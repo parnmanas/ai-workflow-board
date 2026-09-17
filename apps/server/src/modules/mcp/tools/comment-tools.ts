@@ -41,7 +41,7 @@ import { computeLoopScore } from '../../../common/loop-score';
 import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
 import { lockTicketCommentWrites } from '../../../common/ticket-comment-write-lock';
-import { sinceBoundaryParam } from '../../../common/created-at-since-param';
+import { tiedCreatedAtWhere } from '../../../common/created-at-since-param';
 import { resolveMentionDispatchExtras } from '../../../common/mention-dispatch-profile';
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -93,8 +93,12 @@ function extractDedupeKey(metadata: unknown): string | null {
 // 그때그때 유도하는 값으로 교체한다:
 //   1. `lockTicketCommentWrites` 로 같은 티켓 코멘트 쓰기가 이미 직렬화된
 //      상태에서, 그 시점 이 티켓의 가장 최근 created_at 을 조회한다.
-//   2. 그 created_at 과 정확히 같은(=, LIMIT 없음) row 를 전부 가져온다 —
-//      같은 초에 몇 건이 몰리든 개수와 무관하게 전량 조회된다.
+//   2. 그 created_at 과 같은 시각의 row 를 (LIMIT 없이) 전부 가져온다 —
+//      같은 초에 몇 건이 몰리든 개수와 무관하게 전량 조회된다. "같은 시각"
+//      판정은 드라이버 저장 정밀도에 맞춰야 한다(ticket 62407d4e): 단순 등호는
+//      Postgres 의 마이크로초 꼬리가 JS Date 왕복에서 잘려 0건이 되므로
+//      tiedCreatedAtWhere() 가 sqljs 는 초 단위 등호, 그 외는 [t, t+1ms)
+//      반개구간으로 갈라 준다.
 //   3. 그 tied-group 안에서 `_comment_write_seq` 최댓값 + 1 을 다음 값으로
 //      쓰고, 최댓값을 가진 row 를 "진짜 마지막 코멘트"로 채택한다.
 // 매 insert 가 그 순간의 DB 값으로부터 새로 계산되므로(프로세스 메모리에
@@ -464,11 +468,12 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           // "마지막 코멘트" 판정 + 다음 write-seq 채번을 모두 이 tied-group
           // 조회 하나로 처리한다(파일 상단 extractWriteSeq 주석 참고, 리뷰
           // 라운드3). 프로세스-로컬 카운터도 take:N 윈도우도 없다: 이 티켓의
-          // 현재 최신 created_at 을 먼저 찾고, 그 값과 정확히 같은 row 를
-          // LIMIT 없이 전부 가져와 그 안에서 write-seq 최댓값과 그 보유자를
-          // 고른다. sql.js 는 @CreateDateColumn 기본값이 초 단위라 문자열
-          // 비교가 어긋날 수 있으므로 sinceBoundaryParam 으로 그 드라이버의
-          // 저장 포맷에 맞춰 정확히 일치시킨다(Postgres 는 그대로 통과).
+          // 현재 최신 created_at 을 먼저 찾고, 그와 같은 시각의 row 를 LIMIT
+          // 없이 전부 가져와 그 안에서 write-seq 최댓값과 그 보유자를 고른다.
+          // "같은 시각" 판정은 드라이버마다 저장 정밀도가 달라 등호 하나로는
+          // 성립하지 않는다 — sqljs 는 초 단위 문자열, Postgres 는 마이크로초라
+          // JS Date 왕복에서 꼬리가 잘린다. 양쪽을 tiedCreatedAtWhere 가 각각
+          // 맞는 조건으로 만든다(ticket 62407d4e).
           const mostRecent = await lockedRepo.findOne({
             where: { ticket_id },
             order: { created_at: 'DESC' },
@@ -476,10 +481,19 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           let lastComment: Comment | null = null;
           let maxWriteSeq = 0;
           if (mostRecent) {
-            const tiedGroup = await lockedRepo.createQueryBuilder('c')
+            const tied = tiedCreatedAtWhere(dataSource, 'c', mostRecent.created_at);
+            const tiedRows = await lockedRepo.createQueryBuilder('c')
               .where('c.ticket_id = :ticket_id', { ticket_id })
-              .andWhere('c.created_at = :tiedCreatedAt', { tiedCreatedAt: sinceBoundaryParam(dataSource, mostRecent.created_at) })
+              .andWhere(`(${tied.clause})`, tied.params)
               .getMany();
+            // fail-safe: mostRecent 는 정의상 이 티켓의 최대 created_at row 이므로
+            // tied group 의 원소여야 한다. 조회가 그것조차 못 집으면(= 어떤
+            // 드라이버가 위 창보다도 큰 정밀도를 잃는 경우) 티켓이 비어 있는 것과
+            // 구별되지 않아 합치기가 조용히 죽는다 — 바로 이번 결함의 실패 모드다.
+            // 그 상태를 다시 만들지 않도록 여기서 항상 자기 자신을 포함시킨다.
+            const tiedGroup = tiedRows.some((c) => c.id === mostRecent.id)
+              ? tiedRows
+              : [...tiedRows, mostRecent];
             for (const c of tiedGroup) {
               const seq = extractWriteSeq(c.metadata);
               if (seq > maxWriteSeq) maxWriteSeq = seq;

@@ -60,6 +60,9 @@ export interface InstanceMeta {
   // 배선되면 정적 값보다 우선하고, 다른 provider 들과 같은 best-effort 계약을
   // 따른다(throw 하면 정적 스냅샷으로 접고 하트비트는 계속 돈다).
   availableModelsProvider?: (() => Record<string, string[]> | null) | null;
+  // Agent Session(CLI 직접 세션) — 이 장비에서 ACP 어댑터로 세션을 열 수 있는 CLI
+  // (agent-session-runner.ts detectAcpSessionClis). 부팅 시 한 번 계산한 정적 값.
+  acpSessionClis?: string[] | null;
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
@@ -452,6 +455,7 @@ export class InstanceHeartbeat {
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
         ...(models && Object.keys(models).length ? { available_models: models } : {}),
+        ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(agentLaunchSpecs ? { agent_launch_specs: agentLaunchSpecs } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),

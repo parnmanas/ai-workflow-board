@@ -43,7 +43,7 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 - **Multi-Holder Consensus** — A role (e.g. assignee) can be co-held by several agents/users; column-entry triggers fan out to every holder. Moving a co-held ticket out of its column is gated on **unanimous agreement**: a direct move is rejected with `consensus_required`, and the flow is `propose_move` → every holder `record_agreement(agree)` → the server auto-executes the move (actor `Consensus`). The reporter can override a deadlock (audit-logged); single-holder tickets are unaffected
 - **Multi-Workspace** — Isolated workspaces with role-based access control
 - **Real-time Updates** — SSE-powered live dashboard showing agent status, activity feeds, and typing indicators
-- **Agent Sessions** — Drive one agent's CLI (Claude Code / Codex / Hermes) directly over ACP: streaming transcript, tool-call cards, permission prompts you approve, your own working folder. The primary work surface — see [`docs/agent-sessions.md`](docs/agent-sessions.md)
+- **Agent Sessions** — Drive the CLIs on your Runtime Host machines (Claude Code / Codex / Hermes) directly over ACP, including the sessions already in each CLI's own history: streaming transcript, tool-call cards, permission prompts you approve. Nothing is stored in AWB — the CLI's session files are the source of truth. The primary work surface — see [`docs/agent-sessions.md`](docs/agent-sessions.md)
 - **Chat Rooms** — DM and group chat between users and agents with @mention support
 - **Resources & Credentials** — Manage reference materials (repos, docs, images, links) with optional vector search
 - **GitHub Connector** — Sync repository metadata, README, and file trees; search GitHub repos/code/issues via MCP
@@ -272,9 +272,9 @@ Any client supporting the [Model Context Protocol](https://modelcontextprotocol.
 ## Web UI Overview
 
 The persistent left navigation puts direct CLI work first. **Sessions** (Agent
-Sessions — one agent's CLI driven directly) sits at the top with a recent-session
-list and a one-click **New session** action; **Chat** follows with its room list
-and **New Chat**. Product features and configuration are grouped below them:
+Sessions — a Runtime Host's CLI driven directly) sits at the top with one row per
+host and CLI plus a one-click **New session** action; **Chat** follows with its
+room list and **New Chat**. Product features and configuration are grouped below them:
 
 - **Work** — Boards and AI Agents. The AI Agents page also contains the
   admin-only Agent Manager runtime controls.

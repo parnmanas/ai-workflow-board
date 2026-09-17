@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, click, keydown, React } from './helpers/jsdom.mjs';
+import { setupDom, click, keydown, assertFocused, React } from './helpers/jsdom.mjs';
 import { mountWithBoardStream } from './helpers/boardStream.mjs';
 import { ArtifactPanelProvider, useArtifactPanel } from '../src/contexts/ArtifactPanelContext.tsx';
 import { TicketArtifactOpenerProvider } from '../src/contexts/ticketArtifactOpener.tsx';
@@ -67,7 +67,7 @@ test('① 데스크톱: 티켓 카드 클릭 → 패널(role=complementary) 오�
     const { container } = mountWithBoardStream(h(App, { isMobile: false }), { withAuth: false });
 
     // 초기: 패널 닫힘
-    assert.equal(document.querySelector('[role="complementary"]'), null);
+    assert.equal(Boolean(document.querySelector('[role="complementary"]')), false, '초기에는 Artifact 패널이 닫혀 있다');
 
     const card = container.querySelector('[data-ticket-ref="T1"]');
     assert.ok(card, '티켓 카드 버튼이 렌더돼야 함');
@@ -81,7 +81,7 @@ test('① 데스크톱: 티켓 카드 클릭 → 패널(role=complementary) 오�
     // 열리면 닫기 버튼으로 포커스 이동(기본 a11y)
     const closeBtn = document.querySelector('[aria-label="Artifact 패널 닫기"]');
     assert.ok(closeBtn, '닫기 버튼 존재');
-    assert.equal(document.activeElement, closeBtn, '열리면 닫기 버튼에 포커스');
+    assertFocused(closeBtn, '열리면 닫기 버튼에 포커스');
   } finally {
     dom.cleanup();
   }
@@ -99,8 +99,8 @@ test('④ 데스크톱: 닫기 버튼 클릭 → 패널 닫힘 + 오프너(카�
     const closeBtn = document.querySelector('[aria-label="Artifact 패널 닫기"]');
     click(closeBtn);
 
-    assert.equal(document.querySelector('[role="complementary"]'), null, '닫기 후 패널 사라짐');
-    assert.equal(document.activeElement, card, '닫으면 오프너 카드로 포커스 복귀');
+    assert.equal(Boolean(document.querySelector('[role="complementary"]')), false, '닫기 후 패널 사라짐');
+    assertFocused(card, '닫으면 오프너 카드로 포커스 복귀');
   } finally {
     dom.cleanup();
   }
@@ -156,16 +156,16 @@ test('③④ 모바일: 패널이 role=dialog+aria-modal 로 열리고 Tab 이 �
     assert.equal(dialog.getAttribute('aria-modal'), 'true');
 
     const closeBtn = document.querySelector('[aria-label="Artifact 패널 닫기"]');
-    assert.equal(document.activeElement, closeBtn, '열리면 닫기 버튼 포커스');
+    assertFocused(closeBtn, '열리면 닫기 버튼 포커스');
 
     // Tab: 시트 내부 포커스 가능 요소는 닫기 버튼뿐 → 랩되어 배경으로 새지 않고 유지
     keydown('Tab', { target: closeBtn });
-    assert.equal(document.activeElement, closeBtn, 'Tab 이 배경으로 새지 않고 시트 안에 갇힘');
+    assertFocused(closeBtn, 'Tab 이 배경으로 새지 않고 시트 안에 갇힘');
 
     // Esc 로 닫힘 + 오프너 복귀
     keydown('Escape');
-    assert.equal(document.querySelector('[role="dialog"]'), null, 'Esc 로 모바일 시트 닫힘');
-    assert.equal(document.activeElement, card, 'Esc 닫힘 후 오프너 카드로 복귀');
+    assert.equal(Boolean(document.querySelector('[role="dialog"]')), false, 'Esc 로 모바일 시트 닫힘');
+    assertFocused(card, 'Esc 닫힘 후 오프너 카드로 복귀');
   } finally {
     dom.cleanup();
   }

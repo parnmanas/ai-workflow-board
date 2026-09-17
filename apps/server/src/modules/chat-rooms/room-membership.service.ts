@@ -8,6 +8,7 @@ import { Agent } from '../../entities/Agent';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { LogService } from '../../services/log.service';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import {
   UserChatMode,
@@ -45,6 +46,43 @@ function makeError(status: number, message: string): Error & { status: number } 
 }
 
 /**
+ * 방의 구성을 서버가 정하는가 — Action Run / orchestration mission·step / QA·security
+ * run 방. `setOpenJoin` 이 같은 조건으로 옵션 변경을 막는 것과 같은 근거다: 이 방들의
+ * 참여자 집합은 사람의 초대가 아니라 도메인이 결정한다.
+ */
+function isSystemManagedRoom(room: {
+  action_id?: string | null;
+  orchestration_mission_id?: string | null;
+  orchestration_step_id?: string | null;
+  run_kind?: string | null;
+}): boolean {
+  return !!(
+    room.action_id ||
+    room.orchestration_mission_id ||
+    room.orchestration_step_id ||
+    room.run_kind
+  );
+}
+
+/** 참여자 한 명의 동일성 키. 같은 id 라도 user 와 agent 는 다른 참여자다. */
+function participantKey(type: string, id: string): string {
+  return `${type}:${id}`;
+}
+
+/** 한 요청 안에서 같은 대상이 두 번 지정된 경우를 한 번으로 접는다. */
+function dedupeParticipants<T extends { participant_type: string; participant_id: string }>(
+  list: T[],
+): T[] {
+  const seen = new Set<string>();
+  return list.filter((p) => {
+    const key = participantKey(p.participant_type, p.participant_id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
  * Owns participant (membership) state for chat rooms.
  *
  * Responsibilities:
@@ -78,6 +116,11 @@ export class RoomMembershipService {
     // 서비스가 아니라 **엔티티 저장소**만 가져오므로 orchestration 모듈과의 순환은 없다.
     @InjectRepository(OrchestrationMission)
     private readonly missionRepo: Repository<OrchestrationMission>,
+
+    // DM → group 승격은 되돌릴 수 없어 사후 추적 수단이 필요하다(티켓 70e62a9d).
+    // optional 인 이유는 위 주석과 같다 — 이 서비스를 위치 인자로 만드는 테스트가
+    // 있어 없이도 동작해야 한다. 값이 없으면 로그만 건너뛴다.
+    private readonly logService?: LogService,
   ) {}
 
   /** Wraps a column reference with ::text on postgres to avoid varchar/uuid mismatch */
@@ -105,11 +148,38 @@ export class RoomMembershipService {
   }
 
   /**
-   * Add participants to a group room (not DM). Respects 50-participant cap.
-   * Re-joining a previously left user creates a new participant row.
+   * 방에 참여자를 추가한다 — **멱등**하고 50인 상한을 지킨다.
+   *
+   * 예전에는 `type='dm'` 을 곧장 400 으로 거부했다. 이제 DM 에서도 동작하며, 실제로
+   * 새 참여자가 생기는 순간 같은 room id 를 유지한 채 `type` 을 `group` 으로 올린다
+   * (티켓 70e62a9d — 승격). 히스토리를 이어받는 **새 방을 만들지 않은** 이유는
+   * `chat_rooms.id` 를 참조하는 영속 행이 아홉 군데(메시지·참여자·멘션,
+   * tickets/features 의 `source_chat_room_id`, qa/security/action run,
+   * orchestration mission/step)나 되기 때문이다 — row 하나의 `type` 만 바꾸면 그
+   * 참조와 대화 이력·첨부·읽음 상태가 전부 그대로 남는다.
+   *
+   * **강등(group → dm)은 없다.** 되돌릴 수 없는 전이라 UI 가 사용자에게 먼저 알리고,
+   * 여기서는 사후 추적을 위해 로그 한 줄을 남긴다.
+   *
+   * 승격이 필연적으로 바꾸는 것 둘 — 되살리려 하지 말 것:
+   *   - `_handleDmAgentRequest`(room-messaging)의 **@멘션 없는 자동 디스패치가
+   *     사라진다**. 3인 이상 방에서는 어느 에이전트에게 말하는지 결정할 수 없다.
+   *   - `findAssistantDmRoomId`(클라이언트)가 이 방을 더는 찾지 못해 "Start" 가 새
+   *     어시스턴트 DM 을 연다. 1:1 이 아니게 됐으므로 올바른 동작이다.
+   *
+   * 멱등성: 이미 active 인 대상은 조용히 건너뛴다. 초대 진입점이 DM 까지 열리면서
+   * "이미 방에 있는 상대를 다시 초대"가 일상적인 오클릭이 됐는데, 예전처럼 중복 행을
+   * 넣으면 `leaveRoom` 주석이 기록한 폐해(나가지지 않는 방, cap 초과)가 그대로
+   * 재현된다. 그래서 cap 계산도, SSE 의 `participant_ids` 도, 승격 여부도 전부
+   * **실제로 추가된 것**만 기준으로 한다. 신규가 0명이면 insert·승격·SSE 모두 없다.
+   *
+   * 동시성: `ensureActiveParticipantInTransaction` 과 **같은 락 키**를 쓴다. 키가
+   * 다르면 자유 참여 auto-join 과 초대가 서로를 보지 못해 중복 active 행과 cap
+   * 초과가 다시 생긴다.
    */
   async addParticipants(
     roomId: string,
+    workspaceId: string,
     caller: { type: 'user' | 'agent'; id: string } | string,
     newParticipants: { participant_type: string; participant_id: string }[],
   ): Promise<void> {
@@ -117,28 +187,83 @@ export class RoomMembershipService {
     // the new MCP path passes a typed caller. Normalize here so both work.
     const c = typeof caller === 'string' ? { type: 'user' as const, id: caller } : caller;
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    if (!room) {
+
+    // ── 검사 순서는 의도적이다 (리뷰 라운드1 지적 1) ────────────────────────
+    //
+    // ① 워크스페이스 경계 — **가장 먼저**. participant 행은 한 번 생기면 남으므로
+    //    "이 방의 active 참여자인가"만으로는 경계가 지속되지 않는다: 지난 워크스페이스나
+    //    다른 워크스페이스 방의 행을 들고 있는 호출자가 지금 바인딩된 스코프와 무관하게
+    //    그 방을 승격시키고 새 참여자를 넣을 수 있었다. 존재하지 않는 방과 **같은 404** 를
+    //    주는 것도 의도다 — 남의 워크스페이스 room_id 로 방의 존재를 확인할 수 없어야
+    //    한다(`setOpenJoin` / `requireRoomAccess` 와 동일 규칙).
+    // ② 참여자 자격 — 그 다음. 시스템 방 판정보다 **먼저** 둬서 비참여자가 400/403 의
+    //    차이로 방의 종류를 알아내지 못하게 한다.
+    // ③ 시스템 소유 방 — 마지막. 여기까지 온 호출자는 이미 그 방의 참여자다.
+    if (!room || room.workspace_id !== workspaceId) {
       throw makeError(404, 'Room not found');
-    }
-    if (room.type === 'dm') {
-      throw makeError(400, 'Cannot add participants to a direct message');
     }
 
     await this.requireActiveParticipant(roomId, c.id, c.type);
 
-    // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 조용히 제거.
-    newParticipants = await this.filterOutManagerParticipants(newParticipants);
+    // 시스템 소유 방의 **승격만** 막는다(`setOpenJoin` 과 같은 근거). 오늘 시스템 방은
+    // 전부 group 으로 생성되므로 이 분기에 걸리는 방은 없지만, 누군가 DM 으로 만드는
+    // 순간 그 방의 참여자 집합이 사람 손에 넘어가는 것을 미리 닫아 둔다. **이미 group 인
+    // 시스템 방의 참여자 추가는 지금 동작 그대로 통과한다** — mission 방 멤버 추가 같은
+    // 기존 흐름이 여기에 걸리면 안 된다.
+    if (room.type === 'dm' && isSystemManagedRoom(room)) {
+      throw makeError(400, 'Cannot add participants to a system-managed room');
+    }
 
-    // Wrap cap-check and insert in a transaction to prevent concurrent requests from
-    // exceeding the participant cap (read-check-then-write race condition).
-    await this.participantRepo.manager.transaction(async (em) => {
-      const currentCount = await em
+    // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 조용히 제거.
+    const requested = dedupeParticipants(await this.filterOutManagerParticipants(newParticipants));
+
+    // 중복 제거·cap 검사·insert·승격을 한 트랜잭션에 묶는다. 나눠 놓으면 동시 요청이
+    // 같은 "없음"을 읽고 둘 다 넣어 cap 을 넘기거나 중복 active 행을 만든다.
+    const { added, promoted } = await this.participantRepo.manager.transaction(async (em) => {
+      if (this.dataSource.options.type === 'postgres') {
+        await em.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`chat_room_participants:${roomId}`]);
+      }
+
+      // 락을 잡은 **뒤** 방을 다시 읽는다. 승격 판정과 자동 이름은 커밋된 최신 상태를
+      // 봐야 한다 — 초대 둘이 겹치면 먼저 커밋한 쪽이 이미 group 으로 올려 놓았다.
+      const current = await em.findOne(ChatRoom, { where: { id: roomId } });
+      if (!current) {
+        throw makeError(404, 'Room not found');
+      }
+
+      const activeRows = await em
         .createQueryBuilder(ChatRoomParticipant, 'p')
         .where('p.room_id = :roomId', { roomId })
         .andWhere('p.left_at IS NULL')
-        .getCount();
+        .orderBy('p.joined_at', 'ASC')
+        // joined_at 은 전순서가 아니다 — sql.js 의 `datetime('now')` 는 초 단위라 같은
+        // 방의 참여자 행들이 흔히 같은 값을 갖는다. 타이브레이커로 행 `id` 를 쓰면 안
+        // 된다: 랜덤 UUID 라 순서가 실행마다 달라져 자동 이름이 뒤바뀐다(실제로 이
+        // 테스트가 그렇게 흔들렸다).
+        //
+        // 타이브레이커는 이 테이블의 **단일성 키 전체**여야 한다 — `participantKey` 가
+        // 말하듯 같은 방의 active 행을 유일하게 만드는 것은 `participant_id` 하나가
+        // 아니라 `(participant_type, participant_id)` 다. users 와 agents 는 별개
+        // 테이블이라 같은 UUID 가 양쪽에 존재할 수 있고, 그러면 `participant_id` 까지만
+        // 건 정렬은 여전히 전순서가 아니다(리뷰 라운드1 지적 3). 두 컬럼을 다 걸면
+        // 어느 쪽을 먼저 두든 전순서가 되는데, `participant_id` 를 앞에 두는 이유는
+        // 흔한 경우(같은 UUID 충돌이 없는 방)의 이름을 그대로 두기 위해서다 — type 을
+        // 앞에 두면 tie 마다 에이전트가 사람보다 먼저 와서 기존 이름이 전부 바뀐다.
+        .addOrderBy('p.participant_id', 'ASC')
+        .addOrderBy('p.participant_type', 'ASC')
+        .getMany();
+      const activeKeys = new Set(
+        activeRows.map(r => participantKey(r.participant_type, r.participant_id)),
+      );
 
-      if (currentCount + newParticipants.length > PARTICIPANT_CAP) {
+      const toAdd = requested.filter(
+        p => !activeKeys.has(participantKey(p.participant_type, p.participant_id)),
+      );
+      if (toAdd.length === 0) {
+        return { added: [] as typeof requested, promoted: false };
+      }
+
+      if (activeRows.length + toAdd.length > PARTICIPANT_CAP) {
         throw makeError(400, 'This room is full (50 participant limit).');
       }
 
@@ -146,7 +271,7 @@ export class RoomMembershipService {
       // flagged as unread to the newly added participant. They see the backlog
       // when they scroll, but the room doesn't shout at them with a large badge.
       const joinedAt = new Date();
-      const rows = newParticipants.map(p =>
+      const rows = toAdd.map(p =>
         em.create(ChatRoomParticipant, {
           room_id: roomId,
           participant_type: p.participant_type,
@@ -156,17 +281,69 @@ export class RoomMembershipService {
         }),
       );
       await em.save(rows);
+
+      let promotedHere = false;
+      if (current.type === 'dm') {
+        // 조건부 UPDATE 라 동시 승격에서 두 번째는 affected=0 으로 조용히 지나간다.
+        const result = await em.update(ChatRoom, { id: roomId, type: 'dm' }, { type: 'group' });
+        promotedHere = (result.affected ?? 0) > 0;
+
+        // 이름 없는 DM 은 상대 이름으로 표시돼 왔다(`dm_partner_name`). group 이 되면 그
+        // 폴백이 사라져 헤더·사이드바가 통째로 "Unnamed Group" 이 되므로, 비어 있을 때만
+        // group 의 자동 이름 규칙을 **승격 후 참여자 집합** 기준으로 채운다. 사용자가
+        // 붙여 둔 이름은 절대 덮어쓰지 않는다.
+        if (promotedHere && !(current.name || '').trim()) {
+          const name = await this.buildGroupRoomName([...activeRows, ...toAdd], em);
+          await em.update(ChatRoom, { id: roomId }, { name });
+        }
+      }
+
+      return { added: toAdd, promoted: promotedHere };
     });
 
+    // 새로 들어온 사람이 없으면 알릴 변화도 없다 — 중복 초대가 남에게 이벤트를 쏘지 않는다.
+    if (added.length === 0) return;
+
+    if (promoted) {
+      this.logService?.info(
+        'ChatRooms',
+        `Room ${roomId} promoted dm→group by ${c.type} ${c.id}`,
+      );
+    }
+
+    // member_ids / agent_member_ids 를 insert **뒤에** 다시 읽는다 — 그래야 초대받은
+    // 유저·에이전트 본인도 이 이벤트의 수신자가 된다(`roomMemberFilter`).
     const memberIds = await this.getRoomMemberIds(roomId);
     const agentMemberIds = await this.getRoomAgentMemberIds(roomId);
     activityEvents.emit('chat_room_update', {
       room_id: roomId,
       update_type: 'participant_added',
-      participant_ids: newParticipants.map(p => p.participant_id),
+      participant_ids: added.map(p => p.participant_id),
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
+  }
+
+  /**
+   * group 방의 자동 이름 — 참여자 이름 최대 3명, 초과분은 "and N more".
+   *
+   * `createRoom`(신규 group)과 DM 승격이 **같은 규칙**을 쓰도록 한곳에 둔다. 나뉘어
+   * 있으면 한쪽만 바뀌어 같은 구성의 방이 경로에 따라 다른 이름을 갖는다.
+   *
+   * `em` 을 받으면 이름 조회도 그 트랜잭션 안에서 한다 — 승격은 참여자 insert 와 같은
+   * 트랜잭션에서 이름을 정하므로, 기본 저장소로 질의하면 트랜잭션 밖의 상태를 본다.
+   */
+  async buildGroupRoomName(
+    participants: { participant_type: string; participant_id: string }[],
+    em?: EntityManager,
+  ): Promise<string> {
+    const names: string[] = [];
+    for (const p of participants.slice(0, 3)) {
+      names.push(await this.resolveParticipantName(p.participant_type, p.participant_id, em));
+    }
+    return participants.length > 3
+      ? `${names.join(', ')} and ${participants.length - 3} more`
+      : names.join(', ');
   }
 
   /**
@@ -546,17 +723,28 @@ export class RoomMembershipService {
    * the cast here fixes both the read and the silent no-spawn in one place, and
    * also covers every already-persisted 'system' row.
    */
-  async resolveParticipantName(participantType: string, participantId: string): Promise<string> {
+  async resolveParticipantName(
+    participantType: string,
+    participantId: string,
+    /**
+     * 호출자가 연 트랜잭션. 넘기면 조회도 그 트랜잭션 안에서 돈다 — DM 승격이
+     * 참여자 insert 와 같은 트랜잭션에서 이름을 정하기 때문이다. 생략하면 기존
+     * 2-인자 호출부와 똑같이 기본 저장소로 조회한다.
+     */
+    em?: EntityManager,
+  ): Promise<string> {
     if (!participantId || !UUID_RE.test(participantId)) {
       // 'system' is the known dispatch author; anything else non-uuid is a
       // malformed/legacy id — neither is a row in users/agents.
       return participantId === 'system' ? 'System' : 'Unknown';
     }
+    const userRepo = em ? em.getRepository(User) : this.userRepo;
+    const agentRepo = em ? em.getRepository(Agent) : this.agentRepo;
     if (participantType === 'user') {
-      const user = await this.userRepo.findOne({ where: { id: participantId } });
+      const user = await userRepo.findOne({ where: { id: participantId } });
       return user ? (user.name || user.email) : 'Unknown User';
     } else if (participantType === 'agent') {
-      const display = await resolveAgentDisplayName(this.agentRepo, participantId);
+      const display = await resolveAgentDisplayName(agentRepo, participantId);
       return display ?? 'Unknown Agent';
     }
     return 'Unknown';

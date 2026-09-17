@@ -283,6 +283,9 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     // 발화 게이트가 미션의 `user_chat_mode` 를 읽는다(티켓 9cfd8161). standalone MCP 도
     // 같은 판정을 받아야 하므로 여기서도 넘긴다 — 빠지면 MCP 경로만 옵션을 무시한다.
     dataSource.getRepository(OrchestrationMissionEntity),
+    // DM → group 승격 로그(티켓 70e62a9d). MCP `add_chat_participants` 도 승격을
+    // 일으키므로 그 경로만 추적이 비면 안 된다.
+    logService,
   );
   const roomMessagingService = new RoomMessagingService(
     dataSource.getRepository(ChatRoom),

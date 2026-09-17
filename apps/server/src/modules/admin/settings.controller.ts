@@ -51,6 +51,21 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
     is_secret: true,
     default_value: '',
   },
+  'oauth.google.enabled': {
+    description: 'Enable Google OAuth login button on the sign-in page (true/false)',
+    is_secret: false,
+    default_value: 'false',
+  },
+  'oauth.google.client_id': {
+    description: 'Google OAuth 2.0 client ID (from Google Cloud Console → Credentials)',
+    is_secret: false,
+    default_value: '',
+  },
+  'oauth.google.client_secret': {
+    description: 'Google OAuth 2.0 client secret. Stored encrypted.',
+    is_secret: true,
+    default_value: '',
+  },
 };
 
 /**

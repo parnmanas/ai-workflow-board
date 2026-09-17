@@ -139,8 +139,16 @@ test('awaiting_user step 이 없으면 패널 자체가 렌더되지 않는다',
   const { container } = await render(t, {
     steps: [step({ status: 'done' }), step({ id: 'x', step_key: 'ship', status: 'dispatched' })],
   });
-  assert.equal(container.querySelector('[data-testid="confirm-panel"]'), null);
-  assert.equal(container.querySelector('[data-testid="confirm-card"]'), null);
+  assert.equal(
+    Boolean(container.querySelector('[data-testid="confirm-panel"]')),
+    false,
+    'awaiting_user step 이 없으면 확인 패널이 렌더되지 않는다',
+  );
+  assert.equal(
+    Boolean(container.querySelector('[data-testid="confirm-card"]')),
+    false,
+    'awaiting_user step 이 없으면 확인 카드도 렌더되지 않는다',
+  );
 });
 
 test('awaiting_user step 만 카드로 뜨고, 질문과 pass 번호가 화면에 읽힌다', async (t) => {

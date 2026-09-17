@@ -485,6 +485,11 @@ export class AgentManagerController {
       ? body.manager_capabilities.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : undefined;
 
+    // Agent Session(CLI 직접 세션) — 이 장비에서 세션을 열 수 있는 CLI 목록.
+    const acp_session_clis = Array.isArray(body?.acp_session_clis)
+      ? body.acp_session_clis.filter((s: unknown): s is string => typeof s === 'string' && !!s)
+      : undefined;
+
     // Runtime Host supervision metadata.
     const agent_ids = Array.isArray(body?.agent_ids)
       ? body.agent_ids.filter((s: unknown): s is string => typeof s === 'string' && !!s)
@@ -706,6 +711,7 @@ export class AgentManagerController {
       cli_adapters,
       runtime_capabilities,
       manager_capabilities,
+      acp_session_clis,
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
       started_at: typeof body?.started_at === 'string' && body.started_at ? body.started_at : new Date().toISOString(),
       agent_ids,

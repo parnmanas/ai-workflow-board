@@ -372,7 +372,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_chat_rooms',
-    'List chat rooms the agent participates in, with last message preview and unread count.',
+    'List the chat rooms the agent actively participates in, scoped to the caller\'s own workspace. ' +
+    'Each row carries room_id, name, type, last_message_at and open_join, most recent activity first. ' +
+    'Rooms in another workspace are omitted even when a stale participant row still survives there.',
     {},
     async (_args: Record<string, never>, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
@@ -383,12 +385,29 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         : null;
       if (!agent) return err('Agent identity not found');
 
+      // caller 등급(에이전트 신원)과 workspace 권한은 별개다(티켓 ced48818) — 형제 툴
+      // get_chat_room_messages(티켓 5a95315f)와 같은 결함 계급이다. 참여자 행만 보면
+      // 경계가 지속되지 않는다: `chat_room_participants` 행은 한 번 생기면 남으므로,
+      // 지난/다른 워크스페이스 방의 행을 들고 있는 에이전트에게 그 방의 이름과 마지막
+      // 활동 시각이 계속 실렸다. 같은 "내 방 목록"의 REST 형제 경로인
+      // RoomCrudService.listRooms 는 이미 `r.workspace_id = :wsId` 를 1급 조건으로 걸고
+      // 있으므로, 두 표면이 같은 질문에 같은 답을 내도록 맞춘다. 해석 방식은 이 파일의
+      // 다른 툴들과 같다 — 세션 키의 workspace, 없으면 에이전트 자신의 workspace.
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+
       const rooms = await dataSource.getRepository(ChatRoomParticipant)
         .createQueryBuilder('p')
         .innerJoinAndSelect('p.room', 'r')
         .where('p.participant_id = :agentId', { agentId: agent.id })
         .andWhere('p.participant_type = :type', { type: 'agent' })
         .andWhere('p.left_at IS NULL')
+        // 참여자 행이 아니라 조인된 **방**에 건다. `:wsId` 는 파라미터 바인딩이라
+        // Postgres 가 컬럼 타입으로 강제 변환하므로 toText() 캐스팅이 필요 없다
+        // (chat-room-join-cast-guard.test.mjs 가 명시한 규약과 같다). 위 관계 조인도
+        // 양쪽이 uuid 라 캐스팅 대상이 아니다 — participants.room_id 는 선언은 varchar
+        // 지만 @ManyToOne(ChatRoom) FK 라 스키마 동기화가 uuid 로 만든다.
+        .andWhere('r.workspace_id = :wsId', { wsId: callerWorkspaceId })
         .orderBy('r.last_message_at', 'DESC', 'NULLS LAST')
         .getMany();
 
@@ -410,7 +429,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     'Read the message history of a chat room the agent participates in. ' +
     'Returns full messages (sender, content, attachments, created_at) in chronological order. ' +
     'Use the `before` cursor (a message id) to page backwards through older history. ' +
-    'The agent must be an active participant in the room.',
+    'The agent must be an active participant of a room inside the caller\'s own workspace — ' +
+    'rooms in any other workspace fail the same way a non-existent room does.',
     {
       room_id: z.string().describe('Chat room ID to read messages from'),
       limit: z.number().int().min(1).max(200).optional().describe('Max messages to return (default 50, max 200).'),
@@ -424,8 +444,24 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
       if (!agent) return err('Agent identity not found for this session');
+      // caller 등급(에이전트 신원)과 workspace 권한은 별개다(티켓 5a95315f). 참여자 행만
+      // 보면 경계가 지속되지 않는다 — `chat_room_participants` 행은 한 번 생기면 남으므로,
+      // 지난/다른 워크스페이스 방의 행을 들고 있는 에이전트가 지금 API key 가 묶인 스코프
+      // 밖에 있는 방의 대화 내용 전체를 읽을 수 있었다. 같은 데이터를 읽는 형제 경로인
+      // agent-api `GET /api/agent/chat-rooms/:roomId/messages` 는 이미 scopeRejects 로 키
+      // 스코프와 방의 workspace 를 대조하므로, 두 표면의 규약을 일치시킨다. 해석 방식은 이
+      // 파일의 다른 툴들과 같다 — 세션 키의 workspace, 없으면 에이전트 자신의 workspace.
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
 
       try {
+        // 워크스페이스 대조는 참여자 게이트보다 **먼저** 돈다. 뒤에 두면 타 워크스페이스
+        // 방에 대해 참여자 행이 있을 때는 'Chat room not found', 없을 때는 'Not an active
+        // participant in this room' 으로 응답이 갈려 그 방의 참여자 구성이 드러난다. 없는
+        // 방과 같은 메시지로 수렴시켜, 남의 워크스페이스 room_id 로는 방의 존재조차 확인할
+        // 수 없게 한다.
+        const room = await dataSource.getRepository(ChatRoom).findOne({ where: { id: room_id } });
+        if (!room || room.workspace_id !== callerWorkspaceId) return err('Chat room not found');
         // Mirror the agent-api GET /chat-rooms/:roomId/messages path
         // (agent-api.controller): enforce the agent participant gate
         // explicitly, then read in `observer` mode so the service's own
@@ -539,7 +575,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // validation and emits the same chat_room_update 'renamed' SSE.
   server.tool(
     'set_chat_room_name',
-    'Set or rename a chat room title. The caller must be an active participant. ' +
+    'Set or rename a chat room title. The caller must be an active participant of a room inside the ' +
+    'caller\'s own workspace — rooms in any other workspace fail the same way a non-existent room does. ' +
     'Intended for giving an untitled room a short, descriptive topic-based name (1-100 characters). ' +
     'Renames both DMs and group rooms.',
     {
@@ -552,8 +589,14 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
       if (!agent) return err('Agent identity not found for this session');
+      // caller 등급(에이전트 신원)과 **workspace 권한은 별개**다(티켓 de4d27e9) — 신원만
+      // 확인하고 room_id 를 그대로 넘기면, 지난/다른 워크스페이스 방의 참여자 행을 들고
+      // 있는 에이전트가 지금 API key 가 묶인 스코프 밖의 방 이름을 바꿀 수 있다. 이 파일의
+      // 다른 툴들과 같은 방식으로 호출자의 워크스페이스를 해석해 함께 넘긴다.
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
       try {
-        await roomCrudService.renameRoom(room_id, agent.id, name, 'agent');
+        await roomCrudService.renameRoom(room_id, callerWorkspaceId, agent.id, name, 'agent');
         return ok({ room_id, name: name.trim() });
       } catch (e: any) {
         return err(e?.message || 'Failed to set chat room name');
@@ -564,7 +607,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // Group rooms only — DMs are immutable. Caller must already be a member.
   server.tool(
     'add_chat_participants',
-    'Add participants to an existing group chat room. Fails on DMs, on rooms the caller is not in, and on cap (50). Re-adding a previously-left member creates a fresh participant row.',
+    'Add participants to an existing chat room (group or DM). Inviting into a DM promotes it to a group in place — same room id and history, and the promotion CANNOT be undone. Already-active participants are skipped silently (idempotent). Fails on rooms outside the caller\'s workspace, on rooms the caller is not in, on cap (50), and on promoting a system-managed DM (Action / QA / security / orchestration) — adding to an already-group system room still works. Re-adding a previously-left member creates a fresh participant row.',
     {
       room_id: z.string().describe('Target room ID'),
       participants: z.array(z.object({
@@ -576,9 +619,18 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      // caller 등급(에이전트 신원)과 **workspace 권한은 별개**다 — 신원만 확인하고
+      // room_id 를 그대로 넘기면, 다른/지난 워크스페이스 방의 참여자 행을 들고 있는
+      // 에이전트가 지금 API key 가 묶인 스코프 밖의 방을 승격시킬 수 있다. 이 파일의
+      // 다른 툴들과 같은 방식으로 호출자의 워크스페이스를 해석해 함께 넘긴다.
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
       try {
         await roomMembershipService.addParticipants(
           room_id,
+          callerWorkspaceId,
           { type: 'agent', id: caller.agentId },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
         );

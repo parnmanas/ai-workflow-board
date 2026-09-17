@@ -18,8 +18,9 @@ export const PERMISSIONS = {
   CHAT_SEND: 'chat.send',
   CHAT_VIEW: 'chat.view',
   BROWSE_AGENT_FS: 'agents.fs_browse',
-  // Agent Session(CLI 직접 세션) — 자기 소유 세션 생성/프롬프트/닫기. 세션은
-  // 소유자에게만 보이므로 열람 권한을 따로 두지 않는다.
+  // Agent Session(CLI 직접 세션) — Runtime Host 장비의 CLI 세션(운영자 홈의
+  // Claude Code / Codex 기록 포함)을 열람·구동한다. 장비의 개인 기록이 노출되므로
+  // 기본은 admin 전용이고, 필요한 사용자에게만 부여한다.
   USE_AGENT_SESSIONS: 'agent_sessions.use',
 } as const;
 
@@ -35,7 +36,6 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     PERMISSIONS.VIEW_ACTIVITY,
     PERMISSIONS.CHAT_SEND,
     PERMISSIONS.CHAT_VIEW,
-    PERMISSIONS.USE_AGENT_SESSIONS,
   ],
 };
 
@@ -70,5 +70,5 @@ export const PERMISSION_LABELS: Record<string, { label: string; description: str
   [PERMISSIONS.CHAT_SEND]: { label: 'Send Chat Messages', description: 'Send chat messages to agents', group: 'Chat' },
   [PERMISSIONS.CHAT_VIEW]: { label: 'View Chat Messages', description: 'View chat threads and history', group: 'Chat' },
   [PERMISSIONS.BROWSE_AGENT_FS]: { label: 'Browse Agent Filesystem', description: 'Browse files on an agent machine within scoped roots configured on the plugin side', group: 'Admin' },
-  [PERMISSIONS.USE_AGENT_SESSIONS]: { label: 'Use Agent Sessions', description: 'Open direct CLI sessions (Claude Code / Codex / Hermes) with an agent and drive them interactively', group: 'Sessions' },
+  [PERMISSIONS.USE_AGENT_SESSIONS]: { label: 'Use Agent Sessions', description: 'Browse and drive CLI sessions (Claude Code / Codex / Hermes) on Runtime Host machines, including sessions already on those machines', group: 'Sessions' },
 };

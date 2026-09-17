@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { setupDom, mount, click, keydown, React } from './helpers/jsdom.mjs';
+import { setupDom, mount, click, keydown, assertFocused, React } from './helpers/jsdom.mjs';
 import { Modal } from '../src/components/common/Modal.tsx';
 
 const h = React.createElement;
@@ -43,7 +43,7 @@ test('① 열면 다이얼로그(role=dialog·aria-modal) + 내부 첫 포커스
     const { container } = mount(h(ModalHarness));
 
     // 초기: 모달 닫힘
-    assert.equal(document.querySelector('[role="dialog"]'), null);
+    assert.equal(Boolean(document.querySelector('[role="dialog"]')), false, '초기에는 모달이 닫혀 있다');
 
     const opener = container.querySelector('[data-testid="opener"]');
     opener.focus(); // 복귀 대상으로 기억되도록 포커스 선점
@@ -55,7 +55,7 @@ test('① 열면 다이얼로그(role=dialog·aria-modal) + 내부 첫 포커스
 
     // 열리면 내부 첫 포커스 요소(입력 필드)로 이동
     const field = document.querySelector('[data-testid="field"]');
-    assert.equal(document.activeElement, field, '열리면 다이얼로그 내부 첫 요소에 포커스');
+    assertFocused(field, '열리면 다이얼로그 내부 첫 요소에 포커스');
   } finally {
     dom.cleanup();
   }
@@ -71,19 +71,19 @@ test('② Tab 이 모달 안에 트랩된다(배경으로 새지 않고 순환)'
 
     const field = document.querySelector('[data-testid="field"]');
     const save = document.querySelector('[data-testid="save"]');
-    assert.equal(document.activeElement, field, '초기 포커스: 필드');
+    assertFocused(field, '초기 포커스: 필드');
 
     // 필드에서 Tab → 저장 버튼(다이얼로그 내부 다음 요소)
     keydown('Tab', { target: field });
-    assert.equal(document.activeElement, save, 'Tab → 다음 내부 요소(저장)');
+    assertFocused(save, 'Tab → 다음 내부 요소(저장)');
 
     // 저장에서 Tab → 랩어라운드하여 필드로(배경으로 새지 않음)
     keydown('Tab', { target: save });
-    assert.equal(document.activeElement, field, '마지막에서 Tab → 처음으로 랩(트랩 유지)');
+    assertFocused(field, '마지막에서 Tab → 처음으로 랩(트랩 유지)');
 
     // 필드에서 Shift+Tab → 역방향 랩하여 저장으로
     keydown('Tab', { target: field, shiftKey: true });
-    assert.equal(document.activeElement, save, 'Shift+Tab → 역방향 랩(저장)');
+    assertFocused(save, 'Shift+Tab → 역방향 랩(저장)');
   } finally {
     dom.cleanup();
   }
@@ -99,8 +99,8 @@ test('③ Esc 로 닫으면 opener 로 포커스 복귀', () => {
     assert.ok(document.querySelector('[role="dialog"]'), '모달 열림');
 
     keydown('Escape');
-    assert.equal(document.querySelector('[role="dialog"]'), null, 'Esc 로 모달 닫힘');
-    assert.equal(document.activeElement, opener, '닫으면 열었던 opener 로 포커스 복귀');
+    assert.equal(Boolean(document.querySelector('[role="dialog"]')), false, 'Esc 로 모달 닫힘');
+    assertFocused(opener, '닫으면 열었던 opener 로 포커스 복귀');
   } finally {
     dom.cleanup();
   }
@@ -119,8 +119,8 @@ test('④ 푸터 버튼 클릭(onClose)으로 닫아도 opener 로 복귀', () =
     const backdrop = document.querySelector('[role="dialog"]').parentElement;
     click(backdrop);
 
-    assert.equal(document.querySelector('[role="dialog"]'), null, '배경 클릭으로 닫힘');
-    assert.equal(document.activeElement, opener, '닫으면 opener 로 복귀');
+    assert.equal(Boolean(document.querySelector('[role="dialog"]')), false, '배경 클릭으로 닫힘');
+    assertFocused(opener, '닫으면 opener 로 복귀');
   } finally {
     dom.cleanup();
   }

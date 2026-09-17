@@ -45,3 +45,41 @@ export function sinceBoundaryParam(dataSource: DataSource, since: Date): Date | 
     `${pad(since.getUTCHours())}:${pad(since.getUTCMinutes())}:${pad(since.getUTCSeconds())}`
   );
 }
+
+/**
+ * "가장 최근 `created_at` 과 같은 시각" 인 행을 고르는 WHERE 조건을 드라이버별로
+ * 만든다 (ticket 62407d4e).
+ *
+ * 왜 등호(=) 비교로는 안 되는가 — Postgres 에서 조용히 0건이 된다:
+ * `@CreateDateColumn()` 은 INSERT 시 `CURRENT_TIMESTAMP` 로 채워지고 Postgres 의
+ * `timestamp` 기본 정밀도는 마이크로초다(예: `05:11:20.689432`). 그 행을 엔티티로
+ * 읽으면 JS `Date` 라 **밀리초까지만** 남으므로(`05:11:20.689`), 그 값을 그대로
+ * 등호 파라미터로 되돌리면 자기 자신을 포함해 **어떤 행과도 일치하지 않는다.**
+ * 실측(라이브 Postgres, 티켓 3건·코멘트 45건)에서 tied group 이 항상 비어
+ * `_comment_write_seq` 가 전부 1 이었고, `add_comment` 의 dedupe 합치기가 한 번도
+ * 발동하지 못한 채 같은 `dedupe_key` 자동 알림이 중복 row 로 쌓였다.
+ *
+ * 그래서 sqljs 가 아닌 드라이버에는 **[t, t+1ms) 반개구간**을 쓴다 — JS `Date` 가
+ * 표현할 수 있는 최소 단위 하나만큼만 넓히므로, 잘려나간 마이크로초 꼬리를 가진
+ * 원래 행은 반드시 포함되고 다음 밀리초의 행은 절대 들어오지 않는다.
+ *
+ * sqljs 는 반대 방향의 문제라 기존 처리를 그대로 둔다: 저장 포맷이 초 단위
+ * 문자열이고 비교가 사전식이므로, `sinceBoundaryParam()` 이 만든 초 단위 문자열과의
+ * 등호가 정확히 "같은 초에 저장된 행" 을 집는다(위 함수의 근본원인 설명 참고).
+ */
+export function tiedCreatedAtWhere(
+  dataSource: DataSource,
+  alias: string,
+  at: Date,
+): { clause: string; params: Record<string, unknown> } {
+  if (dataSource.options.type === 'sqljs') {
+    return {
+      clause: `${alias}.created_at = :tiedCreatedAtEq`,
+      params: { tiedCreatedAtEq: sinceBoundaryParam(dataSource, at) },
+    };
+  }
+  return {
+    clause: `${alias}.created_at >= :tiedCreatedAtFrom AND ${alias}.created_at < :tiedCreatedAtTo`,
+    params: { tiedCreatedAtFrom: at, tiedCreatedAtTo: new Date(at.getTime() + 1) },
+  };
+}

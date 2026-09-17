@@ -282,9 +282,10 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 
 ## Agent Sessions (CLI 직접 세션)
 
-- Chat 과 **별개 표면**: 한 사용자 ↔ 한 CLI 에이전트(Claude Code / Codex / Hermes)의 ACP 세션을 직접 몬다. 앞으로의 주 작업 표면이라 chat 모드 기본 랜딩이 `/ws/:wsId/sessions` 다. ChatRoom 은 그대로(다자간 대화 + run dispatch 버스) — 세션 기능을 방(room)에 분기로 얹지 말 것.
-- 이름 규약: 엔티티 `AgentSession`/`AgentSessionEvent`, 모듈 `modules/agent-sessions`, REST `/api/agent-sessions`(사용자) · `/api/agent/sessions`(매니저), SSE `agent_session_request`(→manager) · `agent_session_update`/`agent_session_event`(→UI, 소유자만), 권한 `agent_sessions.use`, 클라이언트 `components/sessions/*`, 매니저 `agent-session-runner.ts`. 상수 단일 원천은 `apps/server/src/common/types/agent-sessions.ts`.
-- `agent_session_request` payload 와 `/api/agent/sessions/*` 바디는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/agent-sessions.md`.
+- Chat 과 **별개 표면**: Runtime Host 장비에 있는 CLI(Claude Code / Codex / Hermes)의 세션을 AWB 화면에서 직접 몬다. 단위는 **(Runtime Host, CLI, 네이티브 세션 id)** 이고 **AWB 는 세션 내용을 저장하지 않는다** — 목록·기록은 매니저가 CLI 홈(`~/.claude/projects`, `~/.codex/sessions`)에서 읽어 reverse RPC 로 답하고, 라이브 턴의 스트림만 driver 사용자에게 SSE 로 중계한다. 그 장비에서 터미널로 쓰던 세션도 그대로 뜬다. chat 모드 기본 랜딩이 `/ws/:wsId/sessions` 다. ChatRoom 은 그대로(다자간 대화 + run dispatch 버스) — 세션 기능을 방(room)에 분기로 얹지 말 것.
+- 이름 규약: 엔티티 없음(메모리 라이브 상태만), 모듈 `modules/agent-sessions`, REST `/api/agent-sessions/hosts/:managerId/:cli/sessions[/:id/...]`(사용자) · `/api/agent/sessions/rpc/:requestId`, `/api/agent/sessions/:managerId/:cli/:id[/events]`(매니저), SSE `agent_session_request`(→manager, scope 는 매니저 identity) · `agent_session_update`/`agent_session_event`(→driver UI), 권한 `agent_sessions.use`(기본 admin 전용), 클라이언트 `components/sessions/*`, 매니저 `agent-session-runner.ts` + `agent-session-store.ts`, 하트비트 `acp_session_clis`. 상수 단일 원천은 `apps/server/src/common/types/agent-sessions.ts`.
+- **CLI 설정**: Runtime Host × CLI 마다 워크스페이스 Credential 을 묶는다(`agent_session_cli_settings`, `PUT /api/agent-sessions/hosts/:managerId/:cli/settings`). 매니저는 바인딩된 credential 만 `GET /api/agent/sessions/credential/:id` 로 받아 **세션 전용 cli-home**(`session-homes/<cli>/<credential_id>`, 기록 디렉터리만 운영자 홈으로 링크)에 기존 어댑터 `prepareCliHome` 으로 적용한다 — 운영자 홈의 로그인 파일은 절대 건드리지 않는다. 비워 두면 장비의 `claude login` 상태를 그대로 쓴다.
+- `agent_session_request` payload(`credential_id` 포함) · `/api/agent/sessions/*` 바디·credential 응답 · 하트비트 `acp_session_clis` 는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/agent-sessions.md`.
 
 ## Skills (AWB 기능)
 

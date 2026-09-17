@@ -214,7 +214,8 @@ function AppContent() {
               <Route index element={<WorkspaceSectionRedirect />} />
               <Route path="assistant" element={<ChatFirstHome />} />
               <Route path="sessions" element={<SessionsPage />} />
-              <Route path="sessions/:sessionId" element={<SessionsPage />} />
+              <Route path="sessions/:managerId" element={<SessionsPage />} />
+              <Route path="sessions/:managerId/:cli/:sessionId" element={<SessionsPage />} />
               <Route path="boards" element={<BoardsIndexPage />} />
               <Route path="boards/:boardId" element={<Board />} />
               <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />

@@ -45,6 +45,67 @@ export function projectParticipants(detail: RoomDetailLike | null | undefined): 
   }));
 }
 
+// ─── 초대 진입점 노출 규칙 ────────────────────────────────────────────────────
+
+/**
+ * 이 방에 "사람 추가" 진입점을 보여줄 것인가 (티켓 70e62a9d).
+ *
+ * 방 타입은 더 이상 기준이 아니다 — DM 에 초대하면 서버가 방을 group 으로 승격시키므로
+ * DM/group 모두 초대할 수 있다. 남은 기준은 **호출자가 이 방의 참여자인가** 하나다:
+ * 아직 참여하지 않은 자유 참여 방(`is_participant === false`, 티켓 995a9519)에서는
+ * 서버가 `requireActiveParticipant` 로 거부하므로 눌러도 실패할 버튼을 주지 않는다.
+ *
+ * `false` 일 때만 감춘다. 값이 없는(이 필드 이전의) 응답은 예전처럼 참여자로 본다.
+ */
+export function canInviteToRoom(
+  room: { is_participant?: boolean } | null | undefined,
+): boolean {
+  return !!room && room.is_participant !== false;
+}
+
+// ─── 방 목록 참여자 wire shape 정규화 ─────────────────────────────────────────
+
+/**
+ * 방 **목록** 응답의 참여자 한 명. 같은 `ChatRoomListItem[]` 로 반환되지만 서버가
+ * 스코프마다 다른 프로젝션을 손으로 만들어 필드 이름이 갈린다:
+ *   - 내 방 (`GET /chat-rooms` → `listRooms`)
+ *       `{ participant_type, participant_id, name }`
+ *   - 워크스페이스 관전 (`?scope=workspace` → `listAllWorkspaceRooms`)
+ *       `{ type, id, name }`
+ *
+ * `api.listChatRooms('workspace')` 도 같은 타입을 돌려주므로 **tsc 는 이 불일치를
+ * 잡지 못한다** — 관전 모드에서 `p.participant_id` 를 읽으면 조용히 undefined 가 되어
+ * 참여자 요약이 빈 문자열로 무너진다. 그래서 읽는 쪽이 방어적으로 정규화한다.
+ * (방 **상세**(getChatRoom)는 별개다 — 그쪽은 `RoomDetailParticipantWire` 한 가지다.)
+ */
+export interface RoomListParticipantWire {
+  participant_type?: string;
+  participant_id?: string;
+  type?: string;
+  id?: string;
+  name?: string;
+}
+
+export interface NormalizedRoomListParticipant {
+  id: string;
+  type: string;
+  name: string;
+}
+
+/**
+ * 두 wire shape 중 어느 쪽이 와도 같은 `{ id, type, name }` 으로 읽는다.
+ * 방 목록 참여자를 소비하는 모든 지점은 이 함수를 거쳐야 한다.
+ */
+export function normalizeRoomListParticipant(
+  p: RoomListParticipantWire | null | undefined,
+): NormalizedRoomListParticipant {
+  return {
+    id: p?.participant_id ?? p?.id ?? '',
+    type: p?.participant_type ?? p?.type ?? '',
+    name: p?.name ?? '',
+  };
+}
+
 /** 로스터에서 사람(user) 참여자 수 — 헤더의 participantCount 계산. */
 export function countUserParticipants(participants: MentionParticipant[]): number {
   return participants.filter((p) => p.type === 'user').length;

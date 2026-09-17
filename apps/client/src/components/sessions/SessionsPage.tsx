@@ -9,31 +9,36 @@ import { tokens } from '../../tokens';
 import type {
   AgentSessionEventEvent,
   AgentSessionEventRecord,
-  AgentSessionSnapshot,
+  AgentSessionHost,
+  AgentSessionLiveSnapshot,
+  AgentSessionSummary,
   AgentSessionUpdateEvent,
 } from '../../types';
 import { Button, EmptyState, ErrorState } from '../common';
 import PageHeader from '../PageHeader';
+import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionComposer from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
+import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessionList.logic';
 import {
+  appendLiveEvent,
   buildTranscript,
   canPrompt,
   describeSessionStatus,
-  hasSeqGap,
-  mergeIncomingEvent,
   pendingPermission,
   runtimeLabel,
   sessionDisplayTitle,
 } from './sessionTranscript.logic';
 
 /**
- * Sessions — Agent Session(CLI 직접 세션) 표면. `/ws/:wsId/sessions` 는 목록,
- * `/ws/:wsId/sessions/:sessionId` 는 한 세션의 트랜스크립트 + 컴포저.
+ * Sessions — Agent Session(CLI 직접 세션) 표면.
+ *   /ws/:wsId/sessions                        Runtime Host 목록
+ *   /ws/:wsId/sessions/:managerId             그 장비의 모든 세션 (cwd 별 그룹)
+ *   /ws/:wsId/sessions/:managerId/:cli/:id    트랜스크립트(장비의 기록) + 라이브 스트림 + 컴포저
  *
- * Chat(ChatPage) 과는 데이터도 계약도 다르다: 방/참여자/멘션이 없고, 에이전트의
- * ACP 스트림이 그대로 보이며, 권한 요청은 여기서 사용자가 결정한다.
+ * Chat(ChatPage) 과는 데이터도 계약도 다르다: 방/참여자/멘션이 없고, 기록은 장비의 CLI 홈에서
+ * 오며, 권한 요청은 여기서 사용자가 결정한다.
  */
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -48,23 +53,15 @@ function toneColor(tone: 'muted' | 'accent' | 'success' | 'warning' | 'danger'):
   }
 }
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status }: { status: string | null | undefined }) {
   const view = describeSessionStatus(status);
   const color = toneColor(view.tone);
   return (
     <span
-      data-session-status={status}
+      data-session-status={status || 'idle'}
       style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        fontSize: 11,
-        fontWeight: 600,
-        color,
-        border: `1px solid ${color}55`,
-        borderRadius: 999,
-        padding: '2px 8px',
-        whiteSpace: 'nowrap',
+        display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color,
+        border: `1px solid ${color}55`, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap',
       }}
     >
       <span
@@ -77,31 +74,24 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-function RuntimeBadge({ runtime }: { runtime: string }) {
+function CliBadge({ cli }: { cli: string }) {
   return (
     <span
       style={{
-        fontSize: 10.5,
-        fontWeight: 600,
-        color: tokens.colors.accentSubtle,
-        background: tokens.colors.badgeAgentBg,
-        border: `1px solid ${tokens.colors.accent}55`,
-        borderRadius: 999,
-        padding: '1px 8px',
-        whiteSpace: 'nowrap',
+        fontSize: 10.5, fontWeight: 600, color: tokens.colors.accentSubtle, background: tokens.colors.badgeAgentBg,
+        border: `1px solid ${tokens.colors.accent}55`, borderRadius: 999, padding: '1px 8px', whiteSpace: 'nowrap',
       }}
     >
-      {runtimeLabel(runtime)}
+      {runtimeLabel(cli)}
     </span>
   );
 }
 
-function relativeTime(iso: string | null): string {
+function relativeTime(iso: string | null | undefined): string {
   if (!iso) return '';
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return '';
-  const diff = Date.now() - t;
-  const min = Math.round(diff / 60_000);
+  const min = Math.round((Date.now() - t) / 60_000);
   if (min < 1) return 'just now';
   if (min < 60) return `${min}m ago`;
   const h = Math.round(min / 60);
@@ -109,80 +99,267 @@ function relativeTime(iso: string | null): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
-// ─── 목록 ───────────────────────────────────────────────────────────────────
+// ─── Runtime Host 목록 ──────────────────────────────────────────────────────
 
-function SessionsIndex({
-  wsId,
-  sessions,
-  loading,
-  error,
-  onReload,
-  onNew,
-}: {
-  wsId: string;
-  sessions: AgentSessionSnapshot[];
-  loading: boolean;
-  error: string | null;
-  onReload: () => void;
-  onNew: () => void;
+function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
+  wsId: string; hosts: AgentSessionHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
 }) {
   const navigate = useNavigate();
   return (
     <>
       <PageHeader
         title="Sessions"
-        description="Drive a CLI agent directly — Claude Code, Codex, Hermes. Your session, your working folder, your approvals."
-        actions={<Button variant="primary" size="sm" onClick={onNew}>New session</Button>}
+        description="Drive a CLI on one of your Runtime Hosts — Claude Code, Codex, Hermes — including the sessions already on that machine."
+        actions={<Button variant="primary" size="sm" onClick={onNew} disabled={hosts.length === 0}>New session</Button>}
       />
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
         {error ? (
           <ErrorState message={error} onRetry={onReload} />
-        ) : loading && sessions.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading sessions…</div>
-        ) : sessions.length === 0 ? (
+        ) : loading && hosts.length === 0 ? (
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading Runtime Hosts…</div>
+        ) : hosts.length === 0 ? (
           <EmptyState
-            title="No sessions yet"
-            description="Start a session with one of your agents. Everything the CLI does streams here, and tool permissions wait for your decision."
-            action={<Button variant="primary" onClick={onNew}>Start your first session</Button>}
+            title="No Runtime Host is connected"
+            description="Sessions run on a machine with awb-agent-manager. Pair one from the AI Agents page, and install claude-agent-acp or codex-acp there."
           />
         ) : (
           <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
-            {sessions.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => navigate(`/ws/${wsId}/sessions/${s.id}`)}
-                style={{
-                  textAlign: 'left',
-                  border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: tokens.radii.lg,
-                  background: tokens.colors.surfaceCard,
-                  padding: '12px 14px',
-                  color: tokens.colors.textPrimary,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                  fontFamily: 'inherit',
-                }}
+            {hosts.map((host) => (
+              <div
+                key={host.manager_id}
+                style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg, background: tokens.colors.surfaceCard, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {sessionDisplayTitle(s)}
-                  </span>
-                  <StatusPill status={s.status} />
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: tokens.colors.textPrimary }}>{host.name}</span>
+                  <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: MONO }}>{host.hostname}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tokens.colors.textMuted }}>seen {relativeTime(host.last_seen_at)}</span>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.agent_name}</span>
-                  <RuntimeBadge runtime={s.runtime} />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                  {host.clis.length === 0
+                    ? <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>No ACP-capable CLI reported</span>
+                    : host.clis.map((cli) => {
+                        const bound = host.cli_settings?.[cli] ?? null;
+                        return (
+                          <span
+                            key={cli}
+                            title={bound ? `Signs in with "${bound.name}"` : "Uses the host's own login"}
+                            style={{
+                              border: `1px solid ${tokens.colors.accent}55`, background: tokens.colors.badgeAgentBg, color: tokens.colors.accentSubtle,
+                              borderRadius: 999, padding: '3px 10px', fontSize: 11.5, fontWeight: 600,
+                            }}
+                          >
+                            {bound ? '🔑 ' : ''}{runtimeLabel(cli)}
+                          </span>
+                        );
+                      })
+                  }
                 </div>
-                <div style={{ display: 'flex', gap: 8, fontSize: 11, color: tokens.colors.textMuted }}>
-                  <span style={{ flex: 1, minWidth: 0, fontFamily: MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.cwd}>
-                    {s.cwd || '(agent working_dir)'}
-                  </span>
-                  <span>{relativeTime(s.last_activity_at || s.created_at)}</span>
+                <div style={{ marginTop: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/ws/${wsId}/sessions/${host.manager_id}`)}
+                    style={{
+                      border: `1px solid ${tokens.colors.accent}66`, background: 'transparent', color: tokens.colors.accentSubtle,
+                      borderRadius: tokens.radii.md, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    Open sessions →
+                  </button>
                 </div>
-              </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── 호스트 세션 목록 — cwd 기준 그룹 ─────────────────────────────────────
+
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+
+function CwdGroupCard({ group, wsId, managerId, onNew }: {
+  group: CwdGroup; wsId: string; managerId: string; onNew: (cwd: string) => void;
+}) {
+  const navigate = useNavigate();
+  const [showOlder, setShowOlder] = useState(false);
+  const latestTime = group.sessions[0]?.updated_at;
+
+  const cutoff = Date.now() - THREE_DAYS_MS;
+  const recentSessions = group.sessions.filter(
+    (s) => s.updated_at && new Date(s.updated_at).getTime() >= cutoff,
+  );
+  // Always show at least the newest session even if everything is old
+  const alwaysVisible = recentSessions.length > 0 ? recentSessions : group.sessions.slice(0, 1);
+  const hiddenSessions = recentSessions.length > 0
+    ? group.sessions.filter((s) => !s.updated_at || new Date(s.updated_at).getTime() < cutoff)
+    : group.sessions.slice(1);
+  const displayed = showOlder ? group.sessions : alwaysVisible;
+
+  return (
+    <div style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg, background: tokens.colors.surfaceCard, overflow: 'hidden' }}>
+      {/* 그룹 헤더 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px',
+        borderBottom: `1px solid ${tokens.colors.border}`, background: `${tokens.colors.surface}88`,
+      }}>
+        <span
+          style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: tokens.colors.textPrimary, fontFamily: MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          title={group.cwd}
+        >
+          {group.cwd || '(unknown directory)'}
+        </span>
+        <span style={{ fontSize: 11, color: tokens.colors.textMuted, whiteSpace: 'nowrap' }}>{relativeTime(latestTime)}</span>
+        <button
+          type="button"
+          onClick={() => onNew(group.cwd)}
+          style={{
+            border: `1px solid ${tokens.colors.accent}66`, background: 'transparent', color: tokens.colors.accentSubtle,
+            borderRadius: tokens.radii.md, padding: '2px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+          }}
+        >
+          + New
+        </button>
+      </div>
+      {/* 세션 행 */}
+      {displayed.map((s, i) => (
+        <button
+          key={s.session_id}
+          type="button"
+          onClick={() => navigate(sessionPath(`/ws/${wsId}`, managerId, s.cli, s.session_id))}
+          style={{
+            width: '100%', textAlign: 'left', border: 'none',
+            borderTop: i === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
+            background: 'transparent', padding: '9px 14px', color: tokens.colors.textPrimary,
+            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, fontFamily: 'inherit',
+          }}
+        >
+          <CliBadge cli={s.cli} />
+          <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {sessionDisplayTitle(s)}
+          </span>
+          {s.source === 'awb' && (
+            <span style={{ fontSize: 10, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: 999, padding: '0 6px', whiteSpace: 'nowrap' }}>AWB</span>
+          )}
+          {s.live_status && s.live_status !== 'idle' && <StatusPill status={s.live_status} />}
+          <span style={{ fontSize: 11, color: tokens.colors.textMuted, whiteSpace: 'nowrap', minWidth: 48, textAlign: 'right' }}>{relativeTime(s.updated_at)}</span>
+        </button>
+      ))}
+      {/* 오래된 세션 토글 */}
+      {hiddenSessions.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowOlder((v) => !v)}
+          style={{
+            width: '100%', textAlign: 'center', border: 'none',
+            borderTop: `1px solid ${tokens.colors.border}`,
+            background: `${tokens.colors.surface}55`, padding: '6px 14px',
+            color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 11.5, fontFamily: 'inherit',
+          }}
+        >
+          {showOlder ? '접기 ↑' : `${hiddenSessions.length}개 더 보기 ↓`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
+  wsId: string; managerId: string; host: AgentSessionHost | null; onNew: () => void; onNewWithCwd: (cwd: string) => void;
+}) {
+  const navigate = useNavigate();
+  const [sessionsByCli, setSessionsByCli] = useState<Record<string, AgentSessionSummary[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [showSettings, setShowSettings] = useState<string | null>(null); // cli 이름
+
+  const load = useCallback(async () => {
+    if (!host) return;
+    setLoading(true);
+    const results: Record<string, AgentSessionSummary[]> = {};
+    const errs: string[] = [];
+    await Promise.all(host.clis.map(async (cli) => {
+      try {
+        const list = await api.listHostSessions(managerId, cli);
+        results[cli] = Array.isArray(list) ? list : [];
+      } catch (err: any) {
+        errs.push(`${runtimeLabel(cli)}: ${err?.message || 'fetch failed'}`);
+        results[cli] = [];
+      }
+    }));
+    setSessionsByCli(results);
+    setErrors(errs);
+    setLoading(false);
+  }, [host, managerId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  useBoardStreamEvent('agent_session_update', useCallback((data: AgentSessionUpdateEvent) => {
+    const s = data?.session;
+    if (!s || s.manager_id !== managerId) return;
+    setSessionsByCli((prev) => {
+      const cli = s.cli;
+      const list = prev[cli];
+      if (!list) return prev;
+      return { ...prev, [cli]: list.map((row) => row.session_id === s.session_id ? { ...row, live_status: s.status, title: s.title || row.title } : row) };
+    });
+  }, [managerId]));
+
+  const groups = useMemo(() => groupSessionsByCwd(sessionsByCli), [sessionsByCli]);
+  const hostName = host?.name || managerId.slice(0, 8);
+  const totalSessions = groups.reduce((n, g) => n + g.sessions.length, 0);
+
+  return (
+    <>
+      <PageHeader
+        title={hostName}
+        description={host ? `${host.hostname} — sessions grouped by working directory` : 'This Runtime Host is not connected right now.'}
+        actions={(
+          <>
+            <Button variant="ghost" size="sm" onClick={() => navigate(`/ws/${wsId}/sessions`)}>All hosts</Button>
+            <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>Reload</Button>
+            {host && host.clis.map((cli) => {
+              const bound = host.cli_settings?.[cli] ?? null;
+              return (
+                <Button
+                  key={cli}
+                  variant={showSettings === cli ? 'secondary' : 'ghost'}
+                  size="sm"
+                  onClick={() => setShowSettings((v) => (v === cli ? null : cli))}
+                  title={bound ? `Signs in with "${bound.name}"` : "Uses the host's own login"}
+                >
+                  {bound ? `🔑 ${runtimeLabel(cli)}` : runtimeLabel(cli)}
+                </Button>
+              );
+            })}
+            <Button variant="primary" size="sm" onClick={onNew}>New session</Button>
+          </>
+        )}
+      />
+      {showSettings && (
+        <div style={{ paddingTop: 12 }}>
+          <CliSettingsPanel wsId={wsId} managerId={managerId} cli={showSettings} hostName={hostName} onChanged={() => window.dispatchEvent(new Event(AGENT_SESSIONS_CHANGED_EVENT))} />
+        </div>
+      )}
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
+        {errors.length > 0 && (
+          <div style={{ marginBottom: 12, padding: '8px 12px', background: `${tokens.colors.warningBg}55`, border: `1px solid ${tokens.colors.warningLight}44`, borderRadius: tokens.radii.md, fontSize: 12, color: tokens.colors.warningLight }}>
+            {errors.join(' · ')}
+          </div>
+        )}
+        {loading && totalSessions === 0 ? (
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Asking the Runtime Host for sessions…</div>
+        ) : groups.length === 0 ? (
+          <EmptyState
+            title="No sessions on this host yet"
+            description={`${hostName} has no saved sessions. Start one and it will show up here — and in the CLI's own history.`}
+            action={<Button variant="primary" onClick={onNew}>Start a session</Button>}
+          />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 960 }}>
+            {groups.map((group) => (
+              <CwdGroupCard key={group.cwd} group={group} wsId={wsId} managerId={managerId} onNew={onNewWithCwd} />
             ))}
           </div>
         )}
@@ -193,77 +370,52 @@ function SessionsIndex({
 
 // ─── 세션 뷰 ────────────────────────────────────────────────────────────────
 
-function SessionView({
-  wsId,
-  sessionId,
-  onDeleted,
-  onNew,
-}: {
-  wsId: string;
-  sessionId: string;
-  onDeleted: () => void;
-  onNew: () => void;
+function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
+  wsId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
 }) {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const confirm = useConfirm();
-  const [session, setSession] = useState<AgentSessionSnapshot | null>(null);
+  const [summary, setSummary] = useState<AgentSessionSummary | null>(null);
+  const [live, setLive] = useState<AgentSessionLiveSnapshot | null>(null);
   const [events, setEvents] = useState<AgentSessionEventRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState('');
   const [follow, setFollow] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const refetchingRef = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [snap, list] = await Promise.all([
-        api.getAgentSession(sessionId),
-        api.listAgentSessionEvents(sessionId, 0, 2000),
-      ]);
-      setSession(snap);
-      setEvents(Array.isArray(list) ? list : []);
+      const detail = await api.getHostSession(managerId, cli, sessionId);
+      setSummary(detail.session);
+      setLive(detail.live);
+      setEvents(Array.isArray(detail.events) ? detail.events : []);
       setError(null);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load the session');
+      setError(err?.message || 'Failed to load the session from the Runtime Host');
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [managerId, cli, sessionId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  const matches = useCallback((d: { manager_id?: string; cli?: string; session_id?: string } | null | undefined) =>
+    !!d && d.manager_id === managerId && d.cli === cli && d.session_id === sessionId, [managerId, cli, sessionId]);
+
   useBoardStreamEvent('agent_session_update', useCallback((data: AgentSessionUpdateEvent) => {
-    if (!data?.session || data.session.id !== sessionId) return;
-    if (data.reason === 'deleted') {
-      onDeleted();
-      return;
-    }
-    setSession(data.session);
-  }, [sessionId, onDeleted]));
+    if (!matches(data?.session)) return;
+    setLive(data.session);
+  }, [matches]));
 
   useBoardStreamEvent('agent_session_event', useCallback((data: AgentSessionEventEvent) => {
-    if (!data || data.session_id !== sessionId || !data.event) return;
-    setEvents((prev) => mergeIncomingEvent(prev, data.event));
-  }, [sessionId]));
-
-  // SSE 유실로 seq 갭이 생기면 한 번 재조회한다.
-  useEffect(() => {
-    if (!hasSeqGap(events) || refetchingRef.current) return;
-    refetchingRef.current = true;
-    api.listAgentSessionEvents(sessionId, 0, 2000)
-      .then((list) => setEvents(Array.isArray(list) ? list : []))
-      .catch(() => undefined)
-      .finally(() => {
-        refetchingRef.current = false;
-      });
-  }, [events, sessionId]);
+    if (!matches(data) || !data.event) return;
+    setEvents((prev) => appendLiveEvent(prev, data.event));
+  }, [matches]));
 
   const blocks = useMemo(() => buildTranscript(events), [events]);
   const pending = useMemo(() => pendingPermission(blocks), [blocks]);
@@ -280,228 +432,143 @@ function SessionView({
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   };
 
-  const status = session?.status || 'starting';
-  const statusView = describeSessionStatus(status);
-  const busy = status === 'busy' || status === 'awaiting_permission';
+  const status = live?.status || 'idle';
+  const busy = status === 'busy' || status === 'awaiting_permission' || status === 'starting';
+  const title = live?.title || summary?.title || '';
+  const cwd = live?.cwd || summary?.cwd || '';
 
   const send = useCallback(async (text: string) => {
     try {
-      const result = await api.promptAgentSession(sessionId, text);
-      setSession(result.session);
+      const result = await api.promptHostSession(managerId, cli, sessionId, text);
+      setLive(result.live);
+      setEvents((prev) => appendLiveEvent(prev, {
+        id: `local:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text }, created_at: new Date().toISOString(),
+      }));
       setFollow(true);
     } catch (err: any) {
       showToast(err?.message || 'Failed to send the prompt', 'error');
       throw err;
     }
-  }, [sessionId, showToast]);
+  }, [managerId, cli, sessionId, showToast]);
 
   const decide = useCallback(async (requestId: string, optionId: string | null) => {
     setDecidingRequestId(requestId);
     try {
-      const snap = await api.decideAgentSessionPermission(sessionId, requestId, optionId);
-      setSession(snap);
+      setLive(await api.decideHostSessionPermission(managerId, cli, sessionId, requestId, optionId));
     } catch (err: any) {
       showToast(err?.message || 'Failed to answer the permission request', 'error');
     } finally {
       setDecidingRequestId(null);
     }
-  }, [sessionId, showToast]);
+  }, [managerId, cli, sessionId, showToast]);
 
   const cancel = useCallback(async () => {
     try {
-      await api.cancelAgentSession(sessionId);
+      await api.cancelHostSession(managerId, cli, sessionId);
       showToast('Cancel requested', 'info');
     } catch (err: any) {
       showToast(err?.message || 'Failed to cancel', 'error');
     }
-  }, [sessionId, showToast]);
+  }, [managerId, cli, sessionId, showToast]);
 
   const setMode = useCallback(async (modeId: string) => {
     try {
-      await api.setAgentSessionMode(sessionId, modeId);
+      await api.setHostSessionMode(managerId, cli, sessionId, modeId);
     } catch (err: any) {
       showToast(err?.message || 'Failed to change mode', 'error');
     }
-  }, [sessionId, showToast]);
-
-  const saveTitle = useCallback(async () => {
-    setEditingTitle(false);
-    if (!session || titleDraft.trim() === (session.title || '').trim()) return;
-    try {
-      const snap = await api.renameAgentSession(sessionId, titleDraft.trim());
-      setSession(snap);
-    } catch (err: any) {
-      showToast(err?.message || 'Failed to rename', 'error');
-    }
-  }, [session, sessionId, titleDraft, showToast]);
+  }, [managerId, cli, sessionId, showToast]);
 
   const close = useCallback(async () => {
-    if (!(await confirm({ title: 'Close this session?', message: 'The agent process stops. The transcript stays readable, but you cannot prompt it again.', danger: false, confirmLabel: 'Close session' }))) return;
+    if (!(await confirm({ title: 'Stop the agent process?', message: 'The CLI process on the Runtime Host stops. The session stays in the CLI\'s history and reopens on your next prompt.', danger: false, confirmLabel: 'Stop' }))) return;
     try {
-      const snap = await api.closeAgentSession(sessionId);
-      setSession(snap);
+      setLive(await api.closeHostSession(managerId, cli, sessionId));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to close', 'error');
+      showToast(err?.message || 'Failed to stop', 'error');
     }
-  }, [confirm, sessionId, showToast]);
+  }, [confirm, managerId, cli, sessionId, showToast]);
 
-  const remove = useCallback(async () => {
-    if (!(await confirm({ title: 'Delete this session?', message: 'The transcript is deleted for good.', danger: true, confirmLabel: 'Delete' }))) return;
-    try {
-      await api.deleteAgentSession(sessionId);
-      window.dispatchEvent(new Event(AGENT_SESSIONS_CHANGED_EVENT));
-      onDeleted();
-    } catch (err: any) {
-      showToast(err?.message || 'Failed to delete', 'error');
-    }
-  }, [confirm, sessionId, onDeleted, showToast]);
-
-  if (error && !session) {
+  if (error && !live && !summary) {
     return (
       <>
-        <PageHeader title="Session" actions={<Button variant="secondary" size="sm" onClick={() => navigate(`/ws/${wsId}/sessions`)}>All sessions</Button>} />
+        <PageHeader title="Session" actions={<Button variant="secondary" size="sm" onClick={() => navigate(`/ws/${wsId}/sessions/${managerId}`)}>Back to list</Button>} />
         <div style={{ padding: 20 }}><ErrorState message={error} onRetry={() => void load()} /></div>
       </>
     );
   }
 
-  const composerHint = status === 'closed'
-    ? 'This session is closed. Start a new one to continue.'
-    : status === 'awaiting_permission'
-      ? 'The agent is waiting for your decision on the permission request above.'
-      : status === 'suspended'
-        ? 'The agent process is stopped. Your next prompt reopens the session' + (session?.resume_supported ? ' and restores its context.' : '.')
-        : status === 'error' && session?.last_error
-          ? `Last error: ${session.last_error}`
-          : null;
+  const authProblem = !!live?.last_error && /auth|login|credential/i.test(live.last_error);
+  const composerHint = status === 'awaiting_permission'
+    ? 'The agent is waiting for your decision on the permission request above.'
+    : status === 'error' && authProblem
+      ? `${runtimeLabel(cli)} on ${host?.name || 'the host'} is not signed in. Log in on the host, or bind a credential in this CLI's settings (list page → CLI settings).`
+    : status === 'idle' || status === 'closed'
+      ? `No live process — your next prompt starts ${runtimeLabel(cli)} on ${host?.name || 'the host'} and resumes this session.`
+      : status === 'error' && live?.last_error
+        ? `Last error: ${live.last_error}`
+        : null;
 
   return (
     <>
       <header
         style={{
-          background: tokens.gradients.surfaceCard,
-          borderBottom: `1px solid ${tokens.colors.border}`,
-          padding: '10px 16px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          flexWrap: 'wrap',
-          flexShrink: 0,
+          background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}`, padding: '10px 16px',
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0,
         }}
       >
         <button
           type="button"
-          onClick={() => navigate(`/ws/${wsId}/sessions`)}
-          aria-label="All sessions"
-          title="All sessions"
+          onClick={() => navigate(`/ws/${wsId}/sessions/${managerId}`)}
+          aria-label="Back to sessions"
+          title="Back to sessions"
           style={{ border: 'none', background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 16, padding: '0 4px' }}
         >
           ←
         </button>
         <div style={{ flex: 1, minWidth: 200, display: 'flex', flexDirection: 'column', gap: 3 }}>
-          {editingTitle ? (
-            <input
-              autoFocus
-              aria-label="Session title"
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onBlur={() => void saveTitle()}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void saveTitle();
-                if (e.key === 'Escape') setEditingTitle(false);
-              }}
-              style={{
-                fontSize: 15,
-                fontWeight: 700,
-                background: tokens.colors.surface,
-                color: tokens.colors.textPrimary,
-                border: `1px solid ${tokens.colors.accent}`,
-                borderRadius: tokens.radii.md,
-                padding: '2px 8px',
-                maxWidth: 520,
-              }}
-            />
-          ) : (
-            <button
-              type="button"
-              title="Rename"
-              onClick={() => {
-                setTitleDraft(session?.title || '');
-                setEditingTitle(true);
-              }}
-              style={{
-                textAlign: 'left',
-                border: 'none',
-                background: 'transparent',
-                color: tokens.colors.textPrimary,
-                fontSize: 15,
-                fontWeight: 700,
-                padding: 0,
-                cursor: 'text',
-                fontFamily: 'inherit',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {session ? sessionDisplayTitle(session) : 'Session'}
-            </button>
-          )}
+          <span style={{ color: tokens.colors.textPrimary, fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {sessionDisplayTitle({ title, cli, session_id: sessionId })}
+          </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, color: tokens.colors.textSecondary, flexWrap: 'wrap' }}>
-            <span>{session?.agent_name || '…'}</span>
-            {session && <RuntimeBadge runtime={session.runtime} />}
-            <span style={{ fontFamily: MONO, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }} title={session?.cwd || ''}>
-              {session?.cwd || '(agent working_dir)'}
+            <span>{host?.name || live?.manager_name || managerId.slice(0, 8)}</span>
+            <CliBadge cli={cli} />
+            <span style={{ fontFamily: MONO, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }} title={cwd}>
+              {cwd || '(cwd unknown)'}
             </span>
+            <span style={{ fontFamily: MONO, color: tokens.colors.textMuted }} title={sessionId}>{sessionId.slice(0, 8)}</span>
           </div>
         </div>
         <StatusPill status={status} />
-        {session && session.available_modes.length > 0 && (
+        {live && live.available_modes.length > 0 && (
           <select
             aria-label="Session mode"
-            value={session.current_mode || ''}
-            disabled={status === 'closed'}
+            value={live.current_mode || ''}
+            disabled={!busy && status !== 'ready'}
             onChange={(e) => void setMode(e.target.value)}
-            style={{
-              padding: '4px 8px',
-              borderRadius: tokens.radii.md,
-              border: `1px solid ${tokens.colors.border}`,
-              background: tokens.colors.surface,
-              color: tokens.colors.textPrimary,
-              fontSize: 12,
-            }}
+            style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12 }}
           >
-            {!session.current_mode && <option value="">mode…</option>}
-            {session.available_modes.map((m) => (
-              <option key={m.id} value={m.id} title={m.description}>{m.name}</option>
-            ))}
+            {!live.current_mode && <option value="">mode…</option>}
+            {live.available_modes.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.name}</option>)}
           </select>
         )}
         <div style={{ display: 'flex', gap: 6 }}>
-          <Button variant="ghost" size="sm" onClick={() => void load()} title="Reload transcript">Reload</Button>
+          <Button variant="ghost" size="sm" onClick={() => void load()} title="Reload the transcript from the Runtime Host">Reload</Button>
           <Button variant="ghost" size="sm" onClick={onNew}>New</Button>
-          {status !== 'closed' && <Button variant="secondary" size="sm" onClick={() => void close()}>Close</Button>}
-          <Button variant="danger" size="sm" onClick={() => void remove()}>Delete</Button>
+          {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>Stop</Button>}
         </div>
       </header>
 
-      {session?.last_error && status === 'error' && (
+      {live?.last_error && status === 'error' && (
         <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}` }}>
-          {session.last_error}
+          {live.last_error}
         </div>
       )}
 
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}
-      >
+      <div ref={scrollRef} onScroll={onScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
         {loading && events.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Loading transcript…</div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Reading the session from the Runtime Host…</div>
         ) : blocks.length === 0 ? (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>
-            {statusView.live ? 'Session is ready. Send your first prompt.' : 'No transcript yet.'}
-          </div>
+          <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>No transcript yet. Send your first prompt.</div>
         ) : (
           <SessionTranscript
             blocks={blocks}
@@ -521,17 +588,8 @@ function SessionView({
             if (el) el.scrollTop = el.scrollHeight;
           }}
           style={{
-            alignSelf: 'center',
-            marginTop: -36,
-            marginBottom: 8,
-            fontSize: 11.5,
-            padding: '4px 10px',
-            borderRadius: 999,
-            border: `1px solid ${tokens.colors.border}`,
-            background: tokens.colors.surfaceCard,
-            color: tokens.colors.textSecondary,
-            cursor: 'pointer',
-            zIndex: 1,
+            alignSelf: 'center', marginTop: -36, marginBottom: 8, fontSize: 11.5, padding: '4px 10px', borderRadius: 999,
+            border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard, color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
           }}
         >
           ↓ Jump to latest
@@ -539,13 +597,9 @@ function SessionView({
       )}
 
       <SessionComposer
-        disabled={status === 'closed'}
+        disabled={false}
         busy={busy}
-        placeholder={
-          pending ? 'Answer the permission request above…'
-            : status === 'closed' ? 'Session closed'
-              : canPrompt(status) ? 'Send a prompt to the CLI…' : 'Working…'
-        }
+        placeholder={pending ? 'Answer the permission request above…' : canPrompt(status) ? `Send a prompt to ${runtimeLabel(cli)}…` : 'Working…'}
         hint={composerHint}
         onSend={send}
         onCancel={() => void cancel()}
@@ -557,11 +611,12 @@ function SessionView({
 // ─── 라우트 컨테이너 ────────────────────────────────────────────────────────
 
 export default function SessionsPage() {
-  const { wsId, sessionId } = useParams<{ wsId: string; sessionId?: string }>();
+  const { wsId, managerId, cli, sessionId } = useParams<{ wsId: string; managerId?: string; cli?: string; sessionId?: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { sessions, loading, error, reload } = useAgentSessionsNav(wsId ?? null);
+  const { hosts, loading, error, reload } = useAgentSessionsNav(wsId ?? null);
   const [newOpen, setNewOpen] = useState(false);
+  const [newInitialCwd, setNewInitialCwd] = useState<string | undefined>();
 
   useEffect(() => {
     if (searchParams.get('new') !== '1') return;
@@ -571,27 +626,31 @@ export default function SessionsPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const onDeleted = useCallback(() => {
-    reload();
-    navigate(`/ws/${wsId}/sessions`, { replace: true });
-  }, [navigate, reload, wsId]);
+  const openNew = useCallback(() => { setNewInitialCwd(undefined); setNewOpen(true); }, []);
+  const openNewWithCwd = useCallback((cwd: string) => { setNewInitialCwd(cwd); setNewOpen(true); }, []);
 
   if (!wsId) return null;
+  const host = managerId ? hosts.find((h) => h.manager_id === managerId) ?? null : null;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {sessionId ? (
-        <SessionView key={sessionId} wsId={wsId} sessionId={sessionId} onDeleted={onDeleted} onNew={() => setNewOpen(true)} />
+      {managerId && cli && sessionId ? (
+        <SessionView key={`${managerId}/${cli}/${sessionId}`} wsId={wsId} managerId={managerId} cli={cli} sessionId={sessionId} host={host} onNew={openNew} />
+      ) : managerId ? (
+        <HostProjectsView key={managerId} wsId={wsId} managerId={managerId} host={host} onNew={openNew} onNewWithCwd={openNewWithCwd} />
       ) : (
-        <SessionsIndex wsId={wsId} sessions={sessions} loading={loading} error={error} onReload={reload} onNew={() => setNewOpen(true)} />
+        <HostsIndex wsId={wsId} hosts={hosts} loading={loading} error={error} onReload={reload} onNew={openNew} />
       )}
       <NewSessionModal
         open={newOpen}
         onClose={() => setNewOpen(false)}
-        onCreated={(session) => {
+        hosts={hosts}
+        initialManagerId={managerId}
+        initialCli={cli}
+        initialCwd={newInitialCwd}
+        onCreated={(liveSession) => {
           setNewOpen(false);
-          window.dispatchEvent(new Event(AGENT_SESSIONS_CHANGED_EVENT));
-          navigate(`/ws/${wsId}/sessions/${session.id}`);
+          navigate(sessionPath(`/ws/${wsId}`, liveSession.manager_id, liveSession.cli, liveSession.session_id));
         }}
       />
     </div>

@@ -1,35 +1,26 @@
-// Agent Session(CLI 직접 세션) 서버 계약 — docs/agent-sessions.md.
+// Agent Session(CLI 직접 세션) 서버 contract — docs/agent-sessions.md.
 //
-// 사용자 표면(/api/agent-sessions)과 agent-manager 표면(/api/agent/sessions)을
-// 실제 앱 부팅으로 왕복하며 다음을 고정한다:
-//   1. create → `agent_session_request{op:'open'}` 이 emit 되고 소유자 SSE 에
-//      `agent_session_update{reason:'created'}` 가 도착한다.
-//   2. prompt → user_prompt 행(seq 1) + `agent_session_request{op:'prompt'}`(turn_id/text/cwd 동반),
-//      진행 중이면 두 번째 prompt 는 409.
-//   3. 매니저가 X-Agent-Key 로 이벤트 배치 + patch 를 append 하면 seq 가 이어 붙고
-//      소유자 SSE 에 `agent_session_event` / `agent_session_update` 가 흐른다.
-//   4. permission 결정은 request 로 릴레이되고 중복 결정은 409.
-//   5. 소유자가 아니면 404, 세션 agent 도 그 Runtime Host 도 아닌 키는 403,
-//      Runtime Host(manager) 키는 200.
-//   6. close 뒤 prompt 는 409, delete 뒤 GET 은 404.
-//   7. ACP 어댑터가 없는 타입(custom/antigravity)은 409 runtime_unsupported,
-//      runtime_config.extra.acp_command 가 있으면 열린다.
+// 서버는 상태 없는 중계자다. 이 테스트는 가짜 Runtime Host(매니저 키 + 하트비트)를 세우고
+//   1. GET hosts 가 살아 있는 매니저와 그 장비의 세션 CLI 를 보여주고,
+//   2. list / history / open 이 `agent_session_request{request_id}` reverse RPC 로 매니저에
+//      가서 `POST /api/agent/sessions/rpc/:id` 응답으로 풀리고(타임아웃·소유권 포함),
+//   3. prompt 가 driver 를 잡고 `op:'prompt'` 를 내보내며, 매니저가 중계한 이벤트/상태가
+//      driver 의 SSE 로만 흐르고(저장 없음),
+//   4. permission / cancel / set_mode / close 가 올바른 op 으로 나가고,
+//   5. 다른 매니저 키는 RPC/이벤트를 풀 수 없다
+// 를 고정한다.
 //
 // 실행: node --test --test-force-exit test/agent-sessions.test.mjs (dist 필요)
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
-// 키 경계(403/200) 단언이 의미를 가지려면 AgentAuthGuard 가 실제로 키를 검증해야 한다.
-// bootApp 은 AGENT_DEV_MODE 를 'true' 로 기본 설정하므로 부팅 전에 끈다.
 process.env.AGENT_DEV_MODE = 'false';
 
-/** 응답 본문을 한 번만 읽어 { status, body, text } 로 돌려준다 — assert 메시지에
- *  `res.text` 를 넣으면 본문이 소비돼 이후 json() 이 터진다. */
 async function call(url, init) {
   const res = await fetch(url, init);
   const text = await res.text();
@@ -38,250 +29,335 @@ async function call(url, init) {
   return { status: res.status, body, text };
 }
 
-test('agent session lifecycle: create → prompt → manager stream → permission → close → delete', async (t) => {
+async function waitFor(predicate, label, timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+test('agent sessions relay: hosts → RPC list/history/open → prompt stream → permission → close', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions');
-  const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'user' });
-  const stranger = await createUser(app, getDataSourceToken, { name: 'stranger', role: 'user' });
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
+  const plainUser = await createUser(app, getDataSourceToken, { name: 'plain', role: 'user' });
   const ownerToken = app.get(AuthService).createSession(owner.id);
-  const strangerToken = app.get(AuthService).createSession(stranger.id);
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
-  const agentKey = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'session-agent' });
+  const plainToken = app.get(AuthService).createSession(plainUser.id);
   const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
-  const agentHeaders = { 'X-Agent-Key': agentKey.raw_key, 'Content-Type': 'application/json' };
+
+  // 가짜 Runtime Host — createAgent 가 만든 manager identity + 그 키로 하트비트를 친다.
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
+  const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-rolf-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude', 'codex', 'pi'], acp_session_clis: ['claude', 'codex'], pid: 4242,
+      started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok(heartbeat.status < 300, `heartbeat accepted: ${heartbeat.status} ${heartbeat.text}`);
+
+  // 다른 매니저(무관한 장비)
+  const other = await createAgent(app, getDataSourceToken, ws.id, { name: 'other', type: 'claude' });
+  const otherKey = runtimeHostKeyForAgent(other.id);
 
   const requests = [];
   const onRequest = (payload) => requests.push(payload);
   activityEvents.on('agent_session_request', onRequest);
   t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const rpcRespond = (predicate, body) => waitFor(() => requests.some(predicate), 'rpc request').then(() => {
+    const req = requests.find(predicate);
+    return call(`${base}/api/agent/sessions/rpc/${req.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...body }) });
+  });
 
-  // SSE 스트림은 앱보다 먼저 닫는다 — 열린 keep-alive 연결이 app.close() 를 수 초간 붙든다.
   const stream = await openSseStream(port, ownerToken, {});
   t.after(() => stream.close());
 
-  // 1. 후보 에이전트 + 생성
-  const agentsRes = await call(`${base}/api/agent-sessions/agents`, { headers: ownerHeaders });
-  assert.equal(agentsRes.status, 200);
-  const option = agentsRes.body.find((a) => a.id === agent.id);
-  assert.ok(option, 'agent appears in the session picker');
-  assert.equal(option.supported, true);
-  assert.equal(option.type, 'claude');
+  // 1. hosts — 권한 없는 user 롤은 403, admin 은 장비와 세션 CLI 를 본다
+  const forbidden = await call(`${base}/api/agent-sessions/hosts`, { headers: { ...ownerHeaders, Authorization: `Bearer ${plainToken}` } });
+  assert.equal(forbidden.status, 403, 'agent_sessions.use is admin-only by default');
+  const hosts = await call(`${base}/api/agent-sessions/hosts`, { headers: ownerHeaders });
+  assert.equal(hosts.status, 200, hosts.text);
+  const host = hosts.body.find((h) => h.manager_id === managerId);
+  assert.ok(host, 'heartbeating manager is listed as a session host');
+  assert.equal(host.name, 'rolf');
+  assert.deepEqual(host.clis, ['claude', 'codex'], 'only ACP-capable CLIs reported by the manager');
+  assert.equal(hosts.body.some((h) => h.manager_id === other.manager_agent_id), false, 'a manager without a heartbeat is not a host');
 
-  const createRes = await call(`${base}/api/agent-sessions`, {
-    method: 'POST', headers: ownerHeaders,
-    body: JSON.stringify({ agent_id: agent.id, cwd: '/tmp/work', permission_policy: 'ask' }),
+  // 2a. list — RPC 왕복
+  const listCall = call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`, { headers: ownerHeaders });
+  await rpcRespond((r) => r.op === 'list' && r.cli === 'claude', {
+    ok: true,
+    result: { sessions: [
+      { session_id: 'sess-aaaa', cwd: '/home/parn/repo', title: 'Fix login', created_at: null, updated_at: '2026-09-17T00:00:00.000Z', source: 'cli', size_bytes: 12 },
+      { session_id: 'bad id with spaces', cwd: '/x', title: 'x', updated_at: '2026-09-17T00:00:00.000Z' },
+    ] },
   });
-  assert.equal(createRes.status, 201, createRes.text);
-  const session = createRes.body;
-  assert.equal(session.status, 'starting');
-  assert.equal(session.runtime, 'claude');
-  assert.equal(session.cwd, '/tmp/work');
-  assert.equal(session.owner_user_id, owner.id);
-  assert.equal(requests.at(-1)?.op, 'open');
-  assert.equal(requests.at(-1)?.agent_id, agent.id);
-  await stream.waitFor('agent_session_update', (d) => d?.session?.id === session.id && d.reason === 'created', 4000);
+  const list = await listCall;
+  assert.equal(list.status, 200, list.text);
+  assert.deepEqual(list.body.map((s) => s.session_id), ['sess-aaaa'], 'malformed ids are dropped');
+  assert.equal(list.body[0].cli, 'claude');
+  const listReq = requests.find((r) => r.op === 'list');
+  assert.equal(listReq.manager_id, managerId);
+  assert.equal(listReq.driver_user_id, owner.id);
 
-  // 5a. 소유자 격리 — 남의 세션은 존재 자체가 404
-  const strangerRes = await call(`${base}/api/agent-sessions/${session.id}`, {
-    headers: { ...ownerHeaders, Authorization: `Bearer ${strangerToken}` },
+  // 2b. unsupported cli → 409 without an RPC
+  const unsupported = await call(`${base}/api/agent-sessions/hosts/${managerId}/pi/sessions`, { headers: ownerHeaders });
+  assert.equal(unsupported.status, 409);
+  assert.equal(unsupported.body.error, 'cli_unsupported');
+
+  // 2c. rpc ownership — the other manager's key cannot resolve our request
+  const historyCall = call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa`, { headers: ownerHeaders });
+  await waitFor(() => requests.some((r) => r.op === 'history'), 'history rpc');
+  const historyReq = requests.find((r) => r.op === 'history');
+  assert.equal(historyReq.session_id, 'sess-aaaa');
+  const spoof = await call(`${base}/api/agent/sessions/rpc/${historyReq.request_id}`, {
+    method: 'POST', headers: { 'X-Agent-Key': otherKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manager_id: other.manager_agent_id, ok: true, result: { session: null, events: [] } }),
   });
-  assert.equal(strangerRes.status, 404);
-
-  // 2. prompt
-  const promptRes = await call(`${base}/api/agent-sessions/${session.id}/prompt`, {
-    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'run the tests' }),
-  });
-  assert.equal(promptRes.status, 202, promptRes.text);
-  const promptBody = promptRes.body;
-  assert.equal(promptBody.session.status, 'busy');
-  assert.equal(promptBody.session.title, 'run the tests', 'first prompt excerpt becomes the title');
-  const promptReq = requests.at(-1);
-  assert.equal(promptReq.op, 'prompt');
-  assert.equal(promptReq.text, 'run the tests');
-  assert.equal(promptReq.turn_id, promptBody.turn_id);
-  assert.equal(promptReq.cwd, '/tmp/work');
-  assert.equal(promptReq.runtime, 'claude');
-  const promptFrame = await stream.waitFor('agent_session_event', (d) => d?.session_id === session.id && d.event?.type === 'user_prompt', 4000);
-  assert.equal(promptFrame.data.event.seq, 1);
-  assert.equal(promptFrame.data.event.payload.text, 'run the tests');
-
-  const busyRes = await call(`${base}/api/agent-sessions/${session.id}/prompt`, {
-    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }),
-  });
-  assert.equal(busyRes.status, 409);
-  assert.equal(busyRes.body.error, 'session_busy');
-
-  // 3. 매니저 스트림 append + patch
-  const turnId = promptBody.turn_id;
-  const appendRes = await call(`${base}/api/agent/sessions/${session.id}/events`, {
-    method: 'POST', headers: agentHeaders,
-    body: JSON.stringify({
+  assert.equal(spoof.status, 404, 'foreign manager cannot resolve the rpc');
+  const historyResp = await call(`${base}/api/agent/sessions/rpc/${historyReq.request_id}`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({ manager_id: managerId, ok: true, result: {
+      session: { session_id: 'sess-aaaa', cwd: '/home/parn/repo', title: 'Fix login', updated_at: '2026-09-17T00:00:00.000Z', source: 'cli' },
       events: [
-        { type: 'turn', payload: { phase: 'started' }, turn_id: turnId },
-        { type: 'text', payload: { text: 'Running' }, turn_id: turnId },
-        { type: 'tool_call', payload: { tool_call_id: 't1', title: 'Bash', kind: 'execute', input: { cmd: 'npm test' } }, turn_id: turnId },
-        {
-          type: 'permission_request',
-          payload: {
-            request_id: 'perm-1', tool_call_id: 't1', title: 'Run npm test', kind: 'execute',
-            options: [{ option_id: 'allow', name: 'Allow', kind: 'allow_once' }, { option_id: 'deny', name: 'Deny', kind: 'reject_once' }],
-          },
-          turn_id: turnId,
-        },
+        { id: 'sess-aaaa:1', seq: 1, turn_id: 't0', type: 'user_prompt', payload: { text: 'fix the login test' }, created_at: '2026-09-17T00:00:00.000Z' },
+        { id: 'sess-aaaa:2', seq: 2, turn_id: 't0', type: 'text', payload: { text: 'On it.' }, created_at: '2026-09-17T00:00:01.000Z' },
+        { id: 'sess-aaaa:3', seq: 3, turn_id: 't0', type: 'bogus', payload: {}, created_at: '2026-09-17T00:00:01.000Z' },
       ],
-      patch: {
-        status: 'awaiting_permission', native_session_id: 'acp-1', resume_supported: true,
-        available_modes: [{ id: 'default', name: 'Default' }, { id: 'acceptEdits', name: 'Accept edits' }],
-        current_mode: 'default', reason: 'permission',
-      },
+    } }),
+  });
+  assert.equal(historyResp.status, 200, historyResp.text);
+  const history = await historyCall;
+  assert.equal(history.status, 200, history.text);
+  assert.equal(history.body.session.title, 'Fix login');
+  assert.deepEqual(history.body.events.map((e) => e.type), ['user_prompt', 'text'], 'unknown event types are dropped from history');
+  assert.equal(history.body.live.status, 'idle', 'no live process yet');
+  assert.equal(history.body.live.manager_name, 'rolf');
+
+  // 2d. open (new session) — RPC returns the native id
+  const openCall = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ cwd: '/home/parn/repo', title: 'Review PR' }) });
+  await rpcRespond((r) => r.op === 'open' && r.cli === 'codex', {
+    ok: true,
+    result: { session_id: 'codex-thread-9', cwd: '/home/parn/repo', title: 'Review PR', status: 'ready', resume_supported: false, available_modes: [{ id: 'default', name: 'Default' }], current_mode: 'default' },
+  });
+  const opened = await openCall;
+  assert.equal(opened.status, 201, opened.text);
+  assert.equal(opened.body.session_id, 'codex-thread-9');
+  assert.equal(opened.body.status, 'ready');
+  assert.equal(opened.body.driver_user_id, owner.id);
+  assert.deepEqual(opened.body.available_modes.map((m) => m.id), ['default']);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === 'codex-thread-9' && d.reason === 'opened', 4000);
+  const openReq = requests.find((r) => r.op === 'open');
+  assert.equal(openReq.session_id, null);
+  assert.equal(openReq.cwd, '/home/parn/repo');
+
+  // 2e. missing cwd for a new session → 400, no rpc
+  const noCwd = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({}) });
+  assert.equal(noCwd.status, 400);
+  assert.equal(noCwd.body.error, 'cwd_required');
+
+  // 3. prompt on the existing claude session (idle → starting, driver = owner)
+  const prompt = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'run the suite' }) });
+  assert.equal(prompt.status, 202, prompt.text);
+  assert.equal(prompt.body.live.status, 'starting');
+  assert.equal(prompt.body.live.driver_user_id, owner.id);
+  const promptReq = requests.find((r) => r.op === 'prompt');
+  assert.equal(promptReq.session_id, 'sess-aaaa');
+  assert.equal(promptReq.text, 'run the suite');
+  assert.equal(promptReq.turn_id, prompt.body.turn_id);
+  assert.equal(promptReq.cwd, '/home/parn/repo', 'cwd from the history summary is forwarded');
+  const busy = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
+  assert.equal(busy.status, 409);
+  assert.equal(busy.body.error, 'session_busy');
+
+  // manager relays the stream — frames reach the driver's SSE, nothing is stored
+  const turnId = prompt.body.turn_id;
+  const relay = await call(`${base}/api/agent/sessions/${managerId}/claude/sess-aaaa/events`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      manager_id: managerId,
+      events: [
+        { id: 'sess-aaaa:live:1', seq: 1, turn_id: turnId, type: 'turn', payload: { phase: 'started' }, created_at: new Date().toISOString() },
+        { id: 'sess-aaaa:live:2', seq: 2, turn_id: turnId, type: 'text', payload: { text: 'Running' }, created_at: new Date().toISOString() },
+        { id: 'sess-aaaa:live:3', seq: 3, turn_id: turnId, type: 'permission_request', payload: { request_id: 'perm-1', tool_call_id: 't1', title: 'Run npm test', options: [{ option_id: 'allow', name: 'Allow', kind: 'allow_once' }] }, created_at: new Date().toISOString() },
+      ],
+      state: { status: 'awaiting_permission', reason: 'permission' },
     }),
   });
-  assert.equal(appendRes.status, 200, appendRes.text);
-  const appended = appendRes.body;
-  assert.deepEqual(appended.events.map((e) => e.seq), [2, 3, 4, 5]);
-  assert.equal(appended.session.status, 'awaiting_permission');
-  assert.equal(appended.session.native_session_id, 'acp-1');
-  assert.equal(appended.session.resume_supported, true);
-  assert.deepEqual(appended.session.available_modes.map((m) => m.id), ['default', 'acceptEdits']);
-  await stream.waitFor('agent_session_event', (d) => d?.session_id === session.id && d.event?.type === 'permission_request' && d.event.payload.request_id === 'perm-1', 4000);
-  await stream.waitFor('agent_session_update', (d) => d?.session?.id === session.id && d.session.status === 'awaiting_permission', 4000);
-
-  const badTypeRes = await call(`${base}/api/agent/sessions/${session.id}/events`, {
-    method: 'POST', headers: agentHeaders, body: JSON.stringify({ events: [{ type: 'bogus', payload: {} }] }),
+  assert.equal(relay.status, 200, relay.text);
+  assert.equal(relay.body.relayed, 3);
+  assert.equal(relay.body.live.status, 'awaiting_permission');
+  await stream.waitFor('agent_session_event', (d) => d?.session_id === 'sess-aaaa' && d.event?.type === 'permission_request', 4000);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === 'sess-aaaa' && d.session.status === 'awaiting_permission', 4000);
+  const foreignRelay = await call(`${base}/api/agent/sessions/${managerId}/claude/sess-aaaa/events`, {
+    method: 'POST', headers: { 'X-Agent-Key': otherKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manager_id: managerId, events: [] }),
   });
-  assert.equal(badTypeRes.status, 400);
-  const reservedRes = await call(`${base}/api/agent/sessions/${session.id}/events`, {
-    method: 'POST', headers: agentHeaders, body: JSON.stringify({ events: [{ type: 'user_prompt', payload: { text: 'x' } }] }),
+  assert.equal(foreignRelay.status, 403, 'another manager cannot relay into this host');
+  const badType = await call(`${base}/api/agent/sessions/${managerId}/claude/sess-aaaa/events`, {
+    method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events: [{ type: 'bogus', payload: {} }] }),
   });
-  assert.equal(reservedRes.status, 400);
+  assert.equal(badType.status, 400);
 
-  const listEvRes = await call(`${base}/api/agent-sessions/${session.id}/events?after_seq=0`, { headers: ownerHeaders });
-  assert.equal(listEvRes.status, 200);
-  const evs = listEvRes.body;
-  assert.deepEqual(evs.map((e) => e.type), ['user_prompt', 'turn', 'text', 'tool_call', 'permission_request']);
-  assert.deepEqual(evs.map((e) => e.seq), [1, 2, 3, 4, 5]);
-  assert.equal(evs[3].payload.input.cmd, 'npm test');
-  const afterRes = await call(`${base}/api/agent-sessions/${session.id}/events?after_seq=3`, { headers: ownerHeaders });
-  assert.deepEqual(afterRes.body.map((e) => e.seq), [4, 5]);
-
-  // 4. permission 결정
-  const permRes = await call(`${base}/api/agent-sessions/${session.id}/permission`, {
-    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ request_id: 'perm-1', option_id: 'allow' }),
-  });
-  assert.equal(permRes.status, 200, permRes.text);
-  const permReq = requests.at(-1);
-  assert.equal(permReq.op, 'permission');
-  assert.equal(permReq.request_id, 'perm-1');
+  // 4. permission → op, then manager finishes the turn
+  const decide = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/permission`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ request_id: 'perm-1', option_id: 'allow' }) });
+  assert.equal(decide.status, 200, decide.text);
+  assert.equal(decide.body.status, 'busy');
+  const permReq = requests.find((r) => r.op === 'permission');
+  assert.equal(permReq.permission_request_id, 'perm-1');
   assert.equal(permReq.option_id, 'allow');
-  assert.equal(permReq.native_session_id, 'acp-1', 'request carries the ACP session id the manager patched in');
-  await stream.waitFor('agent_session_event', (d) => d?.session_id === session.id && d.event?.type === 'permission_decision' && d.event.payload.option_id === 'allow', 4000);
-  const permAgain = await call(`${base}/api/agent-sessions/${session.id}/permission`, {
-    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ request_id: 'perm-1', option_id: 'deny' }),
+  const finish = await call(`${base}/api/agent/sessions/${managerId}/claude/sess-aaaa`, {
+    method: 'PATCH', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, status: 'ready', reason: 'turn_finished' }),
   });
-  assert.equal(permAgain.status, 409);
+  assert.equal(finish.status, 200, finish.text);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === 'sess-aaaa' && d.session.status === 'ready', 4000);
 
-  const finishRes = await call(`${base}/api/agent/sessions/${session.id}/events`, {
-    method: 'POST', headers: agentHeaders,
-    body: JSON.stringify({
-      events: [
-        { type: 'tool_update', payload: { tool_call_id: 't1', status: 'completed', output: 'ok' }, turn_id: turnId },
-        { type: 'text', payload: { text: ' done' }, turn_id: turnId },
-        { type: 'usage', payload: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, turn_id: turnId },
-        { type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, turn_id: turnId },
-      ],
-      patch: { status: 'ready', reason: 'turn_finished' },
-    }),
-  });
-  assert.equal(finishRes.status, 200);
-  await stream.waitFor('agent_session_update', (d) => d?.session?.id === session.id && d.session.status === 'ready', 4000);
+  const mode = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'plan' }) });
+  assert.equal(mode.status, 202);
+  assert.equal(requests.find((r) => r.op === 'set_mode')?.mode_id, 'plan');
+  const cancel = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/cancel`, { method: 'POST', headers: ownerHeaders });
+  assert.equal(cancel.status, 202);
+  assert.ok(requests.some((r) => r.op === 'cancel' && r.session_id === 'sess-aaaa'));
 
-  const listRes = await call(`${base}/api/agent-sessions`, { headers: ownerHeaders });
-  assert.equal(listRes.status, 200);
-  const sessions = listRes.body;
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].id, session.id);
-  assert.equal(sessions[0].last_event_seq, 10);
-  assert.equal(sessions[0].agent_name.includes('/'), true, 'agent_name follows the <Manager>/<Agent> contract');
+  // 5. close → status closed + op close; prompting again reopens (starting)
+  const close = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/close`, { method: 'POST', headers: ownerHeaders });
+  assert.equal(close.status, 200);
+  assert.equal(close.body.status, 'closed');
+  assert.ok(requests.some((r) => r.op === 'close' && r.session_id === 'sess-aaaa'));
+  const reopen = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'one more' }) });
+  assert.equal(reopen.status, 202);
+  assert.equal(reopen.body.live.status, 'starting');
 
-  // 5b. 키 경계 — 무관한 agent 키는 403, Runtime Host 키는 200
-  const intruder = await createAgent(app, getDataSourceToken, ws.id, { name: 'intruder', type: 'claude' });
-  const intruderKey = await createApiKey(app, getDataSourceToken, intruder.id, { workspaceId: ws.id, label: 'intruder' });
-  const intruderRes = await call(`${base}/api/agent/sessions/${session.id}/events`, {
-    method: 'POST', headers: { 'X-Agent-Key': intruderKey.raw_key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ events: [{ type: 'system', payload: { text: 'nope' } }] }),
-  });
-  assert.equal(intruderRes.status, 403);
-  const hostKey = runtimeHostKeyForAgent(agent.id);
-  assert.ok(hostKey, 'fixture minted a Runtime Host key');
-  const hostRes = await call(`${base}/api/agent/sessions/${session.id}`, {
-    method: 'PATCH', headers: { 'X-Agent-Key': hostKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: 'suspended', reason: 'idle_reap' }),
-  });
-  assert.equal(hostRes.status, 200, hostRes.text);
-  assert.equal(hostRes.body.session.status, 'suspended');
+  // 6. rpc timeout surfaces as 504 (nobody answers)
+  const orig = requests.length;
+  const slow = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions/never-answered`, { headers: ownerHeaders });
+  await waitFor(() => requests.length > orig, 'history rpc emitted');
+  // 응답 없이 두면 서비스 타임아웃(40s)이 걸린다 — 테스트에서는 오프라인 호스트 404 로 대체 확인
+  const offline = await call(`${base}/api/agent-sessions/hosts/${other.manager_agent_id}/claude/sessions`, { headers: ownerHeaders });
+  assert.equal(offline.status, 404);
+  assert.equal(offline.body.error, 'host_offline');
+  // 미응답 RPC 는 매니저가 not_found 로 닫는다
+  const pendingReq = requests[requests.length - 1];
+  await call(`${base}/api/agent/sessions/rpc/${pendingReq.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' }) });
+  const slowRes = await slow;
+  assert.equal(slowRes.status, 404);
+  assert.equal(slowRes.body.error, 'not_found');
 
-  // rename
-  const renameRes = await call(`${base}/api/agent-sessions/${session.id}`, {
-    method: 'PATCH', headers: ownerHeaders, body: JSON.stringify({ title: 'Test run' }),
-  });
-  assert.equal(renameRes.status, 200);
-  assert.equal(renameRes.body.title, 'Test run');
-
-  // 6. close → prompt 409 → delete → 404
-  const closeRes = await call(`${base}/api/agent-sessions/${session.id}/close`, { method: 'POST', headers: ownerHeaders });
-  assert.equal(closeRes.status, 200);
-  assert.equal(closeRes.body.status, 'closed');
-  assert.equal(requests.at(-1)?.op, 'close');
-  const closedPrompt = await call(`${base}/api/agent-sessions/${session.id}/prompt`, {
-    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'still there?' }),
-  });
-  assert.equal(closedPrompt.status, 409);
-  assert.equal(closedPrompt.body.error, 'session_closed');
-  const delRes = await call(`${base}/api/agent-sessions/${session.id}`, { method: 'DELETE', headers: ownerHeaders });
-  assert.equal(delRes.status, 200);
-  assert.equal(delRes.body.ok, true);
-  const goneRes = await call(`${base}/api/agent-sessions/${session.id}`, { headers: ownerHeaders });
-  assert.equal(goneRes.status, 404);
   stream.close();
 });
 
-test('agent session create refuses agents without an ACP adapter unless runtime_config.extra.acp_command is set', async (t) => {
+// ─── CLI 설정: Runtime Host × CLI 에 워크스페이스 Credential 바인딩 ──────────
+test('cli settings: candidates by provider prefix, validation, host listing, request payload, and manager-only credential fetch', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
-  const { getDataSourceToken, AuthService } = modules;
-  const base = `http://localhost:${port}`;
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const { encrypt } = await import('../dist/services/encryption.service.js');
   const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-runtime');
-  const owner = await createUser(app, getDataSourceToken, { name: 'owner' });
-  const headers = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const ws = await createWorkspace(app, getDataSourceToken, 'cli-settings');
+  const otherWs = await createWorkspace(app, getDataSourceToken, 'cli-settings-other');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
+  const ownerToken = app.get(AuthService).createSession(owner.id);
+  const headers = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
 
-  const custom = await createAgent(app, getDataSourceToken, ws.id, { name: 'custom', type: 'custom' });
-  const antigravity = await createAgent(app, getDataSourceToken, ws.id, { name: 'agy', type: 'antigravity' });
-  for (const a of [custom, antigravity]) {
-    const res = await call(`${base}/api/agent-sessions`, { method: 'POST', headers, body: JSON.stringify({ agent_id: a.id }) });
-    assert.equal(res.status, 409);
-    assert.equal(res.body.error, 'runtime_unsupported');
-  }
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instance_id: 'inst-rolf-2', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test', cli: 'claude', cli_adapters: ['claude', 'codex'], acp_session_clis: ['claude', 'codex'], pid: 1, started_at: new Date().toISOString() }),
+  });
+  const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'stranger', type: 'claude' });
+  const strangerKey = runtimeHostKeyForAgent(stranger.id);
 
-  const picker = (await call(`${base}/api/agent-sessions/agents`, { headers })).body;
-  assert.equal(picker.find((a) => a.id === custom.id)?.supported, false);
-  assert.equal(picker.find((a) => a.id === custom.id)?.reason, 'no_acp_adapter');
+  const credRepo = ds.getRepository('Credential');
+  const mkCred = (workspace_id, name, provider, fields) => credRepo.save(credRepo.create({ workspace_id, name, description: '', provider, encrypted_data: encrypt(JSON.stringify(fields)) }));
+  // 줄바꿈이 섞인 채 저장된 토큰(정규화 이전 row) — 서버가 정리해 보낸다
+  const claudeToken = await mkCred(ws.id, 'rolf oauth token', 'claude_oauth_token', { oauth_token: 'sk-ant-oat-sec\n ret' });
+  const globalClaude = await mkCred(null, 'shared claude key', 'claude_api_key', { api_key: 'sk-global' });
+  const codexCred = await mkCred(ws.id, 'codex login', 'codex_subscription', { auth_json: '{}' });
+  const foreignCred = await mkCred(otherWs.id, 'other ws claude', 'claude_api_key', { api_key: 'sk-other' });
 
-  // explicit ACP command override unlocks the runtime
-  const repo = ds.getRepository('Agent');
-  await repo.update({ id: custom.id }, { runtime_config: { strategy: 'single', permission_mode: 'strict', extra: { acp_command: '/opt/acp/my-agent' } } });
-  const okRes = await call(`${base}/api/agent-sessions`, { method: 'POST', headers, body: JSON.stringify({ agent_id: custom.id }) });
-  assert.equal(okRes.status, 201, okRes.text);
-  assert.equal(okRes.body.runtime, 'custom');
+  // GET: candidates = workspace + global credentials whose provider matches the CLI
+  const initial = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { headers });
+  assert.equal(initial.status, 200, initial.text);
+  assert.equal(initial.body.supports_credential, true);
+  assert.equal(initial.body.credential, null);
+  assert.deepEqual(initial.body.candidates.map((c) => c.id).sort(), [claudeToken.id, globalClaude.id].sort(), 'codex and other-workspace credentials are not offered');
+  assert.equal(initial.body.candidates.find((c) => c.id === globalClaude.id).scope, 'global');
+  const hermes = await call(`${base}/api/agent-sessions/hosts/${managerId}/hermes/settings`, { headers });
+  assert.equal(hermes.body.supports_credential, false);
+  assert.deepEqual(hermes.body.candidates, []);
 
-  // hosted:false → Runtime Host 없음 → 409
-  const orphan = await createAgent(app, getDataSourceToken, ws.id, { name: 'orphan', type: 'claude', hosted: false });
-  const orphanRes = await call(`${base}/api/agent-sessions`, { method: 'POST', headers, body: JSON.stringify({ agent_id: orphan.id }) });
-  assert.equal(orphanRes.status, 409);
-  assert.equal(orphanRes.body.error, 'agent_has_no_runtime_host');
+  // PUT validation
+  const mismatch = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: codexCred.id }) });
+  assert.equal(mismatch.status, 400);
+  assert.equal(mismatch.body.error, 'credential_provider_mismatch');
+  const foreign = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: foreignCred.id }) });
+  assert.equal(foreign.status, 404);
+  const unknownHost = await call(`${base}/api/agent-sessions/hosts/${agent.id}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
+  assert.equal(unknownHost.status, 404, 'a non-manager agent id is not a host');
+  const hermesPut = await call(`${base}/api/agent-sessions/hosts/${managerId}/hermes/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
+  assert.equal(hermesPut.status, 409);
+
+  const saved = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
+  assert.equal(saved.status, 200, saved.text);
+  assert.equal(saved.body.credential.id, claudeToken.id);
+  assert.equal(saved.body.credential.provider, 'claude_oauth_token');
+  assert.ok(saved.body.updated_at);
+
+  // hosts list carries the binding per CLI
+  const hosts = await call(`${base}/api/agent-sessions/hosts`, { headers });
+  const host = hosts.body.find((h) => h.manager_id === managerId);
+  assert.equal(host.cli_settings.claude.name, 'rolf oauth token');
+  assert.equal(host.cli_settings.codex, undefined);
+
+  // open / prompt requests carry workspace_id + credential_id; list/history carry workspace_id only
+  const requests = [];
+  const onRequest = (p) => requests.push(p);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const openCall = call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`, { method: 'POST', headers, body: JSON.stringify({ cwd: '/home/parn/repo' }) });
+  await waitFor(() => requests.some((r) => r.op === 'open'), 'open rpc');
+  const openReq = requests.find((r) => r.op === 'open');
+  assert.equal(openReq.credential_id, claudeToken.id);
+  assert.equal(openReq.workspace_id, ws.id);
+  await call(`${base}/api/agent/sessions/rpc/${openReq.request_id}`, { method: 'POST', headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ manager_id: managerId, ok: true, result: { session_id: 'sess-cred', cwd: '/home/parn/repo', status: 'ready' } }) });
+  assert.equal((await openCall).status, 201);
+  const prompt = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/prompt`, { method: 'POST', headers, body: JSON.stringify({ text: 'hi' }) });
+  assert.equal(prompt.status, 202);
+  assert.equal(requests.find((r) => r.op === 'prompt').credential_id, claudeToken.id);
+
+  // manager fetches the decrypted material — only for a bound credential, only as the bound manager
+  const fetched = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  assert.equal(fetched.status, 200, fetched.text);
+  assert.equal(fetched.body.provider, 'claude_oauth_token');
+  assert.deepEqual(fetched.body.fields, { oauth_token: 'sk-ant-oat-secret' }, 'interior whitespace is stripped before the token reaches the manager');
+  assert.equal(fetched.body.fields.oauth_token.includes('\n'), false);
+  const unbound = await call(`${base}/api/agent/sessions/credential/${globalClaude.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  assert.equal(unbound.status, 403, 'a credential that is not bound in CLI settings is not served');
+  const otherManager = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': strangerKey } });
+  assert.equal(otherManager.status, 403, 'another Runtime Host cannot read this binding');
+  const noWs = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  assert.equal(noWs.status, 400);
+
+  // clearing the binding
+  const cleared = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: null }) });
+  assert.equal(cleared.body.credential, null);
+  const afterClear = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
+  assert.equal(afterClear.status, 403);
 });

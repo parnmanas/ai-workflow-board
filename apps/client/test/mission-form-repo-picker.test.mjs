@@ -230,8 +230,8 @@ test('새 미션 — UUID 를 타이핑하지 않고 드롭다운만으로 repo 
 
   // UUID 를 타이핑할 자리가 애초에 없어야 한다 — 목록이 정상일 때 수동 입력은 숨는다.
   assert.equal(
-    container.querySelector('input[aria-label="resource_id 직접 입력"]'),
-    null,
+    Boolean(container.querySelector('input[aria-label="resource_id 직접 입력"]')),
+    false,
     '목록을 정상적으로 받은 상태에서는 원시 id 입력이 노출되지 않는다',
   );
 });

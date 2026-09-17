@@ -185,6 +185,57 @@ export class AuthService {
     return { token, user: safeUser };
   }
 
+  /**
+   * Google OAuth 로그인/신규 가입. google_id 로 찾고, 없으면 이메일로 매칭해 연결한다.
+   * 최초 사용자는 admin/active 로, 이후 사용자는 user/pending 으로 생성.
+   */
+  async loginOrCreateGoogleUser(
+    googleId: string,
+    email: string,
+    name: string,
+    avatarUrl: string,
+  ): Promise<{ token: string; user: any } | { error: string; status?: number }> {
+    // 1. google_id 로 기존 유저 조회
+    let user = await this.userRepo.findOne({ where: { google_id: googleId } as any });
+
+    // 2. google_id 없으면 이메일로 찾아 연결
+    if (!user && email) {
+      user = await this.userRepo.findOne({ where: { email } });
+      if (user) {
+        (user as any).google_id = googleId;
+        if (!user.avatar_url && avatarUrl) user.avatar_url = avatarUrl;
+        user = await this.userRepo.save(user);
+      }
+    }
+
+    // 3. 그래도 없으면 신규 생성
+    if (!user) {
+      const total = await this.userRepo.count();
+      const created = this.userRepo.create({
+        name,
+        email,
+        avatar_url: avatarUrl,
+        role: total === 0 ? 'admin' : 'user',
+        status: total === 0 ? 'active' : 'pending',
+        google_id: googleId,
+      } as any);
+      user = await this.userRepo.save(created as any);
+    }
+
+    if (!user) return { error: 'Failed to create user account' };
+
+    if ((user as any).status === 'pending') {
+      return { error: 'Your account is pending admin approval' };
+    }
+    if ((user as any).status === 'rejected') {
+      return { error: 'Your account has been rejected' };
+    }
+
+    const token = this.createSession(user.id);
+    const { password_hash, ...safeUser } = user as any;
+    return { token, user: safeUser };
+  }
+
   async getSessionUser(token: string): Promise<User | null> {
     const session = this.validateSession(token);
     if (!session) return null;

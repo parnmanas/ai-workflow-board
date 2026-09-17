@@ -1,31 +1,23 @@
-// Agent Session(CLI 직접 세션) 러너 — fake-acp-server.mjs 픽스처로 실제 ACP 왕복을
-// 돌리며 서버 contract(POST /api/agent/sessions/:id/events, PATCH /api/agent/sessions/:id)
-// 로 무엇이 어떤 순서로 나가는지 고정한다(docs/agent-sessions.md).
-//
-//  1. open  → session/new → 'Session opened' system 행 + patch{status:'ready',
-//             native_session_id, resume_supported}
-//  2. prompt → 픽스처가 thought/message/tool_call/tool_call_update 를 스트리밍하고
-//             session/request_permission 을 던진다 → 러너는 reasoning/text/tool_call/
-//             tool_update/permission_request 를 순서대로 append 하고
-//             patch{status:'awaiting_permission'} 을 보낸 뒤 결정을 기다린다.
-//  3. permission → 픽스처가 usage_update + end_turn 으로 턴을 끝낸다 → usage + turn(finished)
-//             + patch{status:'ready'}.
-//  4. auto_allow 정책이면 사용자 결정 없이 decided_by:'policy' 로 즉시 진행한다.
-//  5. native_session_id 가 있고 어댑터가 loadSession 을 지원하면 session/load 로 복원한다.
-//  6. 부트스트랩되지 않은 agent(ctx 없음)면 서버에 status:'error' 를 patch 한다.
-//  7. close → 프로세스가 종료되고 'Agent process stopped.' 가 남는다.
-
+// Agent Session(CLI 직접 세션) 러너 — fake-acp-server.mjs 로 실제 ACP 왕복을 돌리며
+// 서버 contract(rpc 응답 · events 중계 · state patch)를 고정한다(docs/agent-sessions.md).
+//   1. list / history RPC 는 저장소(CLI 홈 파일)에서 읽어 응답한다.
+//   2. open(신규) 은 session/new 로 네이티브 id 를 받아 인덱스에 기록하고 상태 ready.
+//   3. prompt 는 스트림을 순서대로 중계하고, permission 은 사용자 결정으로 풀린다.
+//   4. open(기존 id) 는 session/load 로 복원한다(cwd 는 기록에서).
+//   5. 없는 cwd / 알 수 없는 CLI 는 RPC 오류로 응답한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readlink, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { AgentSessionRunner, resolveAcpCommandForRuntime } from '../dist/lib/agent-session-runner.js';
+import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
+import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
-const AGENT = 'agent-session-test';
+const MANAGER = 'manager-1';
+const CLAUDE_ID = '11111111-2222-4333-8444-555555555555';
 
 function installFakeServer() {
   const calls = [];
@@ -34,16 +26,19 @@ function installFakeServer() {
     const target = String(url);
     const method = init?.method || 'GET';
     const body = init?.body ? JSON.parse(init.body) : null;
-    const apiKey = init?.headers?.['X-Agent-Key'];
-    calls.push({ url: target, method, body, apiKey });
+    calls.push({ url: target, method, body, apiKey: init?.headers?.['X-Agent-Key'] });
     return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
   return {
     calls,
     restore: () => { globalThis.fetch = original; },
-    events: () => calls
-      .filter((c) => c.method === 'POST' && c.url.includes('/api/agent/sessions/'))
-      .flatMap((c) => c.body.events.map((e) => ({ ...e, patch: c.body.patch ?? null }))),
+    rpc: (requestId) => calls.find((c) => c.url.endsWith(`/api/agent/sessions/rpc/${requestId}`))?.body ?? null,
+    events: (sessionId) => calls
+      .filter((c) => c.method === 'POST' && c.url.includes(`/api/agent/sessions/${MANAGER}/`) && c.url.endsWith(`/${sessionId}/events`))
+      .flatMap((c) => c.body.events.map((e) => ({ ...e, state: c.body.state ?? null }))),
+    states: (sessionId) => calls
+      .filter((c) => c.url.includes(`/api/agent/sessions/${MANAGER}/`) && (c.url.endsWith(`/${sessionId}/events`) || c.url.endsWith(`/${sessionId}`)))
+      .map((c) => (c.method === 'PATCH' ? c.body : c.body.state)).filter(Boolean),
   };
 }
 
@@ -56,42 +51,54 @@ async function waitFor(predicate, label, timeoutMs = 8000) {
   throw new Error(`timeout waiting for ${label}`);
 }
 
-function context(cwd, extra = {}) {
-  return {
-    agent_id: AGENT,
-    workspace_id: 'ws-1',
-    api_key: 'agent-api-key',
-    cwd,
-    cli: 'claude',
-    cli_home_dir: join(cwd, 'cli-home'),
-    extra_env: { FAKE_EXTRA: '1' },
-    runtime_config: { strategy: 'single', permission_mode: 'strict' },
-    ...extra,
-  };
+function request(op, extra = {}) {
+  return { manager_id: MANAGER, cli: 'claude', op, driver_user_id: 'user-1', issued_at: new Date().toISOString(), ...extra };
 }
 
-function request(sessionId, op, extra = {}) {
-  return {
-    session_id: sessionId,
-    workspace_id: 'ws-1',
-    agent_id: AGENT,
-    owner_user_id: 'user-1',
-    op,
-    runtime: 'claude',
-    cwd: '',
-    native_session_id: null,
-    permission_policy: 'ask',
-    issued_at: new Date().toISOString(),
-    ...extra,
-  };
+/** `root` 아래를 cwd 로 물고 있는 살아 있는 프로세스의 pid. Linux 에서만 답할 수
+ *  있다(/proc). Windows 에서는 그런 프로세스가 있으면 rmdir 이 EBUSY 로 실패하므로
+ *  rm 자체가 검출기다 — 이 함수는 그 **Windows 전용 결함을 ubuntu 축에서도 빨갛게**
+ *  만들려고 있다(ticket 445453a7). 러너를 어떻게 만들었든 상관없이 OS 에 직접 묻기
+ *  때문에, 하네스가 정리 등록을 빠뜨려도 그대로 잡힌다.
+ *  (죽은 직후 zombie 는 cwd 링크를 읽을 수 없어 자연히 제외된다.) */
+async function pidsHoldingCwd(root) {
+  let entries;
+  try {
+    entries = await readdir('/proc');
+  } catch {
+    return []; // /proc 이 없는 축 — 여기서는 검출할 수 없다.
+  }
+  const holders = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const cwd = await readlink(`/proc/${entry}/cwd`);
+      if (cwd === root || cwd.startsWith(`${root}/`)) holders.push(entry);
+    } catch {
+      /* 이미 사라졌거나 읽을 권한이 없는 프로세스 */
+    }
+  }
+  return holders;
 }
 
 async function harness(t, runnerOptions = {}) {
-  const cwd = await mkdtemp(join(tmpdir(), 'awb-agent-session-'));
+  const root = await mkdtemp(join(tmpdir(), 'awb-agent-session-'));
+  const cwd = join(root, 'work');
+  await mkdir(cwd, { recursive: true });
+  const claudeHome = join(root, 'claude');
+  const projectDir = join(claudeHome, 'projects', '-work');
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(join(projectDir, `${CLAUDE_ID}.jsonl`), [
+    JSON.stringify({ type: 'user', uuid: 'u1', sessionId: CLAUDE_ID, cwd, timestamp: '2026-09-17T00:00:00.000Z', message: { role: 'user', content: 'existing prompt' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a1', sessionId: CLAUDE_ID, cwd, timestamp: '2026-09-17T00:00:01.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'existing answer' }] } }),
+  ].join('\n') + '\n');
+  const store = new AgentSessionStore({ claudeHome, codexHome: join(root, 'codex'), indexPath: join(root, 'index.json') });
   const server = installFakeServer();
   const runner = new AgentSessionRunner(
     { url: 'http://127.0.0.1:0', apiKey: 'manager-key' },
     {
+      getManagerId: () => MANAGER,
+      store,
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
       flushIntervalMs: 10,
       idleMinutes: 0,
@@ -101,138 +108,317 @@ async function harness(t, runnerOptions = {}) {
       ...runnerOptions,
     },
   );
+  // root 를 cwd 로 물고 있는 러너를 모두 여기 모은다. node:test 의 t.after 는
+  // 등록 순서(FIFO)로 돌기 때문에, 중첩 하네스가 자기 러너를 별도 t.after 로 걸면
+  // **여기 있는 rm(root) 이 먼저** 돌아 자식이 cwd 를 문 채로 삭제된다. Windows 는
+  // 프로세스의 cwd 가 디렉터리 핸들을 잡으므로 그 rmdir 이 EBUSY 로 실패한다
+  // (POSIX 는 열린 cwd 여도 unlink 가 성공해 조용히 지나간다 — ticket 445453a7).
+  const rootHolders = [runner];
   t.after(async () => {
-    await runner.stopAll('test');
+    for (const holder of [...rootHolders].reverse()) await holder.stopAll('test').catch(() => undefined);
+    // 진단은 rm 전에 걷고, **단언은 정리를 다 끝낸 뒤에** 한다. 훅 도중에 던지면
+    // 남은 정리(server.restore · rm · 아직 안 멈춘 러너)가 통째로 건너뛰어져,
+    // 살아남은 자식 때문에 테스트 러너가 종료하지 못하고 hang 처럼 보인다.
+    const leaked = rootHolders.flatMap((holder) => holder._snapshot());
+    const holding = await pidsHoldingCwd(root);
+    // 진단만 하고 두면 그 프로세스가 러너의 이벤트 루프를 붙잡아, 실패가 읽을 수
+    // 있는 단언이 아니라 hang 으로 나타난다(실측: 149s 뒤 timeout). 정리까지 여기서
+    // 끝내고 단언은 그 뒤에 한다 — root 는 이 하네스만 쓰는 mkdtemp 라 이 pid 들은
+    // 정의상 우리가 띄운 자식이다.
+    for (const pid of holding) {
+      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* 이미 사라졌다 */ }
+    }
     server.restore();
-    await rm(cwd, { recursive: true, force: true });
+    const rmError = await rm(root, { recursive: true, force: true }).then(() => null, (err) => err);
+
+    // 좁은 진단부터 넓은 진단 순으로 단언한다.
+    assert.deepEqual(leaked, [], `rm(root) 전에 살아 있는 세션이 남았다: ${JSON.stringify(leaked)}`);
+    // 위 단언은 **등록된** 러너만 본다 — 등록을 빠뜨린 하네스는 그냥 통과한다.
+    // 그래서 등록과 무관하게 OS 에 직접 묻는 이 검사가 실제 게이트다.
+    assert.deepEqual(holding, [], `rm(root) 전에 root 를 cwd 로 쥔 프로세스가 남았다 (pid ${holding.join(', ')})`);
+    // Windows 는 위 두 단언이 못 보는 잠금까지 여기서 드러난다(EBUSY).
+    assert.equal(rmError, null, `임시 root 를 지우지 못했다: ${rmError?.message ?? ''}`);
   });
-  return { cwd, server, runner };
+  // 이 root 를 공유하는 러너를 추가로 등록한다 — 자기 t.after 를 따로 걸지 말 것.
+  const holdsRoot = (extra) => { rootHolders.push(extra); };
+  return { root, cwd, store, server, runner, holdsRoot };
 }
 
-test('open → prompt → permission relay → turn finished, in stream order', async (t) => {
+test('list / history RPCs answer from the CLI home store', async (t) => {
   const { cwd, server, runner } = await harness(t);
-  const sid = 'session-order';
+  await runner.handle(request('list', { request_id: 'rpc-list' }));
+  const list = server.rpc('rpc-list');
+  assert.equal(list.ok, true);
+  assert.equal(list.manager_id, MANAGER);
+  assert.deepEqual(list.result.sessions.map((s) => s.session_id), [CLAUDE_ID]);
+  assert.equal(list.result.sessions[0].cwd, cwd);
+  assert.equal(list.result.sessions[0].live_status, undefined, 'no live process yet');
 
-  await runner.handle(request(sid, 'open'), context(cwd));
-  await waitFor(() => server.events().some((e) => e.type === 'system' && /Session opened/.test(e.payload.text)), 'open system row');
-  const openPatch = server.events().find((e) => e.type === 'system').patch;
-  assert.equal(openPatch.status, 'ready');
-  assert.equal(openPatch.native_session_id, 'session-1');
-  assert.equal(openPatch.resume_supported, true, 'fixture advertises loadSession');
-  assert.equal(server.calls[0].apiKey, 'agent-api-key', 'stream is posted under the agent key');
-  assert.equal(server.calls[0].body.agent_id, AGENT, 'dev-mode identity fallback is carried in the body');
+  await runner.handle(request('history', { request_id: 'rpc-history', session_id: CLAUDE_ID }));
+  const history = server.rpc('rpc-history');
+  assert.equal(history.ok, true);
+  assert.deepEqual(history.result.events.map((e) => e.type), ['user_prompt', 'text']);
+  assert.equal(history.result.live, null);
 
-  // prompt runs until the fixture asks for permission
-  const turn = runner.handle(request(sid, 'prompt', { turn_id: 't-1', text: 'hello there' }), context(cwd));
-  await waitFor(() => server.events().some((e) => e.type === 'permission_request'), 'permission_request row');
-  const permission = server.events().find((e) => e.type === 'permission_request');
-  assert.equal(permission.patch?.status, 'awaiting_permission');
-  assert.deepEqual(permission.payload.options.map((o) => o.option_id), ['allow-once', 'deny']);
-  assert.equal(permission.payload.tool_call_id, 'tool-2');
-  assert.equal(permission.turn_id, 't-1');
-
-  const beforeDecision = server.events().map((e) => e.type);
-  assert.deepEqual(beforeDecision, ['system', 'turn', 'reasoning', 'text', 'tool_call', 'tool_update', 'permission_request']);
-  assert.equal(server.events().find((e) => e.type === 'text').payload.text, 'hello');
-  assert.equal(server.events().find((e) => e.type === 'reasoning').payload.text, 'thinking');
-  assert.equal(server.events().find((e) => e.type === 'tool_call').payload.title, 'Read file');
-  assert.equal(server.events().find((e) => e.type === 'tool_update').payload.status, 'completed');
-  assert.equal(server.events().find((e) => e.type === 'turn').payload.phase, 'started');
-  assert.equal(server.events().find((e) => e.type === 'turn').patch?.status, 'busy');
-
-  // the user decides → the fixture finishes the turn
-  await runner.handle(request(sid, 'permission', { request_id: permission.payload.request_id, option_id: 'allow-once' }), context(cwd));
-  await turn;
-  // 전송은 세션당 FIFO 체인이라 순서는 보장되지만, 병렬 부하가 큰 러너에서는 handle()
-  // 이 돌아온 직후 마지막 POST 가 아직 진행 중일 수 있다 — 행이 보일 때까지 기다린다.
-  await waitFor(() => server.events().some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn(finished) row');
-  const types = server.events().map((e) => e.type);
-  const finished = server.events().filter((e) => e.type === 'turn').at(-1);
-  assert.equal(finished.payload.phase, 'finished');
-  assert.equal(finished.payload.stop_reason, 'end_turn');
-  assert.equal(finished.patch?.status, 'ready');
-  assert.ok(types.includes('usage'), 'usage row is relayed');
-  assert.equal(types.at(-1), 'turn', 'turn(finished) is the last row of the turn');
-  assert.equal(server.events().find((e) => e.type === 'usage').payload.total_tokens, 21);
-
-  // close → process stops
-  const pidBefore = runner._snapshot()[0]?.pid;
-  assert.ok(pidBefore, 'live session has a pid');
-  await runner.handle(request(sid, 'close'), context(cwd));
-  assert.equal(runner._snapshot().length, 0);
-  assert.ok(server.events().some((e) => e.type === 'system' && /Agent process stopped/.test(e.payload.text)));
+  await runner.handle(request('history', { request_id: 'rpc-missing', session_id: 'missing-1' }));
+  assert.equal(server.rpc('rpc-missing').ok, false);
+  assert.equal(server.rpc('rpc-missing').code, 'not_found');
 });
 
-test('permission_policy=auto_allow answers the request from policy and records decided_by=policy', async (t) => {
-  const { cwd, server, runner } = await harness(t);
-  const sid = 'session-auto';
-  await runner.handle(request(sid, 'prompt', { turn_id: 't-auto', text: 'go', permission_policy: 'auto_allow' }), context(cwd));
-  await waitFor(() => server.events().some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn(finished) row');
-  const decision = server.events().find((e) => e.type === 'permission_decision');
-  assert.ok(decision, 'decision row was written by the runner');
-  assert.equal(decision.payload.decided_by, 'policy');
+test('open(new) → prompt stream → permission relay → turn finished, and the session lands in the AWB index', async (t) => {
+  const { cwd, store, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open', session_id: null, cwd, title: 'Try things' }));
+  const opened = server.rpc('rpc-open');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.equal(opened.result.session_id, 'session-1');
+  assert.equal(opened.result.status, 'ready');
+  assert.equal(opened.result.resume_supported, true);
+  const sid = opened.result.session_id;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'system' && /Session opened/.test(e.payload.text)), 'opened row');
+  assert.equal(server.events(sid)[0].state.status, 'ready');
+  assert.equal(server.events(sid)[0].state.title, 'Try things');
+  assert.equal(server.calls[0].apiKey, 'manager-key', 'relay uses the manager key');
+  assert.equal((await store.listSessions('claude')).find((s) => s.session_id === sid)?.source, 'awb');
+
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-1', text: 'hello there' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  const permission = server.events(sid).find((e) => e.type === 'permission_request');
+  assert.equal(permission.state?.status, 'awaiting_permission');
+  assert.deepEqual(server.events(sid).map((e) => e.type), ['system', 'turn', 'reasoning', 'text', 'tool_call', 'tool_update', 'permission_request']);
+  assert.equal(server.events(sid).find((e) => e.type === 'text').payload.text, 'hello');
+  assert.equal(server.events(sid).find((e) => e.type === 'turn').state.status, 'busy');
+  assert.ok(server.events(sid).every((e, i) => e.seq === i + 1), 'seq is contiguous per session');
+
+  await runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
+  await turn;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn(finished) row');
+  const types = server.events(sid).map((e) => e.type);
+  assert.equal(types[types.indexOf('permission_request') + 1], 'permission_decision', 'the runner records the user decision right after the request');
+  const decision = server.events(sid).find((e) => e.type === 'permission_decision');
+  assert.equal(decision.payload.decided_by, 'user');
   assert.equal(decision.payload.option_id, 'allow-once');
-  const finished = server.events().filter((e) => e.type === 'turn').at(-1);
+  const finished = server.events(sid).filter((e) => e.type === 'turn').at(-1);
   assert.equal(finished.payload.stop_reason, 'end_turn');
-  assert.ok(!server.events().some((e) => e.patch?.status === 'awaiting_permission'), 'never waited on the user');
+  assert.equal(finished.state.status, 'ready');
+  assert.ok(types.includes('usage'));
+
+  await runner.handle(request('list', { request_id: 'rpc-list-2' }));
+  assert.equal(server.rpc('rpc-list-2').result.sessions.find((s) => s.session_id === sid).live_status, 'ready');
+
+  await runner.handle(request('close', { session_id: sid }));
+  assert.equal(runner._snapshot().length, 0);
+  assert.equal(server.events(sid).at(-1).state.status, 'closed');
 });
 
-test('a cancelled permission decision refuses the tool and the turn still finishes', async (t) => {
+test('open(existing id) resumes via session/load using the cwd recorded in the CLI home', async (t) => {
   const { cwd, server, runner } = await harness(t);
-  const sid = 'session-deny';
-  const turn = runner.handle(request(sid, 'prompt', { turn_id: 't-deny', text: 'go' }), context(cwd));
-  await waitFor(() => server.events().some((e) => e.type === 'permission_request'), 'permission_request row');
-  const permission = server.events().find((e) => e.type === 'permission_request');
-  await runner.handle(request(sid, 'permission', { request_id: permission.payload.request_id, option_id: null }), context(cwd));
+  await runner.handle(request('open', { request_id: 'rpc-resume', session_id: CLAUDE_ID }));
+  const resumed = server.rpc('rpc-resume');
+  assert.equal(resumed.ok, true, JSON.stringify(resumed));
+  assert.equal(resumed.result.session_id, CLAUDE_ID);
+  assert.equal(resumed.result.cwd, cwd);
+  await waitFor(() => server.events(CLAUDE_ID).some((e) => /Session resumed/.test(e.payload.text)), 'resumed row');
+  assert.equal(server.events(CLAUDE_ID)[0].state.reason, 'resumed');
+  // prompt on the resumed session reuses the live process
+  const before = runner._snapshot()[0]?.pid;
+  const turn = runner.handle(request('prompt', { session_id: CLAUDE_ID, turn_id: 't-2', text: 'continue' }));
+  await waitFor(() => server.events(CLAUDE_ID).some((e) => e.type === 'permission_request'), 'permission');
+  const permission = server.events(CLAUDE_ID).find((e) => e.type === 'permission_request');
+  await runner.handle(request('permission', { session_id: CLAUDE_ID, permission_request_id: permission.payload.request_id, option_id: null }));
   await turn;
-  await waitFor(() => server.events().some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn(finished) row');
-  const finished = server.events().filter((e) => e.type === 'turn').at(-1);
-  assert.equal(finished.payload.phase, 'finished');
-  assert.equal(finished.payload.stop_reason, 'refusal', 'fixture reports refusal when the outcome is cancelled');
+  assert.equal(runner._snapshot()[0]?.pid, before, 'same process');
+  await waitFor(() => server.events(CLAUDE_ID).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'finished');
+  assert.equal(server.events(CLAUDE_ID).filter((e) => e.type === 'turn').at(-1).payload.stop_reason, 'refusal');
 });
 
-test('native_session_id + loadSession capability → session/load resume', async (t) => {
-  const { cwd, server, runner } = await harness(t);
-  const sid = 'session-resume';
-  await runner.handle(request(sid, 'open', { native_session_id: 'session-previous' }), context(cwd));
-  await waitFor(() => server.events().some((e) => e.type === 'system'), 'system row');
-  const opened = server.events().find((e) => e.type === 'system');
-  assert.match(opened.payload.text, /Session resumed/);
-  assert.equal(opened.patch.native_session_id, 'session-previous');
-  assert.equal(opened.patch.reason, 'resumed');
-});
-
-test('missing agent context → server session is marked error under the manager key', async (t) => {
+test('errors: unknown cwd for a new session and a missing session file fail as RPC errors, nothing spawned', async (t) => {
   const { server, runner } = await harness(t);
-  await runner.handle(request('session-nocx', 'prompt', { turn_id: 't', text: 'x' }), undefined);
-  const patch = server.calls.find((c) => c.method === 'PATCH');
-  assert.ok(patch, 'PATCH was sent');
-  assert.equal(patch.apiKey, 'manager-key');
-  assert.equal(patch.body.status, 'error');
-  assert.match(patch.body.last_error, /not bootstrapped/);
+  await runner.handle(request('open', { request_id: 'rpc-bad-cwd', session_id: null, cwd: '/definitely/not/here' }));
+  assert.equal(server.rpc('rpc-bad-cwd').ok, false);
+  assert.match(server.rpc('rpc-bad-cwd').error, /does not exist/);
+  await runner.handle(request('open', { request_id: 'rpc-no-file', session_id: 'unknown-session' }));
+  assert.equal(server.rpc('rpc-no-file').ok, false);
+  assert.match(server.rpc('rpc-no-file').error, /No working directory/);
   assert.equal(runner._snapshot().length, 0);
+  // fire-and-forget prompt on an unknown session → error row + state error
+  await runner.handle(request('prompt', { session_id: 'unknown-session', turn_id: 't', text: 'x' }));
+  const err = server.events('unknown-session').find((e) => e.type === 'error');
+  assert.ok(err, 'error row relayed');
+  assert.equal(err.state?.status, 'error');
 });
 
-test('a missing working directory fails open with an error row instead of spawning', async (t) => {
-  const { server, runner } = await harness(t);
-  await runner.handle(request('session-nocwd', 'open', { cwd: '/definitely/not/here' }), context('/definitely/not/here'));
-  const error = server.events().find((e) => e.type === 'error');
-  assert.ok(error, 'error row posted');
-  assert.match(error.payload.message, /does not exist/);
-  assert.equal(error.patch?.status, 'error');
-  assert.equal(runner._snapshot().length, 0);
-});
-
-test('resolveAcpCommandForRuntime honours runtime_config.extra.acp_command and env overrides', async () => {
-  const explicit = await resolveAcpCommandForRuntime('custom', { runtime_config: { extra: { acp_command: '/opt/acp/agent', acp_args: ['--flag', 1] } } });
-  assert.deepEqual(explicit, { command: '/opt/acp/agent', args: ['--flag', '1'] });
+test('command resolution: env override, npx fallback, unknown cli; detectAcpSessionClis reads PATH', async (t) => {
   process.env.AWB_ACP_COMMAND_CODEX = 'node /tmp/codex-acp.js --x';
   try {
-    assert.deepEqual(await resolveAcpCommandForRuntime('codex', {}), { command: 'node', args: ['/tmp/codex-acp.js', '--x'] });
+    assert.deepEqual(await resolveAcpCommandForCli('codex'), { command: 'node', args: ['/tmp/codex-acp.js', '--x'] });
   } finally {
     delete process.env.AWB_ACP_COMMAND_CODEX;
   }
-  await assert.rejects(() => resolveAcpCommandForRuntime('antigravity', {}), /No ACP adapter/);
-  const claude = await resolveAcpCommandForRuntime('claude', {});
-  assert.ok(claude.command === 'npx' || /claude-agent-acp/.test(claude.command), 'falls back to npx when the adapter is not on PATH');
+  await assert.rejects(() => resolveAcpCommandForCli('pi'), /No ACP adapter/);
+  const claude = await resolveAcpCommandForCli('claude');
+  assert.ok(claude.command === 'npx' || /claude-agent-acp/.test(claude.command));
+
+  const binDir = await mkdtemp(join(tmpdir(), 'awb-acp-bin-'));
+  t.after(() => rm(binDir, { recursive: true, force: true }));
+  await writeFile(join(binDir, 'codex-acp'), '#!/bin/sh\n', { mode: 0o755 });
+  const originalPath = process.env.PATH;
+  process.env.PATH = binDir;
+  try {
+    const clis = await detectAcpSessionClis({});
+    assert.deepEqual(clis, ['codex']);
+    assert.deepEqual(await detectAcpSessionClis({ AWB_ACP_COMMAND_CLAUDE: 'x' }), ['claude', 'codex']);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+// ─── CLI 설정 credential 적용 ───────────────────────────────────────────────
+// credential 이 묶이면 운영자 홈 대신 세션 전용 cli-home 을 쓰되, 기록 디렉터리는
+// 운영자 홈으로 링크해 기존 세션이 그대로 보이고 이어진다. 운영자 홈 파일은 불변.
+import { lstat, readFile, stat as statFile } from 'node:fs/promises';
+
+async function credentialHarness(t, provider, fields, cli = 'claude') {
+  const base = await harness(t);
+  const captureFile = join(base.root, 'capture.json');
+  const sessionHomesDir = join(base.root, 'session-homes');
+  const codexHome = join(base.root, 'codex');
+  await mkdir(join(codexHome, 'sessions'), { recursive: true });
+  const store = new AgentSessionStore({ claudeHome: join(base.root, 'claude'), codexHome, indexPath: join(base.root, 'index.json') });
+  const fetches = [];
+  const runner = new AgentSessionRunner(
+    { url: 'http://127.0.0.1:0', apiKey: 'manager-key' },
+    {
+      getManagerId: () => MANAGER,
+      store,
+      sessionHomesDir,
+      commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
+      // 운영자 셸의 API 키가 credential 을 덮지 않아야 한다 + 운영자 홈은 env 로 고정.
+      // 운영자 환경의 CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY 등이 테스트에
+      // 흘러들어오면 "credential 없는 operator-login" 케이스가 오염된다 — 명시적으로 덮는다.
+      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined },
+      credentialFetcher: async (id, ws) => {
+        fetches.push({ id, ws });
+        return provider ? { credential_id: id, provider, fields } : null;
+      },
+      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
+    },
+  );
+  base.holdsRoot(runner);
+  const capture = async () => JSON.parse(await readFile(captureFile, 'utf8'));
+  return { ...base, runner, sessionHomesDir, captureFile, capture, fetches, cli, server: base.server };
+}
+
+test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKEN, operator key stripped, projects linked back', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  await h.runner.handle({ ...request('open', { request_id: 'rpc-cred', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1' }) });
+  const opened = h.server.rpc('rpc-cred');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.deepEqual(h.fetches, [{ id: 'cred-1', ws: 'ws-1' }]);
+  const cap = await h.capture();
+  const home = join(h.sessionHomesDir, 'claude', 'cred-1');
+  assert.equal(cap.CLAUDE_CONFIG_DIR, home, 'session-specific cli-home');
+  assert.equal(cap.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-test');
+  assert.equal(cap.ANTHROPIC_API_KEY, null, 'operator shell key is stripped so it cannot shadow the credential');
+  const link = join(home, 'projects');
+  assert.ok((await lstat(link)).isSymbolicLink(), 'projects is a symlink');
+  assert.equal(await readlink(link), join(h.root, 'claude', 'projects'), 'linked to the operator home so existing sessions stay visible');
+  const trust = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8'));
+  assert.equal(trust.projects[h.cwd].hasTrustDialogAccepted, true, 'workspace trust seeded for headless use');
+  await assert.rejects(statFile(join(home, '.credentials.json')), 'oauth token mode writes no credentials file');
+});
+
+test('credential (claude_subscription): .credentials.json lands in the session home only; operator home untouched', async (t) => {
+  const h = await credentialHarness(t, 'claude_subscription', { credentials_json: '{"claudeAiOauth":{"accessToken":"x"}}' });
+  await h.runner.handle(request('open', { request_id: 'rpc-sub', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-2' }));
+  assert.equal(h.server.rpc('rpc-sub').ok, true, JSON.stringify(h.server.rpc('rpc-sub')));
+  const home = join(h.sessionHomesDir, 'claude', 'cred-2');
+  assert.equal(await readFile(join(home, '.credentials.json'), 'utf8'), '{"claudeAiOauth":{"accessToken":"x"}}');
+  const cap = await h.capture();
+  assert.equal(cap.CLAUDE_CONFIG_DIR, home);
+  assert.equal(cap.CLAUDE_CODE_OAUTH_TOKEN, null);
+  await assert.rejects(statFile(join(h.root, 'claude', '.credentials.json')), 'operator home never receives the file');
+});
+
+test('credential (codex_subscription): auth.json in the session home with sessions linked back', async (t) => {
+  const h = await credentialHarness(t, 'codex_subscription', { auth_json: '{"tokens":{"access_token":"a"}}', config_toml: '' }, 'codex');
+  await h.runner.handle({ ...request('open', { request_id: 'rpc-codex', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-3' }), cli: 'codex' });
+  const opened = h.server.rpc('rpc-codex');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const home = join(h.sessionHomesDir, 'codex', 'cred-3');
+  assert.equal(await readFile(join(home, 'auth.json'), 'utf8'), '{"tokens":{"access_token":"a"}}');
+  const cap = await h.capture();
+  assert.equal(cap.CODEX_HOME, home);
+  assert.equal(cap.OPENAI_API_KEY, null, 'operator OPENAI_API_KEY stripped');
+  assert.ok((await lstat(join(home, 'sessions'))).isSymbolicLink());
+});
+
+test('credential errors: provider mismatch, unsupported cli, and missing material fail the open RPC without spawning', async (t) => {
+  const mismatch = await credentialHarness(t, 'codex_api_key', { api_key: 'k' });
+  await mismatch.runner.handle(request('open', { request_id: 'rpc-mismatch', session_id: null, cwd: mismatch.cwd, workspace_id: 'ws-1', credential_id: 'cred-x' }));
+  assert.equal(mismatch.server.rpc('rpc-mismatch').ok, false);
+  assert.equal(mismatch.server.rpc('rpc-mismatch').code, 'credential_provider_mismatch');
+  assert.equal(mismatch.runner._snapshot().length, 0);
+
+  const hermes = await credentialHarness(t, 'claude_api_key', { api_key: 'k' });
+  await hermes.runner.handle({ ...request('open', { request_id: 'rpc-hermes', session_id: null, cwd: hermes.cwd, workspace_id: 'ws-1', credential_id: 'cred-h' }), cli: 'hermes' });
+  assert.equal(hermes.server.rpc('rpc-hermes').code, 'credential_unsupported');
+
+  const missing = await credentialHarness(t, null, {});
+  await missing.runner.handle(request('open', { request_id: 'rpc-missing-cred', session_id: null, cwd: missing.cwd, workspace_id: 'ws-1', credential_id: 'cred-gone' }));
+  assert.equal(missing.server.rpc('rpc-missing-cred').code, 'credential_unavailable');
+});
+
+test('no credential bound → operator login: env untouched, no session home created', async (t) => {
+  const h = await credentialHarness(t, 'claude_api_key', { api_key: 'unused' });
+  await h.runner.handle(request('open', { request_id: 'rpc-plain', session_id: null, cwd: h.cwd, workspace_id: 'ws-1' }));
+  assert.equal(h.server.rpc('rpc-plain').ok, true);
+  assert.deepEqual(h.fetches, [], 'credential is never fetched without a binding');
+  const cap = await h.capture();
+  assert.equal(cap.CLAUDE_CONFIG_DIR, join(h.root, 'claude'), 'operator home stays the CLI home');
+  assert.equal(cap.ANTHROPIC_API_KEY, 'operator-shell-key');
+  await assert.rejects(statFile(join(h.sessionHomesDir, 'claude')), 'no session home');
+});
+
+test('binding a credential after the session is live reopens the process with the credential on the next prompt', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-late' });
+  await h.runner.handle(request('open', { request_id: 'rpc-first', session_id: null, cwd: h.cwd, workspace_id: 'ws-1' }));
+  const first = h.server.rpc('rpc-first');
+  assert.equal(first.ok, true);
+  const sid = first.result.session_id;
+  assert.equal((await h.capture()).CLAUDE_CODE_OAUTH_TOKEN, null, 'opened with the operator login');
+  const pidBefore = h.runner._snapshot()[0]?.pid;
+
+  // the operator binds a credential in CLI settings, then prompts again
+  const turn = h.runner.handle(request('prompt', { session_id: sid, turn_id: 't-late', text: 'hi', workspace_id: 'ws-1', credential_id: 'cred-late' }));
+  await waitFor(() => h.server.events(sid).some((e) => e.type === 'permission_request'), 'permission after reopen');
+  const permission = h.server.events(sid).find((e) => e.type === 'permission_request');
+  await h.runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
+  await turn;
+  assert.notEqual(h.runner._snapshot()[0]?.pid, pidBefore, 'a new adapter process was started');
+  assert.equal((await h.capture()).CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-late', 'the new process carries the credential');
+  assert.ok(h.server.events(sid).some((e) => e.type === 'system' && /CLI settings changed/.test(e.payload.text)), 'the transcript explains the reopen');
+  assert.deepEqual(h.fetches, [{ id: 'cred-late', ws: 'ws-1' }]);
+});
+
+test('credential whitespace is repaired before use (a token pasted with a line wrap still works) and incomplete credentials are refused', async (t) => {
+  const wrapped = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-first-half\n second-half' });
+  await wrapped.runner.handle(request('open', { request_id: 'rpc-wrap', session_id: null, cwd: wrapped.cwd, workspace_id: 'ws-1', credential_id: 'cred-wrap' }));
+  assert.equal(wrapped.server.rpc('rpc-wrap').ok, true, JSON.stringify(wrapped.server.rpc('rpc-wrap')));
+  assert.equal((await wrapped.capture()).CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-first-halfsecond-half', 'interior whitespace stripped');
+
+  const empty = await credentialHarness(t, 'claude_oauth_token', { oauth_token: '   ' });
+  await empty.runner.handle(request('open', { request_id: 'rpc-empty', session_id: null, cwd: empty.cwd, workspace_id: 'ws-1', credential_id: 'cred-empty' }));
+  assert.equal(empty.server.rpc('rpc-empty').ok, false);
+  assert.equal(empty.server.rpc('rpc-empty').code, 'credential_incomplete');
+  assert.equal(empty.runner._snapshot().length, 0);
+});
+
+test('redactSecrets hides bearer tokens and API keys quoted by CLI error messages', () => {
+  const msg = 'API Error: Headers.append: "Bearer sk-ant-oat01-AAAAbbbbCCCCdddd1234\n more" is an invalid header value; api_key="sk-live-abcdefghijklmnopqrstuvwxyz"';
+  const out = redactSecrets(msg);
+  assert.doesNotMatch(out, /oat01-AAAA/);
+  assert.doesNotMatch(out, /sk-live-abcdefghijklmnop/);
+  assert.match(out, /Bearer <redacted>/);
+  assert.match(out, /api_key="<redacted>"/);
+  assert.equal(redactSecrets('plain message'), 'plain message');
 });

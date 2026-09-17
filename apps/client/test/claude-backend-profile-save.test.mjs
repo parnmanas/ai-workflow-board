@@ -184,7 +184,11 @@ test('저장 중 버튼을 잠그고 실패 후 다시 저장할 수 있게 복�
 
   await act(async () => { pending.reject(new Error('의도한 저장 실패')); });
   assert.equal(save.disabled, false);
-  assert.equal(save.querySelector('[aria-hidden="true"]'), null);
+  assert.equal(
+    Boolean(save.querySelector('[aria-hidden="true"]')),
+    false,
+    '저장이 실패로 끝났으면 진행 표시가 사라져야 한다',
+  );
 });
 
 test('유효하지 않은 기존 참조를 명시하고 다른 Credential 선택 또는 해제를 허용한다', async (t) => {
@@ -303,7 +307,11 @@ test('프로필이 0건이면 EmptyState 를, 목록 로드가 실패하면 Erro
   const { container } = await renderManager(t, { profiles: [] });
   assert.match(container.textContent, /등록된 프로필이 없습니다/);
   // EmptyState 는 경보 시맨틱이 없다 — role="alert" 가 붙으면 안 된다.
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.equal(
+    Boolean(container.querySelector('[role="alert"]')),
+    false,
+    'EmptyState 에 경보 시맨틱(role="alert")이 붙으면 안 된다',
+  );
 
   // 기본값 셀렉트 변경 실패 경로가 아니라, 목록 조회 실패 경로를 태운다.
   const failing = await renderManager(t, {

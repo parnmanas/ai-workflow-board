@@ -594,6 +594,63 @@ export default function SettingsManager() {
         </div>
       </Card>
 
+      {/* ─── Google OAuth ─── */}
+      <Card padding="20px">
+        <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+          Google OAuth
+        </div>
+        <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
+          Adds a "Continue with Google" button to the login page alongside the existing
+          email/password form. Create an OAuth 2.0 Client ID in Google Cloud Console and set the
+          authorised redirect URI to{' '}
+          <code style={{ fontSize: 11 }}>{window.location.origin}/api/auth/oauth/google/callback</code>.
+          The client secret is stored encrypted.
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div>
+            <label style={labelStyle}>Enable Google Login</label>
+            <div style={hintStyle}>Show "Continue with Google" on the sign-in page</div>
+            <select
+              value={formValues['oauth.google.enabled'] || 'false'}
+              onChange={(e) => handleChange('oauth.google.enabled', e.target.value)}
+              style={selectStyle}
+            >
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+          </div>
+
+          <div>
+            <label style={labelStyle}>Client ID</label>
+            <div style={hintStyle}>Google OAuth 2.0 client ID (from Google Cloud Console)</div>
+            <Input
+              value={formValues['oauth.google.client_id'] || ''}
+              onChange={(e) => handleChange('oauth.google.client_id', e.target.value)}
+              placeholder="123456789-abc.apps.googleusercontent.com"
+            />
+          </div>
+
+          <div>
+            <label style={labelStyle}>Client Secret</label>
+            <div style={hintStyle}>Stored encrypted. Re-enter to rotate; masked on read.</div>
+            <input
+              type="password"
+              value={formValues['oauth.google.client_secret'] || ''}
+              onChange={(e) => handleChange('oauth.google.client_secret', e.target.value)}
+              placeholder="GOCSPX-…"
+              style={secretInputStyle}
+            />
+          </div>
+        </div>
+
+        <StatusDot
+          enabled={formValues['oauth.google.enabled'] === 'true'}
+          enabledText="Google login enabled — button shown on login page"
+          disabledText="Google login disabled"
+        />
+      </Card>
+
       {/* ─── Save ─── */}
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button

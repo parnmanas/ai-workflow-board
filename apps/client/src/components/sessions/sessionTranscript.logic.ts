@@ -11,7 +11,7 @@
  *   - `turn` started 는 블록을 만들지 않고, finished 는 stop_reason 이 end_turn 이
  *     아닐 때만 남긴다(취소/거절/오류를 사용자가 볼 수 있게)
  */
-import type { AgentSessionEventRecord, AgentSessionSnapshot, AgentSessionStatus } from '../../types';
+import type { AgentSessionEventRecord, AgentSessionStatus } from '../../types';
 
 export interface PermissionOptionView {
   option_id: string;
@@ -204,18 +204,19 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
   return blocks;
 }
 
-/** SSE 로 도착한 행을 seq 순서로 끼워 넣는다 — 중복(같은 id/seq)은 무시. */
-export function mergeIncomingEvent(
+/**
+ * 라이브 스트림 행을 트랜스크립트 끝에 붙인다. 기록(history)의 seq 와 라이브 seq 는
+ * 서로 다른 번호 공간이라(라이브는 프로세스마다 1 부터) 도착 순서대로 이어 붙이고,
+ * id 로만 중복을 거른다. 표시용 seq 는 마지막 값 + 1 로 다시 매긴다.
+ */
+export function appendLiveEvent(
   events: AgentSessionEventRecord[],
   incoming: AgentSessionEventRecord,
 ): AgentSessionEventRecord[] {
-  if (!incoming || typeof incoming.seq !== 'number') return events;
-  if (events.some((e) => e.id === incoming.id || e.seq === incoming.seq)) return events;
+  if (!incoming || !incoming.id) return events;
+  if (events.some((e) => e.id === incoming.id)) return events;
   const last = events[events.length - 1];
-  if (!last || last.seq < incoming.seq) return [...events, incoming];
-  const next = [...events, incoming];
-  next.sort((a, b) => a.seq - b.seq);
-  return next;
+  return [...events, { ...incoming, seq: (last?.seq ?? 0) + 1 }];
 }
 
 /** 아직 결정되지 않은 가장 최근 permission 블록. */
@@ -241,8 +242,10 @@ export interface StatusView {
   live: boolean;
 }
 
-export function describeSessionStatus(status: AgentSessionStatus | string): StatusView {
+export function describeSessionStatus(status: AgentSessionStatus | string | null | undefined): StatusView {
   switch (status) {
+    case 'idle':
+      return { label: 'Idle', tone: 'muted', live: false };
     case 'starting':
       return { label: 'Starting', tone: 'accent', live: true };
     case 'ready':
@@ -251,8 +254,6 @@ export function describeSessionStatus(status: AgentSessionStatus | string): Stat
       return { label: 'Working', tone: 'accent', live: true };
     case 'awaiting_permission':
       return { label: 'Needs your approval', tone: 'warning', live: true };
-    case 'suspended':
-      return { label: 'Suspended', tone: 'muted', live: false };
     case 'closed':
       return { label: 'Closed', tone: 'muted', live: false };
     case 'error':
@@ -262,15 +263,16 @@ export function describeSessionStatus(status: AgentSessionStatus | string): Stat
   }
 }
 
-export function sessionDisplayTitle(session: Pick<AgentSessionSnapshot, 'title' | 'agent_name' | 'runtime'>): string {
+export function sessionDisplayTitle(session: { title?: string | null; cli?: string; session_id?: string }): string {
   const title = (session.title || '').trim();
   if (title) return title;
-  return `${session.agent_name || 'Agent'} · ${session.runtime || 'session'}`;
+  const id = session.session_id ? session.session_id.slice(0, 8) : '';
+  return `${runtimeLabel(session.cli || '')}${id ? ` · ${id}` : ' session'}`;
 }
 
-/** 프롬프트 전송 가능 여부 — 서버 규칙(closed 불가, 진행 중 불가)의 UI 거울. */
-export function canPrompt(status: AgentSessionStatus | string): boolean {
-  return status !== 'closed' && status !== 'busy' && status !== 'awaiting_permission';
+/** 프롬프트 전송 가능 여부 — 서버 규칙(진행 중만 불가; idle/closed 는 재오픈)의 UI 거울. */
+export function canPrompt(status: AgentSessionStatus | string | null | undefined): boolean {
+  return status !== 'busy' && status !== 'awaiting_permission' && status !== 'starting';
 }
 
 export function runtimeLabel(runtime: string): string {

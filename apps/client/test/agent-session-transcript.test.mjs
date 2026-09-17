@@ -4,15 +4,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  appendLiveEvent,
   buildTranscript,
   canPrompt,
   describeSessionStatus,
-  hasSeqGap,
-  mergeIncomingEvent,
   pendingPermission,
   sessionDisplayTitle,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
-import { applySessionUpdate, sortSessionsByActivity } from '../src/components/sessions/sessionList.logic.ts';
+import {
+  cwdBaseName,
+  groupSessionsByCwd,
+  sessionPath,
+  sortSessionsByActivity,
+} from '../src/components/sessions/sessionList.logic.ts';
 
 let seq = 0;
 function ev(type, payload, turn_id = 't1') {
@@ -72,39 +76,94 @@ test('text chunks from different turns never merge', () => {
   assert.equal(blocks.length, 2);
 });
 
-test('mergeIncomingEvent appends in seq order, ignores duplicates, and hasSeqGap detects loss', () => {
-  const base = [{ id: 'a', seq: 1, turn_id: '', type: 'system', payload: {}, created_at: '' }];
-  const withTwo = mergeIncomingEvent(base, { id: 'b', seq: 2, turn_id: '', type: 'system', payload: {}, created_at: '' });
-  assert.equal(withTwo.length, 2);
-  assert.equal(mergeIncomingEvent(withTwo, { id: 'b', seq: 2, turn_id: '', type: 'system', payload: {}, created_at: '' }), withTwo, 'duplicate id is a no-op');
-  const outOfOrder = mergeIncomingEvent(mergeIncomingEvent(base, { id: 'd', seq: 4, turn_id: '', type: 'system', payload: {}, created_at: '' }), { id: 'c', seq: 3, turn_id: '', type: 'system', payload: {}, created_at: '' });
-  assert.deepEqual(outOfOrder.map((e) => e.seq), [1, 3, 4]);
-  assert.equal(hasSeqGap(outOfOrder), true);
-  assert.equal(hasSeqGap(withTwo), false);
+test('appendLiveEvent appends in arrival order, renumbers display seq, and drops duplicate ids', () => {
+  const history = [
+    { id: 's:1', seq: 1, turn_id: '', type: 'user_prompt', payload: { text: 'a' }, created_at: '' },
+    { id: 's:2', seq: 2, turn_id: '', type: 'text', payload: { text: 'b' }, created_at: '' },
+  ];
+  // 라이브 seq 는 프로세스마다 1 부터 — 기록의 seq 와 겹쳐도 순서를 바꾸지 않는다
+  const withLive = appendLiveEvent(history, { id: 's:live:ab12:1', seq: 1, turn_id: 't', type: 'turn', payload: { phase: 'started' }, created_at: '' });
+  assert.deepEqual(withLive.map((e) => e.id), ['s:1', 's:2', 's:live:ab12:1']);
+  assert.equal(withLive[2].seq, 3, 'display seq continues after history');
+  assert.equal(appendLiveEvent(withLive, { id: 's:live:ab12:1', seq: 1, turn_id: 't', type: 'turn', payload: {}, created_at: '' }), withLive, 'duplicate id is a no-op');
+  assert.equal(appendLiveEvent(withLive, { id: '', seq: 9, turn_id: '', type: 'text', payload: {}, created_at: '' }), withLive, 'events without an id are ignored');
 });
 
 test('status helpers mirror the server prompt rules', () => {
   assert.equal(canPrompt('ready'), true);
-  assert.equal(canPrompt('suspended'), true, 'a suspended session reopens on prompt');
+  assert.equal(canPrompt('idle'), true, 'an idle session reopens on prompt');
+  assert.equal(canPrompt('closed'), true, 'a stopped session reopens on prompt');
   assert.equal(canPrompt('error'), true);
   assert.equal(canPrompt('busy'), false);
   assert.equal(canPrompt('awaiting_permission'), false);
-  assert.equal(canPrompt('closed'), false);
+  assert.equal(canPrompt('starting'), false);
   assert.equal(describeSessionStatus('awaiting_permission').tone, 'warning');
-  assert.equal(describeSessionStatus('closed').live, false);
-  assert.equal(sessionDisplayTitle({ title: '', agent_name: 'ralf/coder', runtime: 'claude' }), 'ralf/coder · claude');
-  assert.equal(sessionDisplayTitle({ title: 'Fix login', agent_name: 'ralf/coder', runtime: 'claude' }), 'Fix login');
+  assert.equal(describeSessionStatus('idle').live, false);
+  assert.equal(describeSessionStatus(undefined).label, 'Unknown');
+  assert.equal(sessionDisplayTitle({ title: '', cli: 'claude', session_id: '11111111-2222' }), 'Claude Code · 11111111');
+  assert.equal(sessionDisplayTitle({ title: 'Fix login', cli: 'claude', session_id: 'x' }), 'Fix login');
 });
 
-test('session list: SSE update upserts, deletes, and keeps most-recent-activity order', () => {
-  const s = (id, last) => ({ id, workspace_id: 'ws', last_activity_at: last, updated_at: last, created_at: last, status: 'ready', title: id, agent_name: 'a', runtime: 'claude' });
-  const sorted = sortSessionsByActivity([s('old', '2026-09-01T00:00:00Z'), s('new', '2026-09-10T00:00:00Z')]);
-  assert.deepEqual(sorted.map((x) => x.id), ['new', 'old']);
-  const upserted = applySessionUpdate(sorted, { event_type: 'agent_session_update', reason: 'status', timestamp: '', session: { ...s('old', '2026-09-20T00:00:00Z'), status: 'busy' } });
-  assert.deepEqual(upserted.map((x) => x.id), ['old', 'new']);
-  assert.equal(upserted[0].status, 'busy');
-  const added = applySessionUpdate(upserted, { event_type: 'agent_session_update', reason: 'created', timestamp: '', session: s('fresh', '2026-09-21T00:00:00Z') });
-  assert.equal(added[0].id, 'fresh');
-  const removed = applySessionUpdate(added, { event_type: 'agent_session_update', reason: 'deleted', timestamp: '', session: s('old', '') });
-  assert.deepEqual(removed.map((x) => x.id), ['fresh', 'new']);
+test('session list helpers: activity sort, canonical paths', () => {
+  const sorted = sortSessionsByActivity([
+    { cli: 'claude', session_id: 'old', cwd: '/a', title: 'old', created_at: null, updated_at: '2026-09-01T00:00:00Z', source: 'cli' },
+    { cli: 'claude', session_id: 'new', cwd: '/a', title: 'new', created_at: null, updated_at: '2026-09-10T00:00:00Z', source: 'cli' },
+  ]);
+  assert.deepEqual(sorted.map((s) => s.session_id), ['new', 'old']);
+  assert.equal(sessionPath('/ws/w1', 'm1', 'claude', 'abc def'), '/ws/w1/sessions/m1/claude/abc%20def');
+});
+
+test('cwdBaseName 은 표시용 마지막 경로 요소를 뽑는다 — POSIX·Windows·후행 구분자·빈 입력', () => {
+  assert.equal(cwdBaseName(''), '(unknown)', '빈 cwd 는 자리표시자로 대체된다');
+  assert.equal(cwdBaseName('/a/b'), 'b');
+  assert.equal(cwdBaseName('/a/b/'), 'b', '후행 구분자는 무시한다');
+  assert.equal(cwdBaseName('a/b'), 'b', '상대 경로도 마지막 요소를 뽑는다');
+  assert.equal(cwdBaseName('C:\\a\\b'), 'b', 'Windows 구분자');
+  assert.equal(cwdBaseName('C:\\a\\b\\'), 'b', 'Windows 후행 구분자');
+  assert.equal(cwdBaseName('project'), 'project', '구분자가 없으면 입력이 곧 이름이다');
+  // 루트는 후행 구분자를 떼고 나면 남는 요소가 없어 cwd 원문으로 되돌아간다.
+  // '(unknown)' 이 아니라 '/' 인 것이 이 폴백의 유일한 관측 지점이다.
+  assert.equal(cwdBaseName('/'), '/');
+});
+
+// groupSessionsByCwd 픽스처 — 실제 페이로드 모양(AgentSessionSummary 필수 필드)을 유지한다.
+// updated_at 은 전부 다르게 둔다: 동률 tie-break 은 열거 순서에 의존해 단언 대상이 아니다.
+function sessionsByCliFixture() {
+  return {
+    claude: [
+      { cli: 'claude', session_id: 'alpha-claude', cwd: '/repo/alpha', title: 'alpha (claude)', created_at: null, updated_at: '2026-09-01T00:00:00Z', source: 'cli' },
+      { cli: 'claude', session_id: 'beta-claude', cwd: '/repo/beta', title: 'beta (claude)', created_at: null, updated_at: '2026-09-09T00:00:00Z', source: 'cli' },
+    ],
+    codex: [
+      { cli: 'codex', session_id: 'alpha-codex', cwd: '/repo/alpha', title: 'alpha (codex)', created_at: null, updated_at: '2026-09-05T00:00:00Z', source: 'cli' },
+      { cli: 'codex', session_id: 'blank-cwd', cwd: '', title: 'cwd 가 빈 문자열', created_at: null, updated_at: '2026-09-03T00:00:00Z', source: 'cli' },
+      { cli: 'codex', session_id: 'no-cwd', title: 'cwd 키 자체가 없음', created_at: null, updated_at: '2026-09-02T00:00:00Z', source: 'cli' },
+    ],
+  };
+}
+
+test('groupSessionsByCwd 는 그룹을 각 그룹 최신 세션 기준 내림차순으로 놓는다', () => {
+  const groups = groupSessionsByCwd(sessionsByCliFixture());
+  assert.deepEqual(
+    groups.map((g) => g.cwd),
+    ['/repo/beta', '/repo/alpha', ''],
+    'beta(09-09) > alpha(09-05) > 빈 cwd(09-03) — 사이드바와 목록 페이지가 공유하는 그룹 경계',
+  );
+  assert.deepEqual(groups.map((g) => g.cwdLabel), ['beta', 'alpha', '(unknown)']);
+});
+
+test('groupSessionsByCwd 는 그룹 안에서 CLI 가 섞여도 updated_at 내림차순을 지키고 cli 를 보존한다', () => {
+  const alpha = groupSessionsByCwd(sessionsByCliFixture()).find((g) => g.cwd === '/repo/alpha');
+  // cli 는 sessionPath 가 URL 을 만드는 데 쓰므로 그룹핑을 거쳐도 살아남아야 한다.
+  assert.deepEqual(
+    alpha.sessions.map((s) => [s.cli, s.session_id]),
+    [['codex', 'alpha-codex'], ['claude', 'alpha-claude']],
+  );
+});
+
+test('groupSessionsByCwd 는 cwd 가 빈 문자열이거나 없는 세션을 하나의 (unknown) 그룹으로 묶는다', () => {
+  const unknown = groupSessionsByCwd(sessionsByCliFixture()).filter((g) => g.cwd === '');
+  assert.equal(unknown.length, 1, '빈 cwd 와 누락 cwd 가 그룹을 나눠 가지면 안 된다');
+  assert.equal(unknown[0].cwdLabel, '(unknown)');
+  assert.deepEqual(unknown[0].sessions.map((s) => s.session_id), ['blank-cwd', 'no-cwd']);
 });

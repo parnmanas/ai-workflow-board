@@ -157,6 +157,55 @@ async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 20 } = {}) 
   }
 }
 
+// `process.kill` 은 프로세스 전역이다. 스텁을 깐 테스트는 자기 세션이 받은
+// 신호만이 아니라 **주변 잡음**까지 함께 받는다 — 앞선 테스트가 남긴
+// fire-and-forget 게이트나 재무장된 idle 타이머가 뒤늦게 깨어나
+// `_getLiveSession` 의 liveness 프로브(`process.kill(pid, 0)`, 신호 0)를 쏘기
+// 때문이다. 그 잡음이 언제 도착하는지는 러너 부하에 달려 있어, 리눅스에서는
+// 대체로 스텁을 깔기 전에 끝나지만 windows 에서는 프로세스 열거가 PowerShell
+// (`Get-CimInstance Win32_Process`) 이라 수백 ms 씩 밀린다.
+//
+// 그래서 "마지막 호출만 덮어쓰기"(`killed = { pid, sig }`)로 기록하면 안 된다 —
+// 정상 SIGTERM 뒤에 외래 프로브가 한 번만 끼어들어도 기록이 그 pid/신호로
+// 바뀌어 단언이 깨진다. ticket 14e12a1d 의 windows flake(20회차 중 2회)가
+// 정확히 이 모양이었고, 실패 덤프의 `actual: false`(= null 이 아님)가 "기록은
+// 있는데 값이 남의 것" 임을 그대로 보여준다.
+//
+// 대신 호출을 전부 기록하고 **이 세션의 pid 가 SIGTERM 을 받았는가** 로만
+// 판정한다. 순서·출처에 무관해지므로 주변 잡음이 늘어도 판정이 흔들리지 않는다.
+//
+// 왜 하필 SIGTERM 하나만 보는가 — 잡음의 종류가 둘이기 때문이다.
+//  1. 신호 0 (`process.kill(pid, 0)`)은 liveness 프로브라 애초에 종료가 아니다.
+//  2. SIGKILL 은 제품이 **언제나 SIGTERM 뒤 유예(STOP_GRACE_MS)로만** 보낸다
+//     (`#forceTerminate`·`#killUnhealthy` 둘 다 동일). 이 파일의 여러 테스트가
+//     같은 out-of-range sentinel(`DEAD_PID`)을 쓰므로, 앞 테스트가 예약해 둔
+//     그 늦은 SIGKILL 이 뒤 테스트의 창으로 흘러들어올 수 있다. 종료 여부의
+//     증인을 SIGTERM 으로 고정하면 그 유입이 판정을 바꾸지 못한다.
+function stubProcessKill() {
+  const original = process.kill;
+  const calls = [];
+  process.kill = (pid, sig) => { calls.push({ pid, sig }); };
+  const sigterms = (pid) => calls.filter((c) => c.pid === pid && c.sig === 'SIGTERM');
+  return {
+    calls,
+    sigterms,
+    sawSigterm: (pid) => sigterms(pid).length > 0,
+    restore: () => { process.kill = original; },
+  };
+}
+
+// 위 잡음을 결정적으로 재현하는 수단. 실제 발생원(앞선 테스트의 늦은 게이트)은
+// 러너 부하에 좌우돼 리눅스에서 재현되지 않으므로, 같은 성질의 외래 프로브를
+// 직접 한 번 쏘아 "순서·출처 무관" 불변식을 테스트 안에 고정한다.
+const FOREIGN_PROBE_PID = 4242;
+function fireForeignLivenessProbe() {
+  try {
+    process.kill(FOREIGN_PROBE_PID, 0);
+  } catch {
+    /* 스텁이 깔린 상태에서만 호출한다 — 만약을 위한 방어 */
+  }
+}
+
 // ── 1. idle expired + live background task → does not close stdin, rearms ──
 
 test('idle expired + a live background task → stdin stays open, timer rearms (defer, not kill)', async () => {
@@ -410,9 +459,7 @@ test('maxTurns reached + zero progress evidence → closes stdin for respawn (re
 
 test('P0 regression: unhealthy time-threshold hit but fresh cli-home activity → defers the kill', async () => {
   const mgr = new Harness(makeConfig());
-  const origKill = process.kill;
-  let killed = false;
-  process.kill = () => { killed = true; };
+  const kill = stubProcessKill();
   const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
   const cwd = '/workspace/ticket-unhealthy-a';
   let sess;
@@ -429,25 +476,26 @@ test('P0 regression: unhealthy time-threshold hit but fresh cli-home activity �
     await writeFile(join(scopedDir, 'agent-workflow.jsonl'), '{"line":1}\n'); // in-process Workflow still writing
 
     await mgr.checkUnhealthy(sess, '31m elapsed without an LLM response');
-    assert.equal(killed, false, 'must NOT SIGTERM a session with fresh cli-home (in-process Workflow) evidence');
+    assert.deepEqual(
+      kill.sigterms(DEAD_PID),
+      [],
+      'must NOT SIGTERM a session with fresh cli-home (in-process Workflow) evidence',
+    );
     assert.equal(sess.unhealthyKilled, false, 'not flagged unhealthy-killed');
     assert.ok(mgr._sessions.has(sess.sessionKey), 'session record kept alive');
   } finally {
-    process.kill = origKill;
+    kill.restore();
     await rm(cliHomeDir, { recursive: true, force: true });
   }
 });
 
 test('P0 regression: unhealthy turn-threshold hit but active keep-alive → defers the kill', async () => {
   const mgr = new Harness(makeConfig({ chatKeepAliveMaxMinutes: 120 }));
-  const origKill = process.kill;
-  let killed = false;
-  // applyKeepAlive resolves through _getLiveSession's OS-level liveness probe
-  // (process.kill(pid, 0), signal 0 — "does this pid exist?", never a real
-  // kill). Only flag a REAL termination signal, or this stub would also trip
-  // on that harmless probe and false-fail the test before the actual gate
-  // under test ever runs.
-  process.kill = (_pid, sig) => { if (sig) killed = true; };
+  // applyKeepAlive 는 `_getLiveSession` 의 OS 레벨 liveness 프로브
+  // (`process.kill(pid, 0)`, 신호 0 — "이 pid 있나?", 진짜 kill 이 아님)를
+  // 거친다. `sigterms` 가 SIGTERM 만, 그것도 이 pid 것만 세므로 그 프로브와
+  // 다른 세션의 잡음 양쪽 모두에 걸리지 않는다.
+  const kill = stubProcessKill();
   try {
     // applyKeepAlive resolves through the OS-level _getLiveSession check —
     // use this test process's own (genuinely alive) pid, same as the
@@ -458,31 +506,36 @@ test('P0 regression: unhealthy turn-threshold hit but active keep-alive → defe
     assert.equal(grant.ok, true);
 
     await mgr.checkUnhealthy(sess, '5 consecutive turns without an LLM response');
-    assert.equal(killed, false, 'must NOT SIGTERM a session with an active keep-alive grant');
+    assert.deepEqual(
+      kill.sigterms(process.pid),
+      [],
+      'must NOT SIGTERM a session with an active keep-alive grant',
+    );
     assert.equal(sess.unhealthyKilled, false, 'not flagged unhealthy-killed');
     assert.ok(mgr._sessions.has(sess.sessionKey), 'session record kept alive');
   } finally {
-    process.kill = origKill;
+    kill.restore();
   }
 });
 
 test('P0 control: unhealthy hit + zero progress evidence + no keep-alive → still kills exactly like before (no regression)', async () => {
   const mgr = new Harness(makeConfig());
-  const origKill = process.kill;
-  let killed = null;
-  process.kill = (pid, sig) => { killed = { pid, sig }; };
+  const kill = stubProcessKill();
   try {
     const sess = makeFakeSession({ pid: DEAD_PID, unrespondedSince: Date.now() - 31 * 60_000 });
     mgr._sessions.set(sess.sessionKey, sess);
     await mgr.checkUnhealthy(sess, '31m elapsed without an LLM response');
-    assert.ok(killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM', 'a genuinely silent session is still SIGTERM-ed');
+    assert.ok(
+      kill.sawSigterm(DEAD_PID),
+      'a genuinely silent session is still SIGTERM-ed',
+    );
     assert.equal(sess.unhealthyKilled, true);
     assert.equal(mgr._sessions.has(sess.sessionKey), false, 'session record dropped');
     // ticket b831b896 round 3: tagged before SIGTERM so a run-completion
     // backstop can report the real cause instead of guessing.
     assert.equal(sess.stopReason, 'health_watchdog');
   } finally {
-    process.kill = origKill;
+    kill.restore();
   }
 });
 
@@ -492,9 +545,7 @@ test('P0 control: unhealthy hit + zero progress evidence + no keep-alive → sti
 
 test('P0 integration: 5 consecutive unresponded turns via _writeTurn + fresh cli-home evidence → session survives', async () => {
   const mgr = new Harness(makeConfig());
-  const origKill = process.kill;
-  let killed = false;
-  process.kill = () => { killed = true; };
+  const kill = stubProcessKill();
   const cliHomeDir = await mkdtemp(join(tmpdir(), 'awb-cli-home-'));
   const cwd = '/workspace/ticket-unhealthy-b';
   let sess;
@@ -512,22 +563,31 @@ test('P0 integration: 5 consecutive unresponded turns via _writeTurn + fresh cli
 
     for (let i = 0; i < 5; i++) mgr.writeTurn(sess, `turn ${i}`); // UNHEALTHY_TURN_THRESHOLD = 5
     assert.equal(sess.unrespondedTurnCount, 5, 'threshold reached');
-    await settle(); // let the fire-and-forget _maybeKillUnhealthy gate resolve
+    // fire-and-forget `_maybeKillUnhealthy` 게이트가 끝났는지를 고정 지연이
+    // 아니라 관측점으로 판정한다 — 게이트는 판정 직후 반드시
+    // `_lastBackgroundTaskCount` 를 적는다(`#recordProgressVerdict`).
+    // windows 에서 이 게이트는 PowerShell 프로세스 열거를 거쳐 30ms 를 훌쩍
+    // 넘기므로, 고정 지연은 게이트가 끝나기 전에 단언해 버릴 뿐 아니라
+    // **끝나지 않은 게이트를 다음 테스트로 흘려보내** 그쪽 `process.kill`
+    // 스텁에 남의 프로브를 꽂는다(ticket 14e12a1d 의 flake 발생원).
+    await waitUntil(() => sess._lastBackgroundTaskCount !== undefined);
 
-    assert.equal(killed, false, 'progress evidence must defer the kill even through the real dispatch path');
+    assert.deepEqual(
+      kill.sigterms(DEAD_PID),
+      [],
+      'progress evidence must defer the kill even through the real dispatch path',
+    );
     assert.equal(sess.unhealthyKilled, false);
     assert.ok(mgr._sessions.has(sess.sessionKey), 'session record kept alive');
   } finally {
-    process.kill = origKill;
+    kill.restore();
     await rm(cliHomeDir, { recursive: true, force: true });
   }
 });
 
 test('P0 integration control: 5 consecutive unresponded turns via _writeTurn + zero evidence → session still killed (no regression)', async () => {
   const mgr = new Harness(makeConfig());
-  const origKill = process.kill;
-  let killed = null;
-  process.kill = (pid, sig) => { killed = { pid, sig }; };
+  const kill = stubProcessKill();
   try {
     const sess = makeFakeSession({
       pid: DEAD_PID,
@@ -536,16 +596,23 @@ test('P0 integration control: 5 consecutive unresponded turns via _writeTurn + z
     mgr._sessions.set(sess.sessionKey, sess);
 
     for (let i = 0; i < 5; i++) mgr.writeTurn(sess, `turn ${i}`);
-    await waitUntil(() => killed !== null);
+    // 배리어가 "아무 process.kill 호출" 이 아니라 "이 세션의 종료 신호" 를
+    // 기다리는지 잠근다 — 외래 프로브를 먼저 흘려도 빠져나가면 안 된다.
+    // 예전의 `killed !== null` 배리어는 여기서 곧장 통과해 버렸고, 그 다음
+    // 단언이 남의 pid 를 보고 깨졌다.
+    fireForeignLivenessProbe();
+    await waitUntil(() => kill.sawSigterm(DEAD_PID));
 
+    // 배리어와 같은 술어를 다시 단언한다 — 중복이지만, 타임아웃 시 나오는
+    // 일반 메시지 대신 무엇을 기대했는지가 실패 출력에 남는다.
     assert.ok(
-      killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM',
+      kill.sawSigterm(DEAD_PID),
       'a genuinely silent session at the turn threshold is still SIGTERM-ed',
     );
     assert.equal(sess.unhealthyKilled, true);
     assert.equal(mgr._sessions.has(sess.sessionKey), false);
   } finally {
-    process.kill = origKill;
+    kill.restore();
   }
 });
 
@@ -615,9 +682,7 @@ test('applyKeepAlive: extend is rejected once the hard ceiling is already reache
 
 test('keep-alive ceiling reached → force-terminates the session and posts a room notice (never silent)', async () => {
   const mgr = new ChatSessionManager(makeConfig({ chatKeepAliveMaxMinutes: 30 }));
-  const origKill = process.kill;
-  let killed = null;
-  process.kill = (pid, sig) => { killed = { pid, sig }; };
+  const kill = stubProcessKill();
   try {
     const roomId = 'room-ka';
     const agentId = 'agent-ka';
@@ -636,21 +701,35 @@ test('keep-alive ceiling reached → force-terminates the session and posts a ro
     // Simulate the ceiling having been reached (backdate the first declaration).
     sess._keepAliveFirstDeclaredAtMs = Date.now() - 31 * 60_000;
 
+    // `#forceTerminate` 는 awaited 라, 이 await 가 끝난 시점에 SIGTERM 은 이미
+    // 나갔다 — kill 쪽 단언에는 대기가 필요 없다. 예전의 `await settle()` 은
+    // 방 공지(fire-and-forget)를 기다리려던 것인데, 그 30ms 창이 바로 주변
+    // 잡음이 끼어드는 구간이었다.
     await mgr._onIdleTimerFired(sess, 10 * 60_000);
-    await settle();
 
-    assert.ok(killed && killed.pid === DEAD_PID && killed.sig === 'SIGTERM', 'ceiling breach signals the CLI child');
+    // ticket 14e12a1d: SIGTERM 뒤에 외래 liveness 프로브가 도착해도 판정이
+    // 흔들리지 않아야 한다. windows 에서만 우연히 나던 인터리빙(20회차 중 2회,
+    // `actual: false`)을 여기서 결정적으로 만들어 불변식을 고정한다.
+    fireForeignLivenessProbe();
+
+    assert.ok(
+      kill.sawSigterm(DEAD_PID),
+      'ceiling breach signals the CLI child',
+    );
     assert.equal(mgr._sessions.has(key), false, 'session record dropped immediately (drop-first, like #killUnhealthy)');
     // ticket b831b896 round 3: tagged before SIGTERM (on the retained local
     // `sess` reference — the map entry is already gone by this point).
     assert.equal(sess.stopReason, 'keep_alive_ceiling');
 
+    // 방 공지는 `_onForcedTermination` 이 `void postChatRoomMessage(...)` 로
+    // 띄우는 fire-and-forget 이라, 고정 지연 대신 게시 자체를 배리어로 쓴다.
+    await waitUntil(() => posts.some((p) => p.roomId === roomId));
     const notices = posts.filter((p) => p.roomId === roomId);
     assert.equal(notices.length, 1, 'exactly one room notice posted — never a silent kill');
     assert.match(notices[0].body.content, /keep-alive/i, 'notice explains the ceiling was the reason');
     assert.match(notices[0].body.content, /stress test/, 'notice surfaces the declared reason');
   } finally {
-    process.kill = origKill;
+    kill.restore();
   }
 });
 
@@ -677,7 +756,8 @@ test('a session running past progressEscalationHours gets exactly ONE visible es
   mgr._sessions.set(key, sess);
 
   await mgr._onIdleTimerFired(sess, 10 * 60_000);
-  await settle();
+  // 위 ceiling 테스트와 같은 이유로 고정 지연 대신 게시 자체를 배리어로 쓴다.
+  await waitUntil(() => posts.some((p) => p.roomId === roomId));
   assert.equal(ended, false, 'real progress evidence — escalation is a notice, not a kill');
   assert.ok(sess._progressEscalatedAt, 'escalation timestamp stamped so it does not repeat');
 
@@ -687,6 +767,10 @@ test('a session running past progressEscalationHours gets exactly ONE visible es
   // A second idle-check tick must NOT post a duplicate escalation.
   if (sess.idleTimer) clearTimeout(sess.idleTimer);
   await mgr._onIdleTimerFired(sess, 10 * 60_000);
+  // 여기만 고정 지연이 남는다 — "두 번째 공지가 **안** 온다" 는 부재(negative)
+  // 단언이라 기다릴 양의 관측점이 없다. 중복 억제 판정 자체는 위 await 안에서
+  // 동기적으로 끝나므로(`_progressEscalatedAt` 확인) 이 지연은 판정을 만드는
+  // 대기가 아니라, 혹시 떠 버린 게시가 도착할 여유를 주는 쪽이다.
   await settle();
   assert.equal(posts.filter((p) => p.roomId === roomId).length, 1, 'escalation fires at most once per session');
   if (sess.idleTimer) clearTimeout(sess.idleTimer);

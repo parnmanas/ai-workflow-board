@@ -477,8 +477,16 @@ export async function terminateWindowsProcessTree(
     }
   }
 
+  // force 패스 뒤에 자식이 실제로 사라지는 것까지 관측할 예산을 **미리 떼어 둔다**.
+  // `taskkill /F` 는 kill 을 접수하면 돌아올 뿐이고, 호출부가 필요한 신호는 "핸들이
+  // 풀렸다" 이다 — Windows 는 프로세스가 완전히 사라질 때까지 cwd 디렉터리 핸들을
+  // 놓지 않으므로, 여기서 안 기다리면 드레인이 끝난 줄 알고 지우려는 호출부가
+  // EBUSY 로 실패한다(ticket 445453a7). 진입 관측과 마찬가지로 grace 에서 떼어
+  // 쓰므로 총 대기 시간은 여전히 graceMs 를 넘지 않는다.
+  const reapMs = child ? Math.min(remainingGraceMs, EXIT_OBSERVE_MS) : 0;
+
   logTaskkill('soft', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T'], { timeoutMs: 10_000 }));
-  if (child) await waitForChildExit(child, remainingGraceMs, injectedSleep);
+  if (child) await waitForChildExit(child, remainingGraceMs - reapMs, injectedSleep);
   else await sleep(remainingGraceMs);
 
   // grace 동안 자식이 끝났으면 force 패스를 쏘지 않는다. 이 창(hermes 250ms,
@@ -490,6 +498,16 @@ export async function terminateWindowsProcessTree(
   }
 
   logTaskkill('force', rootPid, await run('taskkill', ['/PID', String(rootPid), '/T', '/F'], { timeoutMs: 10_000 }));
+
+  // 드레인의 확정 기준은 "kill 을 호출했다" 가 아니라 "종료를 관측했다" 이다.
+  // 핸들이 없으면 관측할 방법 자체가 없으므로 종전대로 접수만 하고 끝낸다.
+  if (!child) return;
+  await waitForChildExit(child, reapMs, injectedSleep);
+  if (!childHasExited(child)) {
+    // 여기까지 오면 호출부는 아직 잠긴 파일을 볼 수 있다. 조용히 성공한 척하지
+    // 않고 남긴다 — 이 줄이 뜨면 reapMs 가 모자랐거나 `/F` 가 실패한 것이다.
+    log(`[process-tree] win32 force tree-kill: pid=${rootPid} not observed exiting within ${reapMs}ms — files it holds may still be locked`);
+  }
 }
 
 /**

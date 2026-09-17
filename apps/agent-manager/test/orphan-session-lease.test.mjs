@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { cleanupOrphanSubagents } from '../dist/lib/orphan-cleanup.js';
-import { resolveLostCreateRace } from '../dist/lib/agent-lockfile.js';
+import { resolveLostCreateRace, isTransientLockRaceCode } from '../dist/lib/agent-lockfile.js';
 
 const tempDirs = [];
 const children = [];
@@ -280,7 +280,34 @@ for (const fixture of [
         console.log('REJECTED:' + error.code);
       }
     `;
-    const outputs = (await raceContenders(contenderSource, env)).map(({ output }) => output);
+    // ── 회수 진입 배리어 ──────────────────────────────────────────────────
+    //
+    // READY/go 배리어는 두 contender 의 **출발**만 맞춘다. 출발한 뒤 회수 경로에
+    // 닿기까지 수백 ms 밀리면(4-vCPU Windows 러너 실측) 늦은 쪽은 이미 이긴
+    // 동료가 300ms 보유 후 풀어준 **빈 lock** 을 만나 정당하게 취득한다 — 그건
+    // 동시 회수가 아니라 순차 취득이라, 제품이 아니라 이 테스트의 전제만 깨진다.
+    // 실측 로그가 정확히 그 모양이었다: acquire(pid=10588) → released →
+    // acquire(pid=10356) → released 로 겹침이 0 이고, 그래서 ACQUIRED 가 2 였다.
+    // (같은 run 의 stale fixture 는 "reusing stale lock" 이 두 번 찍혀 실제로
+    // 겹쳤고 취득은 1 이었다 — 상호배제 자체는 그때도 지켜졌다.)
+    //
+    // 그래서 형제 --force 테스트와 같은 방식으로 회수 가드를 테스트가 먼저 잡아
+    // 둔다. 가드를 쥐고 있는 동안에는 아무도 회수를 끝낼 수 없으므로, 두
+    // contender 가 모두 "가드 대기" 를 찍은 것을 확인한 뒤 놓아 주면 둘 다 자기
+    // 첫 O_EXCL create 를 이미 실패한 채 회수 경로 안에 들어와 있음이 벽시계
+    // 추측이 아니라 happens-before 로 고정된다. 가드 owner pid 를 이 테스트
+    // 프로세스로 적어 두면 stale 회수 대상이 아니다.
+    const recoveryLock = join(home, 'agent.lock.recovery');
+    await fsp.mkdir(recoveryLock);
+    await fsp.writeFile(join(recoveryLock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+    const awaitingGuard = 'waiting for recovery guard before stale-cleanup';
+
+    const outputs = (
+      await raceContenders(contenderSource, env, async (contenders) => {
+        await Promise.all(contenders.map((c) => c.awaitStderr(awaitingGuard)));
+        await fsp.rm(recoveryLock, { recursive: true, force: true });
+      })
+    ).map(({ output }) => output);
     assert.equal(outputs.filter((output) => output.includes('ACQUIRED')).length, 1);
     // 진 쪽은 반드시 소유권 오류(EAGENTLOCKED)여야 한다. 회수 경로가 create
     // 레이스에서 지면 예전에는 raw `EEXIST` 가 그대로 새어 나왔다 — 그 누수를
@@ -320,4 +347,63 @@ test('create 레이스 승자가 이미 죽었으면 재시도로 판정한다 �
 test('create 레이스 직후 lock이 사라졌거나 읽을 수 없으면 재시도로 판정한다', () => {
   // readLock 은 unparseable/pid<=0/파일없음 을 모두 null 로 degrade 한다.
   assert.deepEqual(resolveLostCreateRace(() => null, () => true), { outcome: 'retry' });
+});
+
+// ── Windows 삭제 대기 errno 누수 (티켓 4667de43, flake-repro shard2 round4 실측) ──
+//
+// 회수 진입 배리어를 넣어 두 contender 가 **실제로 겹치기 시작**하자 그 다음 결함이
+// 드러났다: 진 contender 가 `EAGENTLOCKED` 가 아니라 raw `EPERM` 으로 거절됐다
+// (관측 출력 `["READY\nACQUIRED\n","READY\nREJECTED:EPERM\n"]`). 취득은 정확히
+// 1건이라 상호배제 자체는 지켜졌고 **오류 계약만** 샜다. Windows 는 삭제 대기
+// 상태의 파일·디렉터리에 대한 create/mkdir 을 EEXIST 가 아니라 EPERM 으로 거절한다.
+test('삭제 대기 errno(EPERM/EACCES/EBUSY)는 일시적 레이스로 분류된다', () => {
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    assert.equal(isTransientLockRaceCode(code), true, `${code} 는 일시적 레이스여야 한다`);
+  }
+  // EEXIST/ENOENT 는 이미 각 호출부가 제 의미로 처리한다 — 여기로 접으면 안 된다.
+  for (const code of ['EEXIST', 'ENOENT', 'EROFS', 'EAGENTLOCKED', undefined]) {
+    assert.equal(isTransientLockRaceCode(code), false, `${code} 는 접으면 안 된다`);
+  }
+});
+
+// 분류만 맞고 실제 acquire 경로가 안 바뀌면 의미가 없으므로 **제품 경로의 결과**로
+// 검증한다. 영구적인 권한 오류를 만들어 두고 (1) 재시도 상한이 있어 스스로 끝나는지,
+// (2) 상한을 넘겼을 때 합성한 ELOCKRACE 가 아니라 **원본 errno** 가 올라오는지 본다.
+// 원본을 잃으면 진짜 권한 문제가 "레이스" 로 위장돼 진단이 불가능해진다.
+test('권한 오류가 계속되면 합성 ELOCKRACE 가 아니라 원본 errno 가 올라온다', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('chmod 기반 권한 차단이 Windows 에서 같은 의미를 갖지 않는다');
+    return;
+  }
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('root 는 쓰기 권한 차단을 무시한다');
+    return;
+  }
+  const home = await fsp.mkdtemp(join(tmpdir(), 'awb-manager-perm-'));
+  tempDirs.push(home);
+  // lock 파일 생성 자체가 막히도록 홈을 읽기 전용으로 만든다. 정리(rm)가 가능하도록
+  // 단언 전에 되돌린다 — afterEach 의 rm 이 읽기 전용 디렉터리에서 실패하면 안 된다.
+  await fsp.chmod(home, 0o500);
+
+  const source = `
+    const { acquireAgentLock } = await import(${JSON.stringify(lockModuleUrl)});
+    try {
+      await acquireAgentLock({ role: 'manager', version: 'new' });
+      console.log('ACQUIRED');
+    } catch (error) { console.log('REJECTED:' + error.code); }
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+    env: { ...process.env, AWB_AGENT_MANAGER_HOME: home },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  children.push(child);
+  let out = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  await fsp.chmod(home, 0o700);
+
+  assert.equal(code, 0, '재시도 상한이 있어 스스로 끝나야 한다 (무한 루프 금지)');
+  assert.match(out, /REJECTED:(EACCES|EPERM)/, `원본 errno 가 보존돼야 한다: ${JSON.stringify(out)}`);
+  assert.doesNotMatch(out, /ELOCKRACE/, '합성한 레이스 코드가 호출자에게 새면 안 된다');
 });

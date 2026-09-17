@@ -11,6 +11,7 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { type MentionParticipant } from './utils/markdown';
 import ChatMessageInput from './ChatMessageInput';
+import { canInviteToRoom } from './utils/participantFlow';
 import ActiveTaskStrip from './ActiveTaskStrip';
 
 
@@ -31,7 +32,13 @@ interface RoomHeaderActionsProps {
   openJoinPending: boolean;
 }
 
-function RoomHeaderActions({
+/**
+ * 방 헤더의 동작 버튼 묶음. context 를 전혀 쓰지 않는 순수 표현 컴포넌트라 provider
+ * 없이 마운트할 수 있어, 버튼 노출 조건을 실제 렌더로 검증하려고 export 한다
+ * (`apps/client/test/chat-invite-participants.test.mjs`). `{cond && <button/>}` 이
+ * 조용히 접히는 결함은 소스 문자열 검사로는 잡히지 않는다.
+ */
+export function RoomHeaderActions({
   room,
   isRenaming,
   onRenameStart,
@@ -133,12 +140,12 @@ function RoomHeaderActions({
 
   return (
     <div style={{ display: 'flex', gap: tokens.spacing.sm }}>
-      {/* Add People stays group-only — DMs are fixed at 2 participants. */}
-      {room.type === 'group' && (
-        <button onClick={onAddPeople} style={ghostButton}>
-          Add People
-        </button>
-      )}
+      {/* 초대는 모든 방 타입에서 열려 있다 (티켓 70e62a9d). DM 에서 누르면 서버가 방을
+          group 으로 승격시키며, 되돌릴 수 없다는 경고는 피커 모달이 보여준다 — 여기서
+          버튼을 감추면 사용자가 실제로 대화하는 DM 에서는 초대 자체가 불가능해진다. */}
+      <button onClick={onAddPeople} data-testid="room-add-people" style={ghostButton}>
+        Add People
+      </button>
       {/* 자유 참여(open join, ticket 995a9519) — group 전용. DM 은 정확히 2인
           불변식이라 서버가 이 옵션을 거부하므로 토글 자체를 걸지 않는다. 켜면 같은
           워크스페이스의 모든 유저에게 방이 보이고, 참여자가 아니어도 첫 발언 시점에
@@ -625,9 +632,11 @@ export default function ChatRoomView({
               +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} more
             </span>
           )}
-          {/* 대화 도중 참여자 추가 진입점 — 그룹 방 전용 (DM 은 서버가 추가를 거부한다).
-              헤더의 "Add People" 버튼과 동일한 모달을 연다. */}
-          {room.type === 'group' && (
+          {/* 대화 도중 참여자 추가 진입점 — 헤더의 "Add People" 과 같은 모달을 연다.
+              DM 을 포함한 모든 방에서 보인다(티켓 70e62a9d). 아직 참여하지 않은 자유
+              참여 방에서는 서버가 거부하므로 감춘다 — 헤더가 그 경우 버튼 묶음을 통째로
+              대체하는 것과 같은 기준이고, 규칙 자체는 canInviteToRoom 이 소유한다. */}
+          {canInviteToRoom(room) && (
             <button
               onClick={() => setShowAddPeople(true)}
               aria-label="Add participant"
@@ -780,6 +789,8 @@ export default function ChatRoomView({
         addToRoomId={room.id}
         // 이미 방에 있는 참여자는 피커 후보에서 제외해 중복 선택을 막는다.
         existingParticipantIds={participants.map((p) => p.id)}
+        // DM 에 초대하면 방이 group 으로 승격되고 되돌릴 수 없다 — 확정 전에 알린다.
+        promotesDmToGroup={room.type === 'dm'}
       />
     </div>
   );

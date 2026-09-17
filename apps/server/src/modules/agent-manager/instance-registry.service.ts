@@ -218,6 +218,10 @@ export interface InstanceRecord {
   // silently. Older managers (pre this ticket) leave it undefined — the gate
   // treats that identically to "reported, but empty".
   manager_capabilities?: string[];
+  // Agent Session(CLI 직접 세션): 이 장비에서 ACP 어댑터로 세션을 열 수 있는 CLI
+  // (claude / codex / hermes 중 실제로 실행 파일이 잡히는 것). 구버전 매니저는
+  // undefined — 그때는 cli_adapters ∩ ACP_SESSION_CLIS 로 추정한다.
+  acp_session_clis?: string[];
 }
 
 /**

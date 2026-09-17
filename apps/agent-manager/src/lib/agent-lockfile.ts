@@ -471,13 +471,20 @@ export async function acquireAgentLock(opts: AcquireOptions): Promise<LockHandle
     pid_start_ticks: readProcessStartTicks(process.pid),
   };
 
-  // 회수 경로가 create 레이스에서 이미 죽은 승자에게 졌을 때만 다시 돈다
-  // (ELOCKRACE). 그 외 결과는 첫 시도에서 그대로 확정된다.
+  // ELOCKRACE 일 때만 다시 돈다 — (a) 회수 경로가 create 레이스에서 이미 죽은
+  // 승자에게 졌을 때, (b) Windows 의 삭제 대기 errno 를 접은 경우
+  // (isTransientLockRaceCode). 그 외 결과는 첫 시도에서 그대로 확정된다.
   for (let attempt = 1; ; attempt++) {
     try {
       return await attemptAcquire(payload, force);
     } catch (err: any) {
-      if (err?.code !== 'ELOCKRACE' || attempt >= MAX_ACQUIRE_ATTEMPTS) throw err;
+      if (err?.code !== 'ELOCKRACE') throw err;
+      // 상한을 넘기면 합성한 ELOCKRACE 가 아니라 **원본 fs 오류**를 올린다 —
+      // 진짜 권한 문제(읽기 전용 홈 등)를 "레이스" 로 위장하면 진단이 어려워진다.
+      if (attempt >= MAX_ACQUIRE_ATTEMPTS) throw err.cause ?? err;
+      // 삭제 대기 창은 곧 닫히지만 즉시 재시도하면 같은 창에 다시 들어간다.
+      // 가드 루프와 같은 간격으로 한 박자 쉰다.
+      await delay(25);
     }
   }
 }
@@ -491,6 +498,8 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
     log(`[lockfile] acquired ${LOCK_PATH} (role=${role} pid=${process.pid})`);
     return makeReleaseHandle(payload);
   } catch (err: any) {
+    // 떠나는 owner 의 unlink 와 겹치면 Windows 는 EEXIST 가 아니라 EPERM 을 준다.
+    if (isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
     if (err?.code !== 'EEXIST') throw err;
   }
 
@@ -581,6 +590,24 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
 }
 
 async function acquireAfterStaleCleanup(payload: LockPayload): Promise<LockHandle> {
+  // 회수 경로에 들어섰다는 사실을 가드 획득 **전에** 남긴다. `--force` 경로는
+  // 같은 지점에서 이미 "waiting for takeover guard" 를 찍는데 이쪽만 조용해서,
+  // 읽을 수 없는 lock 을 회수하려다 가드 앞 25ms 루프에 들어간 매니저가 로그상
+  // 완전히 멎은 것처럼 보였다(성공할 때까지 단 한 줄도 안 남음). 회수는 드문
+  // 경로라 항상 남겨도 소음이 되지 않는다.
+  log(`[lockfile] waiting for recovery guard before stale-cleanup (role=${payload.role} pid=${process.pid})`);
+  // 회수 구간 전체를 감싼다 — 가드 획득(`mkdirSync`)·`unlinkSync`·재생성 어디서
+  // 나오든 Windows 의 삭제 대기 errno 는 같은 뜻이라 한 곳에서 접는 편이 맞다.
+  // `lockedBy`(EAGENTLOCKED)·`ELOCKRACE` 는 코드가 달라 그대로 통과한다.
+  try {
+    return await reclaimAndCreate(payload);
+  } catch (err: any) {
+    if (isTransientLockRaceCode(err?.code)) throw asRetryableRace(err);
+    throw err;
+  }
+}
+
+async function reclaimAndCreate(payload: LockPayload): Promise<LockHandle> {
   const releaseRecovery = await acquireRecoveryLock();
   try {
     // 가드를 잡는 사이 lock 이 바뀌었을 수 있으니 다시 읽어 판정한다. 여기서
@@ -630,6 +657,32 @@ function createAfterCleanup(payload: LockPayload): void {
     retry.code = 'ELOCKRACE';
     throw retry;
   }
+}
+
+/** Windows 는 "삭제 대기(delete-pending)" 상태의 파일·디렉터리에 대한 create/unlink/
+ *  mkdir 을 POSIX 의 EEXIST/ENOENT 가 아니라 EPERM·EACCES·EBUSY 로 거절한다.
+ *
+ *  회수 경로는 설계상 동료와 겹치는 구간이다 — 특히 승자가 가드 디렉터리를 막
+ *  `rmSync` 하는 순간 진 쪽의 `mkdirSync` 가 정확히 그 창에 들어간다. 거기서 나온
+ *  코드는 "영구 실패" 가 아니라 "이번 시도만 어긋남" 을 뜻하므로, 그대로 올리면
+ *  `EAGENTLOCKED` 를 기대하는 호출자에게 raw fs 코드가 새어 나간다.
+ *
+ *  이건 `createAfterCleanup` 이 이미 EEXIST 에 대해 고쳐 둔 것과 **같은 결함
+ *  클래스**이고(다만 Windows 가 내는 errno 가 다를 뿐), 실측으로 확인됐다 —
+ *  flake-repro shard2 round4 에서 진 contender 가 `REJECTED:EPERM` 을 냈다.
+ *  그래서 같은 방식으로 재판정 대상(ELOCKRACE)으로 접는다. 무한 재시도는
+ *  `MAX_ACQUIRE_ATTEMPTS` 가 막으므로, 진짜 권한 오류라면 상한 뒤 그대로 드러난다. */
+export function isTransientLockRaceCode(code: unknown): boolean {
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+}
+
+function asRetryableRace(err: any): Error {
+  const retry: any = new Error(
+    `AWB agent-manager lock operation hit a transient filesystem race (${err?.code}); retrying`,
+  );
+  retry.code = 'ELOCKRACE';
+  retry.cause = err;
+  return retry;
 }
 
 /** createAfterCleanup 의 판정 규칙. 순수 로직 + 의존성 주입이라 실제 프로세스

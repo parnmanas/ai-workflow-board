@@ -1,5 +1,5 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -8,8 +8,8 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { AgentSessionError, AgentSessionsService } from './agent-sessions.service';
 
 /**
- * 사용자(소유자) 표면. 워크스페이스는 chat-rooms 와 같은 `X-Workspace-Id` 헤더
- * 규약을 따르고, 실질 경계는 owner_user_id 다 — 남의 세션은 404 로 감춘다.
+ * 사용자 표면. 워크스페이스는 chat-rooms 와 같은 `X-Workspace-Id` 헤더 규약.
+ * 모든 경로가 (Runtime Host, CLI) 아래에 있다 — 세션은 AWB 의 것이 아니라 그 장비의 것이다.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('agent-sessions')
@@ -19,10 +19,14 @@ import { AgentSessionError, AgentSessionsService } from './agent-sessions.servic
 export class AgentSessionsController {
   constructor(private readonly sessions: AgentSessionsService) {}
 
-  private workspaceId(req: Request): string | null {
+  private workspaceId(req: Request, res: Response): string | null {
     const raw = req.headers['x-workspace-id'];
     const value = Array.isArray(raw) ? raw[0] : raw;
-    return value ? String(value) : null;
+    if (!value) {
+      res.status(400).json({ error: 'workspace_required', message: 'X-Workspace-Id header is required' });
+      return null;
+    }
+    return String(value);
   }
 
   private userId(req: Request): string {
@@ -31,9 +35,7 @@ export class AgentSessionsController {
 
   private async run(res: Response, status: number, fn: () => Promise<unknown>) {
     try {
-      const body = await fn();
-      if (status === 204) return res.status(204).send();
-      return res.status(status).json(body);
+      return res.status(status).json(await fn());
     } catch (err) {
       if (err instanceof AgentSessionError) {
         return res.status(err.status).json({ error: err.code, message: err.message });
@@ -42,95 +44,126 @@ export class AgentSessionsController {
     }
   }
 
-  @Get()
-  async list(@Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req);
-    if (!ws) return res.status(400).json({ error: 'workspace_required', message: 'X-Workspace-Id header is required' });
-    return this.run(res, 200, () => this.sessions.listForOwner(ws, this.userId(req)));
+  @Get('hosts')
+  async hosts(@Req() req: Request, @Res() res: Response) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.listHosts(ws));
   }
 
-  /** 세션을 열 수 있는 에이전트 후보 — 새 세션 피커용. */
-  @Get('agents')
-  async listAgents(@Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req);
-    if (!ws) return res.status(400).json({ error: 'workspace_required', message: 'X-Workspace-Id header is required' });
-    return this.run(res, 200, () => this.sessions.listSessionAgents(ws));
+  /** CLI 설정 — 이 Runtime Host 의 이 CLI 를 어떤 워크스페이스 Credential 로 인증할지. */
+  @Get('hosts/:managerId/:cli/settings')
+  async getSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.getCliSettings(ws, managerId, cli));
   }
 
-  @Post()
-  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req) || (typeof body?.workspace_id === 'string' ? body.workspace_id : null);
-    if (!ws) return res.status(400).json({ error: 'workspace_required', message: 'X-Workspace-Id header is required' });
-    if (!body?.agent_id || typeof body.agent_id !== 'string') {
-      return res.status(400).json({ error: 'agent_id_required', message: 'agent_id is required' });
-    }
-    return this.run(res, 201, () => this.sessions.create({
-      workspaceId: ws,
-      userId: this.userId(req),
-      agentId: body.agent_id,
-      cwd: typeof body.cwd === 'string' ? body.cwd : '',
-      title: typeof body.title === 'string' ? body.title : '',
-      permissionPolicy: typeof body.permission_policy === 'string' ? body.permission_policy : 'ask',
+  /** `{ credential_id: string | null }` */
+  @Put('hosts/:managerId/:cli/settings')
+  async setSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.setCliSettings(ws, this.userId(req), managerId, cli, body?.credential_id ?? null));
+  }
+
+  @Get('hosts/:managerId/:cli/sessions')
+  async list(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.listSessions(ws, this.userId(req), managerId, cli));
+  }
+
+  /** `{ session_id?, cwd?, title? }` — session_id 없으면 새 세션(session/new), 있으면 복원(session/load). */
+  @Post('hosts/:managerId/:cli/sessions')
+  async open(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 201, () => this.sessions.openSession(ws, this.userId(req), managerId, cli, {
+      session_id: typeof body?.session_id === 'string' ? body.session_id : null,
+      cwd: typeof body?.cwd === 'string' ? body.cwd : '',
+      title: typeof body?.title === 'string' ? body.title : '',
     }));
   }
 
-  @Get(':id')
-  async get(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 200, () => this.sessions.getOwnedSnapshot(id, this.userId(req)));
-  }
-
-  @Get(':id/events')
-  async events(
-    @Param('id') id: string,
+  @Get('hosts/:managerId/:cli/sessions/:sessionId')
+  async get(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
     @Req() req: Request,
     @Res() res: Response,
-    @Query('after_seq') afterSeq?: string,
-    @Query('limit') limit?: string,
   ) {
-    return this.run(res, 200, () => this.sessions.listEvents(
-      id,
-      this.userId(req),
-      Number.parseInt(afterSeq || '0', 10) || 0,
-      Number.parseInt(limit || '0', 10) || 0,
-    ));
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.getSession(ws, this.userId(req), managerId, cli, sessionId));
   }
 
-  @Post(':id/prompt')
-  async prompt(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 202, () => this.sessions.prompt(id, this.userId(req), body?.text));
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/prompt')
+  async prompt(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 202, () => this.sessions.prompt(ws, this.userId(req), managerId, cli, sessionId, body?.text));
   }
 
-  @Post(':id/permission')
-  async permission(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 200, () => this.sessions.decidePermission(id, this.userId(req), body?.request_id, body?.option_id ?? null));
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/permission')
+  async permission(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.decidePermission(ws, this.userId(req), managerId, cli, sessionId, body?.request_id, body?.option_id ?? null));
   }
 
-  @Post(':id/cancel')
-  async cancel(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 202, () => this.sessions.cancel(id, this.userId(req)));
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/cancel')
+  async cancel(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 202, () => this.sessions.cancel(ws, this.userId(req), managerId, cli, sessionId));
   }
 
-  @Post(':id/mode')
-  async setMode(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 202, () => this.sessions.setMode(id, this.userId(req), body?.mode_id));
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/mode')
+  async setMode(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 202, () => this.sessions.setMode(ws, this.userId(req), managerId, cli, sessionId, body?.mode_id));
   }
 
-  @Patch(':id')
-  async rename(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 200, () => this.sessions.rename(id, this.userId(req), body?.title));
-  }
-
-  @Post(':id/close')
-  async close(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    return this.run(res, 200, () => this.sessions.close(id, this.userId(req)));
-  }
-
-  @Delete(':id')
-  async remove(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    // 클라이언트 request() 헬퍼가 항상 res.json() 을 읽으므로 204 대신 200 + { ok }.
-    return this.run(res, 200, async () => {
-      await this.sessions.remove(id, this.userId(req));
-      return { ok: true };
-    });
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/close')
+  async close(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.close(ws, this.userId(req), managerId, cli, sessionId));
   }
 }

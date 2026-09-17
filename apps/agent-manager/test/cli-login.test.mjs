@@ -242,6 +242,27 @@ function progressBodies(sessionId) {
     .map((r) => r.body);
 }
 
+function logText() {
+  return existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '';
+}
+
+/** LOG_PATH 에서 **이 세션이 찍은 stderr 줄만** 뽑는다.
+ *
+ *  LOG_PATH 는 이 파일의 AWB_AGENT_MANAGER_HOME 아래라 다른 테스트 파일과는
+ *  섞이지 않지만, 같은 파일 안의 테스트끼리는 한 파일에 계속 누적된다. 그래서
+ *  redaction 단언을 파일 전체에 걸면 **앞선 테스트가 남긴 [REDACTED] 가 이
+ *  테스트를 거짓 통과**시킨다. 제품이 stderr 줄마다 세션 태그를 붙여 주므로
+ *  (`cli-login[<sessionId 앞 8자>][err] `) 그 태그로 좁힌다.
+ *
+ *  동시에 이 함수는 "자식이 실제로 그 줄을 찍었다" 는 관측 가능한 배리어이기도
+ *  하다 — log() 가 appendFileSync 라 기록은 동기적이다. */
+function sessionStderrLines(sessionId) {
+  const tag = `cli-login[${sessionId.slice(0, 8)}][err] `;
+  return logText()
+    .split('\n')
+    .filter((line) => line.includes(tag));
+}
+
 test('success: awaiting_user then succeeded, credential_fields carries the harvested auth.json/config.toml', async () => {
   const manager = new CliLoginManager({ url: 'https://awb.example', apiKey: 'k' }, { codexBin: fakeCodexSuccess() });
   const sessionId = randomUUID();
@@ -299,10 +320,14 @@ test('timeout: a hung login is killed and reported timed_out within the injected
   const sessionId = randomUUID();
   await manager.start({ sessionId, commandId: 'cmd-4', cli: 'codex' });
 
-  // awaiting_user should still surface before the timeout fires — the fake
-  // script prints the prompt immediately, well under 150ms.
-  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'awaiting_user'));
-
+  // 이 테스트의 주제는 **타임아웃 자체**다 — 자식이 무엇을 찍었는지에 기대지
+  // 않는다. 예전에는 여기서 awaiting_user 를 먼저 기다렸는데, 그 단언은 주입
+  // 타임아웃(150ms)이 자식 Node 의 기동보다 길다는 데 걸린 레이스였다: Windows
+  // 러너 실측으로 이 파일의 이웃 테스트들이 spawn→출력→보고 한 바퀴에 102~218ms
+  // 를 쓰므로 150ms 는 그 구간 한가운데다. 지면 타임아웃이 프롬프트보다 먼저
+  // 자식을 죽여 awaiting_user 가 영영 오지 않고, 기본 5000ms waitUntil 이 터졌다
+  // (실측 5306ms). "hung 로그인도 awaiting_user 를 낸다" 는 성질은 바로 아래
+  // cancel 테스트가 기본 10분 타임아웃으로 여유 있게 잠근다.
   await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
   const homeDir = join(CLI_LOGINS_DIR, sessionId);
   await waitUntil(() => !existsSync(homeDir), { timeoutMs: 3000 });
@@ -442,10 +467,10 @@ test('claude timeout: a hung login is killed and reported timed_out within the i
   const sessionId = randomUUID();
   await manager.start({ sessionId, commandId: 'cmd-c4', cli: 'claude' });
 
-  // awaiting_user should still surface before the timeout fires — the fake
-  // script prints the prompt immediately, well under 150ms.
-  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'awaiting_user'));
-
+  // codex 쪽 timeout 테스트와 같은 이유로 awaiting_user 선행 단언을 두지 않는다
+  // — 주입 타임아웃(150ms)이 자식 기동을 이기지 못하면 프롬프트가 찍히기 전에
+  // 죽어 그 보고가 아예 생기지 않는다(실측 실패 지점이 정확히 여기였다).
+  // hung claude 로그인의 awaiting_user 는 아래 cancel 테스트가 잠근다.
   await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
   const homeDir = join(CLI_LOGINS_DIR, sessionId);
   await waitUntil(() => !existsSync(homeDir), { timeoutMs: 3000 });
@@ -569,8 +594,15 @@ test('review-fix: a succeeded report that never gets delivered NEVER touches the
   const sessionId = randomUUID();
   await manager.start({ sessionId, commandId: 'cmd-secret-1', cli: 'codex' });
 
-  // 성공 보고가 재시도까지 전부 소진될 시간을 준다(재시도 3회 x 5ms + 여유).
-  await delay(300);
+  // 고정 지연(예전 `await delay(300)`)은 자식 기동이 느린 러너에서 재시도가
+  // 끝나기도 전에 단언을 돌게 한다 — 이 파일의 다른 windows flake 와 정확히
+  // 같은 결함 클래스다(실측: 자식 첫 출력을 400ms 로 늦추면 이 테스트가 깨진다).
+  // 제품은 "전달 실패 → 격리 홈 보존" 을 확정한 바로 그 지점에서 세션 태그가
+  // 붙은 줄을 정확히 한 번 남기므로, 그 줄을 종료 배리어로 쓴다.
+  await waitUntil(
+    () => logText().includes(`cli-login: leaving isolated home on disk (session=${sessionId.slice(0, 8)}`),
+    { timeoutMs: 10_000 },
+  );
 
   // awaiting_user 보고(URL/코드 — 시크릿 아님)는 outbox에 들어가는 게 정상
   // 동작이다. 이 테스트가 잠그는 것은 오직 'succeeded'(시크릿 포함) 상태가
@@ -587,17 +619,34 @@ test('review-fix: a succeeded report that never gets delivered NEVER touches the
 
 test('review-fix: stderr containing a labeled token is redacted before it ever reaches the log file', async () => {
   const secret = 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6';
+  // 예전에는 timeoutMs: 150 을 "세션을 끝내는 수단" 으로 썼는데, 그 타임아웃이
+  // 자식 기동을 이기면 stderr 줄 자체가 안 나와 redact 할 것이 없어지고
+  // [REDACTED] 단언이 깨졌다(Windows 실측: 단언 덤프에 이 세션 줄이 0개).
+  // 이 테스트의 주제는 타임아웃이 아니라 redaction 이므로, 종료 수단을
+  // 벽시계에서 **관측 가능한 배리어 + 명시적 cancel** 로 바꾼다.
   const manager = new CliLoginManager(
     { url: 'https://awb.example', apiKey: 'k' },
-    { codexBin: fakeCodexLeakySecretOnStderr(secret), timeoutMs: 150 },
+    { codexBin: fakeCodexLeakySecretOnStderr(secret) },
   );
   const sessionId = randomUUID();
   await manager.start({ sessionId, commandId: 'cmd-stderr-1', cli: 'codex' });
-  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
 
-  const logContent = existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '';
-  assert.doesNotMatch(logContent, new RegExp(secret), 'stderr token leaked into agent-manager.log unredacted');
-  assert.match(logContent, /\[REDACTED\]/, 'expected the redaction marker to appear in place of the token');
+  // 배리어: 자식이 그 stderr 줄을 실제로 찍어 제품이 로그에 남길 때까지 기다린다.
+  // 여기 timeout 은 레이스 창이 아니라 실패 마감시한이라, 러너가 느려도 통과한다.
+  await waitUntil(() => sessionStderrLines(sessionId).length >= 1, { timeoutMs: 10_000 });
+
+  // 시크릿 부재는 로그 **전체**에 걸어 둔다(더 강한 단언이고 거짓 통과가 없다).
+  assert.doesNotMatch(logText(), new RegExp(secret), 'stderr token leaked into agent-manager.log unredacted');
+  // 마커 존재는 **이 세션 줄로 좁힌다** — 파일 전체에 걸면 앞선 테스트가 남긴
+  // [REDACTED] 가 이 단언을 거짓 통과시킨다.
+  assert.match(
+    sessionStderrLines(sessionId).join('\n'),
+    /\[REDACTED\]/,
+    'expected the redaction marker to appear in place of the token',
+  );
+
+  assert.equal(await manager.cancel(sessionId), true);
+  await waitUntil(() => !manager.isBusy(), { timeoutMs: 10_000 });
 });
 
 // 리뷰 지적(round 2, 확인된 버그): redactSecrets()가 모든 패턴에 같은
@@ -608,19 +657,25 @@ test('review-fix: stderr containing a labeled token is redacted before it ever r
 // 커녕 원문을 중복 노출. 아래는 4종 시크릿(JWT/prefix-key/labeled/opaque)을
 // 전부 문자열 "중간"에 심어 이 정확한 실패 모드를 재현한다.
 test('review-fix round2: JWT/prefix-key/labeled/opaque secrets embedded MID-STRING in stderr are all redacted in the real log file (not just leaked back in)', async () => {
+  // 위 테스트와 같은 이유로 벽시계 타임아웃 대신 배리어 + cancel 을 쓴다.
   const manager = new CliLoginManager(
     { url: 'https://awb.example', apiKey: 'k' },
-    { codexBin: fakeCodexLeakySecretsEverywhere(), timeoutMs: 150 },
+    { codexBin: fakeCodexLeakySecretsEverywhere() },
   );
   const sessionId = randomUUID();
   await manager.start({ sessionId, commandId: 'cmd-stderr-2', cli: 'codex' });
-  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'timed_out'), { timeoutMs: 3000 });
 
-  const logContent = existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '';
+  // 이 fixture 는 stderr 에 4줄을 찍는다 — 일부만 도착한 상태로 단언하면
+  // 아직 안 온 줄의 누출을 놓치므로 4줄이 다 들어올 때까지 기다린다.
+  await waitUntil(() => sessionStderrLines(sessionId).length >= 4, { timeoutMs: 10_000 });
+
   for (const [kind, secret] of Object.entries(LEAKY_SECRETS)) {
-    assert.doesNotMatch(logContent, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${kind} leaked into agent-manager.log unredacted`);
+    assert.doesNotMatch(logText(), new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${kind} leaked into agent-manager.log unredacted`);
   }
-  assert.match(logContent, /\[REDACTED\]/);
+  assert.match(sessionStderrLines(sessionId).join('\n'), /\[REDACTED\]/);
+
+  assert.equal(await manager.cancel(sessionId), true);
+  await waitUntil(() => !manager.isBusy(), { timeoutMs: 10_000 });
 });
 
 test('review-fix round2: JWT/prefix-key/labeled/opaque secrets embedded MID-STRING in unparseable stdout are all redacted in raw_output_fallback', async () => {

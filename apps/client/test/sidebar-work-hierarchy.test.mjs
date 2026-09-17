@@ -373,7 +373,7 @@ test('⑦ 접기/펼치기가 세 메뉴 모두에서 같게 동작한다', asyn
     assert.ok(subList(view, label), `${label} 서브메뉴가 처음부터 접혀 있다`);
 
     click(toggle);
-    assert.equal(subList(view, label), null, `${label} 서브메뉴가 접히지 않았다`);
+    assert.equal(Boolean(subList(view, label)), false, `${label} 서브메뉴가 접히지 않았다`);
 
     const expand = workSection(view).querySelector(`button[aria-label="Expand ${label} list"]`);
     assert.ok(expand, `${label} 에 펼치기 토글이 없다`);
@@ -460,7 +460,7 @@ test('⑬ 접어둔 그룹이라도 그 영역으로 이동하면 다시 펴져 
 
   // Orchestrations 를 접어 둔다.
   click(workSection(view).querySelector('button[aria-label="Collapse Orchestrations list"]'));
-  assert.equal(subList(view, 'Orchestrations'), null);
+  assert.equal(Boolean(subList(view, 'Orchestrations')), false, 'Orchestrations 를 접었는데 서브메뉴가 남아 있다');
 
   // 그 상태에서 미션 상세로 이동하면 접힘이 풀려 활성 항목이 드러나야 한다.
   click(findByText(subList(view, 'Boards'), 'AWB'));
@@ -474,9 +474,9 @@ test('⑬ 접어둔 그룹이라도 그 영역으로 이동하면 다시 펴져 
 
   // 다른 그룹의 사용자 접힘은 그대로 유지된다.
   click(workSection(view).querySelector('button[aria-label="Collapse Teams list"]'));
-  assert.equal(subList(view, 'Teams'), null);
+  assert.equal(Boolean(subList(view, 'Teams')), false, 'Teams 를 접었는데 서브메뉴가 남아 있다');
   click(groupRow(view, 'Boards'));
-  assert.equal(subList(view, 'Teams'), null, 'Teams 접힘이 임의로 풀렸다');
+  assert.equal(Boolean(subList(view, 'Teams')), false, 'Teams 접힘이 임의로 풀렸다');
 });
 
 test('⑭ 미션이 외부에서 삭제되면 실제 SSE 경로를 타고 서브메뉴에서 사라진다', async (t) => {

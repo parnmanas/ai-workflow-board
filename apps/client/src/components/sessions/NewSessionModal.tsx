@@ -1,18 +1,26 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
-import type { AgentSessionAgentOption, AgentSessionSnapshot } from '../../types';
+import type { AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
 import { Button, Input, Modal } from '../common';
+import DirectoryPicker from '../admin/DirectoryPicker';
+import { lastCwdStorageKey } from './sessionList.logic';
 import { runtimeLabel } from './sessionTranscript.logic';
 
 /**
- * 새 Agent Session — 에이전트 하나, 작업 폴더, 권한 정책을 고른다. Chat 의
- * NewChatModal(참여자 여러 명, DM/그룹) 과 의도적으로 다른 모양이다.
+ * 새 Agent Session — Runtime Host 와 CLI 를 고르고 작업 폴더를 준다. Chat 의
+ * NewChatModal(참여자 여러 명, DM/그룹)과 의도적으로 다른 모양이다. 세션은 AWB Agent 가
+ * 아니라 그 장비의 CLI(운영자 홈)로 열린다.
  */
 export interface NewSessionModalProps {
   open: boolean;
   onClose: () => void;
-  onCreated: (session: AgentSessionSnapshot) => void;
+  hosts: AgentSessionHost[];
+  initialManagerId?: string;
+  initialCli?: string;
+  /** 그룹 헤더의 "+ New" 버튼에서 전달되는 cwd 프리필 값. */
+  initialCwd?: string;
+  onCreated: (live: AgentSessionLiveSnapshot) => void;
 }
 
 const selectStyle: React.CSSProperties = {
@@ -32,75 +40,70 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
 };
 
-function reasonText(reason: string | null): string {
-  switch (reason) {
-    case 'no_acp_adapter':
-      return 'no ACP adapter for this CLI type';
-    case 'manager_identity':
-      return 'Runtime Host identity';
-    case 'agent_type_missing':
-      return 'CLI type not set';
-    default:
-      return reason || 'unsupported';
+function readLastCwd(managerId: string, cli: string): string {
+  try {
+    return window.localStorage.getItem(lastCwdStorageKey(managerId, cli)) || '';
+  } catch {
+    return '';
   }
 }
 
-export default function NewSessionModal({ open, onClose, onCreated }: NewSessionModalProps) {
-  const [agents, setAgents] = useState<AgentSessionAgentOption[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [agentId, setAgentId] = useState('');
+function rememberCwd(managerId: string, cli: string, cwd: string): void {
+  try {
+    window.localStorage.setItem(lastCwdStorageKey(managerId, cli), cwd);
+  } catch {
+    /* best-effort */
+  }
+}
+
+export default function NewSessionModal({ open, onClose, hosts, initialManagerId, initialCli, initialCwd, onCreated }: NewSessionModalProps) {
+  const [managerId, setManagerId] = useState(initialManagerId || '');
+  const [cli, setCli] = useState(initialCli || '');
   const [cwd, setCwd] = useState('');
-  const [cwdTouched, setCwdTouched] = useState(false);
-  const [policy, setPolicy] = useState<'ask' | 'auto_allow'>('ask');
+  const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    let cancelled = false;
-    setLoading(true);
     setError(null);
-    setCwdTouched(false);
-    api.listAgentSessionAgents()
-      .then((list) => {
-        if (cancelled) return;
-        setAgents(list);
-        const first = list.find((a) => a.supported);
-        setAgentId((prev) => (prev && list.some((a) => a.id === prev && a.supported) ? prev : first?.id || ''));
-      })
-      .catch((err: any) => {
-        if (!cancelled) setError(err?.message || 'Failed to load agents');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
+    setTitle('');
+    const host = hosts.find((h) => h.manager_id === initialManagerId) ?? hosts[0] ?? null;
+    const nextManager = host?.manager_id || '';
+    const nextCli = host && initialCli && host.clis.includes(initialCli) ? initialCli : host?.clis[0] || '';
+    setManagerId(nextManager);
+    setCli(nextCli);
+    // initialCwd(그룹 헤더 "+ New")가 있으면 우선 적용, 없으면 마지막 기억 cwd
+    setCwd(initialCwd || (nextManager && nextCli ? readLastCwd(nextManager, nextCli) : ''));
+  }, [open, hosts, initialManagerId, initialCli, initialCwd]);
 
-  const selected = useMemo(() => agents.find((a) => a.id === agentId) || null, [agents, agentId]);
+  const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
 
   useEffect(() => {
-    if (!selected || cwdTouched) return;
-    setCwd(selected.working_dir || '');
-  }, [selected, cwdTouched]);
+    if (!host) return;
+    if (!host.clis.includes(cli)) setCli(host.clis[0] || '');
+  }, [host, cli]);
 
-  const supportedCount = agents.filter((a) => a.supported).length;
+  useEffect(() => {
+    if (managerId && cli) setCwd((prev) => prev || readLastCwd(managerId, cli));
+  }, [managerId, cli]);
 
   const create = async () => {
-    if (!selected || !selected.supported || creating) return;
+    if (!managerId || !cli || creating) return;
+    const trimmed = cwd.trim();
+    if (!trimmed) {
+      setError('A working directory on the Runtime Host is required.');
+      return;
+    }
     setCreating(true);
     setError(null);
     try {
-      const session = await api.createAgentSession({
-        agent_id: selected.id,
-        cwd: cwd.trim(),
-        permission_policy: policy,
-      });
-      onCreated(session);
+      const live = await api.openHostSession(managerId, cli, { cwd: trimmed, title: title.trim() });
+      rememberCwd(managerId, cli, trimmed);
+      onCreated(live);
     } catch (err: any) {
-      setError(err?.message || 'Failed to create the session');
+      setError(err?.message || 'Failed to open the session');
     } finally {
       setCreating(false);
     }
@@ -115,7 +118,7 @@ export default function NewSessionModal({ open, onClose, onCreated }: NewSession
       footer={(
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="secondary" onClick={onClose} disabled={creating}>Cancel</Button>
-          <Button variant="primary" onClick={() => void create()} disabled={!selected?.supported || creating} loading={creating}>
+          <Button variant="primary" onClick={() => void create()} disabled={!managerId || !cli || creating} loading={creating}>
             Start session
           </Button>
         </div>
@@ -123,66 +126,67 @@ export default function NewSessionModal({ open, onClose, onCreated }: NewSession
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <p style={{ margin: 0, fontSize: 12.5, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-          Drive one agent&apos;s CLI directly (Claude Code, Codex, Hermes). The CLI&apos;s own session is the
-          source of truth — output streams here, and tool permissions are yours to approve.
+          Opens the CLI on that machine with its own login and history — the same session you would
+          see in a terminal there. Output streams here and tool permissions are yours to approve.
         </p>
 
         <div>
-          <label htmlFor="new-session-agent" style={labelStyle}>Agent</label>
-          <select
-            id="new-session-agent"
-            style={selectStyle}
-            value={agentId}
-            disabled={loading || agents.length === 0}
-            onChange={(e) => setAgentId(e.target.value)}
-          >
-            {loading && <option value="">Loading agents…</option>}
-            {!loading && agents.length === 0 && <option value="">No agents in this workspace</option>}
-            {agents.map((a) => (
-              <option key={a.id} value={a.id} disabled={!a.supported}>
-                {a.name} · {runtimeLabel(a.type)}{a.supported ? (a.is_online ? '' : ' · offline') : ` · ${reasonText(a.reason)}`}
-              </option>
+          <label htmlFor="new-session-host" style={labelStyle}>Runtime Host</label>
+          <select id="new-session-host" style={selectStyle} value={managerId} disabled={hosts.length === 0} onChange={(e) => setManagerId(e.target.value)}>
+            {hosts.length === 0 && <option value="">No Runtime Host is connected</option>}
+            {hosts.map((h) => (
+              <option key={h.manager_id} value={h.manager_id}>{h.name}{h.hostname && h.hostname !== h.name ? ` (${h.hostname})` : ''}</option>
             ))}
           </select>
-          {!loading && agents.length > 0 && supportedCount === 0 && (
-            <div style={{ marginTop: 6, fontSize: 11.5, color: tokens.colors.warningLight }}>
-              None of these agents has an ACP adapter. Sessions need a claude / codex / hermes agent, or
-              <code style={{ fontFamily: 'monospace' }}> runtime_config.extra.acp_command</code> on a custom one.
-            </div>
-          )}
-          {selected && !selected.is_online && selected.supported && (
-            <div style={{ marginTop: 6, fontSize: 11.5, color: tokens.colors.textMuted }}>
-              This agent&apos;s Runtime Host is offline right now — the session opens when it reconnects.
-            </div>
-          )}
         </div>
 
-        <Input
-          label="Working directory (on the Runtime Host)"
-          value={cwd}
-          placeholder={selected?.working_dir || '/path/to/repo'}
-          onChange={(e) => {
-            setCwdTouched(true);
-            setCwd(e.target.value);
-          }}
-        />
-
         <div>
-          <label htmlFor="new-session-policy" style={labelStyle}>Tool permissions</label>
-          <select
-            id="new-session-policy"
-            style={selectStyle}
-            value={policy}
-            onChange={(e) => setPolicy(e.target.value === 'auto_allow' ? 'auto_allow' : 'ask')}
-          >
-            <option value="ask">Ask me every time (recommended)</option>
-            <option value="auto_allow">Allow automatically</option>
+          <label htmlFor="new-session-cli" style={labelStyle}>CLI</label>
+          <select id="new-session-cli" style={selectStyle} value={cli} disabled={!host || host.clis.length === 0} onChange={(e) => setCli(e.target.value)}>
+            {(!host || host.clis.length === 0) && <option value="">No ACP-capable CLI on this host</option>}
+            {host?.clis.map((c) => <option key={c} value={c}>{runtimeLabel(c)}</option>)}
           </select>
         </div>
 
-        {error && (
-          <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+            <div style={{ flex: 1 }}>
+              <Input
+                label="Working directory (on the Runtime Host)"
+                value={cwd}
+                placeholder="/path/to/repo"
+                onChange={(e) => setCwd(e.target.value)}
+              />
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!managerId}
+              onClick={() => setPickerOpen(true)}
+              style={{ marginBottom: 1, whiteSpace: 'nowrap' }}
+            >
+              Browse…
+            </Button>
+          </div>
+        </div>
+        {managerId && (
+          <DirectoryPicker
+            isOpen={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            managerAgentId={managerId}
+            initialPath={cwd.trim() || undefined}
+            onPick={(picked) => setCwd(picked)}
+          />
         )}
+
+        <Input
+          label="Title (optional)"
+          value={title}
+          placeholder="Defaults to your first prompt"
+          onChange={(e) => setTitle(e.target.value)}
+        />
+
+        {error && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>}
       </div>
     </Modal>
   );

@@ -253,8 +253,8 @@ test('참여자가 아니면 observer 로 강등되고 입력창 대신 사유�
       );
       assert.ok(textOf(view.container).includes('관전으로 읽는 메시지'), '읽기는 가능해야 한다');
       assert.equal(
-        view.container.querySelector('textarea'),
-        null,
+        Boolean(view.container.querySelector('textarea')),
+        false,
         '읽기 전용인데 입력창이 살아 있으면 보내지지 않는 지시를 쓰게 된다',
       );
     },
@@ -331,7 +331,7 @@ test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다
     async ({ view, joinCalls }) => {
       const button = view.container.querySelector('[data-testid="mission-conversation-join"]');
       assert.ok(button, '관전 상태에서는 참여 버튼이 있어야 한다');
-      assert.equal(view.container.querySelector('textarea'), null, '참여 전에는 입력창이 없다');
+      assert.equal(Boolean(view.container.querySelector('textarea')), false, '참여 전에는 입력창이 없다');
 
       click(button);
       await settle();
@@ -346,8 +346,8 @@ test('관전 상태에서 "대화에 참여"를 누르면 입력창이 열린다
         '참여에 성공했으면 입력창이 열려야 한다 — 이것이 이 티켓의 사용자 가시 완료 기준이다',
       );
       assert.equal(
-        view.container.querySelector('[data-testid="mission-conversation-join"]'),
-        null,
+        Boolean(view.container.querySelector('[data-testid="mission-conversation-join"]')),
+        false,
         '참여한 뒤에도 버튼이 남아 있으면 이미 들어온 방에 또 들어가라고 권하는 셈이다',
       );
     },
@@ -377,8 +377,8 @@ test('참여가 거부되면 사유가 보이고 입력창은 열리지 않는�
         '서버가 준 사유를 그대로 보여줘야 왜 막혔는지 알 수 있다',
       );
       assert.equal(
-        view.container.querySelector('textarea'),
-        null,
+        Boolean(view.container.querySelector('textarea')),
+        false,
         '거부됐는데 입력창이 열리면 보내지지 않을 지시를 쓰게 된다',
       );
     },
@@ -403,8 +403,8 @@ test('종료된 미션의 관전 상태에는 참여 버튼을 걸지 않는다'
         '종료된 미션에서는 종료가 사유여야 한다',
       );
       assert.equal(
-        view.container.querySelector('[data-testid="mission-conversation-join"]'),
-        null,
+        Boolean(view.container.querySelector('[data-testid="mission-conversation-join"]')),
+        false,
         '참여에 성공해도 보낼 orchestrator 세션이 없다 — 아무 일도 못 하는 버튼을 주면 안 된다',
       );
     },
@@ -423,8 +423,8 @@ test('종료된 미션은 입력창 없이 기록 보존 안내를 보여준다'
         '종료된 미션에는 보낼 orchestrator 세션이 없으므로 안내가 나와야 한다',
       );
       assert.equal(
-        view.container.querySelector('textarea'),
-        null,
+        Boolean(view.container.querySelector('textarea')),
+        false,
         '종료된 미션에서 입력창이 살아 있으면 사용자가 허공에 지시를 보낸다',
       );
       assert.ok(
@@ -864,18 +864,18 @@ test('chat 옵션이 off 면 권한이 있어도 읽기 전용이고, 사유가 
         'off 는 그 자체가 사유로 보여야 한다 — 옵션을 끈 사람만이 되돌릴 수 있는 상태다',
       );
       assert.equal(
-        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
-        null,
+        Boolean(view.container.querySelector('[data-testid="mission-conversation-observer-notice"]')),
+        false,
         '참여 문제가 아닌데 참여 문제라고 말하면 사용자는 참여 버튼을 찾아 헤맨다',
       );
       assert.equal(
-        view.container.querySelector('[data-testid="mission-conversation-join"]'),
-        null,
+        Boolean(view.container.querySelector('[data-testid="mission-conversation-join"]')),
+        false,
         '참여해도 풀리지 않는 차단에 참여 버튼을 걸면 안 된다',
       );
       assert.equal(
-        view.container.querySelector('textarea'),
-        null,
+        Boolean(view.container.querySelector('textarea')),
+        false,
         'off 에서 입력창이 열려 있으면 전송 순간에만 403 이 뜬다',
       );
       assert.ok(textOf(view.container).includes('읽기 전용'), '읽기는 계속 가능하다는 사실이 문구에 있어야 한다');
@@ -901,13 +901,13 @@ test('MANAGE_ACTIONS 가 없으면 "참여자 아님"이 아니라 권한 부족
         '권한 부족은 권한 부족이라고 말해야 한다 — 이것이 요구사항 C 다',
       );
       assert.equal(
-        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
-        null,
+        Boolean(view.container.querySelector('[data-testid="mission-conversation-observer-notice"]')),
+        false,
         '권한 문제를 참여 문제로 뭉뚱그리면 참여에 성공한 뒤에도 왜 막히는지 알 수 없다',
       );
       assert.equal(
-        view.container.querySelector('textarea'),
-        null,
+        Boolean(view.container.querySelector('textarea')),
+        false,
         '보낼 수 없는 입력창을 열어두면 전송 순간에만 사유를 알게 된다',
       );
       assert.ok(
@@ -930,8 +930,8 @@ test('권한이 있고 옵션이 열려 있으면 참여자가 아니어도 입�
     },
     async ({ view }) => {
       assert.equal(
-        view.container.querySelector('[data-testid="mission-conversation-permission-notice"]'),
-        null,
+        Boolean(view.container.querySelector('[data-testid="mission-conversation-permission-notice"]')),
+        false,
         '권한이 있는데 권한 배너를 띄우면 없는 문제를 지어내는 것이다',
       );
       assert.ok(
