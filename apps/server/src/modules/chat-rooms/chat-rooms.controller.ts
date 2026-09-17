@@ -406,16 +406,22 @@ export class ChatRoomsController {
     }
   }
 
+  // 초대는 DM 을 group 으로 승격시킬 수 있다(티켓 70e62a9d). `setOpenJoin` 과 같은
+  // 이유로 워크스페이스를 함께 넘긴다 — 방의 active 참여자인지만 보면, 다른/지난
+  // 워크스페이스 방의 참여자 행을 들고 있는 호출자가 지금 보고 있는 스코프 밖의 방을
+  // 바꿀 수 있다. 대조는 서비스가 하고 불일치는 404 다.
   @Post(':roomId/participants')
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async addParticipants(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
     const { participants } = body;
     if (!participants || !Array.isArray(participants)) {
       return res.status(400).json({ error: 'participants array required' });
     }
     try {
-      await this.membership.addParticipants(roomId, user.id, participants);
+      await this.membership.addParticipants(roomId, wsId, user.id, participants);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });

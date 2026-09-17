@@ -26,6 +26,7 @@ import { serializeSqljsTransactions } from '../dist/db.js';
 import { activityEvents } from '../dist/services/activity.service.js';
 
 const WS = '11111111-1111-4111-8111-111111111111';
+const OTHER_WS = '22222222-2222-4222-8222-222222222222';
 const ALICE = '33333333-3333-4333-8333-333333333333';
 const BOB = '44444444-4444-4444-8444-444444444444';
 const CAROL = '66666666-6666-4666-8666-666666666666';
@@ -102,8 +103,8 @@ function captureRoomUpdates() {
   return seen;
 }
 
-const invite = (roomId, callerId, participants, callerType = 'user') =>
-  membership.addParticipants(roomId, { type: callerType, id: callerId }, participants);
+const invite = (roomId, callerId, participants, callerType = 'user', workspaceId = WS) =>
+  membership.addParticipants(roomId, workspaceId, { type: callerType, id: callerId }, participants);
 
 const asUser = (id) => ({ participant_type: 'user', participant_id: id });
 const asAgent = (id) => ({ participant_type: 'agent', participant_id: id });
@@ -368,28 +369,25 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     assert.equal((await roomOf(room.id)).type, 'group');
   });
 
-  it('겹쳐 들어온 두 초대가 중복 active 행을 만들지 않는다', async () => {
-    // 주의: sql.js 는 단일 WASM 인스턴스라 이 두 호출은 직렬화 큐를 통해 순차 실행된다
-    // — 여기서 검증하는 것은 "겹친 호출이 에러·중복 없이 끝난다"이지 Postgres 의 진짜
-    //   병렬 트랜잭션 격리가 아니다. 그쪽은 advisory lock 으로 지키며 별도 검증 대상이다.
+  it('같은 대상을 다시 초대해도 승격은 한 번만 일어난다 (조건부 UPDATE 멱등)', async () => {
+    // 이 스위트는 sql.js 라 **겹치는 트랜잭션을 실제 레이스처럼 쓰지 않는다**(보드 교훈:
+    // 단일 WASM 커넥션이라 직렬화 큐를 타므로 통과가 Postgres 의 병렬 격리를 증명하지
+    // 못한다). 여기서 고정하는 것은 순차 재호출에 대한 멱등성 — 조건부 UPDATE
+    // (`WHERE type='dm'`)가 두 번째에는 affected=0 으로 조용히 지나가는가다.
+    // 진짜 동시 초대·advisory lock 직렬화는 Postgres 전용
+    // `test/qa-flows/chat-dm-promotion-pg-race.test.mjs` 가 검증한다.
     const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
 
-    const events = captureRoomUpdates();
-    try {
-      await Promise.all([
-        invite(room.id, ALICE, [asUser(BOB)]),
-        invite(room.id, ALICE, [asUser(BOB)]),
-      ]);
+    await invite(room.id, ALICE, [asUser(BOB)]);
+    await invite(room.id, ALICE, [asUser(BOB)]);
+    await invite(room.id, ALICE, [asUser(CAROL)]);
 
-      assert.equal((await activeRows(room.id, BOB)).length, 1);
-      assert.equal(events.length, 1, '실제로 추가한 쪽만 이벤트를 낸다');
-    } finally {
-      events.stop();
-    }
+    assert.equal((await activeRows(room.id, BOB)).length, 1);
+    assert.equal((await roomOf(room.id)).type, 'group');
     assert.equal(
       logLines.filter((l) => l.includes('promoted dm→group')).length,
       1,
-      '조건부 UPDATE 라 두 번째 승격은 affected=0 으로 조용히 지나가야 한다',
+      '이미 group 이 된 뒤의 초대가 승격을 또 보고하면 안 된다',
     );
   });
 
@@ -422,6 +420,93 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     await invite(room.id, ALICE, [asUser(BOB)]);
 
     assert.equal((await activeRows(room.id, BOB)).length, 1);
+  });
+
+  // ── 워크스페이스 경계 (리뷰 라운드1 지적 1) ──────────────────────────────
+
+  it('다른 워크스페이스의 방은 active 참여자여도 404 로 거부된다', async () => {
+    // participant 행은 한 번 생기면 남는다. 그래서 "이 방의 참여자인가"만으로는 경계가
+    // 지속되지 않는다 — 지난/다른 워크스페이스 방의 행을 들고 있는 호출자가 지금
+    // 바인딩된 스코프 밖의 방을 승격시킬 수 있었다.
+    const room = await seedRoom({ workspace_id: OTHER_WS }, [
+      { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
+    ]);
+
+    await assert.rejects(
+      () => invite(room.id, ALICE, [asUser(BOB)], 'user', WS),
+      (err) => err.status === 404 && /room not found/i.test(err.message),
+      '타 워크스페이스 room_id 가 통과했다',
+    );
+
+    const after = await roomOf(room.id);
+    assert.equal(after.type, 'dm', '거부된 호출이 방을 승격시키면 안 된다');
+    assert.equal((await activeRows(room.id)).length, 2, '참여자도 추가되면 안 된다');
+    assert.equal((await activeRows(room.id, BOB)).length, 0);
+  });
+
+  it('타 워크스페이스에서는 방의 존재도 종류도 드러나지 않는다 (404 로 수렴)', async () => {
+    // 없는 방과 **같은 404** 여야 한다 — 다르면 남의 워크스페이스 room_id 를 넣어보는
+    // 것만으로 방의 존재를 확인할 수 있다. 시스템 소유 방이어도 400 이 아니라 404 다
+    // (워크스페이스 검사가 시스템 방 판정보다 먼저 돌기 때문).
+    const foreignSystemDm = await seedRoom({ workspace_id: OTHER_WS, run_kind: 'qa' }, [
+      { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
+    ]);
+
+    const missing = await invite('00000000-0000-4000-8000-000000000000', ALICE, [asUser(BOB)])
+      .then(() => null, (e) => e);
+    const foreign = await invite(foreignSystemDm.id, ALICE, [asUser(BOB)], 'user', WS)
+      .then(() => null, (e) => e);
+
+    assert.equal(missing.status, 404);
+    assert.equal(foreign.status, 404, '타 워크스페이스 시스템 방이 400 으로 종류를 드러냈다');
+    assert.equal(foreign.message, missing.message, '두 사유가 구별되면 방의 존재가 샌다');
+  });
+
+  it('비참여자에게는 시스템 방 여부가 드러나지 않는다 (400 아니라 403)', async () => {
+    // 시스템 방 판정을 참여자 검사보다 먼저 두면, 같은 워크스페이스의 비참여자가
+    // 400/403 차이로 그 방이 시스템 소유인지 알아낼 수 있다.
+    const systemDm = await seedRoom({ run_kind: 'qa' }, [
+      { type: 'user', id: ALICE }, { type: 'agent', id: BOT },
+    ]);
+
+    await assert.rejects(
+      () => invite(systemDm.id, OUTSIDER, [asUser(BOB)]),
+      (err) => err.status === 403,
+      '비참여자가 403 이 아닌 다른 사유를 받았다',
+    );
+  });
+
+  // ── 정렬 전순서 (리뷰 라운드1 지적 3) ────────────────────────────────────
+
+  it('같은 UUID 를 user 와 agent 가 나눠 가져도 자동 이름이 결정적이다', async () => {
+    // 단일성 키는 `participant_id` 가 아니라 `(participant_type, participant_id)` 다 —
+    // users 와 agents 는 별개 테이블이라 같은 UUID 가 양쪽에 존재할 수 있다. 그때
+    // `participant_id` 까지만 건 정렬은 전순서가 아니라서 자동 이름이 실행마다 뒤바뀐다.
+    //
+    // 삽입 순서를 기대 순서의 **반대**로 두는 것이 이 테스트의 핵심이다: 타이브레이커가
+    // 없으면 DB 가 돌려주는 삽입 순서(user → agent)가 그대로 이름이 되고, 있으면
+    // 'agent' < 'user' 로 뒤집힌다.
+    const TWIN = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const userRepo = dataSource.getRepository(User);
+    const agentRepo = dataSource.getRepository(Agent);
+    await userRepo.save(userRepo.create({ id: TWIN, name: 'Twin User', email: 'twin@example.com' }));
+    await agentRepo.save(agentRepo.create({ id: TWIN, name: 'Twin Agent', type: 'claude' }));
+
+    const room = await seedRoom({ name: '' }, [
+      { type: 'user', id: TWIN },   // 먼저 삽입
+      { type: 'agent', id: TWIN },  // 나중에 삽입
+    ]);
+    // joined_at 을 같은 값으로 고정해 타이브레이커만이 순서를 결정하게 만든다.
+    await dataSource.getRepository(ChatRoomParticipant)
+      .update({ room_id: room.id }, { joined_at: new Date('2026-01-01T00:00:00.000Z') });
+
+    await invite(room.id, TWIN, [asUser(BOB)]);
+
+    assert.equal(
+      (await roomOf(room.id)).name,
+      'Twin Agent, Twin User, Bob',
+      'participant_type 이 타이브레이커에 없으면 삽입 순서가 새어 이름이 뒤바뀐다',
+    );
   });
 
   // ── SSE 수신자 스코프 ───────────────────────────────────────────────────

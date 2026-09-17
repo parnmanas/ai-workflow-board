@@ -564,7 +564,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // Group rooms only — DMs are immutable. Caller must already be a member.
   server.tool(
     'add_chat_participants',
-    'Add participants to an existing chat room (group or DM). Inviting into a DM promotes it to a group in place — same room id and history, and the promotion CANNOT be undone. Already-active participants are skipped silently (idempotent). Fails on system-managed rooms (Action / QA / security / orchestration), on rooms the caller is not in, and on cap (50). Re-adding a previously-left member creates a fresh participant row.',
+    'Add participants to an existing chat room (group or DM). Inviting into a DM promotes it to a group in place — same room id and history, and the promotion CANNOT be undone. Already-active participants are skipped silently (idempotent). Fails on rooms outside the caller\'s workspace, on rooms the caller is not in, on cap (50), and on promoting a system-managed DM (Action / QA / security / orchestration) — adding to an already-group system room still works. Re-adding a previously-left member creates a fresh participant row.',
     {
       room_id: z.string().describe('Target room ID'),
       participants: z.array(z.object({
@@ -576,9 +576,18 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      // caller 등급(에이전트 신원)과 **workspace 권한은 별개**다 — 신원만 확인하고
+      // room_id 를 그대로 넘기면, 다른/지난 워크스페이스 방의 참여자 행을 들고 있는
+      // 에이전트가 지금 API key 가 묶인 스코프 밖의 방을 승격시킬 수 있다. 이 파일의
+      // 다른 툴들과 같은 방식으로 호출자의 워크스페이스를 해석해 함께 넘긴다.
+      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
+      if (!agent) return err('Agent identity not found for this session');
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
       try {
         await roomMembershipService.addParticipants(
           room_id,
+          callerWorkspaceId,
           { type: 'agent', id: caller.agentId },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
         );

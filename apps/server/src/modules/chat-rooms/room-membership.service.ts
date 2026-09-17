@@ -179,6 +179,7 @@ export class RoomMembershipService {
    */
   async addParticipants(
     roomId: string,
+    workspaceId: string,
     caller: { type: 'user' | 'agent'; id: string } | string,
     newParticipants: { participant_type: string; participant_id: string }[],
   ): Promise<void> {
@@ -186,9 +187,24 @@ export class RoomMembershipService {
     // the new MCP path passes a typed caller. Normalize here so both work.
     const c = typeof caller === 'string' ? { type: 'user' as const, id: caller } : caller;
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    if (!room) {
+
+    // ── 검사 순서는 의도적이다 (리뷰 라운드1 지적 1) ────────────────────────
+    //
+    // ① 워크스페이스 경계 — **가장 먼저**. participant 행은 한 번 생기면 남으므로
+    //    "이 방의 active 참여자인가"만으로는 경계가 지속되지 않는다: 지난 워크스페이스나
+    //    다른 워크스페이스 방의 행을 들고 있는 호출자가 지금 바인딩된 스코프와 무관하게
+    //    그 방을 승격시키고 새 참여자를 넣을 수 있었다. 존재하지 않는 방과 **같은 404** 를
+    //    주는 것도 의도다 — 남의 워크스페이스 room_id 로 방의 존재를 확인할 수 없어야
+    //    한다(`setOpenJoin` / `requireRoomAccess` 와 동일 규칙).
+    // ② 참여자 자격 — 그 다음. 시스템 방 판정보다 **먼저** 둬서 비참여자가 400/403 의
+    //    차이로 방의 종류를 알아내지 못하게 한다.
+    // ③ 시스템 소유 방 — 마지막. 여기까지 온 호출자는 이미 그 방의 참여자다.
+    if (!room || room.workspace_id !== workspaceId) {
       throw makeError(404, 'Room not found');
     }
+
+    await this.requireActiveParticipant(roomId, c.id, c.type);
+
     // 시스템 소유 방의 **승격만** 막는다(`setOpenJoin` 과 같은 근거). 오늘 시스템 방은
     // 전부 group 으로 생성되므로 이 분기에 걸리는 방은 없지만, 누군가 DM 으로 만드는
     // 순간 그 방의 참여자 집합이 사람 손에 넘어가는 것을 미리 닫아 둔다. **이미 group 인
@@ -197,8 +213,6 @@ export class RoomMembershipService {
     if (room.type === 'dm' && isSystemManagedRoom(room)) {
       throw makeError(400, 'Cannot add participants to a system-managed room');
     }
-
-    await this.requireActiveParticipant(roomId, c.id, c.type);
 
     // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 조용히 제거.
     const requested = dedupeParticipants(await this.filterOutManagerParticipants(newParticipants));
@@ -225,10 +239,18 @@ export class RoomMembershipService {
         // joined_at 은 전순서가 아니다 — sql.js 의 `datetime('now')` 는 초 단위라 같은
         // 방의 참여자 행들이 흔히 같은 값을 갖는다. 타이브레이커로 행 `id` 를 쓰면 안
         // 된다: 랜덤 UUID 라 순서가 실행마다 달라져 자동 이름이 뒤바뀐다(실제로 이
-        // 테스트가 그렇게 흔들렸다). `participant_id` 는 active 행 사이에서 방마다
-        // 유일하므로(이 메서드가 지키는 불변식) 둘을 합치면 전순서가 되고, 같은 참여자
-        // 구성이면 언제나 같은 이름이 나온다.
+        // 테스트가 그렇게 흔들렸다).
+        //
+        // 타이브레이커는 이 테이블의 **단일성 키 전체**여야 한다 — `participantKey` 가
+        // 말하듯 같은 방의 active 행을 유일하게 만드는 것은 `participant_id` 하나가
+        // 아니라 `(participant_type, participant_id)` 다. users 와 agents 는 별개
+        // 테이블이라 같은 UUID 가 양쪽에 존재할 수 있고, 그러면 `participant_id` 까지만
+        // 건 정렬은 여전히 전순서가 아니다(리뷰 라운드1 지적 3). 두 컬럼을 다 걸면
+        // 어느 쪽을 먼저 두든 전순서가 되는데, `participant_id` 를 앞에 두는 이유는
+        // 흔한 경우(같은 UUID 충돌이 없는 방)의 이름을 그대로 두기 위해서다 — type 을
+        // 앞에 두면 tie 마다 에이전트가 사람보다 먼저 와서 기존 이름이 전부 바뀐다.
         .addOrderBy('p.participant_id', 'ASC')
+        .addOrderBy('p.participant_type', 'ASC')
         .getMany();
       const activeKeys = new Set(
         activeRows.map(r => participantKey(r.participant_type, r.participant_id)),
