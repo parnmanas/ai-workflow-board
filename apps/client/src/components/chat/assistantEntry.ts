@@ -12,6 +12,11 @@
 //   - 서버 검증(workspaces.controller `assistant_agent_id`)과 동일 기준을 클라에서도
 //     써서 read/write 가 어긋나지 않게 한다.
 
+import {
+  normalizeRoomListParticipant,
+  type RoomListParticipantWire,
+} from './utils/participantFlow';
+
 /** 셀렉터/카드에서 쓰는 어시스턴트 에이전트 최소 표현. */
 export interface AssistantAgentInfo {
   id: string;
@@ -87,7 +92,12 @@ export function resolveAssistant(
 export interface RoomLike {
   id: string;
   type?: 'dm' | 'group' | string;
-  participants?: Array<{ participant_type: string; participant_id: string }>;
+  /**
+   * 방 목록의 참여자 프로젝션. 스코프에 따라 `{participant_type, participant_id}` 로도
+   * `{type, id}` 로도 오므로(티켓 70e62a9d 요구사항 6) 원시 필드를 직접 읽지 않고
+   * `normalizeRoomListParticipant` 를 거친다.
+   */
+  participants?: RoomListParticipantWire[];
 }
 
 /**
@@ -102,7 +112,9 @@ export function findAssistantDmRoomId(rooms: RoomLike[] | null | undefined, assi
     (r) =>
       r.type === 'dm' &&
       Array.isArray(r.participants) &&
-      r.participants.some((p) => p.participant_type === 'agent' && p.participant_id === assistantId),
+      r.participants
+        .map(normalizeRoomListParticipant)
+        .some((p) => p.type === 'agent' && p.id === assistantId),
   );
   return room ? room.id : null;
 }

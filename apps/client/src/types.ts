@@ -1762,11 +1762,19 @@ export interface ChatRoomListItem {
   // Light projection of every active participant — drives the room-list
   // filter input (matches members by display name without an extra fetch).
   // Server-side projection added in v0.42; older responses may omit it.
-  participants?: Array<{
-    participant_type: 'user' | 'agent';
-    participant_id: string;
-    name: string;
-  }>;
+  //
+  // **필드 이름이 스코프마다 다르다** (티켓 70e62a9d 요구사항 6). 두 응답이 같은
+  // `ChatRoomListItem[]` 로 오지만 서버가 프로젝션을 각각 손으로 만든다:
+  //   - 내 방 (`listRooms`)                       `{ participant_type, participant_id }`
+  //   - 관전 (`?scope=workspace`, `listAllWorkspaceRooms`)  `{ type, id }`
+  // 유니온으로 선언해 둔 이유는 한쪽 필드를 곧장 읽는 코드를 tsc 가 막게 하기
+  // 위해서다 — 예전 선언은 앞의 shape 하나뿐이라 관전 모드에서 `participant_id` 가
+  // 조용히 undefined 가 되는 것을 잡지 못했다. 읽을 때는
+  // `normalizeRoomListParticipant`(components/chat/utils/participantFlow)를 쓸 것.
+  participants?: Array<
+    | { participant_type: 'user' | 'agent'; participant_id: string; name: string }
+    | { type: 'user' | 'agent'; id: string; name: string }
+  >;
   // 자유 참여(open join, ticket 995a9519). 켜진 방은 참여자가 아닌 사용자에게도
   // 이 목록에 실리므로, 방 하나가 두 상태로 올 수 있다:
   //   open_join && is_participant  — 이미 참여 중인 열린 방

@@ -4,6 +4,7 @@ import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import type { ChatRoomListItem } from '../../types';
 import { relativeTimeShort } from './utils/time';
+import { normalizeRoomListParticipant } from './utils/participantFlow';
 
 // ─── ChatRoomListPanel ────────────────────────────────────────────────────────
 
@@ -113,7 +114,8 @@ export default function ChatRoomListPanel({
       if (display.toLowerCase().includes(q)) return true;
       if (room.dm_partner_name && room.dm_partner_name.toLowerCase().includes(q)) return true;
       if (room.participants) {
-        for (const p of room.participants) {
+        for (const raw of room.participants) {
+          const p = normalizeRoomListParticipant(raw);
           if (p.name && p.name.toLowerCase().includes(q)) return true;
         }
       }
@@ -558,15 +560,10 @@ interface RoomListRowProps {
   currentUserId?: string;
 }
 
-// 서버가 방 목록에 실어 주는 participants 프로젝션은 스코프별로 필드명이 다르다:
-//  - 내 방(listRooms):        { participant_type, participant_id, name }
-//  - 워크스페이스(observer):  { type, id, name }
-// 두 형태를 모두 안전하게 읽어 (id, name) 로 정규화한다.
-function normalizeMember(p: any): { id: string; name: string } {
-  return { id: p?.participant_id ?? p?.id ?? '', name: p?.name ?? '' };
-}
-
 // 방 참여자 이름을 "본인 제외"하고 최대 MAX 명까지, 초과분은 "+N" 으로 요약한다.
+// 스코프별로 갈리는 두 wire shape 는 normalizeRoomListParticipant 가 흡수한다 —
+// 예전엔 여기 있던 지역 헬퍼가 `id` 만 정규화하고 `type` 은 그대로 둬서 관전 모드의
+// 참여자 종류를 읽을 수 없었다(티켓 70e62a9d 요구사항 6).
 const MAX_SUMMARY_NAMES = 3;
 function buildParticipantSummary(
   participants: ChatRoomListItem['participants'],
@@ -574,7 +571,7 @@ function buildParticipantSummary(
 ): string | null {
   if (!participants || participants.length === 0) return null;
   const names = participants
-    .map(normalizeMember)
+    .map(normalizeRoomListParticipant)
     .filter((m) => m.id !== currentUserId && m.name)
     .map((m) => m.name);
   if (names.length === 0) return null;
