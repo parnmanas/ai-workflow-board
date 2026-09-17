@@ -1,6 +1,7 @@
 // Agent Session(CLI 직접 세션) 표면의 IA 계약 — 소스 텍스트 단언.
-//   - 사이드바에서 Sessions 섹션이 Chat 섹션보다 위에 온다(주 작업 표면).
-//     행은 Runtime Host > working directory > 세션의 3단 트리다 — CLI 는 트리 레벨이 아니라 세션의 속성.
+//   - 사이드바 트리(Sessions 가 Chat 위 · Runtime Host > working directory > 세션 3단 · 3일 경과분
+//     접기 · 권한 게이트)는 여기서 다루지 않는다 — 소스 정규식으로 잡으려다 리팩터마다 깨져서
+//     (티켓 b421e5ba, 7957aedb) 실렌더 단언인 sidebar-sessions-tree.test.mjs 로 옮겼다.
 //   - 세션 라우트(/sessions, /sessions/:managerId, /sessions/:managerId/:cli/:sessionId)가 등록돼 있다.
 //     * 중간 레벨이 managerId 단위로 바뀌었다: cwd 기준 그룹 뷰.
 //   - chat 모드의 기본 랜딩이 sessions 다.
@@ -12,39 +13,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const read = (rel) => readFile(new URL(rel, import.meta.url), 'utf8');
-const [sidebar, app, stream, viewMode, api, page] = await Promise.all([
-  read('../src/components/Sidebar.tsx'),
+const [app, stream, viewMode, api, page] = await Promise.all([
   read('../src/App.tsx'),
   read('../src/contexts/BoardStreamContext.tsx'),
   read('../src/contexts/viewMode.ts'),
   read('../src/api.ts'),
   read('../src/components/sessions/SessionsPage.tsx'),
 ]);
-
-test('sidebar puts Sessions above Chat, with host > cwd > session rows and its own New action', () => {
-  const sessionsIndex = sidebar.indexOf('<section aria-labelledby="sidebar-sessions-heading"');
-  const chatIndex = sidebar.indexOf('<section aria-labelledby="sidebar-chat-heading"');
-  assert.ok(sessionsIndex >= 0, 'Sessions section exists');
-  assert.ok(sessionsIndex < chatIndex, 'Sessions precedes Chat');
-  assert.match(sidebar, /aria-label="New session"/);
-  assert.match(sidebar, /`\$\{workspaceBase\}\/sessions\?new=1`/);
-  // 행 구조 — 호스트 > cwd > 세션. cwd 묶음은 groupSessionsByCwd 가 만들고,
-  // CLI 는 트리 레벨에서 내려가 세션의 속성(경로 세그먼트)으로만 남는다.
-  assert.match(sidebar, /groups: groupSessionsByCwd\(/, '호스트의 세션은 cwd 로 묶인다');
-  const hostRowIndex = sidebar.indexOf('sessionHosts.map((host)');
-  const cwdRowIndex = sidebar.indexOf('hostData.groups.map((group)');
-  const sessionRowIndex = sidebar.indexOf('group.sessions.map((s)');
-  assert.ok(hostRowIndex >= 0, '호스트 행을 그린다');
-  assert.ok(cwdRowIndex >= 0, 'cwd 그룹 행을 그린다');
-  assert.ok(sessionRowIndex >= 0, '세션 행을 그린다');
-  assert.ok(hostRowIndex < cwdRowIndex, 'cwd 그룹은 호스트 아래에 중첩된다');
-  assert.ok(cwdRowIndex < sessionRowIndex, '세션 행은 cwd 그룹 아래에 중첩된다');
-  assert.match(sidebar, /\{group\.cwdLabel\}/, 'cwd 는 눈에 보이는 트리 레벨이다');
-  assert.match(sidebar, /sessionPath\([^)]*, host\.manager_id, s\.cli, s\.session_id\)/, '세션 링크는 여전히 CLI 를 담는다');
-  assert.match(sidebar, /aria-label="Runtime Hosts"/);
-  assert.match(sidebar, /hasPermission\('agent_sessions\.use'\)/, 'section is permission-gated');
-  assert.match(sidebar, /useAgentSessionsNav\(/);
-});
 
 test('routes: hosts index, host projects view, and session detail render SessionsPage; chat mode lands on sessions', () => {
   assert.match(app, /path="sessions" element=\{<SessionsPage \/>\}/);
