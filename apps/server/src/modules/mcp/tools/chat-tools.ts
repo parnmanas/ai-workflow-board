@@ -372,7 +372,9 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'list_chat_rooms',
-    'List chat rooms the agent participates in, with last message preview and unread count.',
+    'List the chat rooms the agent actively participates in, scoped to the caller\'s own workspace. ' +
+    'Each row carries room_id, name, type, last_message_at and open_join, most recent activity first. ' +
+    'Rooms in another workspace are omitted even when a stale participant row still survives there.',
     {},
     async (_args: Record<string, never>, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
@@ -383,12 +385,29 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         : null;
       if (!agent) return err('Agent identity not found');
 
+      // caller 등급(에이전트 신원)과 workspace 권한은 별개다(티켓 ced48818) — 형제 툴
+      // get_chat_room_messages(티켓 5a95315f)와 같은 결함 계급이다. 참여자 행만 보면
+      // 경계가 지속되지 않는다: `chat_room_participants` 행은 한 번 생기면 남으므로,
+      // 지난/다른 워크스페이스 방의 행을 들고 있는 에이전트에게 그 방의 이름과 마지막
+      // 활동 시각이 계속 실렸다. 같은 "내 방 목록"의 REST 형제 경로인
+      // RoomCrudService.listRooms 는 이미 `r.workspace_id = :wsId` 를 1급 조건으로 걸고
+      // 있으므로, 두 표면이 같은 질문에 같은 답을 내도록 맞춘다. 해석 방식은 이 파일의
+      // 다른 툴들과 같다 — 세션 키의 workspace, 없으면 에이전트 자신의 workspace.
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
+
       const rooms = await dataSource.getRepository(ChatRoomParticipant)
         .createQueryBuilder('p')
         .innerJoinAndSelect('p.room', 'r')
         .where('p.participant_id = :agentId', { agentId: agent.id })
         .andWhere('p.participant_type = :type', { type: 'agent' })
         .andWhere('p.left_at IS NULL')
+        // 참여자 행이 아니라 조인된 **방**에 건다. `:wsId` 는 파라미터 바인딩이라
+        // Postgres 가 컬럼 타입으로 강제 변환하므로 toText() 캐스팅이 필요 없다
+        // (chat-room-join-cast-guard.test.mjs 가 명시한 규약과 같다). 위 관계 조인도
+        // 양쪽이 uuid 라 캐스팅 대상이 아니다 — participants.room_id 는 선언은 varchar
+        // 지만 @ManyToOne(ChatRoom) FK 라 스키마 동기화가 uuid 로 만든다.
+        .andWhere('r.workspace_id = :wsId', { wsId: callerWorkspaceId })
         .orderBy('r.last_message_at', 'DESC', 'NULLS LAST')
         .getMany();
 
