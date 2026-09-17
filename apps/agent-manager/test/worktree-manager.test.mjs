@@ -920,6 +920,8 @@ test('cleanupTerminalTicketGit: clean이고 base에 반영된 티켓 worktree와
       removedRemoteBranches: [],
       remainingBranches: [],
       heldReasons: [],
+      benignHolds: [],
+      benignHeldBranches: [],
     });
   } finally {
     await fixture.cleanup();
@@ -1238,6 +1240,91 @@ test('cleanupTerminalTicketGit: base 에 없는 커밋 위의 detached worktree 
     );
     // 커밋이 여전히 도달 가능하다 — 회수했다면 참조가 사라졌을 것이다.
     assert.equal(git(fixture.wt, ['rev-parse', 'HEAD']), head);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// 정상 보류 vs 실제 정리 오류 (ticket 62407d4e).
+//
+// Done 진입 정리와 "재개된 per-ticket worktree 프로비저닝" 은 동시에 일어난다. 정리가
+// worktree 를 지운 뒤 로컬 ref 를 지우기 전에 다른 세션이 같은 branch 를 다시 체크아웃하면
+// `git branch -d` 는 실패한다 — 그런데 이건 **잘못된 상태가 아니다**: 커밋은 base 에
+// 들어가 있고 원격 ref 도 이미 지워졌으므로 잃는 것이 없으며, 그 checkout 이 끝나면 다음
+// sweep 이 회수한다. 이걸 "정리 실패" 로 알리면 Merging 절차를 정확히 마친 담당자와 이후
+// 감사에게 정리가 덜 끝난 것처럼 읽힌다(보드에 그 오독 사례가 남아 있다).
+//
+// 판정은 stderr 문구가 아니라 **저장소 상태**로 한다 — Git 버전·로캘에 따라 문구가
+// 달라지므로 거기에 단언을 걸면 환경이 바뀔 때 조용히 오분류된다.
+test('cleanupTerminalTicketGit: 원격 ref 가 없고 재개된 worktree 가 로컬 ref 를 물고 있으면 정상 보류로 분류한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const resumed = join(fixture.workingDir, '.awb', 'wt', 'repo-resource', 'resumed-checkout');
+  try {
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        // 검증~삭제 사이에 다른 세션이 같은 branch 를 다시 체크아웃한 상황 그대로.
+        beforeLocalDelete: (branch) => {
+          if (branch !== fixture.branch) return;
+          git(fixture.base, ['worktree', 'add', '-q', resumed, fixture.branch]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    // 실제 오류로 보고하지 않는다.
+    assert.deepEqual(result.heldReasons, [], JSON.stringify(result));
+    assert.deepEqual(result.benignHeldBranches, [fixture.branch], JSON.stringify(result));
+    assert.equal(result.benignHolds.length, 1, JSON.stringify(result));
+    assert.match(result.benignHolds[0], /정상/);
+    assert.ok(result.benignHolds[0].includes(fixture.branch));
+
+    // 제품 불변식으로 단언한다(리포트 필드가 아니라 저장소의 실제 상태):
+    // 원격 ref 는 지워졌고, 로컬 ref 와 그 커밋은 그대로 살아 있다.
+    // (`removedRemoteBranches` 는 보류가 하나라도 있으면 성공을 주장하지 않는 기존
+    //  보수적 규약을 따르므로 여기서는 비어 있다 — 실제 삭제 여부는 아래 ls-remote 로 본다.)
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]), '');
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.deepEqual(result.removedLocalBranches, []);
+    assert.equal(existsSync(resumed), true, '재개된 checkout 을 건드리면 안 된다');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('cleanupTerminalTicketGit: 물고 있는 worktree 가 없는 로컬 ref 삭제 실패는 실제 오류로 보고한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        // 검증 이후에 base 에 없는 커밋이 ref 에 얹힌 경우 — `-d` 가 거부하는 것이
+        // 옳고, 사람이 볼 필요가 있는 상태다.
+        beforeLocalDelete: (branch) => {
+          if (branch !== fixture.branch) return;
+          const tree = git(fixture.base, ['rev-parse', 'origin/main^{tree}']);
+          const late = git(fixture.base, ['commit-tree', tree, '-p', 'origin/main', '-m', '늦게 도착한 커밋']);
+          git(fixture.base, ['branch', '-f', branch, late]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.benignHolds, [], JSON.stringify(result));
+    assert.deepEqual(result.benignHeldBranches, [], JSON.stringify(result));
+    assert.ok(
+      result.heldReasons.includes(`로컬 브랜치 삭제 실패: ${fixture.branch}`),
+      JSON.stringify(result),
+    );
+    // 보류된 ref 와 그 커밋은 보존된다.
+    assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
+    assert.deepEqual(result.removedLocalBranches, []);
   } finally {
     await fixture.cleanup();
   }

@@ -135,7 +135,18 @@ export interface TerminalTicketCleanupReport {
   removedLocalBranches: string[];
   removedRemoteBranches: string[];
   remainingBranches: string[];
+  /** 정리 **오류** — 사람이 볼 필요가 있는 것만. 정상 보류는 여기 넣지 않는다. */
   heldReasons: string[];
+  /**
+   * 정상 보류(ticket 62407d4e) — "지금 지울 수 없지만 잘못된 것은 아무것도 없다".
+   * 유일한 사례는 원격 ref 가 이미 없고 살아 있는 worktree 가 로컬 ref 를 물고 있는
+   * 상태다: 커밋은 base 에 들어가 있고 원격도 정리된 뒤이므로 잃는 것이 없으며, 그
+   * checkout 이 끝나면 다음 sweep 이 회수한다. 이걸 오류로 보고하면 이미 절차를
+   * 정확히 지킨 담당자에게 "정리 미완" 이라고 잘못 알리게 된다.
+   */
+  benignHolds: string[];
+  /** 위 정상 보류로 설명되는 잔여 브랜치 — 호출자가 알림 소음을 걸러내는 데 쓴다. */
+  benignHeldBranches: string[];
 }
 
 /**
@@ -405,6 +416,10 @@ export class WorktreeManager {
   #terminalCleanupHooks: {
     removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
     beforeRemoteDelete?: (branch: string) => Promise<void> | void;
+    /** 로컬 ref 삭제 직전에 저장소 상태를 바꿔 넣는 seam — 검증과 삭제 사이의
+     *  실제 경쟁(재개된 worktree 가 같은 branch 를 다시 체크아웃하는 것)을
+     *  플랫폼·Git 버전에 의존하지 않고 결정적으로 재현하기 위한 것이다. */
+    beforeLocalDelete?: (branch: string) => Promise<void> | void;
   };
 
   constructor(opts: {
@@ -414,6 +429,7 @@ export class WorktreeManager {
     terminalCleanupHooks?: {
       removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
       beforeRemoteDelete?: (branch: string) => Promise<void> | void;
+      beforeLocalDelete?: (branch: string) => Promise<void> | void;
     };
   } = {}) {
     this.#provisionLockTimeoutMs = opts.provisionLockTimeoutMs ?? PROVISION_LOCK_TIMEOUT_MS;
@@ -1795,6 +1811,20 @@ export class WorktreeManager {
   }
 
   /**
+   * 이 저장소의 어떤 worktree 가 `branch` 를 체크아웃하고 있는지 경로로 답한다
+   * (없으면 null).
+   *
+   * `git branch -d` 실패의 성격을 **stderr 문구가 아니라 저장소 상태로** 가르기
+   * 위한 것이다 — "Cannot delete branch ... checked out at ..." 같은 문구는 Git
+   * 버전과 로캘에 따라 달라지므로 거기에 단언을 걸면 환경이 바뀔 때 조용히
+   * 오분류된다.
+   */
+  async #worktreeHoldingBranch(repo: string, branch: string): Promise<string | null> {
+    const worktrees = await this.listWorktrees(repo);
+    return worktrees.find((w) => w.branch === branch)?.path ?? null;
+  }
+
+  /**
    * terminal 진입 시 티켓 전용 Git 흔적을 보수적으로 정리한다.
    *
    * 판정은 **두 축**으로 나뉜다(ticket 7b384c10) — 하나로 뭉치면 Merging 가이드를
@@ -1841,6 +1871,8 @@ export class WorktreeManager {
       removedRemoteBranches: [],
       remainingBranches: [],
       heldReasons: [],
+      benignHolds: [],
+      benignHeldBranches: [],
     };
     if (!opts.baseWorkingDir || !opts.ticketId) return report;
     const ticket8 = String(opts.ticketId).slice(0, 8);
@@ -2045,12 +2077,28 @@ export class WorktreeManager {
       for (const branch of localBranches) {
         if (protectedBranches.has(branch)) continue;
         if (blockedBranches.has(branch)) continue;
+        await this.#terminalCleanupHooks.beforeLocalDelete?.(branch);
         const deleted = await git(entry.repo, ['branch', '-d', branch]);
-        if (deleted.ok || /not found/i.test(deleted.stderr)) report.removedLocalBranches.push(branch);
-        else {
-          report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
-          blockedBranches.add(branch);
+        if (deleted.ok || /not found/i.test(deleted.stderr)) {
+          report.removedLocalBranches.push(branch);
+          continue;
         }
+        // 실패 원인을 stderr 문구로 가르지 않는다 — Git 버전·로캘마다 달라진다.
+        // 저장소 상태로 직접 판정한다(ticket 62407d4e): 살아 있는 worktree 가
+        // 이 ref 를 물고 있고 원격 ref 도 이미 없으면, 잃는 것이 없는 정상
+        // 보류다(이 경로까지 온 시점에 branch 가 base 에 포함된다는 것은 위
+        // merge-base 검사로 이미 확정돼 있다). 그 외는 진짜 오류로 올린다.
+        const holder = await this.#worktreeHoldingBranch(entry.repo, branch);
+        const remoteStillThere = await git(entry.repo, [
+          'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`,
+        ]);
+        if (holder && !remoteStillThere.ok) {
+          report.benignHolds.push(`로컬 ref 보류(정상): ${branch} — 작업트리 ${holder} 가 체크아웃 중이고 원격 ref 는 이미 없음`);
+          report.benignHeldBranches.push(branch);
+        } else {
+          report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+        }
+        blockedBranches.add(branch);
       }
       for (const branch of remotelyDeleted) {
         if (!blockedBranches.has(branch)) report.removedRemoteBranches.push(branch);
@@ -2085,6 +2133,8 @@ export class WorktreeManager {
       }
     }
     report.heldReasons = [...new Set(report.heldReasons)];
+    report.benignHolds = [...new Set(report.benignHolds)];
+    report.benignHeldBranches = [...new Set(report.benignHeldBranches)];
     report.remainingBranches = [...new Set(report.remainingBranches)];
     return report;
   }
