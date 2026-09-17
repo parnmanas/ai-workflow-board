@@ -5,6 +5,7 @@
 // 이 하네스는 기존 러너 관례(`node --import tsx --test`)를 그대로 쓰면서 jsdom 위에
 // react-dom/client + act 로 실제 컴포넌트를 마운트해 그 상호작용을 실검증한다.
 // vitest/playwright 같은 신규 프레임워크는 도입하지 않는다(jsdom devDep 하나만 추가).
+import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
 // react-dom 은 모듈이 최초 평가되는 시점에 canUseDOM(전역 window/document 존재 여부)을
@@ -150,6 +151,42 @@ export function typeInto(element, value) {
     setter.call(element, value);
     element.dispatchEvent(new window.Event('input', { bubbles: true }));
   });
+}
+
+/**
+ * 요소를 짧은 식별 문자열로 줄인다 — 실패 메시지에 "무엇이었는지"를 남기되
+ * 노드 자체를 assert 인자로는 넘기지 않기 위해서다(아래 assertFocused 주석 참조).
+ */
+export function describeElement(el) {
+  if (!el) return '(없음)';
+  const tag = typeof el.tagName === 'string' ? el.tagName.toLowerCase() : 'node';
+  const testId = el.getAttribute?.('data-testid');
+  const label = el.getAttribute?.('aria-label');
+  const text = el.textContent?.trim().slice(0, 24);
+  const detail = testId ? `data-testid=${testId}` : label ? `aria-label=${label}` : text ? `"${text}"` : '';
+  return detail ? `${tag}[${detail}]` : tag;
+}
+
+/**
+ * 포커스가 `expected` 요소에 있는지 단언한다.
+ *
+ * `assert.equal(document.activeElement, expected)` 를 직접 쓰면 안 된다 — jsdom 노드를
+ * node:assert 의 비교 인자로 넘기면 실패하는 순간 util.inspect 가 `depth: 1000` +
+ * `getters: true` 로 element → document → window 순환 그래프를 펼치다 러너를 통째로
+ * SIGKILL 로 죽인다(티켓 b207d941 에서 62.7초 뒤 SIGKILL 로 실측). 포커스 단언은 특히
+ * 위험한데, 양쪽 인자가 **둘 다** 노드라 실패 시 두 번 펼치기 때문이다.
+ *
+ * 그래서 동일성 판정은 boolean 으로 좁혀 넘기고, "실제로 어디에 포커스가 있었는지"는
+ * 문자열로 만들어 메시지에 싣는다 — 실패가 읽을 수 있는 한 줄로 떨어진다.
+ * 이 규칙 자체는 test/dom-node-assert-guard.test.mjs 가 소스 스캔으로 강제한다.
+ */
+export function assertFocused(expected, message) {
+  const active = document.activeElement;
+  assert.equal(
+    active === expected,
+    true,
+    `${message} — 기대: ${describeElement(expected)} / 실제 포커스: ${describeElement(active)}`,
+  );
 }
 
 export { React, act };
