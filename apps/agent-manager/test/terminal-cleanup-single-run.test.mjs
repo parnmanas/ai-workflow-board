@@ -117,7 +117,7 @@ test('같은 terminal 이동이 겹치거나 다시 와도 정리는 한 번만 
   assert.equal(await waitFor(() => cleanupCalls.length === 1), true, '첫 정리가 시작돼야 한다');
   dispatcher.handleBoardUpdate(MOVED_EVENT);
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(cleanupCalls.length, 1, '실행 중인 정리가 있으면 중복 호출은 버려야 한다');
+  assert.equal(cleanupCalls.length, 1, '실행 중인 정리와 겹쳐 돌면 안 된다');
 
   releaseFirstCleanup();
   assert.equal(await waitFor(() => comments.length === 1), true, '알림이 한 번은 나가야 한다');
@@ -127,6 +127,41 @@ test('같은 terminal 이동이 겹치거나 다시 와도 정리는 한 번만 
   assert.equal(cleanupCalls.length, 1, '완료된 (ticket, terminal_entered_at) 은 재실행하지 않는다');
   assert.equal(comments.length, 1, '중복 알림이 없어야 한다');
   assert.equal(comments[0].metadata.dedupe_key, `terminal-git-cleanup-held:${ENTERED_AT}`);
+});
+
+test('정리 도중 티켓이 다시 terminal 로 진입하면 그 진입도 정리한다', async (t) => {
+  // 겹친 호출을 그냥 버리면 이 경우가 조용히 새어나간다 — 첫 실행이 도는 동안
+  // 티켓이 reopen 후 다시 terminal 로 들어오면, 그 새 진입을 정리할 주체가 없어진다.
+  const comments = [];
+  const cleanupCalls = [];
+  const state = { terminalEnteredAt: ENTERED_AT };
+  let releaseFirstCleanup;
+  const firstCleanupGate = new Promise((resolve) => { releaseFirstCleanup = resolve; });
+
+  installFetchStub(t, { comments, state });
+  const dispatcher = makeDispatcher({
+    workingDirs: ['/managed/awb.programmer'],
+    async cleanupTerminalTicketGit(opts) {
+      cleanupCalls.push(opts);
+      if (cleanupCalls.length === 1) await firstCleanupGate;
+      return heldReport(`ticket/${TICKET}-work`);
+    },
+  });
+
+  dispatcher.handleBoardUpdate(MOVED_EVENT);
+  assert.equal(await waitFor(() => cleanupCalls.length === 1), true, '첫 정리가 시작돼야 한다');
+
+  // 첫 실행이 아직 도는 중에 재진입이 일어나고 그 이동 이벤트가 도착한다.
+  state.terminalEnteredAt = '2026-09-18T01:02:03.456Z';
+  dispatcher.handleBoardUpdate(MOVED_EVENT);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(cleanupCalls.length, 1, '줄은 서되 겹쳐 돌지는 않는다');
+
+  releaseFirstCleanup();
+  assert.equal(await waitFor(() => cleanupCalls.length === 2), true,
+    '새 terminal 진입은 앞 실행이 끝난 뒤 이어서 정리돼야 한다');
+  assert.equal(await waitFor(() => comments.length === 2), true);
+  assert.notEqual(comments[0].metadata.dedupe_key, comments[1].metadata.dedupe_key);
 });
 
 test('agent home 이 여러 개여도 알림은 한 건으로 합치고 사유는 모두 담는다', async (t) => {

@@ -1416,29 +1416,35 @@ export class EventDispatcher {
    * 불리고, 같은 이동이 재전달되거나(SSE 재연결 replay) 이동 이벤트가 겹쳐 오면
    * 정리가 중복 실행돼 같은 실패 알림이 티켓에 두 번 쌓였다(실측: 1.3초 간격).
    * 두 겹으로 막는다:
-   *   1. 티켓당 in-flight 가드 — 실행 중이면 새 호출은 그대로 버린다. 진행 중인
-   *      실행이 같은 일을 이미 하고 있으므로 잃는 것이 없다.
+   *   1. 티켓당 직렬화 — 이 티켓의 정리는 절대 겹쳐 돌지 않는다. 실행 중에 새
+   *      호출이 오면 뒤로 줄을 세운다. 그냥 버리지 않는 이유는, 그 사이 티켓이
+   *      reopen 후 다시 terminal 로 들어왔을 수 있기 때문이다 — 버리면 그 새
+   *      진입은 아무도 정리하지 않는다.
    *   2. `(ticketId, terminal_entered_at)` 완료 키 — 그 terminal 진입에 대한
-   *      정리가 **성공적으로 끝났으면** 다시 실행하지 않는다. 같은 티켓이 나중에
-   *      reopen 후 다시 terminal 로 들어오면 terminal_entered_at 이 바뀌므로 키도
-   *      달라져 정상적으로 다시 돈다.
+   *      정리가 **성공적으로 끝났으면** 다시 실행하지 않는다. 줄을 서서 들어온
+   *      호출은 여기서 걸러지고(REST 재조회 한 번이 비용의 전부), 진입이 실제로
+   *      바뀌었으면 키가 달라 정상적으로 다시 돈다.
    * 완료 키는 실패 시 찍지 않는다 — 중간에 터진 실행은 다음 이동 이벤트에서 다시
    * 시도될 수 있어야 한다(중복 알림은 서버의 dedupe_key 합치기가 흡수한다).
    */
   async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
     if (!this.#worktreeManager) return;
     if (!this.#managedAgentContexts) return;
-    if (this.#terminalCleanupInFlight.has(ticketId)) {
-      log(`[worktree] terminal cleanup already in flight ticket=${ticketId.slice(0, 8)} — 중복 호출 무시`);
-      return;
-    }
-    // 아래 두 줄 사이에 await 가 없어야 한다 — 그래야 검사와 등록이 원자적이다.
-    const run = this.#runTerminalTicketCleanup(ticketId);
+    // 아래 두 문장 사이에 await 가 없어야 한다 — 그래야 읽기와 등록이 원자적이고
+    // 두 이벤트가 같은 선행 실행을 보고 각각 체인을 만드는 일이 없다.
+    const previous = this.#terminalCleanupInFlight.get(ticketId);
+    const run = (previous ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => this.#runTerminalTicketCleanup(ticketId));
     this.#terminalCleanupInFlight.set(ticketId, run);
     try {
       await run;
     } finally {
-      this.#terminalCleanupInFlight.delete(ticketId);
+      // 내가 마지막 주자일 때만 지운다 — 그 사이 더 온 이벤트가 이어 붙인 체인을
+      // 끊으면 그 뒤 호출이 다시 겹쳐 돌 수 있다.
+      if (this.#terminalCleanupInFlight.get(ticketId) === run) {
+        this.#terminalCleanupInFlight.delete(ticketId);
+      }
     }
   }
 
