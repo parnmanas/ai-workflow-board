@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { AgentSessionRunner, detectAcpSessionClis, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
+import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
 import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-acp-server.mjs', import.meta.url));
@@ -321,4 +321,48 @@ test('no credential bound → operator login: env untouched, no session home cre
   assert.equal(cap.CLAUDE_CONFIG_DIR, join(h.root, 'claude'), 'operator home stays the CLI home');
   assert.equal(cap.ANTHROPIC_API_KEY, 'operator-shell-key');
   await assert.rejects(statFile(join(h.sessionHomesDir, 'claude')), 'no session home');
+});
+
+test('binding a credential after the session is live reopens the process with the credential on the next prompt', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-late' });
+  await h.runner.handle(request('open', { request_id: 'rpc-first', session_id: null, cwd: h.cwd, workspace_id: 'ws-1' }));
+  const first = h.server.rpc('rpc-first');
+  assert.equal(first.ok, true);
+  const sid = first.result.session_id;
+  assert.equal((await h.capture()).CLAUDE_CODE_OAUTH_TOKEN, null, 'opened with the operator login');
+  const pidBefore = h.runner._snapshot()[0]?.pid;
+
+  // the operator binds a credential in CLI settings, then prompts again
+  const turn = h.runner.handle(request('prompt', { session_id: sid, turn_id: 't-late', text: 'hi', workspace_id: 'ws-1', credential_id: 'cred-late' }));
+  await waitFor(() => h.server.events(sid).some((e) => e.type === 'permission_request'), 'permission after reopen');
+  const permission = h.server.events(sid).find((e) => e.type === 'permission_request');
+  await h.runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
+  await turn;
+  assert.notEqual(h.runner._snapshot()[0]?.pid, pidBefore, 'a new adapter process was started');
+  assert.equal((await h.capture()).CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-late', 'the new process carries the credential');
+  assert.ok(h.server.events(sid).some((e) => e.type === 'system' && /CLI settings changed/.test(e.payload.text)), 'the transcript explains the reopen');
+  assert.deepEqual(h.fetches, [{ id: 'cred-late', ws: 'ws-1' }]);
+});
+
+test('credential whitespace is repaired before use (a token pasted with a line wrap still works) and incomplete credentials are refused', async (t) => {
+  const wrapped = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-first-half\n second-half' });
+  await wrapped.runner.handle(request('open', { request_id: 'rpc-wrap', session_id: null, cwd: wrapped.cwd, workspace_id: 'ws-1', credential_id: 'cred-wrap' }));
+  assert.equal(wrapped.server.rpc('rpc-wrap').ok, true, JSON.stringify(wrapped.server.rpc('rpc-wrap')));
+  assert.equal((await wrapped.capture()).CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-first-halfsecond-half', 'interior whitespace stripped');
+
+  const empty = await credentialHarness(t, 'claude_oauth_token', { oauth_token: '   ' });
+  await empty.runner.handle(request('open', { request_id: 'rpc-empty', session_id: null, cwd: empty.cwd, workspace_id: 'ws-1', credential_id: 'cred-empty' }));
+  assert.equal(empty.server.rpc('rpc-empty').ok, false);
+  assert.equal(empty.server.rpc('rpc-empty').code, 'credential_incomplete');
+  assert.equal(empty.runner._snapshot().length, 0);
+});
+
+test('redactSecrets hides bearer tokens and API keys quoted by CLI error messages', () => {
+  const msg = 'API Error: Headers.append: "Bearer sk-ant-oat01-AAAAbbbbCCCCdddd1234\n more" is an invalid header value; api_key="sk-live-abcdefghijklmnopqrstuvwxyz"';
+  const out = redactSecrets(msg);
+  assert.doesNotMatch(out, /oat01-AAAA/);
+  assert.doesNotMatch(out, /sk-live-abcdefghijklmnop/);
+  assert.match(out, /Bearer <redacted>/);
+  assert.match(out, /api_key="<redacted>"/);
+  assert.equal(redactSecrets('plain message'), 'plain message');
 });

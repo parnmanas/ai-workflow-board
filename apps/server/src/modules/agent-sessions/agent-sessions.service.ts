@@ -6,6 +6,7 @@ import { Agent } from '../../entities/Agent';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { Credential } from '../../entities/Credential';
 import { decrypt } from '../../services/encryption.service';
+import { normalizeCredentialFields } from '../../common/credential-fields';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { InstanceRecord, InstanceRegistryService } from '../agent-manager/instance-registry.service';
@@ -344,7 +345,8 @@ export class AgentSessionsService {
         fields = {};
       }
     }
-    return { credential_id: cred.id, provider: cred.provider, fields };
+    // 줄바꿈이 섞인 채 저장된 토큰(정규화 이전에 만든 row)도 여기서 고쳐 보낸다 — 매니저도 같은 규칙을 다시 적용한다.
+    return { credential_id: cred.id, provider: cred.provider, fields: normalizeCredentialFields(fields) };
   }
 
   // ─── Reverse RPC ────────────────────────────────────────────────────────

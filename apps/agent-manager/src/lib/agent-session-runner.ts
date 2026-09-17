@@ -17,6 +17,7 @@ import { delimiter, join } from 'node:path';
 
 import { AgentSessionStore, resolveClaudeHome, resolveCodexHome, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
+import { normalizeCredentialFields } from './credential-fields.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 import {
@@ -95,6 +96,28 @@ export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = {
   codex: 'codex_',
 };
 
+/** provider 별 비어 있으면 안 되는 필드 — agent-manager-commands.ts 의 REQUIRED_CREDENTIAL_FIELDS 와 같은 규약. */
+const SESSION_REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
+  claude_subscription: ['credentials_json'],
+  claude_api_key: ['api_key'],
+  claude_oauth_token: ['oauth_token'],
+  codex_subscription: ['auth_json'],
+  codex_api_key: ['api_key'],
+};
+
+/**
+ * 오류 문구에서 bearer 토큰/API 키를 가린다. CLI/SDK 오류가 헤더 값을 그대로 인용하는
+ * 경우가 있어(예: 잘못된 헤더 값 오류에 토큰 전체가 실린다) 그대로 중계하면 트랜스크립트와
+ * 로그에 비밀이 남는다.
+ */
+export function redactSecrets(text: string): string {
+  return String(text ?? '')
+    .replace(/Bearer\s+[^\s"'`]+/gi, 'Bearer <redacted>')
+    .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-<redacted>')
+    .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-<redacted>')
+    .replace(/(api[_-]?key|oauth[_-]?token|access[_-]?token|refresh[_-]?token)(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, '$1$2<redacted>');
+}
+
 /** CLI 홈 안에서 세션 기록이 사는 하위 디렉터리 — 세션 전용 홈에서 운영자 홈으로 링크한다. */
 const SESSION_STORE_SUBDIR: Record<string, string> = {
   claude: 'projects',
@@ -132,6 +155,8 @@ interface LiveSession {
   seq: number;
   /** 프로세스마다 다른 id 접두어 — 라이브 seq 는 프로세스마다 1 부터라 id 만으로 중복을 걸러야 한다. */
   nonce: string;
+  /** 이 프로세스에 적용된 CLI 설정 credential('' = 운영자 로그인). 바인딩이 바뀌면 재오픈한다. */
+  credentialId: string;
   closing: boolean;
   exited: boolean;
 }
@@ -324,7 +349,7 @@ export class AgentSessionRunner {
       const settled = this.#live.get(this.#key(cli, sessionId)) ?? liveBefore;
       if (settled) await settled.postChain;
     } catch (err: any) {
-      const message = err?.message ?? String(err);
+      const message = redactSecrets(err?.message ?? String(err));
       log(`${tag} ${request.op} failed: ${message}`);
       const live = this.#live.get(this.#key(cli, sessionId));
       const failure: AgentSessionEventInput = { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: request.turn_id };
@@ -377,7 +402,7 @@ export class AgentSessionRunner {
           await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: `Unknown RPC op ${String(request.op)}`, code: 'bad_request' });
       }
     } catch (err: any) {
-      const message = err?.message ?? String(err);
+      const message = redactSecrets(err?.message ?? String(err));
       log(`${tag} ${request.op} rpc failed: ${message}`);
       await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: message, code: err?.code ?? 'manager_error' });
     }
@@ -393,7 +418,14 @@ export class AgentSessionRunner {
   async #ensureLive(cli: string, sessionId: string, cwd: string, title: string, request: AgentSessionRequest): Promise<LiveSession> {
     if (sessionId) {
       const existing = this.#live.get(this.#key(cli, sessionId));
-      if (existing && !existing.exited && !existing.closing) return existing;
+      if (existing && !existing.exited && !existing.closing) {
+        // CLI 설정이 바뀌었으면(credential 을 묶거나 풀었으면) 살아 있는 프로세스는 옛
+        // 인증으로 떠 있는 것이다 — 턴 중이 아니면 닫고 새 인증으로 다시 연다.
+        const wanted = request.credential_id || '';
+        if (existing.credentialId === wanted || existing.turn) return existing;
+        log(`[agent-session ${cli} ${sessionId.slice(0, 8)}] credential binding changed (${existing.credentialId || 'operator-login'} → ${wanted || 'operator-login'}); reopening`);
+        await this.#closeLive(cli, sessionId, 'idle', 'credential_changed');
+      }
       const inFlight = this.#opening.get(this.#key(cli, sessionId));
       if (inFlight) return inFlight;
     }
@@ -433,7 +465,7 @@ export class AgentSessionRunner {
       requestTimeoutMs: this.#options.requestTimeoutMs,
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
-      onStderr: (line) => log(`${tag} stderr: ${line}`),
+      onStderr: (line) => log(`${tag} stderr: ${redactSecrets(line)}`),
       spawnOptions: { detached: process.platform !== 'win32' },
     });
 
@@ -464,6 +496,7 @@ export class AgentSessionRunner {
         postChain: Promise.resolve(),
         seq: 0,
         nonce: randomUUID().slice(0, 8),
+        credentialId: request.credential_id || '',
         closing: false,
         exited: false,
       };
@@ -548,11 +581,20 @@ export class AgentSessionRunner {
     if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
       ?? ((id: string, ws: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, ws));
-    const credential = await fetcher(credentialId, request.workspace_id || '');
-    if (!credential) throw Object.assign(new Error('The credential assigned in CLI settings could not be fetched from AWB.'), { code: 'credential_unavailable' });
-    if (!credential.provider.startsWith(prefix)) {
-      throw Object.assign(new Error(`CLI settings credential provider ${credential.provider} does not match ${cli}.`), { code: 'credential_provider_mismatch' });
+    const fetched = await fetcher(credentialId, request.workspace_id || '');
+    if (!fetched) throw Object.assign(new Error('The credential assigned in CLI settings could not be fetched from AWB.'), { code: 'credential_unavailable' });
+    if (!fetched.provider.startsWith(prefix)) {
+      throw Object.assign(new Error(`CLI settings credential provider ${fetched.provider} does not match ${cli}.`), { code: 'credential_provider_mismatch' });
     }
+    // 줄바꿈 등 공백이 섞인 토큰(터미널에서 접혀 복사된 `claude setup-token` 값)은 헤더
+    // 생성부터 실패한다 — managed-agent 경로와 같은 규칙으로 정리한다.
+    const { fields, repaired } = normalizeCredentialFields(fetched.fields);
+    if (repaired.length) log(`[agent-session ${cli}] credential ${fetched.credential_id.slice(0, 8)} whitespace repaired in: ${repaired.join(', ')}`);
+    const missing = (SESSION_REQUIRED_CREDENTIAL_FIELDS[fetched.provider] ?? []).filter((key) => !fields[key]);
+    if (missing.length) {
+      throw Object.assign(new Error(`CLI settings credential ${fetched.provider} is missing ${missing.join(', ')} — re-save it in Settings → Credentials.`), { code: 'credential_incomplete' });
+    }
+    const credential: SessionCredential = { ...fetched, fields };
     const adapter = createRuntimeCliAdapter(cli);
     const cliHome = join(this.#options.sessionHomesDir, cli, credential.credential_id);
     await mkdir(cliHome, { recursive: true, mode: 0o700 });
@@ -674,7 +716,7 @@ export class AgentSessionRunner {
       await this.#store.touchAwbSession(live.cli, live.sessionId).catch(() => undefined);
     } catch (err: any) {
       this.#flushBuffers(live, turnId);
-      const message = err?.message ?? String(err);
+      const message = redactSecrets(err?.message ?? String(err));
       this.#enqueue(live, [
         { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: turnId },
         { type: 'turn', payload: { phase: 'finished', stop_reason: 'error' }, turn_id: turnId },
@@ -907,7 +949,9 @@ export class AgentSessionRunner {
       ? 'Agent process stopped.'
       : reason === 'idle'
         ? `Idle for ${this.#options.idleMinutes} min — agent process stopped. The next prompt reopens the session.`
-        : `Agent process stopped (${reason}). The next prompt reopens the session.`;
+        : reason === 'credential_changed'
+          ? 'CLI settings changed — reopening the session with the new credential.'
+          : `Agent process stopped (${reason}). The next prompt reopens the session.`;
     this.#enqueue(live, [{ type: 'system', payload: { text } }], { status: finalStatus, reason });
     await live.postChain;
   }

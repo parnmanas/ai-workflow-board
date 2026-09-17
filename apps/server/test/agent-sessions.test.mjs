@@ -286,7 +286,8 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
 
   const credRepo = ds.getRepository('Credential');
   const mkCred = (workspace_id, name, provider, fields) => credRepo.save(credRepo.create({ workspace_id, name, description: '', provider, encrypted_data: encrypt(JSON.stringify(fields)) }));
-  const claudeToken = await mkCred(ws.id, 'rolf oauth token', 'claude_oauth_token', { oauth_token: 'sk-ant-oat-secret' });
+  // 줄바꿈이 섞인 채 저장된 토큰(정규화 이전 row) — 서버가 정리해 보낸다
+  const claudeToken = await mkCred(ws.id, 'rolf oauth token', 'claude_oauth_token', { oauth_token: 'sk-ant-oat-sec\n ret' });
   const globalClaude = await mkCred(null, 'shared claude key', 'claude_api_key', { api_key: 'sk-global' });
   const codexCred = await mkCred(ws.id, 'codex login', 'codex_subscription', { auth_json: '{}' });
   const foreignCred = await mkCred(otherWs.id, 'other ws claude', 'claude_api_key', { api_key: 'sk-other' });
@@ -345,7 +346,8 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const fetched = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(fetched.status, 200, fetched.text);
   assert.equal(fetched.body.provider, 'claude_oauth_token');
-  assert.deepEqual(fetched.body.fields, { oauth_token: 'sk-ant-oat-secret' });
+  assert.deepEqual(fetched.body.fields, { oauth_token: 'sk-ant-oat-secret' }, 'interior whitespace is stripped before the token reaches the manager');
+  assert.equal(fetched.body.fields.oauth_token.includes('\n'), false);
   const unbound = await call(`${base}/api/agent/sessions/credential/${globalClaude.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(unbound.status, 403, 'a credential that is not bound in CLI settings is not served');
   const otherManager = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': strangerKey } });
