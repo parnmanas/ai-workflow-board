@@ -539,7 +539,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // validation and emits the same chat_room_update 'renamed' SSE.
   server.tool(
     'set_chat_room_name',
-    'Set or rename a chat room title. The caller must be an active participant. ' +
+    'Set or rename a chat room title. The caller must be an active participant of a room inside the ' +
+    'caller\'s own workspace — rooms in any other workspace fail the same way a non-existent room does. ' +
     'Intended for giving an untitled room a short, descriptive topic-based name (1-100 characters). ' +
     'Renames both DMs and group rooms.',
     {
@@ -552,8 +553,14 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
       if (!agent) return err('Agent identity not found for this session');
+      // caller 등급(에이전트 신원)과 **workspace 권한은 별개**다(티켓 de4d27e9) — 신원만
+      // 확인하고 room_id 를 그대로 넘기면, 지난/다른 워크스페이스 방의 참여자 행을 들고
+      // 있는 에이전트가 지금 API key 가 묶인 스코프 밖의 방 이름을 바꿀 수 있다. 이 파일의
+      // 다른 툴들과 같은 방식으로 호출자의 워크스페이스를 해석해 함께 넘긴다.
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
       try {
-        await roomCrudService.renameRoom(room_id, agent.id, name, 'agent');
+        await roomCrudService.renameRoom(room_id, callerWorkspaceId, agent.id, name, 'agent');
         return ok({ room_id, name: name.trim() });
       } catch (e: any) {
         return err(e?.message || 'Failed to set chat room name');

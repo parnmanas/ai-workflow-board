@@ -368,16 +368,23 @@ export class ChatRoomsController {
     }
   }
 
+  // rename 도 `setOpenJoin` 과 같은 이유로 워크스페이스를 함께 넘긴다(티켓 de4d27e9).
+  // 방의 active 참여자인지만 보면, 지난/다른 워크스페이스 방의 참여자 행을 들고 있는
+  // 호출자가 지금 보고 있는 스코프 밖의 방 이름을 바꿀 수 있다. 대조는 서비스가 하고,
+  // 불일치는 없는 방과 **같은 404** 로 돌려준다. 클라이언트는 `getAuthHeaders()` 가
+  // 이미 이 헤더를 싣는다.
   @Patch(':roomId/name')
   @RequirePermission(PERMISSIONS.CHAT_SEND)
   async renameRoom(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Body() body: any) {
     const user = (req as any).currentUser;
+    const wsId = req.headers['x-workspace-id'] as string;
+    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
     const { name } = body;
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ error: 'name required' });
     }
     try {
-      await this.crud.renameRoom(roomId, user.id, name);
+      await this.crud.renameRoom(roomId, wsId, user.id, name);
       return res.json({ ok: true });
     } catch (err: any) {
       return res.status(err.status || 400).json({ error: err.message });

@@ -469,10 +469,25 @@ export class RoomCrudService {
    * Rename any room (DM or group). DMs may be renamed now that same-member
    * DM dedup is gone — users keeping multiple topic-tagged threads with the
    * same person rely on naming to tell them apart.
+   *
+   * 워크스페이스 대조는 참여자 검사와 **별개로** 필요하다(티켓 de4d27e9).
+   * `chat_room_participants` 행은 한 번 생기면 남으므로 "이 방의 active 참여자인가"
+   * 만으로는 경계가 지속되지 않는다 — 지난/다른 워크스페이스 방의 참여자 행을 들고
+   * 있는 호출자가 지금 바인딩된 스코프와 무관하게 그 방 이름을 바꿀 수 있었다.
+   * 방 이름은 사이드바·헤더에 그대로 노출되므로 타 워크스페이스에 대한 교란 수단이
+   * 된다. 검사 순서도 참여자 게이트보다 **앞**이어야 한다 — 뒤에 두면 참여자 행을
+   * 가진 호출자에게 403/404 차이로 방의 존재가 드러난다.
    */
-  async renameRoom(roomId: string, actorId: string, newName: string, actorType: string = 'user'): Promise<void> {
+  async renameRoom(
+    roomId: string,
+    workspaceId: string,
+    actorId: string,
+    newName: string,
+    actorType: string = 'user',
+  ): Promise<void> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    if (!room) {
+    // 워크스페이스가 다르면 존재 자체를 알려주지 않는다 — `setOpenJoin` / `requireRoomAccess` 와 같은 규칙.
+    if (!room || room.workspace_id !== workspaceId) {
       throw makeError(404, 'Room not found');
     }
 
