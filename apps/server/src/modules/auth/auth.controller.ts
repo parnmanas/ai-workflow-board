@@ -1,12 +1,13 @@
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { LoginDto, RegisterDto, SetupDto } from './auth.dto';
-import { Controller, Post, Get, Body, Headers, Req, Res, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Get, Body, Headers, Query, Req, Res, HttpStatus } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { User } from '../../entities/User';
 import { Workspace } from '../../entities/Workspace';
 import { AuthService } from '../../services/auth.service';
+import { GoogleOAuthService } from '../../services/google-oauth.service';
 import { ReBACService } from '../../services/rebac.service';
 import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../common/types/permissions';
 
@@ -15,6 +16,7 @@ import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../c
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
+    private readonly googleOAuthService: GoogleOAuthService,
     private readonly rebacService: ReBACService,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
@@ -206,6 +208,65 @@ export class AuthController {
   async publicWorkspaces(@Res() res: Response) {
     const workspaces = await this.workspaceRepo.find({ where: { is_public: 1 } as any });
     return res.json(workspaces.map(ws => ({ id: ws.id, name: ws.name, slug: ws.slug })));
+  }
+
+  /** Public: exposes whether Google OAuth is enabled + the client_id (never the secret). */
+  @Get('oauth/config')
+  async oauthConfig(@Res() res: Response) {
+    const enabled = await this.googleOAuthService.isEnabled();
+    const clientId = enabled ? await this.googleOAuthService.getClientId() : null;
+    return res.json({ google: { enabled, client_id: clientId || null } });
+  }
+
+  /** Redirects the browser to Google's consent screen. */
+  @Get('oauth/google/start')
+  async googleOAuthStart(@Req() req: Request, @Res() res: Response) {
+    const redirectUri = this._buildRedirectUri(req);
+    const authUrl = await this.googleOAuthService.getAuthUrl(redirectUri, 'awb');
+    if (!authUrl) {
+      return (res as any).status(503).json({ error: 'Google OAuth is not configured' });
+    }
+    return (res as any).redirect(authUrl);
+  }
+
+  /** Google redirects back here after consent. Exchanges code → token → AWB session. */
+  @Get('oauth/google/callback')
+  async googleOAuthCallback(
+    @Query('code') code: string,
+    @Query('error') oauthError: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const expressRes = res as any;
+    if (oauthError || !code) {
+      return expressRes.redirect(`/?oauth_error=${encodeURIComponent(oauthError || 'access_denied')}`);
+    }
+
+    const redirectUri = this._buildRedirectUri(req);
+    const googleUser = await this.googleOAuthService.exchangeCodeForUser(code, redirectUri);
+    if (!googleUser) {
+      return expressRes.redirect('/?oauth_error=token_exchange_failed');
+    }
+
+    const result = await this.authService.loginOrCreateGoogleUser(
+      googleUser.sub,
+      googleUser.email,
+      googleUser.name,
+      googleUser.picture,
+    );
+
+    if ('error' in result) {
+      return expressRes.redirect(`/?oauth_error=${encodeURIComponent(result.error)}`);
+    }
+
+    return expressRes.redirect(`/?token=${encodeURIComponent(result.token)}`);
+  }
+
+  private _buildRedirectUri(req: Request): string {
+    const expressReq = req as any;
+    const proto = expressReq.get('x-forwarded-proto') || expressReq.protocol || 'http';
+    const host = expressReq.get('x-forwarded-host') || expressReq.get('host') || 'localhost';
+    return `${proto}://${host}/api/auth/oauth/google/callback`;
   }
 
   @Get('permissions')
