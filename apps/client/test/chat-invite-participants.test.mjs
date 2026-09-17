@@ -91,8 +91,8 @@ test('아직 참여하지 않은 자유 참여 방에서는 초대 버튼을 감
   );
   try {
     assert.equal(
-      container.querySelector('[data-testid="room-add-people"]'),
-      null,
+      Boolean(container.querySelector('[data-testid="room-add-people"]')),
+      false,
       '서버가 거부할 버튼을 주면 안 된다',
     );
     assert.ok(container.querySelector('[data-testid="room-open-join-hint"]'), '참여 안내가 보여야 한다');
@@ -105,7 +105,11 @@ test('Open Join 토글은 group 전용으로 남는다 (서버가 DM 을 계속 
   setupDom();
   const dm = mount(React.createElement(RoomHeaderActions, { room: room({ type: 'dm' }), ...noopHeaderProps }));
   try {
-    assert.equal(dm.container.querySelector('[data-testid="room-open-join-toggle"]'), null);
+    assert.equal(
+      Boolean(dm.container.querySelector('[data-testid="room-open-join-toggle"]')),
+      false,
+      'DM 방에는 Open Join 토글이 렌더되면 안 된다',
+    );
   } finally {
     dm.unmount();
   }
@@ -206,7 +210,11 @@ test('group 방 초대에는 승격 경고를 띄우지 않는다', async () => 
   const picker = mountPicker({ addToRoomId: 'room-1', promotesDmToGroup: false });
   try {
     await flush();
-    assert.equal(picker.container.querySelector('[data-testid="dm-promotion-notice"]'), null);
+    assert.equal(
+      Boolean(picker.container.querySelector('[data-testid="dm-promotion-notice"]')),
+      false,
+      'group 방 초대에는 DM 승격 경고를 띄우지 않는다',
+    );
     assert.ok(
       [...picker.container.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Add to Room'),
       'group 방은 기존 라벨 그대로여야 한다',

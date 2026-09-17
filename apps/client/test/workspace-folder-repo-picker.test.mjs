@@ -154,7 +154,11 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 repo 와 �
   assert.equal(created.length, 1);
   assert.deepEqual(created[0].repo_ref, { resource_id: 'repo-game', branch: 'release' });
   // 사용자가 UUID 를 친 적이 없다 — 어떤 자유 텍스트 입력에도 resource id 가 남지 않는다.
-  assert.equal(container.querySelector('input[aria-label="resource_id 직접 입력"]'), null);
+  assert.equal(
+    Boolean(container.querySelector('input[aria-label="resource_id 직접 입력"]')),
+    false,
+    '자유 텍스트 경로에도 resource_id 직접 입력 필드가 남으면 안 된다',
+  );
 });
 
 test('Actions: 저장된 repo 선택이 재편집 시 이름·URL 라벨로 복원된다', async (t) => {
@@ -239,7 +243,7 @@ test('Actions: 브랜치 조회가 실패하면 자유 입력으로 폴백하고
   click(button(container, 'Edit'));
   await flush();
 
-  assert.equal(container.querySelector('select[aria-label="브랜치 선택"]'), null,
+  assert.equal(Boolean(container.querySelector('select[aria-label="브랜치 선택"]')), false,
     '브랜치 목록을 못 받았으면 드롭다운을 강요하면 안 됩니다.');
   const manualBranch = container.querySelector('input[aria-label="브랜치 직접 입력"]');
   assert.ok(manualBranch, '브랜치 자유 입력 폴백이 없습니다.');

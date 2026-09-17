@@ -175,7 +175,11 @@ test('closing while reveal is pending prevents the stale secret from returning',
     await pending.promise;
   });
   assert.doesNotMatch(container.textContent, /secret-from-a/);
-  assert.equal(container.querySelector('input[autocomplete="current-password"]'), null);
+  assert.equal(
+    Boolean(container.querySelector('input[autocomplete="current-password"]')),
+    false,
+    '다른 자격증명으로 바뀌면 이전 비밀값 입력 필드가 남으면 안 된다',
+  );
 });
 
 test('an A response cannot populate B reveal modal after target changes', async (t) => {

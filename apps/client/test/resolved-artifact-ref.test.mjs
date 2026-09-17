@@ -42,7 +42,11 @@ for (const reason of ['not_found', 'workspace_access_denied']) {
     const { dom, root } = await renderWith({
       type: 'action', id, available: false, label: 'action', deepLink: null, reason,
     });
-    assert.equal(dom.window.document.querySelector('a'), null);
+    assert.equal(
+      Boolean(dom.window.document.querySelector('a')),
+      false,
+      'available=false 면 링크(a) 대신 비활성 칩만 그려야 한다',
+    );
     const chip = dom.window.document.querySelector('[aria-disabled="true"]');
     assert.ok(chip);
     assert.match(chip.textContent, new RegExp(id));
@@ -55,7 +59,11 @@ test('no_detail_surface renders type, canonical name, context, and unavailable s
     type: 'action', id, available: false, label: 'Canonical action', deepLink: null,
     workspaceName: 'Platform', boardName: 'Release board', reason: 'no_detail_surface',
   });
-  assert.equal(dom.window.document.querySelector('a'), null);
+  assert.equal(
+      Boolean(dom.window.document.querySelector('a')),
+      false,
+      'available=false 면 링크(a) 대신 비활성 칩만 그려야 한다',
+    );
   const chip = dom.window.document.querySelector('[aria-disabled="true"]');
   assert.ok(chip);
   assert.match(chip.textContent, /action · Canonical action/);
