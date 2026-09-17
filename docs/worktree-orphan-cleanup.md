@@ -178,6 +178,25 @@ checkout 만 회수한다.
    비어 있다면 **다른 매니저 범위의 사본**을 가리키는 관측 보고다. 티켓 담당자가
    할 수 있는 일은 없다.
 
+### 정상 보류와 실제 오류의 분리 (ticket 62407d4e)
+
+위 3번의 알림 중 **가장 흔한 형태 하나는 이제 아예 발행되지 않는다.** 원격 ref 가
+이미 없고(담당자가 Merging step 5 에서 지웠다) 살아 있는 worktree 가 로컬 ref 를 물고
+있어 `git branch -d` 가 거부되는 상태 — Done 진입과 같은 순간에 리뷰 디스패치가
+per-ticket worktree 를 다시 프로비저닝하면 그대로 발생한다 — 는 **정상 보류**다.
+커밋은 base 에 들어가 있고 원격도 정리된 뒤라 잃는 것이 없으며, 그 checkout 이 끝나면
+10분 sweep 이 회수한다. `TerminalTicketCleanupReport.benignHolds` 로 분리되고,
+이것만 남으면 매니저는 티켓에 코멘트를 쓰지 않고 로그만 남긴다. 실제 오류가 함께
+있을 때만 경고가 나가며, 그때도 정상 보류는 별도 절에 적히고 "잔여 브랜치" 목록에서는
+빠진다.
+
+판정은 stderr 문구가 아니라 저장소 상태(`git worktree list` 의 보유자 + 원격 추적 ref
+존재 여부)로 한다 — Git 버전·로캘에 따라 문구가 달라지기 때문이다.
+
+같은 티켓에서 정리 실행 자체도 `(ticketId, terminal_entered_at)` 기준 단일 실행으로
+직렬화됐다. 겹치거나 재전달된 `moved` 이벤트는 버려지고, 여러 agent home 의 결과는
+알림 한 건으로 합쳐진다.
+
 ### 회수되는 checkout 의 형태 (ticket 7b384c10)
 
 `merging_workflow` 는 step 3 에서 base branch 체크아웃을, step 5 에서 로컬 feature
