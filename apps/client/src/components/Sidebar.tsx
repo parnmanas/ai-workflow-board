@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import { useToast } from '../contexts/ToastContext';
 import { api } from '../api';
-import type { ChatRoomListItem } from '../types';
+import type { AgentSessionHost, AgentSessionSummary, ChatRoomListItem } from '../types';
 import { tokens } from '../tokens';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
 import { NavBadge } from './common/NavBadge';
@@ -24,8 +24,8 @@ import {
 } from './workNavigation';
 import { useWorkNavLists } from '../hooks/useWorkNavLists';
 import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
-import { hostCliEntries } from './sessions/sessionList.logic';
-import { runtimeLabel } from './sessions/sessionTranscript.logic';
+import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessions/sessionList.logic';
+import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 
 interface SidebarProps {
   overlay: boolean;
@@ -92,6 +92,14 @@ export default function Sidebar({
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
   const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
 
+  // Sessions 트리 — 섹션/호스트/cwd 폴드 상태 + 세션 캐시
+  const [sessionsCollapsed, setSessionsCollapsed] = React.useState(false);
+  const [chatsCollapsed, setChatsCollapsed] = React.useState(false);
+  const [collapsedHosts, setCollapsedHosts] = React.useState<Set<string>>(() => new Set());
+  const [collapsedHostCwds, setCollapsedHostCwds] = React.useState<Set<string>>(() => new Set());
+  const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
+  const loadAttemptedRef = React.useRef<Set<string>>(new Set());
+
   // 워크스페이스 전체 "모두 읽음" (티켓 628f4b39) — 보드 스코프 버전은
   // "보드"가 명확한 Board 페이지 자체(Board.tsx)에 있고, 여기는 "모든
   // 보드를 한 번에"가 의미를 갖는 유일한 곳이다.
@@ -121,6 +129,8 @@ export default function Sidebar({
   React.useEffect(() => {
     setVisibleRoomCount(SIDEBAR_ROOMS_BASE_COUNT);
     setVisibleGroupCounts({});
+    loadAttemptedRef.current.clear();
+    setHostSessions({});
   }, [wsId]);
 
   const isPathActive = (path: string): boolean =>
@@ -250,6 +260,68 @@ export default function Sidebar({
       badgeLabel: `마지막 확인 이후 새 에러 로그 ${counts.agentErrors}건`,
     },
   ];
+
+  const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+  const loadHostSessions = React.useCallback(async (host: AgentSessionHost) => {
+    const { manager_id: managerId } = host;
+    setHostSessions((prev) => ({ ...prev, [managerId]: { groups: prev[managerId]?.groups ?? [], loading: true, loaded: false } }));
+    const byCliMap: Record<string, AgentSessionSummary[]> = {};
+    await Promise.all(host.clis.map(async (cli) => {
+      try {
+        const list = await api.listHostSessions(managerId, cli);
+        byCliMap[cli] = Array.isArray(list) ? list : [];
+      } catch {
+        byCliMap[cli] = [];
+      }
+    }));
+    setHostSessions((prev) => ({ ...prev, [managerId]: { groups: groupSessionsByCwd(byCliMap), loading: false, loaded: true } }));
+  }, []);
+
+  // 세션 섹션이 열려 있고 호스트가 확장된 상태면 자동 로드 (첫 시도만)
+  React.useEffect(() => {
+    if (sessionsCollapsed || !canUseSessions) return;
+    for (const host of sessionHosts) {
+      if (collapsedHosts.has(host.manager_id)) continue;
+      if (loadAttemptedRef.current.has(host.manager_id)) continue;
+      loadAttemptedRef.current.add(host.manager_id);
+      void loadHostSessions(host);
+    }
+  // loadHostSessions는 useCallback으로 안정적이므로 포함, hostSessions는 의도적으로 제외
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionsCollapsed, canUseSessions, sessionHosts, collapsedHosts, loadHostSessions]);
+
+  const toggleHostSessions = React.useCallback((host: AgentSessionHost) => {
+    setCollapsedHosts((prev) => {
+      const next = new Set(prev);
+      if (next.has(host.manager_id)) {
+        next.delete(host.manager_id);
+        if (!loadAttemptedRef.current.has(host.manager_id)) {
+          loadAttemptedRef.current.add(host.manager_id);
+          void loadHostSessions(host);
+        }
+      } else {
+        next.add(host.manager_id);
+      }
+      return next;
+    });
+  }, [loadHostSessions]);
+
+  const toggleCwd = React.useCallback((cwdKey: string) => {
+    setCollapsedHostCwds((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwdKey)) next.delete(cwdKey); else next.add(cwdKey);
+      return next;
+    });
+  }, []);
+
+  const sectionFoldButtonStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 5, flex: 1,
+    background: 'none', border: 'none', cursor: 'pointer',
+    color: 'inherit', fontSize: 'inherit', fontWeight: 'inherit',
+    letterSpacing: 'inherit', textTransform: 'inherit' as const,
+    padding: 0, textAlign: 'left' as const, userSelect: 'none' as const,
+  };
 
   const sectionHeaderStyle: React.CSSProperties = {
     display: 'flex',
@@ -464,7 +536,6 @@ export default function Sidebar({
     );
   };
 
-  const sessionEntries = hostCliEntries(sessionHosts, workspaceBase, runtimeLabel);
   const activeRoomId = rooms.find((room) => location.pathname === `${workspaceBase}/chat/${room.id}`)?.id ?? null;
   const { displayRooms, hiddenRooms } = paginateSidebarRooms(rooms, visibleRoomCount, activeRoomId);
   // One source of truth once the counts have loaded. Taking the max of the
@@ -493,7 +564,7 @@ export default function Sidebar({
       ref={containerRef}
       className={sidebarClassName}
       style={{
-        width: overlay ? undefined : 260,
+        width: overlay ? undefined : 288,
         flexShrink: 0,
         background: tokens.colors.surfaceCard,
         borderRight: `1px solid ${tokens.colors.border}`,
@@ -547,58 +618,163 @@ export default function Sidebar({
       >
         {canUseSessions && (
           <section aria-labelledby="sidebar-sessions-heading">
+            {/* 섹션 헤더 — 폴드 토글 + 새 세션 버튼 */}
             <div style={sectionHeaderStyle}>
-              <span id="sidebar-sessions-heading">Sessions</span>
+              <button
+                type="button"
+                aria-expanded={!sessionsCollapsed}
+                onClick={() => setSessionsCollapsed((v) => !v)}
+                style={sectionFoldButtonStyle}
+              >
+                <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
+                  {sessionsCollapsed ? '▶' : '▼'}
+                </span>
+                <span id="sidebar-sessions-heading">Sessions</span>
+              </button>
               <button
                 type="button"
                 aria-label="New session"
                 title="New session"
                 onClick={() => handleNavClick(`${workspaceBase}/sessions?new=1`)}
-                style={{
-                  width: 24,
-                  height: 24,
-                  border: 'none',
-                  borderRadius: 6,
-                  background: 'transparent',
-                  color: tokens.colors.textSecondary,
-                  cursor: 'pointer',
-                  fontSize: 17,
-                  lineHeight: 1,
-                }}
+                style={{ width: 24, height: 24, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 17, lineHeight: 1 }}
               >
                 +
               </button>
             </div>
 
-            {renderNavItem({
-              key: 'all-sessions',
-              path: `${workspaceBase}/sessions`,
-              label: 'All sessions',
-              icon: '>_',
-              exact: true,
-            })}
+            {/* 호스트 > cwd > 세션 트리 */}
+            {!sessionsCollapsed && (
+              <div aria-label="Runtime Hosts" style={{ paddingBottom: 4 }}>
+                {sessionHostsLoading && sessionHosts.length === 0 ? (
+                  <div style={subListTextStyle}>Loading hosts...</div>
+                ) : sessionHosts.length === 0 ? (
+                  <div style={subListTextStyle}>No Runtime Host connected</div>
+                ) : (
+                  sessionHosts.map((host) => {
+                    const hostExpanded = !collapsedHosts.has(host.manager_id);
+                    const hostData = hostSessions[host.manager_id];
+                    const hostBasePath = `${workspaceBase}/sessions/${host.manager_id}`;
+                    const hostActive = isPathActive(hostBasePath);
+                    return (
+                      <React.Fragment key={host.manager_id}>
+                        {/* 호스트 행 */}
+                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => handleNavClick(hostBasePath)}
+                            aria-current={hostActive ? 'page' : undefined}
+                            title={host.hostname && host.hostname !== host.name ? `${host.name} (${host.hostname})` : host.name}
+                            style={{ ...navRowStyle(hostActive, true), flex: 1, paddingRight: 4 }}
+                            onMouseEnter={(e) => { if (!hostActive) e.currentTarget.style.background = tokens.colors.surfaceHover; }}
+                            onMouseLeave={(e) => { if (!hostActive) e.currentTarget.style.background = 'transparent'; }}
+                          >
+                            <span style={iconStyle(hostActive)} aria-hidden="true">
+                              {(host.name[0] || 'H').toUpperCase()}
+                            </span>
+                            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {host.name}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={hostExpanded ? `Collapse ${host.name}` : `Expand ${host.name}`}
+                            aria-expanded={hostExpanded}
+                            onClick={() => toggleHostSessions(host)}
+                            style={{ width: 24, height: 24, marginRight: 6, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 8, flexShrink: 0 }}
+                          >
+                            {hostExpanded ? '▼' : '▶'}
+                          </button>
+                        </div>
 
-            <div aria-label="Runtime Hosts" style={{ paddingBottom: 4 }}>
-              {sessionHostsLoading && sessionHosts.length === 0 ? (
-                <div style={subListTextStyle}>Loading hosts...</div>
-              ) : sessionEntries.length === 0 ? (
-                <div style={subListTextStyle}>No Runtime Host connected</div>
-              ) : (
-                sessionEntries.map((entry) =>
-                  renderNavItem(
-                    {
-                      key: `session-host-${entry.key}`,
-                      path: entry.path,
-                      label: entry.label,
-                      title: `${entry.host_name} — ${runtimeLabel(entry.cli)} sessions on that machine`,
-                      icon: entry.cli.slice(0, 1).toUpperCase(),
-                      active: isPathActive(entry.path),
-                    },
-                    true,
-                  ),
-                )
-              )}
-            </div>
+                        {/* 세션 트리 */}
+                        {hostExpanded && (
+                          <div>
+                            {hostData?.loading && !hostData.loaded ? (
+                              <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted }}>Loading…</div>
+                            ) : !hostData?.groups.length ? (
+                              <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted, fontStyle: 'italic' }}>No sessions</div>
+                            ) : (
+                              hostData.groups.map((group) => {
+                                const cwdKey = `${host.manager_id}:${group.cwd}`;
+                                const cwdExpanded = !collapsedHostCwds.has(cwdKey);
+                                const hasActive = group.sessions.some(
+                                  (s) => location.pathname === sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id),
+                                );
+                                return (
+                                  <React.Fragment key={cwdKey}>
+                                    {/* cwd 헤더 */}
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleCwd(cwdKey)}
+                                      title={group.cwd || '(unknown directory)'}
+                                      style={{
+                                        width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
+                                        display: 'flex', alignItems: 'center', gap: 5,
+                                        padding: '3px 12px 3px 38px',
+                                        color: hasActive ? tokens.colors.accent : tokens.colors.textMuted,
+                                        cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', minHeight: 24,
+                                      }}
+                                      onMouseEnter={(e) => { e.currentTarget.style.background = tokens.colors.surfaceHover; }}
+                                      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                                    >
+                                      <span aria-hidden="true" style={{ fontSize: 7, flexShrink: 0 }}>{cwdExpanded ? '▼' : '▶'}</span>
+                                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: MONO }}>
+                                        {group.cwdLabel}
+                                      </span>
+                                      <span style={{ fontSize: 10, color: tokens.colors.textMuted, flexShrink: 0 }}>{group.sessions.length}</span>
+                                    </button>
+                                    {/* 세션 행 */}
+                                    {cwdExpanded && group.sessions.map((s) => {
+                                      const sPath = sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id);
+                                      const sActive = location.pathname === sPath;
+                                      const statusColor = s.live_status === 'busy' || s.live_status === 'starting'
+                                        ? tokens.colors.warningLight
+                                        : s.live_status === 'error' ? tokens.colors.dangerLight
+                                        : s.live_status === 'ready' || s.live_status === 'awaiting_permission' ? tokens.colors.successLight
+                                        : null;
+                                      return (
+                                        <button
+                                          key={s.session_id}
+                                          type="button"
+                                          onClick={() => handleNavClick(sPath)}
+                                          aria-current={sActive ? 'page' : undefined}
+                                          title={sessionDisplayTitle(s)}
+                                          style={{
+                                            width: '100%', textAlign: 'left', border: 'none',
+                                            borderLeft: `3px solid ${sActive ? tokens.colors.accent : 'transparent'}`,
+                                            background: sActive ? tokens.colors.surfaceHover : 'transparent',
+                                            display: 'flex', alignItems: 'center', gap: 6,
+                                            padding: '2px 10px 2px 50px',
+                                            color: sActive ? tokens.colors.textPrimary : tokens.colors.textSecondary,
+                                            cursor: 'pointer', fontSize: 11, fontFamily: 'inherit', minHeight: 26,
+                                          }}
+                                          onMouseEnter={(e) => { if (!sActive) e.currentTarget.style.background = tokens.colors.surfaceHover; }}
+                                          onMouseLeave={(e) => { if (!sActive) e.currentTarget.style.background = 'transparent'; }}
+                                        >
+                                          <span style={{ fontSize: 9, fontWeight: 700, color: sActive ? tokens.colors.accent : tokens.colors.textMuted, whiteSpace: 'nowrap', fontFamily: MONO, flexShrink: 0 }}>
+                                            {runtimeLabel(s.cli).slice(0, 2).toUpperCase()}
+                                          </span>
+                                          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {sessionDisplayTitle(s)}
+                                          </span>
+                                          {statusColor && (
+                                            <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: statusColor }} />
+                                          )}
+                                        </button>
+                                      );
+                                    })}
+                                  </React.Fragment>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </React.Fragment>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </section>
         )}
 
@@ -606,7 +782,17 @@ export default function Sidebar({
 
         <section aria-labelledby="sidebar-chat-heading">
           <div style={sectionHeaderStyle}>
-            <span id="sidebar-chat-heading">Chat</span>
+            <button
+              type="button"
+              aria-expanded={!chatsCollapsed}
+              onClick={() => setChatsCollapsed((v) => !v)}
+              style={sectionFoldButtonStyle}
+            >
+              <span aria-hidden="true" style={{ fontSize: 7, color: tokens.colors.textMuted, lineHeight: 1 }}>
+                {chatsCollapsed ? '▶' : '▼'}
+              </span>
+              <span id="sidebar-chat-heading">Chat</span>
+            </button>
             <button
               type="button"
               aria-label="New chat"
@@ -628,7 +814,7 @@ export default function Sidebar({
             </button>
           </div>
 
-          {renderNavItem({
+          {!chatsCollapsed && renderNavItem({
             key: 'all-chats',
             path: `${workspaceBase}/chat`,
             label: 'All chats',
@@ -638,7 +824,7 @@ export default function Sidebar({
             exact: true,
           })}
 
-          <div
+          {!chatsCollapsed && <div
             aria-label="Chat rooms"
             style={{
               minHeight: roomsLoading ? 40 : undefined,
@@ -733,7 +919,7 @@ export default function Sidebar({
                 )}
               </button>
             )}
-          </div>
+          </div>}
         </section>
 
         <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border }} />
