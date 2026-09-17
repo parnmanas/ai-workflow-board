@@ -449,6 +449,12 @@ export const AGENT_CHAIN_DEPTH_CAP = 3;
 // couldn't free a slot). Deliberately NOT the "유효한 Git 체크아웃" broken-checkout
 // copy: pool exhaustion is a transient, self-healing condition, so this states that
 // recovery is autonomous (no operator action needed unless it persists).
+/** terminal 정리 완료 키의 보관 상한(FIFO) — 오래 뜬 매니저에서 무한 증가를 막는다.
+ *  키는 (ticketId, terminal_entered_at) 라 티켓 수만큼만 늘고, 넘치면 가장 오래된
+ *  것부터 버린다. 버려진 키의 티켓에 뒤늦게 같은 이동 이벤트가 또 오면 정리가 한 번
+ *  더 도는데, 정리 자체가 멱등이고 알림은 서버의 dedupe_key 합치기가 흡수한다. */
+const TERMINAL_CLEANUP_DONE_LIMIT = 512;
+
 const POOL_EXHAUSTED_RETRY_COMMENT =
   `⚠️ **shared worktree 풀 고갈 (pool_exhausted)** — 공유 warm-pool 의 모든 슬롯이 활성 lease 라 에이전트를 실행하지 않고 디스패치를 보류했습니다.\n\n` +
   `on-demand lease 재조정을 즉시 시도했지만 회수 가능한 슬롯이 없었습니다 (reclaim grace(20분) 이내의 lease 이거나, 같은 working_dir 를 공유하는 다른 보드와의 일시적 경합).\n\n` +
@@ -1088,6 +1094,11 @@ export class EventDispatcher {
    *  need only survive dispatch→exit within one lifetime. */
   readonly #inflightTriggerRaw = new Map<string, string>();
   static readonly #INFLIGHT_RAW_CAP = 512;
+  /** terminal Git 정리의 단일 실행 가드(ticket 62407d4e) — 티켓당 실행 중인 정리와,
+   *  `(ticketId, terminal_entered_at)` 로 키잉한 완료 기록. 자세한 근거는
+   *  `#cleanupTerminalTicketWorktrees` 주석 참고. */
+  readonly #terminalCleanupInFlight = new Map<string, Promise<void>>();
+  readonly #terminalCleanupDone = new Set<string>();
   /** Remember the raw of a trigger we are about to dispatch (blocker #1). FIFO-
    *  capped so a long-lived manager can't grow it unbounded from keys that never
    *  hit a session limit. */
@@ -1400,10 +1411,39 @@ export class EventDispatcher {
    * Git 흔적을 정리한다. 서버의 terminal_entered_at을 재확인하고, worktree가
    * clean하며 티켓 branch가 base에 포함된 경우에만 worktree와 로컬/origin ref를
    * 삭제한다. 보류 결과는 티켓 코멘트에 남기며 전체 처리는 best-effort다.
+   *
+   * **단일 실행 보장(ticket 62407d4e)** — 이 진입점은 `board_update` 하나마다
+   * 불리고, 같은 이동이 재전달되거나(SSE 재연결 replay) 이동 이벤트가 겹쳐 오면
+   * 정리가 중복 실행돼 같은 실패 알림이 티켓에 두 번 쌓였다(실측: 1.3초 간격).
+   * 두 겹으로 막는다:
+   *   1. 티켓당 in-flight 가드 — 실행 중이면 새 호출은 그대로 버린다. 진행 중인
+   *      실행이 같은 일을 이미 하고 있으므로 잃는 것이 없다.
+   *   2. `(ticketId, terminal_entered_at)` 완료 키 — 그 terminal 진입에 대한
+   *      정리가 **성공적으로 끝났으면** 다시 실행하지 않는다. 같은 티켓이 나중에
+   *      reopen 후 다시 terminal 로 들어오면 terminal_entered_at 이 바뀌므로 키도
+   *      달라져 정상적으로 다시 돈다.
+   * 완료 키는 실패 시 찍지 않는다 — 중간에 터진 실행은 다음 이동 이벤트에서 다시
+   * 시도될 수 있어야 한다(중복 알림은 서버의 dedupe_key 합치기가 흡수한다).
    */
   async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
     if (!this.#worktreeManager) return;
     if (!this.#managedAgentContexts) return;
+    if (this.#terminalCleanupInFlight.has(ticketId)) {
+      log(`[worktree] terminal cleanup already in flight ticket=${ticketId.slice(0, 8)} — 중복 호출 무시`);
+      return;
+    }
+    // 아래 두 줄 사이에 await 가 없어야 한다 — 그래야 검사와 등록이 원자적이다.
+    const run = this.#runTerminalTicketCleanup(ticketId);
+    this.#terminalCleanupInFlight.set(ticketId, run);
+    try {
+      await run;
+    } finally {
+      this.#terminalCleanupInFlight.delete(ticketId);
+    }
+  }
+
+  async #runTerminalTicketCleanup(ticketId: string): Promise<void> {
+    if (!this.#worktreeManager || !this.#managedAgentContexts) return;
     try {
       const ticket = await fetchTicketContext(this.#config, ticketId);
       // terminal_entered_at is null whenever the ticket is NOT currently in a
@@ -1411,7 +1451,16 @@ export class EventDispatcher {
       // treated as "unknown → skip" so a transient REST error can't nuke a
       // live ticket's worktree.
       if (!ticket || !ticket.terminal_entered_at) return;
+      const runKey = `${ticketId}:${ticket.terminal_entered_at}`;
+      if (this.#terminalCleanupDone.has(runKey)) {
+        log(`[worktree] terminal cleanup already done ticket=${ticketId.slice(0, 8)} entered=${ticket.terminal_entered_at} — 재실행 생략`);
+        return;
+      }
       let total = 0;
+      const heldReasons: string[] = [];
+      const benignHolds: string[] = [];
+      const benignHeldBranches: string[] = [];
+      const remainingBranches: string[] = [];
       const seenDirs = new Set<string>();
       for (const ctx of this.#managedAgentContexts.list()) {
         if (!ctx.working_dir) continue;
@@ -1427,16 +1476,23 @@ export class EventDispatcher {
           repositoryResourceId: ticket.base_repo?.id,
         });
         total += cleanup.removedWorktrees;
-        if (cleanup.heldReasons.length > 0 || cleanup.remainingBranches.length > 0) {
-          await fireAndForgetTool(this.#config, 'add_comment', {
-            ticket_id: ticketId,
-            content:
-              `⚠️ Git 자동 정리를 보류했습니다.\n\n사유:\n- ${cleanup.heldReasons.join('\n- ') || '잔여 브랜치 확인 필요'}\n\n` +
-              `잔여 브랜치: ${cleanup.remainingBranches.join(', ') || '없음'}`,
-            metadata: { dedupe_key: `terminal-git-cleanup-held:${ticket.terminal_entered_at}` },
-          });
-        }
+        // home 마다 코멘트를 쓰지 않고 한 번에 모은다 — 매니저가 여러 agent home 을
+        // 관리하면(awb.programmer / awb.reviewer / …) 예전 구현은 home 수만큼
+        // 같은 알림을 발행했다. 이게 중복 알림의 두 번째 원인이었다.
+        // `?? []`: 정리는 best-effort 경로라 리포트 한 필드가 비어 있다고 예외로
+        // 죽으면 안 된다(회수 자체는 이미 끝난 뒤다).
+        heldReasons.push(...(cleanup.heldReasons ?? []));
+        benignHolds.push(...(cleanup.benignHolds ?? []));
+        benignHeldBranches.push(...(cleanup.benignHeldBranches ?? []));
+        remainingBranches.push(...(cleanup.remainingBranches ?? []));
       }
+      await this.#reportTerminalCleanup(ticketId, ticket.terminal_entered_at, {
+        heldReasons: [...new Set(heldReasons)],
+        benignHolds: [...new Set(benignHolds)],
+        benignHeldBranches: [...new Set(benignHeldBranches)],
+        remainingBranches: [...new Set(remainingBranches)],
+      });
+      this.#rememberTerminalCleanupDone(runKey);
       if (total > 0) {
         log(
           `[worktree] terminal ticket=${ticketId.slice(0, 8)} reclaimed ${total} worktree(s)`,
@@ -1450,6 +1506,58 @@ export class EventDispatcher {
       log(
         `[worktree] terminal cleanup failed for ticket=${ticketId.slice(0, 8)}: ${err?.message ?? err}`,
       );
+    }
+  }
+
+  /**
+   * 정리 결과를 티켓에 알린다 — **조치가 필요할 때만**(ticket 62407d4e).
+   *
+   * 정상 보류(원격 ref 는 이미 없고 살아 있는 worktree 가 로컬 ref 를 물고 있는
+   * 상태)만 남은 경우에는 코멘트를 쓰지 않고 로그만 남긴다. 그 상태는 잃는 것이
+   * 없고 다음 sweep 이 회수하는데, "⚠️ 정리를 보류했습니다 / 잔여 브랜치: …" 로
+   * 알리면 Merging 절차를 정확히 마친 담당자와 이후 감사에게 정리가 덜 끝난
+   * 것처럼 읽힌다(보드에 그 오독 사례가 기록돼 있다).
+   */
+  async #reportTerminalCleanup(
+    ticketId: string,
+    terminalEnteredAt: string,
+    summary: {
+      heldReasons: string[];
+      benignHolds: string[];
+      benignHeldBranches: string[];
+      remainingBranches: string[];
+    },
+  ): Promise<void> {
+    const benign = new Set(summary.benignHeldBranches);
+    // 정상 보류로 설명되는 ref 는 "잔여" 소음에서 뺀다. 원격 ref 가 이미 없는 것이
+    // 정상 보류의 조건이므로 로컬 이름만 대조하면 된다.
+    const unexplainedRemaining = summary.remainingBranches.filter((branch) => !benign.has(branch));
+    if (summary.heldReasons.length === 0 && unexplainedRemaining.length === 0) {
+      if (summary.benignHolds.length > 0) {
+        log(`[worktree] terminal cleanup ticket=${ticketId.slice(0, 8)} 정상 보류만 남음(코멘트 생략): ${summary.benignHolds.join(' | ')}`);
+      }
+      return;
+    }
+    const benignSection = summary.benignHolds.length > 0
+      ? `\n\n정상 보류(조치 불필요):\n- ${summary.benignHolds.join('\n- ')}`
+      : '';
+    await fireAndForgetTool(this.#config, 'add_comment', {
+      ticket_id: ticketId,
+      content:
+        `⚠️ Git 자동 정리를 보류했습니다.\n\n사유:\n- ${summary.heldReasons.join('\n- ') || '잔여 브랜치 확인 필요'}\n\n` +
+        `잔여 브랜치: ${unexplainedRemaining.join(', ') || '없음'}` +
+        benignSection,
+      metadata: { dedupe_key: `terminal-git-cleanup-held:${terminalEnteredAt}` },
+    });
+  }
+
+  /** 완료 키 보관 — 프로세스가 오래 떠 있어도 무한정 자라지 않도록 상한을 둔다. */
+  #rememberTerminalCleanupDone(runKey: string): void {
+    this.#terminalCleanupDone.add(runKey);
+    while (this.#terminalCleanupDone.size > TERMINAL_CLEANUP_DONE_LIMIT) {
+      const oldest = this.#terminalCleanupDone.values().next().value;
+      if (oldest === undefined) break;
+      this.#terminalCleanupDone.delete(oldest);
     }
   }
 
