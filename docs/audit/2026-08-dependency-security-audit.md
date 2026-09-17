@@ -2850,3 +2850,106 @@ GitHub 쪽 best-effort 스케줄 유실의 **일회성 사건**으로 종결하�
 - **PR #10** — 09-11~09-17 감사 기록. 열려 있고 base `main`. 오늘 기록도 같은 브랜치에 얹었다.
 - **PR #11 / #8** — base 브랜치 삭제로 **자동 CLOSED**. #11 은 재개하려면 브랜치 복원이 선행돼야 한다.
 - **다음 회차 확인 항목** — cron 10번 단계의 실패 문구가 '원격에 이 브랜치가 없다' 로 바뀌었는지(5절).
+
+---
+
+## 재검증 로그 — 2026-09-18 (`main` @ `b231e34a`)
+
+8회차. 일주일 만에 `main` 팁이 움직였고(`ef98b93b` → `b231e34a`, 커밋 약 30개),
+어제 세운 예측 하나가 **빗나갔다**. 아래 3절이 이번 회차의 핵심이다.
+
+### 1. `main` — 취약점 0건 (의존성 축은 팁 이동에도 불변)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+
+팁이 크게 움직였으므로 "커밋이 많으니 의존성도 바뀌었겠지" 로 넘기지 않고 blob 으로 재확인했다.
+루트 `package.json` 과 `package-lock.json` 은 직전 감사 시점과 **blob 동일**이다. 즉 신규 커밋
+약 30개는 전부 기능/테스트 변경이고 **의존성 축은 건드리지 않았다**. 패키지 538 / 버전 579 라는
+수치가 지난 회차와 같은 것도 이와 일치한다.
+
+`apps/server`·`apps/client` 의 `package.json` 은 DIFF 로 보이지만, 정규화한
+`dependencies`+`devDependencies`+`overrides` 는 **완전히 동일**하고 차이는 `scripts` 키
+하나뿐이다(테스트 등록 줄). 이전 회차들에서 확립한 판정 그대로 **security-neutral** 이다 —
+DIFF 를 눈으로 보고 드리프트라 부르지 말 것.
+
+### 2. 배포 브랜치 — 여전히 없음, 그리고 여전히 취약
+
+- `git ls-remote` 및 `GET /branches/production.private` → **404** (조회 자체는 성공 = 진짜 삭제).
+- `gh run list --workflow=deploy.yml` → 마지막 배포는 **2026-09-05, `0ddec72f`** 로 변동 없음.
+
+따라서 결론도 어제와 같다: **NAS 에서 도는 이미지는 7건(multer DoS x3, js-yaml, hono x3)을
+포함한 트리이고, 그것을 감사할 브랜치도 고칠 머지 경로도 없다.** 브랜치가 사라진 것은 위험이
+해소된 게 아니라 가시성만 사라진 것이다.
+
+### 3. 어제의 예측은 틀렸다 — 머지되지 않은 PR 의 코드로 CI 동작을 예측했다
+
+7회차에 "다음 cron 부터 10번 단계가 '원격에 이 브랜치가 없다' 로 바뀐다" 고 적었다.
+09-17 스케줄 실행 `35205211091` 의 10번 단계 실제 출력은 **옛 문구 그대로**였다:
+
+```
+FAIL production.private — fetch 실패
+  - production.private: git fetch 실패 (Command failed: git fetch ... origin production.private)
+  ... main 에서 고친 뒤 production.private 로 머지할 것.
+```
+
+원인은 단순하고 전적으로 내 쪽 오류다. 그 진단 개선(`remoteBranchExists`)은
+**`sec-audit-20260911` 브랜치 = PR #10 에만 있고 `main` 에는 없다.** 확인:
+`git show origin/main:scripts/audit-deploy-branch-deps.mjs | grep -c remoteBranchExists` → **0**,
+`apps/server/test/deploy-branch-audit-guard.test.mjs` 도 `main` 에 **부재**. cron 은 `main` 에서
+도니 당연히 옛 코드가 돈다.
+
+**재사용할 교훈: 머지되지 않은 PR 안의 수정으로 CI 동작 변화를 예측하지 말 것.** 예측을 적을 때는
+"그 코드가 어느 브랜치에 있고, 그 잡이 어느 브랜치에서 도는가" 를 먼저 맞춰봐야 한다. 이 예측은
+PR #10 이 `main` 에 들어가기 전까지는 **성립할 수 없다** — 확인 항목이 아니라 머지 대기 항목이다.
+
+같은 브랜치에서 직접 돌린 수정본은 의도대로 동작하고 **fail-closed 도 유지**된다(real exit=1):
+
+```
+FAIL production.private — 원격에 이 브랜치가 없다 (삭제됐거나 이름이 바뀌었다)
+  ... 브랜치가 사라져도 이미 배포된 이미지는 그대로 돌아간다 ...
+```
+
+### 4. cron 실행 서명과 지연
+
+09-17 스케줄 실행 `35205211091` (09:27:24Z). 예정 `17 4 * * *` 대비 **+5시간 10분** 지연으로,
+이전 회차들에서 관찰한 지연 폭(+4h21m ~ +5h36m) 범위 안이다. 09-15 의 미실행은 일회성으로
+종결된 상태가 유지된다. 실패 서명은 구조적으로 예상대로였다 — 4~9번 단계 green,
+**10번만 red**, 11번 `발행 트리 재감사` 는 skip. 10번 실패가 11번을 건너뛰게 하는 **단계 순서
+취약성은 여전히 살아 있다.**
+
+### 5. 감사 브랜치에 `origin/main` 머지 — 테스트 등록 합집합
+
+팁이 움직였으므로 감사 브랜치에 `origin/main` 을 머지했고, `apps/server/package.json` 의
+`test` 스크립트에서 충돌이 났다(양쪽 다 테스트를 추가). 한쪽을 고르지 않고 **합집합**으로
+해소했다 — `main` 쪽 6개(`chat-messages-workspace-boundary`,
+`chat-rooms-list-workspace-boundary`, `chat-rename-workspace-boundary`, `chat-dm-promotion`,
+`migration-sqlite-dialect-guard`, `comment-dedupe-created-at-precision`) + 이쪽 1개
+(`deploy-branch-audit-guard`). `test:qa:pg` 의 `main` 쪽 추가 2건도 보존했다.
+비테스트 부분(skeleton)이 양쪽 동일함을 확인한 뒤 합쳤고, 결과는 `origin/main` 대비 **정확히
+한 줄** 차이다. `test-registration-completeness` 가 green 이므로 등록 누락은 없다.
+
+### 게이트 결과 (`main` @ `b231e34a`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** / `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 1건** (`production.private` 원격에 없음, exit=1 — 2·3절)
+- `audit-install-scripts` — install-script 3개 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — *설정상* 커버, 단 대상 브랜치는 존재하지 않음 (2절)
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- 가드 **91/91** 통과 (16 + 16 + 39 + 6 + 6 + 4 + 4)
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. lockfile 재생성은 불필요했다
+(`main` 0건, lockfile blob 무변화).
+
+### 이월
+
+- **운영자 결정 필요 (최우선, 8회차 연속 미해결)** — `production.private` 삭제가 **의도된
+  은퇴인가, 실수인가.** 어느 쪽이든 **지금 NAS 에서 도는 이미지는 `0ddec72f` (7건 포함)** 다.
+- **PR #10** — 09-11~09-18 감사 기록 + 배포 브랜치 게이트 진단 수정. 열려 있고 base `main`.
+  이 PR 이 머지되기 전에는 cron 의 10번 단계 문구가 **바뀌지 않는다**(3절).
+- **PR #11 / #8** — base 브랜치 삭제로 자동 CLOSED. 복원이 선행돼야 재개 가능.
+- **다음 회차 확인 항목** — (a) PR #10 이 머지됐다면, 그 이후 cron 의 10번 단계 문구가
+  '원격에 이 브랜치가 없다' 로 바뀌는지. 머지 전이면 확인 자체가 성립하지 않는다.
+  (b) `main` 팁이 또 움직였다면 루트 lockfile blob 동일성부터 재확인.
