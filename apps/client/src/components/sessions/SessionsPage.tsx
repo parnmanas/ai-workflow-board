@@ -177,11 +177,26 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
 
 // ─── 호스트 세션 목록 — cwd 기준 그룹 ─────────────────────────────────────
 
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+
 function CwdGroupCard({ group, wsId, managerId, onNew }: {
   group: CwdGroup; wsId: string; managerId: string; onNew: (cwd: string) => void;
 }) {
   const navigate = useNavigate();
+  const [showOlder, setShowOlder] = useState(false);
   const latestTime = group.sessions[0]?.updated_at;
+
+  const cutoff = Date.now() - THREE_DAYS_MS;
+  const recentSessions = group.sessions.filter(
+    (s) => s.updated_at && new Date(s.updated_at).getTime() >= cutoff,
+  );
+  // Always show at least the newest session even if everything is old
+  const alwaysVisible = recentSessions.length > 0 ? recentSessions : group.sessions.slice(0, 1);
+  const hiddenSessions = recentSessions.length > 0
+    ? group.sessions.filter((s) => !s.updated_at || new Date(s.updated_at).getTime() < cutoff)
+    : group.sessions.slice(1);
+  const displayed = showOlder ? group.sessions : alwaysVisible;
+
   return (
     <div style={{ border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg, background: tokens.colors.surfaceCard, overflow: 'hidden' }}>
       {/* 그룹 헤더 */}
@@ -208,7 +223,7 @@ function CwdGroupCard({ group, wsId, managerId, onNew }: {
         </button>
       </div>
       {/* 세션 행 */}
-      {group.sessions.map((s, i) => (
+      {displayed.map((s, i) => (
         <button
           key={s.session_id}
           type="button"
@@ -231,6 +246,21 @@ function CwdGroupCard({ group, wsId, managerId, onNew }: {
           <span style={{ fontSize: 11, color: tokens.colors.textMuted, whiteSpace: 'nowrap', minWidth: 48, textAlign: 'right' }}>{relativeTime(s.updated_at)}</span>
         </button>
       ))}
+      {/* 오래된 세션 토글 */}
+      {hiddenSessions.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowOlder((v) => !v)}
+          style={{
+            width: '100%', textAlign: 'center', border: 'none',
+            borderTop: `1px solid ${tokens.colors.border}`,
+            background: `${tokens.colors.surface}55`, padding: '6px 14px',
+            color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 11.5, fontFamily: 'inherit',
+          }}
+        >
+          {showOlder ? '접기 ↑' : `${hiddenSessions.length}개 더 보기 ↓`}
+        </button>
+      )}
     </div>
   );
 }
