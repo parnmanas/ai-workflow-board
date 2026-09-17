@@ -564,7 +564,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
   // Group rooms only — DMs are immutable. Caller must already be a member.
   server.tool(
     'add_chat_participants',
-    'Add participants to an existing group chat room. Fails on DMs, on rooms the caller is not in, and on cap (50). Re-adding a previously-left member creates a fresh participant row.',
+    'Add participants to an existing chat room (group or DM). Inviting into a DM promotes it to a group in place — same room id and history, and the promotion CANNOT be undone. Already-active participants are skipped silently (idempotent). Fails on system-managed rooms (Action / QA / security / orchestration), on rooms the caller is not in, and on cap (50). Re-adding a previously-left member creates a fresh participant row.',
     {
       room_id: z.string().describe('Target room ID'),
       participants: z.array(z.object({

@@ -366,16 +366,10 @@ export class RoomCrudService {
       roomName = name.trim();
     } else if (roomType === 'group') {
       // Auto-generated default for groups so the list isn't full of "(unnamed)".
-      const names: string[] = [];
-      for (const p of uniqueParticipants.slice(0, 3)) {
-        const resolved = await this.membership.resolveParticipantName(p.participant_type, p.participant_id);
-        names.push(resolved);
-      }
-      if (uniqueParticipants.length > 3) {
-        roomName = `${names.join(', ')} and ${uniqueParticipants.length - 3} more`;
-      } else {
-        roomName = names.join(', ');
-      }
+      // 규칙 자체는 RoomMembershipService 가 소유한다 — DM → group 승격(티켓 70e62a9d)이
+      // 같은 이름을 붙여야 하고, 두 벌로 두면 한쪽만 바뀌어 같은 구성의 방이 경로에
+      // 따라 다른 이름을 갖는다.
+      roomName = await this.membership.buildGroupRoomName(uniqueParticipants);
     }
 
     // Save room
