@@ -11,6 +11,7 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { type MentionParticipant } from './utils/markdown';
 import ChatMessageInput from './ChatMessageInput';
+import { canInviteToRoom } from './utils/participantFlow';
 import ActiveTaskStrip from './ActiveTaskStrip';
 
 
@@ -632,9 +633,10 @@ export default function ChatRoomView({
             </span>
           )}
           {/* 대화 도중 참여자 추가 진입점 — 헤더의 "Add People" 과 같은 모달을 연다.
-              DM 을 포함한 모든 방에서 보인다(티켓 70e62a9d). 단 아직 참여하지 않은 자유
-              참여 방에서는 서버가 거부하므로 헤더와 같은 기준으로 감춘다. */}
-          {room.is_participant !== false && (
+              DM 을 포함한 모든 방에서 보인다(티켓 70e62a9d). 아직 참여하지 않은 자유
+              참여 방에서는 서버가 거부하므로 감춘다 — 헤더가 그 경우 버튼 묶음을 통째로
+              대체하는 것과 같은 기준이고, 규칙 자체는 canInviteToRoom 이 소유한다. */}
+          {canInviteToRoom(room) && (
             <button
               onClick={() => setShowAddPeople(true)}
               aria-label="Add participant"

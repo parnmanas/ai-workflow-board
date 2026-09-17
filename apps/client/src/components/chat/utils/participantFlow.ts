@@ -45,6 +45,24 @@ export function projectParticipants(detail: RoomDetailLike | null | undefined): 
   }));
 }
 
+// ─── 초대 진입점 노출 규칙 ────────────────────────────────────────────────────
+
+/**
+ * 이 방에 "사람 추가" 진입점을 보여줄 것인가 (티켓 70e62a9d).
+ *
+ * 방 타입은 더 이상 기준이 아니다 — DM 에 초대하면 서버가 방을 group 으로 승격시키므로
+ * DM/group 모두 초대할 수 있다. 남은 기준은 **호출자가 이 방의 참여자인가** 하나다:
+ * 아직 참여하지 않은 자유 참여 방(`is_participant === false`, 티켓 995a9519)에서는
+ * 서버가 `requireActiveParticipant` 로 거부하므로 눌러도 실패할 버튼을 주지 않는다.
+ *
+ * `false` 일 때만 감춘다. 값이 없는(이 필드 이전의) 응답은 예전처럼 참여자로 본다.
+ */
+export function canInviteToRoom(
+  room: { is_participant?: boolean } | null | undefined,
+): boolean {
+  return !!room && room.is_participant !== false;
+}
+
 // ─── 방 목록 참여자 wire shape 정규화 ─────────────────────────────────────────
 
 /**

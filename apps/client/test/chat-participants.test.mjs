@@ -36,6 +36,7 @@ import {
   countUserParticipants,
   dispatchChatRoomUpdate,
   loadAddPeopleCandidates,
+  normalizeRoomListParticipant,
 } from '../src/components/chat/utils/participantFlow.ts';
 
 // ─── 테스트 유틸 ──────────────────────────────────────────────────────────────
@@ -600,4 +601,48 @@ test('dispatchChatRoomUpdate: open_join_changed 재조회 실패는 조용히 �
   await flush();
 
   assert.deepEqual(roomsState.get().map((r) => r.id), ['A'], '실패해도 기존 목록을 유지한다');
+});
+
+// ─── 시나리오 5: 방 목록 참여자 wire shape 정규화 (티켓 70e62a9d 요구사항 6) ───
+
+// 서버는 같은 ChatRoomListItem[] 을 스코프마다 다른 필드 이름으로 내려준다. tsc 가
+// 잡지 못하는 기존 불일치라, 두 shape 를 같은 함수에 넣어 같은 결과가 나오는지 본다.
+const listRoomsShape = (type, id, name) => ({ participant_type: type, participant_id: id, name });
+const observerShape = (type, id, name) => ({ type, id, name });
+
+test('normalizeRoomListParticipant: 내 방 shape 와 관전 shape 가 같은 결과로 정규화된다', () => {
+  const mine = normalizeRoomListParticipant(listRoomsShape('agent', 'agent-1', 'rolf/Bot'));
+  const observed = normalizeRoomListParticipant(observerShape('agent', 'agent-1', 'rolf/Bot'));
+
+  assert.deepEqual(mine, { id: 'agent-1', type: 'agent', name: 'rolf/Bot' });
+  assert.deepEqual(observed, mine, '같은 참여자가 스코프에 따라 다르게 읽히면 안 된다');
+});
+
+test('normalizeRoomListParticipant: 관전 shape 의 type 도 정규화한다 (예전 헬퍼가 놓친 필드)', () => {
+  // 예전 RoomListPanel.normalizeMember 는 id 만 정규화하고 type 은 그대로 뒀다 —
+  // 관전 모드에서 참여자가 유저인지 에이전트인지 판별할 근거가 사라졌다.
+  assert.equal(normalizeRoomListParticipant(observerShape('user', 'u-1', 'Alice')).type, 'user');
+  assert.equal(normalizeRoomListParticipant(observerShape('agent', 'a-1', 'Bot')).type, 'agent');
+});
+
+test('normalizeRoomListParticipant: 값이 없어도 빈 문자열로 수렴한다 (렌더가 깨지지 않게)', () => {
+  assert.deepEqual(normalizeRoomListParticipant(null), { id: '', type: '', name: '' });
+  assert.deepEqual(normalizeRoomListParticipant(undefined), { id: '', type: '', name: '' });
+  assert.deepEqual(normalizeRoomListParticipant({}), { id: '', type: '', name: '' });
+});
+
+test('normalizeRoomListParticipant: 관전 shape 로도 "본인 제외" 요약이 성립한다', () => {
+  // 방 목록 요약은 정규화된 id 로 본인을 걸러낸다. id 가 undefined 로 떨어지면
+  // 본인이 요약에 남거나 이름이 통째로 빈 문자열이 됐다.
+  const ME = 'user-me';
+  const summary = [
+    observerShape('user', ME, 'Me'),
+    observerShape('user', 'user-bob', 'Bob'),
+    observerShape('agent', 'agent-bot', 'rolf/Bot'),
+  ]
+    .map(normalizeRoomListParticipant)
+    .filter((m) => m.id !== ME && m.name)
+    .map((m) => m.name);
+
+  assert.deepEqual(summary, ['Bob', 'rolf/Bot']);
 });
