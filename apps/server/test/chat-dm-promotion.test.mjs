@@ -21,6 +21,7 @@ import { Agent } from '../dist/entities/Agent.js';
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { RoomMembershipService } from '../dist/modules/chat-rooms/room-membership.service.js';
 import { RoomCrudService } from '../dist/modules/chat-rooms/room-crud.service.js';
+import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
 import { serializeSqljsTransactions } from '../dist/db.js';
 import { activityEvents } from '../dist/services/activity.service.js';
 
@@ -36,6 +37,7 @@ const MANAGER = '99999999-9999-4999-8999-999999999999';
 let dataSource;
 let membership;
 let crud;
+let messaging;
 /** 승격 로그를 모으는 자리 — 되돌릴 수 없는 전이의 관측 수단이 실제로 남는지 본다. */
 let logLines;
 
@@ -139,6 +141,28 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
       capturingLog,
     );
     crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, capturingLog, membership);
+
+    // 요구사항 7(초대된 뒤 실제로 대화가 되는가)은 참여자 행만 봐서는 검증되지 않는다 —
+    // 발화 게이트가 그 행을 실제로 통과시키는지 봐야 한다. 그래서 진짜 메시지 경로를
+    // 구성한다. 이 스위트가 쓰지 않는 의존성(티켓/멘션/첨부)만 빈 객체로 둔다.
+    const empty = {};
+    messaging = new RoomMessagingService(
+      roomRepo,          // roomRepo
+      partRepo,          // participantRepo
+      msgRepo,           // messageRepo
+      agentRepo,         // agentRepo
+      empty,             // ticketRepo
+      empty,             // userMentionRepo
+      empty,             // attachmentRepo
+      // 성공 경로는 커밋 뒤 chat_workspace_folder_enabled 를 읽는다 — "설정 없음"으로 답한다.
+      { async findOne() { return null; } }, // workspaceRepo
+      dataSource,        // dataSource
+      capturingLog,      // logService
+      membership,        // membership
+      // 본문에 @멘션이 없으므로 "찾은 것 없음"으로 답해 그 뒤 경로를 그대로 지나가게 한다.
+      { parseMentions: () => [], async resolveMentions() { return []; } }, // mentionService
+      empty,             // connectivity
+    );
 
     // 이름 해석(자동 방 이름 / dm_partner_name)이 실제 행을 읽도록 시드한다.
     await userRepo.save([
@@ -443,5 +467,45 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     assert.equal(listed.type, 'group');
     assert.equal(listed.unread_count, 0, 'last_read_at = now 정책이 유지되어야 한다');
     assert.equal(listed.is_participant, true);
+  });
+
+  // ── 초대 후 실제로 대화가 되는가 (요구사항 7) ────────────────────────────
+
+  it('승격된 방에서 초대된 에이전트가 실제로 발화할 수 있다', async () => {
+    // 참여자 행이 생겼다는 것만으로는 부족하다 — 발화 게이트가 그 행을 실제로
+    // 통과시키는지 봐야 한다. 과거 회귀(티켓 f6a0de0e)가 정확히 이 지점이었다:
+    // mission 방에 사람 참여자가 등록되지 않아 발화가 403 으로 막혔다.
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+
+    await invite(room.id, ALICE, [asAgent(HELPER)]);
+
+    const msg = await messaging.sendMessage(room.id, WS, 'agent', HELPER, 'Helper', '초대 고맙습니다');
+    assert.ok(msg?.id, '초대된 에이전트의 발화가 저장되지 않았다');
+
+    const stored = await dataSource.getRepository(ChatRoomMessage).find({ where: { room_id: room.id } });
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].sender_id, HELPER);
+  });
+
+  it('승격된 방에서 초대된 유저도 발화할 수 있다', async () => {
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+
+    await invite(room.id, ALICE, [asUser(BOB)]);
+
+    const msg = await messaging.sendMessage(room.id, WS, 'user', BOB, 'Bob', '안녕하세요');
+    assert.ok(msg?.id);
+  });
+
+  it('초대되지 않은 에이전트는 승격 뒤에도 여전히 거부된다 (경계 유지)', async () => {
+    // 승격이 방을 아무에게나 열어 주는 것이 아니라는 확인. 자유 참여(open_join)
+    // 완화는 유저 전용이므로 에이전트는 참여자 행을 계속 요구한다.
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+
+    await invite(room.id, ALICE, [asUser(BOB)]);
+
+    await assert.rejects(
+      () => messaging.sendMessage(room.id, WS, 'agent', HELPER, 'Helper', '난입'),
+      (err) => err.status === 403,
+    );
   });
 });
