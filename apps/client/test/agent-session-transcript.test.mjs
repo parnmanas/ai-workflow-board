@@ -110,6 +110,7 @@ test('session list helpers: activity sort, host×cli sidebar rows, canonical pat
     { manager_id: 'm2', instance_id: 'i2', hostname: 'ralf', name: 'ralf', clis: [], plugin_version: '1', last_seen_at: '' },
   ], '/ws/w1', (cli) => cli.toUpperCase());
   assert.deepEqual(rows.map((r) => r.label), ['rolf · CLAUDE', 'rolf · CODEX']);
-  assert.equal(rows[0].path, '/ws/w1/sessions/m1/claude');
+  // 사이드바 행은 이제 managerId 수준(cwd 그룹 뷰)을 가리킨다 — 이전의 :managerId/:cli 대신
+  assert.equal(rows[0].path, '/ws/w1/sessions/m1');
   assert.equal(sessionPath('/ws/w1', 'm1', 'claude', 'abc def'), '/ws/w1/sessions/m1/claude/abc%20def');
 });
