@@ -410,7 +410,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     'Read the message history of a chat room the agent participates in. ' +
     'Returns full messages (sender, content, attachments, created_at) in chronological order. ' +
     'Use the `before` cursor (a message id) to page backwards through older history. ' +
-    'The agent must be an active participant in the room.',
+    'The agent must be an active participant of a room inside the caller\'s own workspace — ' +
+    'rooms in any other workspace fail the same way a non-existent room does.',
     {
       room_id: z.string().describe('Chat room ID to read messages from'),
       limit: z.number().int().min(1).max(200).optional().describe('Max messages to return (default 50, max 200).'),
@@ -424,8 +425,24 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
       if (!agent) return err('Agent identity not found for this session');
+      // caller 등급(에이전트 신원)과 workspace 권한은 별개다(티켓 5a95315f). 참여자 행만
+      // 보면 경계가 지속되지 않는다 — `chat_room_participants` 행은 한 번 생기면 남으므로,
+      // 지난/다른 워크스페이스 방의 행을 들고 있는 에이전트가 지금 API key 가 묶인 스코프
+      // 밖에 있는 방의 대화 내용 전체를 읽을 수 있었다. 같은 데이터를 읽는 형제 경로인
+      // agent-api `GET /api/agent/chat-rooms/:roomId/messages` 는 이미 scopeRejects 로 키
+      // 스코프와 방의 workspace 를 대조하므로, 두 표면의 규약을 일치시킨다. 해석 방식은 이
+      // 파일의 다른 툴들과 같다 — 세션 키의 workspace, 없으면 에이전트 자신의 workspace.
+      const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
+      if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
 
       try {
+        // 워크스페이스 대조는 참여자 게이트보다 **먼저** 돈다. 뒤에 두면 타 워크스페이스
+        // 방에 대해 참여자 행이 있을 때는 'Chat room not found', 없을 때는 'Not an active
+        // participant in this room' 으로 응답이 갈려 그 방의 참여자 구성이 드러난다. 없는
+        // 방과 같은 메시지로 수렴시켜, 남의 워크스페이스 room_id 로는 방의 존재조차 확인할
+        // 수 없게 한다.
+        const room = await dataSource.getRepository(ChatRoom).findOne({ where: { id: room_id } });
+        if (!room || room.workspace_id !== callerWorkspaceId) return err('Chat room not found');
         // Mirror the agent-api GET /chat-rooms/:roomId/messages path
         // (agent-api.controller): enforce the agent participant gate
         // explicitly, then read in `observer` mode so the service's own
