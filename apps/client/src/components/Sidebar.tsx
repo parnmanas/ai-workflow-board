@@ -27,9 +27,10 @@ import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
 import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 
-// ─── 사이드바 폴드 상태 localStorage 저장 ────────────────────────────────────
+// ─── 사이드바 폴드 상태 쿠키 저장 ───────────────────────────────────────────
 
-const SIDEBAR_FOLD_KEY = 'awb.sidebar.fold';
+const SIDEBAR_FOLD_KEY = 'awb_sidebar_fold';
+const SIDEBAR_FOLD_MAX_AGE = 60 * 60 * 24 * 365; // 1년
 
 interface SidebarFoldSnapshot {
   sessions?: boolean;
@@ -40,7 +41,8 @@ interface SidebarFoldSnapshot {
 
 function loadSidebarFold(): Required<SidebarFoldSnapshot> {
   try {
-    const raw = localStorage.getItem(SIDEBAR_FOLD_KEY);
+    const match = document.cookie.split(';').find((c) => c.trim().startsWith(`${SIDEBAR_FOLD_KEY}=`));
+    const raw = match ? decodeURIComponent(match.trim().slice(SIDEBAR_FOLD_KEY.length + 1)) : null;
     const parsed: SidebarFoldSnapshot = raw ? (JSON.parse(raw) as SidebarFoldSnapshot) : {};
     return {
       sessions: parsed.sessions ?? false,
@@ -55,7 +57,8 @@ function loadSidebarFold(): Required<SidebarFoldSnapshot> {
 
 function saveSidebarFold(snap: Required<SidebarFoldSnapshot>): void {
   try {
-    localStorage.setItem(SIDEBAR_FOLD_KEY, JSON.stringify(snap));
+    const value = encodeURIComponent(JSON.stringify(snap));
+    document.cookie = `${SIDEBAR_FOLD_KEY}=${value}; path=/; max-age=${SIDEBAR_FOLD_MAX_AGE}; SameSite=Lax`;
   } catch { /* best-effort */ }
 }
 
