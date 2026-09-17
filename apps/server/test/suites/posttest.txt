@@ -1,0 +1,17 @@
+# posttest 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
+# 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
+test/artifact-ref-resolver.test.mjs
+test/artifact-ref.test.mjs
+test/auth-login-throttle.test.mjs
+test/catalog-scope.test.mjs
+test/claude-backend-profile-mcp.test.mjs
+test/claude-backend-profiles.integration.test.mjs
+test/cli-login-session.test.mjs
+test/cli-runtime-profile-mcp-write.test.mjs
+test/cli-runtime-profiles.test.mjs
+test/credentials-reveal.test.mjs
+test/github-repo-ref-injection.test.mjs
+test/ssrf-guard.test.mjs
+test/ticket-mcp-artifact-ref.test.mjs
+test/ticket-ref-session.test.mjs
+test/workflow-functions.test.mjs

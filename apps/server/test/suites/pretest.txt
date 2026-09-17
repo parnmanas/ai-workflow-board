@@ -1,0 +1,17 @@
+# pretest 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
+# 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
+test/agent-column-state-sync.test.mjs
+test/agent-launch-spec-heartbeat.test.mjs
+test/agent-launch-spec-manager-wire.test.mjs
+test/agent-runtime-config.test.mjs
+test/agent-workspace-scope.test.mjs
+test/confirmed-duplicate-correction.test.mjs
+test/global-agent-workspace-mutation.test.mjs
+test/hermes-collaboration.test.mjs
+test/outreach-ticket-duplicate-gate.test.mjs
+test/prompt-template-reset.integration.test.mjs
+test/run-skill-snapshot.test.mjs
+test/runtime-capabilities-heartbeat.test.mjs
+test/runtime-host-only-topology.test.mjs
+test/runtime-types.test.mjs
+test/skill-lifecycle.test.mjs

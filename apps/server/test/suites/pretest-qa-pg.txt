@@ -1,0 +1,5 @@
+# pretest:qa:pg 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
+# 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
+test/qa-flows/claude-backend-profile-pg-lock.test.mjs
+test/qa-flows/confirmed-duplicate-correction-wire.test.mjs
+test/qa-flows/prompt-audit-report-pg-cast.test.mjs
