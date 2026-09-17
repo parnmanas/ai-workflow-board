@@ -2084,17 +2084,31 @@ export class WorktreeManager {
           continue;
         }
         // 실패 원인을 stderr 문구로 가르지 않는다 — Git 버전·로캘마다 달라진다.
-        // 저장소 상태로 직접 판정한다(ticket 62407d4e): 살아 있는 worktree 가
-        // 이 ref 를 물고 있고 원격 ref 도 이미 없으면, 잃는 것이 없는 정상
-        // 보류다(이 경로까지 온 시점에 branch 가 base 에 포함된다는 것은 위
-        // merge-base 검사로 이미 확정돼 있다). 그 외는 진짜 오류로 올린다.
+        // 저장소 상태로 직접 판정한다(ticket 62407d4e). "잃는 것이 없다" 는 세
+        // 조건이 **삭제 실패 시점에** 모두 성립할 때만이다: 살아 있는 worktree 가
+        // 이 ref 를 물고 있고, 원격 ref 는 이미 없으며, 로컬 ref 가 여전히 base 에
+        // 포함돼 있다.
+        //
+        // 위 merge-base 검사 결과를 재사용하지 않고 base 포함을 여기서 다시 본다 —
+        // 검사와 이 지점 사이에 재개된 worktree 가 같은 branch 를 체크아웃하고 새
+        // 커밋까지 얹을 수 있고(TOCTOU), 그러면 원격 ref 가 이미 지워진 상태에서
+        // 그 커밋이 로컬 ref 에만 남는다. 경합 뒤에는 앞선 검사가 현재 ref 를
+        // 대변하지 못하므로, 그 상태를 "조치 불필요" 로 덮으면 사람이 봐야 할
+        // 유실 위험을 조용히 가린다.
         const holder = await this.#worktreeHoldingBranch(entry.repo, branch);
         const remoteStillThere = await git(entry.repo, [
           'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`,
         ]);
         if (holder && !remoteStillThere.ok) {
-          report.benignHolds.push(`로컬 ref 보류(정상): ${branch} — 작업트리 ${holder} 가 체크아웃 중이고 원격 ref 는 이미 없음`);
-          report.benignHeldBranches.push(branch);
+          const stillMerged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
+          if (stillMerged.ok) {
+            report.benignHolds.push(`로컬 ref 보류(정상): ${branch} — 작업트리 ${holder} 가 체크아웃 중이고 원격 ref 는 이미 없음`);
+            report.benignHeldBranches.push(branch);
+          } else {
+            report.heldReasons.push(
+              `로컬 브랜치 삭제 실패(검증 이후 고유 커밋): ${branch} — 작업트리 ${holder} 가 체크아웃한 뒤 base 에 없는 커밋이 얹혔고 원격 ref 는 이미 없음`,
+            );
+          }
         } else {
           report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
         }

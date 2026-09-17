@@ -1295,6 +1295,60 @@ test('cleanupTerminalTicketGit: 원격 ref 가 없고 재개된 worktree 가 로
   }
 });
 
+// 위 정상 보류 판정의 TOCTOU 경계. 앞선 두 테스트는 "재개된 checkout" 과 "ref 전진" 을
+// 각각 따로만 만들어서, 둘이 **겹친** 실제 경합을 놓친다. 여기서는 base 포함 검사가 끝난
+// 뒤에 재개된 worktree 가 같은 branch 를 체크아웃하고 그 위에 커밋까지 만든다 — 이때
+// holder 는 존재하고 원격 ref 도 이미 없으므로 앞선 검사 결과를 재사용하면 "조치 불필요"
+// 로 오분류된다. 원격 ref 가 지워진 뒤 base 밖 커밋이 로컬 ref 에만 남은 상태이므로
+// 사람이 봐야 한다.
+test('cleanupTerminalTicketGit: 검증 뒤 재개된 worktree 가 체크아웃하고 새 커밋까지 만들면 정상 보류가 아니다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const resumed = join(fixture.workingDir, '.awb', 'wt', 'repo-resource', 'resumed-checkout');
+  let lateCommit = '';
+  try {
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        // 정상 보류 테스트와 **딱 한 가지**만 다르다: 체크아웃에 그치지 않고 커밋까지 얹는다.
+        beforeLocalDelete: async (branch) => {
+          if (branch !== fixture.branch) return;
+          git(fixture.base, ['worktree', 'add', '-q', resumed, fixture.branch]);
+          await fsp.writeFile(join(resumed, 'late.txt'), '재개된 세션이 늦게 만든 커밋\n');
+          git(resumed, ['add', '.']);
+          git(resumed, ['commit', '-q', '-m', '재개된 세션이 늦게 만든 커밋']);
+          lateCommit = git(resumed, ['rev-parse', 'HEAD']);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    // 정상 보류로 분류하지 않는다.
+    assert.deepEqual(result.benignHolds, [], JSON.stringify(result));
+    assert.deepEqual(result.benignHeldBranches, [], JSON.stringify(result));
+    assert.ok(
+      result.heldReasons.some(
+        (reason) => reason.startsWith('로컬 브랜치 삭제 실패(검증 이후 고유 커밋):') && reason.includes(fixture.branch),
+      ),
+      JSON.stringify(result),
+    );
+
+    // 제품 불변식으로 단언한다(리포트 필드가 아니라 저장소의 실제 상태).
+    // 경합 상대는 정상 보류 테스트와 똑같이 holder 가 있고 원격 ref 는 없는 상태다 —
+    // 그 둘만으로 판정하면 이 케이스가 정상 보류로 새어 나간다.
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]), '');
+    assert.equal(git(fixture.base, ['rev-parse', fixture.branch]), lateCommit);
+    // 늦게 온 커밋은 base 밖에 있고, 로컬 ref 에만 남아 있다.
+    assert.equal(git(fixture.base, ['rev-list', '--count', `origin/main..${fixture.branch}`]), '1');
+    assert.deepEqual(result.removedLocalBranches, []);
+    assert.equal(existsSync(resumed), true, '재개된 checkout 을 건드리면 안 된다');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('cleanupTerminalTicketGit: 물고 있는 worktree 가 없는 로컬 ref 삭제 실패는 실제 오류로 보고한다', async () => {
   const fixture = await makeManagedTerminalRepo(TICKET_A);
   try {
