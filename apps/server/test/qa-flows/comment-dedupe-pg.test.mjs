@@ -71,9 +71,6 @@ test('Postgres: 같은 dedupe_key 자동 알림은 순차·동시 어느 쪽으�
     '이 파일은 진짜 Postgres 타임스탬프 정밀도와 커넥션 풀에서만 의미가 있다 — 드라이버가 postgres 가 아니면 검증이 공허하다',
   );
 
-  const { Comment } = await import('file://' + path.join(DIST_ROOT, 'entities', 'Comment.js'));
-  const { ActivityLog } = await import('file://' + path.join(DIST_ROOT, 'entities', 'ActivityLog.js'));
-  const { Agent } = await import('file://' + path.join(DIST_ROOT, 'entities', 'Agent.js'));
   const { ActivityService } = await import('file://' + path.join(DIST_ROOT, 'services', 'activity.service.js'));
   const { registerCommentTools } = await import(
     'file://' + path.join(DIST_ROOT, 'modules', 'mcp', 'tools', 'comment-tools.js')
@@ -85,7 +82,7 @@ test('Postgres: 같은 dedupe_key 자동 알림은 순차·동시 어느 쪽으�
     { tool(name, _description, _schema, handler) { handlers.set(name, handler); } },
     {
       dataSource: ds,
-      activityService: new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub),
+      activityService: new ActivityService(ds.getRepository('ActivityLog'), ds.getRepository('Agent'), logStub),
       mentionService: { parseMentions: () => [] },
       logger: logStub,
       ticketRoleAssignmentService: null,
@@ -94,7 +91,8 @@ test('Postgres: 같은 dedupe_key 자동 알림은 순차·동시 어느 쪽으�
     },
   );
   const addComment = handlers.get('add_comment');
-  const commentRepo = ds.getRepository(Comment);
+  // 부팅된 앱의 DataSource 를 그대로 쓰므로 엔티티는 등록된 이름으로 집는다.
+  const commentRepo = ds.getRepository('Comment');
 
   const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'pgdedupe' });
   const makeTicket = (title) => createTicket(app, getDataSourceToken, {
