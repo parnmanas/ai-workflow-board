@@ -2953,3 +2953,145 @@ FAIL production.private — 원격에 이 브랜치가 없다 (삭제됐거나 �
 - **다음 회차 확인 항목** — (a) PR #10 이 머지됐다면, 그 이후 cron 의 10번 단계 문구가
   '원격에 이 브랜치가 없다' 로 바뀌는지. 머지 전이면 확인 자체가 성립하지 않는다.
   (b) `main` 팁이 또 움직였다면 루트 lockfile blob 동일성부터 재확인.
+
+---
+
+## 재검증 로그 — 2026-09-19 (`main` @ `b231e34a`)
+
+9회차. `main` 의존성 축은 8회차와 완전히 동일하지만, 이번 회차는 **감사 장치 자체의 결함을
+하나 찾아 고쳤다**. 배포 브랜치가 사라진 뒤로 `발행 트리 재감사` 단계가 9일 넘게 한 번도
+돌지 않고 있었다 — 4절이 이번 회차의 핵심이다.
+
+### 1. `main` — 취약점 0건 (팁·lockfile 모두 무변화)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** (패키지 538 / 버전 579, 출처 npm)
+- 같은 스크립트 `--audit-level=low` — **0건**
+
+`main` 팁은 `b231e34a` 로 8회차와 같고, 루트 `package.json` / `package-lock.json` 은 감사
+브랜치와 **blob 동일**(`3a357fd3` / `e464f1db`)이다. 머지할 것도 재생성할 것도 없다.
+
+### 2. 배포 브랜치 — 여전히 없음
+
+- `git fetch --prune` 이 이번에 로컬의 낡은 `origin/production.private` 참조를 정리했다
+  (원격 삭제의 지연 반영일 뿐, 새로운 사건이 아니다).
+- `git ls-remote --heads origin production.private` → **조회 성공, 결과 0행** = 진짜 없음.
+- `gh run list --workflow=deploy.yml` → 마지막 배포는 **2026-09-05, `0ddec72f`** 로 변동 없음.
+
+### 3. 방법 개선 — 브랜치가 없어도 **배포된 트리는 감사할 수 있다**
+
+지금까지 회차들은 배포 브랜치가 사라진 뒤 "감사할 대상이 없다" 로 처리하고, 7건이라는 숫자는
+09-10 시점 판정을 **물려받아** 적어 왔다. 그럴 필요가 없다는 것을 이번에 확인했다 —
+배포를 식별하는 건 브랜치가 아니라 **커밋 sha** 이고, 그 sha 는 브랜치가 지워져도 여전히
+받아올 수 있다:
+
+```
+git fetch origin 0ddec72f699ebee87d8c0a4af51bcc469f17479d --depth=1
+git show 0ddec72f:package-lock.json > <tmp>
+node scripts/audit-lockfile-advisories.mjs --lockfile=<tmp> --audit-level=moderate
+```
+
+오늘자 advisory 데이터로 **실제 배포 중인 트리**를 직접 조회한 결과는 **7건, exit=1**
+(패키지 537 / 버전 580):
+
+| 심각도 | 패키지 | 설치됨 | 취약 범위 | advisory |
+| --- | --- | --- | --- | --- |
+| high | js-yaml | 4.3.1, 5.2.3 | `>=4.0.0 <4.3.2` | GHSA-2883-xcg3-v3hh |
+| high | multer | 2.2.0 | `<2.3.0` | GHSA-wc9g-mqfw-jrwm |
+| high | multer | 2.2.0 | `=2.2.0` | GHSA-qfvm-cv95-jqjf |
+| high | multer | 2.2.0 | `<2.3.0` | GHSA-535w-7cp7-47q4 |
+| moderate | hono | 4.13.0 | `<4.13.5` | GHSA-gqvv-2mrq-wpjv |
+| moderate | hono | 4.13.0 | `<4.13.5` | GHSA-g6gw-c38x-mqfc |
+| moderate | hono | 4.13.0 | `<4.13.5` | GHSA-crvj-82cr-hjcx |
+
+즉 **7건은 인용이 아니라 오늘 재도출한 값**이고, 목록도 늘지 않았다. 결론은 바뀌지 않는다 —
+NAS 에서 도는 이미지는 이 7건을 포함하며, 고칠 머지 경로는 여전히 없다. 다만 앞으로는
+브랜치 부재를 이유로 배포 트리 판정을 물려받지 말 것.
+
+### 4. 결함 발견 및 수정 — 가드 하나의 실패가 뒤따르는 가드를 침묵시킨다
+
+ticket 1019e57d 는 "네트워크 스텝이 죽으면 오프라인 가드가 전부 skipped 된다" 를 **순서
+변경**으로 고쳤다. 그런데 결합 자체는 남아 있었다. GitHub Actions 는 앞 스텝이 실패하면 뒤
+스텝을 기본적으로 skip 하므로, 순서를 어떻게 놓든 **먼저 죽은 가드가 나중 가드를 침묵시킨다.**
+
+실측 — 최근 스케줄 실행 4회 전부 동일하다:
+
+| run | 스텝 10 `배포 브랜치 lockfile 재감사` | 스텝 11 `발행 트리 재감사` |
+| --- | --- | --- |
+| 34830287705 (09-14) | failure | **skipped** |
+| 35078672216 (09-16) | failure | **skipped** |
+| 35205211091 (09-17) | failure | **skipped** |
+| 35327285746 (09-18) | failure | **skipped** |
+
+배포 브랜치가 삭제돼 스텝 10 이 **매일 확정적으로** 실패하므로, 스텝 11 은 그 이후 단 한 번도
+돌지 않았다. 이게 왜 중요한가: 스텝 11 은 `npm i -g awb-agent-manager` 가 깔 트리를 보는
+**유일한 시간축 검사**이고, 그 설치 경로는 **lockfile 을 읽지 않는다**(`^` 범위를 그 시점
+레지스트리에서 새로 해석한다). 따라서 lockfile 감사가 초록이어도 그 축은 9일 넘게
+**전혀 감사되지 않은 상태**였다. 이것이 바로 이 가드들이 막으라고 있는 false-pass 다.
+
+**비어 있던 기간의 실제 위험은 없었다** — 오늘 `audit-published-deps.mjs` 를 직접 돌린 결과
+live/next 양쪽 **moderate 이상 0건**, install script 0개, 선언 범위 4개 전부 상한 있음(exit=0).
+lockfile → 실제 해석 드리프트 7건(`ajv` 8.18.0→8.20.0, `fast-uri` 3.1.7→3.1.8,
+`hono` 4.13.7→4.13.8, `ip-address` 10.7.0→10.7.2, `proxy-addr` 2.0.7→2.0.8,
+`type-is` 1.6.18→2.1.0, `zod` 4.5.4→4.6.5)은 오늘 기준 전부 깨끗하다. 즉 **취약점이 숨어
+있었던 게 아니라, 볼 수 있는 눈이 감겨 있었다.**
+
+수정: `dependency-audit` 잡의 가드 `run:` 스텝 **8개 전부**에 `if: ${{ !cancelled() }}` 를
+붙여 서로 독립시켰다(schedule 전용 2개는 기존 조건과 AND). 실패는 그대로 잡 실패로 올라가므로
+게이트는 약해지지 않고, 한 번에 **모든** 실패가 보인다. `always()` 가 아니라 `!cancelled()` 인
+이유는 취소된 워크플로까지 계속 돌리지 않기 위해서다.
+
+회귀 가드는 `lockfile-advisory-audit-guard.test.mjs` 에 3건 추가했다(파서가 `if:` 를 읽도록
+확장). 새 파일이 아니라 **ci.yml 스텝 순서 가드를 이미 소유한 기존 파일을 확장**했으므로
+`package.json` 의 `test` 스크립트 등록은 불필요하다(`test-registration-completeness` green).
+
+- `dependency-audit 의 모든 가드 스텝은 앞 스텝 실패와 무관하게 실행된다`
+- `현재 ci.yml 에서 if 조건을 실제로 읽어낸다 (파서 공허성 차단)`
+- `조건 없는 스텝을 넣으면 독립성 가드가 FAIL 한다 (가드의 공허성 차단)` — 수정 전 형태를
+  픽스처로 넣어 가드가 실제로 잡는지 단언한다. `always()` 는 인정하지 않는 것도 여기서 단언.
+
+### 5. 8회차 교훈 재확인 — 예측은 브랜치를 맞춰야 한다
+
+8회차에서 세운 규칙("머지되지 않은 PR 안의 수정으로 CI 동작을 예측하지 말 것")이 그대로
+확인됐다. 09-18 스케줄 실행 `35327285746` 의 10번 단계 출력은 여전히 **옛 문구**다:
+
+```
+FAIL production.private — fetch 실패
+  - production.private: git fetch 실패 (Command failed: git fetch ... origin production.private)
+```
+
+`remoteBranchExists` 수정이 아직 PR #10 에만 있고 cron 은 `main` 에서 돌기 때문이다. 같은
+이유로 **이번 회차의 ci.yml 수정도 `main` 에 머지되기 전에는 cron 동작을 바꾸지 않는다** —
+다음 회차에서 스텝 11 이 도는지 확인하려 하지 말 것. 머지 대기 항목이다.
+
+cron 지연: `35327285746` 는 09:00:37Z 실행으로 예정 `17 4 * * *` 대비 **+4시간 43분**,
+관찰 범위(+4h21m ~ +5h36m) 안이다. 09-15 미실행은 일회성 종결 상태 유지.
+
+### 게이트 결과 (`main` @ `b231e34a`)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** / `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 1건** (`production.private` 원격에 없음, exit=1)
+- `audit-install-scripts` — install-script 3개 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — *설정상* 커버, 단 대상 브랜치는 존재하지 않음 (2절)
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- `audit-published-deps` (전체, 네트워크) — **live/next 양쪽 0건** (4절, CI 가 9일간 건너뛴 검사)
+- 배포 트리 `0ddec72f` 직접 감사 — **7건** (3절)
+- 가드 **94/94** 통과 (16 + 16 + 42 + 6 + 6 + 4 + 4) — 직전 91 에서 +3
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. lockfile 재생성은 불필요했다.
+
+### 이월
+
+- **운영자 결정 필요 (최우선, 9회차 연속 미해결)** — `production.private` 삭제가 **의도된
+  은퇴인가, 실수인가.** 어느 쪽이든 **지금 NAS 에서 도는 이미지는 `0ddec72f`** 이고, 오늘
+  재도출한 대로 **7건을 포함**한다.
+- **PR #10** — 09-11~09-19 감사 기록 + 배포 브랜치 게이트 진단 수정 + 이번 회차의 스텝 독립성
+  수정. 열려 있고 base `main`. 이 PR 이 머지되기 전에는 cron 의 10번 단계 문구도, 11번 단계의
+  실행 여부도 **바뀌지 않는다**(5절).
+- **PR #11 / #8** — base 브랜치 삭제로 자동 CLOSED. 복원이 선행돼야 재개 가능.
+- **다음 회차 확인 항목** — (a) `main` 팁이 움직였다면 루트 lockfile blob 동일성부터 재확인.
+  (b) 배포 트리는 브랜치가 아니라 `deploy.yml` 이 알려주는 **sha 로** 감사할 것(3절).
+  (c) PR #10 머지 후에는 cron 에서 스텝 10 이 red 여도 스텝 11 이 도는지 확인.
+- **아직 만들지 않은 것** — cron *liveness* 검사(`audit-cron-coverage` 는 설정만 본다). 09-15
+  미실행 같은 사건은 여전히 자동으로 잡히지 않는다.
