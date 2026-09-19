@@ -14,6 +14,7 @@ test/qa-flows/dispatch-intent-pg-race.test.mjs
 test/qa-flows/mcp-agent-roundtrip.test.mjs
 test/qa-flows/multi-user-chat.test.mjs
 test/qa-flows/orchestration-confirm-reminder-pg-cast.test.mjs
+test/qa-flows/orchestration-event-write-seq-backfill-pg.test.mjs
 test/qa-flows/orchestration-event-write-seq-pg.test.mjs
 test/qa-flows/orchestration-team-nullable-migration-pg.test.mjs
 test/qa-flows/silent-exit-dedupe.test.mjs

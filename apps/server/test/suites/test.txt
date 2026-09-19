@@ -155,6 +155,7 @@ test/orchestration-confirm-controller.test.mjs
 test/orchestration-confirm-notify.test.mjs
 test/orchestration-confirm-policy.test.mjs
 test/orchestration-conversation-controller.test.mjs
+test/orchestration-event-write-seq-backfill.test.mjs
 test/orchestration-fail-mission-externally.test.mjs
 test/orchestration-graph-patch.test.mjs
 test/orchestration-graph-replan.test.mjs
