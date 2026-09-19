@@ -21,17 +21,23 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 /**
  * `(mission_id, write_seq)` 에 UNIQUE 제약을 **의도적으로 걸지 않는다** (티켓 7396f93d).
  *
- * 전순서 불변식은 쓰기 시점에 이미 보장된다 — `recordEvent` 가 미션 row 를 잠근 트랜잭션
- * 안에서 `MAX(write_seq) + 1` 을 확정하고(티켓 50031353), 그 이전에 쌓여 있던 행은
- * `1760000000086-BackfillOrchestrationEventWriteSeq` 가 미션별 1..N 으로 재부여했다
- * (티켓 c17b5c2c). 회귀는 sqljs·Postgres 양쪽 실드라이버 동시성 테스트가 잡는다.
+ * **정상 채번 경로의 양수 `write_seq` 유일성**은 쓰기 시점에 이미 보장된다 — `recordEvent` 가
+ * 미션 row 를 잠근 트랜잭션 안에서 `MAX(write_seq) + 1` 을 확정하고(티켓 50031353), 그 이전에
+ * 쌓여 있던 행은 `1760000000086-BackfillOrchestrationEventWriteSeq` 가 미션별 1..N 으로
+ * 재부여했다(티켓 c17b5c2c). 회귀는 sqljs·Postgres 양쪽 실드라이버 동시성 테스트가 잡는다.
+ * 아래 fail-open 이 남기는 `write_seq = 0` 행은 **이 보장 밖이다** — 0 은 "순서 미상" 이라
+ * 애초에 순서를 주장하지 않는 값이고, 같은 미션에 여러 개 생길 수 있다.
  *
- * 그래서 제약은 **정상 경로에서는 중복 방어이고, 유일하게 남은 위반 경로에서는 무력하다.**
- * `recordEvent` 는 정렬 키 유도가 실패해도 `write_seq: 0`("순서 미상")으로 타임라인 행을
- * 남긴다. 한 미션에서 이 fail-open 이 두 번 일어나면 0 이 두 행이 되는데, UNIQUE 면 두 번째
- * INSERT 가 거부되고 그 예외는 맨 안쪽 catch 가 삼켜 **감사 행이 통째로 사라진다** — 조용한
- * degrade 가 조용한 유실로 바뀔 뿐 순서는 복구되지 않는다. `write_seq <> 0` 부분 인덱스도
- * 이 경로를 보호하지 못하는 것은 같고, 레거시 seq=1 군집(티켓 85efcb69 증상)에는 그대로 걸린다.
+ * 그래서 제약은 **이미 성립하는 범위를 한 번 더 덮을 뿐이고, 남은 위반 경로에는 형태별로 다르게
+ * 빗나간다.** `recordEvent` 는 정렬 키 유도가 실패해도 `write_seq: 0` 으로 타임라인 행을 남기는데,
+ * 한 미션에서 이 fail-open 이 두 번 일어나면 0 이 두 행이 된다. 그때:
+ *
+ * - **전체 UNIQUE** 는 두 번째 0 INSERT 를 거부하고, 그 예외를 맨 안쪽 catch 가 삼켜 **감사 행이
+ *   통째로 사라진다.** 순서가 복구되는 게 아니라 조용한 degrade 가 조용한 유실로 바뀐다.
+ * - **`write_seq <> 0` 부분 인덱스** 는 0 이 인덱스 밖이라 그 INSERT 를 **거부하지 않는다** —
+ *   유실은 만들지 않지만 0 중복과 그로 인한 커서 건너뜀을 그대로 둔다. 즉 이 경로에 대해
+ *   아무것도 하지 않는다. 그러면서도 백필 전 **양수** 레거시 중복(seq=1 군집, 티켓 85efcb69
+ *   증상)에는 그대로 걸려 아래의 부팅 실패는 피하지 못한다.
  *
  * 반대편 비용은 크다. `db.ts` 의 `synchronize` 는 모든 분기에서 하드코딩 on 이고(D-01)
  * `runMigrations()` 는 `DataSource.initialize()` **뒤에** 돈다(D-02, `database.module.ts`).
@@ -43,7 +49,8 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
  *
  * 다시 검토한다면 제약만 얹지 말고, `dispatch_intents` 처럼 synchronize **이전에** 도는
  * 복구 훅(`db.ts` 의 `preSyncPostgres` / `preSyncSqljsOpenIntents`, 티켓 3c3b17a3)을 함께
- * 설계할 것. 그때도 fail-open 채번을 먼저 유일값으로 바꿔야 위 유실 경로가 닫힌다.
+ * 설계할 것. 그리고 fail-open 채번을 먼저 유일값으로 바꿔야 한다 — 그러지 않으면 전체 UNIQUE 는
+ * 위 유실 경로를, 부분 인덱스는 0 중복과 커서 건너뜀을 그대로 남긴다.
  */
 export class OrchestrationEvent {
   @PrimaryGeneratedColumn('uuid')
