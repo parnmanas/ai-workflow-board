@@ -187,3 +187,66 @@ test('fitHistoryBytes keeps the newest events within the byte budget and never r
   const single = fitHistoryBytes([ev(1, 50_000)], 1_000);
   assert.equal(single.length, 1, 'one oversized event still comes through rather than an empty transcript');
 });
+
+// ─── 큰 세션: 최근 창만 들고 온다 (BoundedHistory) ─────────────────────────────
+//
+// 기록 파일은 수백 MB 까지 자란다(실측: codex rollout 353MB). 전부 배열에 쌓은 뒤 잘라내면
+// 파일 크기에 비례해 메모리를 먹었다(최대 RSS 586MB). 파싱하면서 창 밖으로 나간 건 즉시 버리고,
+// payload 크기도 담는 시점에 자른다. seq/id 는 절대 위치를 유지해야 앞부분이 그대로인 한
+// 같은 이벤트가 같은 id 를 갖는다(화면이 라이브 행과 중복을 거르는 근거).
+test('BoundedHistory keeps the newest N, counts what it dropped, and reports the absolute offset', async () => {
+  const { BoundedHistory } = await import('../dist/lib/agent-session-store.js');
+  const window = new BoundedHistory(3);
+  assert.deepEqual(window.items(), []);
+  assert.equal(window.total, 0);
+  for (let i = 1; i <= 10; i += 1) window.push(i);
+  assert.deepEqual(window.items(), [8, 9, 10], 'the newest survive');
+  assert.equal(window.total, 10, 'everything pushed is counted');
+  assert.equal(window.offset, 7, 'the first kept item sat at absolute index 7 (0-based)');
+
+  const unbounded = new BoundedHistory(0);
+  unbounded.push('a');
+  assert.deepEqual(unbounded.items(), [], 'a zero window keeps nothing');
+  assert.equal(unbounded.total, 1, 'but still counts');
+
+  const roomy = new BoundedHistory(100);
+  for (let i = 0; i < 5; i += 1) roomy.push(i);
+  assert.deepEqual(roomy.items(), [0, 1, 2, 3, 4]);
+  assert.equal(roomy.offset, 0, 'nothing dropped → offset 0');
+});
+
+test('a long codex session returns only the newest events, numbered by absolute position, with an omission note', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'awb-store-window-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dir = join(root, 'codex', 'sessions', '2026', '09', '20');
+  await mkdir(dir, { recursive: true });
+  const sessionId = '01a0aaaa-1111-7000-8000-222233334444';
+  const lines = [JSON.stringify({ type: 'session_meta', timestamp: '2026-09-20T00:00:00.000Z', payload: { id: sessionId, cwd: root, timestamp: '2026-09-20T00:00:00.000Z' } })];
+  // 300 턴 — 창(10)보다 훨씬 많다. 덩치 큰 tool 출력도 섞어 payload 자르기를 함께 태운다.
+  for (let i = 0; i < 300; i += 1) {
+    lines.push(JSON.stringify({ type: 'response_item', timestamp: '2026-09-20T00:00:01.000Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `prompt ${i}` }] } }));
+    lines.push(JSON.stringify({ type: 'response_item', timestamp: '2026-09-20T00:00:02.000Z', payload: { type: 'custom_tool_call', call_id: `c${i}`, name: 'exec', status: 'completed', input: 'x'.repeat(50_000) } }));
+    lines.push(JSON.stringify({ type: 'response_item', timestamp: '2026-09-20T00:00:03.000Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `answer ${i}` }] } }));
+  }
+  await writeFile(join(dir, `rollout-2026-09-20T00-00-00-${sessionId}.jsonl`), lines.join('\n') + '\n');
+
+  const store = new AgentSessionStore({ claudeHome: join(root, 'claude'), codexHome: join(root, 'codex'), indexPath: join(root, 'index.json'), historyEventLimit: 10 });
+  const history = await store.readHistory('codex', sessionId);
+  assert.equal(history.truncated, true);
+  const note = history.events[0];
+  assert.equal(note.type, 'system');
+  assert.match(note.payload.text, /Earlier history omitted \(\d+ events\)/);
+
+  const rows = history.events.slice(1);
+  assert.equal(rows.length, 10, 'only the window is returned');
+  assert.equal(rows.at(-1).payload.text, 'answer 299', 'the newest row is the end of the file');
+  assert.equal(rows.at(-1).seq, 900, 'seq is the absolute position, not the position within the window');
+  assert.equal(rows.at(-1).id, `${sessionId}:900`);
+  assert.ok(rows.every((e, i) => e.seq === rows[0].seq + i), 'seq is contiguous across the window');
+  const omitted = Number(/\((\d+) events\)/.exec(note.payload.text)[1]);
+  assert.equal(omitted, 900 - rows.length, 'the note counts everything that was dropped, not just the tail');
+
+  const big = rows.find((e) => e.type === 'tool_call');
+  assert.ok(big, 'the window still carries tool calls');
+  assert.ok(JSON.stringify(big.payload).length < 40_000, 'oversized payloads are cut as they enter the window');
+});

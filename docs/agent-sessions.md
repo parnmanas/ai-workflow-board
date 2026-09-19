@@ -131,6 +131,20 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
   턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
 - 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
 
+### 긴 세션 (기록 창과 라이브 창)
+
+기록 파일은 수백 MB 까지 자란다(실측: rolf 의 codex rollout 353MB, ralf 176MB). 어느 쪽도 통째로 다루지 않는다.
+
+- **매니저**: 파싱하면서 최근 `historyEventLimit`(4000) 건만 `BoundedHistory` 에 들고, 창 밖으로 나간 건 즉시 버린다.
+  payload 크기(`boundHistoryPayload`)도 **담는 시점에** 자른다 — 나중에 한 번에 자르면 창 안에 원본 blob 이 남아
+  파일 크기만큼 메모리를 먹는다(353MB 세션에서 최대 RSS 586MB → 293MB, 3.1s → 2.0s). 그 다음 바이트 상한
+  (`HISTORY_BODY_MAX_BYTES` 6MB)에 맞춰 다시 오래된 것부터 버리고, `Earlier history omitted (N events)` 한 줄을 앞에 붙인다.
+  `seq`/`id` 는 창 안 위치가 아니라 **절대 위치**다 — 앞부분이 그대로인 한 같은 이벤트가 같은 id 를 가져야 화면이
+  라이브 행과 중복을 거를 수 있다.
+- **화면**: 라이브 행도 `LIVE_EVENT_WINDOW`(4000)을 넘으면 앞에서 버리고 `Earlier messages trimmed (N events)` 한 줄을
+  남긴다(마커는 항상 하나, 누적 개수만 올라간다). 상한이 없으면 오래 켜 둔 세션에서 배열이 무한히 자라고
+  매 스트림 청크마다 전체를 다시 접느라(`buildTranscript`) 점점 느려진다.
+
 ### 어댑터의 MCP 연결 알림 (`mcp_startup.<server>`)
 
 codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지 않는 한 번짜리 `tool_call`** 로 알린다

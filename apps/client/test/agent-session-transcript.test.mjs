@@ -294,3 +294,39 @@ test('a tool_call that arrives already completed/failed (codex mcp startup) is n
   assert.equal(blocks[0].status, 'failed', 'initial status is honoured');
   assert.equal(blocks[1].status, 'in_progress', 'calls without a status still start as running');
 });
+
+// ─── 라이브 창(window) — 오래 켜 둔 세션이 무한히 자라지 않는다 ────────────────
+test('appendLiveEvent keeps only the most recent window and says how many it dropped', () => {
+  seq = 0;
+  let events = [];
+  for (let i = 0; i < 5; i += 1) events = appendLiveEvent(events, ev('text', { text: `t${i}` }), 3);
+  assert.equal(events.length, 4, 'window of 3 plus the marker');
+  assert.equal(events[0].type, 'system');
+  assert.equal(events[0].payload.dropped, 2);
+  assert.match(events[0].payload.text, /Earlier messages trimmed \(2 events\)/);
+  assert.deepEqual(events.slice(1).map((e) => e.payload.text), ['t2', 't3', 't4'], 'the newest rows survive');
+
+  // 계속 흘러도 마커는 하나뿐이고 누적 개수만 올라간다
+  events = appendLiveEvent(events, ev('text', { text: 't5' }), 3);
+  assert.equal(events.filter((e) => e.type === 'system').length, 1, 'one marker, not one per trim');
+  assert.equal(events[0].payload.dropped, 3);
+  assert.deepEqual(events.slice(1).map((e) => e.payload.text), ['t3', 't4', 't5']);
+  assert.ok(events.slice(1).every((e, i) => e.seq === events[i + 1].seq), 'kept rows keep their display seq');
+
+  // 상한 안에서는 아무것도 버리지 않는다(기본 동작)
+  let small = [];
+  for (let i = 0; i < 3; i += 1) small = appendLiveEvent(small, ev('text', { text: `s${i}` }), 10);
+  assert.equal(small.length, 3);
+  assert.equal(small.some((e) => e.id === 'live:trimmed'), false);
+});
+
+test('the trim marker renders as a system note and does not disturb folding', () => {
+  seq = 0;
+  let events = [];
+  for (let i = 0; i < 4; i += 1) events = appendLiveEvent(events, ev('text', { text: `chunk${i} ` }, 't1'), 2);
+  const blocks = buildTranscript(events);
+  assert.equal(blocks[0].kind, 'system', 'the marker is a plain system note');
+  assert.match(blocks[0].text, /Earlier messages trimmed/);
+  const assistant = blocks.find((b) => b.kind === 'assistant');
+  assert.equal(assistant.text, 'chunk2 chunk3 ', 'surviving chunks of the same turn still merge');
+});
