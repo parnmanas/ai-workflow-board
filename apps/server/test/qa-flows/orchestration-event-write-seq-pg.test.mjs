@@ -86,6 +86,7 @@ let booted = null;
 async function bootOnce() {
   if (!booted) booted = await bootService();
   booted.logged.length = 0;
+  booted.warned.length = 0;
   return booted;
 }
 
@@ -127,9 +128,13 @@ async function bootService() {
   // 죽이지 않기 위해). 그래서 서비스 배선이 틀리면 "이벤트가 0건" 으로만 보이고 원인이
   // 숨는다 — 에러를 모아 두었다가 각 케이스 끝에서 비어 있는지 단언한다.
   const logged = [];
+  // fail-open 은 error 가 아니라 warn 으로 남는다(그게 계약이다 — 행은 남기고 degrade).
+  // 그 경로가 실제로 돌았는지 단언하려면 warn 도 모아야 한다(티켓 7b679009).
+  const warned = [];
   const logService = {
     error: (...args) => logged.push(args.join(' ')),
-    warn() {}, info() {}, debug() {},
+    warn: (...args) => warned.push(args.join(' ')),
+    info() {}, debug() {},
   };
 
   const missions = new OrchestrationMissionService(
@@ -146,6 +151,7 @@ async function bootService() {
   return {
     missions,
     logged,
+    warned,
     missionRepo: ds.getRepository(entities.OrchestrationMission),
     eventRepo: ds.getRepository(entities.OrchestrationEvent),
   };
@@ -552,4 +558,125 @@ test('Postgres: 같은 미션에 동시 recordEvent 를 태워도 write_seq 가 
     [...seen].sort(), rows.map((e) => e.id).sort(),
     `커서 순회가 ${seen.length}/${N} 건만 덮었다 — 동시 기록 결과 위에서도 누락이 0 이어야 한다.`,
   );
+});
+
+// ── 티켓 7b679009: fail-open write_seq=0 이 두 번 나도 커서가 이벤트를 잃지 않는다 ──
+//
+// `recordEvent` 는 직렬화 트랜잭션이 실패하면 `write_seq: 0`("순서 미상")으로 행만 남기고
+// 넘어간다. 한 미션에서 두 번 발동하면 tied group 안에 seq 동률 두 행이 생기고, 커서가
+// 그 사이를 가리키면 tie-break 가 `0 < 0` 으로 거짓이 되어 나머지가 사라진다.
+//
+// **왜 Postgres 를 따로 봐야 하는가 — sqljs 에서는 드러나지 않는 축이 하나 더 있다.**
+// fail-open 행의 `created_at` 은 잠금 안에서 찍히지 못하고 DB 기본값(`CURRENT_TIMESTAMP`,
+// µs 정밀도)으로 들어온다. 즉 같은 밀리초 안에서도 두 행의 µs 가 **서로 다르다.** 그러면
+// 정렬(µs 까지 보는 `created_at`)과 술어(tied group 을 한 덩어리로 보는 `[t, t+1ms)`)의
+// granularity 가 어긋나, `id` 를 타이브레이커로 더해도 uuid 대소가 µs 대소와 반대인 절반의
+// 경우에 여전히 행이 사라진다. sqljs 는 저장 포맷이 초 단위 문자열이라 이 어긋남 자체가
+// 없어서, sqljs green 을 Postgres 의 보장으로 간주하면 안 된다(보드 교훈). 이 케이스가
+// 정렬 granularity 까지 커서 정밀도에 맞췄는지를 진짜 µs 위에서 확인한다.
+test('Postgres: 한 미션에서 fail-open 이 두 번 나도 커서가 전량을 덮는다', { skip: SKIP }, async () => {
+  const { missions, logged, warned, missionRepo, eventRepo } = await bootOnce();
+  const mission = await newMission(missionRepo, 'fail-open 두 번');
+
+  // ── 정상 기록 3건 → seq 1..3, 한 밀리초 안에 µs 꼬리만 다르게 ──
+  const beforeIds = await recordAndPin(
+    missions, eventRepo, mission,
+    ['정상 1', '정상 2', '정상 3'],
+    (i) => `2026-01-02 03:04:11.111${microTail(i)}`,
+  );
+
+  // ── fail-open 2건: 직렬화 트랜잭션만 실패시켜 production 의 catch 경로를 태운다 ──
+  const originalTransaction = ds.transaction;
+  const failOpenMessages = ['fail-open A', 'fail-open B'];
+  try {
+    ds.transaction = async () => { throw new Error('injected: serialized event write failed'); };
+    for (const m of failOpenMessages) await missions.recordEvent(mission, { type: 'note', message: m });
+  } finally {
+    ds.transaction = originalTransaction;
+  }
+  const failOpenRows = [];
+  for (const m of failOpenMessages) {
+    const row = await eventRepo.findOne({ where: { mission_id: mission.id, message: m } });
+    assert.ok(row, `"${m}" 이벤트가 저장돼야 한다`);
+    failOpenRows.push(row);
+  }
+
+  // 완료 조건 2: fail-open 은 기록 자체를 막지 않는다 — 행은 남고 값은 "순서 미상"인 0 이다.
+  assert.deepEqual(
+    failOpenRows.map((e) => e.write_seq), [0, 0],
+    'fail-open 은 write_seq 0 으로라도 타임라인 행을 남겨야 한다 — 막히면 ' +
+    '"타임라인 한 줄 때문에 dispatch 를 죽이지 않는다" 는 계약이 좁아진다',
+  );
+  assert.equal(
+    warned.filter((l) => l.includes('retrying unordered')).length, 2,
+    'fail-open 경로가 실제로 두 번 돌았어야 한다 — 로그가 없으면 트랜잭션이 그냥 성공한 것이고 픽스처가 공허하다',
+  );
+  assert.deepEqual(logged, [], '안쪽 폴백 INSERT 까지 실패하면 감사 행이 통째로 사라진다 — 그건 다른 결함이다');
+
+  // fail-open 두 행을 같은 밀리초 + 서로 다른 µs 꼬리로 고정한다. DB 기본값이 만드는
+  // 모양 그대로이고(잠금 밖이라 시각을 찍지 못한다), 러너 속도 의존만 걷어낸 것이다.
+  const failOpenIds = failOpenRows.map((e) => e.id);
+  await forceTiedTimestamps(ds, failOpenIds, '2026-01-02 03:04:11.222');
+  await assertFixtureIsMicrosecondTied(ds, failOpenIds, 'fail-open tied group');
+
+  // ── fail-open 뒤의 정상 기록 → 0 이 최댓값을 끌어내리지 않는다 ──
+  const [resumedId] = await recordAndPin(
+    missions, eventRepo, mission, ['정상 4'], () => '2026-01-02 03:04:11.333137',
+  );
+  const resumed = await eventRepo.findOne({ where: { id: resumedId } });
+  assert.equal(resumed.write_seq, 4, 'seq 0 이 섞여도 다음 정상 기록은 MAX + 1 이어야 한다');
+
+  // 픽스처의 핵심 — 두 fail-open 행의 µs 가 **서로 달라야** 정렬/술어 granularity 어긋남이
+  // load-bearing 해진다. 같으면 이 케이스가 sqljs 케이스와 다를 게 없어져 공허하다.
+  const tails = await ds.query(
+    `SELECT (EXTRACT(MICROSECONDS FROM created_at)::bigint % 1000) AS us_tail
+       FROM orchestration_events WHERE id = ANY($1::uuid[])`,
+    [failOpenIds],
+  );
+  assert.equal(
+    new Set(tails.map((r) => Number(r.us_tail))).size, 2,
+    'fail-open 두 행의 µs 꼬리가 달라야 한다 — 같으면 정렬과 술어의 granularity 어긋남을 재현하지 못한다',
+  );
+
+  const all = [...beforeIds, ...failOpenIds, resumedId];
+
+  /** 커서로 전량 순회한다. `withId=false` 는 고치기 전 (at, seq) 2단 커서 모양이다. */
+  async function walk(limit, withId) {
+    const seen = [];
+    let cursor = null;
+    for (let page = 0; page < 30; page += 1) {
+      const res = await missions.listMissionEvents(mission.id, WS, {
+        limit,
+        before_at: cursor?.at,
+        before_seq: cursor?.seq,
+        ...(withId ? { before_id: cursor?.id } : {}),
+      });
+      for (const e of res.events) seen.push(e.id);
+      cursor = res.next_cursor;
+      if (!res.has_more) break;
+    }
+    return seen;
+  }
+
+  // ── 비공허성: 옛 2단 커서는 실제로 잃는다 ──
+  const legacy = await walk(1, false);
+  assert.ok(
+    legacy.length < all.length,
+    '(at, seq) 2단 커서는 seq 동률 군집에서 행을 잃어야 한다 — 이 단언이 실패하면 픽스처가 ' +
+    `결함을 재현하지 못한 것이다 (순회 ${legacy.length} / 전체 ${all.length})`,
+  );
+
+  // ── 제품 불변식: 3단 커서는 하나도 빠뜨리지 않는다 ──
+  for (const limit of [1, 2, 3]) {
+    const seen = await walk(limit, true);
+    assert.equal(
+      new Set(seen).size, seen.length,
+      `limit=${limit}: 커서가 같은 이벤트를 두 번 돌려줬다 (중복 ${seen.length - new Set(seen).size}건)`,
+    );
+    assert.deepEqual(
+      [...seen].sort(), [...all].sort(),
+      `limit=${limit}: 커서 순회가 ${seen.length}/${all.length} 건만 덮었다 — 같은 밀리초 안에서 ` +
+      'seq 가 동률이면 안정 키(id)로 가르고, 정렬도 같은 granularity 로 잘라야 손실이 0 이 된다',
+    );
+  }
 });
