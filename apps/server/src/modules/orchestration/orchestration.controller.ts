@@ -212,6 +212,11 @@ export class OrchestrationController {
   /**
    * 타임라인 커서 페이지네이션(리뷰 라운드1 P1-3). `missions/:id` 는 최신 N건만 싣는
    * bounded window 라, 그 창을 과거로 미는 전용 경로가 따로 필요하다.
+   *
+   * `before_id` 는 커서의 **마지막 키**다(티켓 7b679009). `write_seq` 동률 — fail-open 의
+   * `write_seq: 0` 이 한 미션에서 두 번 났거나 백필 전 레거시 구간이 남은 경우 — 에서
+   * 페이지 경계 유실을 막는 유일한 수단이라, `next_cursor.id` 를 받았으면 반드시 되돌려
+   * 보내야 한다. 생략하면 서버는 예전 2단 술어로 degrade 한다(구 클라이언트 호환).
    */
   @Get('missions/:id/events')
   async listMissionEvents(
@@ -220,6 +225,7 @@ export class OrchestrationController {
     @Query('limit') limit: string,
     @Query('before_at') beforeAt: string,
     @Query('before_seq') beforeSeq: string,
+    @Query('before_id') beforeId: string,
     @Res() res: Response,
   ) {
     try {
@@ -228,6 +234,7 @@ export class OrchestrationController {
           limit: limit ? parseInt(limit, 10) : undefined,
           before_at: beforeAt || undefined,
           before_seq: beforeSeq ? parseInt(beforeSeq, 10) : undefined,
+          before_id: beforeId || undefined,
         }),
       );
     } catch (e: any) {

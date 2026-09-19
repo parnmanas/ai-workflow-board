@@ -18,14 +18,18 @@ export const AGENT_SESSION_STATUSES = [
   'ready',                 // ACP 세션이 열려 있고 프롬프트를 받을 수 있음
   'busy',                  // 프롬프트 턴 진행 중
   'awaiting_permission',   // 에이전트가 permission 을 요청하고 사용자 결정을 기다림
+  'awaiting_input',        // 에이전트가 구조화된 입력(ACP elicitation: 질문/폼)을 요청하고 사용자 답을 기다림
   'error',                 // 마지막 동작이 실패 — last_error 참조, 다음 prompt 로 재시도
   'closed',                // 사용자가 닫음 — 프로세스 종료. 다시 prompt 하면 idle 처럼 재오픈
 ] as const;
 export type AgentSessionStatus = (typeof AGENT_SESSION_STATUSES)[number];
 
-/** 프롬프트를 받을 수 있는 상태 — 진행 중(busy / awaiting_permission)만 아니면 매니저가 (재)오픈한다. */
+/** 사용자 결정을 기다리는 상태 — 카드(permission / elicitation)에 답해야 턴이 이어진다. */
+export const AGENT_SESSION_WAITING_STATUSES: ReadonlySet<string> = new Set(['awaiting_permission', 'awaiting_input']);
+
+/** 프롬프트를 받을 수 있는 상태 — 진행 중(busy / 대기 / starting)만 아니면 매니저가 (재)오픈한다. */
 export function agentSessionAcceptsPrompt(status: string | null | undefined): boolean {
-  return status !== 'busy' && status !== 'awaiting_permission' && status !== 'starting';
+  return status !== 'busy' && status !== 'starting' && !AGENT_SESSION_WAITING_STATUSES.has(status || '');
 }
 
 export const AGENT_SESSION_EVENT_TYPES = [
@@ -34,8 +38,11 @@ export const AGENT_SESSION_EVENT_TYPES = [
   'reasoning',            // { text }
   'tool_call',            // { tool_call_id, title, kind?, input? }
   'tool_update',          // { tool_call_id, status?, output? }
-  'permission_request',   // { request_id, tool_call_id, title?, kind?, options: [{ option_id, name, kind }] }
-  'permission_decision',  // { request_id, outcome, option_id?, decided_by: 'user'|'policy'|'timeout' }
+  'permission_request',   // { request_id, tool_call_id, title?, description?, kind?, options: [{ option_id, name, kind }] }
+  'permission_decision',  // { request_id, outcome, option_id?, decided_by: 'user'|'policy'|'timeout'|'system' } — system: 프로세스 종료/close 로 매니저가 취소
+  'elicitation_request',  // { elicitation_id, mode: 'form'|'url', message, schema? (ACP ElicitationSchema), url?, tool_call_id? } — 에이전트의 질문/폼
+  'elicitation_decision', // { elicitation_id, action: 'accept'|'decline'|'cancel', content?, decided_by: 'user'|'agent'|'system' }
+  'plan',                 // { entries: [{ content, priority, status }] } — 같은 turn 의 최신 plan 이 이전 것을 대체한다
   'usage',                // { input_tokens, output_tokens, total_tokens, … }
   'turn',                 // { phase: 'started'|'finished', stop_reason? }
   'error',                // { message, code? }
@@ -50,8 +57,10 @@ export const AGENT_SESSION_REQUEST_OPS = [
   'open',        // RPC: 세션을 연다(session_id 없으면 session/new, 있으면 session/load)
   'prompt',      // { turn_id, text } — 살아 있지 않으면 매니저가 먼저 연다
   'permission',  // { permission_request_id, option_id | null }
+  'elicitation', // { elicitation_id, elicitation_action: 'accept'|'decline'|'cancel', elicitation_content? } — 질문/폼 답
   'cancel',
   'set_mode',    // { mode_id }
+  'set_config_option', // { config_id, config_value: string | boolean } — 모델·reasoning 등 ACP session config option
   'close',       // 프로세스 종료
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
@@ -65,6 +74,33 @@ export interface AgentSessionModeOption {
   description?: string;
 }
 
+/**
+ * ACP session config option(모델·reasoning·mode 등)의 서버/UI 투영. 어댑터가 `session/new` 응답과
+ * `config_option_update` 로 전체 목록을 주고, `session/set_config_option` 으로 바꾼다.
+ * `type: 'select'` 는 `options` 중 하나(`current_value` 는 value id), `'boolean'` 은 on/off.
+ */
+export interface AgentSessionConfigOption {
+  config_id: string;
+  name: string;
+  description?: string;
+  /** ACP SessionConfigOptionCategory — 'model' | 'mode' | 'thought_level' | 'model_config' | 그 외 문자열. UI 배치 힌트일 뿐. */
+  category: string;
+  type: 'select' | 'boolean' | string;
+  current_value: string | boolean | null;
+  options: Array<{ value: string; name: string; description?: string; group?: string }>;
+}
+
+/** 어댑터가 `available_commands_update` 로 알려 준 slash command. 프롬프트 텍스트에 `/name …` 로 실어 보낸다. */
+export interface AgentSessionCommand {
+  name: string;
+  description: string;
+  /** 명령 뒤에 자유 텍스트를 받는다면 그 힌트. */
+  input_hint?: string;
+}
+
+export const AGENT_SESSION_CONFIG_OPTIONS_MAX = 32;
+export const AGENT_SESSION_COMMANDS_MAX = 200;
+
 /** 장비의 CLI 홈에서 읽은 세션 한 줄. */
 export interface AgentSessionSummary {
   cli: string;
@@ -76,6 +112,8 @@ export interface AgentSessionSummary {
   /** 'cli' = CLI 홈에서 발견, 'awb' = AWB 세션 화면에서 만든 것(매니저 로컬 인덱스). */
   source: 'cli' | 'awb';
   size_bytes?: number;
+  /** 매니저에 살아 있는 프로세스가 있을 때의 상태(list RPC 가 세션마다 실어 보낸다). 없으면 프로세스 없음. */
+  live_status?: AgentSessionStatus | string;
 }
 
 export interface AgentSessionEventRecord {

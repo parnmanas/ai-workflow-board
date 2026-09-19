@@ -49,11 +49,46 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   로컬 인덱스(`$AWB_AGENT_MANAGER_HOME/agent-sessions.json`)로 기억한다.
 - **매니저 `agent-session-runner.ts`** — 세션당 ACP 어댑터 프로세스. 명령 우선순위: env `AWB_ACP_COMMAND_<CLI>` →
   PATH 의 `claude-agent-acp` / `codex-acp` / `hermes-acp` → `npx --yes @agentclientprotocol/claude-agent-acp` /
-  `@zed-industries/codex-acp`. env 는 매니저 프로세스 그대로(운영자 CLI 홈), AWB MCP 서버는 매니저 키로 주입.
+  `@agentclientprotocol/codex-acp`. **어댑터는 두 패키지 모두 `@agentclientprotocol/*`** — zed-industries 의 codex-acp 는
+  2026-07 에 archive 됐고 옛 Codex 코어(rust-v0.137)라 새 모델을 "requires a newer version of Codex" 로 거부한다.
+  `@agentclientprotocol/codex-acp` 는 설치된 codex CLI 와 같은 세대의 `@openai/codex` 를 번들한다. 장비에는
+  `npm i -g @agentclientprotocol/codex-acp @agentclientprotocol/claude-agent-acp` 로 미리 설치해 둔다(npx 폴백은 첫 실행이 느리다).
+  env 는 매니저 프로세스 그대로(운영자 CLI 홈), AWB MCP 서버는 매니저 키로 주입. codex 에는 `NO_BROWSER=1` 을 더해
+  브라우저 로그인 auth method 를 숨긴다. `session/new`/`load` 가 auth required(-32000) 로 거부되면 환경에 API 키가 있을 때
+  api-key 계열 ACP `authenticate` 를 한 번 시도하고, 아니면 "장비에서 `<cli> login` 하거나 credential 을 묶으라" 는 오류를 낸다.
   기존 세션은 `session/load`(cwd 는 기록에서), 새 세션은 `session/new`. load 재생분은 버린다(UI 가 history 로 이미 가짐).
   유휴 30분(`config.agent_sessions.idle_minutes`) 또는 close 로 프로세스 회수 → 상태 idle/closed, 다음 prompt 가 다시 연다.
 - **클라이언트 `components/sessions`** — 호스트 목록 → 호스트×CLI 세션 목록(장비의 기록) → 트랜스크립트(history + 라이브
   스트림) + 컴포저. 권한 카드 버튼이 `POST …/permission` 을 부른다. 라이브 행은 도착 순서로 붙이고 id 로만 중복을 거른다.
+
+## 상호작용 (모델 선택 · slash command · 질문/폼 · plan)
+
+ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델 목록이나 명령을 하드코딩하지 않고 **어댑터가 알려 준 것**을 보여 준다.
+
+| ACP | AWB 상태/이벤트 | 사용자 조작 |
+|---|---|---|
+| `session/new`·`load` 응답의 `configOptions`, `config_option_update` | 스냅샷 `config_options[]` (`config_id, name, category, type: select\|boolean, current_value, options[]`) | 헤더의 셀렉트/체크박스 → `POST …/config-option {config_id, value}` → op `set_config_option` → `session/set_config_option` → 어댑터가 준 전체 목록으로 갱신 + system 행 |
+| `available_commands_update` | 스냅샷 `available_commands[]` (`name, description, input_hint?`) | 컴포저에서 `/` 를 치면 자동완성(↑/↓, Enter/Tab 선택, Esc). 선택은 텍스트만 채우고 전송하지 않는다. 명령은 프롬프트 텍스트로 그대로 간다 |
+| `session/request_permission` (`title`/`description`/`toolCall`, claude 의 `_meta.permission`) | `permission_request` 행 + `awaiting_permission` | 권한 카드 → `POST …/permission` |
+| `elicitation/create` (form: JSON Schema, url) — claude 의 AskUserQuestion 등 | `elicitation_request` 행 + **`awaiting_input`** (form 만). url 은 링크 카드만 남기고 바로 accept, 완료는 `elicitation/complete` → `elicitation_decision{decided_by:'agent'}` | 폼 카드(문자열/숫자/불리언/단일·다중 선택, required 검사) → `POST …/elicitation {elicitation_id, action: accept\|decline\|cancel, content}` → op `elicitation` |
+| `plan` / `plan_update` | `plan` 행(`entries[{content, priority, status}]`) — 같은 turn 의 최신 것이 이전 것을 대체 | 체크리스트 카드 |
+| `session_info_update` | 제목 패치 | — |
+
+client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
+config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 — codex-acp 1.12, claude-agent-acp 0.79 실측) 또는
+`configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
+설정 변경(`set_config_option` / `set_mode`)은 프로세스가 없는 세션에도 된다 — 서버가 `starting` 으로 올리고 매니저가
+prompt 와 같은 경로로 먼저 연 뒤 적용하므로 **첫 프롬프트 전에 모델·approval 모드를 고를 수 있다**. 턴 중·대기 중에는 409.
+설정 목록 자체는 어댑터가 살아 있어야 오므로, 세션 페이지에 들어오면 `idle` 세션은 자동으로 한 번 연결한다(`POST …/sessions
+{session_id}` → session/load, 터미널의 `--resume` 과 같다). `closed`/`error` 는 헤더의 Connect/Reconnect 버튼으로만 다시 연다.
+
+codex-acp 1.12 실측(rolf): `session/new` 가 modes(read-only / agent / agent-full-access) 와 config options
+Mode·Collaboration mode(default/plan)·Model(gpt-5.6-sol, gpt-6-astra, …)·Reasoning effort·Fast mode 를 준다. approval 은
+`session/request_permission` 으로 온다(예: plan 확정 "Implement this plan?" 의 implement_plan/revise_plan). 질문은
+Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + 메모)으로 온다. read-only 모드에서도 작업 폴더 안의
+쓰기는 codex 샌드박스가 그냥 허용하므로 approval 이 뜨지 않는 게 codex 의 동작이다.
+`awaiting_input` 은 `awaiting_permission` 과 같은 대기 상태다: prompt 는 409 `session_busy`, 유령 되돌림 대상, 프로세스 종료·close 때
+미결 질문은 `elicitation_decision{action:'cancel', decided_by:'system'}` 으로 닫히고, history RPC 가 미결 질문을 같은 id 로 다시 실어 보낸다.
 
 ## CLI 설정 (credential 바인딩)
 
@@ -76,9 +111,73 @@ Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → C
 
 ## 상태
 
-`idle`(프로세스 없음) → `starting` → `ready` ⇄ `busy` ⇄ `awaiting_permission`; `error`(last_error); `closed`(사용자가 멈춤).
-idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 중(busy / awaiting_permission / starting)에는 409 `session_busy`.
+`idle`(프로세스 없음) → `starting` → `ready` ⇄ `busy` ⇄ `awaiting_permission` / `awaiting_input`; `error`(last_error); `closed`(사용자가 멈춤).
+idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 중(busy / awaiting_* / starting)에는 409 `session_busy`.
 상수는 `apps/server/src/common/types/agent-sessions.ts` 가 단일 원천이다.
+
+**진실은 매니저 쪽 프로세스다.** 서버 메모리의 상태는 매니저의 마지막 상태 패치에 의존하는데, 매니저가
+self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호를 보내 세션 프로세스가 먼저 죽는다) 그 패치가
+오지 못해 목록에 "Needs your approval" 유령이 남고 prompt 가 409 로 막히던 문제가 있었다. 그래서:
+
+- `list` RPC 답의 세션별 `live_status`, `history` RPC 답의 `live`(프로세스가 없으면 `null`)로 서버가 메모리를 **되맞춘다**.
+  매니저가 "없다" 고 하면 진행 중 상태는 idle 로 — `starting` 만은 open RPC 타임아웃(120s) 동안 지킨다.
+- 매니저 인스턴스가 사라지면(`agent_instance_update` action=removed, 같은 identity 의 다른 인스턴스 없음) 그 장비의 진행 중
+  세션을 모두 idle 로 되돌리고 driver 에게 `agent_session_update{reason:'host_offline'}` 를 보낸다.
+- **하트비트가 살아 있는 세션 전체를 싣는다** (`agent_sessions: [{cli, session_id, status}]`, 매니저 `InstanceMeta.agentSessionsProvider`
+  → `AgentSessionRunner.liveStates()`). 서버는 매 하트비트(30초)마다 그 목록으로 메모리를 맞춘다 — 보고된 세션은 그 상태로,
+  보고에 없는 진행 중 세션은 idle 로(`reason:'heartbeat'`). 매니저 업데이트·재부팅·연결 단절·프로세스 사망 어느 경우든 30초
+  안에 화면이 실제와 같아진다. 비어 있어도 `[]` 를 보내는 이유가 이것이다(구버전 매니저는 필드가 없어 아무것도 바꾸지 않는다).
+- 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
+  턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
+- 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
+
+### 어댑터의 MCP 연결 알림 (`mcp_startup.<server>`)
+
+codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지 않는 한 번짜리 `tool_call`** 로 알린다
+(`toolCallId: 'mcp_startup.awb'`, `title: 'mcp__awb__startup'`, status 가 곧 결과). 게다가 이 알림은
+`session/new` **응답보다 먼저** 온다. 그래서 두 가지가 겹쳐 있었다:
+
+- 상태를 버리고 중계하면 update 가 영원히 오지 않으므로 카드가 계속 "running" 으로 남는다. 이건 에이전트가 한
+  일이 아니라 세션이 열리는 과정이므로 **카드로 만들지 않는다** — 성공은 조용히 버리고, 실패만 "이 서버의 툴을
+  못 쓴다" 는 사실이라 `system` 행으로 남긴다.
+- 세션 id 를 알기 전의 행은 보낼 곳이 없다. 예전엔 seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났고,
+  UI 의 유실 감지(`hasSeqGap`)가 계속 재조회를 돌게 했다. 지금은 `preSessionEvents` 에 모아 뒀다가 세션이 열리는
+  즉시 순서대로 내보낸다.
+
+그 실패의 실제 원인이었던 것: AWB 의 MCP 게이트가 `X-AWB-Client-Type: agent-session` 을 면제 목록에 넣지 않아
+세션마다 handshake 가 `schemaVersion mismatch` 로 실패했다. CLI 네이티브 MCP 클라이언트는 AWB 확장 capability 를
+모르므로 subagent / managed-subagent / runtime-child 와 같은 면제다(`mcp-schema-version.test.mjs` 가 네 종류를 모두 고정).
+
+### 긴 기록 (history 응답 크기)
+
+기록 응답은 서버의 JSON 본문 상한(10MB)을 넘으면 413 으로 버려지고, 화면은 40초 뒤 타임아웃 에러만 본다.
+실측(ralf codex 세션): 응답이 **21.16MiB**, 개별 `tool_update` 하나가 1.37MB 였다. 원인은 codex 의 tool 출력이
+문자열이 아니라 content block **배열**로 와서 `truncate(...)` 갈래를 비껴간 것이다. 그래서:
+
+- payload 크기 정리는 CLI 별 파서가 아니라 `readHistory` **한 곳**에서 한다(`boundHistoryPayload`) — 갈래마다 자르면
+  한 곳만 빠뜨려도 응답 전체가 죽는다. 문자열은 자르고, 배열·객체는 개수를 제한하고, 그래도 크면 미리보기로 대체한다.
+- 마지막 방어선으로 응답 전체를 바이트로 자른다(`fitHistoryBytes`, 6MiB). **오래된 것부터** 버려 최근 대화를 지키고,
+  한 건도 못 담을 만큼 큰 이벤트만 있어도 최소 한 건은 남긴다. 버린 건수는 기존 `Earlier history omitted` 안내에 합산된다.
+
+같은 파일 기준 응답이 21.16MiB → 2.41MiB 로 줄고 786건이 모두 남는다.
+
+### 거대한 메시지
+
+어댑터가 tool 출력을 알림 **한 줄**로 보내는데, 큰 파일 읽기나 긴 명령 출력이면 기본 상한(4MiB)을 넘는다.
+예전엔 그 줄 하나가 `acp_message_too_large` 로 스트림을 죽여 프로세스가 SIGTERM 으로 내려갔다(턴은 error 로 끝났다).
+개행이 곧 재동기화 지점이므로 **그 줄만 버리면** 나머지는 멀쩡하다 — 세션 어댑터는 상한을 64MiB 로 올리고
+`skipOversizedLines` 로 넘치는 줄을 건너뛴 뒤, 몇 MiB 를 버렸는지 `system` 행으로 알린다. 기본값은 예전대로
+치명적 오류다(hermes 런타임의 엄격한 계약을 바꾸지 않는다). 청크로 쪼개져 오는 줄도 한 번만 보고한다.
+
+일반 tool_call 도 초기 status 를 그대로 싣는다(`tool_call.payload.status`) — 기록(codex rollout)의 호출 행에도
+자기 status 가 있으므로, 결과 행이 없는 호출(중단된 턴 등)이 "running" 으로 굳지 않는다.
+- 매니저는 프로세스가 죽으면 턴 중이었어도 무조건 `status: idle` 을 보내고, 미결 permission 은
+  `permission_decision{outcome:'cancelled', decided_by:'system'}` 로 닫는다(close 도 같다). `stopAll` 은 이미 죽은
+  세션의 마지막 전송을 최대 3s 기다린다.
+- 미결 permission 요청은 CLI 홈 파일에 없으므로(SSE 로만 흘렀다) `history` RPC 가 기록 끝에 **같은 id** 로 다시 실어 보낸다.
+  화면은 "승인 대기" 인데 카드가 없으면 한 번 다시 읽고(`SessionView`), 매니저 답에 따라 카드가 생기거나 idle 이 된다.
+- 새 세션 모달은 **열릴 때만** 기본 호스트/CLI/cwd 를 채운다. `hosts` 는 매니저 하트비트마다 새 배열로 내려오므로 그것을
+  초기화 트리거로 쓰면 사용자가 고르던 호스트·cwd·제목이 30초 간격으로 되돌아간다(`new-session-modal-host-refresh.test.mjs`).
 
 ## agent-manager contract 변경 규칙
 
@@ -88,16 +187,27 @@ idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 �
 ## 운영 메모
 
 - `agent_sessions.use` 는 기본 admin 전용이다 — 장비 운영자의 개인 CLI 기록이 그대로 보이기 때문이다. 필요한 사용자에게만 부여한다.
-- 세션이 "Authentication required" 로 실패하면 장비에서 `claude login` 을 하거나 CLI 설정에 credential 을 묶는다.
+- 세션이 "Authentication required" 로 실패하면 장비에서 `claude login` / `codex login` 을 하거나 CLI 설정에 credential 을 묶는다.
+- Codex 세션이 "Model metadata for … not found" / "requires a newer version of Codex" 를 내면 어댑터가 옛 zed-industries 것이다 —
+  `npm uninstall -g @zed-industries/codex-acp && npm i -g @agentclientprotocol/codex-acp` 로 바꾼다. 모델은 세션 헤더의 Model 셀렉트에서 고른다.
 - 같은 세션을 터미널과 AWB 에서 동시에 쓰지 말 것 — 두 프로세스가 같은 JSONL 에 쓴다.
 - Codex 는 어댑터가 `loadSession` 을 지원할 때만 기존 세션을 이어 쓸 수 있다(미지원이면 open 이 `resume_unsupported` 로 실패).
 - 세션 프로세스는 매니저 self-update drain 카운트에 포함되고, 매니저 종료(SIGTERM)는 모든 세션 프로세스를 멈춘다(상태 idle).
-- Windows 에서 `npx` 폴백은 `.cmd` shim 문제로 실패할 수 있다 — `AWB_ACP_COMMAND_CLAUDE` 등으로 절대 경로를 지정한다.
+- Windows: 어댑터 프로세스는 cross-spawn 으로 띄우므로 npm 배치 shim(`codex-acp.cmd`)과 `npx` 폴백이 모두 동작한다
+  (예전엔 node 의 spawn() 이 `spawn npx ENOENT` / `spawn EINVAL` 로 죽어 ralf 에서 세션이 열리지 않았다). 다만 `npx --yes`
+  폴백은 첫 실행에 패키지를 내려받느라 initialize 타임아웃(60s)을 넘길 수 있으니 장비에
+  `npm i -g @zed-industries/codex-acp @agentclientprotocol/claude-agent-acp` 로 미리 설치해 두는 편이 낫다.
+  특수한 레이아웃은 `AWB_ACP_COMMAND_CLAUDE` 등으로 절대 경로를 지정한다.
 - 첨부/이미지, 여러 사용자 동시 관람, 터미널(PTY) 모드는 범위 밖이다.
 
 ## 테스트
 
-- 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달.
+- 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달 /
+  유령 상태 되돌림(list·history·인스턴스 제거·하트비트) / config option·elicitation op 과 awaiting_input / 첫 이벤트의 상태 추정.
+- agent-manager: `agent-session-heartbeat.test.mjs` — 하트비트 `agent_sessions` 필드와 `liveStates()`.
 - agent-manager: `apps/agent-manager/test/agent-session-store.test.mjs`(합성 Claude·Codex 파일 파싱),
-  `agent-session-runner.test.mjs`(fake ACP 로 list·history·open·prompt·permission·resume, credential 별 세션 cli-home 적용).
-- 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`, `sessions-navigation.test.mjs`.
+  `agent-session-runner.test.mjs`(fake ACP 로 list·history·open·prompt·permission·resume, credential 별 세션 cli-home 적용,
+  미결 permission/질문 재전송·취소, config option·slash command·plan·elicitation 왕복).
+- 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`(접기 규칙·slash 매칭·schema 정규화), `sessions-navigation.test.mjs`,
+  `new-session-modal-host-refresh.test.mjs`(호스트 목록 갱신이 열린 모달을 되돌리지 않는다),
+  `session-interactive-ui.test.mjs`(컴포저 자동완성, 질문 폼 렌더·제출).

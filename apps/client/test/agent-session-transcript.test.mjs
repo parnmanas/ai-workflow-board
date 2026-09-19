@@ -5,11 +5,18 @@ import assert from 'node:assert/strict';
 
 import {
   appendLiveEvent,
+  applySlashCommand,
   buildTranscript,
+  canConnect,
   canPrompt,
   describeSessionStatus,
+  isWaitingStatus,
+  matchSlashCommands,
+  normalizeElicitationSchema,
+  pendingInteraction,
   pendingPermission,
   sessionDisplayTitle,
+  shouldAutoConnect,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
 import {
   cwdBaseName,
@@ -166,4 +173,124 @@ test('groupSessionsByCwd 는 cwd 가 빈 문자열이거나 없는 세션을 하
   assert.equal(unknown.length, 1, '빈 cwd 와 누락 cwd 가 그룹을 나눠 가지면 안 된다');
   assert.equal(unknown[0].cwdLabel, '(unknown)');
   assert.deepEqual(unknown[0].sessions.map((s) => s.session_id), ['blank-cwd', 'no-cwd']);
+});
+
+// ─── 질문/폼(elicitation) · plan · slash command ────────────────────────────────
+
+test('buildTranscript folds an elicitation decision into its question card, and pendingInteraction sees form questions but not url ones', () => {
+  seq = 0;
+  const schema = { type: 'object', title: 'Deployment target', properties: { env: { type: 'string', title: 'Environment', enum: ['dev', 'prod'] }, notes: { type: 'string', title: 'Notes' } }, required: ['env'] };
+  const events = [
+    ev('user_prompt', { text: 'deploy' }),
+    ev('elicitation_request', { elicitation_id: 'e1', mode: 'form', message: 'Which environment?', schema, tool_call_id: 'c1' }),
+  ];
+  let blocks = buildTranscript(events);
+  const card = blocks.find((b) => b.kind === 'elicitation');
+  assert.ok(card, 'question card exists');
+  assert.equal(card.mode, 'form');
+  assert.equal(card.message, 'Which environment?');
+  assert.deepEqual(card.schema.fields.map((f) => [f.name, f.type, f.required, f.choices?.map((c) => c.value) ?? null]), [['env', 'string', true, ['dev', 'prod']], ['notes', 'string', false, null]]);
+  assert.equal(pendingInteraction(blocks)?.elicitationId, 'e1', 'an unanswered form question is the pending interaction');
+
+  blocks = buildTranscript([...events, ev('elicitation_decision', { elicitation_id: 'e1', action: 'accept', content: { env: 'prod' }, decided_by: 'user' })]);
+  const answered = blocks.find((b) => b.kind === 'elicitation');
+  assert.deepEqual(answered.decision, { action: 'accept', content: { env: 'prod' }, decided_by: 'user' });
+  assert.equal(pendingInteraction(blocks), null, 'answered question is no longer pending');
+  assert.equal(blocks.filter((b) => b.kind === 'system').length, 0, 'decision folded, no stray system note');
+
+  // url 방식은 기다리지 않는다 — 카드만 남고 elicitation/complete 로 닫힌다
+  const urlBlocks = buildTranscript([
+    ev('elicitation_request', { elicitation_id: 'u1', mode: 'url', message: 'Sign in', url: 'https://example.com/login' }),
+  ]);
+  assert.equal(urlBlocks[0].mode, 'url');
+  assert.equal(urlBlocks[0].url, 'https://example.com/login');
+  assert.equal(pendingInteraction(urlBlocks), null, 'url elicitations do not block the composer');
+  // permission 은 여전히 pendingInteraction 이다
+  const perm = buildTranscript([ev('permission_request', { request_id: 'p1', tool_call_id: 'c1', title: 'Run', description: 'Reason: tests', options: [{ option_id: 'a', name: 'Allow', kind: 'allow_once' }] })]);
+  assert.equal(pendingInteraction(perm)?.kind, 'permission');
+  assert.equal(perm[0].description, 'Reason: tests', 'permission description is kept for the card');
+  assert.equal(pendingPermission(perm)?.requestId, 'p1');
+});
+
+test('plan rows in the same turn replace each other; plans in different turns stay separate', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('plan', { entries: [{ content: 'Ask', priority: 'high', status: 'in_progress' }, { content: 'Deploy', priority: 'medium', status: 'pending' }] }, 't1'),
+    ev('text', { text: 'working' }, 't1'),
+    ev('plan', { entries: [{ content: 'Ask', priority: 'high', status: 'completed' }, { content: 'Deploy', priority: 'medium', status: 'in_progress' }] }, 't1'),
+    ev('plan', { entries: [{ content: 'Next turn plan', priority: 'low', status: 'pending' }] }, 't2'),
+  ]);
+  const plans = blocks.filter((b) => b.kind === 'plan');
+  assert.equal(plans.length, 2, 'one plan per turn');
+  assert.deepEqual(plans[0].entries.map((e) => e.status), ['completed', 'in_progress'], 'the latest plan of the turn wins in place');
+  assert.equal(blocks.indexOf(plans[0]), 0, 'the plan keeps its original position');
+  assert.equal(plans[1].entries[0].content, 'Next turn plan');
+});
+
+test('normalizeElicitationSchema handles oneOf titles, multi-select arrays, numbers and booleans', () => {
+  const view = normalizeElicitationSchema({
+    type: 'object',
+    properties: {
+      size: { type: 'string', title: 'Size', oneOf: [{ const: 's', title: 'Small' }, { const: 'l', title: 'Large' }] },
+      tags: { type: 'array', title: 'Tags', items: { type: 'string', enum: ['a', 'b'] } },
+      count: { type: 'integer', minimum: 1, maximum: 5, default: 2 },
+      ok: { type: 'boolean', default: true },
+    },
+    required: ['size'],
+  });
+  assert.deepEqual(view.fields.find((f) => f.name === 'size').choices, [{ value: 's', label: 'Small' }, { value: 'l', label: 'Large' }]);
+  assert.deepEqual(view.fields.find((f) => f.name === 'tags').choices, [{ value: 'a', label: 'a' }, { value: 'b', label: 'b' }]);
+  const count = view.fields.find((f) => f.name === 'count');
+  assert.equal(count.type, 'integer');
+  assert.equal(count.minimum, 1);
+  assert.equal(count.maximum, 5);
+  assert.equal(count.defaultValue, 2);
+  assert.equal(count.title, 'count', 'missing title falls back to the property name');
+  assert.equal(view.fields.find((f) => f.name === 'ok').defaultValue, true);
+  assert.equal(normalizeElicitationSchema(null), null);
+});
+
+test('awaiting_input is a waiting status: labelled, blocks prompting, and counts as waiting', () => {
+  assert.equal(describeSessionStatus('awaiting_input').label, 'Needs your input');
+  assert.equal(describeSessionStatus('awaiting_input').tone, 'warning');
+  assert.equal(canPrompt('awaiting_input'), false);
+  assert.equal(isWaitingStatus('awaiting_input'), true);
+  assert.equal(isWaitingStatus('awaiting_permission'), true);
+  assert.equal(isWaitingStatus('busy'), false);
+});
+
+test('slash command matching is active only while the command name is being typed', () => {
+  const commands = [
+    { name: 'review', description: 'Review', input_hint: 'focus' },
+    { name: 'compact', description: 'Compact' },
+    { name: 'review-branch', description: 'Review a branch' },
+  ];
+  assert.deepEqual(matchSlashCommands('/', commands).matches.map((c) => c.name), ['compact', 'review', 'review-branch'], 'bare slash lists everything, sorted');
+  assert.deepEqual(matchSlashCommands('/re', commands).matches.map((c) => c.name), ['review', 'review-branch']);
+  assert.deepEqual(matchSlashCommands('/RE', commands).matches.map((c) => c.name), ['review', 'review-branch'], 'case-insensitive');
+  assert.equal(matchSlashCommands('/review focus here', commands).active, false, 'a space after the name means arguments — popup closes');
+  assert.equal(matchSlashCommands('hello /re', commands).active, false, 'only a leading slash counts');
+  assert.equal(matchSlashCommands('/re', []).active, false, 'no commands, no popup');
+  assert.equal(applySlashCommand(commands[0]), '/review ', 'commands that take input get a trailing space');
+  assert.equal(applySlashCommand(commands[1]), '/compact');
+});
+
+test('entering a session page auto-connects only idle sessions; closed/error keep a manual Connect', () => {
+  assert.equal(shouldAutoConnect('idle'), true, 'idle → open it so model/mode settings arrive');
+  for (const status of ['closed', 'error', 'starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input']) {
+    assert.equal(shouldAutoConnect(status), false, `${status} is not auto-connected`);
+  }
+  assert.deepEqual(['idle', 'closed', 'error'].map(canConnect), [true, true, true]);
+  assert.deepEqual(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input'].map(canConnect), [false, false, false, false, false]);
+});
+
+test('a tool_call that arrives already completed/failed (codex mcp startup) is never shown as running', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('tool_call', { tool_call_id: 'mcp_startup.awb', title: 'mcp__awb__startup', kind: 'other', status: 'failed' }),
+    ev('tool_call', { tool_call_id: 'c1', title: 'Read', kind: 'read' }),
+  ]);
+  assert.equal(blocks[0].kind, 'tool');
+  assert.equal(blocks[0].status, 'failed', 'initial status is honoured');
+  assert.equal(blocks[1].status, 'in_progress', 'calls without a status still start as running');
 });

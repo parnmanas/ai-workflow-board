@@ -222,6 +222,18 @@ export interface InstanceRecord {
   // (claude / codex / hermes 중 실제로 실행 파일이 잡히는 것). 구버전 매니저는
   // undefined — 그때는 cli_adapters ∩ ACP_SESSION_CLIS 로 추정한다.
   acp_session_clis?: string[];
+  // Agent Session(CLI 직접 세션) — 이 매니저에 지금 살아 있는 세션 프로세스와 그 상태.
+  // 매 하트비트마다 전체 목록이 오므로 서버 메모리의 유령 상태(매니저 재시작·연결 단절로
+  // 마지막 상태 패치를 못 받은 busy/awaiting_*)를 30초 안에 되돌릴 수 있다.
+  // `undefined` 는 구버전 매니저(보고 안 함), `[]` 는 "살아 있는 세션 없음".
+  agent_sessions?: AgentSessionHeartbeatEntry[];
+}
+
+/** 하트비트 `agent_sessions[]` 한 줄 — `apps/agent-manager/src/lib/instance-heartbeat.ts` 의 AgentSessionHeartbeatEntry 와 같은 모양. */
+export interface AgentSessionHeartbeatEntry {
+  cli: string;
+  session_id: string;
+  status: string;
 }
 
 /**

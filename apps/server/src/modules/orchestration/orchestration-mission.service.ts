@@ -26,7 +26,8 @@ import { orchestrationError } from './orchestration-errors';
 import { GraphSpec, computeMissionProgress } from './orchestration-graph';
 import { renderConfirmPolicyGuidance } from './orchestration-prompt';
 import { enforceRunBudget } from '../../common/run-budget-guard';
-import { sinceBoundaryParam } from '../../common/created-at-since-param';
+import { sinceBoundaryParam, tiedCreatedAtOrderExpr, tiedCreatedAtWhere } from '../../common/created-at-since-param';
+import { lockMissionEventWrites } from '../../common/orchestration-event-write-lock';
 import { visibleScopeWhere } from '../skills/skill-scope';
 import {
   MAX_PARALLEL_CEILING,
@@ -883,25 +884,61 @@ export class OrchestrationMissionService {
     if (input.actor_type === 'agent' && input.actor_id) {
       actorName = (await resolveAgentDisplayName(this.agentRepo, input.actor_id)) || actorName;
     }
+    const row = {
+      mission_id: mission.id,
+      workspace_id: mission.workspace_id,
+      step_id: input.step_id ?? null,
+      type: input.type,
+      actor_type: input.actor_type || 'system',
+      actor_id: input.actor_id || '',
+      actor_name: actorName,
+      message: (input.message || '').slice(0, 4000),
+      data: input.data ?? null,
+    };
     try {
-      await this.eventRepo.save(
-        this.eventRepo.create({
-          mission_id: mission.id,
-          workspace_id: mission.workspace_id,
-          step_id: input.step_id ?? null,
-          type: input.type,
-          actor_type: input.actor_type || 'system',
-          actor_id: input.actor_id || '',
-          actor_name: actorName,
-          message: (input.message || '').slice(0, 4000),
-          data: input.data ?? null,
-          write_seq: await this.nextEventWriteSeq(mission.id),
-        }),
-      );
+      // seq 유도(읽기)와 INSERT(쓰기)는 **한 트랜잭션** 안에서, 미션 row 를 잠근 뒤에만
+      // 일어나야 한다(티켓 50031353). 예전에는 둘 사이에 잠금도 트랜잭션도 없어서, 이
+      // 메서드를 동시에 호출하는 경로들(runner / reaper 타이머 / confirm-notify / REST)이
+      // 같은 최댓값을 읽고 **같은 write_seq 로 두 행**을 쓸 수 있었다. `(created_at,
+      // write_seq)` 가 전순서라는 커서의 전제가 거기서 깨진다.
+      await this.dataSource.transaction(async (em) => {
+        await lockMissionEventWrites(em, mission.id);
+        const repo = em.getRepository(OrchestrationEvent);
+        const key = await this.nextEventOrderingKey(mission.id, em);
+        await repo.save(
+          repo.create({
+            ...row,
+            // created_at 도 잠금 안에서 정한다 — DB 기본값에 맡기면 안 된다. 아래
+            // nextEventOrderingKey 주석 참고(티켓 50031353).
+            ...(key.at ? { created_at: key.at } : {}),
+            write_seq: key.seq,
+          }),
+        );
+      });
     } catch (e: any) {
-      // A timeline write must never take down a dispatch — losing one audit row
-      // is strictly better than stranding a step because the log table hiccuped.
-      this.logService.error('Orchestration', `failed to record event for mission ${mission.id}: ${e?.message || e}`);
+      // 직렬화 경로가 실패해도 타임라인 행 자체는 남긴다 — `write_seq: 0` 은 "순서 미상"
+      // 이고, 그 미션 안에서 이 값이 여러 번 나올 수 있다는 뜻이다. 이 폴백이 필요한
+      // 이유는 Postgres 에서 트랜잭션 안의 쿼리가 하나라도 실패하면 그 트랜잭션이 통째로
+      // abort 되어 뒤따르는 INSERT 까지 못 나가기 때문이다. 그대로 두면 seq 유도 실패가
+      // 기록 자체를 막아, 잠금을 도입하면서 "타임라인 한 줄 때문에 dispatch 를 죽이지
+      // 않는다" 는 기존 계약을 오히려 좁히게 된다.
+      //
+      // 여기서 유일값을 다시 채번하려 들지 않는다(티켓 7b679009). 방금 DB 왕복이 실패한
+      // 경로에서 또 읽어봐야 그 읽기도 실패할 수 있어 "유일" 이 보장이 아니라 확률이 되고,
+      // 이미 쌓인 레거시 동률 행은 어차피 못 고친다. 대신 소비자인 `listMissionEvents` 가
+      // 안정 키(`id`)를 커서의 마지막 단으로 써서, 동률의 **원인과 무관하게** 전순서를
+      // 만든다 — 그래서 여기 0 이 두 번 나와도 페이지 경계에서 행이 사라지지 않는다.
+      this.logService.warn(
+        'Orchestration',
+        `serialized event write failed for mission ${mission.id}, retrying unordered: ${e?.message || e}`,
+      );
+      try {
+        await this.eventRepo.save(this.eventRepo.create({ ...row, write_seq: 0 }));
+      } catch (e2: any) {
+        // A timeline write must never take down a dispatch — losing one audit row
+        // is strictly better than stranding a step because the log table hiccuped.
+        this.logService.error('Orchestration', `failed to record event for mission ${mission.id}: ${e2?.message || e2}`);
+      }
     }
     this.emitUpdate(mission, { type: input.type, message: input.message, step_key: input.step_key || '' });
   }
@@ -912,17 +949,41 @@ export class OrchestrationMissionService {
    * `getMissionDetail` 은 최신 N건만 실어주는 bounded window 라, 긴 미션의 이전 이력은
    * 어떤 API 로도 가져올 수 없었다. 이 메서드가 그 창을 뒤로 밀 수 있게 한다.
    *
-   * 커서는 `(created_at, write_seq)` 복합 keyset 이다. `created_at` 단독으로는 안 된다 —
-   * fan-out 한 번이면 수십 건이 같은 타임스탬프를 갖고, 그러면 `created_at < cursor` 는
-   * 그 그룹을 통째로 건너뛰고 `<=` 는 무한히 되돌린다. 표준 keyset 술어로 전순서를 만든다.
+   * 커서는 `(created_at, write_seq, id)` **3단** 복합 keyset 이다. 앞의 두 개만으로는
+   * 안 된다:
+   *
+   * - `created_at` 단독 — fan-out 한 번이면 수십 건이 같은 타임스탬프를 갖고, 그러면
+   *   `created_at < cursor` 는 그 그룹을 통째로 건너뛰고 `<=` 는 무한히 되돌린다.
+   * - `(created_at, write_seq)` — `write_seq` 가 미션 안에서 유일할 때만 전순서다. 그
+   *   전제가 깨지는 경로가 실제로 둘 있다(티켓 7b679009). (1) `recordEvent` 는 직렬화
+   *   트랜잭션이 실패하면 `write_seq: 0`("순서 미상")으로 fail-open 하므로, 한 미션에서
+   *   두 번 발동하면 0 이 두 행이 된다. (2) 백필(`1760000000086`)을 아직 돌리지 않은 DB
+   *   에는 미션의 모든 행이 0 또는 1 인 레거시 구간이 그대로 남아 있다. 커서가 그런
+   *   동률 군집 **안쪽**을 가리키면 tie-break 절이 `seq < seq` 로 항상 거짓이 되고, 첫
+   *   분기는 같은 시각 그룹을 통째로 제외해 **나머지 행이 페이지 경계에서 조용히
+   *   사라진다** — write_seq 컬럼이 존재하는 이유였던 바로 그 손실이다.
+   *
+   * 그래서 PK 인 `id` 를 마지막 키로 둔다. `id` 는 미션 안에서(사실 테이블 전체에서)
+   * 유일하므로 세 키의 조합은 **원인과 무관하게** 항상 전순서다 — fail-open 이든 레거시
+   * 행이든 미래의 생산자 회귀든, 동률이 생겨도 페이지 경계에서 행을 잃지 않는다.
+   * 같은 선택을 archive 커서가 먼저 했다(`archive-tools.ts` 의 `buildArchiveCursor` 는
+   * `(archived_at, id)` 를 합성 커서로 싣는다).
+   *
+   * `before_id` 는 optional 이다. 넘기지 않은 호출자는 예전 2단 술어로 degrade 하므로
+   * 기존 동작이 그대로 유지된다 — 대신 위 손실도 그대로다. 서버가 돌려주는
+   * `next_cursor` 는 항상 셋을 다 싣는다.
    *
    * 최신 → 과거 순(DESC)으로 돌려준다. 호출자가 화면에 붙일 때 뒤집는다.
    */
   async listMissionEvents(
     missionId: string,
     workspaceId: string,
-    opts?: { limit?: number; before_at?: string; before_seq?: number },
-  ): Promise<{ events: OrchestrationEvent[]; has_more: boolean; next_cursor: { at: string; seq: number } | null }> {
+    opts?: { limit?: number; before_at?: string; before_seq?: number; before_id?: string },
+  ): Promise<{
+    events: OrchestrationEvent[];
+    has_more: boolean;
+    next_cursor: { at: string; seq: number; id: string } | null;
+  }> {
     const mission = await this.requireMission(missionId);
     if (workspaceId && mission.workspace_id !== workspaceId) {
       throw orchestrationError(404, 'mission not found in this workspace');
@@ -932,19 +993,43 @@ export class OrchestrationMissionService {
     const qb = this.eventRepo
       .createQueryBuilder('e')
       .where('e.mission_id = :missionId', { missionId })
-      .orderBy('e.created_at', 'DESC')
+      // 첫 키는 컬럼이 아니라 **커서 정밀도로 자른 시각**이다. 술어가 tied group 을 한
+      // 덩어리로 보는데 정렬이 그 안을 µs 로 더 잘게 나누면, "커서 행보다 뒤" 를 술어로
+      // 표현할 수 없어 Postgres 에서 행이 사라진다(tiedCreatedAtOrderExpr doc 참고).
+      .orderBy(tiedCreatedAtOrderExpr(this.dataSource, 'e'), 'DESC')
       .addOrderBy('e.write_seq', 'DESC')
+      // 정렬에도 같은 마지막 키가 있어야 한다. 술어만 3단이고 ORDER BY 가 2단이면 동률
+      // 군집 안의 순서를 DB 가 자유롭게 정하므로, 커서가 가리킨 지점과 다음 페이지의
+      // 시작점이 어긋나 행이 빠지거나 겹친다.
+      .addOrderBy('e.id', 'DESC')
       // 한 건 더 읽어 has_more 를 별도 COUNT 없이 판정한다.
       .take(limit + 1);
 
     if (opts?.before_at) {
       const beforeSeq = Number.isFinite(Number(opts.before_seq)) ? Number(opts.before_seq) : 0;
+      const beforeId = typeof opts.before_id === 'string' ? opts.before_id : '';
+      const cursorAt = new Date(opts.before_at);
+      // tie-break 절의 "같은 시각" 도 등호로 물으면 안 된다(티켓 85efcb69). 커서의 `at` 은
+      // 아래에서 `new Date(...).toISOString()` 으로 만들어져 밀리초까지만 남는데 Postgres 의
+      // created_at 은 마이크로초라, 등호는 커서 행 자신을 포함해 한 행도 집지 못한다. 그러면
+      // 이 절이 영영 비어 커서와 같은 밀리초에 몰린 나머지 이벤트가 페이지 경계에서 통째로
+      // 사라진다 — write_seq 컬럼이 존재하는 이유가 바로 그 손실을 막는 것이므로, 생산자쪽
+      // seq 를 고쳐도 여기를 같이 고치지 않으면 결함이 그대로 남는다.
+      // 두 분기는 서로소다: 첫 분기는 `< t`, tie-break 는 sqljs 가 `= t`(초 단위),
+      // 그 외 드라이버가 `[t, t+1ms)` 라 같은 행이 두 번 반환되지 않는다.
+      const tied = tiedCreatedAtWhere(this.dataSource, 'e', cursorAt);
+      // seq 동률은 `id` 로 한 번 더 가른다(위 doc 참고). `id` 가 없는 호출자는 예전
+      // 술어 그대로 — 동작이 나빠지지는 않되 동률 군집에서의 손실도 그대로다.
+      const tieBreak = beforeId
+        ? '(e.write_seq < :beforeSeq OR (e.write_seq = :beforeSeq AND e.id < :beforeId))'
+        : 'e.write_seq < :beforeSeq';
       qb.andWhere(
-        '(e.created_at < :beforeAt OR (e.created_at = :beforeAtEq AND e.write_seq < :beforeSeq))',
+        `(e.created_at < :beforeAt OR ((${tied.clause}) AND ${tieBreak}))`,
         {
-          beforeAt: sinceBoundaryParam(this.dataSource, new Date(opts.before_at)),
-          beforeAtEq: sinceBoundaryParam(this.dataSource, new Date(opts.before_at)),
+          beforeAt: sinceBoundaryParam(this.dataSource, cursorAt),
+          ...tied.params,
           beforeSeq,
+          ...(beforeId ? { beforeId } : {}),
         },
       );
     }
@@ -956,43 +1041,77 @@ export class OrchestrationMissionService {
     return {
       events: page,
       has_more: hasMore,
-      next_cursor: last ? { at: new Date(last.created_at).toISOString(), seq: last.write_seq ?? 0 } : null,
+      next_cursor: last
+        ? { at: new Date(last.created_at).toISOString(), seq: last.write_seq ?? 0, id: last.id }
+        : null,
     };
   }
 
   /**
-   * 다음 이벤트의 `write_seq` 를 **DB 상태에서** 유도한다(티켓 4d065f82).
+   * 다음 이벤트의 **정렬 키**(`write_seq` 와 `created_at`)를 DB 상태에서 유도한다
+   * (티켓 4d065f82, 50031353).
    *
-   * comment-tools.ts 의 `_comment_write_seq` 와 같은 tied-group 기법이다: 이 미션의
-   * 가장 최근 `created_at` 을 찾고, 그와 **정확히 같은** created_at 을 가진 row 를
-   * LIMIT 없이 전부 가져와 그 안의 최댓값 + 1 을 쓴다. 같은 타임스탬프에 몇 건이 몰리든
-   * 개수와 무관하게 전량을 보므로 burst 크기에 영향받지 않고, 프로세스 메모리에
-   * 의존하지 않으므로 재시작에도 리셋되지 않는다.
+   * `recordEvent` 가 미션 row 를 잠근 트랜잭션 안에서만 부르므로, 읽기와 뒤이은 INSERT
+   * 사이에 다른 기록이 끼어들 수 없다. 그래서 두 값 모두 정의상 옳다.
    *
-   * 이 값이 필요한 이유는 커서 페이지네이션이다 — `created_at` 만으로는 fan-out 한 번에
-   * 수십 건이 같은 타임스탬프를 갖는 이 테이블에서 페이지 경계가 이벤트를 건너뛴다.
+   * **`write_seq` = 이 미션의 현재 최댓값 + 1.** `created_at` 을 보지 않는다 — 예전에는
+   * "가장 최근 created_at 과 같은 시각인 row"(tied group)의 최댓값 + 1 을 썼는데, 잠금을
+   * 도입하자 그 방식이 깨졌다. Postgres 의 `CURRENT_TIMESTAMP` 는 문장 시각이 아니라
+   * **트랜잭션 시작 시각**이라, 동시 호출들이 잠금을 기다리기 **전에** 거의 같은 순간
+   * BEGIN 하면서 서로 뒤섞인 `created_at` 을 갖는다. 그러면 "최대 created_at 주변 1ms"
+   * 창이 방금 가장 큰 seq 를 받은 row 를 놓칠 수 있고, 다음 호출이 낡은 최댓값을 다시
+   * 읽어 **같은 seq 를 반복한다**(CI 실측: 8건 동시 기록에서 `[1,2,4,6,3,6,5,6]`).
+   * 미션 전체 MAX 는 타임스탬프 정밀도·단조성에 전혀 기대지 않아 그 실패 모드가 없다.
+   *
+   * **`created_at` 도 여기서 정한다.** 같은 이유로 DB 기본값에 맡기면 안 된다 — 트랜잭션
+   * 시작 시각은 잠금 획득 순서(= `write_seq` 순서)와 어긋날 수 있다. `listMissionEvents`
+   * 는 `created_at DESC, write_seq DESC` 로 정렬하면서 keyset 술어는 **밀리초 단위**로
+   * tied group 을 묶으므로, 한 밀리초 안에서 `created_at`(µs) 순서와 `write_seq` 순서가
+   * 서로 다르면 페이지 경계에서 이벤트가 빠진다(CI 실측: 커서 순회가 8건 중 6건만 덮음).
+   * 잠금 안에서 시각을 찍으면 두 순서가 항상 일치한다. 이 트랜잭션 도입 전에는 INSERT 가
+   * 자기 자신의 암묵 트랜잭션이라 문장 시각 = 삽입 순서였고, 그때는 저절로 성립하던
+   * 불변식이다 — 잠금을 넣으면서 깨진 것을 여기서 되돌린다.
+   *
+   * **Postgres 에서만** 시각을 직접 찍는다. 이 역전은 `CURRENT_TIMESTAMP` 가 트랜잭션
+   * 시작에 고정되는 Postgres 고유의 성질에서 온다 — sqljs 의 `datetime('now')` 도,
+   * MySQL 의 `NOW()` 도 문장 시각이라 잠금 획득 뒤에 평가되므로 삽입 순서와 어긋나지
+   * 않는다. 게다가 sqljs 는 `created_at` 을 초 단위 **문자열**로 저장해서, JS `Date` 를
+   * 박으면 `sinceBoundaryParam()` 이 만드는 문자열과 형식이 어긋나 tied 등호가 통째로
+   * 빗나간다(실측: sqljs 커서 순회가 42건 중 7건만 덮음). 필요 없는 곳은 건드리지 않는다.
+   *
+   * 이미 있는 최대 `created_at` 으로 하한을 둔다(clamp). 서버가 여러 프로세스로 뜨거나
+   * 시계가 뒤로 튀어도 `created_at` 이 `write_seq` 순서를 거스르지 않게 하는 보호다.
+   *
+   * 읽기는 **반드시 호출자의 `EntityManager` 로** 한다. 주입된 저장소를 쓰면 이 조회가
+   * `recordEvent` 의 트랜잭션 **밖**에서 일어나 미션 row 를 잠근 의미가 사라진다 — 잠금이
+   * 지켜야 하는 것은 INSERT 하나가 아니라 "최댓값을 읽고 그 다음 값을 쓴다" 는 읽기-쓰기
+   * 구간 전체다. 틀리게 쓸 수 있는 경로를 두지 않으려고 seam 을 인자로 강제한다.
+   *
+   * (소비자인 `listMissionEvents` 의 keyset 술어는 여전히 `tiedCreatedAtWhere` 가 필요하다 —
+   * 거기서는 커서가 가리키는 "같은 시각" 을 드라이버 정밀도에 맞춰 물어야 한다. 티켓 85efcb69.)
    */
-  private async nextEventWriteSeq(missionId: string): Promise<number> {
+  private async nextEventOrderingKey(
+    missionId: string,
+    manager: EntityManager,
+  ): Promise<{ seq: number; at: Date | null }> {
     try {
-      const mostRecent = await this.eventRepo.findOne({
-        where: { mission_id: missionId },
-        order: { created_at: 'DESC' },
-      });
-      if (!mostRecent) return 1;
-      const tied = await this.eventRepo
+      const row = await manager
+        .getRepository(OrchestrationEvent)
         .createQueryBuilder('e')
+        .select('MAX(e.write_seq)', 'max_seq')
+        .addSelect('MAX(e.created_at)', 'max_at')
         .where('e.mission_id = :missionId', { missionId })
-        .andWhere('e.created_at = :tiedAt', {
-          tiedAt: sinceBoundaryParam(this.dataSource, mostRecent.created_at),
-        })
-        .getMany();
-      let max = 0;
-      for (const e of tied) if ((e.write_seq ?? 0) > max) max = e.write_seq ?? 0;
-      return max + 1;
+        .getRawOne<{ max_seq: number | string | null; max_at: unknown }>();
+      // 이벤트가 없으면 MAX 는 NULL 이고 첫 값은 1 이다.
+      const seq = Number(row?.max_seq ?? 0) + 1;
+      if (manager.connection.options.type !== 'postgres') return { seq, at: null };
+      const maxAt = row?.max_at instanceof Date ? row.max_at.getTime() : 0;
+      return { seq, at: new Date(Math.max(Date.now(), maxAt)) };
     } catch {
-      // seq 유도 실패가 타임라인 기록 자체를 막으면 안 된다 — 0 은 "순서 미상"이고
-      // 커서는 created_at 으로만 비교하게 되어 예전 동작으로 우아하게 후퇴한다.
-      return 0;
+      // 정렬 키 유도 실패가 타임라인 기록 자체를 막으면 안 된다 — seq 0 은 "순서 미상"이고
+      // 커서는 created_at 으로만 비교하게 되어 예전 동작으로 우아하게 후퇴한다. 시각은
+      // null 을 돌려 DB 기본값에 맡긴다.
+      return { seq: 0, at: null };
     }
   }
 

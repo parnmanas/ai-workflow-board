@@ -2072,6 +2072,23 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/mode`,
       { method: 'POST', body: JSON.stringify({ mode_id: modeId }) },
     ),
+  setHostSessionConfigOption: (managerId: string, cli: string, sessionId: string, configId: string, value: string | boolean) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/config-option`,
+      { method: 'POST', body: JSON.stringify({ config_id: configId, value }) },
+    ),
+  answerHostSessionElicitation: (
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    elicitationId: string,
+    action: 'accept' | 'decline' | 'cancel',
+    content?: Record<string, unknown> | null,
+  ) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/elicitation`,
+      { method: 'POST', body: JSON.stringify({ elicitation_id: elicitationId, action, content: content ?? null }) },
+    ),
   closeHostSession: (managerId: string, cli: string, sessionId: string) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/close`,
@@ -2398,22 +2415,26 @@ export const api = {
   /**
    * 미션 타임라인 커서 페이지네이션(티켓 4d065f82). `getOrchestrationMission` 은 최신
    * N건만 싣는 bounded window 라, 이전 이력은 이 경로로만 가져올 수 있다. 커서는
-   * `(at, seq)` 복합 keyset 이다 — 같은 타임스탬프에 몰린 fan-out 이벤트가 페이지
-   * 경계에서 통째로 누락되지 않게 하려면 seq 가 반드시 함께 가야 한다.
+   * `(at, seq, id)` 3단 복합 keyset 이다 — 같은 타임스탬프에 몰린 fan-out 이벤트가 페이지
+   * 경계에서 통째로 누락되지 않게 하려면 seq 가 반드시 함께 가야 하고, **seq 마저 동률인**
+   * 경우(fail-open 의 `write_seq: 0` 이 한 미션에서 두 번, 또는 백필 전 레거시 구간)까지
+   * 막으려면 안정 키인 id 도 함께 가야 한다(티켓 7b679009). 셋 중 하나라도 빼면 그
+   * 군집에서 이벤트가 조용히 사라진다.
    */
   listOrchestrationMissionEvents: (
     id: string,
     workspaceId: string,
-    opts?: { limit?: number; before_at?: string; before_seq?: number },
+    opts?: { limit?: number; before_at?: string; before_seq?: number; before_id?: string },
   ) => {
     const parts = [`workspace_id=${encodeURIComponent(workspaceId)}`];
     if (opts?.limit) parts.push(`limit=${opts.limit}`);
     if (opts?.before_at) parts.push(`before_at=${encodeURIComponent(opts.before_at)}`);
     if (opts?.before_seq !== undefined) parts.push(`before_seq=${opts.before_seq}`);
+    if (opts?.before_id) parts.push(`before_id=${encodeURIComponent(opts.before_id)}`);
     return request<{
       events: OrchestrationTimelineEvent[];
       has_more: boolean;
-      next_cursor: { at: string; seq: number } | null;
+      next_cursor: { at: string; seq: number; id: string } | null;
     }>(`/orchestration/missions/${id}/events?${parts.join('&')}`);
   },
 

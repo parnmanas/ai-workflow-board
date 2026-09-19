@@ -10,6 +10,7 @@ import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
+import type { AgentSessionConfigOption, AgentSessionCommand } from './agent-sessions';
 
 export type StreamEventType =
   | 'board_update'
@@ -942,7 +943,7 @@ export interface AgentSessionRequestPayload {
   /** 요청을 낸 워크스페이스 — credential 조회 스코프. */
   workspace_id: string;
   cli: string;
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close';
   request_id?: string;
   /** open(신규)일 때만 null. */
   session_id?: string | null;
@@ -953,6 +954,13 @@ export interface AgentSessionRequestPayload {
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
+  /** set_config_option — ACP session config option id 와 값(select 는 value id, boolean 은 true/false). */
+  config_id?: string;
+  config_value?: string | boolean;
+  /** elicitation — 에이전트 질문/폼에 대한 답. content 는 요청 schema 에 맞는 객체(accept 일 때). */
+  elicitation_id?: string;
+  elicitation_action?: 'accept' | 'decline' | 'cancel';
+  elicitation_content?: Record<string, unknown> | null;
   /** CLI 설정에 묶인 워크스페이스 Credential — open/prompt 에만 실린다. 매니저는
    *  `GET /api/agent/sessions/credential/:id` 로 원문을 받아 세션 cli-home 에 적용한다. */
   credential_id?: string | null;
@@ -978,6 +986,10 @@ export interface AgentSessionLiveSnapshot {
   status: string;
   current_mode: string | null;
   available_modes: AgentSessionModeOption[];
+  /** ACP session config options(모델·reasoning 등) — 어댑터가 준 전체 목록과 현재값. */
+  config_options: AgentSessionConfigOption[];
+  /** 어댑터가 알려 준 slash command 목록. */
+  available_commands: AgentSessionCommand[];
   resume_supported: boolean;
   last_error: string | null;
   driver_user_id: string | null;

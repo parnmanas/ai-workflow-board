@@ -63,6 +63,10 @@ export interface InstanceMeta {
   // Agent Session(CLI 직접 세션) — 이 장비에서 ACP 어댑터로 세션을 열 수 있는 CLI
   // (agent-session-runner.ts detectAcpSessionClis). 부팅 시 한 번 계산한 정적 값.
   acpSessionClis?: string[] | null;
+  // Agent Session — 지금 살아 있는 세션 프로세스와 상태(AgentSessionRunner.liveStates). 매 tick 전체
+  // 목록을 보내 서버 메모리의 유령 상태(마지막 패치를 못 받은 busy/awaiting_*)를 되돌리게 한다.
+  // 배선되면 비어 있어도 `[]` 를 보낸다 — "살아 있는 세션 없음" 이 정보이기 때문이다.
+  agentSessionsProvider?: (() => AgentSessionHeartbeatEntry[]) | null;
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
@@ -206,6 +210,13 @@ export type RunWorkspaceStatusProvider = () => Promise<RunWorkspaceStatusEntry[]
  *  throw 하면 이번 tick 은 필드를 통째로 생략하고 다음 tick 이 다시 시도한다. */
 export type AgentLaunchSpecProvider = () => AgentLaunchSpecEntry[];
 
+/** 하트비트 `agent_sessions[]` 한 줄 — 서버 `InstanceRecord.agent_sessions` 와 같은 모양. */
+export interface AgentSessionHeartbeatEntry {
+  cli: string;
+  session_id: string;
+  status: string;
+}
+
 export interface InstanceHeartbeatPayload {
   instance_id: string;
   agent_id: string | null;
@@ -236,6 +247,8 @@ export interface InstanceHeartbeatPayload {
   // agent, only when the heartbeat factory was given a provider. See
   // AgentCredentialEntry for the field semantics.
   agent_credentials?: AgentCredentialEntry[];
+  /** Agent Session — 살아 있는 세션 프로세스 전체(비어 있으면 `[]`). 구버전 서버는 무시한다. */
+  agent_sessions?: AgentSessionHeartbeatEntry[];
   // 관리 대상 에이전트별 "다음 spawn 시 실효 실행 사양" (ticket 20fff298).
   // agent_credentials 와 같은 presence 계약 — provider 가 배선돼 있고 row 를
   // 반환할 때만 실린다. 이 필드를 모르는 구버전 AWB 서버는 무시하고, 반대로
@@ -330,7 +343,19 @@ export class InstanceHeartbeat {
     const dispatchBlockCountsProvider = meta?.dispatchBlockCountsProvider ?? null;
     const spawnFailureProvider = meta?.spawnFailureProvider ?? null;
     const agentLaunchSpecProvider = meta?.agentLaunchSpecProvider ?? null;
+    const agentSessionsProvider = meta?.agentSessionsProvider ?? null;
     this.#payloadFactory = async () => {
+      // 다른 provider 와 같은 best-effort 계약 — throw 하면 이번 tick 은 필드를 생략한다.
+      let agentSessions: AgentSessionHeartbeatEntry[] | null = null;
+      if (agentSessionsProvider) {
+        try {
+          agentSessions = agentSessionsProvider()
+            .filter((e) => e && typeof e.cli === 'string' && typeof e.session_id === 'string' && typeof e.status === 'string')
+            .slice(0, 500);
+        } catch (err: any) {
+          log(`Instance heartbeat: agent-sessions provider failed: ${err?.message ?? err}`);
+        }
+      }
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
       const workingDirs = managedSnapshot ? managedSnapshot.workingDirs() : [];
       const updateStatus = updateChecker ? updateChecker.status() : null;
@@ -456,6 +481,7 @@ export class InstanceHeartbeat {
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
         ...(models && Object.keys(models).length ? { available_models: models } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
+        ...(agentSessions ? { agent_sessions: agentSessions } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(agentLaunchSpecs ? { agent_launch_specs: agentLaunchSpecs } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),

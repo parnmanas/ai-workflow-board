@@ -81,7 +81,7 @@ async function pidsHoldingCwd(root) {
   return holders;
 }
 
-async function harness(t, runnerOptions = {}) {
+async function harness(t, runnerOptions = {}, adapterEnv = {}) {
   const root = await mkdtemp(join(tmpdir(), 'awb-agent-session-'));
   const cwd = join(root, 'work');
   await mkdir(cwd, { recursive: true });
@@ -100,6 +100,8 @@ async function harness(t, runnerOptions = {}) {
       getManagerId: () => MANAGER,
       store,
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
+      // 어댑터 프로세스의 env — 픽스처가 MCP handshake 결과 같은 시나리오를 바꾸는 스위치로 읽는다.
+      ...(Object.keys(adapterEnv).length ? { baseEnv: { ...process.env, ...adapterEnv } } : {}),
       flushIntervalMs: 10,
       idleMinutes: 0,
       permissionTimeoutMs: 5000,
@@ -421,4 +423,226 @@ test('redactSecrets hides bearer tokens and API keys quoted by CLI error message
   assert.match(out, /Bearer <redacted>/);
   assert.match(out, /api_key="<redacted>"/);
   assert.equal(redactSecrets('plain message'), 'plain message');
+});
+
+// ─── 미결 permission 의 재전송과 취소 중계 ─────────────────────────────────────
+//
+// permission_request 는 CLI 홈 파일에 남지 않고 SSE 로만 흘렀다. 다른 화면에 있다가 들어온
+// 사용자는 history 만 받으므로 상태는 "승인 대기" 인데 카드가 없었고, 프로세스가 죽거나
+// close 되면 결정 행이 없어 카드가 영원히 대기 중으로 남았다.
+test('history RPC replays pending permission requests with live status; a process dying mid-turn relays a system-cancelled decision and idle', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-p', session_id: null, cwd, title: 'Pending' }));
+  const sid = server.rpc('rpc-open-p').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-p', text: 'hello' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  const asked = server.events(sid).find((e) => e.type === 'permission_request');
+
+  // 화면을 새로 연 사용자가 history 로 다시 읽으면 미결 요청이 기록 끝에 **같은 id** 로 실려 온다
+  await runner.handle(request('history', { request_id: 'rpc-history-p', session_id: sid }));
+  const history = server.rpc('rpc-history-p');
+  assert.equal(history.ok, true, JSON.stringify(history));
+  const replayed = history.result.events.filter((e) => e.type === 'permission_request');
+  assert.equal(replayed.length, 1, 'the pending permission is replayed exactly once');
+  assert.equal(replayed[0].id, asked.id, 'same id as the live row so the UI dedupes it');
+  assert.equal(replayed[0].payload.request_id, asked.payload.request_id);
+  assert.equal(history.result.live.status, 'awaiting_permission');
+  assert.ok(history.result.events.every((e, i) => e.seq === i + 1), 'history seq stays contiguous after the replay');
+
+  // 프로세스가 턴 중에 죽으면(systemd 는 SIGTERM 을 cgroup 전체에 보낸다) 미결 요청은 system 취소로, 상태는 idle 로 중계된다
+  const pid = runner._snapshot()[0].pid;
+  process.kill(pid, 'SIGTERM');
+  await turn;
+  await waitFor(() => server.states(sid).some((s) => s.status === 'idle' && s.reason === 'process_exit'), 'idle after exit');
+  const decision = server.events(sid).find((e) => e.type === 'permission_decision');
+  assert.ok(decision, 'a decision row is relayed for the orphaned request');
+  assert.equal(decision.payload.request_id, asked.payload.request_id);
+  assert.equal(decision.payload.outcome, 'cancelled');
+  assert.equal(decision.payload.decided_by, 'system');
+  assert.equal(runner._snapshot().length, 0);
+  assert.equal(server.states(sid).at(-1).status, 'idle', 'the last state the server hears is idle, never busy/awaiting_permission');
+
+  // 기록에는 더 이상 미결 요청이 없고 live 는 null — stopAll 은 이미 죽은 세션의 마지막 전송을 기다려 준다
+  await runner.stopAll('test');
+  await runner.handle(request('history', { request_id: 'rpc-history-p2', session_id: sid }));
+  const after = server.rpc('rpc-history-p2');
+  assert.equal(after.ok, true, JSON.stringify(after));
+  assert.equal(after.result.events.some((e) => e.type === 'permission_request'), false);
+  assert.equal(after.result.live, null);
+});
+
+test('close while a permission is pending relays a system-cancelled decision and ends in the closed state', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-c', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-c').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-c', text: 'hello' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  const asked = server.events(sid).find((e) => e.type === 'permission_request');
+  await runner.handle(request('close', { session_id: sid }));
+  await turn;
+  const types = server.events(sid).map((e) => e.type);
+  const decisionIdx = types.indexOf('permission_decision');
+  assert.ok(decisionIdx > types.indexOf('permission_request'), 'the decision follows the request');
+  const decision = server.events(sid)[decisionIdx];
+  assert.equal(decision.payload.request_id, asked.payload.request_id);
+  assert.equal(decision.payload.outcome, 'cancelled');
+  assert.equal(decision.payload.decided_by, 'system');
+  assert.equal(server.states(sid).at(-1).status, 'closed');
+  assert.equal(runner._snapshot().length, 0);
+});
+
+// Windows 회귀 가드 (ralf): 어댑터가 npm 배치 shim 이거나 `npx` 폴백이면 node 의 spawn() 은
+// `spawn npx ENOENT` / `spawn EINVAL` 로 죽는다. ACP 어댑터는 반드시 cross-spawn 으로 띄운다.
+test('ACP adapters are spawned through cross-spawn so Windows .cmd shims and the npx fallback resolve', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/lib/runtime/acp/acp-client.ts', import.meta.url), 'utf8');
+  assert.match(source, /from 'cross-spawn'/, 'acp-client imports cross-spawn');
+  assert.doesNotMatch(source, /import \{[^}]*\bspawn\b[^}]*\} from 'node:child_process'/, 'acp-client no longer spawns with node:child_process directly');
+});
+
+// ─── 세션 설정(모델 등) · slash command · plan · 질문/폼(elicitation) ────────────────
+//
+// ACP 가 이미 제공하는 상호작용을 러너가 서버 contract 로 옮긴다: `session/new` 의 configOptions 와
+// `config_option_update` → 상태 config_options, `available_commands_update` → available_commands,
+// `plan` → plan 행, `elicitation/create` → elicitation_request 행 + awaiting_input, 답은 `elicitation` op.
+test('config options / slash commands / plan / elicitation flow through the runner and history carries the live state', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-x', session_id: null, cwd, title: 'Interactive' }));
+  const opened = server.rpc('rpc-open-x');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const sid = opened.result.session_id;
+  assert.deepEqual(opened.result.config_options.map((o) => [o.config_id, o.type, o.current_value]), [['model', 'select', 'fake-fast'], ['fast_mode', 'boolean', false], ['mode', 'select', 'agent']], 'session/new configOptions (SDK 1.x `id` key) land in the open result');
+  assert.deepEqual(opened.result.config_options[0].options.map((o) => o.value), ['fake-fast', 'fake-smart']);
+  await waitFor(() => server.states(sid).some((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2), 'available_commands patch');
+  assert.equal(server.events(sid).some((e) => e.payload?.tool_call_id === 'mcp_startup.awb'), false, "the adapter's MCP handshake is not agent work — a successful one leaves no card");
+  const commands = server.states(sid).find((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2).available_commands;
+  assert.deepEqual(commands, [{ name: 'review', description: 'Review the working tree', input_hint: 'optional focus' }, { name: 'compact', description: 'Compact the context' }]);
+
+  // 모델 변경 — session/set_config_option 왕복, 전체 목록으로 갱신, system 행
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'model', config_value: 'fake-smart' }));
+  await waitFor(() => server.states(sid).some((s) => s.reason === 'config_option'), 'config_option patch');
+  const patched = server.states(sid).filter((s) => s.reason === 'config_option').at(-1);
+  assert.equal(patched.config_options.find((o) => o.config_id === 'model').current_value, 'fake-smart');
+  assert.ok(server.events(sid).some((e) => e.type === 'system' && e.payload.text === 'Model set to Fake Smart.'), 'system row names the chosen option');
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: true }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'system' && e.payload.text === 'Fast mode set to on.'), 'boolean option row');
+  // approval 모드가 config option(category mode) 이면 legacy current_mode 도 같이 맞춘다
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'mode', config_value: 'read-only' }));
+  await waitFor(() => server.states(sid).some((s) => s.current_mode === 'read-only'), 'current_mode follows the mode config option');
+
+  // history 의 live 가 설정·명령·모드를 실어 보낸다(서버 재시작 뒤에도 화면이 복원된다)
+  await runner.handle(request('history', { request_id: 'rpc-history-x', session_id: sid }));
+  const history = server.rpc('rpc-history-x');
+  assert.equal(history.ok, true, JSON.stringify(history));
+  assert.equal(history.result.live.config_options.find((o) => o.config_id === 'model').current_value, 'fake-smart');
+  assert.equal(history.result.live.config_options.find((o) => o.config_id === 'fast_mode').current_value, true);
+  assert.deepEqual(history.result.live.available_commands.map((c) => c.name), ['review', 'compact']);
+
+  // 질문/폼: plan 행 → elicitation_request 행 + awaiting_input → history 재전송 → 답 → 턴 종료
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-x', text: 'ELICIT_TEST deploy please' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'elicitation_request'), 'elicitation_request row');
+  const asked = server.events(sid).find((e) => e.type === 'elicitation_request');
+  assert.equal(asked.state?.status, 'awaiting_input');
+  assert.equal(asked.payload.mode, 'form');
+  assert.equal(asked.payload.message, 'Which environment should I deploy to?');
+  assert.deepEqual(asked.payload.schema.required, ['env']);
+  assert.deepEqual(asked.payload.schema.properties.env.enum, ['dev', 'prod']);
+  const plan = server.events(sid).find((e) => e.type === 'plan');
+  assert.ok(plan, 'plan row relayed before the question');
+  assert.deepEqual(plan.payload.entries.map((e) => e.status), ['in_progress', 'pending']);
+  await runner.handle(request('history', { request_id: 'rpc-history-x2', session_id: sid }));
+  const replay = server.rpc('rpc-history-x2');
+  assert.equal(replay.result.live.status, 'awaiting_input');
+  assert.equal(replay.result.events.filter((e) => e.type === 'elicitation_request').length, 1, 'the pending question is replayed for a reloaded screen');
+  assert.equal(replay.result.events.find((e) => e.type === 'elicitation_request').id, asked.id);
+
+  await runner.handle(request('elicitation', { session_id: sid, elicitation_id: asked.payload.elicitation_id, elicitation_action: 'accept', elicitation_content: { env: 'prod' } }));
+  await turn;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn finished');
+  const decision = server.events(sid).find((e) => e.type === 'elicitation_decision');
+  assert.equal(decision.payload.action, 'accept');
+  assert.equal(decision.payload.decided_by, 'user');
+  assert.deepEqual(decision.payload.content, { env: 'prod' });
+  assert.equal(decision.state?.status, 'busy', 'answering puts the session back to busy until the turn ends');
+  assert.ok(server.events(sid).some((e) => e.type === 'text' && e.payload.text.includes('Deploying to prod')), 'the agent received the answer');
+  const plans = server.events(sid).filter((e) => e.type === 'plan');
+  assert.equal(plans.at(-1).payload.entries[0].status, 'completed', 'the updated plan is relayed as another plan row (UI folds it)');
+  assert.equal(server.events(sid).filter((e) => e.type === 'turn').at(-1).payload.stop_reason, 'end_turn');
+  assert.equal(server.states(sid).at(-1).status, 'ready');
+});
+
+test('closing a session while a question is pending cancels it with a system decision', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-y', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-y').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-y', text: 'ELICIT_TEST' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'elicitation_request'), 'elicitation_request row');
+  await runner.handle(request('close', { session_id: sid }));
+  await turn;
+  const decision = server.events(sid).find((e) => e.type === 'elicitation_decision');
+  assert.ok(decision, 'decision row relayed');
+  assert.equal(decision.payload.action, 'cancel');
+  assert.equal(decision.payload.decided_by, 'system');
+  assert.equal(server.states(sid).at(-1).status, 'closed');
+  assert.equal(runner._snapshot().length, 0);
+});
+
+// codex-acp 는 MCP 서버 연결을 `mcp_startup.<server>` 라는 update 없는 한 번짜리 tool_call 로 알리고,
+// 그것도 session/new 응답보다 먼저 보낸다. 예전엔 (1) 상태를 버리고 중계해 카드가 영원히 "running" 으로
+// 남거나, (2) 세션 id 를 모르는 시점이라 조용히 버려지면서 seq 만 올려 이후 행이 한 칸씩 어긋났다.
+test('the adapter MCP handshake never becomes a running card, and it never eats a seq number', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-mcp', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-mcp').result.session_id;
+  const events = server.events(sid);
+  assert.equal(events.some((e) => e.payload?.tool_call_id === 'mcp_startup.awb'), false, 'a successful handshake is silent');
+  assert.equal(events[0].seq, 1, 'the first relayed row still starts at seq 1 — the dropped notification consumed nothing');
+  assert.ok(events.every((e, i) => e.seq === i + 1), 'seq stays contiguous');
+});
+
+test('a FAILED MCP handshake is surfaced as a system note, not as a stuck tool card', async (t) => {
+  const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_MCP_STARTUP_STATUS: 'failed' });
+  await runner.handle(request('open', { request_id: 'rpc-open-mcp-fail', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-mcp-fail').result.session_id;
+  const note = server.events(sid).find((e) => e.type === 'system' && /MCP server/.test(e.payload.text));
+  assert.ok(note, 'the operator is told which server failed');
+  assert.match(note.payload.text, /"awb" did not connect/);
+  assert.equal(server.events(sid).some((e) => e.payload?.tool_call_id === 'mcp_startup.awb'), false, 'still no tool card');
+});
+
+test('set_config_option / set_mode on a session that is not live open it first (choose the model before the first prompt)', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  assert.equal(runner._snapshot().length, 0, 'nothing live yet');
+  await runner.handle(request('set_config_option', { session_id: CLAUDE_ID, config_id: 'model', config_value: 'fake-smart' }));
+  assert.equal(runner._snapshot().length, 1, 'the existing CLI session was opened via session/load');
+  await waitFor(() => server.states(CLAUDE_ID).some((s) => s.reason === 'config_option'), 'config_option patch');
+  assert.ok(server.events(CLAUDE_ID).some((e) => /Session resumed/.test(e.payload.text)), 'opened with the cwd recorded in the CLI home');
+  assert.equal(server.states(CLAUDE_ID).filter((s) => s.reason === 'config_option').at(-1).config_options.find((o) => o.config_id === 'model').current_value, 'fake-smart');
+  await runner.handle(request('set_mode', { session_id: CLAUDE_ID, mode_id: 'plan' }));
+  await waitFor(() => server.states(CLAUDE_ID).some((s) => s.reason === 'mode' && s.current_mode === 'plan'), 'mode patch');
+  assert.equal(runner._snapshot().length, 1, 'same process reused for set_mode');
+  await runner.handle(request('close', { session_id: CLAUDE_ID }));
+  assert.equal(runner._snapshot().length, 0);
+});
+
+// 거대한 한 줄이 세션을 죽이던 사고: "ACP stdout line exceeds the configured byte limit" 뒤
+// 프로세스가 SIGTERM 으로 내려가 턴이 error 로 끝났다. 개행이 재동기화 지점이므로 그 줄만
+// 버리면 나머지 스트림과 턴은 그대로 살아 있어야 한다.
+test('an oversized adapter message drops that message only — the turn finishes and the session stays live', async (t) => {
+  const { cwd, server, runner } = await harness(t, { maxLineBytes: 2048 });
+  await runner.handle(request('open', { request_id: 'rpc-open-big', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-big').result.session_id;
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-big', text: 'OVERSIZED_TEST please' }));
+
+  const events = server.events(sid);
+  const note = events.find((e) => e.type === 'system' && /larger than this session can relay/.test(e.payload.text));
+  assert.ok(note, 'the user is told one message was dropped');
+  assert.match(note.payload.text, /still running/);
+  assert.ok(events.some((e) => e.type === 'text' && e.payload.text === 'still here'), 'the stream resynchronizes — the next message is relayed');
+  const finished = events.filter((e) => e.type === 'turn').at(-1);
+  assert.equal(finished.payload.phase, 'finished');
+  assert.equal(finished.payload.stop_reason, 'end_turn', 'the turn ends normally instead of dying');
+  assert.equal(finished.state.status, 'ready');
+  assert.deepEqual(runner.liveStates().map((s) => s.status), ['ready'], 'the session process survives');
+  assert.equal(events.some((e) => e.type === 'error'), false, 'no protocol error is surfaced');
 });

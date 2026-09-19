@@ -5,6 +5,24 @@ const rl = createInterface({ input: process.stdin });
 let nextSession = 1;
 let pendingPrompt = null;
 let lastNewSessionParams = null;
+// Agent Session 테스트용 — ACP session config options / slash commands / plan / elicitation.
+// 다른 테스트(hermes 등)는 이 필드를 무시한다(추가 필드일 뿐).
+// 실제 어댑터(codex-acp 1.12 / claude-agent-acp 0.79)는 SDK 1.x 스키마의 `id` 키로 보낸다 — `configId` 가 아니다.
+const configOptions = [
+  {
+    id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fake-fast',
+    options: [
+      { value: 'fake-fast', name: 'Fake Fast', description: 'cheap' },
+      { value: 'fake-smart', name: 'Fake Smart', description: 'better' },
+    ],
+  },
+  { id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', currentValue: false },
+  { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'agent', options: [{ value: 'read-only', name: 'Ask for approval' }, { value: 'agent', name: 'Approve for me' }] },
+];
+let pendingElicitPrompt = null;
+// initialize 에서 client 가 광고한 capabilities — 실제 어댑터처럼 slash command 알림은
+// 세션 설정(configOptions) 을 이해하는 client 에게만 보낸다(다른 테스트의 이벤트 순서를 건드리지 않게).
+let clientCapabilities = {};
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -99,6 +117,25 @@ rl.on('line', (line) => {
   const message = JSON.parse(line);
 
   if (!Object.hasOwn(message, 'method')) {
+    if (message.id === 'elicit-1' && pendingElicitPrompt) {
+      // 질문(폼)에 대한 답 — accept 면 답 내용을 echo 하고 턴을 끝낸다
+      const action = message.result?.action;
+      if (action === 'accept') {
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: 'session-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Deploying to ${message.result?.content?.env ?? '?'}` } } },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: 'session-1', update: { sessionUpdate: 'plan', entries: [{ content: 'Ask the user', priority: 'high', status: 'completed' }, { content: 'Deploy', priority: 'medium', status: 'in_progress' }] } },
+        });
+      }
+      result(pendingElicitPrompt, { stopReason: action === 'accept' ? 'end_turn' : 'refusal' });
+      pendingElicitPrompt = null;
+      return;
+    }
     if (message.id === 'permission-1' && pendingPrompt) {
       send({
         jsonrpc: '2.0',
@@ -126,6 +163,7 @@ rl.on('line', (line) => {
 
   switch (message.method) {
     case 'initialize':
+      clientCapabilities = message.params?.clientCapabilities ?? {};
       result(message.id, {
         protocolVersion: 1,
         agentInfo: { name: 'fake-hermes', version: '0.1.0' },
@@ -146,7 +184,30 @@ rl.on('line', (line) => {
           JSON.stringify(message.params),
         );
       }
-      result(message.id, { sessionId: `session-${nextSession++}` });
+      const sessionId = `session-${nextSession++}`;
+      // codex-acp 는 session/new **응답 전에** MCP 서버 연결을 update 없는 한 번짜리 tool_call 로 알린다
+      // (status 가 곧 결과다). 이 시점에는 클라이언트가 아직 세션 id 를 모른다 — 실제 순서를 그대로 재현한다.
+      if (clientCapabilities?.session?.configOptions) send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'mcp_startup.awb', title: 'mcp__awb__startup', kind: 'other', status: process.env.FAKE_ACP_MCP_STARTUP_STATUS || 'completed' } },
+      });
+      result(message.id, { sessionId, configOptions });
+      // 어댑터들은 session/new 직후 slash command 목록을 알린다 — 세션 설정을 이해하는 client 에게만
+      if (clientCapabilities?.session?.configOptions) send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'review', description: 'Review the working tree', input: { type: 'text', hint: 'optional focus' } },
+              { name: 'compact', description: 'Compact the context' },
+            ],
+          },
+        },
+      });
       break;
     }
     case 'session/load': {
@@ -155,13 +216,73 @@ rl.on('line', (line) => {
         invalidParams(message.id, invalid);
         break;
       }
+      result(message.id, { configOptions });
+      break;
+    }
+    case 'session/set_mode': {
+      // 실제 어댑터처럼 빈 결과 + current_mode_update 알림
       result(message.id, {});
+      send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: message.params?.sessionId, update: { sessionUpdate: 'current_mode_update', currentModeId: message.params?.modeId } },
+      });
+      break;
+    }
+    case 'session/set_config_option': {
+      const option = configOptions.find((o) => o.id === message.params?.configId);
+      if (!option) {
+        send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: `Unknown config option ${message.params?.configId}` } });
+        break;
+      }
+      option.currentValue = message.params.value;
+      result(message.id, { configOptions });
       break;
     }
     case 'test/last-new-session':
       result(message.id, lastNewSessionParams);
       break;
     case 'session/prompt':
+      if (JSON.stringify(message.params.prompt).includes('OVERSIZED_TEST')) {
+        // 거대한 tool 출력이 알림 한 줄로 오는 상황 — 그 줄 뒤의 스트림이 멀쩡해야 한다.
+        process.stdout.write(`${'x'.repeat(8192)}\n`);
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: message.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'still here' } } },
+        });
+        result(message.id, { stopReason: 'end_turn' });
+        break;
+      }
+      if (JSON.stringify(message.params.prompt).includes('ELICIT_TEST')) {
+        // plan 을 알린 뒤 폼 질문을 던지고, 답이 올 때까지 턴을 연다 (Agent Session elicitation 테스트)
+        pendingElicitPrompt = message.id;
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: message.params.sessionId, update: { sessionUpdate: 'plan', entries: [{ content: 'Ask the user', priority: 'high', status: 'in_progress' }, { content: 'Deploy', priority: 'medium', status: 'pending' }] } },
+        });
+        send({
+          jsonrpc: '2.0',
+          id: 'elicit-1',
+          method: 'elicitation/create',
+          params: {
+            sessionId: message.params.sessionId,
+            mode: 'form',
+            message: 'Which environment should I deploy to?',
+            requestedSchema: {
+              type: 'object',
+              title: 'Deployment target',
+              properties: {
+                env: { type: 'string', title: 'Environment', enum: ['dev', 'prod'] },
+                notes: { type: 'string', title: 'Notes', maxLength: 200 },
+              },
+              required: ['env'],
+            },
+          },
+        });
+        break;
+      }
       pendingPrompt = message.id;
       if (JSON.stringify(message.params.prompt).includes('CHILD_EVENT_TEST')) {
         send({
@@ -280,6 +401,15 @@ rl.on('line', (line) => {
         result(message.id, {});
       }
       break;
+    case 'test/oversized': {
+      // 한도를 넘는 줄 하나를 뱉고, 곧바로 정상 알림과 응답을 잇는다. 줄을 건너뛰고
+      // 재동기화하는 클라이언트라면 뒤의 둘이 멀쩡히 도착해야 한다.
+      const bytes = Number(message.params?.bytes) || 8192;
+      process.stdout.write(`${'x'.repeat(bytes)}\n`);
+      send({ jsonrpc: '2.0', method: 'test/after-oversized', params: { ok: true } });
+      result(message.id, { survived: true });
+      break;
+    }
     case 'test/hang':
       break;
     case 'test/malformed':

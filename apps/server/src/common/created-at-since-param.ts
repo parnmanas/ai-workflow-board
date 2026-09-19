@@ -83,3 +83,33 @@ export function tiedCreatedAtWhere(
     params: { tiedCreatedAtFrom: at, tiedCreatedAtTo: new Date(at.getTime() + 1) },
   };
 }
+
+/**
+ * keyset 커서의 **정렬 키**로 쓸 `created_at` 표현식 (ticket 7b679009).
+ *
+ * `tiedCreatedAtWhere()` 와 반드시 **같은 granularity** 여야 한다. 둘이 어긋나면 커서가
+ * 조용히 행을 잃는다 — 정렬은 tied group 안을 마이크로초로 더 잘게 나누는데 술어는 그
+ * 그룹을 한 덩어리로만 보기 때문에, "커서 행보다 뒤" 를 술어로 표현할 방법이 없어진다.
+ *
+ * 구체적으로 Postgres 에서 이렇게 깨진다. 커서의 `at` 은 `new Date(...).toISOString()` 을
+ * 거쳐 **밀리초까지만** 남는데(pg 드라이버가 µs 를 절단한다) `created_at` 은 µs 다. 같은
+ * 밀리초 안에 `write_seq` 가 동률인 두 행이 있으면 — fail-open 의 `write_seq: 0` 이 두 번
+ * 났을 때가 정확히 그 모양이다 — 정렬은 µs 로 둘을 가르지만 술어의 tie-break 는 (seq, id)
+ * 로만 가르므로, 둘의 대소가 어긋나는 절반의 경우에 뒤쪽 행이 페이지 경계에서 사라진다.
+ * `id` 를 마지막 키로 더해도 이 어긋남 자체는 남으므로, 정렬 쪽을 커서 정밀도에 맞춰
+ * 잘라야 비로소 술어가 정렬의 정확한 거울이 된다.
+ *
+ * - **postgres**: `date_trunc('milliseconds', ...)`. `tiedCreatedAtWhere` 의 `[t, t+1ms)`
+ *   와 정확히 같은 버킷이고, 첫 분기 `created_at < t` 도 `bucket < t` 와 동치다.
+ * - **그 외**: 컬럼 그대로. sqljs 는 `datetime('now')` 가 초 단위 문자열이라 버킷이 곧
+ *   컬럼 값이고(그래서 tied 판정도 문자열 등호다), MySQL 의 `datetime` 기본 정밀도도
+ *   초라 `[t, t+1ms)` 안에는 같은 값만 들어온다. 어느 쪽도 자를 것이 없다.
+ *
+ * 이 절단은 "같은 버킷 안에서는 시각이 아니라 `write_seq` 가 순서다" 라는 기존 설계를
+ * 정렬에도 그대로 적용하는 것이기도 하다 — `write_seq` 컬럼이 존재하는 이유가 바로
+ * 그것이다(티켓 4d065f82).
+ */
+export function tiedCreatedAtOrderExpr(dataSource: DataSource, alias: string): string {
+  if (dataSource.options.type === 'postgres') return `date_trunc('milliseconds', ${alias}.created_at)`;
+  return `${alias}.created_at`;
+}

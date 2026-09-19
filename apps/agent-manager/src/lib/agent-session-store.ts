@@ -67,6 +67,18 @@ const DEFAULT_LIST_LIMIT = 200;
 const DEFAULT_HISTORY_LIMIT = 4000;
 const TITLE_MAX = 120;
 const TOOL_TEXT_MAX = 16_000;
+/**
+ * 기록 이벤트 하나가 직렬화됐을 때의 상한. codex 의 tool 출력은 문자열이 아니라 content block
+ * 배열로 오는데, 그 경로가 잘리지 않아 이벤트 하나가 1.3MiB 를 넘기도 했다. 응답 전체는 서버의
+ * JSON 본문 상한(10MB)을 넘으면 413 으로 버려지고 화면은 타임아웃 에러만 본다.
+ */
+const HISTORY_EVENT_PAYLOAD_MAX_CHARS = 32_000;
+/**
+ * 기록 응답 본문의 바이트 상한(가장 최근 것부터 채운다). 서버 상한(10MB)보다 넉넉히 낮게 잡아
+ * base64·헤더 같은 부대 비용을 감안한다. 개별 이벤트를 아무리 잘라도 수천 건이 쌓이면 넘을 수
+ * 있으므로 마지막 방어선으로 둔다.
+ */
+const HISTORY_BODY_MAX_BYTES = 6 * 1024 * 1024;
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 export function resolveClaudeHome(env: NodeJS.ProcessEnv = process.env): string {
@@ -175,6 +187,48 @@ async function walk(dir: string, depth: number, out: string[]): Promise<void> {
     if (entry.isDirectory()) await walk(full, depth - 1, out);
     else if (entry.isFile() && entry.name.endsWith('.jsonl')) out.push(full);
   }
+}
+
+/**
+ * 이벤트 payload 를 크기 안으로 접는다. 문자열은 자르고, 배열·객체는 개수를 제한한다.
+ * (러너의 boundedValue 와 같은 규칙 — 그쪽은 라이브 스트림, 이쪽은 CLI 홈 기록이다.)
+ */
+export function boundHistoryPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const bounded = boundValue(payload, 0) as Record<string, unknown>;
+  if (JSON.stringify(bounded).length <= HISTORY_EVENT_PAYLOAD_MAX_CHARS) return bounded;
+  // 구조를 아무리 접어도 큰 경우(거대한 배열 등) — 내용을 미리보기로 대체한다.
+  const preview = JSON.stringify(bounded).slice(0, 4_000);
+  return { truncated: true, preview };
+}
+
+function boundValue(value: unknown, depth: number): unknown {
+  if (value === undefined || value === null) return value;
+  if (typeof value === 'string') return truncate(value, TOOL_TEXT_MAX);
+  if (typeof value !== 'object') return value;
+  if (depth > 6) return '[nested]';
+  if (Array.isArray(value)) return value.slice(0, 100).map((entry) => boundValue(entry, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>).slice(0, 100)) {
+    out[key] = boundValue(entry, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * 직렬화 바이트가 상한에 들어오도록 **오래된 것부터** 버린다 — 화면은 끝(최근)부터 읽으므로
+ * 최근 대화를 지키는 편이 쓸모 있다. 한 건도 못 담을 만큼 큰 이벤트만 남는 경우에도 최소 한 건은 남긴다.
+ */
+export function fitHistoryBytes<T extends { payload: Record<string, unknown> }>(events: T[], maxBytes: number): T[] {
+  let total = 0;
+  let firstKept = events.length;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const size = Buffer.byteLength(JSON.stringify(events[i])) + 1;
+    if (total + size > maxBytes && firstKept < events.length) break;
+    total += size;
+    firstKept = i;
+    if (total > maxBytes) break;
+  }
+  return events.slice(firstKept);
 }
 
 export class AgentSessionStore {
@@ -408,13 +462,22 @@ export class AgentSessionStore {
     }
     const st = await stat(path);
     const parsed = cli === 'claude' ? await this.#claudeHistory(path, sessionId) : await this.#codexHistory(path, sessionId);
-    const events = parsed.events.map((e, i) => ({ ...e, seq: i + 1, id: `${sessionId}:${i + 1}` }));
-    const truncated = events.length > this.#historyLimit;
-    const kept = truncated ? events.slice(events.length - this.#historyLimit) : events;
+    // payload 크기 정리는 여기 한 곳에서만 한다 — CLI 별 파서가 각자 자르면 한 갈래만 빠뜨려도
+    // (실제로 codex 의 배열형 tool 출력이 그랬다) 응답 전체가 서버 상한을 넘어 버려진다.
+    const events = parsed.events.map((e, i) => ({
+      ...e,
+      payload: boundHistoryPayload(e.payload),
+      seq: i + 1,
+      id: `${sessionId}:${i + 1}`,
+    }));
+    const withinCount = events.length > this.#historyLimit ? events.slice(events.length - this.#historyLimit) : events;
+    const kept = fitHistoryBytes(withinCount, HISTORY_BODY_MAX_BYTES);
+    const omitted = events.length - kept.length;
+    const truncated = omitted > 0;
     if (truncated) {
       kept.unshift({
         id: `${sessionId}:truncated`, seq: 0, turn_id: '', type: 'system',
-        payload: { text: `Earlier history omitted (${events.length - this.#historyLimit} events).` },
+        payload: { text: `Earlier history omitted (${omitted} events).` },
         created_at: kept[0]?.created_at ?? new Date().toISOString(),
       });
     }
@@ -551,6 +614,9 @@ export class AgentSessionStore {
               title: name,
               kind: codexToolKind(name),
               input,
+              // codex 는 호출 행에 자기 status 를 남긴다(completed/failed). 결과 행이 없는 호출도
+              // 있으므로(중단된 턴 등) 이걸 무시하면 기록이 영원히 "running" 으로 보인다.
+              ...(typeof payload.status === 'string' && payload.status ? { status: payload.status } : {}),
             }, ts);
             break;
           }

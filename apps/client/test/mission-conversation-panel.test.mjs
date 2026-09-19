@@ -502,6 +502,10 @@ test('위로 스크롤하면 커서로 과거 실행 이벤트를 이어 붙인�
           'number',
           'created_at 만으로 커서를 만들면 같은 초에 몰린 이벤트가 페이지 경계에서 통째로 누락된다',
         );
+        // 티켓 7b679009: seq 마저 동률인 군집(fail-open 의 write_seq=0 두 행, 백필 전
+        // 레거시 구간)에서는 id 만이 페이지 경계를 가른다. 클라이언트가 이 값을 빼면
+        // 서버가 조용히 예전 2단 술어로 degrade 하므로 손실이 눈에 띄지 않게 돌아온다.
+        assert.equal(opts.before_id, 'recent-0', 'before_id 가 커서 마지막 키로 함께 가야 한다');
         return { events: [...older].reverse(), has_more: false, next_cursor: null };
       },
     },
@@ -554,7 +558,7 @@ test('과거 페이지를 여러 장 넘겨도 가장 오래된 페이지가 실
         return {
           events: [...page].reverse(), // 서버는 최신 → 과거 순
           has_more: served < pages.length,
-          next_cursor: { at: page[0].created_at, seq: 0 },
+          next_cursor: { at: page[0].created_at, seq: 0, id: page[0].id },
         };
       },
     },

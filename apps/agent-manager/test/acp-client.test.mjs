@@ -111,3 +111,52 @@ test('EOF rejects all pending requests and records process exit', async (t) => {
       && error.exitCode === 17,
   );
 });
+
+// 한 줄이 상한을 넘는 경우 (ticket: codex 세션이 "ACP stdout line exceeds the configured byte
+// limit" 뒤 SIGTERM 으로 죽던 사고). 큰 파일 읽기나 긴 명령 출력이 알림 한 줄로 오면 그 줄
+// 하나가 세션 전체를 죽였다. 개행이 곧 재동기화 지점이므로 그 줄만 버리면 스트림은 살아 있다.
+test('an oversized stdout line is fatal by default — the strict contract other runtimes rely on', async (t) => {
+  const { client } = await createClient({ maxLineBytes: 1024 });
+  t.after(() => client.close());
+  await assert.rejects(
+    client.request('test/oversized', { bytes: 4096 }),
+    (error) => error instanceof AcpProtocolError && error.code === 'acp_message_too_large',
+  );
+});
+
+test('with skipOversizedLines the huge line is dropped, reported, and the stream resynchronizes', async (t) => {
+  const oversized = [];
+  const { client, events } = await createClient({
+    maxLineBytes: 1024,
+    skipOversizedLines: true,
+    onOversizedLine: (bytes) => oversized.push(bytes),
+  });
+  t.after(() => client.close());
+
+  const response = await client.request('test/oversized', { bytes: 4096 });
+  assert.deepEqual(response, { survived: true }, 'the response that follows the dropped line still arrives');
+  assert.equal(oversized.length, 1, 'the drop is reported exactly once');
+  assert.ok(oversized[0] >= 4096, `the reported size covers the whole line: ${oversized[0]}`);
+  assert.ok(
+    events.some((e) => e.type === 'diagnostic' && e.method === 'test/after-oversized'),
+    'the notification sent right after the oversized line is parsed normally',
+  );
+  // 세션은 계속 쓸 수 있다
+  const initialized = await client.initialize({ clientInfo: { name: 'awb-runtime-host', version: '1.0.0' } });
+  assert.equal(initialized.protocolVersion, 1);
+});
+
+test('an oversized line split across chunks is still skipped in one piece', async (t) => {
+  const oversized = [];
+  const { client } = await createClient({
+    maxLineBytes: 512,
+    skipOversizedLines: true,
+    onOversizedLine: (bytes) => oversized.push(bytes),
+  });
+  t.after(() => client.close());
+  // 512B 상한에 512KiB 한 줄 — 여러 chunk 로 쪼개져 도착한다(부분 버퍼 경로).
+  const response = await client.request('test/oversized', { bytes: 512 * 1024 });
+  assert.deepEqual(response, { survived: true });
+  assert.equal(oversized.length, 1, 'the chunked line is reported once, not per chunk');
+  assert.ok(oversized[0] >= 512 * 1024, `all discarded bytes are counted: ${oversized[0]}`);
+});

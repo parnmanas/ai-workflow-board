@@ -150,7 +150,12 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   const openCall = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ cwd: '/home/parn/repo', title: 'Review PR' }) });
   await rpcRespond((r) => r.op === 'open' && r.cli === 'codex', {
     ok: true,
-    result: { session_id: 'codex-thread-9', cwd: '/home/parn/repo', title: 'Review PR', status: 'ready', resume_supported: false, available_modes: [{ id: 'default', name: 'Default' }], current_mode: 'default' },
+    result: {
+      session_id: 'codex-thread-9', cwd: '/home/parn/repo', title: 'Review PR', status: 'ready', resume_supported: false,
+      available_modes: [{ id: 'default', name: 'Default' }], current_mode: 'default',
+      config_options: [{ config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'gpt-a', options: [{ value: 'gpt-a', name: 'A' }, { value: 'gpt-b', name: 'B' }] }],
+      available_commands: [{ name: 'review', description: 'Review' }],
+    },
   });
   const opened = await openCall;
   assert.equal(opened.status, 201, opened.text);
@@ -158,6 +163,8 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   assert.equal(opened.body.status, 'ready');
   assert.equal(opened.body.driver_user_id, owner.id);
   assert.deepEqual(opened.body.available_modes.map((m) => m.id), ['default']);
+  assert.deepEqual(opened.body.config_options.map((o) => [o.config_id, o.current_value]), [['model', 'gpt-a']], 'open result carries the adapter settings so the header renders immediately');
+  assert.deepEqual(opened.body.available_commands.map((c) => c.name), ['review']);
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === 'codex-thread-9' && d.reason === 'opened', 4000);
   const openReq = requests.find((r) => r.op === 'open');
   assert.equal(openReq.session_id, null);
@@ -360,4 +367,312 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   assert.equal(cleared.body.credential, null);
   const afterClear = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(afterClear.status, 403);
+});
+
+// ─── 유령 상태: 매니저 답(list live_status / history live)과 매니저 재시작이 진행 중 상태를 되돌린다 ──
+//
+// 증상: 목록·사이드바에 "Needs your approval" 가 떠 있는데 세션에 들어가면 권한 카드가 없고
+// prompt 는 409 session_busy. 서버는 세션 상태를 메모리에만 두고 매니저의 마지막 상태 패치에
+// 의존하는데, 매니저가 self-update/SIGTERM 으로 재시작하면(systemd 가 cgroup 전체에 신호를
+// 보내 세션 프로세스가 먼저 죽는다) 그 패치가 오지 않아 24시간 TTL 동안 유령이 남았다.
+test('ghost in-flight state is reconciled with the manager answer and cleared when the manager instance goes away', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-ghost');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-ghost', role: 'admin' });
+  const ownerToken = app.get(AuthService).createSession(owner.id);
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-ghost', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
+  const heartbeat = (instanceId) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4242, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok((await heartbeat('inst-ghost-1')).status < 300, 'first manager instance registered');
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const answered = new Set();
+  // 같은 op 의 RPC 가 여러 번 나가므로 아직 답하지 않은 가장 오래된 요청에 답한다.
+  const answerNext = async (op, body) => {
+    await waitFor(() => requests.some((r) => r.op === op && !answered.has(r.request_id)), `${op} rpc`);
+    const req = requests.find((r) => r.op === op && !answered.has(r.request_id));
+    answered.add(req.request_id);
+    const res = await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...body }) });
+    assert.equal(res.status, 200, res.text);
+    return req;
+  };
+  const stream = await openSseStream(port, ownerToken, {});
+  t.after(() => stream.close());
+
+  const sid = 'sess-ghost';
+  const sessionsUrl = `${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`;
+  const row = (liveStatus) => ({
+    session_id: sid, cwd: '/home/parn/repo', title: 'Ghost', created_at: null, updated_at: '2026-09-19T00:00:00.000Z', source: 'cli',
+    ...(liveStatus ? { live_status: liveStatus } : {}),
+  });
+  const permissionRow = { id: `${sid}:live:1`, seq: 1, turn_id: 't0', type: 'permission_request', payload: { request_id: 'perm-9', tool_call_id: 't', title: 'Run rm -rf build', options: [{ option_id: 'allow', name: 'Allow', kind: 'allow_once' }] }, created_at: '2026-09-19T00:00:01.000Z' };
+  const relayState = async (state, events = []) => {
+    const res = await call(`${base}/api/agent/sessions/${managerId}/claude/${sid}/events`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events, state }) });
+    assert.equal(res.status, 200, res.text);
+    return res.body.live;
+  };
+
+  // 0. prompt → starting, 매니저가 permission 요청을 중계 → awaiting_permission (driver = owner)
+  const prompt = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'do it' }) });
+  assert.equal(prompt.status, 202, prompt.text);
+  assert.equal((await relayState({ status: 'awaiting_permission', reason: 'permission' }, [{ ...permissionRow, turn_id: prompt.body.turn_id }])).status, 'awaiting_permission');
+
+  // 1a. list — 매니저도 awaiting_permission 이라고 답하면 그대로
+  let listCall = call(sessionsUrl, { headers: ownerHeaders });
+  await answerNext('list', { ok: true, result: { sessions: [row('awaiting_permission')] } });
+  let list = await listCall;
+  assert.equal(list.status, 200, list.text);
+  assert.equal(list.body[0].live_status, 'awaiting_permission', 'manager and server agree');
+
+  // 1b. list — 매니저에 그 세션의 프로세스가 없다(재시작됐다) → idle 로 되돌리고 driver 화면에 알린다
+  listCall = call(sessionsUrl, { headers: ownerHeaders });
+  await answerNext('list', { ok: true, result: { sessions: [row(null)] } });
+  list = await listCall;
+  assert.equal(list.body[0].live_status, 'idle', 'ghost awaiting_permission is reset when the manager reports no live process');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'list', 4000);
+  // 그리고 prompt 가 409 session_busy 대신 다시 받아들여진다
+  const again = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'retry' }) });
+  assert.equal(again.status, 202, again.text);
+  assert.equal(again.body.live.status, 'starting');
+
+  // 1c. starting 은 open 이 아직 진행 중일 수 있으므로 list 가 "없다" 고 해도 grace 동안 지킨다
+  listCall = call(sessionsUrl, { headers: ownerHeaders });
+  await answerNext('list', { ok: true, result: { sessions: [row(null)] } });
+  list = await listCall;
+  assert.equal(list.body[0].live_status, 'starting', 'starting survives a list answer inside the open grace window');
+
+  // 2a. history — 매니저 live 가 진실: awaiting_permission + 기록 끝에 재전송된 permission_request 가 그대로 통과한다
+  let detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await answerNext('history', {
+    ok: true,
+    result: {
+      session: row(null),
+      events: [{ id: `${sid}:1`, seq: 1, turn_id: 't0', type: 'user_prompt', payload: { text: 'do it' }, created_at: '2026-09-19T00:00:00.000Z' }, { ...permissionRow, seq: 2 }],
+      truncated: false,
+      live: { session_id: sid, cwd: '/home/parn/repo', title: 'Ghost', status: 'awaiting_permission', resume_supported: true },
+    },
+  });
+  let detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'awaiting_permission', 'manager-reported status replaces starting');
+  assert.deepEqual(detail.body.events.map((e) => e.type), ['user_prompt', 'permission_request'], 'a replayed pending permission_request passes through history');
+  assert.equal(detail.body.events[1].payload.request_id, 'perm-9');
+
+  // 2b. history — live: null (프로세스 없음) 이면 유령 awaiting_permission 을 idle 로
+  detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await answerNext('history', { ok: true, result: { session: row(null), events: [], truncated: false, live: null } });
+  detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'idle');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'history', 4000);
+
+  // 3. 매니저 재시작: 같은 identity·hostname 의 새 instance_id 가 옛 인스턴스를 대체하면 그 장비의 진행 중 세션은 idle 로
+  assert.equal((await relayState({ status: 'busy', reason: 'turn_started' })).status, 'busy');
+  assert.ok((await heartbeat('inst-ghost-2')).status < 300, 'restarted manager instance registered');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'host_offline', 4000);
+  const afterRestart = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'after restart' }) });
+  assert.equal(afterRestart.status, 202, `no 409 session_busy after the host restarted: ${afterRestart.text}`);
+  assert.ok(requests.filter((r) => r.op === 'prompt').length >= 3, 'each accepted prompt reached the manager');
+
+  stream.close();
+});
+
+// ─── 상호작용 contract: 세션 설정(모델 등) · slash command · 질문/폼(elicitation) ────────
+//
+// 매니저가 상태 패치로 config_options / available_commands 를 보내면 스냅샷에 실리고,
+// 사용자는 POST config-option / POST elicitation 으로 set_config_option / elicitation op 을 낸다.
+// awaiting_input 은 awaiting_permission 과 같은 대기 상태(409 session_busy, 유령 되돌림 대상)다.
+test('interactive contract: config options + commands in the snapshot, set_config_option and elicitation ops, awaiting_input semantics', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-interactive');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-interactive', role: 'admin' });
+  const ownerToken = app.get(AuthService).createSession(owner.id);
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-interactive', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
+  const heartbeat = (instanceId) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4242, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok((await heartbeat('inst-interactive-1')).status < 300);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const stream = await openSseStream(port, ownerToken, {});
+  t.after(() => stream.close());
+
+  const sid = 'codex-thread-77';
+  const sessionsUrl = `${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`;
+  const relay = async (body) => {
+    const res = await call(`${base}/api/agent/sessions/${managerId}/codex/${sid}/events`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events: [], ...body }) });
+    assert.equal(res.status, 200, res.text);
+    return res.body;
+  };
+  const configOptions = [
+    { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'gpt-fast', options: [{ value: 'gpt-fast', name: 'Fast' }, { value: 'gpt-smart', name: 'Smart', description: 'slower', group: 'Premium' }] },
+    { config_id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', current_value: false, options: [] },
+    { config_id: '', name: 'dropped', category: 'x', type: 'select', current_value: null, options: [] },
+  ];
+
+  // 0. prompt(driver) → 매니저가 opened 상태로 설정·명령을 보낸다
+  const prompt = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'hi' }) });
+  assert.equal(prompt.status, 202, prompt.text);
+  const opened = await relay({ state: { status: 'ready', reason: 'opened', config_options: configOptions, available_commands: [{ name: 'review', description: 'Review', input_hint: 'focus' }, { name: 'compact', description: 'Compact' }, { name: '', description: 'dropped' }] } });
+  assert.deepEqual(opened.live.config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'options without an id are dropped');
+  assert.deepEqual(opened.live.config_options[0].options[1], { value: 'gpt-smart', name: 'Smart', description: 'slower', group: 'Premium' });
+  assert.deepEqual(opened.live.available_commands, [{ name: 'review', description: 'Review', input_hint: 'focus' }, { name: 'compact', description: 'Compact' }]);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.config_options?.length === 2, 4000);
+
+  // 1. set_config_option — 선택지 검증 + op payload
+  const bad = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'nope' }) });
+  assert.equal(bad.status, 400, bad.text);
+  assert.equal(bad.body.error, 'config_value_invalid');
+  const setModel = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'gpt-smart' }) });
+  assert.equal(setModel.status, 202, setModel.text);
+  const setBool = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'fast_mode', value: true }) });
+  assert.equal(setBool.status, 202, setBool.text);
+  const ops = requests.filter((r) => r.op === 'set_config_option');
+  assert.deepEqual(ops.map((r) => [r.config_id, r.config_value]), [['model', 'gpt-smart'], ['fast_mode', true]]);
+  assert.equal(ops[0].session_id, sid);
+  const noValue = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model' }) });
+  assert.equal(noValue.status, 400);
+
+  // 2. 질문/폼: awaiting_input 은 prompt 를 막고, 답은 elicitation op 으로 나간다
+  const asked = await relay({
+    events: [{ id: `${sid}:live:9`, seq: 9, turn_id: prompt.body.turn_id, type: 'elicitation_request', payload: { elicitation_id: 'elic-1', mode: 'form', message: 'Env?', schema: { type: 'object', properties: { env: { type: 'string', enum: ['dev', 'prod'] } }, required: ['env'] } }, created_at: new Date().toISOString() }],
+    state: { status: 'awaiting_input', reason: 'elicitation' },
+  });
+  assert.equal(asked.relayed, 1, 'elicitation_request is an accepted event type');
+  assert.equal(asked.live.status, 'awaiting_input');
+  await stream.waitFor('agent_session_event', (d) => d?.session_id === sid && d.event?.type === 'elicitation_request', 4000);
+  const blocked = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
+  assert.equal(blocked.status, 409, 'a pending question blocks prompting like a pending permission');
+  const badAction = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'maybe' }) });
+  assert.equal(badAction.status, 400);
+  const badContent = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'accept', content: ['not', 'an', 'object'] }) });
+  assert.equal(badContent.status, 400);
+  const answered = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'accept', content: { env: 'prod' } }) });
+  assert.equal(answered.status, 200, answered.text);
+  assert.equal(answered.body.status, 'busy', 'answering hands the turn back to the agent');
+  const elicitOp = requests.find((r) => r.op === 'elicitation');
+  assert.equal(elicitOp.elicitation_id, 'elic-1');
+  assert.equal(elicitOp.elicitation_action, 'accept');
+  assert.deepEqual(elicitOp.elicitation_content, { env: 'prod' });
+  const declined = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-2', action: 'decline' }) });
+  assert.equal(declined.status, 200);
+  assert.equal(requests.filter((r) => r.op === 'elicitation').at(-1).elicitation_content, null);
+
+  // 3. plan / elicitation_decision 도 중계되는 타입이고, history 답의 live 가 설정·명령을 되살린다
+  const more = await relay({ events: [
+    { id: `${sid}:live:10`, seq: 10, turn_id: prompt.body.turn_id, type: 'plan', payload: { entries: [{ content: 'Deploy', priority: 'high', status: 'in_progress' }] }, created_at: new Date().toISOString() },
+    { id: `${sid}:live:11`, seq: 11, turn_id: prompt.body.turn_id, type: 'elicitation_decision', payload: { elicitation_id: 'elic-1', action: 'accept', content: { env: 'prod' }, decided_by: 'user' }, created_at: new Date().toISOString() },
+  ] });
+  assert.equal(more.relayed, 2);
+  const answeredHistory = new Set();
+  const detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await waitFor(() => requests.some((r) => r.op === 'history' && !answeredHistory.has(r.request_id)), 'history rpc');
+  const historyReq = requests.find((r) => r.op === 'history' && !answeredHistory.has(r.request_id));
+  answeredHistory.add(historyReq.request_id);
+  await call(`${base}/api/agent/sessions/rpc/${historyReq.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ok: true, result: {
+    session: { session_id: sid, cwd: '/home/parn/repo', title: 'Interactive', updated_at: '2026-09-19T00:00:00.000Z', source: 'awb' },
+    events: [], truncated: false,
+    live: { session_id: sid, status: 'ready', cwd: '/home/parn/repo', title: 'Interactive', resume_supported: true, current_mode: 'agent', available_modes: [{ id: 'agent', name: 'Agent' }, { id: 'read-only', name: 'Read only' }], config_options: [{ ...configOptions[0], current_value: 'gpt-smart' }], available_commands: [{ name: 'status', description: 'Status' }] },
+  } }) });
+  const detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'ready');
+  assert.equal(detail.body.live.current_mode, 'agent');
+  assert.deepEqual(detail.body.live.available_modes.map((m) => m.id), ['agent', 'read-only']);
+  assert.equal(detail.body.live.config_options[0].current_value, 'gpt-smart', 'history live carries the manager-side config state');
+  assert.deepEqual(detail.body.live.available_commands.map((c) => c.name), ['status']);
+
+  // 3b. 프로세스가 없는 세션의 설정 변경은 409 가 아니라 매니저가 열게 한다(starting) — 첫 프롬프트 전에 모델을 고른다
+  const idleSid = 'codex-thread-idle';
+  const idleSet = await call(`${sessionsUrl}/${idleSid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'gpt-smart' }) });
+  assert.equal(idleSet.status, 202, idleSet.text);
+  assert.equal(idleSet.body.status, 'starting', 'an idle session is opened for the settings change');
+  const idleOp = requests.filter((r) => r.op === 'set_config_option').at(-1);
+  assert.equal(idleOp.session_id, idleSid);
+  assert.equal(idleOp.config_value, 'gpt-smart');
+  const idleMode = await call(`${sessionsUrl}/${idleSid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'read-only' }) });
+  assert.equal(idleMode.status, 202, idleMode.text);
+  assert.equal(requests.filter((r) => r.op === 'set_mode').at(-1).session_id, idleSid);
+  // 턴 중(busy)에는 설정을 바꿀 수 없다 — 위 history 답이 ready 로 되돌렸으므로 매니저가 다시 busy 를 알린 상황을 만든다
+  assert.equal((await relay({ state: { status: 'busy', reason: 'turn_started' } })).live.status, 'busy');
+  const busyMode = await call(`${sessionsUrl}/${sid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'read-only' }) });
+  assert.equal(busyMode.status, 409, 'settings cannot change mid-turn');
+  assert.equal(busyMode.body.error, 'session_busy');
+
+  // 4. awaiting_input 도 유령 되돌림 대상이다 — 매니저 재시작이면 idle 로
+  assert.equal((await relay({ state: { status: 'awaiting_input', reason: 'elicitation' } })).live.status, 'awaiting_input');
+  assert.ok((await heartbeat('inst-interactive-2')).status < 300);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'host_offline', 4000);
+
+  // 5. 하트비트의 agent_sessions 가 진실이다 — 매 하트비트(30초)마다 서버 메모리를 맞춘다
+  const heartbeatWith = (agentSessions) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-interactive-2', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4242, started_at: new Date().toISOString(),
+      ...(agentSessions !== undefined ? { agent_sessions: agentSessions } : {}),
+    }),
+  });
+  assert.equal((await relay({ state: { status: 'busy', reason: 'turn_started' } })).live.status, 'busy');
+  assert.ok((await heartbeatWith(undefined)).status < 300);
+  const stillBusy = await call(`${sessionsUrl}/${sid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'agent' }) });
+  assert.equal(stillBusy.status, 409, 'an old manager that does not report agent_sessions changes nothing');
+  assert.ok((await heartbeatWith([])).status < 300, 'heartbeat: no live sessions');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'heartbeat', 4000);
+  assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'awaiting_permission' }])).status < 300, 'heartbeat: waiting for approval');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'awaiting_permission' && d.reason === 'heartbeat', 4000);
+  const blockedByHeartbeat = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'x' }) });
+  assert.equal(blockedByHeartbeat.status, 409, 'a heartbeat-reported waiting state blocks prompting');
+  assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'ready' }])).status < 300);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'ready' && d.reason === 'heartbeat', 4000);
+
+  // 6. 서버가 처음 보는 세션에 매니저가 먼저 말을 걸면 상태는 배치에서 읽는다 — system 행 하나로 busy 유령을 만들지 않는다
+  const { AgentSessionsService } = await import(new URL('../dist/modules/agent-sessions/agent-sessions.service.js', import.meta.url));
+  const svc = app.get(AgentSessionsService);
+  const seed = (sessionId, events, state) => call(`${base}/api/agent/sessions/${managerId}/codex/${sessionId}/events`, {
+    method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events, ...(state ? { state } : {}) }),
+  });
+  assert.equal((await seed('seed-system', [{ id: 'seed-system:1', seq: 1, turn_id: '', type: 'system', payload: { text: 'Model set to Smart.' }, created_at: new Date().toISOString() }], { config_options: [], reason: 'config_option' })).status, 200);
+  assert.equal((await seed('seed-text', [{ id: 'seed-text:1', seq: 1, turn_id: 't9', type: 'text', payload: { text: 'working…' }, created_at: new Date().toISOString() }])).status, 200);
+  assert.equal((await seed('seed-done', [{ id: 'seed-done:1', seq: 1, turn_id: 't9', type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, created_at: new Date().toISOString() }])).status, 200);
+  assert.equal(svc['live'].get(`${managerId}/codex/seed-system`).status, 'idle', 'a lone system row (settings change) does not seed a busy ghost');
+  assert.equal(svc['live'].get(`${managerId}/codex/seed-text`).status, 'busy', 'turn-only rows (text) seed busy');
+  assert.equal(svc['live'].get(`${managerId}/codex/seed-done`).status, 'ready', 'a finished turn seeds ready');
+
+  stream.close();
 });

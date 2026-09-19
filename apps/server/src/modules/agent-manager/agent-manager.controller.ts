@@ -489,6 +489,13 @@ export class AgentManagerController {
     const acp_session_clis = Array.isArray(body?.acp_session_clis)
       ? body.acp_session_clis.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : undefined;
+    // Agent Session — 지금 살아 있는 세션 프로세스와 상태(전체 목록). 구버전 매니저는 undefined.
+    const agent_sessions = Array.isArray(body?.agent_sessions)
+      ? body.agent_sessions
+        .filter((e: any) => e && typeof e === 'object' && typeof e.cli === 'string' && typeof e.session_id === 'string' && typeof e.status === 'string')
+        .slice(0, 500)
+        .map((e: any) => ({ cli: String(e.cli).slice(0, 32), session_id: String(e.session_id).slice(0, 200), status: String(e.status).slice(0, 32) }))
+      : undefined;
 
     // Runtime Host supervision metadata.
     const agent_ids = Array.isArray(body?.agent_ids)
@@ -712,6 +719,7 @@ export class AgentManagerController {
       runtime_capabilities,
       manager_capabilities,
       acp_session_clis,
+      ...(agent_sessions !== undefined ? { agent_sessions } : {}),
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
       started_at: typeof body?.started_at === 'string' && body.started_at ? body.started_at : new Date().toISOString(),
       agent_ids,

@@ -25,6 +25,7 @@ import {
   patchAgentSessionState,
   postAgentSessionEvents,
   postAgentSessionRpcResponse,
+  type AgentSessionConfigOptionPatch,
   type AgentSessionEventInput,
   type AgentSessionRef,
   type AgentSessionStatePatch,
@@ -32,7 +33,13 @@ import {
 } from './rest.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
-import type { AcpMcpServer, AcpPermissionOutcome, AcpPermissionRequest } from './runtime/acp/acp-types.js';
+import type {
+  AcpElicitationOutcome,
+  AcpElicitationRequest,
+  AcpMcpServer,
+  AcpPermissionOutcome,
+  AcpPermissionRequest,
+} from './runtime/acp/acp-types.js';
 import { resolveHermesAcpCommand } from './runtime/hermes/hermes-command.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 
@@ -41,7 +48,7 @@ export interface AgentSessionRequest {
   manager_id: string;
   workspace_id?: string;
   cli: string;
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -51,6 +58,13 @@ export interface AgentSessionRequest {
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
+  /** set_config_option */
+  config_id?: string;
+  config_value?: string | boolean;
+  /** elicitation — 에이전트 질문/폼에 대한 답 */
+  elicitation_id?: string;
+  elicitation_action?: 'accept' | 'decline' | 'cancel';
+  elicitation_content?: Record<string, unknown> | null;
   /** CLI 설정에 묶인 워크스페이스 Credential(open/prompt). 없으면 운영자 로그인 그대로. */
   credential_id?: string | null;
   driver_user_id: string;
@@ -82,6 +96,8 @@ export interface AgentSessionRunnerOptions {
   sessionHomesDir?: string;
   /** 테스트용 credential 조회 override. */
   credentialFetcher?: (credentialId: string, workspaceId: string) => Promise<SessionCredential | null>;
+  /** stdout 한 줄 상한 override — 테스트가 64MiB 를 쓰지 않고 초과 경로를 돌기 위한 주입점. */
+  maxLineBytes?: number;
 }
 
 export interface SessionCredential {
@@ -131,10 +147,24 @@ interface SessionAuth {
   cliHome: string | null;
 }
 
+/** 서버로 이미 보낸(seq/id 가 찍힌) 이벤트 행. */
+type StampedEvent = AgentSessionEventInput & { seq: number; id: string; created_at: string };
+
 interface PendingPermission {
   resolve: (outcome: AcpPermissionOutcome) => void;
   timer: NodeJS.Timeout;
+  /** 중계했던 permission_request 행 — history RPC 가 미결 요청을 다시 실어 보낸다(같은 id 라 UI 가 중복을 거른다). */
+  event: StampedEvent;
 }
+
+/** 어댑터의 `elicitation/create`(질문/폼) — 사용자가 답할 때까지 JSON-RPC 요청을 열어 둔다. */
+interface PendingElicitation {
+  resolve: (outcome: AcpElicitationOutcome) => void;
+  timer: NodeJS.Timeout;
+  event: StampedEvent;
+}
+
+type CommandPatch = { name: string; description: string; input_hint?: string };
 
 interface LiveSession {
   cli: string;
@@ -146,6 +176,14 @@ interface LiveSession {
   /** session/load 가 기록을 재생하는 동안 true — 재생 이벤트는 UI 가 이미 history 로 가졌으므로 버린다. */
   loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
+  pendingElicitations: Map<string, PendingElicitation>;
+  /** 세션 id 를 알기 전(session/new 응답 전)에 어댑터가 보낸 행 — 열리는 즉시 순서대로 흘려보낸다. */
+  preSessionEvents: AgentSessionEventInput[];
+  /** 어댑터가 준 세션 설정(모델·reasoning …)·slash command·모드 — history RPC 의 `live` 로 서버가 다시 받는다. */
+  configOptions: AgentSessionConfigOptionPatch[];
+  availableCommands: CommandPatch[];
+  currentMode: string | null;
+  availableModes: Array<{ id: string; name: string; description?: string }>;
   turn: { turnId: string; startedAt: number } | null;
   textBuffer: string;
   reasoningBuffer: string;
@@ -167,6 +205,13 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;
 const DEFAULT_FLUSH_INTERVAL_MS = 150;
 const MAX_TOOL_TEXT_CHARS = 16_000;
+/**
+ * 세션 어댑터의 stdout 한 줄 상한. 기본값(4MiB)은 세션에는 작다 — 큰 파일 읽기나 긴 명령
+ * 출력이 한 줄짜리 알림으로 오면 그 줄 하나가 프로세스를 통째로 죽였다("ACP stdout line
+ * exceeds the configured byte limit" → SIGTERM). 넉넉히 올리되 무한 버퍼는 만들지 않고,
+ * 넘치면 그 줄만 버리고 스트림은 이어 간다(skipOversizedLines).
+ */
+const SESSION_MAX_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_PAYLOAD_CHARS = 200_000;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
 export const ACP_SESSION_CLIS = ['claude', 'codex', 'hermes'] as const;
@@ -193,6 +238,91 @@ function boundedPayload(payload: Record<string, unknown>): Record<string, unknow
   const serialized = JSON.stringify(bounded);
   if (serialized.length <= MAX_PAYLOAD_CHARS) return bounded;
   return { truncated: true, preview: serialized.slice(0, 4_000) };
+}
+
+/** ACP SessionConfigOption[] → 서버 패치 모양. 그룹(`{group, name, options}`)은 평탄화하고 group 라벨을 남긴다. */
+export function parseConfigOptions(raw: unknown): AgentSessionConfigOptionPatch[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentSessionConfigOptionPatch[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const o = entry as Record<string, unknown>;
+    // 실제 어댑터(codex-acp 1.12, claude-agent-acp 0.79)는 SDK 1.x 스키마의 `id` 로 보낸다. v2 초안은 `configId`.
+    const configId = typeof o.configId === 'string' ? o.configId : typeof o.id === 'string' ? o.id : typeof o.config_id === 'string' ? o.config_id : '';
+    if (!configId) continue;
+    const type = typeof o.type === 'string' ? o.type : (typeof o.currentValue === 'boolean' ? 'boolean' : 'select');
+    const options: AgentSessionConfigOptionPatch['options'] = [];
+    const pushOption = (v: unknown, group?: string) => {
+      if (!v || typeof v !== 'object') return;
+      const opt = v as Record<string, unknown>;
+      const value = typeof opt.value === 'string' ? opt.value : typeof opt.id === 'string' ? opt.id : '';
+      if (!value) return;
+      options.push({
+        value,
+        name: typeof opt.name === 'string' && opt.name ? opt.name : value,
+        ...(typeof opt.description === 'string' && opt.description ? { description: opt.description } : {}),
+        ...(group ? { group } : {}),
+      });
+    };
+    if (Array.isArray(o.options)) {
+      for (const v of o.options) {
+        const g = v as Record<string, unknown> | null;
+        if (g && typeof g === 'object' && Array.isArray(g.options)) {
+          const label = typeof g.name === 'string' ? g.name : typeof g.group === 'string' ? g.group : '';
+          for (const inner of g.options) pushOption(inner, label || undefined);
+        } else {
+          pushOption(v);
+        }
+      }
+    }
+    const current = o.currentValue ?? o.current_value;
+    out.push({
+      config_id: configId,
+      name: typeof o.name === 'string' && o.name ? o.name : configId,
+      ...(typeof o.description === 'string' && o.description ? { description: o.description } : {}),
+      category: typeof o.category === 'string' && o.category ? o.category : 'unknown',
+      type,
+      current_value: typeof current === 'boolean' ? current : typeof current === 'string' ? current : null,
+      options,
+    });
+  }
+  return out;
+}
+
+/** ACP AvailableCommand[] → `{ name, description, input_hint? }`. */
+export function parseCommands(raw: unknown): CommandPatch[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CommandPatch[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const c = entry as Record<string, unknown>;
+    const name = typeof c.name === 'string' ? c.name.trim().replace(/^\//, '') : '';
+    if (!name) continue;
+    const input = c.input && typeof c.input === 'object' ? (c.input as Record<string, unknown>) : null;
+    const hint = input && typeof input.hint === 'string' ? input.hint : '';
+    out.push({ name, description: typeof c.description === 'string' ? c.description : '', ...(hint ? { input_hint: hint } : {}) });
+  }
+  return out;
+}
+
+/** ACP Plan / PlanUpdate(items) entries → `{ content, priority, status }[]`. 항목이 없으면 null. */
+export function parsePlanEntries(raw: unknown): Array<{ content: string; priority: string; status: string }> | null {
+  if (!Array.isArray(raw)) return null;
+  const entries = raw
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+    .map((e) => ({
+      content: typeof e.content === 'string' ? e.content.slice(0, 2_000) : '',
+      priority: typeof e.priority === 'string' ? e.priority : 'medium',
+      status: typeof e.status === 'string' ? e.status : 'pending',
+    }))
+    .filter((e) => e.content);
+  return entries;
+}
+
+/** `mcp_startup.<server>` (codex-acp 의 MCP 연결 알림) 이면 서버 이름, 아니면 null. */
+export function mcpStartupServerOf(toolCallId: string): string | null {
+  const m = /^mcp_startup\.(.+)$/.exec(String(toolCallId || ''));
+  return m ? m[1] : null;
 }
 
 export async function findOnPath(name: string): Promise<string | null> {
@@ -232,8 +362,11 @@ export async function resolveAcpCommandForCli(cli: string): Promise<ResolvedAcpC
       return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
     }
     case 'codex': {
+      // `@agentclientprotocol/codex-acp` 가 유지되는 어댑터다 — 설치된 codex CLI 와 같은 세대의 코어를
+      // 번들해 최신 모델을 쓴다. zed-industries 것은 2026-07 에 archive 됐고 옛 코어라 새 모델을
+      // "requires a newer version of Codex" 로 거부한다.
       const found = await findOnPath('codex-acp');
-      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@zed-industries/codex-acp'] };
+      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/codex-acp'] };
     }
     case 'hermes': {
       const resolved = await resolveHermesAcpCommand();
@@ -256,10 +389,12 @@ export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env)
 export class AgentSessionRunner {
   readonly #config: AwbConfig;
   readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir'>>
-    & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher'>;
+    & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher' | 'maxLineBytes'>;
   readonly #store: AgentSessionStore;
   readonly #live = new Map<string, LiveSession>();
   readonly #opening = new Map<string, Promise<LiveSession>>();
+  /** 프로세스가 먼저 죽어 #live 에서 빠진 세션 — stopAll 이 마지막 상태 전송까지 기다린다. */
+  readonly #exited: LiveSession[] = [];
 
   constructor(config: AwbConfig, options: AgentSessionRunnerOptions) {
     this.#config = config;
@@ -277,6 +412,7 @@ export class AgentSessionRunner {
       mcpServers: options.mcpServers,
       sessionHomesDir: options.sessionHomesDir ?? join(AGENT_MANAGER_HOME, 'session-homes'),
       credentialFetcher: options.credentialFetcher,
+      maxLineBytes: options.maxLineBytes,
     };
   }
 
@@ -288,13 +424,20 @@ export class AgentSessionRunner {
     return Array.from(this.#live.values()).map((live) => ({
       cli: live.cli,
       session_id: live.sessionId,
-      busy: live.turn !== null || live.pendingPermissions.size > 0,
+      busy: live.turn !== null || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0,
       pid: live.client.process.pid ?? null,
     }));
   }
 
   countInFlight(): number {
     return this._snapshot().filter((s) => s.busy).length;
+  }
+
+  /** 하트비트용 — 살아 있는 세션 전체와 서버 contract 의 status. 닫히는 중/죽은 것은 뺀다. */
+  liveStates(): Array<{ cli: string; session_id: string; status: string }> {
+    return Array.from(this.#live.values())
+      .filter((live) => !live.exited && !live.closing)
+      .map((live) => ({ cli: live.cli, session_id: live.sessionId, status: this.#statusOf(live) }));
   }
 
   #ref(cli: string, sessionId: string): AgentSessionRef {
@@ -327,17 +470,30 @@ export class AgentSessionRunner {
         case 'permission':
           this.#resolvePermission(cli, sessionId, request.permission_request_id || '', request.option_id ?? null);
           return;
+        case 'elicitation':
+          this.#resolveElicitation(cli, sessionId, request.elicitation_id || '', request.elicitation_action || 'cancel', request.elicitation_content ?? null);
+          return;
+        case 'set_config_option': {
+          if (!sessionId || !request.config_id || request.config_value === undefined) return;
+          // 살아 있지 않으면 먼저 연다 — 목록에서 들어온 기존 세션도 프롬프트 전에 모델을 바꿀 수 있다.
+          const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
+          await this.#setConfigOption(live, request.config_id, request.config_value);
+          return;
+        }
         case 'cancel': {
           const live = this.#live.get(this.#key(cli, sessionId));
           if (live) await live.client.cancel(live.sessionId).catch(() => undefined);
           return;
         }
         case 'set_mode': {
-          const live = this.#live.get(this.#key(cli, sessionId));
           const modeId = request.mode_id || '';
-          if (!live || !modeId) return;
+          if (!sessionId || !modeId) return;
+          // 살아 있지 않으면 먼저 연다(prompt 와 같다) — 첫 프롬프트 전에 approval 모드를 고를 수 있어야 한다.
+          const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
           await live.client.request('session/set_mode', { sessionId: live.sessionId, modeId }, { timeoutMs: this.#options.requestTimeoutMs });
-          this.#enqueue(live, [{ type: 'system', payload: { text: `Mode set to ${modeId}.` } }], { current_mode: modeId, reason: 'mode' });
+          live.currentMode = modeId;
+          const modeName = live.availableModes.find((m) => m.id === modeId)?.name || modeId;
+          this.#enqueue(live, [{ type: 'system', payload: { text: `Mode set to ${modeName}.` } }], { current_mode: modeId, reason: 'mode' });
           return;
         }
         case 'close':
@@ -382,11 +538,20 @@ export class AgentSessionRunner {
             await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' });
             return;
           }
+          // 아직 결정되지 않은 permission 요청은 CLI 홈 파일에 없다(SSE 로만 흘렀다). 화면을
+          // 다시 열거나 새로고침한 사용자가 "Needs your approval" 만 보고 카드는 못 보는 일이
+          // 없도록 기록 끝에 다시 실어 보낸다 — id 가 같아 라이브로 이미 받은 행과 겹치지 않는다.
+          const pending = live
+            ? [...Array.from(live.pendingPermissions.values()), ...Array.from(live.pendingElicitations.values())].map((p) => p.event)
+            : [];
+          const events = pending.length
+            ? [...history.events, ...pending.map((e, i) => ({ ...e, seq: history.events.length + i + 1 }))]
+            : history.events;
           await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
             ok: true,
             result: {
               session: history.session ?? (live ? this.#summaryOf(live) : null),
-              events: history.events,
+              events,
               truncated: history.truncated,
               live: live ? this.#stateOf(live) : null,
             },
@@ -411,6 +576,14 @@ export class AgentSessionRunner {
   async stopAll(reason = 'manager_shutdown'): Promise<void> {
     const keys = Array.from(this.#live.values()).map((l) => [l.cli, l.sessionId] as const);
     await Promise.all(keys.map(([cli, id]) => this.#closeLive(cli, id, 'idle', reason).catch(() => undefined)));
+    // systemd 는 SIGTERM 을 cgroup 전체에 보내므로 세션 프로세스가 매니저보다 먼저 죽는 일이
+    // 흔하다. 그 세션은 #onProcessExit 로 이미 #live 에서 빠졌지만 마지막 상태(idle) 전송이
+    // 아직 날아가는 중일 수 있다 — 매니저가 그걸 끊고 종료하면 서버에는 busy/awaiting_permission
+    // 유령이 남는다. 잠깐(최대 3s) 기다려 준다.
+    const drains = this.#exited.splice(0).map((l) => l.postChain);
+    if (drains.length) {
+      await Promise.race([Promise.all(drains), new Promise<void>((resolve) => setTimeout(resolve, 3_000).unref?.())]);
+    }
   }
 
   // ─── 프로세스/세션 열기 ───────────────────────────────────────────────
@@ -457,14 +630,31 @@ export class AgentSessionRunner {
     log(`${tag} spawning ACP adapter cmd=${command} ${args.join(' ')} cwd=${cwd} auth=${auth.label}`);
 
     let live: LiveSession | null = null;
+    const env = this.#buildEnv(cli, requestedSessionId || 'new', auth);
     const client = await AcpClient.spawn({
       command,
       args,
       cwd,
-      env: this.#buildEnv(cli, requestedSessionId || 'new', auth),
+      env,
       requestTimeoutMs: this.#options.requestTimeoutMs,
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
+      onElicitation: (elicitation) => (live ? this.#onElicitation(live, elicitation) : Promise.resolve({ action: 'cancel' as const })),
+      // 한 줄이 상한을 넘으면 그 메시지만 버리고 세션은 살려 둔다 — 잃는 것은 그 출력 하나다.
+      maxLineBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
+      maxMessageBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
+      skipOversizedLines: true,
+      onOversizedLine: (bytes) => {
+        const mib = Math.round(bytes / (1024 * 1024));
+        log(`${tag} dropped an oversized ACP message (${mib} MiB) — the session continues`);
+        if (live) {
+          this.#enqueue(live, [{
+            type: 'system',
+            payload: { text: `The agent sent a ${mib} MiB message, larger than this session can relay. That one message was dropped; the session is still running.` },
+            turn_id: live.turn?.turnId,
+          }]);
+        }
+      },
       onStderr: (line) => log(`${tag} stderr: ${redactSecrets(line)}`),
       spawnOptions: { detached: process.platform !== 'win32' },
     });
@@ -472,10 +662,19 @@ export class AgentSessionRunner {
     try {
       const initialized = await client.initialize({
         clientInfo: { name: 'awb-agent-session', version: this.#options.clientVersion || '1' },
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        // elicitation(form/url): 에이전트의 질문·폼(claude AskUserQuestion 등)을 카드로 받는다.
+        // session.configOptions.boolean / plan: 어댑터가 boolean 설정과 plan 업데이트를 보내도 된다는 뜻.
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+          elicitation: { form: {}, url: {} },
+          session: { configOptions: { boolean: {} } },
+          plan: {},
+        },
       });
       const caps = (initialized?.agentCapabilities ?? {}) as Record<string, unknown>;
       const loadSupported = caps.loadSession === true;
+      const authMethods = Array.isArray(initialized?.authMethods) ? initialized.authMethods : [];
       const sessionIdForMcp = requestedSessionId || 'new';
       const mcpServers = this.#options.mcpServers ? this.#options.mcpServers(sessionIdForMcp) : this.#defaultMcpServers(sessionIdForMcp);
 
@@ -488,6 +687,12 @@ export class AgentSessionRunner {
         loadSupported,
         loading: false,
         pendingPermissions: new Map(),
+        pendingElicitations: new Map(),
+        preSessionEvents: [],
+        configOptions: [],
+        availableCommands: [],
+        currentMode: null,
+        availableModes: [],
         turn: null,
         textBuffer: '',
         reasoningBuffer: '',
@@ -502,6 +707,7 @@ export class AgentSessionRunner {
       };
 
       let modes: unknown;
+      let configOptions: unknown;
       let resumed = false;
       if (requestedSessionId) {
         if (!loadSupported) {
@@ -509,23 +715,40 @@ export class AgentSessionRunner {
         }
         live.loading = true;
         try {
-          const loaded = await client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers });
+          const loaded = await this.#withAuthRetry(client, cli, authMethods, env, () => client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers }));
           modes = (loaded as any)?.modes;
+          configOptions = (loaded as any)?.configOptions;
           resumed = true;
+        } catch (err: any) {
+          if (err?.code === 'auth_required') throw err;
+          // codex-acp 는 옛 rollout 형식의 thread 를 "Internal error" 로만 거부한다 — 무엇을 해야 하는지 알려 준다.
+          const detail = redactSecrets(String(err?.message ?? err));
+          throw Object.assign(
+            new Error(`${cli} could not resume this session (${detail}). Older sessions may not be resumable by the adapter — start a new session in the same folder.`),
+            { code: 'resume_failed', cause: err },
+          );
         } finally {
           live.loading = false;
         }
       } else {
-        const created = await client.newSession({ cwd, mcpServers });
+        const created = await this.#withAuthRetry(client, cli, authMethods, env, () => client.newSession({ cwd, mcpServers }));
         live.sessionId = created.sessionId;
         modes = created.modes;
+        configOptions = created.configOptions;
         await this.#store.recordAwbSession({ cli, session_id: live.sessionId, cwd, title }).catch(() => undefined);
       }
       if (!live.sessionId) throw new Error('ACP adapter returned no session id.');
       const key = this.#key(cli, live.sessionId);
       this.#live.set(key, live);
       client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
+      if (live.preSessionEvents.length) {
+        const buffered = live.preSessionEvents.splice(0);
+        this.#enqueue(live, buffered);
+      }
       const modeInfo = this.#parseModes(modes);
+      live.currentMode = modeInfo.current;
+      live.availableModes = modeInfo.available;
+      live.configOptions = parseConfigOptions(configOptions);
       this.#enqueue(live, [{
         type: 'system',
         payload: {
@@ -538,6 +761,8 @@ export class AgentSessionRunner {
         ...(title ? { title } : {}),
         current_mode: modeInfo.current,
         available_modes: modeInfo.available,
+        config_options: live.configOptions,
+        available_commands: live.availableCommands,
         resume_supported: loadSupported,
         last_error: null,
         reason: resumed ? 'resumed' : 'opened',
@@ -563,7 +788,69 @@ export class AgentSessionRunner {
     env.AWB_MANAGER_ID = this.#options.getManagerId();
     env.AWB_SESSION_CLI = cli;
     env.AWB_SESSION_ID = sessionId;
+    // codex-acp: 매니저 프로세스에는 브라우저가 없다 — ChatGPT 브라우저 로그인 auth method 를 숨겨
+    // 어댑터가 장비의 codex 로그인(auth.json)이나 API 키만 쓰게 한다.
+    if (cli === 'codex' && env.NO_BROWSER === undefined) env.NO_BROWSER = '1';
     return env;
+  }
+
+  /**
+   * `session/new` / `session/load` 가 "authentication required"(-32000) 로 거부되면 ACP `authenticate`
+   * 를 한 번 시도한다. 환경에 API 키가 있으면 api-key 계열 method, 없으면 남은 method 를 이름으로
+   * 안내하는 오류를 낸다 — 장비에서 `<cli> login` 하거나 CLI 설정에 credential 을 묶으라는 뜻이다.
+   */
+  async #withAuthRetry<T>(client: AcpClient, cli: string, authMethods: unknown[], env: NodeJS.ProcessEnv, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (err: any) {
+      const rpcCode = err?.rpcCode ?? err?.code;
+      const message = String(err?.message ?? '');
+      const authRequired = rpcCode === -32000 || /auth(entication)? required|not (logged|signed) in|unauthenticated/i.test(message);
+      if (!authRequired) throw err;
+      const methods = authMethods
+        .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
+        .map((m) => ({ id: String(m.id ?? ''), name: String(m.name ?? m.id ?? ''), type: String(m.type ?? '') }))
+        .filter((m) => m.id);
+      const hasApiKey = !!(env.CODEX_API_KEY || env.OPENAI_API_KEY || env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN);
+      const apiKeyMethod = methods.find((m) => /api[-_]?key|token/i.test(m.id) || /api[-_]?key|token/i.test(m.name));
+      if (hasApiKey && apiKeyMethod) {
+        log(`[agent-session ${cli}] authentication required — trying ACP auth method ${apiKeyMethod.id}`);
+        await client.authenticate(apiKeyMethod.id, { timeoutMs: this.#options.requestTimeoutMs });
+        return await run();
+      }
+      const listed = methods.length ? ` Available methods: ${methods.map((m) => m.name || m.id).join(', ')}.` : '';
+      throw Object.assign(
+        new Error(`Authentication required for ${cli} on this Runtime Host — run \`${cli} login\` there, or bind a credential in CLI settings.${listed}`),
+        { code: 'auth_required' },
+      );
+    }
+  }
+
+  /** ACP `session/set_config_option` — 응답의 전체 목록으로 상태를 갱신하고 system 행으로 남긴다. */
+  async #setConfigOption(live: LiveSession, configId: string, value: string | boolean): Promise<void> {
+    const before = live.configOptions.find((o) => o.config_id === configId);
+    const response = await live.client.setConfigOption(
+      typeof value === 'boolean'
+        ? { sessionId: live.sessionId, configId, type: 'boolean', value }
+        : { sessionId: live.sessionId, configId, type: 'id', value },
+      { timeoutMs: this.#options.requestTimeoutMs },
+    );
+    if (Array.isArray(response?.configOptions)) live.configOptions = parseConfigOptions(response.configOptions);
+    else if (before) {
+      before.current_value = value;
+    }
+    const after = live.configOptions.find((o) => o.config_id === configId);
+    // codex-acp 는 approval 모드를 config option(category 'mode') 으로도 노출한다 — legacy current_mode 와 맞춘다.
+    if (after?.category === 'mode' && typeof after.current_value === 'string') live.currentMode = after.current_value;
+    const label = after?.name || before?.name || configId;
+    const chosen = typeof value === 'boolean'
+      ? (value ? 'on' : 'off')
+      : (after?.options.find((o) => o.value === value)?.name || String(value));
+    this.#enqueue(live, [{ type: 'system', payload: { text: `${label} set to ${chosen}.` } }], {
+      config_options: live.configOptions,
+      ...(after?.category === 'mode' ? { current_mode: live.currentMode } : {}),
+      reason: 'config_option',
+    });
   }
 
   /**
@@ -658,6 +945,7 @@ export class AgentSessionRunner {
   #statusOf(live: LiveSession): string {
     if (live.exited || live.closing) return 'idle';
     if (live.pendingPermissions.size > 0) return 'awaiting_permission';
+    if (live.pendingElicitations.size > 0) return 'awaiting_input';
     if (live.turn) return 'busy';
     return 'ready';
   }
@@ -674,6 +962,10 @@ export class AgentSessionRunner {
       title: live.title,
       status: this.#statusOf(live),
       resume_supported: live.loadSupported,
+      current_mode: live.currentMode,
+      available_modes: live.availableModes,
+      config_options: live.configOptions,
+      available_commands: live.availableCommands,
     };
   }
 
@@ -744,11 +1036,29 @@ export class AgentSessionRunner {
         return;
       case 'tool_started':
       case 'child_started': {
+        const startupServer = event.type === 'tool_started' ? mcpStartupServerOf(event.toolCallId) : null;
+        if (startupServer !== null) {
+          // codex-acp 는 MCP 서버 연결을 `mcp_startup.<server>` 라는 한 번짜리 tool_call 로 알린다
+          // (update 가 따라오지 않는다). 에이전트가 한 일이 아니라 세션이 열리는 과정이므로 카드로
+          // 띄우지 않는다 — 성공은 조용히 버리고, 실패만 "툴을 못 쓴다" 는 사실이라 system 으로 남긴다.
+          if (event.type === 'tool_started' && event.status === 'failed') {
+            this.#flushBuffers(live, turnId);
+            this.#enqueue(live, [{
+              type: 'system',
+              payload: { text: `MCP server "${startupServer}" did not connect — its tools are unavailable in this session.` },
+              turn_id: turnId,
+            }]);
+          }
+          return;
+        }
         this.#flushBuffers(live, turnId);
         const id = event.type === 'tool_started' ? event.toolCallId : event.childRunId;
+        // 초기 status 를 그대로 싣는다 — codex-acp 의 `mcp_startup.<server>` 처럼 update 없이 한 번에
+        // failed/completed 로 오는 호출이 있어, 없으면 화면이 영원히 "running" 으로 남는다.
+        const status = event.type === 'tool_started' && event.status ? event.status : undefined;
         this.#enqueue(live, [{
           type: 'tool_call',
-          payload: { tool_call_id: id, title: event.title, kind: event.kind, input: boundedValue(event.input), delegated: event.type === 'child_started' || undefined },
+          payload: { tool_call_id: id, title: event.title, kind: event.kind, input: boundedValue(event.input), delegated: event.type === 'child_started' || undefined, ...(status ? { status } : {}) },
           turn_id: turnId,
         }]);
         return;
@@ -776,9 +1086,54 @@ export class AgentSessionRunner {
       case 'diagnostic': {
         const data = (event.data ?? {}) as Record<string, unknown>;
         const kind = String(data.sessionUpdate ?? data.session_update ?? '');
-        if (event.method === 'session/update' && kind === 'current_mode_update') {
-          const modeId = String(data.currentModeId ?? data.current_mode_id ?? '');
-          if (modeId) this.#enqueue(live, [], { current_mode: modeId, reason: 'mode' });
+        if (event.method === 'session/update') {
+          switch (kind) {
+            case 'current_mode_update': {
+              const modeId = String(data.currentModeId ?? data.current_mode_id ?? '');
+              if (modeId) {
+                live.currentMode = modeId;
+                this.#enqueue(live, [], { current_mode: modeId, reason: 'mode' });
+              }
+              return;
+            }
+            case 'config_option_update':
+              live.configOptions = parseConfigOptions(data.configOptions ?? data.config_options);
+              this.#enqueue(live, [], { config_options: live.configOptions, reason: 'config_option' });
+              return;
+            case 'available_commands_update':
+              live.availableCommands = parseCommands(data.availableCommands ?? data.available_commands);
+              this.#enqueue(live, [], { available_commands: live.availableCommands, reason: 'commands' });
+              return;
+            case 'plan':
+            case 'plan_update': {
+              const entries = parsePlanEntries(kind === 'plan' ? data.entries : (data.plan as any)?.entries ?? data.entries);
+              if (entries) {
+                this.#flushBuffers(live, turnId);
+                this.#enqueue(live, [{ type: 'plan', payload: { entries }, turn_id: turnId }]);
+              }
+              return;
+            }
+            case 'plan_removed':
+              return;
+            case 'session_info_update': {
+              const title = typeof data.title === 'string' ? data.title.trim().slice(0, 200) : '';
+              if (title && title !== live.title) {
+                live.title = title;
+                this.#enqueue(live, [], { title, reason: 'title' });
+                void this.#store.touchAwbSession(live.cli, live.sessionId, { title }).catch(() => undefined);
+              }
+              return;
+            }
+            default:
+              break;
+          }
+        }
+        if (event.method === 'elicitation/complete') {
+          // URL 방식 elicitation 이 끝났다는 어댑터의 알림 — 카드를 '완료' 로 닫는다.
+          const elicitationId = String(data.elicitationId ?? data.elicitation_id ?? '');
+          if (elicitationId) {
+            this.#enqueue(live, [{ type: 'elicitation_decision', payload: { elicitation_id: elicitationId, action: 'accept', decided_by: 'agent' }, turn_id: turnId }]);
+          }
           return;
         }
         log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] diagnostic ${event.method}${kind ? ` (${kind})` : ''}`);
@@ -795,12 +1150,16 @@ export class AgentSessionRunner {
     this.#flushBuffers(live, turnId);
     const requestId = randomUUID();
     const options = (permission.options ?? []).map((o) => ({ option_id: o.optionId, name: o.name, kind: o.kind }));
-    this.#enqueue(live, [{
+    const meta = (permission._meta?.permission ?? null) as Record<string, unknown> | null;
+    const title = permission.title || permission.toolCall?.title || (typeof meta?.title === 'string' ? meta.title : '');
+    const description = permission.description || (typeof meta?.description === 'string' ? meta.description : '');
+    const [requestEvent] = this.#enqueue(live, [{
       type: 'permission_request',
       payload: {
         request_id: requestId,
-        tool_call_id: permission.toolCall?.toolCallId ?? '',
-        title: permission.toolCall?.title ?? '',
+        tool_call_id: permission.toolCall?.toolCallId ?? permission.subject?.toolCallId ?? '',
+        title,
+        ...(description ? { description } : {}),
         kind: permission.toolCall?.kind ?? '',
         options,
         raw_input: boundedValue((permission.toolCall as any)?.rawInput ?? (permission.toolCall as any)?.raw_input),
@@ -818,8 +1177,95 @@ export class AgentSessionRunner {
         resolve({ outcome: 'cancelled' });
       }, this.#options.permissionTimeoutMs);
       timer.unref?.();
-      live.pendingPermissions.set(requestId, { resolve, timer });
+      live.pendingPermissions.set(requestId, { resolve, timer, event: requestEvent });
     });
+  }
+
+  /**
+   * 미결 permission 을 전부 cancelled 로 푼다(프로세스 종료·close·credential 재오픈). 결정 행을
+   * 같이 중계해야 화면의 권한 카드가 "대기 중" 으로 영원히 남지 않는다 — 결정자는 사용자가
+   * 아니므로 `decided_by: 'system'`.
+   */
+  #cancelPendingPermissions(live: LiveSession): void {
+    const events: AgentSessionEventInput[] = [];
+    for (const [requestId, pending] of live.pendingPermissions) {
+      clearTimeout(pending.timer);
+      live.pendingPermissions.delete(requestId);
+      events.push({
+        type: 'permission_decision',
+        payload: { request_id: requestId, outcome: 'cancelled', option_id: null, decided_by: 'system' },
+        turn_id: live.turn?.turnId,
+      });
+      pending.resolve({ outcome: 'cancelled' });
+    }
+    for (const [elicitationId, pending] of live.pendingElicitations) {
+      clearTimeout(pending.timer);
+      live.pendingElicitations.delete(elicitationId);
+      events.push({
+        type: 'elicitation_decision',
+        payload: { elicitation_id: elicitationId, action: 'cancel', decided_by: 'system' },
+        turn_id: live.turn?.turnId,
+      });
+      pending.resolve({ action: 'cancel' });
+    }
+    if (events.length) this.#enqueue(live, events);
+  }
+
+  /**
+   * 어댑터의 `elicitation/create` — 에이전트가 사용자에게 구조화된 입력을 요청한다(claude 의
+   * AskUserQuestion, codex 의 질문 등). form 은 JSON Schema 를 그대로 카드로 넘기고 답이 올 때까지
+   * 요청을 연다. url 은 링크 카드만 남기고 바로 accept 한다(완료는 `elicitation/complete` 로 온다).
+   */
+  async #onElicitation(live: LiveSession, request: AcpElicitationRequest): Promise<AcpElicitationOutcome> {
+    if (live.loading) return { action: 'cancel' };
+    const turnId = live.turn?.turnId;
+    this.#flushBuffers(live, turnId);
+    const mode = request.mode === 'url' ? 'url' : 'form';
+    const elicitationId = (mode === 'url' && typeof request.elicitationId === 'string' && request.elicitationId) ? request.elicitationId : randomUUID();
+    const payload: Record<string, unknown> = {
+      elicitation_id: elicitationId,
+      mode,
+      message: typeof request.message === 'string' ? request.message.slice(0, 8_000) : '',
+      tool_call_id: typeof request.toolCallId === 'string' ? request.toolCallId : '',
+    };
+    if (mode === 'form') payload.schema = boundedValue(request.requestedSchema ?? {});
+    if (mode === 'url') payload.url = typeof request.url === 'string' ? request.url.slice(0, 2_048) : '';
+    if (mode === 'url') {
+      this.#enqueue(live, [{ type: 'elicitation_request', payload, turn_id: turnId }]);
+      return { action: 'accept' };
+    }
+    const [requestEvent] = this.#enqueue(live, [{ type: 'elicitation_request', payload, turn_id: turnId }], { status: 'awaiting_input', reason: 'elicitation' });
+    return new Promise<AcpElicitationOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        live.pendingElicitations.delete(elicitationId);
+        this.#enqueue(live, [{
+          type: 'elicitation_decision',
+          payload: { elicitation_id: elicitationId, action: 'cancel', decided_by: 'timeout' },
+          turn_id: live.turn?.turnId,
+        }], { status: this.#statusOf(live) === 'awaiting_input' ? 'busy' : this.#statusOf(live), reason: 'elicitation_timeout' });
+        resolve({ action: 'cancel' });
+      }, this.#options.permissionTimeoutMs);
+      timer.unref?.();
+      live.pendingElicitations.set(elicitationId, { resolve, timer, event: requestEvent });
+    });
+  }
+
+  #resolveElicitation(cli: string, sessionId: string, elicitationId: string, action: 'accept' | 'decline' | 'cancel', content: Record<string, unknown> | null): void {
+    const live = this.#live.get(this.#key(cli, sessionId));
+    if (!live) return;
+    const pending = live.pendingElicitations.get(elicitationId);
+    if (!pending) {
+      log(`[agent-session ${cli} ${sessionId.slice(0, 8)}] elicitation ${elicitationId.slice(0, 8)} not pending (late or duplicate answer)`);
+      return;
+    }
+    clearTimeout(pending.timer);
+    live.pendingElicitations.delete(elicitationId);
+    this.#enqueue(live, [{
+      type: 'elicitation_decision',
+      payload: { elicitation_id: elicitationId, action, ...(action === 'accept' ? { content: boundedValue(content ?? {}) } : {}), decided_by: 'user' },
+      turn_id: live.turn?.turnId,
+    }], { status: live.pendingPermissions.size > 0 ? 'awaiting_permission' : 'busy', reason: `elicitation_${action}` });
+    pending.resolve(action === 'accept' ? { action: 'accept', content: content ?? {} } : { action });
   }
 
   #resolvePermission(cli: string, sessionId: string, requestId: string, optionId: string | null): void {
@@ -868,10 +1314,20 @@ export class AgentSessionRunner {
     if (events.length) this.#enqueue(live, events);
   }
 
-  /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. */
-  #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): void {
+  /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. 찍힌 행을 돌려준다. */
+  #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): StampedEvent[] {
+    // 세션 id 가 정해지기 전(session/new 응답 전)에 어댑터가 보내는 알림은 보낼 곳이 없다. 예전엔
+    // seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났고, UI 의 유실 감지(hasSeqGap)가 계속
+    // 재조회를 돌게 했다. 아예 세지 않는다.
+    // 세션 id 가 정해지기 전(session/new 응답 전)에 어댑터가 보내는 행은 보낼 곳이 없다 — 예전엔
+    // seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났다(UI 의 유실 감지가 계속 재조회를 돌았다).
+    // 세지 말고 모아 뒀다가 세션이 열리면 순서대로 내보낸다(MCP 연결 실패 안내가 여기 실린다).
+    if (!live.sessionId) {
+      live.preSessionEvents.push(...events);
+      return [];
+    }
     const now = new Date().toISOString();
-    const stamped = events.map((e) => {
+    const stamped: StampedEvent[] = events.map((e) => {
       live.seq += 1;
       return { ...e, payload: boundedPayload(e.payload), seq: live.seq, id: `${live.sessionId}:live:${live.nonce}:${live.seq}`, created_at: now };
     });
@@ -881,6 +1337,7 @@ export class AgentSessionRunner {
         ? postAgentSessionEvents(this.#config, ref, stamped, state ?? null)
         : Promise.resolve({ ok: true, status: 204 })))
       .then(() => undefined, () => undefined);
+    return stamped;
   }
 
   // ─── 수명주기 ─────────────────────────────────────────────────────────
@@ -891,7 +1348,7 @@ export class AgentSessionRunner {
     const ms = this.#options.idleMinutes * 60_000;
     if (ms <= 0) return;
     live.idleTimer = setTimeout(() => {
-      if (live.turn || live.pendingPermissions.size > 0) {
+      if (live.turn || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0) {
         this.#touch(live);
         return;
       }
@@ -911,19 +1368,23 @@ export class AgentSessionRunner {
     const live = this.#live.get(key);
     if (!live) return;
     live.exited = true;
-    for (const [id, pending] of live.pendingPermissions) {
-      clearTimeout(pending.timer);
-      pending.resolve({ outcome: 'cancelled' });
-      live.pendingPermissions.delete(id);
-    }
     this.#clearIdle(live);
-    if (live.closing) return;
+    if (live.closing) {
+      this.#cancelPendingPermissions(live);
+      return;
+    }
     this.#live.delete(key);
     const detail = `Agent process exited (${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}).`;
     log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] ${detail}`);
     this.#flushBuffers(live, live.turn?.turnId);
+    this.#cancelPendingPermissions(live);
+    // 프로세스가 없으니 상태는 무조건 idle 이다 — 턴 중이었어도 마찬가지(#runPrompt 의 catch 가
+    // 곧 error 행 + turn(finished) 을 덧붙이고 같은 idle 을 다시 보낸다). 예전엔 턴 중이면 상태를
+    // 안 보냈고, 그 사이 매니저가 종료되면 서버에 busy/awaiting_permission 이 그대로 남았다.
     this.#enqueue(live, [{ type: 'system', payload: { text: `${detail} The next prompt reopens the session.` } }],
-      live.turn ? undefined : { status: 'idle', reason: 'process_exit' });
+      { status: 'idle', reason: 'process_exit' });
+    this.#exited.push(live);
+    if (this.#exited.length > 50) this.#exited.splice(0, this.#exited.length - 50);
   }
 
   async #closeLive(cli: string, sessionId: string, finalStatus: 'closed' | 'idle', reason: string = finalStatus): Promise<void> {
@@ -932,11 +1393,7 @@ export class AgentSessionRunner {
     if (!live) return;
     live.closing = true;
     this.#clearIdle(live);
-    for (const [id, pending] of live.pendingPermissions) {
-      clearTimeout(pending.timer);
-      pending.resolve({ outcome: 'cancelled' });
-      live.pendingPermissions.delete(id);
-    }
+    this.#cancelPendingPermissions(live);
     if (live.turn) await live.client.cancel(live.sessionId).catch(() => undefined);
     this.#flushBuffers(live, live.turn?.turnId);
     if (!live.exited) await live.client.closeSession(live.sessionId).catch(() => undefined);

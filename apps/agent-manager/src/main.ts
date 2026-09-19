@@ -1116,6 +1116,8 @@ async function runRuntime(
       // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
       availableModelsProvider: () => availableModels,
       acpSessionClis,
+      // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
+      agentSessionsProvider: () => agentSessionRunner.liveStates(),
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,

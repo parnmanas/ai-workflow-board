@@ -57,28 +57,46 @@ function rememberCwd(managerId: string, cli: string, cwd: string): void {
 }
 
 export default function NewSessionModal({ open, onClose, hosts, initialManagerId, initialCli, initialCwd, onCreated }: NewSessionModalProps) {
-  const [managerId, setManagerId] = useState(initialManagerId || '');
-  const [cli, setCli] = useState(initialCli || '');
+  const [managerId, setManagerId] = useState('');
+  const [cli, setCli] = useState('');
   const [cwd, setCwd] = useState('');
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  // 닫힐 때 폼을 비운다 — 다음에 열릴 때 아래 effect 가 "아직 고른 호스트가 없다" 를
+  // 보고 기본값을 채우게 하려는 것이지, 열려 있는 동안 되돌리려는 것이 아니다.
   useEffect(() => {
-    if (!open) return;
-    setError(null);
+    if (open) return;
+    setManagerId('');
+    setCli('');
+    setCwd('');
     setTitle('');
+    setError(null);
+    setPickerOpen(false);
+  }, [open]);
+
+  // 기본 호스트/CLI/cwd 는 **아직 아무것도 고르지 않았을 때만** 채운다. `hosts` 는 매니저
+  // 하트비트마다(`agent_instance_update` → useAgentSessionsNav 재조회) 새 배열로 내려오므로,
+  // 예전처럼 hosts 가 바뀔 때마다 초기화하면 사용자가 고르던 호스트가 30초 간격으로
+  // 첫 번째 호스트로 되돌아가고 cwd·제목·DirectoryPicker 트리까지 함께 리셋됐다.
+  // 모달이 호스트 목록보다 먼저 열린 경우(사이드바 "New session" 직후)에도 이 effect 가
+  // 목록 도착 시 한 번만 기본값을 채운다.
+  useEffect(() => {
+    if (!open || managerId) return;
     const host = hosts.find((h) => h.manager_id === initialManagerId) ?? hosts[0] ?? null;
-    const nextManager = host?.manager_id || '';
-    const nextCli = host && initialCli && host.clis.includes(initialCli) ? initialCli : host?.clis[0] || '';
-    setManagerId(nextManager);
+    if (!host) return;
+    const nextCli = initialCli && host.clis.includes(initialCli) ? initialCli : host.clis[0] || '';
+    setManagerId(host.manager_id);
     setCli(nextCli);
     // initialCwd(그룹 헤더 "+ New")가 있으면 우선 적용, 없으면 마지막 기억 cwd
-    setCwd(initialCwd || (nextManager && nextCli ? readLastCwd(nextManager, nextCli) : ''));
-  }, [open, hosts, initialManagerId, initialCli, initialCwd]);
+    setCwd((prev) => prev || initialCwd || (nextCli ? readLastCwd(host.manager_id, nextCli) : ''));
+  }, [open, hosts, managerId, initialManagerId, initialCli, initialCwd]);
 
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
+  // 하트비트 TTL 사이에 잠깐 목록에서 빠진 호스트는 선택을 유지한다(다음 하트비트에 돌아온다).
+  const selectedHostMissing = !!managerId && !host;
 
   useEffect(() => {
     if (!host) return;
@@ -132,8 +150,9 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
 
         <div>
           <label htmlFor="new-session-host" style={labelStyle}>Runtime Host</label>
-          <select id="new-session-host" style={selectStyle} value={managerId} disabled={hosts.length === 0} onChange={(e) => setManagerId(e.target.value)}>
-            {hosts.length === 0 && <option value="">No Runtime Host is connected</option>}
+          <select id="new-session-host" style={selectStyle} value={managerId} disabled={hosts.length === 0 && !managerId} onChange={(e) => setManagerId(e.target.value)}>
+            {hosts.length === 0 && !managerId && <option value="">No Runtime Host is connected</option>}
+            {selectedHostMissing && <option value={managerId}>Reconnecting…</option>}
             {hosts.map((h) => (
               <option key={h.manager_id} value={h.manager_id}>{h.name}{h.hostname && h.hostname !== h.name ? ` (${h.hostname})` : ''}</option>
             ))}
@@ -143,7 +162,8 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
         <div>
           <label htmlFor="new-session-cli" style={labelStyle}>CLI</label>
           <select id="new-session-cli" style={selectStyle} value={cli} disabled={!host || host.clis.length === 0} onChange={(e) => setCli(e.target.value)}>
-            {(!host || host.clis.length === 0) && <option value="">No ACP-capable CLI on this host</option>}
+            {!host && cli && <option value={cli}>{runtimeLabel(cli)}</option>}
+            {(!host || host.clis.length === 0) && !cli && <option value="">No ACP-capable CLI on this host</option>}
             {host?.clis.map((c) => <option key={c} value={c}>{runtimeLabel(c)}</option>)}
           </select>
         </div>
