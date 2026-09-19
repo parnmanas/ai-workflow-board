@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { AgentSessionStore, claudeToolKind } from '../dist/lib/agent-session-store.js';
+import { AgentSessionStore, boundHistoryPayload, claudeToolKind, fitHistoryBytes } from '../dist/lib/agent-session-store.js';
 
 const jsonl = (rows) => rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
 const CLAUDE_ID = '11111111-2222-4333-8444-555555555555';
@@ -130,4 +130,60 @@ test('awb index: hermes sessions only exist in the index; an indexed claude sess
   assert.equal((await store.readHistory('claude', CLAUDE_ID)).session.title, 'Renamed');
   assert.equal((await store.listSessions('claude')).find((s) => s.session_id === CLAUDE_ID).source, 'awb');
   assert.equal((await store.readHistory('claude', 'missing')).session, null);
+});
+
+// 긴 세션이 화면에서 "로딩하다 에러" 로 끝나던 사고 (실측: ralf 의 codex 세션 기록 응답이 21.16MiB →
+// 서버 JSON 본문 상한 10MB 초과 → 413 → RPC 가 풀리지 않고 40s 뒤 타임아웃).
+// 원인은 codex 의 tool 출력이 **문자열이 아니라 content block 배열**로 와서 자르는 갈래를 비껴간 것.
+// 자르기는 CLI 별 파서가 아니라 readHistory 한 곳에서 하고, 바이트 상한을 마지막 방어선으로 둔다.
+test('history: a codex tool output shaped as an array is bounded like a string one, so one event cannot blow the response', async (t) => {
+  const home = await seedHome(t);
+  const bigBlocks = Array.from({ length: 400 }, (_, i) => ({ type: 'input_text', text: `line ${i} ` + 'y'.repeat(4000) }));
+  const codexDir = join(home.codexHome, 'sessions', '2026', '09', '18');
+  const id = '019d5d74-427c-7d13-b1c4-a54e0081374b';
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(join(codexDir, `rollout-2026-09-18T10-00-00-${id}.jsonl`), jsonl([
+    { timestamp: '2026-09-18T00:00:00.000Z', type: 'session_meta', payload: { id, timestamp: '2026-09-18T00:00:00.000Z', cwd: '/tmp/work/codex' } },
+    { timestamp: '2026-09-18T00:00:01.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'read everything' }] } },
+    { timestamp: '2026-09-18T00:00:02.000Z', type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'call_big', input: 'text(await tools.exec_command({cmd:"cat huge"}))', status: 'completed' } },
+    { timestamp: '2026-09-18T00:00:03.000Z', type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call_big', output: bigBlocks } },
+    { timestamp: '2026-09-18T00:00:04.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] } },
+  ]));
+  const store = new AgentSessionStore(home);
+  const history = await store.readHistory('codex', id);
+  const update = history.events.find((e) => e.type === 'tool_update');
+  assert.ok(update, 'the tool result is still relayed');
+  const bytes = Buffer.byteLength(JSON.stringify(update));
+  assert.ok(bytes < 64_000, `the array-shaped output is bounded, not passed through raw: ${bytes} bytes`);
+  const whole = Buffer.byteLength(JSON.stringify(history.events));
+  assert.ok(whole < 200_000, `the whole response stays small: ${whole} bytes`);
+  assert.ok(history.events.some((e) => e.type === 'text' && e.payload.text === 'done'), 'later events survive');
+});
+
+test('boundHistoryPayload folds long strings and wide arrays, and falls back to a preview when the shape is still too big', () => {
+  const bounded = boundHistoryPayload({ output: 'z'.repeat(50_000), keep: 'short' });
+  assert.equal(bounded.keep, 'short');
+  assert.ok(String(bounded.output).length < 20_000, 'long strings are truncated');
+  assert.match(String(bounded.output), /truncated/);
+
+  const wide = boundHistoryPayload({ blocks: Array.from({ length: 5_000 }, (_, i) => ({ text: `row ${i}` })) });
+  assert.ok(Array.isArray(wide.blocks) && wide.blocks.length <= 100, 'wide arrays are capped');
+
+  // 접어도 큰 경우 — 미리보기로 대체하되 내용을 완전히 잃지는 않는다
+  const huge = boundHistoryPayload({ blocks: Array.from({ length: 100 }, () => ({ text: 'q'.repeat(2_000) })) });
+  assert.equal(huge.truncated, true);
+  assert.ok(String(huge.preview).length <= 4_000);
+});
+
+test('fitHistoryBytes keeps the newest events within the byte budget and never returns nothing', () => {
+  const ev = (i, size) => ({ id: `e${i}`, seq: i, type: 'text', payload: { text: 'x'.repeat(size) } });
+  const events = [ev(1, 1000), ev(2, 1000), ev(3, 1000), ev(4, 1000)];
+  const kept = fitHistoryBytes(events, 2600);
+  assert.ok(kept.length < events.length, 'oldest events are dropped');
+  assert.equal(kept.at(-1).id, 'e4', 'the newest event is always kept');
+  assert.deepEqual(kept.map((e) => e.id), events.slice(events.length - kept.length).map((e) => e.id), 'the kept window is contiguous and at the end');
+
+  assert.deepEqual(fitHistoryBytes(events, 10_000).map((e) => e.id), ['e1', 'e2', 'e3', 'e4'], 'a generous budget keeps everything');
+  const single = fitHistoryBytes([ev(1, 50_000)], 1_000);
+  assert.equal(single.length, 1, 'one oversized event still comes through rather than an empty transcript');
 });

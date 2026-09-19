@@ -148,6 +148,19 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 세션마다 handshake 가 `schemaVersion mismatch` 로 실패했다. CLI 네이티브 MCP 클라이언트는 AWB 확장 capability 를
 모르므로 subagent / managed-subagent / runtime-child 와 같은 면제다(`mcp-schema-version.test.mjs` 가 네 종류를 모두 고정).
 
+### 긴 기록 (history 응답 크기)
+
+기록 응답은 서버의 JSON 본문 상한(10MB)을 넘으면 413 으로 버려지고, 화면은 40초 뒤 타임아웃 에러만 본다.
+실측(ralf codex 세션): 응답이 **21.16MiB**, 개별 `tool_update` 하나가 1.37MB 였다. 원인은 codex 의 tool 출력이
+문자열이 아니라 content block **배열**로 와서 `truncate(...)` 갈래를 비껴간 것이다. 그래서:
+
+- payload 크기 정리는 CLI 별 파서가 아니라 `readHistory` **한 곳**에서 한다(`boundHistoryPayload`) — 갈래마다 자르면
+  한 곳만 빠뜨려도 응답 전체가 죽는다. 문자열은 자르고, 배열·객체는 개수를 제한하고, 그래도 크면 미리보기로 대체한다.
+- 마지막 방어선으로 응답 전체를 바이트로 자른다(`fitHistoryBytes`, 6MiB). **오래된 것부터** 버려 최근 대화를 지키고,
+  한 건도 못 담을 만큼 큰 이벤트만 있어도 최소 한 건은 남긴다. 버린 건수는 기존 `Earlier history omitted` 안내에 합산된다.
+
+같은 파일 기준 응답이 21.16MiB → 2.41MiB 로 줄고 786건이 모두 남는다.
+
 ### 거대한 메시지
 
 어댑터가 tool 출력을 알림 **한 줄**로 보내는데, 큰 파일 읽기나 긴 명령 출력이면 기본 상한(4MiB)을 넘는다.
