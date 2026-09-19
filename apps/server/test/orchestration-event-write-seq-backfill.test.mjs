@@ -174,6 +174,9 @@ describe('레거시 write_seq 백필', () => {
       await seedEvent(okMission.id, okSeconds[i], i + 1, `ok #${i}`);
     }
     const okBefore = await rowsInBackfillOrder(okMission.id);
+    const createdAtBefore = await dataSource.query(
+      'SELECT id, created_at FROM orchestration_events ORDER BY id ASC',
+    );
 
     // ── 비공허성: 백필 전에는 커서가 실제로 이벤트를 잃는다 ──
     const walkedBefore = await walkTimeline(zeroMission.id, 5);
@@ -207,6 +210,15 @@ describe('레거시 write_seq 백필', () => {
 
     // 이미 올바른 미션은 손대지 않는다 — 재부여가 "전부 다시 쓰기" 가 아님을 고정한다.
     assert.deepEqual(await rowsInBackfillOrder(okMission.id), okBefore, '이미 1..N 인 미션의 행은 그대로여야 한다');
+
+    // `created_at` 은 백필이 기준으로 삼는 축이다. UPDATE 가 이 컬럼까지 건드리면 방금
+    // 계산한 순서가 그 자리에서 무효가 되고 재실행마다 다른 번호가 나온다 — 암묵적으로
+    // 통과하는 데 기대지 말고 못 박는다.
+    assert.deepEqual(
+      await dataSource.query('SELECT id, created_at FROM orchestration_events ORDER BY id ASC'),
+      createdAtBefore,
+      '백필은 write_seq 만 쓰고 created_at 은 건드리지 않아야 한다',
+    );
 
     // ── 제품 불변식: 백필 후 커서가 전량을 덮고 중복이 없다 ──
     const walkedAfter = await walkTimeline(zeroMission.id, 5);
