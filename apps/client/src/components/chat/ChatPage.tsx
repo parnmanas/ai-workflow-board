@@ -421,7 +421,16 @@ export default function ChatPage() {
       setMessages((prev) => {
         // Deduplicate: skip if this message was already appended optimistically
         if (prev.some((m) => m.id === msg.id)) return prev;
-        return [...prev, msg];
+        const next = [...prev, msg];
+        // Guard against out-of-order SSE delivery (agent reply SSE can arrive
+        // before the user's own message SSE when sendMessage() awaits async
+        // pre-processing). Sort only when the new message is older than the
+        // current tail — the common in-order path pays no sort cost.
+        const tail = prev[prev.length - 1];
+        if (tail && new Date(msg.created_at).getTime() < new Date(tail.created_at).getTime()) {
+          return next.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        }
+        return next;
       });
       // Skip read-receipts when watching as a non-member observer.
       if (!isObserverRef.current && !isProgress) {
@@ -612,7 +621,12 @@ export default function ChatPage() {
     // (see ticket 3203bbaf — Chat Echo back 버그).
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
-      return [...prev, msg];
+      const next = [...prev, msg];
+      const tail = prev[prev.length - 1];
+      if (tail && new Date(msg.created_at).getTime() < new Date(tail.created_at).getTime()) {
+        return next.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      }
+      return next;
     });
   }
 
