@@ -150,7 +150,12 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   const openCall = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ cwd: '/home/parn/repo', title: 'Review PR' }) });
   await rpcRespond((r) => r.op === 'open' && r.cli === 'codex', {
     ok: true,
-    result: { session_id: 'codex-thread-9', cwd: '/home/parn/repo', title: 'Review PR', status: 'ready', resume_supported: false, available_modes: [{ id: 'default', name: 'Default' }], current_mode: 'default' },
+    result: {
+      session_id: 'codex-thread-9', cwd: '/home/parn/repo', title: 'Review PR', status: 'ready', resume_supported: false,
+      available_modes: [{ id: 'default', name: 'Default' }], current_mode: 'default',
+      config_options: [{ config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'gpt-a', options: [{ value: 'gpt-a', name: 'A' }, { value: 'gpt-b', name: 'B' }] }],
+      available_commands: [{ name: 'review', description: 'Review' }],
+    },
   });
   const opened = await openCall;
   assert.equal(opened.status, 201, opened.text);
@@ -158,6 +163,8 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   assert.equal(opened.body.status, 'ready');
   assert.equal(opened.body.driver_user_id, owner.id);
   assert.deepEqual(opened.body.available_modes.map((m) => m.id), ['default']);
+  assert.deepEqual(opened.body.config_options.map((o) => [o.config_id, o.current_value]), [['model', 'gpt-a']], 'open result carries the adapter settings so the header renders immediately');
+  assert.deepEqual(opened.body.available_commands.map((c) => c.name), ['review']);
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === 'codex-thread-9' && d.reason === 'opened', 4000);
   const openReq = requests.find((r) => r.op === 'open');
   assert.equal(openReq.session_id, null);

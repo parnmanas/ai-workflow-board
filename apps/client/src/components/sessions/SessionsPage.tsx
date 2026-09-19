@@ -24,12 +24,14 @@ import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessionList.lo
 import {
   appendLiveEvent,
   buildTranscript,
+  canConnect,
   canPrompt,
   describeSessionStatus,
   isWaitingStatus,
   pendingInteraction,
   runtimeLabel,
   sessionDisplayTitle,
+  shouldAutoConnect,
 } from './sessionTranscript.logic';
 
 /**
@@ -435,6 +437,29 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     void load();
   }, [status, pending, loading, live?.updated_at, sessionId, load]);
 
+  // 연결 — 프로세스가 없는 세션을 session/load 로 연다. 모델·모드 같은 설정 목록과 slash command 는
+  // 어댑터가 살아 있어야 오므로, 페이지에 들어오면 idle 세션은 자동으로 한 번 연결한다(터미널에서
+  // `--resume` 하는 것과 같다). closed/error 는 Connect 버튼으로만.
+  const [connecting, setConnecting] = useState(false);
+  const autoConnectedRef = useRef<string | null>(null);
+  const connect = useCallback(async () => {
+    setConnecting(true);
+    try {
+      setLive(await api.openHostSession(managerId, cli, { session_id: sessionId }));
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to connect to the session on the Runtime Host', 'error');
+    } finally {
+      setConnecting(false);
+    }
+  }, [managerId, cli, sessionId, showToast]);
+  useEffect(() => {
+    if (loading || !live || connecting || !shouldAutoConnect(status)) return;
+    const marker = `${managerId}/${cli}/${sessionId}`;
+    if (autoConnectedRef.current === marker) return;
+    autoConnectedRef.current = marker;
+    void connect();
+  }, [loading, live, connecting, status, managerId, cli, sessionId, connect]);
+
   useEffect(() => {
     if (!follow) return;
     const el = scrollRef.current;
@@ -541,8 +566,10 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       : 'The Runtime Host reports a pending request — fetching it… If it does not appear, Stop the agent process and prompt again.')
     : status === 'error' && authProblem
       ? `${runtimeLabel(cli)} on ${host?.name || 'the host'} is not signed in. Log in on the host, or bind a credential in this CLI's settings (list page → CLI settings).`
+    : connecting || status === 'starting'
+      ? `Connecting to ${runtimeLabel(cli)} on ${host?.name || 'the host'}… settings appear once the session is open.`
     : status === 'idle' || status === 'closed'
-      ? `No live process — your next prompt starts ${runtimeLabel(cli)} on ${host?.name || 'the host'} and resumes this session.`
+      ? `No live process — Connect, or send a prompt, to start ${runtimeLabel(cli)} on ${host?.name || 'the host'} and resume this session.`
       : status === 'error' && live?.last_error
         ? `Last error: ${live.last_error}`
         : null;
@@ -637,6 +664,12 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </select>
         )}
         <div style={{ display: 'flex', gap: 6 }}>
+          {canConnect(status) && !connecting && (
+            <Button variant="primary" size="sm" onClick={() => void connect()} title="Start the CLI process for this session on the Runtime Host and load its settings">
+              {status === 'error' ? 'Reconnect' : 'Connect'}
+            </Button>
+          )}
+          {(connecting || status === 'starting') && <Button variant="secondary" size="sm" disabled loading>Connecting…</Button>}
           <Button variant="ghost" size="sm" onClick={() => void load()} title="Reload the transcript from the Runtime Host">Reload</Button>
           <Button variant="ghost" size="sm" onClick={onNew}>New</Button>
           {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>Stop</Button>}

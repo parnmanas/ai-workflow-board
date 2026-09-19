@@ -7,6 +7,7 @@ import {
   appendLiveEvent,
   applySlashCommand,
   buildTranscript,
+  canConnect,
   canPrompt,
   describeSessionStatus,
   isWaitingStatus,
@@ -15,6 +16,7 @@ import {
   pendingInteraction,
   pendingPermission,
   sessionDisplayTitle,
+  shouldAutoConnect,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
 import {
   cwdBaseName,
@@ -271,4 +273,13 @@ test('slash command matching is active only while the command name is being type
   assert.equal(matchSlashCommands('/re', []).active, false, 'no commands, no popup');
   assert.equal(applySlashCommand(commands[0]), '/review ', 'commands that take input get a trailing space');
   assert.equal(applySlashCommand(commands[1]), '/compact');
+});
+
+test('entering a session page auto-connects only idle sessions; closed/error keep a manual Connect', () => {
+  assert.equal(shouldAutoConnect('idle'), true, 'idle → open it so model/mode settings arrive');
+  for (const status of ['closed', 'error', 'starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input']) {
+    assert.equal(shouldAutoConnect(status), false, `${status} is not auto-connected`);
+  }
+  assert.deepEqual(['idle', 'closed', 'error'].map(canConnect), [true, true, true]);
+  assert.deepEqual(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input'].map(canConnect), [false, false, false, false, false]);
 });

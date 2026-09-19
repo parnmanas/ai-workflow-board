@@ -465,6 +465,20 @@ export function isWaitingStatus(status: AgentSessionStatus | string | null | und
   return status === 'awaiting_permission' || status === 'awaiting_input';
 }
 
+/**
+ * 세션 페이지에 들어왔을 때 자동으로 연결(session/load)할지. 프로세스가 없는 `idle` 만 —
+ * 모델·모드 같은 설정 목록은 어댑터가 살아 있어야 오기 때문이다. `closed` 는 사용자가 일부러
+ * 멈춘 것이고 `error` 는 원인을 보여 줘야 하므로 Connect 버튼으로만 다시 연다.
+ */
+export function shouldAutoConnect(status: AgentSessionStatus | string | null | undefined): boolean {
+  return status === 'idle';
+}
+
+/** 수동 Connect 버튼을 보일 상태 — 프로세스가 없거나 죽은 상태 전부. */
+export function canConnect(status: AgentSessionStatus | string | null | undefined): boolean {
+  return status === 'idle' || status === 'closed' || status === 'error';
+}
+
 export function runtimeLabel(runtime: string): string {
   switch (runtime) {
     case 'claude':

@@ -79,6 +79,8 @@ config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 �
 `configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
 설정 변경(`set_config_option` / `set_mode`)은 프로세스가 없는 세션에도 된다 — 서버가 `starting` 으로 올리고 매니저가
 prompt 와 같은 경로로 먼저 연 뒤 적용하므로 **첫 프롬프트 전에 모델·approval 모드를 고를 수 있다**. 턴 중·대기 중에는 409.
+설정 목록 자체는 어댑터가 살아 있어야 오므로, 세션 페이지에 들어오면 `idle` 세션은 자동으로 한 번 연결한다(`POST …/sessions
+{session_id}` → session/load, 터미널의 `--resume` 과 같다). `closed`/`error` 는 헤더의 Connect/Reconnect 버튼으로만 다시 연다.
 
 codex-acp 1.12 실측(rolf): `session/new` 가 modes(read-only / agent / agent-full-access) 와 config options
 Mode·Collaboration mode(default/plan)·Model(gpt-5.6-sol, gpt-6-astra, …)·Reasoning effort·Fast mode 를 준다. approval 은

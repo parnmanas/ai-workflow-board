@@ -574,6 +574,9 @@ export class AgentSessionsService implements OnModuleDestroy {
       status: typeof result?.status === 'string' ? result.status : 'ready',
       current_mode: result?.current_mode ?? null,
       available_modes: Array.isArray(result?.available_modes) ? result.available_modes : [],
+      // 매니저의 open 답에 실린 세션 설정·명령 — 화면이 SSE 패치를 기다리지 않고 바로 셀렉트를 그린다.
+      ...(Array.isArray(result?.config_options) ? { config_options: result.config_options } : {}),
+      ...(Array.isArray(result?.available_commands) ? { available_commands: result.available_commands } : {}),
       resume_supported: result?.resume_supported === true,
       last_error: null,
     });
