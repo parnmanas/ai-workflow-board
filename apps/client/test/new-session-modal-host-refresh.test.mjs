@@ -105,7 +105,7 @@ test('closing and reopening re-applies the route defaults (host, CLI, prefilled 
     change(hostSelect(), 'm-rolf');
     typeInto(titleInput(), 'scratch');
     view.rerender(h(NewSessionModal, { open: false, onClose() {}, onCreated() {}, hosts: fleet(), initialManagerId: 'm-ragnar', initialCli: 'codex' }));
-    assert.equal(document.querySelector('[role="dialog"]'), null, 'closed');
+    assert.equal(Boolean(document.querySelector('[role="dialog"]')), false, 'open=false 면 다이얼로그가 사라진다');
     view.rerender(render({ hosts: fleet(), initialManagerId: 'm-ragnar', initialCli: 'codex', initialCwd: '/srv/app' }));
     assert.equal(hostSelect().value, 'm-ragnar', 'reopen starts from the route host again');
     assert.equal(cliSelect().value, 'codex');
