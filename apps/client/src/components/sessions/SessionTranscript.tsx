@@ -236,7 +236,7 @@ function PermissionBlock({
           {decided.outcome === 'selected'
             ? `${decidedOption?.name || decided.option_id || 'Selected'}`
             : 'Denied'}
-          <span style={{ color: tokens.colors.textMuted }}> · {decided.decided_by === 'user' ? 'by you' : decided.decided_by === 'policy' ? 'by session policy' : decided.decided_by === 'timeout' ? 'timed out' : decided.decided_by}</span>
+          <span style={{ color: tokens.colors.textMuted }}> · {decided.decided_by === 'user' ? 'by you' : decided.decided_by === 'policy' ? 'by session policy' : decided.decided_by === 'timeout' ? 'timed out' : decided.decided_by === 'system' ? 'agent process stopped' : decided.decided_by}</span>
         </div>
       ) : (
         <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 }}>

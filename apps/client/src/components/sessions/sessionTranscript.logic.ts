@@ -22,7 +22,7 @@ export interface PermissionOptionView {
 export interface PermissionDecisionView {
   outcome: 'selected' | 'cancelled' | string;
   option_id: string | null;
-  decided_by: 'user' | 'policy' | 'timeout' | string;
+  decided_by: 'user' | 'policy' | 'timeout' | 'system' | string;
 }
 
 export type TranscriptBlock =

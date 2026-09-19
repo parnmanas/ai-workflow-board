@@ -131,9 +131,14 @@ interface SessionAuth {
   cliHome: string | null;
 }
 
+/** 서버로 이미 보낸(seq/id 가 찍힌) 이벤트 행. */
+type StampedEvent = AgentSessionEventInput & { seq: number; id: string; created_at: string };
+
 interface PendingPermission {
   resolve: (outcome: AcpPermissionOutcome) => void;
   timer: NodeJS.Timeout;
+  /** 중계했던 permission_request 행 — history RPC 가 미결 요청을 다시 실어 보낸다(같은 id 라 UI 가 중복을 거른다). */
+  event: StampedEvent;
 }
 
 interface LiveSession {
@@ -260,6 +265,8 @@ export class AgentSessionRunner {
   readonly #store: AgentSessionStore;
   readonly #live = new Map<string, LiveSession>();
   readonly #opening = new Map<string, Promise<LiveSession>>();
+  /** 프로세스가 먼저 죽어 #live 에서 빠진 세션 — stopAll 이 마지막 상태 전송까지 기다린다. */
+  readonly #exited: LiveSession[] = [];
 
   constructor(config: AwbConfig, options: AgentSessionRunnerOptions) {
     this.#config = config;
@@ -382,11 +389,18 @@ export class AgentSessionRunner {
             await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' });
             return;
           }
+          // 아직 결정되지 않은 permission 요청은 CLI 홈 파일에 없다(SSE 로만 흘렀다). 화면을
+          // 다시 열거나 새로고침한 사용자가 "Needs your approval" 만 보고 카드는 못 보는 일이
+          // 없도록 기록 끝에 다시 실어 보낸다 — id 가 같아 라이브로 이미 받은 행과 겹치지 않는다.
+          const pending = live ? Array.from(live.pendingPermissions.values()).map((p) => p.event) : [];
+          const events = pending.length
+            ? [...history.events, ...pending.map((e, i) => ({ ...e, seq: history.events.length + i + 1 }))]
+            : history.events;
           await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
             ok: true,
             result: {
               session: history.session ?? (live ? this.#summaryOf(live) : null),
-              events: history.events,
+              events,
               truncated: history.truncated,
               live: live ? this.#stateOf(live) : null,
             },
@@ -411,6 +425,14 @@ export class AgentSessionRunner {
   async stopAll(reason = 'manager_shutdown'): Promise<void> {
     const keys = Array.from(this.#live.values()).map((l) => [l.cli, l.sessionId] as const);
     await Promise.all(keys.map(([cli, id]) => this.#closeLive(cli, id, 'idle', reason).catch(() => undefined)));
+    // systemd 는 SIGTERM 을 cgroup 전체에 보내므로 세션 프로세스가 매니저보다 먼저 죽는 일이
+    // 흔하다. 그 세션은 #onProcessExit 로 이미 #live 에서 빠졌지만 마지막 상태(idle) 전송이
+    // 아직 날아가는 중일 수 있다 — 매니저가 그걸 끊고 종료하면 서버에는 busy/awaiting_permission
+    // 유령이 남는다. 잠깐(최대 3s) 기다려 준다.
+    const drains = this.#exited.splice(0).map((l) => l.postChain);
+    if (drains.length) {
+      await Promise.race([Promise.all(drains), new Promise<void>((resolve) => setTimeout(resolve, 3_000).unref?.())]);
+    }
   }
 
   // ─── 프로세스/세션 열기 ───────────────────────────────────────────────
@@ -795,7 +817,7 @@ export class AgentSessionRunner {
     this.#flushBuffers(live, turnId);
     const requestId = randomUUID();
     const options = (permission.options ?? []).map((o) => ({ option_id: o.optionId, name: o.name, kind: o.kind }));
-    this.#enqueue(live, [{
+    const [requestEvent] = this.#enqueue(live, [{
       type: 'permission_request',
       payload: {
         request_id: requestId,
@@ -818,8 +840,29 @@ export class AgentSessionRunner {
         resolve({ outcome: 'cancelled' });
       }, this.#options.permissionTimeoutMs);
       timer.unref?.();
-      live.pendingPermissions.set(requestId, { resolve, timer });
+      live.pendingPermissions.set(requestId, { resolve, timer, event: requestEvent });
     });
+  }
+
+  /**
+   * 미결 permission 을 전부 cancelled 로 푼다(프로세스 종료·close·credential 재오픈). 결정 행을
+   * 같이 중계해야 화면의 권한 카드가 "대기 중" 으로 영원히 남지 않는다 — 결정자는 사용자가
+   * 아니므로 `decided_by: 'system'`.
+   */
+  #cancelPendingPermissions(live: LiveSession): void {
+    if (live.pendingPermissions.size === 0) return;
+    const events: AgentSessionEventInput[] = [];
+    for (const [requestId, pending] of live.pendingPermissions) {
+      clearTimeout(pending.timer);
+      live.pendingPermissions.delete(requestId);
+      events.push({
+        type: 'permission_decision',
+        payload: { request_id: requestId, outcome: 'cancelled', option_id: null, decided_by: 'system' },
+        turn_id: live.turn?.turnId,
+      });
+      pending.resolve({ outcome: 'cancelled' });
+    }
+    this.#enqueue(live, events);
   }
 
   #resolvePermission(cli: string, sessionId: string, requestId: string, optionId: string | null): void {
@@ -868,10 +911,10 @@ export class AgentSessionRunner {
     if (events.length) this.#enqueue(live, events);
   }
 
-  /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. */
-  #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): void {
+  /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. 찍힌 행을 돌려준다. */
+  #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): StampedEvent[] {
     const now = new Date().toISOString();
-    const stamped = events.map((e) => {
+    const stamped: StampedEvent[] = events.map((e) => {
       live.seq += 1;
       return { ...e, payload: boundedPayload(e.payload), seq: live.seq, id: `${live.sessionId}:live:${live.nonce}:${live.seq}`, created_at: now };
     });
@@ -881,6 +924,7 @@ export class AgentSessionRunner {
         ? postAgentSessionEvents(this.#config, ref, stamped, state ?? null)
         : Promise.resolve({ ok: true, status: 204 })))
       .then(() => undefined, () => undefined);
+    return stamped;
   }
 
   // ─── 수명주기 ─────────────────────────────────────────────────────────
@@ -911,19 +955,23 @@ export class AgentSessionRunner {
     const live = this.#live.get(key);
     if (!live) return;
     live.exited = true;
-    for (const [id, pending] of live.pendingPermissions) {
-      clearTimeout(pending.timer);
-      pending.resolve({ outcome: 'cancelled' });
-      live.pendingPermissions.delete(id);
-    }
     this.#clearIdle(live);
-    if (live.closing) return;
+    if (live.closing) {
+      this.#cancelPendingPermissions(live);
+      return;
+    }
     this.#live.delete(key);
     const detail = `Agent process exited (${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}).`;
     log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] ${detail}`);
     this.#flushBuffers(live, live.turn?.turnId);
+    this.#cancelPendingPermissions(live);
+    // 프로세스가 없으니 상태는 무조건 idle 이다 — 턴 중이었어도 마찬가지(#runPrompt 의 catch 가
+    // 곧 error 행 + turn(finished) 을 덧붙이고 같은 idle 을 다시 보낸다). 예전엔 턴 중이면 상태를
+    // 안 보냈고, 그 사이 매니저가 종료되면 서버에 busy/awaiting_permission 이 그대로 남았다.
     this.#enqueue(live, [{ type: 'system', payload: { text: `${detail} The next prompt reopens the session.` } }],
-      live.turn ? undefined : { status: 'idle', reason: 'process_exit' });
+      { status: 'idle', reason: 'process_exit' });
+    this.#exited.push(live);
+    if (this.#exited.length > 50) this.#exited.splice(0, this.#exited.length - 50);
   }
 
   async #closeLive(cli: string, sessionId: string, finalStatus: 'closed' | 'idle', reason: string = finalStatus): Promise<void> {
@@ -932,11 +980,7 @@ export class AgentSessionRunner {
     if (!live) return;
     live.closing = true;
     this.#clearIdle(live);
-    for (const [id, pending] of live.pendingPermissions) {
-      clearTimeout(pending.timer);
-      pending.resolve({ outcome: 'cancelled' });
-      live.pendingPermissions.delete(id);
-    }
+    this.#cancelPendingPermissions(live);
     if (live.turn) await live.client.cancel(live.sessionId).catch(() => undefined);
     this.#flushBuffers(live, live.turn?.turnId);
     if (!live.exited) await live.client.closeSession(live.sessionId).catch(() => undefined);

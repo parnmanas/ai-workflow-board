@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { In, IsNull, Like, Repository } from 'typeorm';
@@ -128,6 +128,10 @@ const TITLE_MAX = 200;
 const MAX_PENDING = 200;
 const LIVE_TTL_MS = 24 * 60 * 60_000;
 const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000 } as const;
+/** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
+const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(['starting', 'ready', 'busy', 'awaiting_permission']);
+/** prompt 가 `starting` 을 찍은 뒤 매니저가 open 을 끝내기까지 걸릴 수 있는 시간 — 그동안은 list 가 "없다" 고 해도 믿지 않는다. */
+const STARTING_GRACE_MS = RPC_TIMEOUT_MS.open;
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -146,9 +150,24 @@ function liveKey(managerId: string, cli: string, sessionId: string): string {
  *     스트림 이벤트를 driver(마지막으로 open/prompt 한 사용자)에게 SSE 로 흘린다.
  */
 @Injectable()
-export class AgentSessionsService {
+export class AgentSessionsService implements OnModuleDestroy {
   private readonly pending = new Map<string, PendingRpc>();
   private readonly live = new Map<string, LiveState>();
+
+  /**
+   * 매니저 프로세스가 사라지면(재시작·self-update·하트비트 TTL) 그 장비의 세션 프로세스도
+   * 함께 죽는다 — systemd 는 cgroup 전체에 SIGTERM 을 보내므로 매니저가 마지막 상태를 못
+   * 보내는 경우가 흔하다. 메모리의 진행 중 상태를 그대로 두면 목록에 "Needs your approval"
+   * 이 24시간(LIVE_TTL) 동안 남고 prompt 는 409 로 막힌다. 여기서 idle 로 되돌린다.
+   */
+  private readonly onInstanceUpdate = (event: any) => {
+    if (event?.action !== 'removed') return;
+    const instance = event.instance;
+    if (!instance || instance.mode !== 'manager' || typeof instance.agent_id !== 'string') return;
+    // 같은 identity 의 다른 프로세스(재시작 직후 supersede 는 이 시점에 아직 등록 전이다)
+    if (this.managerRecords().some((r) => r.agent_id === instance.agent_id)) return;
+    this.markHostOffline(instance.agent_id);
+  };
 
   constructor(
     @InjectRepository(Agent) private readonly agents: Repository<Agent>,
@@ -156,7 +175,13 @@ export class AgentSessionsService {
     @InjectRepository(Credential) private readonly credentials: Repository<Credential>,
     private readonly registry: InstanceRegistryService,
     private readonly logService: LogService,
-  ) {}
+  ) {
+    activityEvents.on('agent_instance_update', this.onInstanceUpdate);
+  }
+
+  onModuleDestroy() {
+    activityEvents.removeListener('agent_instance_update', this.onInstanceUpdate);
+  }
 
   // ─── Hosts ──────────────────────────────────────────────────────────────
 
@@ -403,10 +428,19 @@ export class AgentSessionsService {
     this.requireHost(workspaceId, managerId, cli);
     const result = await this.rpc<{ sessions?: unknown }>(managerId, cli, 'list', { workspace_id: workspaceId }, userId);
     const list = Array.isArray(result?.sessions) ? result.sessions : [];
-    return list
-      .map((raw: any) => this.normalizeSummary(cli, raw))
-      .filter((s): s is AgentSessionSummary => !!s)
-      .map((s) => ({ ...s, live_status: this.live.get(liveKey(managerId, cli, s.session_id))?.status }));
+    const out: AgentSessionSummary[] = [];
+    for (const raw of list as any[]) {
+      const s = this.normalizeSummary(cli, raw);
+      if (!s) continue;
+      // 매니저가 세션마다 실어 보내는 live_status 가 진실이다(프로세스는 거기 있다). 서버
+      // 메모리는 그 답에 맞춰 고친다 — 매니저가 "없다" 고 하면 진행 중 상태를 idle 로.
+      const reported = typeof raw?.live_status === 'string' && STATUS_SET.has(raw.live_status) ? (raw.live_status as string) : null;
+      const state = this.live.get(liveKey(managerId, cli, s.session_id));
+      if (state) this.reconcileWithManager(state, reported, 'list');
+      const status = state?.status ?? reported ?? undefined;
+      out.push({ ...s, live_status: status });
+    }
+    return out;
   }
 
   async getSession(
@@ -418,17 +452,23 @@ export class AgentSessionsService {
   ): Promise<{ session: AgentSessionSummary | null; live: AgentSessionLiveSnapshot; events: AgentSessionEventRecord[] }> {
     const rec = this.requireHost(workspaceId, managerId, cli);
     this.assertSessionId(sessionId);
-    const result = await this.rpc<{ session?: unknown; events?: unknown }>(managerId, cli, 'history', { workspace_id: workspaceId, session_id: sessionId }, userId);
+    const result = await this.rpc<{ session?: unknown; events?: unknown; live?: unknown }>(managerId, cli, 'history', { workspace_id: workspaceId, session_id: sessionId }, userId);
     const summary = this.normalizeSummary(cli, result?.session);
     const events = Array.isArray(result?.events)
       ? result.events.map((e: any, i: number) => this.normalizeEvent(e, i)).filter((e): e is AgentSessionEventRecord => !!e)
       : [];
+    // 매니저의 `live` (프로세스가 있으면 status/cwd/title, 없으면 null) 가 진실이다. 매니저가
+    // 재시작해 프로세스가 사라졌는데 서버 메모리만 awaiting_permission 으로 남아 있으면
+    // 화면은 "Needs your approval" 인데 트랜스크립트에는 권한 카드가 없는 상태가 된다.
+    const reportedLive = result?.live && typeof result.live === 'object' ? (result.live as Record<string, unknown>) : null;
+    const reportedStatus = typeof reportedLive?.status === 'string' && STATUS_SET.has(reportedLive.status) ? (reportedLive.status as string) : null;
     const state = this.live.get(liveKey(managerId, cli, sessionId)) ?? await this.seedState(rec, managerId, cli, sessionId, {
-      cwd: summary?.cwd || '',
-      title: summary?.title || '',
-      status: 'idle',
+      cwd: summary?.cwd || (typeof reportedLive?.cwd === 'string' ? reportedLive.cwd : ''),
+      title: summary?.title || (typeof reportedLive?.title === 'string' ? reportedLive.title : ''),
+      status: reportedStatus ?? 'idle',
       driver_user_id: null,
     });
+    this.reconcileWithManager(state, reportedStatus, 'history');
     return { session: summary, live: this.snapshot(state), events };
   }
 
@@ -613,6 +653,45 @@ export class AgentSessionsService {
       ?? this.createState(managerId, managerId.slice(0, 8), cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: null });
     this.applyPatch(state, patch);
     return this.emitUpdate(state, patch.reason || 'manager_patch');
+  }
+
+  // ─── 매니저 답과 메모리 상태 맞추기 ────────────────────────────────────
+
+  /**
+   * list / history RPC 답에 실린 매니저 쪽 상태로 메모리를 고친다.
+   *   - 매니저가 status 를 주면 그대로(프로세스가 있는 쪽이 진실).
+   *   - 매니저에 프로세스가 없는데(`null`) 메모리가 진행 중이면 idle 로 — 매니저 재시작·
+   *     연결 단절로 마지막 상태 패치가 오지 못한 유령이다. `starting` 만은 open 이 아직
+   *     진행 중일 수 있으므로 RPC open 타임아웃(120s) 동안 그대로 둔다.
+   * 바뀌면 driver 에게 `agent_session_update` 를 보내 열려 있는 화면도 함께 고친다.
+   */
+  private reconcileWithManager(state: LiveState, reportedStatus: string | null, reason: string): void {
+    if (reportedStatus) {
+      if (reportedStatus === state.status) return;
+      state.status = reportedStatus;
+      state.updated_at = Date.now();
+      this.emitUpdate(state, reason);
+      return;
+    }
+    if (!IN_FLIGHT_STATUSES.has(state.status)) return;
+    if (state.status === 'starting' && Date.now() - state.updated_at < STARTING_GRACE_MS) return;
+    state.status = 'idle';
+    state.updated_at = Date.now();
+    this.emitUpdate(state, reason);
+  }
+
+  /** 이 Runtime Host 의 프로세스가 모두 사라졌다 — 진행 중이던 세션을 idle 로 되돌린다. */
+  markHostOffline(managerId: string): number {
+    let changed = 0;
+    for (const state of this.live.values()) {
+      if (state.manager_id !== managerId || !IN_FLIGHT_STATUSES.has(state.status)) continue;
+      state.status = 'idle';
+      state.updated_at = Date.now();
+      this.emitUpdate(state, 'host_offline');
+      changed += 1;
+    }
+    if (changed) this.logService.info('AgentSession', `Runtime Host ${managerId.slice(0, 8)} went away — ${changed} in-flight session(s) reset to idle`);
+    return changed;
   }
 
   // ─── 내부 ────────────────────────────────────────────────────────────────

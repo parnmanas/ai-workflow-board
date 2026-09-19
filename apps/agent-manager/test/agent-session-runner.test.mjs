@@ -422,3 +422,78 @@ test('redactSecrets hides bearer tokens and API keys quoted by CLI error message
   assert.match(out, /api_key="<redacted>"/);
   assert.equal(redactSecrets('plain message'), 'plain message');
 });
+
+// ─── 미결 permission 의 재전송과 취소 중계 ─────────────────────────────────────
+//
+// permission_request 는 CLI 홈 파일에 남지 않고 SSE 로만 흘렀다. 다른 화면에 있다가 들어온
+// 사용자는 history 만 받으므로 상태는 "승인 대기" 인데 카드가 없었고, 프로세스가 죽거나
+// close 되면 결정 행이 없어 카드가 영원히 대기 중으로 남았다.
+test('history RPC replays pending permission requests with live status; a process dying mid-turn relays a system-cancelled decision and idle', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-p', session_id: null, cwd, title: 'Pending' }));
+  const sid = server.rpc('rpc-open-p').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-p', text: 'hello' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  const asked = server.events(sid).find((e) => e.type === 'permission_request');
+
+  // 화면을 새로 연 사용자가 history 로 다시 읽으면 미결 요청이 기록 끝에 **같은 id** 로 실려 온다
+  await runner.handle(request('history', { request_id: 'rpc-history-p', session_id: sid }));
+  const history = server.rpc('rpc-history-p');
+  assert.equal(history.ok, true, JSON.stringify(history));
+  const replayed = history.result.events.filter((e) => e.type === 'permission_request');
+  assert.equal(replayed.length, 1, 'the pending permission is replayed exactly once');
+  assert.equal(replayed[0].id, asked.id, 'same id as the live row so the UI dedupes it');
+  assert.equal(replayed[0].payload.request_id, asked.payload.request_id);
+  assert.equal(history.result.live.status, 'awaiting_permission');
+  assert.ok(history.result.events.every((e, i) => e.seq === i + 1), 'history seq stays contiguous after the replay');
+
+  // 프로세스가 턴 중에 죽으면(systemd 는 SIGTERM 을 cgroup 전체에 보낸다) 미결 요청은 system 취소로, 상태는 idle 로 중계된다
+  const pid = runner._snapshot()[0].pid;
+  process.kill(pid, 'SIGTERM');
+  await turn;
+  await waitFor(() => server.states(sid).some((s) => s.status === 'idle' && s.reason === 'process_exit'), 'idle after exit');
+  const decision = server.events(sid).find((e) => e.type === 'permission_decision');
+  assert.ok(decision, 'a decision row is relayed for the orphaned request');
+  assert.equal(decision.payload.request_id, asked.payload.request_id);
+  assert.equal(decision.payload.outcome, 'cancelled');
+  assert.equal(decision.payload.decided_by, 'system');
+  assert.equal(runner._snapshot().length, 0);
+  assert.equal(server.states(sid).at(-1).status, 'idle', 'the last state the server hears is idle, never busy/awaiting_permission');
+
+  // 기록에는 더 이상 미결 요청이 없고 live 는 null — stopAll 은 이미 죽은 세션의 마지막 전송을 기다려 준다
+  await runner.stopAll('test');
+  await runner.handle(request('history', { request_id: 'rpc-history-p2', session_id: sid }));
+  const after = server.rpc('rpc-history-p2');
+  assert.equal(after.ok, true, JSON.stringify(after));
+  assert.equal(after.result.events.some((e) => e.type === 'permission_request'), false);
+  assert.equal(after.result.live, null);
+});
+
+test('close while a permission is pending relays a system-cancelled decision and ends in the closed state', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-c', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-c').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-c', text: 'hello' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  const asked = server.events(sid).find((e) => e.type === 'permission_request');
+  await runner.handle(request('close', { session_id: sid }));
+  await turn;
+  const types = server.events(sid).map((e) => e.type);
+  const decisionIdx = types.indexOf('permission_decision');
+  assert.ok(decisionIdx > types.indexOf('permission_request'), 'the decision follows the request');
+  const decision = server.events(sid)[decisionIdx];
+  assert.equal(decision.payload.request_id, asked.payload.request_id);
+  assert.equal(decision.payload.outcome, 'cancelled');
+  assert.equal(decision.payload.decided_by, 'system');
+  assert.equal(server.states(sid).at(-1).status, 'closed');
+  assert.equal(runner._snapshot().length, 0);
+});
+
+// Windows 회귀 가드 (ralf): 어댑터가 npm 배치 shim 이거나 `npx` 폴백이면 node 의 spawn() 은
+// `spawn npx ENOENT` / `spawn EINVAL` 로 죽는다. ACP 어댑터는 반드시 cross-spawn 으로 띄운다.
+test('ACP adapters are spawned through cross-spawn so Windows .cmd shims and the npx fallback resolve', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/lib/runtime/acp/acp-client.ts', import.meta.url), 'utf8');
+  assert.match(source, /from 'cross-spawn'/, 'acp-client imports cross-spawn');
+  assert.doesNotMatch(source, /import \{[^}]*\bspawn\b[^}]*\} from 'node:child_process'/, 'acp-client no longer spawns with node:child_process directly');
+});

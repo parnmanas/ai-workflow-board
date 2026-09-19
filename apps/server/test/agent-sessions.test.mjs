@@ -361,3 +361,129 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const afterClear = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
   assert.equal(afterClear.status, 403);
 });
+
+// ─── 유령 상태: 매니저 답(list live_status / history live)과 매니저 재시작이 진행 중 상태를 되돌린다 ──
+//
+// 증상: 목록·사이드바에 "Needs your approval" 가 떠 있는데 세션에 들어가면 권한 카드가 없고
+// prompt 는 409 session_busy. 서버는 세션 상태를 메모리에만 두고 매니저의 마지막 상태 패치에
+// 의존하는데, 매니저가 self-update/SIGTERM 으로 재시작하면(systemd 가 cgroup 전체에 신호를
+// 보내 세션 프로세스가 먼저 죽는다) 그 패치가 오지 않아 24시간 TTL 동안 유령이 남았다.
+test('ghost in-flight state is reconciled with the manager answer and cleared when the manager instance goes away', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-ghost');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-ghost', role: 'admin' });
+  const ownerToken = app.get(AuthService).createSession(owner.id);
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-ghost', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
+  const heartbeat = (instanceId) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4242, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok((await heartbeat('inst-ghost-1')).status < 300, 'first manager instance registered');
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const answered = new Set();
+  // 같은 op 의 RPC 가 여러 번 나가므로 아직 답하지 않은 가장 오래된 요청에 답한다.
+  const answerNext = async (op, body) => {
+    await waitFor(() => requests.some((r) => r.op === op && !answered.has(r.request_id)), `${op} rpc`);
+    const req = requests.find((r) => r.op === op && !answered.has(r.request_id));
+    answered.add(req.request_id);
+    const res = await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...body }) });
+    assert.equal(res.status, 200, res.text);
+    return req;
+  };
+  const stream = await openSseStream(port, ownerToken, {});
+  t.after(() => stream.close());
+
+  const sid = 'sess-ghost';
+  const sessionsUrl = `${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`;
+  const row = (liveStatus) => ({
+    session_id: sid, cwd: '/home/parn/repo', title: 'Ghost', created_at: null, updated_at: '2026-09-19T00:00:00.000Z', source: 'cli',
+    ...(liveStatus ? { live_status: liveStatus } : {}),
+  });
+  const permissionRow = { id: `${sid}:live:1`, seq: 1, turn_id: 't0', type: 'permission_request', payload: { request_id: 'perm-9', tool_call_id: 't', title: 'Run rm -rf build', options: [{ option_id: 'allow', name: 'Allow', kind: 'allow_once' }] }, created_at: '2026-09-19T00:00:01.000Z' };
+  const relayState = async (state, events = []) => {
+    const res = await call(`${base}/api/agent/sessions/${managerId}/claude/${sid}/events`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events, state }) });
+    assert.equal(res.status, 200, res.text);
+    return res.body.live;
+  };
+
+  // 0. prompt → starting, 매니저가 permission 요청을 중계 → awaiting_permission (driver = owner)
+  const prompt = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'do it' }) });
+  assert.equal(prompt.status, 202, prompt.text);
+  assert.equal((await relayState({ status: 'awaiting_permission', reason: 'permission' }, [{ ...permissionRow, turn_id: prompt.body.turn_id }])).status, 'awaiting_permission');
+
+  // 1a. list — 매니저도 awaiting_permission 이라고 답하면 그대로
+  let listCall = call(sessionsUrl, { headers: ownerHeaders });
+  await answerNext('list', { ok: true, result: { sessions: [row('awaiting_permission')] } });
+  let list = await listCall;
+  assert.equal(list.status, 200, list.text);
+  assert.equal(list.body[0].live_status, 'awaiting_permission', 'manager and server agree');
+
+  // 1b. list — 매니저에 그 세션의 프로세스가 없다(재시작됐다) → idle 로 되돌리고 driver 화면에 알린다
+  listCall = call(sessionsUrl, { headers: ownerHeaders });
+  await answerNext('list', { ok: true, result: { sessions: [row(null)] } });
+  list = await listCall;
+  assert.equal(list.body[0].live_status, 'idle', 'ghost awaiting_permission is reset when the manager reports no live process');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'list', 4000);
+  // 그리고 prompt 가 409 session_busy 대신 다시 받아들여진다
+  const again = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'retry' }) });
+  assert.equal(again.status, 202, again.text);
+  assert.equal(again.body.live.status, 'starting');
+
+  // 1c. starting 은 open 이 아직 진행 중일 수 있으므로 list 가 "없다" 고 해도 grace 동안 지킨다
+  listCall = call(sessionsUrl, { headers: ownerHeaders });
+  await answerNext('list', { ok: true, result: { sessions: [row(null)] } });
+  list = await listCall;
+  assert.equal(list.body[0].live_status, 'starting', 'starting survives a list answer inside the open grace window');
+
+  // 2a. history — 매니저 live 가 진실: awaiting_permission + 기록 끝에 재전송된 permission_request 가 그대로 통과한다
+  let detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await answerNext('history', {
+    ok: true,
+    result: {
+      session: row(null),
+      events: [{ id: `${sid}:1`, seq: 1, turn_id: 't0', type: 'user_prompt', payload: { text: 'do it' }, created_at: '2026-09-19T00:00:00.000Z' }, { ...permissionRow, seq: 2 }],
+      truncated: false,
+      live: { session_id: sid, cwd: '/home/parn/repo', title: 'Ghost', status: 'awaiting_permission', resume_supported: true },
+    },
+  });
+  let detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'awaiting_permission', 'manager-reported status replaces starting');
+  assert.deepEqual(detail.body.events.map((e) => e.type), ['user_prompt', 'permission_request'], 'a replayed pending permission_request passes through history');
+  assert.equal(detail.body.events[1].payload.request_id, 'perm-9');
+
+  // 2b. history — live: null (프로세스 없음) 이면 유령 awaiting_permission 을 idle 로
+  detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await answerNext('history', { ok: true, result: { session: row(null), events: [], truncated: false, live: null } });
+  detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'idle');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'history', 4000);
+
+  // 3. 매니저 재시작: 같은 identity·hostname 의 새 instance_id 가 옛 인스턴스를 대체하면 그 장비의 진행 중 세션은 idle 로
+  assert.equal((await relayState({ status: 'busy', reason: 'turn_started' })).status, 'busy');
+  assert.ok((await heartbeat('inst-ghost-2')).status < 300, 'restarted manager instance registered');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'host_offline', 4000);
+  const afterRestart = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'after restart' }) });
+  assert.equal(afterRestart.status, 202, `no 409 session_busy after the host restarted: ${afterRestart.text}`);
+  assert.ok(requests.filter((r) => r.op === 'prompt').length >= 3, 'each accepted prompt reached the manager');
+
+  stream.close();
+});

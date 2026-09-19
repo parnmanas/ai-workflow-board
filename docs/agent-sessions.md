@@ -80,6 +80,22 @@ Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → C
 idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 중(busy / awaiting_permission / starting)에는 409 `session_busy`.
 상수는 `apps/server/src/common/types/agent-sessions.ts` 가 단일 원천이다.
 
+**진실은 매니저 쪽 프로세스다.** 서버 메모리의 상태는 매니저의 마지막 상태 패치에 의존하는데, 매니저가
+self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호를 보내 세션 프로세스가 먼저 죽는다) 그 패치가
+오지 못해 목록에 "Needs your approval" 유령이 남고 prompt 가 409 로 막히던 문제가 있었다. 그래서:
+
+- `list` RPC 답의 세션별 `live_status`, `history` RPC 답의 `live`(프로세스가 없으면 `null`)로 서버가 메모리를 **되맞춘다**.
+  매니저가 "없다" 고 하면 진행 중 상태는 idle 로 — `starting` 만은 open RPC 타임아웃(120s) 동안 지킨다.
+- 매니저 인스턴스가 사라지면(`agent_instance_update` action=removed, 같은 identity 의 다른 인스턴스 없음) 그 장비의 진행 중
+  세션을 모두 idle 로 되돌리고 driver 에게 `agent_session_update{reason:'host_offline'}` 를 보낸다.
+- 매니저는 프로세스가 죽으면 턴 중이었어도 무조건 `status: idle` 을 보내고, 미결 permission 은
+  `permission_decision{outcome:'cancelled', decided_by:'system'}` 로 닫는다(close 도 같다). `stopAll` 은 이미 죽은
+  세션의 마지막 전송을 최대 3s 기다린다.
+- 미결 permission 요청은 CLI 홈 파일에 없으므로(SSE 로만 흘렀다) `history` RPC 가 기록 끝에 **같은 id** 로 다시 실어 보낸다.
+  화면은 "승인 대기" 인데 카드가 없으면 한 번 다시 읽고(`SessionView`), 매니저 답에 따라 카드가 생기거나 idle 이 된다.
+- 새 세션 모달은 **열릴 때만** 기본 호스트/CLI/cwd 를 채운다. `hosts` 는 매니저 하트비트마다 새 배열로 내려오므로 그것을
+  초기화 트리거로 쓰면 사용자가 고르던 호스트·cwd·제목이 30초 간격으로 되돌아간다(`new-session-modal-host-refresh.test.mjs`).
+
 ## agent-manager contract 변경 규칙
 
 `agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`
@@ -92,7 +108,11 @@ idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 �
 - 같은 세션을 터미널과 AWB 에서 동시에 쓰지 말 것 — 두 프로세스가 같은 JSONL 에 쓴다.
 - Codex 는 어댑터가 `loadSession` 을 지원할 때만 기존 세션을 이어 쓸 수 있다(미지원이면 open 이 `resume_unsupported` 로 실패).
 - 세션 프로세스는 매니저 self-update drain 카운트에 포함되고, 매니저 종료(SIGTERM)는 모든 세션 프로세스를 멈춘다(상태 idle).
-- Windows 에서 `npx` 폴백은 `.cmd` shim 문제로 실패할 수 있다 — `AWB_ACP_COMMAND_CLAUDE` 등으로 절대 경로를 지정한다.
+- Windows: 어댑터 프로세스는 cross-spawn 으로 띄우므로 npm 배치 shim(`codex-acp.cmd`)과 `npx` 폴백이 모두 동작한다
+  (예전엔 node 의 spawn() 이 `spawn npx ENOENT` / `spawn EINVAL` 로 죽어 ralf 에서 세션이 열리지 않았다). 다만 `npx --yes`
+  폴백은 첫 실행에 패키지를 내려받느라 initialize 타임아웃(60s)을 넘길 수 있으니 장비에
+  `npm i -g @zed-industries/codex-acp @agentclientprotocol/claude-agent-acp` 로 미리 설치해 두는 편이 낫다.
+  특수한 레이아웃은 `AWB_ACP_COMMAND_CLAUDE` 등으로 절대 경로를 지정한다.
 - 첨부/이미지, 여러 사용자 동시 관람, 터미널(PTY) 모드는 범위 밖이다.
 
 ## 테스트
@@ -100,4 +120,5 @@ idle / closed / error 에서 prompt 하면 매니저가 다시 연다. 진행 �
 - 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달.
 - agent-manager: `apps/agent-manager/test/agent-session-store.test.mjs`(합성 Claude·Codex 파일 파싱),
   `agent-session-runner.test.mjs`(fake ACP 로 list·history·open·prompt·permission·resume, credential 별 세션 cli-home 적용).
-- 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`, `sessions-navigation.test.mjs`.
+- 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`, `sessions-navigation.test.mjs`,
+  `new-session-modal-host-refresh.test.mjs`(호스트 목록 갱신이 열린 모달을 되돌리지 않는다).

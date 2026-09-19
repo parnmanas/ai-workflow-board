@@ -35,7 +35,7 @@ export const AGENT_SESSION_EVENT_TYPES = [
   'tool_call',            // { tool_call_id, title, kind?, input? }
   'tool_update',          // { tool_call_id, status?, output? }
   'permission_request',   // { request_id, tool_call_id, title?, kind?, options: [{ option_id, name, kind }] }
-  'permission_decision',  // { request_id, outcome, option_id?, decided_by: 'user'|'policy'|'timeout' }
+  'permission_decision',  // { request_id, outcome, option_id?, decided_by: 'user'|'policy'|'timeout'|'system' } — system: 프로세스 종료/close 로 매니저가 취소
   'usage',                // { input_tokens, output_tokens, total_tokens, … }
   'turn',                 // { phase: 'started'|'finished', stop_reason? }
   'error',                // { message, code? }
@@ -76,6 +76,8 @@ export interface AgentSessionSummary {
   /** 'cli' = CLI 홈에서 발견, 'awb' = AWB 세션 화면에서 만든 것(매니저 로컬 인덱스). */
   source: 'cli' | 'awb';
   size_bytes?: number;
+  /** 매니저에 살아 있는 프로세스가 있을 때의 상태(list RPC 가 세션마다 실어 보낸다). 없으면 프로세스 없음. */
+  live_status?: AgentSessionStatus | string;
 }
 
 export interface AgentSessionEventRecord {

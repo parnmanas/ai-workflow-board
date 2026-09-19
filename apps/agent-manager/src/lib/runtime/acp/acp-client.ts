@@ -1,4 +1,5 @@
-import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 
 import type { RuntimeEvent } from '../runtime-events.js';
 import type {
@@ -190,14 +191,19 @@ export class AcpClient {
       throw new AcpProtocolError('acp_write_failed', 'ACP command is required');
     }
     let client: AcpClient | undefined;
-    const child = spawn(options.command, options.args ?? [], {
+    // cross-spawn: Windows 에서 어댑터가 npm 배치 shim(`codex-acp.cmd`, `claude-agent-acp.cmd`)
+    // 이거나 `npx` 폴백일 때 node 의 spawn() 은 `.cmd` 를 직접 실행하지 못한다(bare `npx` 는
+    // ENOENT, `.cmd` 절대경로는 EINVAL). cross-spawn 은 PATHEXT 로 shim 을 찾아
+    // `cmd.exe /d /s /c` 로 감싸고 인자를 escape 한다 — cli-resolver 가 다른 CLI 에 쓰는 것과
+    // 같은 경로. POSIX 에서는 child_process.spawn 과 동일하다.
+    const child = crossSpawn(options.command, options.args ?? [], {
       ...options.spawnOptions,
       cwd: options.cwd,
       env: options.env,
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    }) as ChildProcessWithoutNullStreams;
     const peer = new JsonRpcPeer(child, {
       requestTimeoutMs: options.requestTimeoutMs,
       maxLineBytes: options.maxLineBytes,

@@ -420,6 +420,20 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const blocks = useMemo(() => buildTranscript(events), [events]);
   const pending = useMemo(() => pendingPermission(blocks), [blocks]);
 
+  // 상태는 "승인 대기" 인데 트랜스크립트에 미결 권한 카드가 없다 — permission_request 행을
+  // SSE 로 못 받은 경우(다른 화면에 있었거나 새로고침)다. history RPC 가 미결 요청을 다시
+  // 실어 보내고, 매니저에 프로세스가 없으면 서버가 idle 로 되돌리므로 한 번 다시 읽으면
+  // 둘 중 하나로 정리된다. 같은 상태 스냅샷에 대해 한 번만 시도한다(무한 재조회 방지).
+  const status = live?.status || 'idle';
+  const reconciledForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (status !== 'awaiting_permission' || pending || loading) return;
+    const marker = `${sessionId}:${live?.updated_at || ''}`;
+    if (reconciledForRef.current === marker) return;
+    reconciledForRef.current = marker;
+    void load();
+  }, [status, pending, loading, live?.updated_at, sessionId, load]);
+
   useEffect(() => {
     if (!follow) return;
     const el = scrollRef.current;
@@ -432,7 +446,6 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   };
 
-  const status = live?.status || 'idle';
   const busy = status === 'busy' || status === 'awaiting_permission' || status === 'starting';
   const title = live?.title || summary?.title || '';
   const cwd = live?.cwd || summary?.cwd || '';
@@ -499,7 +512,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
 
   const authProblem = !!live?.last_error && /auth|login|credential/i.test(live.last_error);
   const composerHint = status === 'awaiting_permission'
-    ? 'The agent is waiting for your decision on the permission request above.'
+    ? (pending
+      ? 'The agent is waiting for your decision on the permission request above.'
+      : 'The Runtime Host reports a pending permission request — fetching it… If it does not appear, Stop the agent process and prompt again.')
     : status === 'error' && authProblem
       ? `${runtimeLabel(cli)} on ${host?.name || 'the host'} is not signed in. Log in on the host, or bind a credential in this CLI's settings (list page → CLI settings).`
     : status === 'idle' || status === 'closed'
