@@ -100,7 +100,54 @@ export interface AcpNewSessionResponse {
   sessionId: string;
   models?: unknown;
   modes?: unknown;
+  /** ACP session config options(모델·reasoning·mode …). `session/load` 응답과 `config_option_update` 도 같은 모양. */
+  configOptions?: unknown;
 }
+
+/** ACP SessionConfigOption — `select` 는 options 중 하나(currentValue = value id), `boolean` 은 on/off. */
+export interface AcpSessionConfigOption {
+  configId: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  type: 'select' | 'boolean' | string;
+  currentValue?: unknown;
+  options?: unknown;
+  [key: string]: unknown;
+}
+
+/** `session/set_config_option` — value 는 select 면 `{ type: 'id', value }`, boolean 이면 `{ type: 'boolean', value }`. */
+export type AcpSetConfigOptionRequest =
+  | { sessionId: string; configId: string; type: 'id'; value: string }
+  | { sessionId: string; configId: string; type: 'boolean'; value: boolean };
+
+export interface AcpAvailableCommand {
+  name: string;
+  description?: string;
+  input?: { type?: string; hint?: string; [key: string]: unknown } | null;
+  [key: string]: unknown;
+}
+
+/** `elicitation/create` — 에이전트가 사용자에게 구조화된 입력(폼) 또는 URL 방문을 요청한다. */
+export interface AcpElicitationRequest {
+  message: string;
+  mode: 'form' | 'url' | string;
+  /** form: JSON Schema(primitive 속성만). */
+  requestedSchema?: Record<string, unknown>;
+  /** url */
+  elicitationId?: string;
+  url?: string;
+  sessionId?: string;
+  toolCallId?: string | null;
+  requestId?: string | number;
+  _meta?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export type AcpElicitationOutcome =
+  | { action: 'accept'; content?: Record<string, unknown> | null }
+  | { action: 'decline' }
+  | { action: 'cancel' };
 
 export interface AcpLoadSessionRequest extends AcpNewSessionRequest {
   sessionId: string;
@@ -138,13 +185,19 @@ export interface AcpPermissionOption {
 
 export interface AcpPermissionRequest {
   sessionId: string;
-  toolCall: {
+  /** 어댑터(claude-agent-acp / codex-acp)가 보내는 대상 tool call. 최신 스키마는 `subject`/`title` 로도 온다. */
+  toolCall?: {
     toolCallId: string;
     title?: string;
     kind?: string;
     [key: string]: unknown;
   };
+  /** 권한 프롬프트 제목/설명(ACP 최신 스키마, claude-agent-acp 는 `_meta.permission` 에도 같은 값을 둔다). */
+  title?: string;
+  description?: string | null;
+  subject?: { toolCallId?: string; [key: string]: unknown } | null;
   options: AcpPermissionOption[];
+  _meta?: Record<string, unknown> | null;
 }
 
 export type AcpPermissionOutcome =

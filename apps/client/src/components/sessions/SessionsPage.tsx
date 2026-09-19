@@ -26,7 +26,8 @@ import {
   buildTranscript,
   canPrompt,
   describeSessionStatus,
-  pendingPermission,
+  isWaitingStatus,
+  pendingInteraction,
   runtimeLabel,
   sessionDisplayTitle,
 } from './sessionTranscript.logic';
@@ -418,16 +419,16 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   }, [matches]));
 
   const blocks = useMemo(() => buildTranscript(events), [events]);
-  const pending = useMemo(() => pendingPermission(blocks), [blocks]);
+  const pending = useMemo(() => pendingInteraction(blocks), [blocks]);
 
-  // 상태는 "승인 대기" 인데 트랜스크립트에 미결 권한 카드가 없다 — permission_request 행을
+  // 상태는 "승인/입력 대기" 인데 트랜스크립트에 미결 카드가 없다 — permission/elicitation 행을
   // SSE 로 못 받은 경우(다른 화면에 있었거나 새로고침)다. history RPC 가 미결 요청을 다시
   // 실어 보내고, 매니저에 프로세스가 없으면 서버가 idle 로 되돌리므로 한 번 다시 읽으면
   // 둘 중 하나로 정리된다. 같은 상태 스냅샷에 대해 한 번만 시도한다(무한 재조회 방지).
   const status = live?.status || 'idle';
   const reconciledForRef = useRef<string | null>(null);
   useEffect(() => {
-    if (status !== 'awaiting_permission' || pending || loading) return;
+    if (!isWaitingStatus(status) || pending || loading) return;
     const marker = `${sessionId}:${live?.updated_at || ''}`;
     if (reconciledForRef.current === marker) return;
     reconciledForRef.current = marker;
@@ -446,9 +447,13 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   };
 
-  const busy = status === 'busy' || status === 'awaiting_permission' || status === 'starting';
+  const busy = status === 'busy' || isWaitingStatus(status) || status === 'starting';
   const title = live?.title || summary?.title || '';
   const cwd = live?.cwd || summary?.cwd || '';
+  const configOptions = live?.config_options ?? [];
+  const commands = live?.available_commands ?? [];
+  // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
+  const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
 
   const send = useCallback(async (text: string) => {
     try {
@@ -472,6 +477,25 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       showToast(err?.message || 'Failed to answer the permission request', 'error');
     } finally {
       setDecidingRequestId(null);
+    }
+  }, [managerId, cli, sessionId, showToast]);
+
+  const answerElicitation = useCallback(async (elicitationId: string, action: 'accept' | 'decline' | 'cancel', content: Record<string, unknown> | null) => {
+    setDecidingRequestId(elicitationId);
+    try {
+      setLive(await api.answerHostSessionElicitation(managerId, cli, sessionId, elicitationId, action, content));
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to send your answer', 'error');
+    } finally {
+      setDecidingRequestId(null);
+    }
+  }, [managerId, cli, sessionId, showToast]);
+
+  const setConfigOption = useCallback(async (configId: string, value: string | boolean) => {
+    try {
+      await api.setHostSessionConfigOption(managerId, cli, sessionId, configId, value);
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to change the setting', 'error');
     }
   }, [managerId, cli, sessionId, showToast]);
 
@@ -511,10 +535,10 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   }
 
   const authProblem = !!live?.last_error && /auth|login|credential/i.test(live.last_error);
-  const composerHint = status === 'awaiting_permission'
+  const composerHint = isWaitingStatus(status)
     ? (pending
-      ? 'The agent is waiting for your decision on the permission request above.'
-      : 'The Runtime Host reports a pending permission request — fetching it… If it does not appear, Stop the agent process and prompt again.')
+      ? (pending.kind === 'elicitation' ? 'The agent is asking you something above — answer it to continue.' : 'The agent is waiting for your decision on the permission request above.')
+      : 'The Runtime Host reports a pending request — fetching it… If it does not appear, Stop the agent process and prompt again.')
     : status === 'error' && authProblem
       ? `${runtimeLabel(cli)} on ${host?.name || 'the host'} is not signed in. Log in on the host, or bind a credential in this CLI's settings (list page → CLI settings).`
     : status === 'idle' || status === 'closed'
@@ -554,7 +578,52 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </div>
         </div>
         <StatusPill status={status} />
-        {live && live.available_modes.length > 0 && (
+        {/* 어댑터가 준 세션 설정(모델·reasoning·mode …) — 살아 있는 세션에서만 바꿀 수 있다 */}
+        {configOptions.map((option) => {
+          const controlsDisabled = !busy && status !== 'ready';
+          if (option.type === 'boolean') {
+            return (
+              <label key={option.config_id} title={option.description} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: tokens.colors.textSecondary, cursor: controlsDisabled ? 'not-allowed' : 'pointer' }}>
+                <input
+                  type="checkbox"
+                  aria-label={option.name}
+                  data-config-id={option.config_id}
+                  checked={option.current_value === true}
+                  disabled={controlsDisabled}
+                  onChange={(e) => void setConfigOption(option.config_id, e.target.checked)}
+                />
+                {option.name}
+              </label>
+            );
+          }
+          if (option.type !== 'select') return null;
+          const groups = new Map<string, typeof option.options>();
+          for (const o of option.options) {
+            const g = o.group || '';
+            if (!groups.has(g)) groups.set(g, []);
+            groups.get(g)!.push(o);
+          }
+          const renderOptions = (list: typeof option.options) => list.map((o) => <option key={o.value} value={o.value} title={o.description}>{o.name}</option>);
+          return (
+            <select
+              key={option.config_id}
+              aria-label={option.name}
+              title={option.description || option.name}
+              data-config-id={option.config_id}
+              data-config-category={option.category}
+              value={typeof option.current_value === 'string' ? option.current_value : ''}
+              disabled={controlsDisabled}
+              onChange={(e) => void setConfigOption(option.config_id, e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12, maxWidth: 220 }}
+            >
+              {typeof option.current_value !== 'string' && <option value="">{option.name}…</option>}
+              {Array.from(groups.entries()).map(([group, list]) => (group
+                ? <optgroup key={group} label={group}>{renderOptions(list)}</optgroup>
+                : renderOptions(list)))}
+            </select>
+          );
+        })}
+        {showLegacyModeSelect && live && (
           <select
             aria-label="Session mode"
             value={live.current_mode || ''}
@@ -589,7 +658,8 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
             blocks={blocks}
             decidingRequestId={decidingRequestId}
             onDecidePermission={(requestId, optionId) => void decide(requestId, optionId)}
-            permissionsEnabled={status === 'awaiting_permission' || status === 'busy'}
+            onAnswerElicitation={(elicitationId, action, content) => void answerElicitation(elicitationId, action, content)}
+            permissionsEnabled={isWaitingStatus(status) || status === 'busy'}
           />
         )}
       </div>
@@ -614,8 +684,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       <SessionComposer
         disabled={false}
         busy={busy}
-        placeholder={pending ? 'Answer the permission request above…' : canPrompt(status) ? `Send a prompt to ${runtimeLabel(cli)}…` : 'Working…'}
+        placeholder={pending ? (pending.kind === 'elicitation' ? 'Answer the question above…' : 'Answer the permission request above…') : canPrompt(status) ? `Send a prompt to ${runtimeLabel(cli)}…` : 'Working…'}
         hint={composerHint}
+        commands={commands}
         onSend={send}
         onCancel={() => void cancel()}
       />

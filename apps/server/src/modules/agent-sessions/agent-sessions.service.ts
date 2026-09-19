@@ -12,12 +12,16 @@ import { LogService } from '../../services/log.service';
 import { InstanceRecord, InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import {
   ACP_SESSION_CLIS,
+  AGENT_SESSION_COMMANDS_MAX,
+  AGENT_SESSION_CONFIG_OPTIONS_MAX,
   AGENT_SESSION_EVENT_BATCH_MAX,
   AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS,
   AGENT_SESSION_EVENT_TYPES,
   AGENT_SESSION_PROMPT_MAX_CHARS,
   AGENT_SESSION_STATUSES,
   agentSessionAcceptsPrompt,
+  type AgentSessionCommand,
+  type AgentSessionConfigOption,
   type AgentSessionEventRecord,
   type AgentSessionSummary,
 } from '../../common/types/agent-sessions';
@@ -83,6 +87,8 @@ export interface ManagerStatePatch {
   title?: string;
   current_mode?: string | null;
   available_modes?: AgentSessionModeOption[] | null;
+  config_options?: AgentSessionConfigOption[] | null;
+  available_commands?: AgentSessionCommand[] | null;
   resume_supported?: boolean;
   last_error?: string | null;
   reason?: string;
@@ -98,6 +104,8 @@ interface LiveState {
   status: string;
   current_mode: string | null;
   available_modes: AgentSessionModeOption[];
+  config_options: AgentSessionConfigOption[];
+  available_commands: AgentSessionCommand[];
   resume_supported: boolean;
   last_error: string | null;
   driver_user_id: string | null;
@@ -129,7 +137,9 @@ const MAX_PENDING = 200;
 const LIVE_TTL_MS = 24 * 60 * 60_000;
 const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000 } as const;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
-const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(['starting', 'ready', 'busy', 'awaiting_permission']);
+const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input']);
+const CONFIG_ID_MAX = 128;
+const ELICITATION_CONTENT_MAX_CHARS = 64_000;
 /** prompt 가 `starting` 을 찍은 뒤 매니저가 open 을 끝내기까지 걸릴 수 있는 시간 — 그동안은 list 가 "없다" 고 해도 믿지 않는다. */
 const STARTING_GRACE_MS = RPC_TIMEOUT_MS.open;
 
@@ -139,6 +149,57 @@ function iso(ms: number): string {
 
 function liveKey(managerId: string, cli: string, sessionId: string): string {
   return `${managerId}/${cli}/${sessionId}`;
+}
+
+function str(v: unknown, max: number): string {
+  return typeof v === 'string' ? v.slice(0, max) : '';
+}
+
+/** 매니저가 보낸 config option 목록을 크기 상한 안에서 그대로 투영한다(알 수 없는 type/category 도 보존 — UI 가 무시). */
+function normalizeConfigOptions(input: unknown): AgentSessionConfigOption[] {
+  if (!Array.isArray(input)) return [];
+  const out: AgentSessionConfigOption[] = [];
+  for (const raw of input.slice(0, AGENT_SESSION_CONFIG_OPTIONS_MAX)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const configId = str(r.config_id, CONFIG_ID_MAX);
+    if (!configId) continue;
+    const options = Array.isArray(r.options)
+      ? r.options.slice(0, 200).map((o: any) => ({
+        value: str(o?.value, 256),
+        name: str(o?.name, 200) || str(o?.value, 256),
+        ...(typeof o?.description === 'string' ? { description: o.description.slice(0, 1000) } : {}),
+        ...(typeof o?.group === 'string' ? { group: o.group.slice(0, 200) } : {}),
+      })).filter((o: { value: string }) => o.value)
+      : [];
+    out.push({
+      config_id: configId,
+      name: str(r.name, 200) || configId,
+      ...(typeof r.description === 'string' ? { description: r.description.slice(0, 1000) } : {}),
+      category: str(r.category, 64) || 'unknown',
+      type: str(r.type, 32) || (typeof r.current_value === 'boolean' ? 'boolean' : 'select'),
+      current_value: typeof r.current_value === 'boolean' ? r.current_value : typeof r.current_value === 'string' ? r.current_value.slice(0, 256) : null,
+      options,
+    });
+  }
+  return out;
+}
+
+function normalizeCommands(input: unknown): AgentSessionCommand[] {
+  if (!Array.isArray(input)) return [];
+  const out: AgentSessionCommand[] = [];
+  for (const raw of input.slice(0, AGENT_SESSION_COMMANDS_MAX)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const name = str(r.name, 100).trim();
+    if (!name) continue;
+    out.push({
+      name,
+      description: str(r.description, 500),
+      ...(typeof r.input_hint === 'string' && r.input_hint ? { input_hint: r.input_hint.slice(0, 200) } : {}),
+    });
+  }
+  return out;
 }
 
 /**
@@ -468,6 +529,16 @@ export class AgentSessionsService implements OnModuleDestroy {
       status: reportedStatus ?? 'idle',
       driver_user_id: null,
     });
+    if (reportedLive) {
+      // 살아 있는 프로세스의 모드·config option·slash command 는 매니저만 안다(서버 재시작 뒤 특히).
+      this.applyPatch(state, {
+        ...(reportedLive.current_mode !== undefined ? { current_mode: reportedLive.current_mode as string | null } : {}),
+        ...(Array.isArray(reportedLive.available_modes) ? { available_modes: reportedLive.available_modes as AgentSessionModeOption[] } : {}),
+        ...(Array.isArray(reportedLive.config_options) ? { config_options: reportedLive.config_options as AgentSessionConfigOption[] } : {}),
+        ...(Array.isArray(reportedLive.available_commands) ? { available_commands: reportedLive.available_commands as AgentSessionCommand[] } : {}),
+        ...(typeof reportedLive.resume_supported === 'boolean' ? { resume_supported: reportedLive.resume_supported } : {}),
+      });
+    }
     this.reconcileWithManager(state, reportedStatus, 'history');
     return { session: summary, live: this.snapshot(state), events };
   }
@@ -575,6 +646,68 @@ export class AgentSessionsService implements OnModuleDestroy {
       permission_request_id: requestId, option_id: optionId, driver_user_id: userId,
     });
     return live;
+  }
+
+  /**
+   * 에이전트의 질문/폼(ACP elicitation)에 답한다. permission 과 같은 fire-and-forget op —
+   * 매니저가 어댑터의 `elicitation/create` 요청을 이 답으로 푼다.
+   */
+  async answerElicitation(
+    workspaceId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    elicitationIdInput: unknown,
+    actionInput: unknown,
+    contentInput: unknown,
+  ): Promise<AgentSessionLiveSnapshot> {
+    this.requireHost(workspaceId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const elicitationId = typeof elicitationIdInput === 'string' ? elicitationIdInput.trim() : '';
+    if (!elicitationId) throw new AgentSessionError(400, 'elicitation_id_required');
+    const action = typeof actionInput === 'string' ? actionInput : '';
+    if (action !== 'accept' && action !== 'decline' && action !== 'cancel') throw new AgentSessionError(400, 'elicitation_action_invalid', "action must be 'accept', 'decline' or 'cancel'");
+    let content: Record<string, unknown> | null = null;
+    if (action === 'accept') {
+      if (contentInput !== undefined && contentInput !== null) {
+        if (typeof contentInput !== 'object' || Array.isArray(contentInput)) throw new AgentSessionError(400, 'elicitation_content_invalid', 'content must be an object matching the requested schema');
+        if (JSON.stringify(contentInput).length > ELICITATION_CONTENT_MAX_CHARS) throw new AgentSessionError(413, 'elicitation_content_too_large');
+        content = contentInput as Record<string, unknown>;
+      } else {
+        content = {};
+      }
+    }
+    const state = this.live.get(liveKey(managerId, cli, sessionId));
+    if (!state) throw new AgentSessionError(409, 'session_not_live', 'This session has no live process on the Runtime Host.');
+    state.driver_user_id = userId;
+    if (state.status === 'awaiting_input') state.status = 'busy';
+    state.updated_at = Date.now();
+    const live = this.emitUpdate(state, 'elicitation');
+    this.emitRequest({
+      manager_id: managerId, workspace_id: workspaceId, cli, op: 'elicitation', session_id: sessionId,
+      elicitation_id: elicitationId, elicitation_action: action, elicitation_content: content, driver_user_id: userId,
+    });
+    return live;
+  }
+
+  /** ACP session config option(모델·reasoning 등)을 바꾼다 — 매니저가 `session/set_config_option` 을 부르고 전체 목록을 다시 보낸다. */
+  async setConfigOption(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string, configIdInput: unknown, valueInput: unknown): Promise<AgentSessionLiveSnapshot> {
+    this.requireHost(workspaceId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const configId = typeof configIdInput === 'string' ? configIdInput.trim() : '';
+    if (!configId || configId.length > CONFIG_ID_MAX) throw new AgentSessionError(400, 'config_id_required');
+    if (typeof valueInput !== 'string' && typeof valueInput !== 'boolean') throw new AgentSessionError(400, 'config_value_invalid', 'value must be a string (select) or boolean');
+    if (typeof valueInput === 'string' && valueInput.length > 256) throw new AgentSessionError(400, 'config_value_invalid');
+    const state = this.live.get(liveKey(managerId, cli, sessionId));
+    if (!state) throw new AgentSessionError(409, 'session_not_live', 'Send a prompt first — config options apply to a live session.');
+    const option = state.config_options.find((o) => o.config_id === configId);
+    if (option && option.type === 'select' && typeof valueInput === 'string' && option.options.length && !option.options.some((o) => o.value === valueInput)) {
+      throw new AgentSessionError(400, 'config_value_invalid', `"${valueInput}" is not one of the offered values for ${option.name}.`);
+    }
+    state.driver_user_id = userId;
+    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput, driver_user_id: userId });
+    return this.snapshot(state);
   }
 
   async cancel(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
@@ -769,6 +902,8 @@ export class AgentSessionsService implements OnModuleDestroy {
       status: STATUS_SET.has(seed.status) ? seed.status : 'idle',
       current_mode: null,
       available_modes: [],
+      config_options: [],
+      available_commands: [],
       resume_supported: false,
       last_error: null,
       driver_user_id: seed.driver_user_id,
@@ -794,6 +929,8 @@ export class AgentSessionsService implements OnModuleDestroy {
           .map((m) => ({ id: m.id, name: typeof m.name === 'string' ? m.name : m.id, description: typeof m.description === 'string' ? m.description : undefined }))
         : [];
     }
+    if (patch.config_options !== undefined) state.config_options = normalizeConfigOptions(patch.config_options);
+    if (patch.available_commands !== undefined) state.available_commands = normalizeCommands(patch.available_commands);
     if (patch.resume_supported !== undefined) state.resume_supported = !!patch.resume_supported;
     if (patch.last_error !== undefined) state.last_error = patch.last_error ? String(patch.last_error).slice(0, 4000) : null;
     state.updated_at = Date.now();
@@ -817,6 +954,8 @@ export class AgentSessionsService implements OnModuleDestroy {
       status: state.status,
       current_mode: state.current_mode,
       available_modes: state.available_modes,
+      config_options: state.config_options,
+      available_commands: state.available_commands,
       resume_supported: state.resume_supported,
       last_error: state.last_error,
       driver_user_id: state.driver_user_id,

@@ -1178,12 +1178,26 @@ export interface AgentSessionEventInput {
   created_at?: string;
 }
 
+export interface AgentSessionConfigOptionPatch {
+  config_id: string;
+  name: string;
+  description?: string;
+  category: string;
+  type: string;
+  current_value: string | boolean | null;
+  options: Array<{ value: string; name: string; description?: string; group?: string }>;
+}
+
 export interface AgentSessionStatePatch {
   status?: string;
   cwd?: string;
   title?: string;
   current_mode?: string | null;
   available_modes?: Array<{ id: string; name: string; description?: string }> | null;
+  /** ACP session config options(모델·reasoning …) 전체 목록 — 서버 스냅샷 `config_options`. */
+  config_options?: AgentSessionConfigOptionPatch[] | null;
+  /** slash command 목록 — 서버 스냅샷 `available_commands`. */
+  available_commands?: Array<{ name: string; description: string; input_hint?: string }> | null;
   resume_supported?: boolean;
   last_error?: string | null;
   reason?: string;

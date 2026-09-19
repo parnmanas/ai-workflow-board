@@ -127,6 +127,36 @@ export class AgentSessionsController {
     return this.run(res, 200, () => this.sessions.decidePermission(ws, this.userId(req), managerId, cli, sessionId, body?.request_id, body?.option_id ?? null));
   }
 
+  /** `{ elicitation_id, action: 'accept'|'decline'|'cancel', content? }` — 에이전트의 질문/폼(ACP elicitation)에 답한다. */
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/elicitation')
+  async elicitation(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 200, () => this.sessions.answerElicitation(ws, this.userId(req), managerId, cli, sessionId, body?.elicitation_id, body?.action, body?.content));
+  }
+
+  /** `{ config_id, value }` — 모델·reasoning 등 ACP session config option 변경. value 는 select 의 value id 또는 boolean. */
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/config-option')
+  async setConfigOption(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 202, () => this.sessions.setConfigOption(ws, this.userId(req), managerId, cli, sessionId, body?.config_id, body?.value));
+  }
+
   @Post('hosts/:managerId/:cli/sessions/:sessionId/cancel')
   async cancel(
     @Param('managerId') managerId: string,

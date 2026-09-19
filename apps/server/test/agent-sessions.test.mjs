@@ -487,3 +487,133 @@ test('ghost in-flight state is reconciled with the manager answer and cleared wh
 
   stream.close();
 });
+
+// ─── 상호작용 contract: 세션 설정(모델 등) · slash command · 질문/폼(elicitation) ────────
+//
+// 매니저가 상태 패치로 config_options / available_commands 를 보내면 스냅샷에 실리고,
+// 사용자는 POST config-option / POST elicitation 으로 set_config_option / elicitation op 을 낸다.
+// awaiting_input 은 awaiting_permission 과 같은 대기 상태(409 session_busy, 유령 되돌림 대상)다.
+test('interactive contract: config options + commands in the snapshot, set_config_option and elicitation ops, awaiting_input semantics', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-interactive');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-interactive', role: 'admin' });
+  const ownerToken = app.get(AuthService).createSession(owner.id);
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-interactive', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
+  const heartbeat = (instanceId) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4242, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok((await heartbeat('inst-interactive-1')).status < 300);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const stream = await openSseStream(port, ownerToken, {});
+  t.after(() => stream.close());
+
+  const sid = 'codex-thread-77';
+  const sessionsUrl = `${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`;
+  const relay = async (body) => {
+    const res = await call(`${base}/api/agent/sessions/${managerId}/codex/${sid}/events`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events: [], ...body }) });
+    assert.equal(res.status, 200, res.text);
+    return res.body;
+  };
+  const configOptions = [
+    { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'gpt-fast', options: [{ value: 'gpt-fast', name: 'Fast' }, { value: 'gpt-smart', name: 'Smart', description: 'slower', group: 'Premium' }] },
+    { config_id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', current_value: false, options: [] },
+    { config_id: '', name: 'dropped', category: 'x', type: 'select', current_value: null, options: [] },
+  ];
+
+  // 0. prompt(driver) → 매니저가 opened 상태로 설정·명령을 보낸다
+  const prompt = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'hi' }) });
+  assert.equal(prompt.status, 202, prompt.text);
+  const opened = await relay({ state: { status: 'ready', reason: 'opened', config_options: configOptions, available_commands: [{ name: 'review', description: 'Review', input_hint: 'focus' }, { name: 'compact', description: 'Compact' }, { name: '', description: 'dropped' }] } });
+  assert.deepEqual(opened.live.config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'options without an id are dropped');
+  assert.deepEqual(opened.live.config_options[0].options[1], { value: 'gpt-smart', name: 'Smart', description: 'slower', group: 'Premium' });
+  assert.deepEqual(opened.live.available_commands, [{ name: 'review', description: 'Review', input_hint: 'focus' }, { name: 'compact', description: 'Compact' }]);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.config_options?.length === 2, 4000);
+
+  // 1. set_config_option — 선택지 검증 + op payload
+  const bad = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'nope' }) });
+  assert.equal(bad.status, 400, bad.text);
+  assert.equal(bad.body.error, 'config_value_invalid');
+  const setModel = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'gpt-smart' }) });
+  assert.equal(setModel.status, 202, setModel.text);
+  const setBool = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'fast_mode', value: true }) });
+  assert.equal(setBool.status, 202, setBool.text);
+  const ops = requests.filter((r) => r.op === 'set_config_option');
+  assert.deepEqual(ops.map((r) => [r.config_id, r.config_value]), [['model', 'gpt-smart'], ['fast_mode', true]]);
+  assert.equal(ops[0].session_id, sid);
+  const noValue = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model' }) });
+  assert.equal(noValue.status, 400);
+
+  // 2. 질문/폼: awaiting_input 은 prompt 를 막고, 답은 elicitation op 으로 나간다
+  const asked = await relay({
+    events: [{ id: `${sid}:live:9`, seq: 9, turn_id: prompt.body.turn_id, type: 'elicitation_request', payload: { elicitation_id: 'elic-1', mode: 'form', message: 'Env?', schema: { type: 'object', properties: { env: { type: 'string', enum: ['dev', 'prod'] } }, required: ['env'] } }, created_at: new Date().toISOString() }],
+    state: { status: 'awaiting_input', reason: 'elicitation' },
+  });
+  assert.equal(asked.relayed, 1, 'elicitation_request is an accepted event type');
+  assert.equal(asked.live.status, 'awaiting_input');
+  await stream.waitFor('agent_session_event', (d) => d?.session_id === sid && d.event?.type === 'elicitation_request', 4000);
+  const blocked = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });
+  assert.equal(blocked.status, 409, 'a pending question blocks prompting like a pending permission');
+  const badAction = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'maybe' }) });
+  assert.equal(badAction.status, 400);
+  const badContent = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'accept', content: ['not', 'an', 'object'] }) });
+  assert.equal(badContent.status, 400);
+  const answered = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-1', action: 'accept', content: { env: 'prod' } }) });
+  assert.equal(answered.status, 200, answered.text);
+  assert.equal(answered.body.status, 'busy', 'answering hands the turn back to the agent');
+  const elicitOp = requests.find((r) => r.op === 'elicitation');
+  assert.equal(elicitOp.elicitation_id, 'elic-1');
+  assert.equal(elicitOp.elicitation_action, 'accept');
+  assert.deepEqual(elicitOp.elicitation_content, { env: 'prod' });
+  const declined = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'elic-2', action: 'decline' }) });
+  assert.equal(declined.status, 200);
+  assert.equal(requests.filter((r) => r.op === 'elicitation').at(-1).elicitation_content, null);
+
+  // 3. plan / elicitation_decision 도 중계되는 타입이고, history 답의 live 가 설정·명령을 되살린다
+  const more = await relay({ events: [
+    { id: `${sid}:live:10`, seq: 10, turn_id: prompt.body.turn_id, type: 'plan', payload: { entries: [{ content: 'Deploy', priority: 'high', status: 'in_progress' }] }, created_at: new Date().toISOString() },
+    { id: `${sid}:live:11`, seq: 11, turn_id: prompt.body.turn_id, type: 'elicitation_decision', payload: { elicitation_id: 'elic-1', action: 'accept', content: { env: 'prod' }, decided_by: 'user' }, created_at: new Date().toISOString() },
+  ] });
+  assert.equal(more.relayed, 2);
+  const answeredHistory = new Set();
+  const detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await waitFor(() => requests.some((r) => r.op === 'history' && !answeredHistory.has(r.request_id)), 'history rpc');
+  const historyReq = requests.find((r) => r.op === 'history' && !answeredHistory.has(r.request_id));
+  answeredHistory.add(historyReq.request_id);
+  await call(`${base}/api/agent/sessions/rpc/${historyReq.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ok: true, result: {
+    session: { session_id: sid, cwd: '/home/parn/repo', title: 'Interactive', updated_at: '2026-09-19T00:00:00.000Z', source: 'awb' },
+    events: [], truncated: false,
+    live: { session_id: sid, status: 'ready', cwd: '/home/parn/repo', title: 'Interactive', resume_supported: true, current_mode: 'agent', available_modes: [{ id: 'agent', name: 'Agent' }, { id: 'read-only', name: 'Read only' }], config_options: [{ ...configOptions[0], current_value: 'gpt-smart' }], available_commands: [{ name: 'status', description: 'Status' }] },
+  } }) });
+  const detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'ready');
+  assert.equal(detail.body.live.current_mode, 'agent');
+  assert.deepEqual(detail.body.live.available_modes.map((m) => m.id), ['agent', 'read-only']);
+  assert.equal(detail.body.live.config_options[0].current_value, 'gpt-smart', 'history live carries the manager-side config state');
+  assert.deepEqual(detail.body.live.available_commands.map((c) => c.name), ['status']);
+
+  // 4. awaiting_input 도 유령 되돌림 대상이다 — 매니저 재시작이면 idle 로
+  assert.equal((await relay({ state: { status: 'awaiting_input', reason: 'elicitation' } })).live.status, 'awaiting_input');
+  assert.ok((await heartbeat('inst-interactive-2')).status < 300);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'host_offline', 4000);
+
+  stream.close();
+});

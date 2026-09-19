@@ -5,6 +5,22 @@ const rl = createInterface({ input: process.stdin });
 let nextSession = 1;
 let pendingPrompt = null;
 let lastNewSessionParams = null;
+// Agent Session 테스트용 — ACP session config options / slash commands / plan / elicitation.
+// 다른 테스트(hermes 등)는 이 필드를 무시한다(추가 필드일 뿐).
+const configOptions = [
+  {
+    configId: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fake-fast',
+    options: [
+      { value: 'fake-fast', name: 'Fake Fast', description: 'cheap' },
+      { value: 'fake-smart', name: 'Fake Smart', description: 'better' },
+    ],
+  },
+  { configId: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', currentValue: false },
+];
+let pendingElicitPrompt = null;
+// initialize 에서 client 가 광고한 capabilities — 실제 어댑터처럼 slash command 알림은
+// 세션 설정(configOptions) 을 이해하는 client 에게만 보낸다(다른 테스트의 이벤트 순서를 건드리지 않게).
+let clientCapabilities = {};
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -99,6 +115,25 @@ rl.on('line', (line) => {
   const message = JSON.parse(line);
 
   if (!Object.hasOwn(message, 'method')) {
+    if (message.id === 'elicit-1' && pendingElicitPrompt) {
+      // 질문(폼)에 대한 답 — accept 면 답 내용을 echo 하고 턴을 끝낸다
+      const action = message.result?.action;
+      if (action === 'accept') {
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: 'session-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Deploying to ${message.result?.content?.env ?? '?'}` } } },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: 'session-1', update: { sessionUpdate: 'plan', entries: [{ content: 'Ask the user', priority: 'high', status: 'completed' }, { content: 'Deploy', priority: 'medium', status: 'in_progress' }] } },
+        });
+      }
+      result(pendingElicitPrompt, { stopReason: action === 'accept' ? 'end_turn' : 'refusal' });
+      pendingElicitPrompt = null;
+      return;
+    }
     if (message.id === 'permission-1' && pendingPrompt) {
       send({
         jsonrpc: '2.0',
@@ -126,6 +161,7 @@ rl.on('line', (line) => {
 
   switch (message.method) {
     case 'initialize':
+      clientCapabilities = message.params?.clientCapabilities ?? {};
       result(message.id, {
         protocolVersion: 1,
         agentInfo: { name: 'fake-hermes', version: '0.1.0' },
@@ -146,7 +182,23 @@ rl.on('line', (line) => {
           JSON.stringify(message.params),
         );
       }
-      result(message.id, { sessionId: `session-${nextSession++}` });
+      const sessionId = `session-${nextSession++}`;
+      result(message.id, { sessionId, configOptions });
+      // 어댑터들은 session/new 직후 slash command 목록을 알린다 — 세션 설정을 이해하는 client 에게만
+      if (clientCapabilities?.session?.configOptions) send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'review', description: 'Review the working tree', input: { type: 'text', hint: 'optional focus' } },
+              { name: 'compact', description: 'Compact the context' },
+            ],
+          },
+        },
+      });
       break;
     }
     case 'session/load': {
@@ -155,13 +207,52 @@ rl.on('line', (line) => {
         invalidParams(message.id, invalid);
         break;
       }
-      result(message.id, {});
+      result(message.id, { configOptions });
+      break;
+    }
+    case 'session/set_config_option': {
+      const option = configOptions.find((o) => o.configId === message.params?.configId);
+      if (!option) {
+        send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: `Unknown config option ${message.params?.configId}` } });
+        break;
+      }
+      option.currentValue = message.params.value;
+      result(message.id, { configOptions });
       break;
     }
     case 'test/last-new-session':
       result(message.id, lastNewSessionParams);
       break;
     case 'session/prompt':
+      if (JSON.stringify(message.params.prompt).includes('ELICIT_TEST')) {
+        // plan 을 알린 뒤 폼 질문을 던지고, 답이 올 때까지 턴을 연다 (Agent Session elicitation 테스트)
+        pendingElicitPrompt = message.id;
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: message.params.sessionId, update: { sessionUpdate: 'plan', entries: [{ content: 'Ask the user', priority: 'high', status: 'in_progress' }, { content: 'Deploy', priority: 'medium', status: 'pending' }] } },
+        });
+        send({
+          jsonrpc: '2.0',
+          id: 'elicit-1',
+          method: 'elicitation/create',
+          params: {
+            sessionId: message.params.sessionId,
+            mode: 'form',
+            message: 'Which environment should I deploy to?',
+            requestedSchema: {
+              type: 'object',
+              title: 'Deployment target',
+              properties: {
+                env: { type: 'string', title: 'Environment', enum: ['dev', 'prod'] },
+                notes: { type: 'string', title: 'Notes', maxLength: 200 },
+              },
+              required: ['env'],
+            },
+          },
+        });
+        break;
+      }
       pendingPrompt = message.id;
       if (JSON.stringify(message.params.prompt).includes('CHILD_EVENT_TEST')) {
         send({

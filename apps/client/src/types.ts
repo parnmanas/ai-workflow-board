@@ -3074,6 +3074,7 @@ export type AgentSessionStatus =
   | 'ready'
   | 'busy'
   | 'awaiting_permission'
+  | 'awaiting_input'
   | 'error'
   | 'closed';
 
@@ -3085,6 +3086,9 @@ export type AgentSessionEventType =
   | 'tool_update'
   | 'permission_request'
   | 'permission_decision'
+  | 'elicitation_request'
+  | 'elicitation_decision'
+  | 'plan'
   | 'usage'
   | 'turn'
   | 'error'
@@ -3094,6 +3098,25 @@ export interface AgentSessionModeOption {
   id: string;
   name: string;
   description?: string;
+}
+
+/** ACP session config option(모델·reasoning·mode …) — 어댑터가 준 전체 목록과 현재값. */
+export interface AgentSessionConfigOption {
+  config_id: string;
+  name: string;
+  description?: string;
+  /** 'model' | 'mode' | 'thought_level' | 'model_config' | 그 외 — 배치 힌트일 뿐. */
+  category: string;
+  type: 'select' | 'boolean' | string;
+  current_value: string | boolean | null;
+  options: Array<{ value: string; name: string; description?: string; group?: string }>;
+}
+
+/** 어댑터가 알려 준 slash command — 프롬프트에 `/name …` 로 보낸다. */
+export interface AgentSessionCommand {
+  name: string;
+  description: string;
+  input_hint?: string;
 }
 
 /** CLI 설정에 묶인 credential 의 공개 투영(비밀 없음). */
@@ -3149,6 +3172,8 @@ export interface AgentSessionLiveSnapshot {
   status: AgentSessionStatus | string;
   current_mode: string | null;
   available_modes: AgentSessionModeOption[];
+  config_options: AgentSessionConfigOption[];
+  available_commands: AgentSessionCommand[];
   resume_supported: boolean;
   last_error: string | null;
   driver_user_id: string | null;

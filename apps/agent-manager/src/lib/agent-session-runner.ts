@@ -25,6 +25,7 @@ import {
   patchAgentSessionState,
   postAgentSessionEvents,
   postAgentSessionRpcResponse,
+  type AgentSessionConfigOptionPatch,
   type AgentSessionEventInput,
   type AgentSessionRef,
   type AgentSessionStatePatch,
@@ -32,7 +33,13 @@ import {
 } from './rest.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
-import type { AcpMcpServer, AcpPermissionOutcome, AcpPermissionRequest } from './runtime/acp/acp-types.js';
+import type {
+  AcpElicitationOutcome,
+  AcpElicitationRequest,
+  AcpMcpServer,
+  AcpPermissionOutcome,
+  AcpPermissionRequest,
+} from './runtime/acp/acp-types.js';
 import { resolveHermesAcpCommand } from './runtime/hermes/hermes-command.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 
@@ -41,7 +48,7 @@ export interface AgentSessionRequest {
   manager_id: string;
   workspace_id?: string;
   cli: string;
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'cancel' | 'set_mode' | 'close';
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -51,6 +58,13 @@ export interface AgentSessionRequest {
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
+  /** set_config_option */
+  config_id?: string;
+  config_value?: string | boolean;
+  /** elicitation — 에이전트 질문/폼에 대한 답 */
+  elicitation_id?: string;
+  elicitation_action?: 'accept' | 'decline' | 'cancel';
+  elicitation_content?: Record<string, unknown> | null;
   /** CLI 설정에 묶인 워크스페이스 Credential(open/prompt). 없으면 운영자 로그인 그대로. */
   credential_id?: string | null;
   driver_user_id: string;
@@ -141,6 +155,15 @@ interface PendingPermission {
   event: StampedEvent;
 }
 
+/** 어댑터의 `elicitation/create`(질문/폼) — 사용자가 답할 때까지 JSON-RPC 요청을 열어 둔다. */
+interface PendingElicitation {
+  resolve: (outcome: AcpElicitationOutcome) => void;
+  timer: NodeJS.Timeout;
+  event: StampedEvent;
+}
+
+type CommandPatch = { name: string; description: string; input_hint?: string };
+
 interface LiveSession {
   cli: string;
   sessionId: string;
@@ -151,6 +174,12 @@ interface LiveSession {
   /** session/load 가 기록을 재생하는 동안 true — 재생 이벤트는 UI 가 이미 history 로 가졌으므로 버린다. */
   loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
+  pendingElicitations: Map<string, PendingElicitation>;
+  /** 어댑터가 준 세션 설정(모델·reasoning …)·slash command·모드 — history RPC 의 `live` 로 서버가 다시 받는다. */
+  configOptions: AgentSessionConfigOptionPatch[];
+  availableCommands: CommandPatch[];
+  currentMode: string | null;
+  availableModes: Array<{ id: string; name: string; description?: string }>;
   turn: { turnId: string; startedAt: number } | null;
   textBuffer: string;
   reasoningBuffer: string;
@@ -200,6 +229,84 @@ function boundedPayload(payload: Record<string, unknown>): Record<string, unknow
   return { truncated: true, preview: serialized.slice(0, 4_000) };
 }
 
+/** ACP SessionConfigOption[] → 서버 패치 모양. 그룹(`{group, name, options}`)은 평탄화하고 group 라벨을 남긴다. */
+export function parseConfigOptions(raw: unknown): AgentSessionConfigOptionPatch[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentSessionConfigOptionPatch[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const o = entry as Record<string, unknown>;
+    const configId = typeof o.configId === 'string' ? o.configId : typeof o.config_id === 'string' ? o.config_id : '';
+    if (!configId) continue;
+    const type = typeof o.type === 'string' ? o.type : (typeof o.currentValue === 'boolean' ? 'boolean' : 'select');
+    const options: AgentSessionConfigOptionPatch['options'] = [];
+    const pushOption = (v: unknown, group?: string) => {
+      if (!v || typeof v !== 'object') return;
+      const opt = v as Record<string, unknown>;
+      const value = typeof opt.value === 'string' ? opt.value : typeof opt.id === 'string' ? opt.id : '';
+      if (!value) return;
+      options.push({
+        value,
+        name: typeof opt.name === 'string' && opt.name ? opt.name : value,
+        ...(typeof opt.description === 'string' && opt.description ? { description: opt.description } : {}),
+        ...(group ? { group } : {}),
+      });
+    };
+    if (Array.isArray(o.options)) {
+      for (const v of o.options) {
+        const g = v as Record<string, unknown> | null;
+        if (g && typeof g === 'object' && Array.isArray(g.options)) {
+          const label = typeof g.name === 'string' ? g.name : typeof g.group === 'string' ? g.group : '';
+          for (const inner of g.options) pushOption(inner, label || undefined);
+        } else {
+          pushOption(v);
+        }
+      }
+    }
+    const current = o.currentValue ?? o.current_value;
+    out.push({
+      config_id: configId,
+      name: typeof o.name === 'string' && o.name ? o.name : configId,
+      ...(typeof o.description === 'string' && o.description ? { description: o.description } : {}),
+      category: typeof o.category === 'string' && o.category ? o.category : 'unknown',
+      type,
+      current_value: typeof current === 'boolean' ? current : typeof current === 'string' ? current : null,
+      options,
+    });
+  }
+  return out;
+}
+
+/** ACP AvailableCommand[] → `{ name, description, input_hint? }`. */
+export function parseCommands(raw: unknown): CommandPatch[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CommandPatch[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const c = entry as Record<string, unknown>;
+    const name = typeof c.name === 'string' ? c.name.trim().replace(/^\//, '') : '';
+    if (!name) continue;
+    const input = c.input && typeof c.input === 'object' ? (c.input as Record<string, unknown>) : null;
+    const hint = input && typeof input.hint === 'string' ? input.hint : '';
+    out.push({ name, description: typeof c.description === 'string' ? c.description : '', ...(hint ? { input_hint: hint } : {}) });
+  }
+  return out;
+}
+
+/** ACP Plan / PlanUpdate(items) entries → `{ content, priority, status }[]`. 항목이 없으면 null. */
+export function parsePlanEntries(raw: unknown): Array<{ content: string; priority: string; status: string }> | null {
+  if (!Array.isArray(raw)) return null;
+  const entries = raw
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+    .map((e) => ({
+      content: typeof e.content === 'string' ? e.content.slice(0, 2_000) : '',
+      priority: typeof e.priority === 'string' ? e.priority : 'medium',
+      status: typeof e.status === 'string' ? e.status : 'pending',
+    }))
+    .filter((e) => e.content);
+  return entries;
+}
+
 export async function findOnPath(name: string): Promise<string | null> {
   const candidates = process.platform === 'win32' ? [`${name}.cmd`, `${name}.exe`, name] : [name];
   for (const dir of (process.env.PATH || '').split(delimiter)) {
@@ -237,8 +344,11 @@ export async function resolveAcpCommandForCli(cli: string): Promise<ResolvedAcpC
       return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
     }
     case 'codex': {
+      // `@agentclientprotocol/codex-acp` 가 유지되는 어댑터다 — 설치된 codex CLI 와 같은 세대의 코어를
+      // 번들해 최신 모델을 쓴다. zed-industries 것은 2026-07 에 archive 됐고 옛 코어라 새 모델을
+      // "requires a newer version of Codex" 로 거부한다.
       const found = await findOnPath('codex-acp');
-      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@zed-industries/codex-acp'] };
+      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/codex-acp'] };
     }
     case 'hermes': {
       const resolved = await resolveHermesAcpCommand();
@@ -295,7 +405,7 @@ export class AgentSessionRunner {
     return Array.from(this.#live.values()).map((live) => ({
       cli: live.cli,
       session_id: live.sessionId,
-      busy: live.turn !== null || live.pendingPermissions.size > 0,
+      busy: live.turn !== null || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0,
       pid: live.client.process.pid ?? null,
     }));
   }
@@ -334,6 +444,15 @@ export class AgentSessionRunner {
         case 'permission':
           this.#resolvePermission(cli, sessionId, request.permission_request_id || '', request.option_id ?? null);
           return;
+        case 'elicitation':
+          this.#resolveElicitation(cli, sessionId, request.elicitation_id || '', request.elicitation_action || 'cancel', request.elicitation_content ?? null);
+          return;
+        case 'set_config_option': {
+          const live = this.#live.get(this.#key(cli, sessionId));
+          if (!live || !request.config_id || request.config_value === undefined) return;
+          await this.#setConfigOption(live, request.config_id, request.config_value);
+          return;
+        }
         case 'cancel': {
           const live = this.#live.get(this.#key(cli, sessionId));
           if (live) await live.client.cancel(live.sessionId).catch(() => undefined);
@@ -344,6 +463,7 @@ export class AgentSessionRunner {
           const modeId = request.mode_id || '';
           if (!live || !modeId) return;
           await live.client.request('session/set_mode', { sessionId: live.sessionId, modeId }, { timeoutMs: this.#options.requestTimeoutMs });
+          live.currentMode = modeId;
           this.#enqueue(live, [{ type: 'system', payload: { text: `Mode set to ${modeId}.` } }], { current_mode: modeId, reason: 'mode' });
           return;
         }
@@ -392,7 +512,9 @@ export class AgentSessionRunner {
           // 아직 결정되지 않은 permission 요청은 CLI 홈 파일에 없다(SSE 로만 흘렀다). 화면을
           // 다시 열거나 새로고침한 사용자가 "Needs your approval" 만 보고 카드는 못 보는 일이
           // 없도록 기록 끝에 다시 실어 보낸다 — id 가 같아 라이브로 이미 받은 행과 겹치지 않는다.
-          const pending = live ? Array.from(live.pendingPermissions.values()).map((p) => p.event) : [];
+          const pending = live
+            ? [...Array.from(live.pendingPermissions.values()), ...Array.from(live.pendingElicitations.values())].map((p) => p.event)
+            : [];
           const events = pending.length
             ? [...history.events, ...pending.map((e, i) => ({ ...e, seq: history.events.length + i + 1 }))]
             : history.events;
@@ -479,14 +601,16 @@ export class AgentSessionRunner {
     log(`${tag} spawning ACP adapter cmd=${command} ${args.join(' ')} cwd=${cwd} auth=${auth.label}`);
 
     let live: LiveSession | null = null;
+    const env = this.#buildEnv(cli, requestedSessionId || 'new', auth);
     const client = await AcpClient.spawn({
       command,
       args,
       cwd,
-      env: this.#buildEnv(cli, requestedSessionId || 'new', auth),
+      env,
       requestTimeoutMs: this.#options.requestTimeoutMs,
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
+      onElicitation: (elicitation) => (live ? this.#onElicitation(live, elicitation) : Promise.resolve({ action: 'cancel' as const })),
       onStderr: (line) => log(`${tag} stderr: ${redactSecrets(line)}`),
       spawnOptions: { detached: process.platform !== 'win32' },
     });
@@ -494,10 +618,19 @@ export class AgentSessionRunner {
     try {
       const initialized = await client.initialize({
         clientInfo: { name: 'awb-agent-session', version: this.#options.clientVersion || '1' },
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        // elicitation(form/url): 에이전트의 질문·폼(claude AskUserQuestion 등)을 카드로 받는다.
+        // session.configOptions.boolean / plan: 어댑터가 boolean 설정과 plan 업데이트를 보내도 된다는 뜻.
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+          elicitation: { form: {}, url: {} },
+          session: { configOptions: { boolean: {} } },
+          plan: {},
+        },
       });
       const caps = (initialized?.agentCapabilities ?? {}) as Record<string, unknown>;
       const loadSupported = caps.loadSession === true;
+      const authMethods = Array.isArray(initialized?.authMethods) ? initialized.authMethods : [];
       const sessionIdForMcp = requestedSessionId || 'new';
       const mcpServers = this.#options.mcpServers ? this.#options.mcpServers(sessionIdForMcp) : this.#defaultMcpServers(sessionIdForMcp);
 
@@ -510,6 +643,11 @@ export class AgentSessionRunner {
         loadSupported,
         loading: false,
         pendingPermissions: new Map(),
+        pendingElicitations: new Map(),
+        configOptions: [],
+        availableCommands: [],
+        currentMode: null,
+        availableModes: [],
         turn: null,
         textBuffer: '',
         reasoningBuffer: '',
@@ -524,6 +662,7 @@ export class AgentSessionRunner {
       };
 
       let modes: unknown;
+      let configOptions: unknown;
       let resumed = false;
       if (requestedSessionId) {
         if (!loadSupported) {
@@ -531,16 +670,18 @@ export class AgentSessionRunner {
         }
         live.loading = true;
         try {
-          const loaded = await client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers });
+          const loaded = await this.#withAuthRetry(client, cli, authMethods, env, () => client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers }));
           modes = (loaded as any)?.modes;
+          configOptions = (loaded as any)?.configOptions;
           resumed = true;
         } finally {
           live.loading = false;
         }
       } else {
-        const created = await client.newSession({ cwd, mcpServers });
+        const created = await this.#withAuthRetry(client, cli, authMethods, env, () => client.newSession({ cwd, mcpServers }));
         live.sessionId = created.sessionId;
         modes = created.modes;
+        configOptions = created.configOptions;
         await this.#store.recordAwbSession({ cli, session_id: live.sessionId, cwd, title }).catch(() => undefined);
       }
       if (!live.sessionId) throw new Error('ACP adapter returned no session id.');
@@ -548,6 +689,9 @@ export class AgentSessionRunner {
       this.#live.set(key, live);
       client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
       const modeInfo = this.#parseModes(modes);
+      live.currentMode = modeInfo.current;
+      live.availableModes = modeInfo.available;
+      live.configOptions = parseConfigOptions(configOptions);
       this.#enqueue(live, [{
         type: 'system',
         payload: {
@@ -560,6 +704,8 @@ export class AgentSessionRunner {
         ...(title ? { title } : {}),
         current_mode: modeInfo.current,
         available_modes: modeInfo.available,
+        config_options: live.configOptions,
+        available_commands: live.availableCommands,
         resume_supported: loadSupported,
         last_error: null,
         reason: resumed ? 'resumed' : 'opened',
@@ -585,7 +731,63 @@ export class AgentSessionRunner {
     env.AWB_MANAGER_ID = this.#options.getManagerId();
     env.AWB_SESSION_CLI = cli;
     env.AWB_SESSION_ID = sessionId;
+    // codex-acp: 매니저 프로세스에는 브라우저가 없다 — ChatGPT 브라우저 로그인 auth method 를 숨겨
+    // 어댑터가 장비의 codex 로그인(auth.json)이나 API 키만 쓰게 한다.
+    if (cli === 'codex' && env.NO_BROWSER === undefined) env.NO_BROWSER = '1';
     return env;
+  }
+
+  /**
+   * `session/new` / `session/load` 가 "authentication required"(-32000) 로 거부되면 ACP `authenticate`
+   * 를 한 번 시도한다. 환경에 API 키가 있으면 api-key 계열 method, 없으면 남은 method 를 이름으로
+   * 안내하는 오류를 낸다 — 장비에서 `<cli> login` 하거나 CLI 설정에 credential 을 묶으라는 뜻이다.
+   */
+  async #withAuthRetry<T>(client: AcpClient, cli: string, authMethods: unknown[], env: NodeJS.ProcessEnv, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (err: any) {
+      const rpcCode = err?.rpcCode ?? err?.code;
+      const message = String(err?.message ?? '');
+      const authRequired = rpcCode === -32000 || /auth(entication)? required|not (logged|signed) in|unauthenticated/i.test(message);
+      if (!authRequired) throw err;
+      const methods = authMethods
+        .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
+        .map((m) => ({ id: String(m.id ?? ''), name: String(m.name ?? m.id ?? ''), type: String(m.type ?? '') }))
+        .filter((m) => m.id);
+      const hasApiKey = !!(env.CODEX_API_KEY || env.OPENAI_API_KEY || env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN);
+      const apiKeyMethod = methods.find((m) => /api[-_]?key|token/i.test(m.id) || /api[-_]?key|token/i.test(m.name));
+      if (hasApiKey && apiKeyMethod) {
+        log(`[agent-session ${cli}] authentication required — trying ACP auth method ${apiKeyMethod.id}`);
+        await client.authenticate(apiKeyMethod.id, { timeoutMs: this.#options.requestTimeoutMs });
+        return await run();
+      }
+      const listed = methods.length ? ` Available methods: ${methods.map((m) => m.name || m.id).join(', ')}.` : '';
+      throw Object.assign(
+        new Error(`Authentication required for ${cli} on this Runtime Host — run \`${cli} login\` there, or bind a credential in CLI settings.${listed}`),
+        { code: 'auth_required' },
+      );
+    }
+  }
+
+  /** ACP `session/set_config_option` — 응답의 전체 목록으로 상태를 갱신하고 system 행으로 남긴다. */
+  async #setConfigOption(live: LiveSession, configId: string, value: string | boolean): Promise<void> {
+    const before = live.configOptions.find((o) => o.config_id === configId);
+    const response = await live.client.setConfigOption(
+      typeof value === 'boolean'
+        ? { sessionId: live.sessionId, configId, type: 'boolean', value }
+        : { sessionId: live.sessionId, configId, type: 'id', value },
+      { timeoutMs: this.#options.requestTimeoutMs },
+    );
+    if (Array.isArray(response?.configOptions)) live.configOptions = parseConfigOptions(response.configOptions);
+    else if (before) {
+      before.current_value = value;
+    }
+    const after = live.configOptions.find((o) => o.config_id === configId);
+    const label = after?.name || before?.name || configId;
+    const chosen = typeof value === 'boolean'
+      ? (value ? 'on' : 'off')
+      : (after?.options.find((o) => o.value === value)?.name || String(value));
+    this.#enqueue(live, [{ type: 'system', payload: { text: `${label} set to ${chosen}.` } }], { config_options: live.configOptions, reason: 'config_option' });
   }
 
   /**
@@ -680,6 +882,7 @@ export class AgentSessionRunner {
   #statusOf(live: LiveSession): string {
     if (live.exited || live.closing) return 'idle';
     if (live.pendingPermissions.size > 0) return 'awaiting_permission';
+    if (live.pendingElicitations.size > 0) return 'awaiting_input';
     if (live.turn) return 'busy';
     return 'ready';
   }
@@ -696,6 +899,10 @@ export class AgentSessionRunner {
       title: live.title,
       status: this.#statusOf(live),
       resume_supported: live.loadSupported,
+      current_mode: live.currentMode,
+      available_modes: live.availableModes,
+      config_options: live.configOptions,
+      available_commands: live.availableCommands,
     };
   }
 
@@ -798,9 +1005,54 @@ export class AgentSessionRunner {
       case 'diagnostic': {
         const data = (event.data ?? {}) as Record<string, unknown>;
         const kind = String(data.sessionUpdate ?? data.session_update ?? '');
-        if (event.method === 'session/update' && kind === 'current_mode_update') {
-          const modeId = String(data.currentModeId ?? data.current_mode_id ?? '');
-          if (modeId) this.#enqueue(live, [], { current_mode: modeId, reason: 'mode' });
+        if (event.method === 'session/update') {
+          switch (kind) {
+            case 'current_mode_update': {
+              const modeId = String(data.currentModeId ?? data.current_mode_id ?? '');
+              if (modeId) {
+                live.currentMode = modeId;
+                this.#enqueue(live, [], { current_mode: modeId, reason: 'mode' });
+              }
+              return;
+            }
+            case 'config_option_update':
+              live.configOptions = parseConfigOptions(data.configOptions ?? data.config_options);
+              this.#enqueue(live, [], { config_options: live.configOptions, reason: 'config_option' });
+              return;
+            case 'available_commands_update':
+              live.availableCommands = parseCommands(data.availableCommands ?? data.available_commands);
+              this.#enqueue(live, [], { available_commands: live.availableCommands, reason: 'commands' });
+              return;
+            case 'plan':
+            case 'plan_update': {
+              const entries = parsePlanEntries(kind === 'plan' ? data.entries : (data.plan as any)?.entries ?? data.entries);
+              if (entries) {
+                this.#flushBuffers(live, turnId);
+                this.#enqueue(live, [{ type: 'plan', payload: { entries }, turn_id: turnId }]);
+              }
+              return;
+            }
+            case 'plan_removed':
+              return;
+            case 'session_info_update': {
+              const title = typeof data.title === 'string' ? data.title.trim().slice(0, 200) : '';
+              if (title && title !== live.title) {
+                live.title = title;
+                this.#enqueue(live, [], { title, reason: 'title' });
+                void this.#store.touchAwbSession(live.cli, live.sessionId, { title }).catch(() => undefined);
+              }
+              return;
+            }
+            default:
+              break;
+          }
+        }
+        if (event.method === 'elicitation/complete') {
+          // URL 방식 elicitation 이 끝났다는 어댑터의 알림 — 카드를 '완료' 로 닫는다.
+          const elicitationId = String(data.elicitationId ?? data.elicitation_id ?? '');
+          if (elicitationId) {
+            this.#enqueue(live, [{ type: 'elicitation_decision', payload: { elicitation_id: elicitationId, action: 'accept', decided_by: 'agent' }, turn_id: turnId }]);
+          }
           return;
         }
         log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] diagnostic ${event.method}${kind ? ` (${kind})` : ''}`);
@@ -817,12 +1069,16 @@ export class AgentSessionRunner {
     this.#flushBuffers(live, turnId);
     const requestId = randomUUID();
     const options = (permission.options ?? []).map((o) => ({ option_id: o.optionId, name: o.name, kind: o.kind }));
+    const meta = (permission._meta?.permission ?? null) as Record<string, unknown> | null;
+    const title = permission.title || permission.toolCall?.title || (typeof meta?.title === 'string' ? meta.title : '');
+    const description = permission.description || (typeof meta?.description === 'string' ? meta.description : '');
     const [requestEvent] = this.#enqueue(live, [{
       type: 'permission_request',
       payload: {
         request_id: requestId,
-        tool_call_id: permission.toolCall?.toolCallId ?? '',
-        title: permission.toolCall?.title ?? '',
+        tool_call_id: permission.toolCall?.toolCallId ?? permission.subject?.toolCallId ?? '',
+        title,
+        ...(description ? { description } : {}),
         kind: permission.toolCall?.kind ?? '',
         options,
         raw_input: boundedValue((permission.toolCall as any)?.rawInput ?? (permission.toolCall as any)?.raw_input),
@@ -850,7 +1106,6 @@ export class AgentSessionRunner {
    * 아니므로 `decided_by: 'system'`.
    */
   #cancelPendingPermissions(live: LiveSession): void {
-    if (live.pendingPermissions.size === 0) return;
     const events: AgentSessionEventInput[] = [];
     for (const [requestId, pending] of live.pendingPermissions) {
       clearTimeout(pending.timer);
@@ -862,7 +1117,74 @@ export class AgentSessionRunner {
       });
       pending.resolve({ outcome: 'cancelled' });
     }
-    this.#enqueue(live, events);
+    for (const [elicitationId, pending] of live.pendingElicitations) {
+      clearTimeout(pending.timer);
+      live.pendingElicitations.delete(elicitationId);
+      events.push({
+        type: 'elicitation_decision',
+        payload: { elicitation_id: elicitationId, action: 'cancel', decided_by: 'system' },
+        turn_id: live.turn?.turnId,
+      });
+      pending.resolve({ action: 'cancel' });
+    }
+    if (events.length) this.#enqueue(live, events);
+  }
+
+  /**
+   * 어댑터의 `elicitation/create` — 에이전트가 사용자에게 구조화된 입력을 요청한다(claude 의
+   * AskUserQuestion, codex 의 질문 등). form 은 JSON Schema 를 그대로 카드로 넘기고 답이 올 때까지
+   * 요청을 연다. url 은 링크 카드만 남기고 바로 accept 한다(완료는 `elicitation/complete` 로 온다).
+   */
+  async #onElicitation(live: LiveSession, request: AcpElicitationRequest): Promise<AcpElicitationOutcome> {
+    if (live.loading) return { action: 'cancel' };
+    const turnId = live.turn?.turnId;
+    this.#flushBuffers(live, turnId);
+    const mode = request.mode === 'url' ? 'url' : 'form';
+    const elicitationId = (mode === 'url' && typeof request.elicitationId === 'string' && request.elicitationId) ? request.elicitationId : randomUUID();
+    const payload: Record<string, unknown> = {
+      elicitation_id: elicitationId,
+      mode,
+      message: typeof request.message === 'string' ? request.message.slice(0, 8_000) : '',
+      tool_call_id: typeof request.toolCallId === 'string' ? request.toolCallId : '',
+    };
+    if (mode === 'form') payload.schema = boundedValue(request.requestedSchema ?? {});
+    if (mode === 'url') payload.url = typeof request.url === 'string' ? request.url.slice(0, 2_048) : '';
+    if (mode === 'url') {
+      this.#enqueue(live, [{ type: 'elicitation_request', payload, turn_id: turnId }]);
+      return { action: 'accept' };
+    }
+    const [requestEvent] = this.#enqueue(live, [{ type: 'elicitation_request', payload, turn_id: turnId }], { status: 'awaiting_input', reason: 'elicitation' });
+    return new Promise<AcpElicitationOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        live.pendingElicitations.delete(elicitationId);
+        this.#enqueue(live, [{
+          type: 'elicitation_decision',
+          payload: { elicitation_id: elicitationId, action: 'cancel', decided_by: 'timeout' },
+          turn_id: live.turn?.turnId,
+        }], { status: this.#statusOf(live) === 'awaiting_input' ? 'busy' : this.#statusOf(live), reason: 'elicitation_timeout' });
+        resolve({ action: 'cancel' });
+      }, this.#options.permissionTimeoutMs);
+      timer.unref?.();
+      live.pendingElicitations.set(elicitationId, { resolve, timer, event: requestEvent });
+    });
+  }
+
+  #resolveElicitation(cli: string, sessionId: string, elicitationId: string, action: 'accept' | 'decline' | 'cancel', content: Record<string, unknown> | null): void {
+    const live = this.#live.get(this.#key(cli, sessionId));
+    if (!live) return;
+    const pending = live.pendingElicitations.get(elicitationId);
+    if (!pending) {
+      log(`[agent-session ${cli} ${sessionId.slice(0, 8)}] elicitation ${elicitationId.slice(0, 8)} not pending (late or duplicate answer)`);
+      return;
+    }
+    clearTimeout(pending.timer);
+    live.pendingElicitations.delete(elicitationId);
+    this.#enqueue(live, [{
+      type: 'elicitation_decision',
+      payload: { elicitation_id: elicitationId, action, ...(action === 'accept' ? { content: boundedValue(content ?? {}) } : {}), decided_by: 'user' },
+      turn_id: live.turn?.turnId,
+    }], { status: live.pendingPermissions.size > 0 ? 'awaiting_permission' : 'busy', reason: `elicitation_${action}` });
+    pending.resolve(action === 'accept' ? { action: 'accept', content: content ?? {} } : { action });
   }
 
   #resolvePermission(cli: string, sessionId: string, requestId: string, optionId: string | null): void {
@@ -935,7 +1257,7 @@ export class AgentSessionRunner {
     const ms = this.#options.idleMinutes * 60_000;
     if (ms <= 0) return;
     live.idleTimer = setTimeout(() => {
-      if (live.turn || live.pendingPermissions.size > 0) {
+      if (live.turn || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0) {
         this.#touch(live);
         return;
       }

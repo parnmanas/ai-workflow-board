@@ -497,3 +497,86 @@ test('ACP adapters are spawned through cross-spawn so Windows .cmd shims and the
   assert.match(source, /from 'cross-spawn'/, 'acp-client imports cross-spawn');
   assert.doesNotMatch(source, /import \{[^}]*\bspawn\b[^}]*\} from 'node:child_process'/, 'acp-client no longer spawns with node:child_process directly');
 });
+
+// ─── 세션 설정(모델 등) · slash command · plan · 질문/폼(elicitation) ────────────────
+//
+// ACP 가 이미 제공하는 상호작용을 러너가 서버 contract 로 옮긴다: `session/new` 의 configOptions 와
+// `config_option_update` → 상태 config_options, `available_commands_update` → available_commands,
+// `plan` → plan 행, `elicitation/create` → elicitation_request 행 + awaiting_input, 답은 `elicitation` op.
+test('config options / slash commands / plan / elicitation flow through the runner and history carries the live state', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-x', session_id: null, cwd, title: 'Interactive' }));
+  const opened = server.rpc('rpc-open-x');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const sid = opened.result.session_id;
+  assert.deepEqual(opened.result.config_options.map((o) => [o.config_id, o.type, o.current_value]), [['model', 'select', 'fake-fast'], ['fast_mode', 'boolean', false]], 'session/new configOptions land in the open result');
+  assert.deepEqual(opened.result.config_options[0].options.map((o) => o.value), ['fake-fast', 'fake-smart']);
+  await waitFor(() => server.states(sid).some((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2), 'available_commands patch');
+  const commands = server.states(sid).find((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2).available_commands;
+  assert.deepEqual(commands, [{ name: 'review', description: 'Review the working tree', input_hint: 'optional focus' }, { name: 'compact', description: 'Compact the context' }]);
+
+  // 모델 변경 — session/set_config_option 왕복, 전체 목록으로 갱신, system 행
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'model', config_value: 'fake-smart' }));
+  await waitFor(() => server.states(sid).some((s) => s.reason === 'config_option'), 'config_option patch');
+  const patched = server.states(sid).filter((s) => s.reason === 'config_option').at(-1);
+  assert.equal(patched.config_options.find((o) => o.config_id === 'model').current_value, 'fake-smart');
+  assert.ok(server.events(sid).some((e) => e.type === 'system' && e.payload.text === 'Model set to Fake Smart.'), 'system row names the chosen option');
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: true }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'system' && e.payload.text === 'Fast mode set to on.'), 'boolean option row');
+
+  // history 의 live 가 설정·명령·모드를 실어 보낸다(서버 재시작 뒤에도 화면이 복원된다)
+  await runner.handle(request('history', { request_id: 'rpc-history-x', session_id: sid }));
+  const history = server.rpc('rpc-history-x');
+  assert.equal(history.ok, true, JSON.stringify(history));
+  assert.equal(history.result.live.config_options.find((o) => o.config_id === 'model').current_value, 'fake-smart');
+  assert.equal(history.result.live.config_options.find((o) => o.config_id === 'fast_mode').current_value, true);
+  assert.deepEqual(history.result.live.available_commands.map((c) => c.name), ['review', 'compact']);
+
+  // 질문/폼: plan 행 → elicitation_request 행 + awaiting_input → history 재전송 → 답 → 턴 종료
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-x', text: 'ELICIT_TEST deploy please' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'elicitation_request'), 'elicitation_request row');
+  const asked = server.events(sid).find((e) => e.type === 'elicitation_request');
+  assert.equal(asked.state?.status, 'awaiting_input');
+  assert.equal(asked.payload.mode, 'form');
+  assert.equal(asked.payload.message, 'Which environment should I deploy to?');
+  assert.deepEqual(asked.payload.schema.required, ['env']);
+  assert.deepEqual(asked.payload.schema.properties.env.enum, ['dev', 'prod']);
+  const plan = server.events(sid).find((e) => e.type === 'plan');
+  assert.ok(plan, 'plan row relayed before the question');
+  assert.deepEqual(plan.payload.entries.map((e) => e.status), ['in_progress', 'pending']);
+  await runner.handle(request('history', { request_id: 'rpc-history-x2', session_id: sid }));
+  const replay = server.rpc('rpc-history-x2');
+  assert.equal(replay.result.live.status, 'awaiting_input');
+  assert.equal(replay.result.events.filter((e) => e.type === 'elicitation_request').length, 1, 'the pending question is replayed for a reloaded screen');
+  assert.equal(replay.result.events.find((e) => e.type === 'elicitation_request').id, asked.id);
+
+  await runner.handle(request('elicitation', { session_id: sid, elicitation_id: asked.payload.elicitation_id, elicitation_action: 'accept', elicitation_content: { env: 'prod' } }));
+  await turn;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn finished');
+  const decision = server.events(sid).find((e) => e.type === 'elicitation_decision');
+  assert.equal(decision.payload.action, 'accept');
+  assert.equal(decision.payload.decided_by, 'user');
+  assert.deepEqual(decision.payload.content, { env: 'prod' });
+  assert.equal(decision.state?.status, 'busy', 'answering puts the session back to busy until the turn ends');
+  assert.ok(server.events(sid).some((e) => e.type === 'text' && e.payload.text.includes('Deploying to prod')), 'the agent received the answer');
+  const plans = server.events(sid).filter((e) => e.type === 'plan');
+  assert.equal(plans.at(-1).payload.entries[0].status, 'completed', 'the updated plan is relayed as another plan row (UI folds it)');
+  assert.equal(server.events(sid).filter((e) => e.type === 'turn').at(-1).payload.stop_reason, 'end_turn');
+  assert.equal(server.states(sid).at(-1).status, 'ready');
+});
+
+test('closing a session while a question is pending cancels it with a system decision', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-y', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-y').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-y', text: 'ELICIT_TEST' }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'elicitation_request'), 'elicitation_request row');
+  await runner.handle(request('close', { session_id: sid }));
+  await turn;
+  const decision = server.events(sid).find((e) => e.type === 'elicitation_decision');
+  assert.ok(decision, 'decision row relayed');
+  assert.equal(decision.payload.action, 'cancel');
+  assert.equal(decision.payload.decided_by, 'system');
+  assert.equal(server.states(sid).at(-1).status, 'closed');
+  assert.equal(runner._snapshot().length, 0);
+});

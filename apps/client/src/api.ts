@@ -2072,6 +2072,23 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/mode`,
       { method: 'POST', body: JSON.stringify({ mode_id: modeId }) },
     ),
+  setHostSessionConfigOption: (managerId: string, cli: string, sessionId: string, configId: string, value: string | boolean) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/config-option`,
+      { method: 'POST', body: JSON.stringify({ config_id: configId, value }) },
+    ),
+  answerHostSessionElicitation: (
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    elicitationId: string,
+    action: 'accept' | 'decline' | 'cancel',
+    content?: Record<string, unknown> | null,
+  ) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/elicitation`,
+      { method: 'POST', body: JSON.stringify({ elicitation_id: elicitationId, action, content: content ?? null }) },
+    ),
   closeHostSession: (managerId: string, cli: string, sessionId: string) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/close`,

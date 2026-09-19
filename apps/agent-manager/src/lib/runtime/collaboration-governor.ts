@@ -63,7 +63,7 @@ function integer(value: unknown, fallback: number, min: number, max: number): nu
 }
 
 function requestFrom(
-  value: AcpPermissionRequest['toolCall'] | Extract<RuntimeEvent, { type: 'child_started' }>,
+  value: NonNullable<AcpPermissionRequest['toolCall']> | Extract<RuntimeEvent, { type: 'child_started' }>,
 ): ChildRequest {
   const record = value as unknown as Record<string, unknown>;
   const raw = objectValue(record.input ?? record.rawInput ?? record.raw_input);
@@ -104,7 +104,7 @@ export class CollaborationGovernor {
     request: AcpPermissionRequest,
     hostHealthy: boolean,
   ): ChildRequest | null {
-    if (!isChildTool(request.toolCall)) return null;
+    if (!request.toolCall || !isChildTool(request.toolCall)) return null;
     return this.#reserve(
       sessionKey,
       config,
