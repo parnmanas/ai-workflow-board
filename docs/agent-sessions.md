@@ -123,6 +123,13 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
   매니저가 "없다" 고 하면 진행 중 상태는 idle 로 — `starting` 만은 open RPC 타임아웃(120s) 동안 지킨다.
 - 매니저 인스턴스가 사라지면(`agent_instance_update` action=removed, 같은 identity 의 다른 인스턴스 없음) 그 장비의 진행 중
   세션을 모두 idle 로 되돌리고 driver 에게 `agent_session_update{reason:'host_offline'}` 를 보낸다.
+- **하트비트가 살아 있는 세션 전체를 싣는다** (`agent_sessions: [{cli, session_id, status}]`, 매니저 `InstanceMeta.agentSessionsProvider`
+  → `AgentSessionRunner.liveStates()`). 서버는 매 하트비트(30초)마다 그 목록으로 메모리를 맞춘다 — 보고된 세션은 그 상태로,
+  보고에 없는 진행 중 세션은 idle 로(`reason:'heartbeat'`). 매니저 업데이트·재부팅·연결 단절·프로세스 사망 어느 경우든 30초
+  안에 화면이 실제와 같아진다. 비어 있어도 `[]` 를 보내는 이유가 이것이다(구버전 매니저는 필드가 없어 아무것도 바꾸지 않는다).
+- 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
+  턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
+- 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
 - 매니저는 프로세스가 죽으면 턴 중이었어도 무조건 `status: idle` 을 보내고, 미결 permission 은
   `permission_decision{outcome:'cancelled', decided_by:'system'}` 로 닫는다(close 도 같다). `stopAll` 은 이미 죽은
   세션의 마지막 전송을 최대 3s 기다린다.
@@ -155,7 +162,8 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
 ## 테스트
 
 - 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달 /
-  유령 상태 되돌림 / config option·elicitation op 과 awaiting_input.
+  유령 상태 되돌림(list·history·인스턴스 제거·하트비트) / config option·elicitation op 과 awaiting_input / 첫 이벤트의 상태 추정.
+- agent-manager: `agent-session-heartbeat.test.mjs` — 하트비트 `agent_sessions` 필드와 `liveStates()`.
 - agent-manager: `apps/agent-manager/test/agent-session-store.test.mjs`(합성 Claude·Codex 파일 파싱),
   `agent-session-runner.test.mjs`(fake ACP 로 list·history·open·prompt·permission·resume, credential 별 세션 cli-home 적용,
   미결 permission/질문 재전송·취소, config option·slash command·plan·elicitation 왕복).

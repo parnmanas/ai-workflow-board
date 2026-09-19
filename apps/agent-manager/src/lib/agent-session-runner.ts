@@ -415,6 +415,13 @@ export class AgentSessionRunner {
     return this._snapshot().filter((s) => s.busy).length;
   }
 
+  /** 하트비트용 — 살아 있는 세션 전체와 서버 contract 의 status. 닫히는 중/죽은 것은 뺀다. */
+  liveStates(): Array<{ cli: string; session_id: string; status: string }> {
+    return Array.from(this.#live.values())
+      .filter((live) => !live.exited && !live.closing)
+      .map((live) => ({ cli: live.cli, session_id: live.sessionId, status: this.#statusOf(live) }));
+  }
+
   #ref(cli: string, sessionId: string): AgentSessionRef {
     return { manager_id: this.#options.getManagerId(), cli, session_id: sessionId };
   }

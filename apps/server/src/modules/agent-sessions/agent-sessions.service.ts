@@ -186,6 +186,18 @@ function normalizeConfigOptions(input: unknown): AgentSessionConfigOption[] {
   return out;
 }
 
+/** 턴이 진행 중일 때만 나오는 이벤트 타입 — 서버가 세션을 처음 보는 배치에서 상태를 추정하는 근거. */
+const TURN_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set(['text', 'reasoning', 'tool_call', 'tool_update', 'permission_request', 'elicitation_request', 'plan', 'usage']);
+
+function inferStatusFromBatch(events: AgentSessionEventRecord[], patch?: ManagerStatePatch | null): string {
+  if (patch && typeof patch.status === 'string' && STATUS_SET.has(patch.status)) return patch.status;
+  const turn = events.filter((e) => e.type === 'turn').at(-1);
+  if (turn) return turn.payload?.phase === 'finished' ? 'ready' : 'busy';
+  if (events.some((e) => e.type === 'permission_request')) return 'awaiting_permission';
+  if (events.some((e) => e.type === 'elicitation_request')) return 'awaiting_input';
+  return events.some((e) => TURN_ONLY_EVENT_TYPES.has(e.type)) ? 'busy' : 'idle';
+}
+
 function normalizeCommands(input: unknown): AgentSessionCommand[] {
   if (!Array.isArray(input)) return [];
   const out: AgentSessionCommand[] = [];
@@ -223,12 +235,16 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 이 24시간(LIVE_TTL) 동안 남고 prompt 는 409 로 막힌다. 여기서 idle 로 되돌린다.
    */
   private readonly onInstanceUpdate = (event: any) => {
-    if (event?.action !== 'removed') return;
-    const instance = event.instance;
+    const instance = event?.instance;
     if (!instance || instance.mode !== 'manager' || typeof instance.agent_id !== 'string') return;
-    // 같은 identity 의 다른 프로세스(재시작 직후 supersede 는 이 시점에 아직 등록 전이다)
-    if (this.managerRecords().some((r) => r.agent_id === instance.agent_id)) return;
-    this.markHostOffline(instance.agent_id);
+    if (event.action === 'removed') {
+      // 같은 identity 의 다른 프로세스(재시작 직후 supersede 는 이 시점에 아직 등록 전이다)
+      if (this.managerRecords().some((r) => r.agent_id === instance.agent_id)) return;
+      this.markHostOffline(instance.agent_id);
+      return;
+    }
+    // registered / updated — 하트비트가 살아 있는 세션 전체 목록을 실어 오면 그것이 진실이다.
+    if (Array.isArray(instance.agent_sessions)) this.reconcileWithHeartbeat(instance.agent_id, instance.agent_sessions);
   };
 
   constructor(
@@ -778,14 +794,16 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (itemsInput.length > AGENT_SESSION_EVENT_BATCH_MAX) throw new AgentSessionError(413, 'events_batch_too_large');
     this.assertSessionId(sessionId);
     const key = liveKey(managerId, cli, sessionId);
-    let state = this.live.get(key);
-    if (!state) {
-      // 매니저가 먼저 말을 거는 경우(서버 재시작 뒤 진행 중이던 세션) — driver 없이 상태만 둔다.
-      state = this.createState(managerId, managerId.slice(0, 8), cli, sessionId, { cwd: '', title: '', status: 'busy', driver_user_id: null });
-    }
     const events = itemsInput
       .map((raw: any, i: number) => this.normalizeEvent(raw, i, true))
       .filter((e): e is AgentSessionEventRecord => !!e);
+    let state = this.live.get(key);
+    if (!state) {
+      // 매니저가 먼저 말을 거는 경우(서버 재시작 뒤) — driver 없이 상태만 둔다. 상태는 배치에서 읽는다:
+      // 패치가 있으면 그것, 턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, 아니면 idle.
+      // 예전엔 무조건 busy 로 심어서 설정 변경 system 행 하나에도 "Working" 유령이 남았다.
+      state = this.createState(managerId, managerId.slice(0, 8), cli, sessionId, { cwd: '', title: '', status: inferStatusFromBatch(events, patch), driver_user_id: null });
+    }
     if (state.driver_user_id) {
       for (const event of events) {
         activityEvents.emit('agent_session_event', {
@@ -840,6 +858,28 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.status = 'idle';
     state.updated_at = Date.now();
     this.emitUpdate(state, reason);
+  }
+
+  /**
+   * 하트비트의 `agent_sessions`(이 매니저에 살아 있는 세션 전체) 로 메모리를 맞춘다 — 30초마다 온다.
+   * 보고된 세션은 그 상태로, 보고에 없는데 메모리가 진행 중이면 idle 로(매니저 재시작·프로세스 사망·
+   * 연결 단절로 마지막 패치를 못 받은 유령). `starting` 은 open 이 끝나기 전 하트비트가 먼저 올 수
+   * 있으므로 open 타임아웃 동안 지킨다.
+   */
+  reconcileWithHeartbeat(managerId: string, reported: Array<{ cli: string; session_id: string; status: string }>): number {
+    const byKey = new Map<string, string>();
+    for (const e of reported) {
+      if (e && typeof e.session_id === 'string' && typeof e.cli === 'string' && STATUS_SET.has(e.status)) byKey.set(liveKey(managerId, e.cli, e.session_id), e.status);
+    }
+    let changed = 0;
+    for (const [key, state] of this.live) {
+      if (state.manager_id !== managerId) continue;
+      const reportedStatus = byKey.get(key) ?? null;
+      const before = state.status;
+      this.reconcileWithManager(state, reportedStatus, 'heartbeat');
+      if (state.status !== before) changed += 1;
+    }
+    return changed;
   }
 
   /** 이 Runtime Host 의 프로세스가 모두 사라졌다 — 진행 중이던 세션을 idle 로 되돌린다. */

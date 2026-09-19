@@ -309,6 +309,13 @@ function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
     });
   }, [managerId]));
 
+  // 매니저 재시작/소멸(인스턴스 등록·제거) 뒤에는 모든 프로세스가 죽었으므로 목록을 다시 묻는다.
+  useBoardStreamEvent('agent_instance_update', useCallback((data: any) => {
+    const action = data?.action;
+    if ((action !== 'registered' && action !== 'removed') || data?.instance?.agent_id !== managerId) return;
+    void load();
+  }, [managerId, load]));
+
   const groups = useMemo(() => groupSessionsByCwd(sessionsByCli), [sessionsByCli]);
   const hostName = host?.name || managerId.slice(0, 8);
   const totalSessions = groups.reduce((n, g) => n + g.sessions.length, 0);

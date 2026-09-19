@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import { useToast } from '../contexts/ToastContext';
 import { api } from '../api';
-import type { AgentSessionHost, AgentSessionSummary, ChatRoomListItem } from '../types';
+import type { AgentSessionUpdateEvent, AgentSessionHost, AgentSessionSummary, ChatRoomListItem } from '../types';
 import { tokens } from '../tokens';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
 import { NavBadge } from './common/NavBadge';
@@ -26,6 +26,7 @@ import { useWorkNavLists } from '../hooks/useWorkNavLists';
 import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
 import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
+import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
 // ─── 사이드바 폴드 상태 쿠키 저장 ───────────────────────────────────────────
 
@@ -316,6 +317,36 @@ export default function Sidebar({
     }));
     setHostSessions((prev) => ({ ...prev, [managerId]: { groups: groupSessionsByCwd(byCliMap), loading: false, loaded: true } }));
   }, []);
+
+  // 라이브 상태 갱신 — 세션 페이지가 받는 것과 같은 driver 전용 SSE. 목록을 다시 묻지 않고 행만 고친다.
+  useBoardStreamEvent('agent_session_update', React.useCallback((data: AgentSessionUpdateEvent) => {
+    const live = data?.session;
+    if (!live) return;
+    setHostSessions((prev) => {
+      const entry = prev[live.manager_id];
+      if (!entry) return prev;
+      let touched = false;
+      const groups = entry.groups.map((g) => ({
+        ...g,
+        sessions: g.sessions.map((row) => {
+          if (row.cli !== live.cli || row.session_id !== live.session_id) return row;
+          touched = true;
+          return { ...row, live_status: live.status, title: live.title || row.title };
+        }),
+      }));
+      return touched ? { ...prev, [live.manager_id]: { ...entry, groups } } : prev;
+    });
+  }, []));
+  // 매니저가 재시작하거나 사라지면(인스턴스 등록/제거) 그 장비의 목록을 다시 묻는다 — 프로세스가 전부
+  // 죽었으므로 예전 dot 은 전부 틀린 값이다. 30초 하트비트 갱신(action 'updated')은 무시한다.
+  useBoardStreamEvent('agent_instance_update', React.useCallback((data: any) => {
+    const action = data?.action;
+    const managerId = data?.instance?.agent_id;
+    if ((action !== 'registered' && action !== 'removed') || typeof managerId !== 'string') return;
+    if (!loadAttemptedRef.current.has(managerId)) return;
+    const host = sessionHosts.find((h) => h.manager_id === managerId);
+    if (host) void loadHostSessions(host);
+  }, [sessionHosts, loadHostSessions]));
 
   // 세션 섹션이 열려 있고 호스트가 확장된 상태면 자동 로드 (첫 시도만)
   React.useEffect(() => {

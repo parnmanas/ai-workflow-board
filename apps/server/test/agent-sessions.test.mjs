@@ -639,5 +639,40 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.ok((await heartbeat('inst-interactive-2')).status < 300);
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'host_offline', 4000);
 
+  // 5. 하트비트의 agent_sessions 가 진실이다 — 매 하트비트(30초)마다 서버 메모리를 맞춘다
+  const heartbeatWith = (agentSessions) => call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-interactive-2', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4242, started_at: new Date().toISOString(),
+      ...(agentSessions !== undefined ? { agent_sessions: agentSessions } : {}),
+    }),
+  });
+  assert.equal((await relay({ state: { status: 'busy', reason: 'turn_started' } })).live.status, 'busy');
+  assert.ok((await heartbeatWith(undefined)).status < 300);
+  const stillBusy = await call(`${sessionsUrl}/${sid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'agent' }) });
+  assert.equal(stillBusy.status, 409, 'an old manager that does not report agent_sessions changes nothing');
+  assert.ok((await heartbeatWith([])).status < 300, 'heartbeat: no live sessions');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'heartbeat', 4000);
+  assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'awaiting_permission' }])).status < 300, 'heartbeat: waiting for approval');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'awaiting_permission' && d.reason === 'heartbeat', 4000);
+  const blockedByHeartbeat = await call(`${sessionsUrl}/${sid}/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'x' }) });
+  assert.equal(blockedByHeartbeat.status, 409, 'a heartbeat-reported waiting state blocks prompting');
+  assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'ready' }])).status < 300);
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'ready' && d.reason === 'heartbeat', 4000);
+
+  // 6. 서버가 처음 보는 세션에 매니저가 먼저 말을 걸면 상태는 배치에서 읽는다 — system 행 하나로 busy 유령을 만들지 않는다
+  const { AgentSessionsService } = await import(new URL('../dist/modules/agent-sessions/agent-sessions.service.js', import.meta.url));
+  const svc = app.get(AgentSessionsService);
+  const seed = (sessionId, events, state) => call(`${base}/api/agent/sessions/${managerId}/codex/${sessionId}/events`, {
+    method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events, ...(state ? { state } : {}) }),
+  });
+  assert.equal((await seed('seed-system', [{ id: 'seed-system:1', seq: 1, turn_id: '', type: 'system', payload: { text: 'Model set to Smart.' }, created_at: new Date().toISOString() }], { config_options: [], reason: 'config_option' })).status, 200);
+  assert.equal((await seed('seed-text', [{ id: 'seed-text:1', seq: 1, turn_id: 't9', type: 'text', payload: { text: 'working…' }, created_at: new Date().toISOString() }])).status, 200);
+  assert.equal((await seed('seed-done', [{ id: 'seed-done:1', seq: 1, turn_id: 't9', type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, created_at: new Date().toISOString() }])).status, 200);
+  assert.equal(svc['live'].get(`${managerId}/codex/seed-system`).status, 'idle', 'a lone system row (settings change) does not seed a busy ghost');
+  assert.equal(svc['live'].get(`${managerId}/codex/seed-text`).status, 'busy', 'turn-only rows (text) seed busy');
+  assert.equal(svc['live'].get(`${managerId}/codex/seed-done`).status, 'ready', 'a finished turn seeds ready');
+
   stream.close();
 });
