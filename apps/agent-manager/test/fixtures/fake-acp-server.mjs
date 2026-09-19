@@ -7,15 +7,17 @@ let pendingPrompt = null;
 let lastNewSessionParams = null;
 // Agent Session 테스트용 — ACP session config options / slash commands / plan / elicitation.
 // 다른 테스트(hermes 등)는 이 필드를 무시한다(추가 필드일 뿐).
+// 실제 어댑터(codex-acp 1.12 / claude-agent-acp 0.79)는 SDK 1.x 스키마의 `id` 키로 보낸다 — `configId` 가 아니다.
 const configOptions = [
   {
-    configId: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fake-fast',
+    id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fake-fast',
     options: [
       { value: 'fake-fast', name: 'Fake Fast', description: 'cheap' },
       { value: 'fake-smart', name: 'Fake Smart', description: 'better' },
     ],
   },
-  { configId: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', currentValue: false },
+  { id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', currentValue: false },
+  { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'agent', options: [{ value: 'read-only', name: 'Ask for approval' }, { value: 'agent', name: 'Approve for me' }] },
 ];
 let pendingElicitPrompt = null;
 // initialize 에서 client 가 광고한 capabilities — 실제 어댑터처럼 slash command 알림은
@@ -210,8 +212,18 @@ rl.on('line', (line) => {
       result(message.id, { configOptions });
       break;
     }
+    case 'session/set_mode': {
+      // 실제 어댑터처럼 빈 결과 + current_mode_update 알림
+      result(message.id, {});
+      send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: message.params?.sessionId, update: { sessionUpdate: 'current_mode_update', currentModeId: message.params?.modeId } },
+      });
+      break;
+    }
     case 'session/set_config_option': {
-      const option = configOptions.find((o) => o.configId === message.params?.configId);
+      const option = configOptions.find((o) => o.id === message.params?.configId);
       if (!option) {
         send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: `Unknown config option ${message.params?.configId}` } });
         break;

@@ -19,6 +19,7 @@ import {
   AGENT_SESSION_EVENT_TYPES,
   AGENT_SESSION_PROMPT_MAX_CHARS,
   AGENT_SESSION_STATUSES,
+  AGENT_SESSION_WAITING_STATUSES,
   agentSessionAcceptsPrompt,
   type AgentSessionCommand,
   type AgentSessionConfigOption,
@@ -693,20 +694,22 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   /** ACP session config option(모델·reasoning 등)을 바꾼다 — 매니저가 `session/set_config_option` 을 부르고 전체 목록을 다시 보낸다. */
   async setConfigOption(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string, configIdInput: unknown, valueInput: unknown): Promise<AgentSessionLiveSnapshot> {
-    this.requireHost(workspaceId, managerId, cli);
+    const rec = this.requireHost(workspaceId, managerId, cli);
     this.assertSessionId(sessionId);
     const configId = typeof configIdInput === 'string' ? configIdInput.trim() : '';
     if (!configId || configId.length > CONFIG_ID_MAX) throw new AgentSessionError(400, 'config_id_required');
     if (typeof valueInput !== 'string' && typeof valueInput !== 'boolean') throw new AgentSessionError(400, 'config_value_invalid', 'value must be a string (select) or boolean');
     if (typeof valueInput === 'string' && valueInput.length > 256) throw new AgentSessionError(400, 'config_value_invalid');
-    const state = this.live.get(liveKey(managerId, cli, sessionId));
-    if (!state) throw new AgentSessionError(409, 'session_not_live', 'Send a prompt first — config options apply to a live session.');
-    const option = state.config_options.find((o) => o.config_id === configId);
+    const known = this.live.get(liveKey(managerId, cli, sessionId));
+    const option = known?.config_options.find((o) => o.config_id === configId);
     if (option && option.type === 'select' && typeof valueInput === 'string' && option.options.length && !option.options.some((o) => o.value === valueInput)) {
       throw new AgentSessionError(400, 'config_value_invalid', `"${valueInput}" is not one of the offered values for ${option.name}.`);
     }
-    state.driver_user_id = userId;
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput, driver_user_id: userId });
+    const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
+    this.emitRequest({
+      manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput,
+      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli), driver_user_id: userId,
+    });
     return this.snapshot(state);
   }
 
@@ -720,14 +723,37 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   async setMode(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string, modeIdInput: unknown): Promise<AgentSessionLiveSnapshot> {
-    this.requireHost(workspaceId, managerId, cli);
+    const rec = this.requireHost(workspaceId, managerId, cli);
     this.assertSessionId(sessionId);
     const modeId = typeof modeIdInput === 'string' ? modeIdInput.trim() : '';
     if (!modeId) throw new AgentSessionError(400, 'mode_id_required');
-    const state = this.live.get(liveKey(managerId, cli, sessionId));
-    if (!state) throw new AgentSessionError(409, 'session_not_live', 'Send a prompt first — modes apply to a live session.');
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId, driver_user_id: userId });
+    // 살아 있지 않은 세션도 받는다 — 매니저가 먼저 열고(prompt 와 같은 경로) 모드를 적용한다.
+    const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
+    this.emitRequest({
+      manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId,
+      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli), driver_user_id: userId,
+    });
     return this.snapshot(state);
+  }
+
+  /**
+   * 설정 변경(set_mode / set_config_option)의 대상 상태. 진행 중(busy / 대기)이면 409, 프로세스가 없으면
+   * prompt 처럼 `starting` 으로 올려 두고 매니저가 열게 한다 — 첫 프롬프트 전에 모델·approval 모드를 고를 수 있다.
+   */
+  private async settingsTarget(rec: InstanceRecord, managerId: string, cli: string, sessionId: string, userId: string): Promise<LiveState> {
+    const state = this.live.get(liveKey(managerId, cli, sessionId))
+      ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: userId });
+    if (state.status === 'busy' || AGENT_SESSION_WAITING_STATUSES.has(state.status)) {
+      throw new AgentSessionError(409, 'session_busy', 'A turn is in progress — change settings after it finishes.');
+    }
+    state.driver_user_id = userId;
+    if (state.status === 'idle' || state.status === 'closed' || state.status === 'error') {
+      state.status = 'starting';
+      state.last_error = null;
+      state.updated_at = Date.now();
+      this.emitUpdate(state, 'settings');
+    }
+    return state;
   }
 
   async close(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {

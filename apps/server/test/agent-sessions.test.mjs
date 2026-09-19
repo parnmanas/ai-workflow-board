@@ -610,6 +610,23 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.equal(detail.body.live.config_options[0].current_value, 'gpt-smart', 'history live carries the manager-side config state');
   assert.deepEqual(detail.body.live.available_commands.map((c) => c.name), ['status']);
 
+  // 3b. 프로세스가 없는 세션의 설정 변경은 409 가 아니라 매니저가 열게 한다(starting) — 첫 프롬프트 전에 모델을 고른다
+  const idleSid = 'codex-thread-idle';
+  const idleSet = await call(`${sessionsUrl}/${idleSid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'gpt-smart' }) });
+  assert.equal(idleSet.status, 202, idleSet.text);
+  assert.equal(idleSet.body.status, 'starting', 'an idle session is opened for the settings change');
+  const idleOp = requests.filter((r) => r.op === 'set_config_option').at(-1);
+  assert.equal(idleOp.session_id, idleSid);
+  assert.equal(idleOp.config_value, 'gpt-smart');
+  const idleMode = await call(`${sessionsUrl}/${idleSid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'read-only' }) });
+  assert.equal(idleMode.status, 202, idleMode.text);
+  assert.equal(requests.filter((r) => r.op === 'set_mode').at(-1).session_id, idleSid);
+  // 턴 중(busy)에는 설정을 바꿀 수 없다 — 위 history 답이 ready 로 되돌렸으므로 매니저가 다시 busy 를 알린 상황을 만든다
+  assert.equal((await relay({ state: { status: 'busy', reason: 'turn_started' } })).live.status, 'busy');
+  const busyMode = await call(`${sessionsUrl}/${sid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'read-only' }) });
+  assert.equal(busyMode.status, 409, 'settings cannot change mid-turn');
+  assert.equal(busyMode.body.error, 'session_busy');
+
   // 4. awaiting_input 도 유령 되돌림 대상이다 — 매니저 재시작이면 idle 로
   assert.equal((await relay({ state: { status: 'awaiting_input', reason: 'elicitation' } })).live.status, 'awaiting_input');
   assert.ok((await heartbeat('inst-interactive-2')).status < 300);

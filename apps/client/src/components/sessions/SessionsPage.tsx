@@ -580,7 +580,8 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         <StatusPill status={status} />
         {/* 어댑터가 준 세션 설정(모델·reasoning·mode …) — 살아 있는 세션에서만 바꿀 수 있다 */}
         {configOptions.map((option) => {
-          const controlsDisabled = !busy && status !== 'ready';
+          // 턴 중·대기 중·여는 중에는 잠근다. idle/closed/error 면 매니저가 세션을 먼저 열고 적용한다.
+          const controlsDisabled = status === 'busy' || status === 'starting' || isWaitingStatus(status);
           if (option.type === 'boolean') {
             return (
               <label key={option.config_id} title={option.description} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: tokens.colors.textSecondary, cursor: controlsDisabled ? 'not-allowed' : 'pointer' }}>
@@ -627,7 +628,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           <select
             aria-label="Session mode"
             value={live.current_mode || ''}
-            disabled={!busy && status !== 'ready'}
+            disabled={status === 'busy' || status === 'starting' || isWaitingStatus(status)}
             onChange={(e) => void setMode(e.target.value)}
             style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12 }}
           >

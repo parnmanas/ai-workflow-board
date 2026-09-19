@@ -509,7 +509,7 @@ test('config options / slash commands / plan / elicitation flow through the runn
   const opened = server.rpc('rpc-open-x');
   assert.equal(opened.ok, true, JSON.stringify(opened));
   const sid = opened.result.session_id;
-  assert.deepEqual(opened.result.config_options.map((o) => [o.config_id, o.type, o.current_value]), [['model', 'select', 'fake-fast'], ['fast_mode', 'boolean', false]], 'session/new configOptions land in the open result');
+  assert.deepEqual(opened.result.config_options.map((o) => [o.config_id, o.type, o.current_value]), [['model', 'select', 'fake-fast'], ['fast_mode', 'boolean', false], ['mode', 'select', 'agent']], 'session/new configOptions (SDK 1.x `id` key) land in the open result');
   assert.deepEqual(opened.result.config_options[0].options.map((o) => o.value), ['fake-fast', 'fake-smart']);
   await waitFor(() => server.states(sid).some((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2), 'available_commands patch');
   const commands = server.states(sid).find((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2).available_commands;
@@ -523,6 +523,9 @@ test('config options / slash commands / plan / elicitation flow through the runn
   assert.ok(server.events(sid).some((e) => e.type === 'system' && e.payload.text === 'Model set to Fake Smart.'), 'system row names the chosen option');
   await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: true }));
   await waitFor(() => server.events(sid).some((e) => e.type === 'system' && e.payload.text === 'Fast mode set to on.'), 'boolean option row');
+  // approval 모드가 config option(category mode) 이면 legacy current_mode 도 같이 맞춘다
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'mode', config_value: 'read-only' }));
+  await waitFor(() => server.states(sid).some((s) => s.current_mode === 'read-only'), 'current_mode follows the mode config option');
 
   // history 의 live 가 설정·명령·모드를 실어 보낸다(서버 재시작 뒤에도 화면이 복원된다)
   await runner.handle(request('history', { request_id: 'rpc-history-x', session_id: sid }));
@@ -578,5 +581,20 @@ test('closing a session while a question is pending cancels it with a system dec
   assert.equal(decision.payload.action, 'cancel');
   assert.equal(decision.payload.decided_by, 'system');
   assert.equal(server.states(sid).at(-1).status, 'closed');
+  assert.equal(runner._snapshot().length, 0);
+});
+
+test('set_config_option / set_mode on a session that is not live open it first (choose the model before the first prompt)', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  assert.equal(runner._snapshot().length, 0, 'nothing live yet');
+  await runner.handle(request('set_config_option', { session_id: CLAUDE_ID, config_id: 'model', config_value: 'fake-smart' }));
+  assert.equal(runner._snapshot().length, 1, 'the existing CLI session was opened via session/load');
+  await waitFor(() => server.states(CLAUDE_ID).some((s) => s.reason === 'config_option'), 'config_option patch');
+  assert.ok(server.events(CLAUDE_ID).some((e) => /Session resumed/.test(e.payload.text)), 'opened with the cwd recorded in the CLI home');
+  assert.equal(server.states(CLAUDE_ID).filter((s) => s.reason === 'config_option').at(-1).config_options.find((o) => o.config_id === 'model').current_value, 'fake-smart');
+  await runner.handle(request('set_mode', { session_id: CLAUDE_ID, mode_id: 'plan' }));
+  await waitFor(() => server.states(CLAUDE_ID).some((s) => s.reason === 'mode' && s.current_mode === 'plan'), 'mode patch');
+  assert.equal(runner._snapshot().length, 1, 'same process reused for set_mode');
+  await runner.handle(request('close', { session_id: CLAUDE_ID }));
   assert.equal(runner._snapshot().length, 0);
 });

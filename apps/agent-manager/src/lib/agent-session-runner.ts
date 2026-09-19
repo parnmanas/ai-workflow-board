@@ -236,7 +236,8 @@ export function parseConfigOptions(raw: unknown): AgentSessionConfigOptionPatch[
   for (const entry of raw) {
     if (!entry || typeof entry !== 'object') continue;
     const o = entry as Record<string, unknown>;
-    const configId = typeof o.configId === 'string' ? o.configId : typeof o.config_id === 'string' ? o.config_id : '';
+    // 실제 어댑터(codex-acp 1.12, claude-agent-acp 0.79)는 SDK 1.x 스키마의 `id` 로 보낸다. v2 초안은 `configId`.
+    const configId = typeof o.configId === 'string' ? o.configId : typeof o.id === 'string' ? o.id : typeof o.config_id === 'string' ? o.config_id : '';
     if (!configId) continue;
     const type = typeof o.type === 'string' ? o.type : (typeof o.currentValue === 'boolean' ? 'boolean' : 'select');
     const options: AgentSessionConfigOptionPatch['options'] = [];
@@ -448,8 +449,9 @@ export class AgentSessionRunner {
           this.#resolveElicitation(cli, sessionId, request.elicitation_id || '', request.elicitation_action || 'cancel', request.elicitation_content ?? null);
           return;
         case 'set_config_option': {
-          const live = this.#live.get(this.#key(cli, sessionId));
-          if (!live || !request.config_id || request.config_value === undefined) return;
+          if (!sessionId || !request.config_id || request.config_value === undefined) return;
+          // 살아 있지 않으면 먼저 연다 — 목록에서 들어온 기존 세션도 프롬프트 전에 모델을 바꿀 수 있다.
+          const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
           await this.#setConfigOption(live, request.config_id, request.config_value);
           return;
         }
@@ -459,12 +461,14 @@ export class AgentSessionRunner {
           return;
         }
         case 'set_mode': {
-          const live = this.#live.get(this.#key(cli, sessionId));
           const modeId = request.mode_id || '';
-          if (!live || !modeId) return;
+          if (!sessionId || !modeId) return;
+          // 살아 있지 않으면 먼저 연다(prompt 와 같다) — 첫 프롬프트 전에 approval 모드를 고를 수 있어야 한다.
+          const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
           await live.client.request('session/set_mode', { sessionId: live.sessionId, modeId }, { timeoutMs: this.#options.requestTimeoutMs });
           live.currentMode = modeId;
-          this.#enqueue(live, [{ type: 'system', payload: { text: `Mode set to ${modeId}.` } }], { current_mode: modeId, reason: 'mode' });
+          const modeName = live.availableModes.find((m) => m.id === modeId)?.name || modeId;
+          this.#enqueue(live, [{ type: 'system', payload: { text: `Mode set to ${modeName}.` } }], { current_mode: modeId, reason: 'mode' });
           return;
         }
         case 'close':
@@ -783,11 +787,17 @@ export class AgentSessionRunner {
       before.current_value = value;
     }
     const after = live.configOptions.find((o) => o.config_id === configId);
+    // codex-acp 는 approval 모드를 config option(category 'mode') 으로도 노출한다 — legacy current_mode 와 맞춘다.
+    if (after?.category === 'mode' && typeof after.current_value === 'string') live.currentMode = after.current_value;
     const label = after?.name || before?.name || configId;
     const chosen = typeof value === 'boolean'
       ? (value ? 'on' : 'off')
       : (after?.options.find((o) => o.value === value)?.name || String(value));
-    this.#enqueue(live, [{ type: 'system', payload: { text: `${label} set to ${chosen}.` } }], { config_options: live.configOptions, reason: 'config_option' });
+    this.#enqueue(live, [{ type: 'system', payload: { text: `${label} set to ${chosen}.` } }], {
+      config_options: live.configOptions,
+      ...(after?.category === 'mode' ? { current_mode: live.currentMode } : {}),
+      reason: 'config_option',
+    });
   }
 
   /**
