@@ -153,7 +153,7 @@ export default function MissionConversationPanel({
   const [participantCount, setParticipantCount] = useState(0);
   /** 커서로 추가로 가져온 과거 실행 이벤트(오래된 것부터). */
   const [olderEvents, setOlderEvents] = useState<OrchestrationTimelineEvent[]>([]);
-  const [eventCursor, setEventCursor] = useState<{ at: string; seq: number } | null>(null);
+  const [eventCursor, setEventCursor] = useState<{ at: string; seq: number; id: string } | null>(null);
   const [hasMoreEvents, setHasMoreEvents] = useState(false);
   const loadingEventsRef = useRef(false);
   /**
@@ -308,7 +308,9 @@ export default function MissionConversationPanel({
       return;
     }
     const oldest = events[0];
-    setEventCursor({ at: oldest.created_at, seq: oldest.write_seq ?? 0 });
+    // id 까지 실어야 한다 — write_seq 가 동률인 군집(fail-open 의 0 두 행, 백필 전 레거시
+    // 구간)에서는 id 만이 페이지 경계를 가를 수 있다(티켓 7b679009).
+    setEventCursor({ at: oldest.created_at, seq: oldest.write_seq ?? 0, id: oldest.id });
     // detail 의 창이 가득 찼다면 그 뒤로 더 있을 수 있다고 본다.
     setHasMoreEvents(events.length >= EVENT_PAGE_SIZE);
   }, [events]);
@@ -322,6 +324,7 @@ export default function MissionConversationPanel({
         limit: EVENT_PAGE_SIZE,
         before_at: eventCursor.at,
         before_seq: eventCursor.seq,
+        before_id: eventCursor.id,
       });
       // 미션이 바뀐 뒤 도착한 페이지를 붙이면 남의 미션 이력이 섞인다.
       if (activeMissionKeyRef.current !== issuedFor) return;
