@@ -18,6 +18,10 @@
 //
 // 매니페스트 이름은 npm 스크립트 이름에서 `:` 를 `-` 로 바꾼 것이다
 // (`test:qa:pg` → `test-qa-pg.txt`). 다른 매핑 규칙은 없다.
+//
+// 새 매니페스트를 만들 때: 이 디렉터리에 파일을 두는 것만으로는 등록이 아니다.
+// 어떤 진입점에서도 `--suite` 로 도달하지 않는 목록은 영영 돌지 않으므로,
+// test/helpers/registration-audit.mjs 의 도달 가능성 검사가 이를 결함으로 잡는다.
 
 import fs from 'node:fs';
 import path from 'node:path';
