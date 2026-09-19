@@ -153,6 +153,17 @@ jobs:
   dependency-audit:
     name: dependency audit
     runs-on: ubuntu-latest
+    # 워크플로 기본값(contents: read)에 `actions: read` 하나만 더한다.
+    # 배포 브랜치가 삭제되면 감사할 브랜치가 없지만 **배포된 트리는 계속 돌고 있다** —
+    # 그 트리는 커밋 sha 로만 식별되고, sha 는 deploy 워크플로의 **실행 이력**에 있다.
+    # 그 이력을 읽는 데 actions:read 가 필요하다(없으면 403 → 폴백이 조용히 null).
+    # 잡 단위 `permissions:` 는 워크플로 선언을 대체하므로 contents: read 를 다시 적는다.
+    # 이 잡은 `npm ci` 를 하지 않아 서드파티 install script 가 돌지 않으므로 —
+    # 다른 잡들과 달리 — 이 토큰과 신뢰할 수 없는 코드가 같은 프로세스 트리에 있지 않다.
+    # 쓰기 스코프는 여전히 전부 none.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -237,6 +248,11 @@ jobs:
       # push/PR 에서는 그 브랜치 자신의 dependency-audit 이 이미 돌므로 불필요.
       - name: 배포 브랜치 lockfile 재감사 (schedule 전용)
         if: ${{ !cancelled() && github.event_name == 'schedule' }}
+        env:
+          # 브랜치가 삭제됐을 때 마지막 배포 sha 를 deploy 워크플로 이력에서 찾기 위해서만
+          # 쓴다(위 permissions 주석 참조). 토큰이 없으면 폴백은 null 로 떨어지고,
+          # 판정은 그대로 FAIL 이라 게이트가 약해지지는 않는다.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/audit-deploy-branch-deps.mjs
       # schedule 전용 — 레지스트리를 실제로 때려 "지금 `npm i -g awb-agent-manager`
       # 가 깔 트리"(live)와 "다음 publish 가 넘길 트리"(next)를 해석해 audit 한다.
