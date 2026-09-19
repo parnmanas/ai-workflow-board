@@ -130,6 +130,26 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
 - 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
   턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
 - 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
+
+### 어댑터의 MCP 연결 알림 (`mcp_startup.<server>`)
+
+codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지 않는 한 번짜리 `tool_call`** 로 알린다
+(`toolCallId: 'mcp_startup.awb'`, `title: 'mcp__awb__startup'`, status 가 곧 결과). 게다가 이 알림은
+`session/new` **응답보다 먼저** 온다. 그래서 두 가지가 겹쳐 있었다:
+
+- 상태를 버리고 중계하면 update 가 영원히 오지 않으므로 카드가 계속 "running" 으로 남는다. 이건 에이전트가 한
+  일이 아니라 세션이 열리는 과정이므로 **카드로 만들지 않는다** — 성공은 조용히 버리고, 실패만 "이 서버의 툴을
+  못 쓴다" 는 사실이라 `system` 행으로 남긴다.
+- 세션 id 를 알기 전의 행은 보낼 곳이 없다. 예전엔 seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났고,
+  UI 의 유실 감지(`hasSeqGap`)가 계속 재조회를 돌게 했다. 지금은 `preSessionEvents` 에 모아 뒀다가 세션이 열리는
+  즉시 순서대로 내보낸다.
+
+그 실패의 실제 원인이었던 것: AWB 의 MCP 게이트가 `X-AWB-Client-Type: agent-session` 을 면제 목록에 넣지 않아
+세션마다 handshake 가 `schemaVersion mismatch` 로 실패했다. CLI 네이티브 MCP 클라이언트는 AWB 확장 capability 를
+모르므로 subagent / managed-subagent / runtime-child 와 같은 면제다(`mcp-schema-version.test.mjs` 가 네 종류를 모두 고정).
+
+일반 tool_call 도 초기 status 를 그대로 싣는다(`tool_call.payload.status`) — 기록(codex rollout)의 호출 행에도
+자기 status 가 있으므로, 결과 행이 없는 호출(중단된 턴 등)이 "running" 으로 굳지 않는다.
 - 매니저는 프로세스가 죽으면 턴 중이었어도 무조건 `status: idle` 을 보내고, 미결 permission 은
   `permission_decision{outcome:'cancelled', decided_by:'system'}` 로 닫는다(close 도 같다). `stopAll` 은 이미 죽은
   세션의 마지막 전송을 최대 3s 기다린다.

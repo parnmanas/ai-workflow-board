@@ -175,6 +175,8 @@ interface LiveSession {
   loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
   pendingElicitations: Map<string, PendingElicitation>;
+  /** 세션 id 를 알기 전(session/new 응답 전)에 어댑터가 보낸 행 — 열리는 즉시 순서대로 흘려보낸다. */
+  preSessionEvents: AgentSessionEventInput[];
   /** 어댑터가 준 세션 설정(모델·reasoning …)·slash command·모드 — history RPC 의 `live` 로 서버가 다시 받는다. */
   configOptions: AgentSessionConfigOptionPatch[];
   availableCommands: CommandPatch[];
@@ -306,6 +308,12 @@ export function parsePlanEntries(raw: unknown): Array<{ content: string; priorit
     }))
     .filter((e) => e.content);
   return entries;
+}
+
+/** `mcp_startup.<server>` (codex-acp 의 MCP 연결 알림) 이면 서버 이름, 아니면 null. */
+export function mcpStartupServerOf(toolCallId: string): string | null {
+  const m = /^mcp_startup\.(.+)$/.exec(String(toolCallId || ''));
+  return m ? m[1] : null;
 }
 
 export async function findOnPath(name: string): Promise<string | null> {
@@ -655,6 +663,7 @@ export class AgentSessionRunner {
         loading: false,
         pendingPermissions: new Map(),
         pendingElicitations: new Map(),
+        preSessionEvents: [],
         configOptions: [],
         availableCommands: [],
         currentMode: null,
@@ -685,6 +694,14 @@ export class AgentSessionRunner {
           modes = (loaded as any)?.modes;
           configOptions = (loaded as any)?.configOptions;
           resumed = true;
+        } catch (err: any) {
+          if (err?.code === 'auth_required') throw err;
+          // codex-acp 는 옛 rollout 형식의 thread 를 "Internal error" 로만 거부한다 — 무엇을 해야 하는지 알려 준다.
+          const detail = redactSecrets(String(err?.message ?? err));
+          throw Object.assign(
+            new Error(`${cli} could not resume this session (${detail}). Older sessions may not be resumable by the adapter — start a new session in the same folder.`),
+            { code: 'resume_failed', cause: err },
+          );
         } finally {
           live.loading = false;
         }
@@ -699,6 +716,10 @@ export class AgentSessionRunner {
       const key = this.#key(cli, live.sessionId);
       this.#live.set(key, live);
       client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
+      if (live.preSessionEvents.length) {
+        const buffered = live.preSessionEvents.splice(0);
+        this.#enqueue(live, buffered);
+      }
       const modeInfo = this.#parseModes(modes);
       live.currentMode = modeInfo.current;
       live.availableModes = modeInfo.available;
@@ -990,11 +1011,29 @@ export class AgentSessionRunner {
         return;
       case 'tool_started':
       case 'child_started': {
+        const startupServer = event.type === 'tool_started' ? mcpStartupServerOf(event.toolCallId) : null;
+        if (startupServer !== null) {
+          // codex-acp 는 MCP 서버 연결을 `mcp_startup.<server>` 라는 한 번짜리 tool_call 로 알린다
+          // (update 가 따라오지 않는다). 에이전트가 한 일이 아니라 세션이 열리는 과정이므로 카드로
+          // 띄우지 않는다 — 성공은 조용히 버리고, 실패만 "툴을 못 쓴다" 는 사실이라 system 으로 남긴다.
+          if (event.type === 'tool_started' && event.status === 'failed') {
+            this.#flushBuffers(live, turnId);
+            this.#enqueue(live, [{
+              type: 'system',
+              payload: { text: `MCP server "${startupServer}" did not connect — its tools are unavailable in this session.` },
+              turn_id: turnId,
+            }]);
+          }
+          return;
+        }
         this.#flushBuffers(live, turnId);
         const id = event.type === 'tool_started' ? event.toolCallId : event.childRunId;
+        // 초기 status 를 그대로 싣는다 — codex-acp 의 `mcp_startup.<server>` 처럼 update 없이 한 번에
+        // failed/completed 로 오는 호출이 있어, 없으면 화면이 영원히 "running" 으로 남는다.
+        const status = event.type === 'tool_started' && event.status ? event.status : undefined;
         this.#enqueue(live, [{
           type: 'tool_call',
-          payload: { tool_call_id: id, title: event.title, kind: event.kind, input: boundedValue(event.input), delegated: event.type === 'child_started' || undefined },
+          payload: { tool_call_id: id, title: event.title, kind: event.kind, input: boundedValue(event.input), delegated: event.type === 'child_started' || undefined, ...(status ? { status } : {}) },
           turn_id: turnId,
         }]);
         return;
@@ -1252,6 +1291,16 @@ export class AgentSessionRunner {
 
   /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. 찍힌 행을 돌려준다. */
   #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): StampedEvent[] {
+    // 세션 id 가 정해지기 전(session/new 응답 전)에 어댑터가 보내는 알림은 보낼 곳이 없다. 예전엔
+    // seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났고, UI 의 유실 감지(hasSeqGap)가 계속
+    // 재조회를 돌게 했다. 아예 세지 않는다.
+    // 세션 id 가 정해지기 전(session/new 응답 전)에 어댑터가 보내는 행은 보낼 곳이 없다 — 예전엔
+    // seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났다(UI 의 유실 감지가 계속 재조회를 돌았다).
+    // 세지 말고 모아 뒀다가 세션이 열리면 순서대로 내보낸다(MCP 연결 실패 안내가 여기 실린다).
+    if (!live.sessionId) {
+      live.preSessionEvents.push(...events);
+      return [];
+    }
     const now = new Date().toISOString();
     const stamped: StampedEvent[] = events.map((e) => {
       live.seq += 1;

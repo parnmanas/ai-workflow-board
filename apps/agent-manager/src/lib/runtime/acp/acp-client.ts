@@ -156,6 +156,7 @@ function normalizeUpdate(
       title,
       kind: toolKind,
       input: field(update, 'rawInput', 'raw_input'),
+      ...(stringValue(update.status) ? { status: stringValue(update.status) } : {}),
     };
   }
   if (kind === 'tool_call_update') {

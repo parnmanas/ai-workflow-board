@@ -185,6 +185,13 @@ rl.on('line', (line) => {
         );
       }
       const sessionId = `session-${nextSession++}`;
+      // codex-acp 는 session/new **응답 전에** MCP 서버 연결을 update 없는 한 번짜리 tool_call 로 알린다
+      // (status 가 곧 결과다). 이 시점에는 클라이언트가 아직 세션 id 를 모른다 — 실제 순서를 그대로 재현한다.
+      if (clientCapabilities?.session?.configOptions) send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'mcp_startup.awb', title: 'mcp__awb__startup', kind: 'other', status: process.env.FAKE_ACP_MCP_STARTUP_STATUS || 'completed' } },
+      });
       result(message.id, { sessionId, configOptions });
       // 어댑터들은 session/new 직후 slash command 목록을 알린다 — 세션 설정을 이해하는 client 에게만
       if (clientCapabilities?.session?.configOptions) send({

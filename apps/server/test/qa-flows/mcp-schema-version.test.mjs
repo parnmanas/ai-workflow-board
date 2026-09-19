@@ -51,5 +51,39 @@ test('MCP initialize without experimental.awb/schemaVersion is rejected with cod
   assert.ok(payload.error, 'Top-level error on initialize without schemaVersion');
   assert.match(payload.error.message || '', /schemaVersion/i);
 
+  // CLI 네이티브 MCP 클라이언트는 AWB 확장 capability 를 모른다 — X-AWB-Client-Type 으로 면제된다.
+  // 'agent-session'(Agent Session 에 주입하는 AWB MCP 서버)이 빠져 있던 동안 codex 세션마다
+  // `mcp__awb__startup` 이 failed 로 떴다. 한 번 빠지면 조용히 다시 빠질 수 있으므로 전부 고정한다.
+  const initialize = (clientType) => fetch(`http://localhost:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${key.raw_key}`,
+      ...(clientType ? { 'X-AWB-Client-Type': clientType } : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'initialize',
+      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'cli-native', version: '0.0.0' } },
+    }),
+  }).then((r) => r.json());
+
+  for (const clientType of ['agent-session', 'subagent', 'managed-subagent', 'runtime-child']) {
+    step(`POST /mcp initialize as X-AWB-Client-Type: ${clientType} (no schemaVersion capability)`);
+    const body = await initialize(clientType);
+    assert.equal(
+      body.error?.message?.includes('schemaVersion'),
+      undefined,
+      `${clientType} must be exempt from the schemaVersion gate — it is a CLI-native MCP client: ${JSON.stringify(body.error ?? {})}`,
+    );
+    assert.ok(body.result, `${clientType} initialize succeeds: ${JSON.stringify(body).slice(0, 200)}`);
+  }
+
+  step('POST /mcp initialize with an unknown client type is still gated');
+  const unknown = await initialize('some-other-client');
+  assert.match(unknown.error?.message || '', /schemaVersion/i);
+
   exitAfterTests(0);
 });

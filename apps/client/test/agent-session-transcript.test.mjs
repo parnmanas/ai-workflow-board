@@ -283,3 +283,14 @@ test('entering a session page auto-connects only idle sessions; closed/error kee
   assert.deepEqual(['idle', 'closed', 'error'].map(canConnect), [true, true, true]);
   assert.deepEqual(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input'].map(canConnect), [false, false, false, false, false]);
 });
+
+test('a tool_call that arrives already completed/failed (codex mcp startup) is never shown as running', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('tool_call', { tool_call_id: 'mcp_startup.awb', title: 'mcp__awb__startup', kind: 'other', status: 'failed' }),
+    ev('tool_call', { tool_call_id: 'c1', title: 'Read', kind: 'read' }),
+  ]);
+  assert.equal(blocks[0].kind, 'tool');
+  assert.equal(blocks[0].status, 'failed', 'initial status is honoured');
+  assert.equal(blocks[1].status, 'in_progress', 'calls without a status still start as running');
+});

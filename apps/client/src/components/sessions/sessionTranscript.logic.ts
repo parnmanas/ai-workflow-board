@@ -204,7 +204,8 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           title: str(p.title) || toolCallId || 'tool',
           toolKind: str(p.kind),
           input: p.input,
-          status: 'in_progress',
+          // codex-acp 의 `mcp_startup.<server>` 처럼 update 없이 처음부터 completed/failed 인 호출이 있다
+          status: str(p.status) || 'in_progress',
           output: undefined,
           delegated: p.delegated === true,
         });

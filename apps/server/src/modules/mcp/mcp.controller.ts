@@ -314,6 +314,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       //                          sessions for managed agents (also Claude CLI
       //                          native MCP).
       //   - 'runtime-child'    : protocol runtimes such as Hermes ACP.
+      //   - 'agent-session'    : Agent Session(CLI 직접 세션) — 매니저가 codex-acp /
+      //                          claude-agent-acp 세션에 주입하는 AWB MCP 서버. CLI 의
+      //                          네이티브 MCP 클라이언트라 AWB 확장 capability 를 모른다.
+      //                          (빠져 있던 동안 세션마다 `mcp__awb__startup` 이 failed 로 떴다.)
       if (req.method === 'POST' && req.body?.method === 'initialize') {
         const clientName = req.body?.params?.clientInfo?.name;
         const clientTypeHeader = String(req.headers['x-awb-client-type'] || '').toLowerCase();
@@ -326,7 +330,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         const isRuntimeChild =
           clientTypeHeader === 'subagent'
           || clientTypeHeader === 'managed-subagent'
-          || clientTypeHeader === 'runtime-child';
+          || clientTypeHeader === 'runtime-child'
+          || clientTypeHeader === 'agent-session';
         if (schemaVer !== 2 && !isInternalClient && !isRuntimeChild) {
           return res.status(200).json({
             jsonrpc: '2.0',

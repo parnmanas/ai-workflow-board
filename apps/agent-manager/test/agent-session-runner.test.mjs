@@ -81,7 +81,7 @@ async function pidsHoldingCwd(root) {
   return holders;
 }
 
-async function harness(t, runnerOptions = {}) {
+async function harness(t, runnerOptions = {}, adapterEnv = {}) {
   const root = await mkdtemp(join(tmpdir(), 'awb-agent-session-'));
   const cwd = join(root, 'work');
   await mkdir(cwd, { recursive: true });
@@ -100,6 +100,8 @@ async function harness(t, runnerOptions = {}) {
       getManagerId: () => MANAGER,
       store,
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
+      // 어댑터 프로세스의 env — 픽스처가 MCP handshake 결과 같은 시나리오를 바꾸는 스위치로 읽는다.
+      ...(Object.keys(adapterEnv).length ? { baseEnv: { ...process.env, ...adapterEnv } } : {}),
       flushIntervalMs: 10,
       idleMinutes: 0,
       permissionTimeoutMs: 5000,
@@ -512,6 +514,7 @@ test('config options / slash commands / plan / elicitation flow through the runn
   assert.deepEqual(opened.result.config_options.map((o) => [o.config_id, o.type, o.current_value]), [['model', 'select', 'fake-fast'], ['fast_mode', 'boolean', false], ['mode', 'select', 'agent']], 'session/new configOptions (SDK 1.x `id` key) land in the open result');
   assert.deepEqual(opened.result.config_options[0].options.map((o) => o.value), ['fake-fast', 'fake-smart']);
   await waitFor(() => server.states(sid).some((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2), 'available_commands patch');
+  assert.equal(server.events(sid).some((e) => e.payload?.tool_call_id === 'mcp_startup.awb'), false, "the adapter's MCP handshake is not agent work — a successful one leaves no card");
   const commands = server.states(sid).find((s) => Array.isArray(s.available_commands) && s.available_commands.length === 2).available_commands;
   assert.deepEqual(commands, [{ name: 'review', description: 'Review the working tree', input_hint: 'optional focus' }, { name: 'compact', description: 'Compact the context' }]);
 
@@ -582,6 +585,29 @@ test('closing a session while a question is pending cancels it with a system dec
   assert.equal(decision.payload.decided_by, 'system');
   assert.equal(server.states(sid).at(-1).status, 'closed');
   assert.equal(runner._snapshot().length, 0);
+});
+
+// codex-acp 는 MCP 서버 연결을 `mcp_startup.<server>` 라는 update 없는 한 번짜리 tool_call 로 알리고,
+// 그것도 session/new 응답보다 먼저 보낸다. 예전엔 (1) 상태를 버리고 중계해 카드가 영원히 "running" 으로
+// 남거나, (2) 세션 id 를 모르는 시점이라 조용히 버려지면서 seq 만 올려 이후 행이 한 칸씩 어긋났다.
+test('the adapter MCP handshake never becomes a running card, and it never eats a seq number', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-mcp', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-mcp').result.session_id;
+  const events = server.events(sid);
+  assert.equal(events.some((e) => e.payload?.tool_call_id === 'mcp_startup.awb'), false, 'a successful handshake is silent');
+  assert.equal(events[0].seq, 1, 'the first relayed row still starts at seq 1 — the dropped notification consumed nothing');
+  assert.ok(events.every((e, i) => e.seq === i + 1), 'seq stays contiguous');
+});
+
+test('a FAILED MCP handshake is surfaced as a system note, not as a stuck tool card', async (t) => {
+  const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_MCP_STARTUP_STATUS: 'failed' });
+  await runner.handle(request('open', { request_id: 'rpc-open-mcp-fail', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-mcp-fail').result.session_id;
+  const note = server.events(sid).find((e) => e.type === 'system' && /MCP server/.test(e.payload.text));
+  assert.ok(note, 'the operator is told which server failed');
+  assert.match(note.payload.text, /"awb" did not connect/);
+  assert.equal(server.events(sid).some((e) => e.payload?.tool_call_id === 'mcp_startup.awb'), false, 'still no tool card');
 });
 
 test('set_config_option / set_mode on a session that is not live open it first (choose the model before the first prompt)', async (t) => {

@@ -551,6 +551,9 @@ export class AgentSessionStore {
               title: name,
               kind: codexToolKind(name),
               input,
+              // codex 는 호출 행에 자기 status 를 남긴다(completed/failed). 결과 행이 없는 호출도
+              // 있으므로(중단된 턴 등) 이걸 무시하면 기록이 영원히 "running" 으로 보인다.
+              ...(typeof payload.status === 'string' && payload.status ? { status: payload.status } : {}),
             }, ts);
             break;
           }

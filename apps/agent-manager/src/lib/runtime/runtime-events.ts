@@ -16,6 +16,9 @@ export type RuntimeEvent =
       title: string;
       kind?: string;
       input?: unknown;
+      /** ACP `tool_call` 의 초기 status(pending/in_progress/completed/failed). codex-acp 의
+       *  `mcp_startup.<server>` 처럼 update 없이 한 번에 completed/failed 로 오는 호출이 있다. */
+      status?: string;
     }
   | {
       type: 'tool_updated' | 'tool_completed';
