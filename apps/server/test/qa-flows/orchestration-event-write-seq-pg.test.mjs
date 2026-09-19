@@ -452,3 +452,104 @@ test('Postgres: 커서 페이지네이션이 같은 밀리초 burst 를 건너�
     );
   }
 });
+
+// ── 티켓 50031353: 동시 recordEvent 가 같은 write_seq 를 쓰지 않는다 ────────────
+//
+// 위 두 테스트는 **순차** 호출만 본다. 그런데 `write_seq` 는 "지금 DB 의 최댓값 + 1" 로
+// 유도되므로, 그 읽기와 뒤이은 INSERT 사이에 다른 호출이 끼어들면 둘이 같은 최댓값을
+// 읽고 **같은 seq 로 두 행**을 쓴다. 예전에는 그 구간에 잠금도 트랜잭션도 없었고
+// `(mission_id, write_seq)` 유니크 제약도 없어서 아무것도 막지 않았다.
+//
+// 동시 진입은 이론이 아니다 — `recordEvent` 는 runner / reaper(setInterval 타이머) /
+// confirm-notify / mission 네 서비스에서 불린다. 리퍼는 요청 흐름과 무관하게 독립적으로
+// 돌기 때문에 같은 미션에 대해 REST·MCP 경로와 시간상 겹칠 수 있다.
+//
+// 왜 Postgres 전용인가 — sql.js 는 단일 WASM 인스턴스·단일 커넥션이고 `db.ts` 의
+// `serializeSqljsTransactions()` 가 겹치는 트랜잭션을 FIFO 로 줄 세워 버린다. 즉 거기서는
+// 이 레이스 자체가 재현되지 않으며, 그 green 을 Postgres 의 보장으로 간주하면 안 된다
+// (보드 교훈). 진짜 커넥션 풀 위에서만 의미가 있다.
+test('Postgres: 같은 미션에 동시 recordEvent 를 태워도 write_seq 가 중복되지 않는다', { skip: SKIP }, async () => {
+  const { missions, logged, missionRepo, eventRepo } = await bootOnce();
+  const mission = await newMission(missionRepo, '동시 기록');
+
+  // 기본 pg 풀(max 10)보다 작게 잡는다 — 모든 호출이 트랜잭션을 열고 미션 row 잠금을
+  // 기다리므로, 동시 수가 풀을 넘으면 커넥션을 못 얻어 대기하는 쪽이 생겨 무엇을 재는
+  // 테스트인지 흐려진다. 8 이면 전부 동시에 잠금 경합까지 도달한다.
+  const N = 8;
+  const messages = Array.from({ length: N }, (_, i) => `동시-${i + 1}`);
+
+  await Promise.all(messages.map((m) => missions.recordEvent(mission, { type: 'note', message: m })));
+
+  assert.deepEqual(logged, [], 'recordEvent 가 조용히 실패했다 — 동시 경로에서 배선이나 잠금이 깨졌다');
+
+  const rows = await readInOrder(eventRepo, mission.id);
+  assert.equal(rows.length, N, `동시 기록 ${N} 건이 모두 저장돼야 한다 (관측 ${rows.length}건)`);
+
+  const seqs = rows.map((e) => e.write_seq);
+
+  // 핵심 단언: 미션 안에서 write_seq 가 서로 달라야 한다. 겹치면 (created_at, write_seq)
+  // 가 전순서가 아니게 되고, 페이지 경계가 그 겹친 쌍 사이에 떨어질 때 한 건이 조용히
+  // 사라진다 — write_seq 컬럼이 존재하는 이유가 바로 그 손실을 막는 것이다.
+  const dupes = seqs.filter((v, i) => seqs.indexOf(v) !== i);
+  assert.deepEqual(
+    dupes, [],
+    `동시 기록이 같은 write_seq 를 ${dupes.length}건 만들었다 (관측 ${JSON.stringify(seqs)}) — ` +
+    '채번의 읽기-쓰기 구간이 직렬화되지 않았다는 뜻이다.',
+  );
+
+  // seq 0 은 "순서 미상" 폴백이다. 폴백으로 떨어지면 중복은 안 생겨도 타이브레이커가
+  // 사라지므로, 중복 단언만으로는 잠금 경로가 실제로 동작했는지 구분되지 않는다.
+  assert.deepEqual(
+    seqs.filter((v) => !v), [],
+    `write_seq 0(순서 미상 폴백) 이 ${seqs.filter((v) => !v).length}건 나왔다 — 직렬화 경로가 통째로 ` +
+    '실패하고 폴백만 돌았다는 뜻이라, 중복이 없더라도 순서 보장은 얻지 못한 상태다.',
+  );
+
+  // 직렬화되면 각 호출은 직전 그룹의 최댓값 + 1 을 쓰므로, 겹쳤든 밀리초 경계를 넘었든
+  // 결과는 1..N 이다. 집합이 정확히 1..N 이어야 "빠짐없이 한 줄씩 증가" 가 확인된다.
+  assert.deepEqual(
+    [...seqs].sort((a, b) => a - b),
+    Array.from({ length: N }, (_, i) => i + 1),
+    `write_seq 집합이 1..${N} 이 아니다 (관측 ${JSON.stringify([...seqs].sort((a, b) => a - b))})`,
+  );
+
+  // ── 커서 순회도 그 결과 위에서 누락·중복 0 이어야 한다 ───────────────────
+  // 동시 기록이 실제로 같은 밀리초에 떨어졌는지는 러너 속도가 정하므로, 여기서만 픽스처로
+  // 고정한다(이미 매겨진 write_seq 는 건드리지 않는다 — 고정은 커서가 볼 입력만 정한다).
+  //
+  // 여덟 건을 **똑같은 시각**으로 박는다. `forceTiedTimestamps` 처럼 µs 꼬리를 어긋나게
+  // 주지 않는 이유가 있다 — 그러면 한 밀리초 안에서 created_at 순서와 write_seq 순서가
+  // 서로 달라지는데, 그건 **프로덕션이 더는 만들지 않는 상태**다. recordEvent 가 잠금
+  // 안에서 created_at 을 찍으므로 두 순서는 항상 일치하고, 같은 밀리초에 몰린 건들은
+  // 실제로 시각이 같다. 어긋난 꼬리를 인위로 박으면 production 이 배제한 입력에 대고
+  // 커서를 시험하는 셈이라, 고쳐야 할 대상이 아닌 것으로 red 가 난다.
+  //
+  // 시각이 전부 같으므로 정렬의 유일한 구분자가 write_seq 가 된다 — tie-break 절이
+  // 최대로 load-bearing 해지는 배치다. µs 꼬리는 0 이 아닌 값으로 둬서, 옛 등호 결함이
+  // 우연히 성립하는 배치가 되지 않게 한다.
+  const TIED_AT = '2026-01-02 03:04:09.111137';
+  for (const e of rows) await pinCreatedAt(ds, e.id, TIED_AT);
+  await assertFixtureIsMicrosecondTied(ds, rows.map((e) => e.id), '동시 기록 tied group');
+
+  const seen = [];
+  let cursor = null;
+  for (let page = 0; page < 20; page += 1) {
+    const res = await missions.listMissionEvents(mission.id, WS, {
+      limit: 3,
+      before_at: cursor?.at,
+      before_seq: cursor?.seq,
+    });
+    for (const e of res.events) seen.push(e.id);
+    cursor = res.next_cursor;
+    if (!res.has_more) break;
+  }
+
+  assert.equal(
+    new Set(seen).size, seen.length,
+    `커서가 같은 이벤트를 두 번 돌려줬다 (중복 ${seen.length - new Set(seen).size}건)`,
+  );
+  assert.deepEqual(
+    [...seen].sort(), rows.map((e) => e.id).sort(),
+    `커서 순회가 ${seen.length}/${N} 건만 덮었다 — 동시 기록 결과 위에서도 누락이 0 이어야 한다.`,
+  );
+});
