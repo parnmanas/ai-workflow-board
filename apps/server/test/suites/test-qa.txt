@@ -65,6 +65,7 @@ test/qa-flows/never-started-agent-dispatch.test.mjs
 test/qa-flows/on-ticket-done-hook.test.mjs
 test/qa-flows/orchestration-confirm-node.test.mjs
 test/qa-flows/orchestration-confirm-notify.test.mjs
+test/qa-flows/orchestration-events-cursor-rest.test.mjs
 test/qa-flows/orchestration-graph-execution.test.mjs
 test/qa-flows/orchestration-lifecycle.test.mjs
 test/qa-flows/orchestration-mission-conversation.test.mjs
