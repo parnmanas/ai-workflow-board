@@ -76,15 +76,21 @@ async function seedMission(title) {
  * 이벤트를 저장한 뒤 `created_at`/`write_seq` 를 레거시 형태로 원시 UPDATE 한다.
  * 저장 포맷을 프로덕션(초 단위, 소수점 없음)과 같게 맞추는 것이 핵심이다(헤더 참고).
  */
-async function seedEvent(missionId, createdAt, writeSeq, message) {
-  const saved = await eventRepo.save(eventRepo.create({
-    mission_id: missionId, workspace_id: WS, type: 'note', message,
-  }));
+async function seedEvent(missionId, createdAt, writeSeq, message, id) {
+  let rowId = id;
+  if (rowId) {
+    // 명시 id 는 `insert()` 로 넣는다 — `save()` 는 PK 가 있으면 조회 후 갱신을 시도한다.
+    await eventRepo.insert({ id: rowId, mission_id: missionId, workspace_id: WS, type: 'note', message });
+  } else {
+    rowId = (await eventRepo.save(eventRepo.create({
+      mission_id: missionId, workspace_id: WS, type: 'note', message,
+    }))).id;
+  }
   await dataSource.query(
     'UPDATE orchestration_events SET created_at = ?, write_seq = ? WHERE id = ?',
-    [createdAt, writeSeq, saved.id],
+    [createdAt, writeSeq, rowId],
   );
-  return saved.id;
+  return rowId;
 }
 
 /** `up()` 을 실제 QueryRunner 로 돌리고, 마이그레이션이 남긴 요약 로그 줄을 돌려준다. */
@@ -229,6 +235,48 @@ describe('레거시 write_seq 백필', () => {
     assert.equal(new Set(walkedAfter).size, walkedAfter.length, '커서가 같은 이벤트를 두 번 돌려주면 안 된다');
 
     assert.equal(firstRunLog.length, 1, '첫 실행은 재부여 요약을 한 줄 남겨야 한다');
+  });
+
+  it('created_at 이 동률이면 uuid 가 아니라 이미 기록된 write_seq 순서를 지킨다', async () => {
+    // 티켓 50031353 이 랜딩한 뒤의 기록 경로를 본뜬다. `nextEventOrderingKey()` 는
+    // Postgres 에서 `created_at` 을 밀리초 정밀도 JS Date 로 직접 박고 기존 최댓값으로
+    // clamp 하므로, 한 밀리초(sqljs 에서는 한 초) 안의 여러 건은 `created_at` 이 정확히
+    // 같고 `write_seq` 만 증가한다 — burst 에서는 정상 경로다.
+    //
+    // 이때 동률을 `id` 로만 가르면 uuid 가 무작위라, 잠금이 애써 직렬화해 기록한 삽입
+    // 순서를 백필이 도로 뒤섞는다. 그래서 **id 오름차순을 write_seq 오름차순의 정확한
+    // 역순**으로 깔아 두 정렬을 갈라놓고, 백필이 write_seq 쪽을 따르는지 본다.
+    const mission = await seedMission('post-fix ties');
+    const SAME_SECOND = '2026-09-19 10:00:00';
+    const RECORDED_SEQS = [3, 4, 5, 6];
+    const idAt = (n) => `bbbbbbbb-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    const idsBySeq = RECORDED_SEQS.map((_, i) => idAt(RECORDED_SEQS.length - i));
+
+    for (let i = 0; i < RECORDED_SEQS.length; i += 1) {
+      await seedEvent(mission.id, SAME_SECOND, RECORDED_SEQS[i], `tie #${i}`, idsBySeq[i]);
+    }
+
+    const byId = await dataSource.query(
+      'SELECT id FROM orchestration_events WHERE mission_id = ? ORDER BY id ASC', [mission.id],
+    );
+    assert.deepEqual(
+      byId.map((r) => r.id), [...idsBySeq].reverse(),
+      'id 오름차순은 write_seq 오름차순의 역순이어야 한다 — 그래야 두 정렬 기준이 갈린다',
+    );
+
+    await runBackfill();
+
+    const renumbered = await dataSource.query(
+      'SELECT id, write_seq FROM orchestration_events WHERE mission_id = ? ORDER BY write_seq ASC', [mission.id],
+    );
+    assert.deepEqual(
+      renumbered.map((r) => r.write_seq), [1, 2, 3, 4],
+      '동률 그룹도 1..N 으로 재부여돼야 한다',
+    );
+    assert.deepEqual(
+      renumbered.map((r) => r.id), idsBySeq,
+      '재부여 순서는 기록된 write_seq 순서를 따라야 한다 — id 로 가르면 삽입 순서가 뒤집힌다',
+    );
   });
 
   it('두 번 돌려도 결과가 같다(멱등)', async () => {

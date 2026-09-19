@@ -38,10 +38,22 @@ import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
  * 물려주는 `created_at` 은 JS `Date` 라 밀리초까지만 남고, 마이크로초만 다른 두 행은
  * JS 에서 동률이 되어 2차 키(`id`)로 갈린다 — 그 순서는 DB 의 실제 마이크로초 순서와
  * 무관하므로, 방금 말한 불변식을 고치러 온 마이그레이션이 되레 그것을 깨뜨린다.
- * `ORDER BY e.created_at ASC, e.id ASC` 를 **DB 에 맡겨** 저장 정밀도 그대로 정렬시키고,
- * 코드는 그 순서에 번호만 붙인다. sqljs 는 초 단위 문자열이라 같은 초 안에서는 `id` 가
- * 실제 타이브레이커가 되는데, 그쪽 커서도 tied group 을 초 단위로 묶으므로 동일하게
- * 정합적이다.
+ * `ORDER BY e.created_at ASC, e.write_seq ASC, e.id ASC` 를 **DB 에 맡겨** 저장 정밀도
+ * 그대로 정렬시키고, 코드는 그 순서에 번호만 붙인다. sqljs 는 초 단위 문자열이라 같은 초
+ * 안에서는 뒤의 두 키가 실제 타이브레이커가 되는데, 그쪽 커서도 tied group 을 초 단위로
+ * 묶으므로 동일하게 정합적이다.
+ *
+ * 2차 키가 `id` 가 아니라 `write_seq` 인 이유 (티켓 50031353 랜딩 이후)
+ * ───────────────────────────────────────────────────────────────────
+ *
+ * `nextEventOrderingKey()` 는 Postgres 에서 `created_at` 을 **밀리초 정밀도 JS `Date`** 로
+ * 직접 박고 기존 최댓값으로 clamp 한다. 그래서 한 밀리초 안에 여러 건이 기록되면
+ * `created_at` 이 **정확히 같고** `write_seq` 만 증가하는 행들이 나온다 — burst 에서는
+ * 예외가 아니라 정상 경로다. 이때 `id` 만으로 동률을 가르면 uuid 는 무작위라, 잠금이
+ * 애써 직렬화해 기록한 삽입 순서를 이 백필이 도로 뒤섞어 버린다. 그래서 동률에서는 먼저
+ * **이미 기록된 `write_seq`** 를 존중하고, 그것마저 같을 때만(= 레거시 구간처럼 한 미션이
+ * 단일 seq 값인 경우) `id` 로 내려간다. 레거시 구간에서는 `write_seq` 가 전부 같으므로
+ * 이 키가 아무것도 바꾸지 않는다 — 즉 기존 동작은 그대로다.
  *
  * 불변식 (1760000000075 / 1760000000084 와 동일한 태도)
  * ─────────────────────────────────────────────────────
@@ -86,6 +98,7 @@ export class BackfillOrchestrationEventWriteSeq1760000000086 implements Migratio
         .select(['e.id', 'e.write_seq'])
         .where('e.mission_id = :missionId', { missionId })
         .orderBy('e.created_at', 'ASC')
+        .addOrderBy('e.write_seq', 'ASC')
         .addOrderBy('e.id', 'ASC')
         .getMany();
 
