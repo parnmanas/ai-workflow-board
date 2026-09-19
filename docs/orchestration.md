@@ -929,8 +929,14 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
   불러도 결과가 같다.
   긴 미션에서는 실행 이벤트를 창 크기(기본 200)로 bounded 하고, 위로 스크롤하면
   `GET /orchestration/missions/:id/events` 커서로 과거를 이어 붙인다 — 커서는
-  `(created_at, write_seq)` 복합 keyset 이다. `created_at` 만으로는 fan-out 한 번에 수십 건이
-  같은 타임스탬프를 갖는 이 테이블에서 페이지 경계가 이벤트를 통째로 건너뛴다.
+  `(created_at, write_seq, id)` **3단** 복합 keyset 이다(`before_at` / `before_seq` /
+  `before_id`, 응답의 `next_cursor` 가 셋을 다 싣는다). `created_at` 만으로는 fan-out 한
+  번에 수십 건이 같은 타임스탬프를 갖는 이 테이블에서 페이지 경계가 이벤트를 통째로
+  건너뛴다. `write_seq` 까지만으로도 부족하다(ticket 7b679009) — `recordEvent` 의 fail-open
+  이 한 미션에서 두 번 나면 `write_seq: 0` 인 행이 둘이 되고, 백필 전 레거시 구간도 미션의
+  모든 행이 같은 값이다. 동률이면 tie-break 가 `seq < seq` 로 항상 거짓이라 같은 시각의
+  나머지가 사라지므로, PK 인 `id` 를 마지막 키로 둬서 원인과 무관하게 전순서를 만든다.
+  `before_id` 를 생략한 호출은 예전 2단 술어로 degrade 한다(동작은 그대로, 손실도 그대로).
   (미션 detail 응답 자체도 최신 N건만 싣는 bounded window 다 — 타임라인 섹션이 전체 이력을
   갖고 있다는 전제는 사실이 아니므로, 과거 접근 수단은 이 커서가 유일하다.)
 
