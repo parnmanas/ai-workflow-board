@@ -917,11 +917,17 @@ export class OrchestrationMissionService {
       });
     } catch (e: any) {
       // 직렬화 경로가 실패해도 타임라인 행 자체는 남긴다 — `write_seq: 0` 은 "순서 미상"
-      // 이고 커서는 created_at 으로만 비교하는 예전 동작으로 후퇴한다. 이 폴백이 필요한
+      // 이고, 그 미션 안에서 이 값이 여러 번 나올 수 있다는 뜻이다. 이 폴백이 필요한
       // 이유는 Postgres 에서 트랜잭션 안의 쿼리가 하나라도 실패하면 그 트랜잭션이 통째로
       // abort 되어 뒤따르는 INSERT 까지 못 나가기 때문이다. 그대로 두면 seq 유도 실패가
       // 기록 자체를 막아, 잠금을 도입하면서 "타임라인 한 줄 때문에 dispatch 를 죽이지
       // 않는다" 는 기존 계약을 오히려 좁히게 된다.
+      //
+      // 여기서 유일값을 다시 채번하려 들지 않는다(티켓 7b679009). 방금 DB 왕복이 실패한
+      // 경로에서 또 읽어봐야 그 읽기도 실패할 수 있어 "유일" 이 보장이 아니라 확률이 되고,
+      // 이미 쌓인 레거시 동률 행은 어차피 못 고친다. 대신 소비자인 `listMissionEvents` 가
+      // 안정 키(`id`)를 커서의 마지막 단으로 써서, 동률의 **원인과 무관하게** 전순서를
+      // 만든다 — 그래서 여기 0 이 두 번 나와도 페이지 경계에서 행이 사라지지 않는다.
       this.logService.warn(
         'Orchestration',
         `serialized event write failed for mission ${mission.id}, retrying unordered: ${e?.message || e}`,
