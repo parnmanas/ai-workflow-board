@@ -624,3 +624,25 @@ test('set_config_option / set_mode on a session that is not live open it first (
   await runner.handle(request('close', { session_id: CLAUDE_ID }));
   assert.equal(runner._snapshot().length, 0);
 });
+
+// 거대한 한 줄이 세션을 죽이던 사고: "ACP stdout line exceeds the configured byte limit" 뒤
+// 프로세스가 SIGTERM 으로 내려가 턴이 error 로 끝났다. 개행이 재동기화 지점이므로 그 줄만
+// 버리면 나머지 스트림과 턴은 그대로 살아 있어야 한다.
+test('an oversized adapter message drops that message only — the turn finishes and the session stays live', async (t) => {
+  const { cwd, server, runner } = await harness(t, { maxLineBytes: 2048 });
+  await runner.handle(request('open', { request_id: 'rpc-open-big', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-big').result.session_id;
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 't-big', text: 'OVERSIZED_TEST please' }));
+
+  const events = server.events(sid);
+  const note = events.find((e) => e.type === 'system' && /larger than this session can relay/.test(e.payload.text));
+  assert.ok(note, 'the user is told one message was dropped');
+  assert.match(note.payload.text, /still running/);
+  assert.ok(events.some((e) => e.type === 'text' && e.payload.text === 'still here'), 'the stream resynchronizes — the next message is relayed');
+  const finished = events.filter((e) => e.type === 'turn').at(-1);
+  assert.equal(finished.payload.phase, 'finished');
+  assert.equal(finished.payload.stop_reason, 'end_turn', 'the turn ends normally instead of dying');
+  assert.equal(finished.state.status, 'ready');
+  assert.deepEqual(runner.liveStates().map((s) => s.status), ['ready'], 'the session process survives');
+  assert.equal(events.some((e) => e.type === 'error'), false, 'no protocol error is surfaced');
+});

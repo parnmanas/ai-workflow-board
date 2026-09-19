@@ -52,6 +52,16 @@ export interface JsonRpcPeerOptions {
   requestTimeoutMs?: number;
   maxLineBytes?: number;
   maxMessageBytes?: number;
+  /**
+   * 한도를 넘는 줄을 만났을 때 스트림을 죽이지 않고 그 줄만 버린다. 줄의 끝(개행)까지
+   * 흘려보내면 다음 메시지부터는 멀쩡히 이어지므로, 잃는 것은 그 메시지 하나뿐이다.
+   * 기본값(false)은 예전 동작 그대로 치명적 오류다 — 프로토콜을 엄격히 봐야 하는
+   * 호출자(hermes 런타임)의 계약을 바꾸지 않기 위해서다. 세션처럼 거대한 tool 출력이
+   * 정상적으로 흐르는 표면만 켠다.
+   */
+  skipOversizedLines?: boolean;
+  /** 버려진 줄을 알린다(skipOversizedLines 일 때만). 사용자에게 보여 줄 근거가 된다. */
+  onOversizedLine?: (bytes: number) => void;
   onNotification?: (method: string, params: unknown) => void | Promise<void>;
   onRequest?: (method: string, params: unknown) => unknown | Promise<unknown>;
   onStderr?: (line: string) => void;
@@ -87,6 +97,8 @@ export class JsonRpcPeer {
   readonly #pending = new Map<JsonRpcId, PendingRequest>();
   #nextId = 1;
   #stdoutBuffer = Buffer.alloc(0);
+  /** 한도를 넘겨 버리는 중인 줄의 누적 바이트 — 개행을 만나면 0 으로 돌아간다. */
+  #discardedBytes = 0;
   #stderrBuffer = '';
   #fatalError: AcpProtocolError | null = null;
   #closed = false;
@@ -204,12 +216,33 @@ export class JsonRpcPeer {
   #consumeStdout(chunk: Buffer): void {
     if (this.#fatalError || this.#closed) return;
     this.#stdoutBuffer = Buffer.concat([this.#stdoutBuffer, chunk]);
+
+    // 넘친 줄을 버리는 중이면 그 줄의 개행까지 흘려보낸다. 개행이 곧 재동기화 지점이다.
+    if (this.#discardedBytes > 0) {
+      const end = this.#stdoutBuffer.indexOf(0x0a);
+      if (end === -1) {
+        this.#discardedBytes += this.#stdoutBuffer.length;
+        this.#stdoutBuffer = Buffer.alloc(0);
+        return;
+      }
+      this.#discardedBytes += end + 1;
+      this.#stdoutBuffer = this.#stdoutBuffer.subarray(end + 1);
+      this.#reportOversized(this.#discardedBytes);
+      this.#discardedBytes = 0;
+    }
+
     if (this.#stdoutBuffer.length > this.#options.maxLineBytes
       && this.#stdoutBuffer.indexOf(0x0a) === -1) {
-      this.#fail(new AcpProtocolError(
-        'acp_message_too_large',
-        'ACP stdout line exceeds the configured byte limit',
-      ));
+      if (!this.#options.skipOversizedLines) {
+        this.#fail(new AcpProtocolError(
+          'acp_message_too_large',
+          'ACP stdout line exceeds the configured byte limit',
+        ));
+        return;
+      }
+      // 아직 끝나지 않은 거대한 줄 — 버퍼를 비우고 개행이 올 때까지 계속 버린다.
+      this.#discardedBytes = this.#stdoutBuffer.length;
+      this.#stdoutBuffer = Buffer.alloc(0);
       return;
     }
 
@@ -220,14 +253,26 @@ export class JsonRpcPeer {
       this.#stdoutBuffer = this.#stdoutBuffer.subarray(newline + 1);
       if (line.length === 0) continue;
       if (line.length > this.#options.maxLineBytes) {
-        this.#fail(new AcpProtocolError(
-          'acp_message_too_large',
-          'ACP stdout line exceeds the configured byte limit',
-        ));
-        return;
+        if (!this.#options.skipOversizedLines) {
+          this.#fail(new AcpProtocolError(
+            'acp_message_too_large',
+            'ACP stdout line exceeds the configured byte limit',
+          ));
+          return;
+        }
+        this.#reportOversized(line.length);
+        continue;
       }
       this.#parseLine(line.toString('utf8').replace(/\r$/, ''));
       if (this.#fatalError) return;
+    }
+  }
+
+  #reportOversized(bytes: number): void {
+    try {
+      this.#options.onOversizedLine?.(bytes);
+    } catch {
+      /* 보고 실패가 스트림을 멈추게 두지 않는다 */
     }
   }
 

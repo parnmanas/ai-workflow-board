@@ -240,6 +240,8 @@ export class AcpClient {
       requestTimeoutMs: options.requestTimeoutMs,
       maxLineBytes: options.maxLineBytes,
       maxMessageBytes: options.maxMessageBytes,
+      skipOversizedLines: options.skipOversizedLines,
+      onOversizedLine: options.onOversizedLine,
       onStderr: options.onStderr,
       onNotification: (method, params) => {
         if (client) client.#handleNotification(method, params);

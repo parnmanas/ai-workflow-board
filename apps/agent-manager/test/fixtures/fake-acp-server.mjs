@@ -243,6 +243,17 @@ rl.on('line', (line) => {
       result(message.id, lastNewSessionParams);
       break;
     case 'session/prompt':
+      if (JSON.stringify(message.params.prompt).includes('OVERSIZED_TEST')) {
+        // 거대한 tool 출력이 알림 한 줄로 오는 상황 — 그 줄 뒤의 스트림이 멀쩡해야 한다.
+        process.stdout.write(`${'x'.repeat(8192)}\n`);
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { sessionId: message.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'still here' } } },
+        });
+        result(message.id, { stopReason: 'end_turn' });
+        break;
+      }
       if (JSON.stringify(message.params.prompt).includes('ELICIT_TEST')) {
         // plan 을 알린 뒤 폼 질문을 던지고, 답이 올 때까지 턴을 연다 (Agent Session elicitation 테스트)
         pendingElicitPrompt = message.id;
@@ -390,6 +401,15 @@ rl.on('line', (line) => {
         result(message.id, {});
       }
       break;
+    case 'test/oversized': {
+      // 한도를 넘는 줄 하나를 뱉고, 곧바로 정상 알림과 응답을 잇는다. 줄을 건너뛰고
+      // 재동기화하는 클라이언트라면 뒤의 둘이 멀쩡히 도착해야 한다.
+      const bytes = Number(message.params?.bytes) || 8192;
+      process.stdout.write(`${'x'.repeat(bytes)}\n`);
+      send({ jsonrpc: '2.0', method: 'test/after-oversized', params: { ok: true } });
+      result(message.id, { survived: true });
+      break;
+    }
     case 'test/hang':
       break;
     case 'test/malformed':

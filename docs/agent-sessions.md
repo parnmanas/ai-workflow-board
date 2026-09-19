@@ -148,6 +148,14 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 세션마다 handshake 가 `schemaVersion mismatch` 로 실패했다. CLI 네이티브 MCP 클라이언트는 AWB 확장 capability 를
 모르므로 subagent / managed-subagent / runtime-child 와 같은 면제다(`mcp-schema-version.test.mjs` 가 네 종류를 모두 고정).
 
+### 거대한 메시지
+
+어댑터가 tool 출력을 알림 **한 줄**로 보내는데, 큰 파일 읽기나 긴 명령 출력이면 기본 상한(4MiB)을 넘는다.
+예전엔 그 줄 하나가 `acp_message_too_large` 로 스트림을 죽여 프로세스가 SIGTERM 으로 내려갔다(턴은 error 로 끝났다).
+개행이 곧 재동기화 지점이므로 **그 줄만 버리면** 나머지는 멀쩡하다 — 세션 어댑터는 상한을 64MiB 로 올리고
+`skipOversizedLines` 로 넘치는 줄을 건너뛴 뒤, 몇 MiB 를 버렸는지 `system` 행으로 알린다. 기본값은 예전대로
+치명적 오류다(hermes 런타임의 엄격한 계약을 바꾸지 않는다). 청크로 쪼개져 오는 줄도 한 번만 보고한다.
+
 일반 tool_call 도 초기 status 를 그대로 싣는다(`tool_call.payload.status`) — 기록(codex rollout)의 호출 행에도
 자기 status 가 있으므로, 결과 행이 없는 호출(중단된 턴 등)이 "running" 으로 굳지 않는다.
 - 매니저는 프로세스가 죽으면 턴 중이었어도 무조건 `status: idle` 을 보내고, 미결 permission 은

@@ -96,6 +96,8 @@ export interface AgentSessionRunnerOptions {
   sessionHomesDir?: string;
   /** 테스트용 credential 조회 override. */
   credentialFetcher?: (credentialId: string, workspaceId: string) => Promise<SessionCredential | null>;
+  /** stdout 한 줄 상한 override — 테스트가 64MiB 를 쓰지 않고 초과 경로를 돌기 위한 주입점. */
+  maxLineBytes?: number;
 }
 
 export interface SessionCredential {
@@ -203,6 +205,13 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;
 const DEFAULT_FLUSH_INTERVAL_MS = 150;
 const MAX_TOOL_TEXT_CHARS = 16_000;
+/**
+ * 세션 어댑터의 stdout 한 줄 상한. 기본값(4MiB)은 세션에는 작다 — 큰 파일 읽기나 긴 명령
+ * 출력이 한 줄짜리 알림으로 오면 그 줄 하나가 프로세스를 통째로 죽였다("ACP stdout line
+ * exceeds the configured byte limit" → SIGTERM). 넉넉히 올리되 무한 버퍼는 만들지 않고,
+ * 넘치면 그 줄만 버리고 스트림은 이어 간다(skipOversizedLines).
+ */
+const SESSION_MAX_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_PAYLOAD_CHARS = 200_000;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
 export const ACP_SESSION_CLIS = ['claude', 'codex', 'hermes'] as const;
@@ -380,7 +389,7 @@ export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env)
 export class AgentSessionRunner {
   readonly #config: AwbConfig;
   readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir'>>
-    & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher'>;
+    & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher' | 'maxLineBytes'>;
   readonly #store: AgentSessionStore;
   readonly #live = new Map<string, LiveSession>();
   readonly #opening = new Map<string, Promise<LiveSession>>();
@@ -403,6 +412,7 @@ export class AgentSessionRunner {
       mcpServers: options.mcpServers,
       sessionHomesDir: options.sessionHomesDir ?? join(AGENT_MANAGER_HOME, 'session-homes'),
       credentialFetcher: options.credentialFetcher,
+      maxLineBytes: options.maxLineBytes,
     };
   }
 
@@ -630,6 +640,21 @@ export class AgentSessionRunner {
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
       onElicitation: (elicitation) => (live ? this.#onElicitation(live, elicitation) : Promise.resolve({ action: 'cancel' as const })),
+      // 한 줄이 상한을 넘으면 그 메시지만 버리고 세션은 살려 둔다 — 잃는 것은 그 출력 하나다.
+      maxLineBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
+      maxMessageBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
+      skipOversizedLines: true,
+      onOversizedLine: (bytes) => {
+        const mib = Math.round(bytes / (1024 * 1024));
+        log(`${tag} dropped an oversized ACP message (${mib} MiB) — the session continues`);
+        if (live) {
+          this.#enqueue(live, [{
+            type: 'system',
+            payload: { text: `The agent sent a ${mib} MiB message, larger than this session can relay. That one message was dropped; the session is still running.` },
+            turn_id: live.turn?.turnId,
+          }]);
+        }
+      },
       onStderr: (line) => log(`${tag} stderr: ${redactSecrets(line)}`),
       spawnOptions: { detached: process.platform !== 'win32' },
     });
