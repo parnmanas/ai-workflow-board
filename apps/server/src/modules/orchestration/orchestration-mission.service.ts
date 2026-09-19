@@ -26,7 +26,7 @@ import { orchestrationError } from './orchestration-errors';
 import { GraphSpec, computeMissionProgress } from './orchestration-graph';
 import { renderConfirmPolicyGuidance } from './orchestration-prompt';
 import { enforceRunBudget } from '../../common/run-budget-guard';
-import { sinceBoundaryParam, tiedCreatedAtWhere } from '../../common/created-at-since-param';
+import { sinceBoundaryParam, tiedCreatedAtOrderExpr, tiedCreatedAtWhere } from '../../common/created-at-since-param';
 import { lockMissionEventWrites } from '../../common/orchestration-event-write-lock';
 import { visibleScopeWhere } from '../skills/skill-scope';
 import {
@@ -943,17 +943,41 @@ export class OrchestrationMissionService {
    * `getMissionDetail` 은 최신 N건만 실어주는 bounded window 라, 긴 미션의 이전 이력은
    * 어떤 API 로도 가져올 수 없었다. 이 메서드가 그 창을 뒤로 밀 수 있게 한다.
    *
-   * 커서는 `(created_at, write_seq)` 복합 keyset 이다. `created_at` 단독으로는 안 된다 —
-   * fan-out 한 번이면 수십 건이 같은 타임스탬프를 갖고, 그러면 `created_at < cursor` 는
-   * 그 그룹을 통째로 건너뛰고 `<=` 는 무한히 되돌린다. 표준 keyset 술어로 전순서를 만든다.
+   * 커서는 `(created_at, write_seq, id)` **3단** 복합 keyset 이다. 앞의 두 개만으로는
+   * 안 된다:
+   *
+   * - `created_at` 단독 — fan-out 한 번이면 수십 건이 같은 타임스탬프를 갖고, 그러면
+   *   `created_at < cursor` 는 그 그룹을 통째로 건너뛰고 `<=` 는 무한히 되돌린다.
+   * - `(created_at, write_seq)` — `write_seq` 가 미션 안에서 유일할 때만 전순서다. 그
+   *   전제가 깨지는 경로가 실제로 둘 있다(티켓 7b679009). (1) `recordEvent` 는 직렬화
+   *   트랜잭션이 실패하면 `write_seq: 0`("순서 미상")으로 fail-open 하므로, 한 미션에서
+   *   두 번 발동하면 0 이 두 행이 된다. (2) 백필(`1760000000086`)을 아직 돌리지 않은 DB
+   *   에는 미션의 모든 행이 0 또는 1 인 레거시 구간이 그대로 남아 있다. 커서가 그런
+   *   동률 군집 **안쪽**을 가리키면 tie-break 절이 `seq < seq` 로 항상 거짓이 되고, 첫
+   *   분기는 같은 시각 그룹을 통째로 제외해 **나머지 행이 페이지 경계에서 조용히
+   *   사라진다** — write_seq 컬럼이 존재하는 이유였던 바로 그 손실이다.
+   *
+   * 그래서 PK 인 `id` 를 마지막 키로 둔다. `id` 는 미션 안에서(사실 테이블 전체에서)
+   * 유일하므로 세 키의 조합은 **원인과 무관하게** 항상 전순서다 — fail-open 이든 레거시
+   * 행이든 미래의 생산자 회귀든, 동률이 생겨도 페이지 경계에서 행을 잃지 않는다.
+   * 같은 선택을 archive 커서가 먼저 했다(`archive-tools.ts` 의 `buildArchiveCursor` 는
+   * `(archived_at, id)` 를 합성 커서로 싣는다).
+   *
+   * `before_id` 는 optional 이다. 넘기지 않은 호출자는 예전 2단 술어로 degrade 하므로
+   * 기존 동작이 그대로 유지된다 — 대신 위 손실도 그대로다. 서버가 돌려주는
+   * `next_cursor` 는 항상 셋을 다 싣는다.
    *
    * 최신 → 과거 순(DESC)으로 돌려준다. 호출자가 화면에 붙일 때 뒤집는다.
    */
   async listMissionEvents(
     missionId: string,
     workspaceId: string,
-    opts?: { limit?: number; before_at?: string; before_seq?: number },
-  ): Promise<{ events: OrchestrationEvent[]; has_more: boolean; next_cursor: { at: string; seq: number } | null }> {
+    opts?: { limit?: number; before_at?: string; before_seq?: number; before_id?: string },
+  ): Promise<{
+    events: OrchestrationEvent[];
+    has_more: boolean;
+    next_cursor: { at: string; seq: number; id: string } | null;
+  }> {
     const mission = await this.requireMission(missionId);
     if (workspaceId && mission.workspace_id !== workspaceId) {
       throw orchestrationError(404, 'mission not found in this workspace');
@@ -963,13 +987,21 @@ export class OrchestrationMissionService {
     const qb = this.eventRepo
       .createQueryBuilder('e')
       .where('e.mission_id = :missionId', { missionId })
-      .orderBy('e.created_at', 'DESC')
+      // 첫 키는 컬럼이 아니라 **커서 정밀도로 자른 시각**이다. 술어가 tied group 을 한
+      // 덩어리로 보는데 정렬이 그 안을 µs 로 더 잘게 나누면, "커서 행보다 뒤" 를 술어로
+      // 표현할 수 없어 Postgres 에서 행이 사라진다(tiedCreatedAtOrderExpr doc 참고).
+      .orderBy(tiedCreatedAtOrderExpr(this.dataSource, 'e'), 'DESC')
       .addOrderBy('e.write_seq', 'DESC')
+      // 정렬에도 같은 마지막 키가 있어야 한다. 술어만 3단이고 ORDER BY 가 2단이면 동률
+      // 군집 안의 순서를 DB 가 자유롭게 정하므로, 커서가 가리킨 지점과 다음 페이지의
+      // 시작점이 어긋나 행이 빠지거나 겹친다.
+      .addOrderBy('e.id', 'DESC')
       // 한 건 더 읽어 has_more 를 별도 COUNT 없이 판정한다.
       .take(limit + 1);
 
     if (opts?.before_at) {
       const beforeSeq = Number.isFinite(Number(opts.before_seq)) ? Number(opts.before_seq) : 0;
+      const beforeId = typeof opts.before_id === 'string' ? opts.before_id : '';
       const cursorAt = new Date(opts.before_at);
       // tie-break 절의 "같은 시각" 도 등호로 물으면 안 된다(티켓 85efcb69). 커서의 `at` 은
       // 아래에서 `new Date(...).toISOString()` 으로 만들어져 밀리초까지만 남는데 Postgres 의
@@ -980,12 +1012,18 @@ export class OrchestrationMissionService {
       // 두 분기는 서로소다: 첫 분기는 `< t`, tie-break 는 sqljs 가 `= t`(초 단위),
       // 그 외 드라이버가 `[t, t+1ms)` 라 같은 행이 두 번 반환되지 않는다.
       const tied = tiedCreatedAtWhere(this.dataSource, 'e', cursorAt);
+      // seq 동률은 `id` 로 한 번 더 가른다(위 doc 참고). `id` 가 없는 호출자는 예전
+      // 술어 그대로 — 동작이 나빠지지는 않되 동률 군집에서의 손실도 그대로다.
+      const tieBreak = beforeId
+        ? '(e.write_seq < :beforeSeq OR (e.write_seq = :beforeSeq AND e.id < :beforeId))'
+        : 'e.write_seq < :beforeSeq';
       qb.andWhere(
-        `(e.created_at < :beforeAt OR ((${tied.clause}) AND e.write_seq < :beforeSeq))`,
+        `(e.created_at < :beforeAt OR ((${tied.clause}) AND ${tieBreak}))`,
         {
           beforeAt: sinceBoundaryParam(this.dataSource, cursorAt),
           ...tied.params,
           beforeSeq,
+          ...(beforeId ? { beforeId } : {}),
         },
       );
     }
@@ -997,7 +1035,9 @@ export class OrchestrationMissionService {
     return {
       events: page,
       has_more: hasMore,
-      next_cursor: last ? { at: new Date(last.created_at).toISOString(), seq: last.write_seq ?? 0 } : null,
+      next_cursor: last
+        ? { at: new Date(last.created_at).toISOString(), seq: last.write_seq ?? 0, id: last.id }
+        : null,
     };
   }
 
