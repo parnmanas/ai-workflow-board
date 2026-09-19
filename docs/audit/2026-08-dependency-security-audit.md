@@ -3095,3 +3095,213 @@ cron 지연: `35327285746` 는 09:00:37Z 실행으로 예정 `17 4 * * *` 대비
   (c) PR #10 머지 후에는 cron 에서 스텝 10 이 red 여도 스텝 11 이 도는지 확인.
 - **아직 만들지 않은 것** — cron *liveness* 검사(`audit-cron-coverage` 는 설정만 본다). 09-15
   미실행 같은 사건은 여전히 자동으로 잡히지 않는다.
+
+---
+
+## 재검증 로그 — 2026-09-20 (`main` @ `8cbd696c`)
+
+10회차. 의존성 축은 조용하다 — `main` 0건, 배포 트리는 여전히 `0ddec72f` 의 7건. 이번 회차의
+실질 작업은 **그 7건을 사람이 아니라 게이트가 세게 만든 것**이다. 9회차에서 "배포된 sha 를
+직접 감사하라" 는 방법을 손으로 실행했는데, 두 회차 연속 손으로 하고 있다는 건 게이트에
+구멍이 있다는 뜻이었다.
+
+### 1. `main` — 0건, 팁은 움직였지만 의존성은 그대로
+
+팁이 `b231e34a` → `8cbd696c` 로 움직였다. 8회차 규칙대로 **루트 두 blob 부터** 확인했다:
+
+| 파일 | `b231e34a` | `8cbd696c` |
+| --- | --- | --- |
+| `package.json` | `3a357fd3` | `3a357fd3` |
+| `package-lock.json` | `e464f1db` | `e464f1db` |
+
+동일. 따라서 팁 이동은 의존성 축과 무관하다 — `git rev-parse` 두 번으로 끝나는 확인이고,
+이 확인 없이 "팁이 움직였으니 드리프트겠지" 로 가면 매번 전수 재검사를 하게 된다.
+
+- `audit-lockfile-advisories --audit-level=moderate` → **0건** (패키지 538 / 버전 579)
+- `--audit-level=low` → **0건**
+
+### 2. 배포 트리 — `0ddec72f`, 7건 (오늘 다시 도출)
+
+`production.private` 는 여전히 원격에 없다(`gh api .../branches/production.private` → 404,
+브랜치 7개 중 배포 브랜치 없음). `gh run list --workflow=deploy.yml` 기준 **마지막 배포는
+2026-09-05 의 `0ddec72f`** 로 9회차와 같다. 그 sha 의 lockfile 을 오늘 advisory 데이터로 다시
+감사해 **7건 (537 패키지 / 580 버전)** 을 확인했다 — 인용이 아니라 재도출이다.
+
+| 패키지 | 설치됨 | 취약 범위 | 심각도 |
+| --- | --- | --- | --- |
+| js-yaml | 4.3.1 | `>=4.0.0 <4.3.2` | high |
+| multer | 2.2.0 | `<2.3.0` (x2), `=2.2.0` | high x3 |
+| hono | 4.13.0 | `<4.13.5` | moderate x3 |
+
+`main` 과 배포 트리의 차이는 **루트 `overrides` 세 줄뿐**이다. 선언 의존성은 전부 동일하다
+(루트 + `apps/server` + `apps/client` + `apps/agent-manager` 의 정규화된
+`dependencies`+`devDependencies` 를 파싱해 비교 → 4개 전부 SAME):
+
+```
+main      multer ^2.3.0   hono ^4.13.5   cosmiconfig→js-yaml ^4.3.2
+deployed  multer ^2.2.0   (없음)          (없음)
+```
+
+### 3. 수정 — 배포 브랜치가 사라져도 게이트가 **배포된 sha** 를 감사한다
+
+7·8회차는 브랜치 404 를 "감사할 대상이 없다" 로 처리했고, 9회차는 배포 sha 를 손으로 감사했다.
+게이트 쪽은 그대로여서, `audit-deploy-branch-deps.mjs` 의 출력은 이랬다:
+
+```
+FAIL production.private — 원격에 이 브랜치가 없다 (삭제됐거나 이름이 바뀌었다)
+```
+
+참이지만 약한 문장이다. **지금 돌고 있는 트리에 취약점이 몇 건인지**는 아무 데도 나오지 않는다.
+브랜치 상태와 배포 상태는 다른 축이고, 배포는 **커밋 sha** 로 식별되므로 브랜치가 지워져도
+감사 대상 자체는 남아 있다.
+
+그래서 브랜치가 없을 때 `deploy.yml` 실행 이력에서 마지막 배포 sha 를 찾아 그 트리를 대신
+감사하는 폴백을 넣었다. 지금 출력:
+
+```
+FAIL production.private — 원격에 이 브랜치가 없다 (삭제됐거나 이름이 바뀌었다)
+     ↳ 마지막 배포 sha 0ddec72f (2026-09-05T11:38:38Z) — 이 트리를 대신 감사한다.
+     ↳ 배포 sha 0ddec72f — moderate 이상 취약점 7건:
+       [high] js-yaml ... [high] multer x3 ... [moderate] hono x3
+```
+
+설계 제약 세 가지:
+
+- **판정은 그대로 FAIL 이다** (exit=1 유지). 폴백은 진단만 채운다. 배포 sha 가 0건으로
+  나와도 통과시키지 않는다 — 브랜치가 없다는 사실 자체가 미해결이기 때문이다.
+- **조회 실패는 절대 던지지 않는다.** `lastDeployedSha()` 는 네트워크 오류·404·JSON 파싱
+  실패·빈 이력·토큰 부재를 전부 `null` 로 떨어뜨린다. 폴백이 예외를 던지면 게이트 본체가
+  죽어서 FAIL 문장 자체가 사라진다.
+- **토큰이 없으면 API 를 때리지 않는다.** github.com 리모트가 아니면 슬러그도 만들지 않는다.
+
+CI 쪽은 `dependency-audit` 잡에만 `actions: read` 를 더했다(워크플로 기본값은
+`contents: read`). 잡 단위 선언은 워크플로 선언을 **대체**하므로 `contents: read` 를 다시
+적었다. 이 잡은 `npm ci` 를 하지 않아 서드파티 install script 가 돌지 않는다 — 다른 잡들과
+달리 토큰과 신뢰할 수 없는 코드가 같은 프로세스 트리에 있지 않다.
+
+### 4. 기존 가드가 이 수정을 막았고, 그게 맞았다 — secrets 계약 재평가
+
+`supply-chain-integrity-guard` 가 즉시 FAIL 했다:
+
+```
+ci.yml now references a secret — re-evaluate this read-only guard, since a workflow
+that handles secrets on `pull_request` is exposed to PR-authored code
+```
+
+가드가 요구한 건 금지가 아니라 **재평가**다. 재평가 결과, 옛 계약(`ci.yml` 은 `secrets.` 를
+일절 참조하지 않는다)이 지키려던 진짜 성질은 "PR 이 작성한 코드가 도는 턴에 secret 이 환경에
+깔리지 않는다" 이지 문자열 `secrets.` 의 부재가 아니었다. 그래서 부재 대신 **성질 자체**를
+단언하도록 바꿨다:
+
+- (a) `GITHUB_TOKEN` 이 아닌 **커스텀 secret 은 여전히 금지**. 배포 키·레지스트리 토큰은
+  탈취 시 피해 차원이 다르고, 이 워크플로는 `npm ci` 와 PR 테스트 코드를 돌린다.
+- (b) 토큰을 환경에 까는 스텝은 **반드시 `github.event_name == 'schedule'` 게이트**를 가져야
+  한다. `pull_request` 에서 checkout 되는 건 PR 의 머지 ref 이므로 이 잡이 돌리는
+  `scripts/*.mjs` 자체가 PR 이 고칠 수 있는 코드다. schedule 게이트가 있으면 그 스텝은 PR
+  이벤트에서 실행되지 않으므로 토큰이 환경에 존재하지 않는다.
+
+**새 계약이 옛 계약보다 엄격하다.** 옛 검사는 `${{ github.token }}` 로 쓰면 그냥 통과했다 —
+같은 토큰인데 문자열만 다르다. 새 검사는 그 우회도 막는다. 가드가 공허하지 않은지 세 가지
+변이로 확인했다(전부 검출):
+
+| 변이 | 검출 | 옛 검사였다면 |
+| --- | --- | --- |
+| schedule 게이트 제거 | ✅ leaky 스텝으로 보고 | ❌ 통과 |
+| 커스텀 secret(`NAS_DEPLOY_KEY`) 추가 | ✅ custom 으로 보고 | ✅ 통과 못 함 |
+| `github.token` 으로 우회 + 게이트 제거 | ✅ leaky 스텝으로 보고 | ❌ **통과** |
+
+가드를 초록으로 만들려고 `github.token` 으로 바꿔 쓰는 선택지는 의도적으로 택하지 않았다.
+보안 성질은 같고 문자열만 피하는 것이라, 게이트를 해결하지 않고 침묵시키는 쪽이다.
+
+### 5. 회귀 가드 — 기존 파일 확장, 94 → 98 (머지 후 114)
+
+`deploy-branch-audit-guard.test.mjs` 에 4건 추가(4 → 8). 네트워크를 타지 않는다 — GitHub API
+는 주입한 fetch 스텁으로, git 은 임시 로컬 bare 저장소로 검사한다.
+
+- `repoSlugFromRemote — ssh/https/.git 형태를 모두 owner/repo 로 푼다` (github.com 이 아니면
+  `null` — 엉뚱한 호스트로 토큰을 보내지 않는다)
+- `lastDeployedSha — deploy 워크플로의 마지막 성공 실행에서 sha 를 읽는다` (`status=success`
+  조회인지까지 단언 — 실패한 실행은 배포된 적이 없다)
+- `lastDeployedSha — 조회가 어떤 식으로 실패하든 throw 하지 않고 null 이다` (5가지 실패 경로 +
+  토큰 없으면 fetch 자체를 호출하지 않음)
+- `배포 sha 폴백은 진단만 채운다 — FAIL 판정을 완화하지 않는다`
+
+`supply-chain-integrity-guard` 는 기존 테스트 **안에서** 단언을 교체했으므로 건수는 16 그대로다.
+새 테스트 **파일**은 만들지 않았으므로 스위트 등록도 불필요하다 —
+`test-registration-completeness` green 이 그 증거다.
+
+### 6. 병합 규칙 변경 — 8회차의 union 규칙은 폐기됐다
+
+8회차는 `apps/server/package.json` 의 `test` 스크립트 충돌을 "main 쪽 파일을 통째로 받고 내
+테스트를 앵커 뒤에 다시 끼운다" 는 union 으로 풀라고 적었다. **그 규칙은 이제 쓰지 말 것.**
+`main` 이 티켓 5dc241d8 로 실행 목록을 `package.json` 밖으로 빼서
+**`apps/server/test/suites/<name>.txt` 줄 단위 매니페스트**로 옮겼다:
+
+```
+ours    node test/run-suite.mjs test/a.test.mjs test/b.test.mjs ... (1만 자 한 줄)
+theirs  node test/run-suite.mjs --suite test
+```
+
+즉 충돌은 append 충돌이 아니라 **구조 변경**이다. 해소는 `package.json` 을 `--theirs` 로
+통째로 받고(= `origin/main` 과 blob 동일함을 확인), 내 테스트를 매니페스트에 등록하는 것이다.
+`test/suites/test.txt` 에 `test/deploy-branch-audit-guard.test.mjs` 한 줄 추가 — `origin/main`
+대비 **정확히 한 줄** 차이, 나머지 7개 스위트 파일은 전부 SAME.
+
+매니페스트가 알파벳 정렬처럼 보이지만 `main` 쪽에도 이미 6곳의 예외가 있다. 정렬을 "고치지"
+말 것 — 무관한 줄을 건드리면 이 매니페스트가 해결하려던 병합 충돌이 되돌아온다. 삽입 위치만
+지역적으로 맞추고, `origin/main` 과의 diff 가 한 줄인지로 검증하는 게 맞다.
+
+이 변경으로 `test-registration-completeness` 가 4 → 20 건으로 커졌고(‘main’ 쪽 증가분),
+가드 합계는 머지 후 **114/114** 가 됐다.
+
+### 7. 스텝 11 은 10일째 skipped — 이번에도 손으로 돌렸다
+
+09-19 스케줄 실행 `35433001603` 의 단계별 결론:
+
+```
+ 4~9  success   (오프라인 가드 5개 + main advisory 감사)
+10    failure   배포 브랜치 lockfile 재감사
+11    skipped   발행 트리 재감사
+```
+
+9회차에서 `!cancelled()` 로 고쳤지만 **그 수정은 PR #10 에만 있고 cron 은 `main` 에서 돈다** —
+8회차 규칙대로 예측하지 않고 머지 대기 항목으로 둔다. 그동안 비는 축은 이번에도 수동 보완했다:
+`audit-published-deps` 전체 실행 → **live/next 양쪽 0건**, install script 0개.
+
+드리프트는 양쪽 7건으로 보고됐다(lockfile → 실제 해석: `ajv` 8.18.0→8.20.0, `fast-uri`
+3.1.7→3.1.8, `hono` 4.13.7→4.13.8, `ip-address` 10.7.0→10.7.2, `proxy-addr` 2.0.7→2.0.8,
+`type-is` 1.6.18→2.1.0, `zod` 4.5.4→4.6.5). 오늘은 전부 깨끗하지만 lockfile 감사가 본 적 없는
+버전들이라는 점이 이 축을 따로 두는 이유다.
+
+cron 지연: 예정 `17 4 * * *` 대비 `35433001603` 는 08:48:36Z → **+4시간 31분**. 관찰 범위
+(+4h21m ~ +5h36m) 안이고, 09-15 이후 미실행은 없다.
+
+### 게이트 결과 (`main` @ `8cbd696c` + 이번 회차 수정)
+
+- `audit-lockfile-advisories --audit-level=moderate` — **0건** / `--audit-level=low` — **0건**
+- `audit-deploy-branch-deps` — **FAIL 1건**, exit=1 (브랜치 404 + **배포 sha `0ddec72f` 7건**, 3절)
+- `audit-install-scripts` — install-script 3개 전부 허용목록 내
+- `audit-action-pins` — 액션 참조 19개 전부 커밋 SHA 고정
+- `audit-ci-branch-coverage` — *설정상* 커버, 단 대상 브랜치는 존재하지 않음
+- `audit-cron-coverage` — 잡 8개 중 cron 은 `dependency-audit` 만 태움
+- `audit-published-deps --offline` — 선언 범위 4개 전부 상한 있음
+- `audit-published-deps` (전체, 네트워크) — **live/next 양쪽 0건** (7절, CI 가 10일째 건너뛴 검사)
+- 가드 **114/114** 통과 (16 + 16 + 42 + 6 + 6 + 20 + 8) — 이번 회차 신규 +4, 나머지 증가는 `main` 쪽
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다. lockfile 재생성은 불필요했다
+(루트 두 blob 이 `origin/main` 과 동일).
+
+### 이월
+
+- **운영자 결정 필요 (최우선, 10회차 연속 미해결)** — `production.private` 삭제가 **의도된
+  은퇴인가, 실수인가.** 어느 쪽이든 **NAS 에서 도는 이미지는 `0ddec72f`** 이고 **7건을
+  포함**한다. 이번 회차부터는 이 사실을 게이트가 직접 출력하므로, 판단 근거를 사람이 매번
+  손으로 만들 필요는 없어졌다.
+- **PR #10** — 09-11~09-20 기록 + 배포 브랜치 게이트 진단 수정 + 스텝 독립성 수정 + 이번
+  회차의 배포 sha 폴백/secrets 계약. 열려 있고 base `main`.
+- **PR #11 / #8** — base 브랜치 삭제로 자동 CLOSED. 복원이 선행돼야 재개 가능.
+- **다음 회차 확인 항목** — (a) 루트 두 blob 동일성 먼저. (b) PR #10 머지 후에는 cron 에서
+  스텝 10 이 red 여도 스텝 11 이 도는지, 그리고 스텝 10 출력에 **배포 sha 7건**이 찍히는지
+  확인(머지 전에는 확인하지 말 것). (c) 배포 sha 가 `0ddec72f` 에서 움직였는지 —
+  움직였다면 누군가 배포 경로를 되살렸다는 뜻이다.
+- **아직 만들지 않은 것** — cron *liveness* 검사(`audit-cron-coverage` 는 설정만 본다).
