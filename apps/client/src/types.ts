@@ -3146,8 +3146,15 @@ export interface AgentSessionCliSettings {
   supports_credential: boolean;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
+  /** 세션을 열 때마다 다시 거는 설정 — `{ [configId]: value }`. `__mode` 는 레거시 set_mode. */
+  default_config: Record<string, string | boolean>;
+  /** 마지막으로 본 선택지 — 세션이 열리기 전에도 고를 수 있게 한다. */
+  known_config_options: AgentSessionConfigOption[];
   updated_at: string | null;
 }
+
+/** `default_config` 안에서 레거시 세션 모드를 가리키는 예약 키(서버 AGENT_SESSION_MODE_DEFAULT_KEY). */
+export const AGENT_SESSION_MODE_DEFAULT_KEY = '__mode';
 
 /** 장비의 CLI 홈에서 읽은 세션 한 줄. */
 export interface AgentSessionSummary {

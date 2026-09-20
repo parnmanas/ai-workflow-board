@@ -98,6 +98,12 @@ export interface AgentSessionCommand {
   input_hint?: string;
 }
 
+/**
+ * `default_config` 안에서 레거시 `session/set_mode`(config option 이 아닌 modes) 를 가리키는 예약 키.
+ * 실제 config option id 와 겹치지 않도록 `__` 접두어를 쓴다.
+ */
+export const AGENT_SESSION_MODE_DEFAULT_KEY = '__mode';
+
 export const AGENT_SESSION_CONFIG_OPTIONS_MAX = 32;
 export const AGENT_SESSION_COMMANDS_MAX = 200;
 

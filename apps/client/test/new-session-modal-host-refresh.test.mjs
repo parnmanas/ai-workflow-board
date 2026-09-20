@@ -8,8 +8,11 @@
 // 실행: node --import tsx --test apps/client/test/new-session-modal-host-refresh.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, typeInto, React, act } from './helpers/jsdom.mjs';
+import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
+import { api } from '../src/api.ts';
 import NewSessionModal from '../src/components/sessions/NewSessionModal.tsx';
+
+const flush = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
 const h = React.createElement;
 
@@ -111,6 +114,98 @@ test('closing and reopening re-applies the route defaults (host, CLI, prefilled 
     assert.equal(cliSelect().value, 'codex');
     assert.equal(cwdInput().value, '/srv/app', '"+ New" on a cwd group prefills that cwd');
     assert.equal(titleInput().value, '', 'the previous draft title is gone');
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});
+
+// ─── 새 세션 모달의 approval 모드 / 모델 선택 ──────────────────────────────────
+//
+// 선택지는 어댑터가 살아 있어야 알 수 있어 서버가 마지막 목록을 캐시해 준다 — 그래서 세션을 열기
+// 전에도 고를 수 있다. 고른 값은 호스트×CLI 에 기억되므로(PUT settings) 이후 열리는 세션마다 다시 걸린다.
+const SETTINGS = {
+  manager_id: 'm-rolf',
+  cli: 'codex',
+  supports_credential: true,
+  credential: null,
+  candidates: [],
+  default_config: { mode: 'read-only' },
+  known_config_options: [
+    { config_id: 'mode', name: 'Mode', category: 'mode', type: 'select', current_value: 'agent', options: [{ value: 'read-only', name: 'Ask for approval' }, { value: 'agent', name: 'Approve for me' }] },
+    { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'gpt-a', options: [{ value: 'gpt-a', name: 'A' }, { value: 'gpt-b', name: 'B' }] },
+    { config_id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', current_value: false, options: [] },
+  ],
+  updated_at: null,
+};
+
+function stubSettingsApi(t, { settings = SETTINGS } = {}) {
+  const calls = { get: [], put: [], open: [] };
+  const original = { get: api.getHostCliSettings, put: api.setHostCliSettings, open: api.openHostSession };
+  api.getHostCliSettings = async (managerId, cli) => { calls.get.push([managerId, cli]); return { ...settings, manager_id: managerId, cli }; };
+  api.setHostCliSettings = async (managerId, cli, credentialId, defaultConfig) => { calls.put.push({ managerId, cli, credentialId, defaultConfig }); return settings; };
+  api.openHostSession = async (managerId, cli, input) => { calls.open.push({ managerId, cli, input }); return { manager_id: managerId, cli, session_id: 's-new', status: 'ready' }; };
+  t.after(() => { api.getHostCliSettings = original.get; api.setHostCliSettings = original.put; api.openHostSession = original.open; });
+  return calls;
+}
+
+test('the modal offers approval mode and model from the cached options, seeded from what is remembered', async (t) => {
+  const dom = setupDom();
+  try {
+    const calls = stubSettingsApi(t);
+    const view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+    await flush();
+    assert.deepEqual(calls.get.at(-1), ['m-rolf', 'codex'], 'settings are read for the chosen host and CLI');
+
+    const modeSelect = document.querySelector('select[data-config-id="mode"]');
+    const modelSelect = document.querySelector('select[data-config-id="model"]');
+    assert.ok(modeSelect, 'approval mode picker is shown');
+    assert.ok(modelSelect, 'model picker is shown');
+    assert.equal(Boolean(document.querySelector('select[data-config-id="fast_mode"]')), false, 'other settings stay in the session header, not the modal');
+    assert.equal(modeSelect.value, 'read-only', 'seeded from the remembered value, not the adapter default');
+    assert.equal(modelSelect.value, '', 'nothing remembered for the model → the adapter default');
+    assert.deepEqual([...modeSelect.options].map((o) => o.value), ['', 'read-only', 'agent']);
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});
+
+test('creating a session remembers the chosen settings before opening it', async (t) => {
+  const dom = setupDom();
+  try {
+    const calls = stubSettingsApi(t);
+    const created = [];
+    const view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex', onCreated: (live) => created.push(live) }));
+    await flush();
+    change(document.querySelector('select[data-config-id="model"]'), 'gpt-b');
+    typeInto(cwdInput(), '/srv/app');
+    click([...document.querySelectorAll('button')].find((b) => b.textContent === 'Start session'));
+    await flush();
+
+    assert.equal(calls.put.length, 1, 'the choice is persisted once');
+    assert.deepEqual(calls.put[0].defaultConfig, { mode: 'read-only', model: 'gpt-b' }, 'both pickers are sent so the session opens with them');
+    assert.equal(calls.open.length, 1);
+    assert.equal(calls.open[0].input.cwd, '/srv/app');
+    assert.deepEqual(created.map((l) => l.session_id), ['s-new']);
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});
+
+test('a host with no cached options shows no pickers and creates without touching settings', async (t) => {
+  const dom = setupDom();
+  try {
+    const calls = stubSettingsApi(t, { settings: { ...SETTINGS, default_config: {}, known_config_options: [] } });
+    const view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+    await flush();
+    assert.equal(Boolean(document.querySelector('select[data-config-id]')), false, 'nothing to offer yet — the first session reveals the options');
+    typeInto(cwdInput(), '/srv/app');
+    click([...document.querySelectorAll('button')].find((b) => b.textContent === 'Start session'));
+    await flush();
+    assert.equal(calls.put.length, 0, 'no settings write when there is nothing to remember');
+    assert.equal(calls.open.length, 1, 'the session still opens');
     view.unmount();
   } finally {
     dom.cleanup();

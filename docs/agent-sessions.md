@@ -77,6 +77,14 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
 config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 — codex-acp 1.12, claude-agent-acp 0.79 실측) 또는
 `configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
+**고른 설정은 기억된다.** 어댑터 프로세스는 매번 자기 기본값으로 시작하므로, 기억해 두지 않으면 유휴 회수·재접속마다
+approval 모드와 모델이 어댑터 기본값으로 돌아간다. `agent_session_cli_settings.default_config` 에 워크스페이스 × 호스트 × CLI
+로 `{ [configId]: value }` 를 남기고(레거시 `session/set_mode` 는 예약 키 `__mode`), open/prompt payload 의 `config_defaults`
+로 매니저에 실어 보내 세션이 열린 직후 다시 건다. 이미 그 값이면 왕복하지 않고, 어댑터가 더는 제공하지 않는 키는 조용히 건너뛴다.
+선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다 — 덕분에 **새 세션 모달이
+세션을 열기 전에** approval 모드와 모델을 고를 수 있다(그 둘만 모달에 두고, 나머지는 세션 헤더에서 바꾼다).
+`PUT …/settings` 의 `default_config` 는 부분 갱신이고 `null` 은 그 키를 지운다(= 어댑터 기본값으로).
+
 설정 변경(`set_config_option` / `set_mode`)은 프로세스가 없는 세션에도 된다 — 서버가 `starting` 으로 올리고 매니저가
 prompt 와 같은 경로로 먼저 연 뒤 적용하므로 **첫 프롬프트 전에 모델·approval 모드를 고를 수 있다**. 턴 중·대기 중에는 409.
 설정 목록 자체는 어댑터가 살아 있어야 오므로, 세션 페이지에 들어오면 `idle` 세션은 자동으로 한 번 연결한다(`POST …/sessions
@@ -92,7 +100,8 @@ Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + �
 
 ## CLI 설정 (credential 바인딩)
 
-Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 를 정한다
+Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 와 **세션마다 다시 걸 설정**
+(`default_config`, 위 "상호작용" 절 참조)을 정한다
 (`agent_session_cli_settings`, `GET/PUT /api/agent-sessions/hosts/:managerId/:cli/settings`, 화면은 호스트 세션
 목록의 "CLI settings"). 비워 두면 장비 운영자의 CLI 로그인(`claude login` / `codex login`)을 그대로 쓴다.
 
