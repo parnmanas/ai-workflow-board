@@ -2038,10 +2038,11 @@ export const api = {
   },
   getHostCliSettings: (managerId: string, cli: string) =>
     request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`),
-  setHostCliSettings: (managerId: string, cli: string, credentialId: string | null) =>
+  /** `defaultConfig` 는 부분 갱신 — 보낸 키만 바뀌고 null 은 그 키를 지운다(어댑터 기본값으로 되돌림). */
+  setHostCliSettings: (managerId: string, cli: string, credentialId: string | null, defaultConfig?: Record<string, string | boolean | null>) =>
     request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`, {
       method: 'PUT',
-      body: JSON.stringify({ credential_id: credentialId }),
+      body: JSON.stringify({ credential_id: credentialId, ...(defaultConfig ? { default_config: defaultConfig } : {}) }),
     }),
   listHostSessions: (managerId: string, cli: string) =>
     request<AgentSessionSummary[]>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`),

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
-import type { AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
+import type { AgentSessionConfigOption, AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
 import { Button, Input, Modal } from '../common';
 import DirectoryPicker from '../admin/DirectoryPicker';
 import { lastCwdStorageKey } from './sessionList.logic';
@@ -64,6 +64,11 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // 세션 설정(approval 모드·모델). 선택지는 어댑터가 살아 있어야 알 수 있어 서버가 마지막 목록을
+  // 캐시해 준다 — 그래서 세션을 열기 전에도 고를 수 있다. 고른 값은 호스트×CLI 에 기억되고,
+  // 이 세션을 포함해 이후 열리는 모든 세션에 다시 걸린다(프로세스가 회수돼도 유지된다).
+  const [knownOptions, setKnownOptions] = useState<AgentSessionConfigOption[]>([]);
+  const [chosenConfig, setChosenConfig] = useState<Record<string, string | boolean>>({});
 
   // 닫힐 때 폼을 비운다 — 다음에 열릴 때 아래 effect 가 "아직 고른 호스트가 없다" 를
   // 보고 기본값을 채우게 하려는 것이지, 열려 있는 동안 되돌리려는 것이 아니다.
@@ -94,6 +99,36 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     setCwd((prev) => prev || initialCwd || (nextCli ? readLastCwd(host.manager_id, nextCli) : ''));
   }, [open, hosts, managerId, initialManagerId, initialCli, initialCwd]);
 
+  // 호스트/CLI 가 정해지면 그 조합의 기억된 설정과 선택지를 불러온다.
+  useEffect(() => {
+    if (!open || !managerId || !cli) {
+      setKnownOptions([]);
+      setChosenConfig({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const settings = await api.getHostCliSettings(managerId, cli);
+        if (cancelled) return;
+        setKnownOptions(settings.known_config_options ?? []);
+        setChosenConfig(settings.default_config ?? {});
+      } catch {
+        if (cancelled) return;
+        // 설정을 못 읽어도 세션은 열 수 있어야 한다 — 선택기만 감춘다.
+        setKnownOptions([]);
+        setChosenConfig({});
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, managerId, cli]);
+
+  // 모달에서 고르는 것은 세션의 성격을 정하는 둘뿐이다(그 밖의 설정은 세션 헤더에서 바꾼다).
+  const modalOptions = useMemo(
+    () => knownOptions.filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0),
+    [knownOptions],
+  );
+
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
   // 하트비트 TTL 사이에 잠깐 목록에서 빠진 호스트는 선택을 유지한다(다음 하트비트에 돌아온다).
   const selectedHostMissing = !!managerId && !host;
@@ -117,6 +152,15 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     setCreating(true);
     setError(null);
     try {
+      // 고른 설정을 먼저 기억시킨다 — 매니저는 세션을 연 직후 이 값을 다시 걸고, 다음에 다시 열 때도 쓴다.
+      const changed = Object.fromEntries(
+        modalOptions
+          .map((o) => [o.config_id, chosenConfig[o.config_id]] as const)
+          .filter(([, value]) => typeof value === 'string' && value),
+      );
+      if (Object.keys(changed).length) {
+        await api.setHostCliSettings(managerId, cli, host?.cli_settings?.[cli]?.id ?? null, changed);
+      }
       const live = await api.openHostSession(managerId, cli, { cwd: trimmed, title: title.trim() });
       rememberCwd(managerId, cli, trimmed);
       onCreated(live);
@@ -198,6 +242,27 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
             onPick={(picked) => setCwd(picked)}
           />
         )}
+
+        {modalOptions.map((option) => (
+          <div key={option.config_id}>
+            <label htmlFor={`new-session-config-${option.config_id}`} style={labelStyle}>
+              {option.name}
+              <span style={{ color: tokens.colors.textMuted }}> — kept for every session on this host</span>
+            </label>
+            <select
+              id={`new-session-config-${option.config_id}`}
+              data-config-id={option.config_id}
+              style={selectStyle}
+              value={typeof chosenConfig[option.config_id] === 'string' ? String(chosenConfig[option.config_id]) : ''}
+              onChange={(e) => setChosenConfig((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
+            >
+              <option value="">{`${runtimeLabel(cli)} default`}</option>
+              {option.options.map((choice) => (
+                <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
+              ))}
+            </select>
+          </div>
+        ))}
 
         <Input
           label="Title (optional)"

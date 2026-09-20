@@ -218,6 +218,48 @@ function boundValue(value: unknown, depth: number): unknown {
  * 직렬화 바이트가 상한에 들어오도록 **오래된 것부터** 버린다 — 화면은 끝(최근)부터 읽으므로
  * 최근 대화를 지키는 편이 쓸모 있다. 한 건도 못 담을 만큼 큰 이벤트만 남는 경우에도 최소 한 건은 남긴다.
  */
+/**
+ * 마지막 `limit` 건만 들고 있는 링 버퍼. 기록 파일은 수백 MB 까지 자라는데(실측: codex rollout 353MB)
+ * 어차피 화면은 최근 것만 쓴다 — 전부 배열에 쌓은 뒤 잘라내면 파일 크기에 비례해 메모리를 먹는다
+ * (353MB 파일에서 최대 RSS 586MB). 파싱하면서 창(window) 밖으로 나간 건 즉시 버린다.
+ * `total` 은 버린 것까지 포함한 전체 개수 — seq 를 절대 위치로 유지하고 생략 건수를 세는 데 쓴다.
+ */
+export class BoundedHistory<T> {
+  #items: T[] = [];
+  #start = 0;
+  #total = 0;
+  constructor(private readonly limit: number) {}
+
+  push(item: T): void {
+    this.#total += 1;
+    if (this.limit <= 0) return;
+    this.#items.push(item);
+    if (this.#items.length > this.limit) {
+      // 앞을 자주 shift 하면 O(n²) 가 되므로 창의 두 배까지 모았다가 한 번에 접는다.
+      this.#start += 1;
+      if (this.#start >= this.limit) {
+        this.#items = this.#items.slice(this.#start);
+        this.#start = 0;
+      }
+    }
+  }
+
+  /** 남아 있는(최근) 항목. */
+  items(): T[] {
+    return this.#start > 0 ? this.#items.slice(this.#start) : this.#items;
+  }
+
+  /** 버려진 것까지 포함한 전체 개수. */
+  get total(): number {
+    return this.#total;
+  }
+
+  /** 남아 있는 첫 항목의 절대 인덱스(0-based). */
+  get offset(): number {
+    return this.#total - (this.#items.length - this.#start);
+  }
+}
+
 export function fitHistoryBytes<T extends { payload: Record<string, unknown> }>(events: T[], maxBytes: number): T[] {
   let total = 0;
   let firstKept = events.length;
@@ -464,15 +506,14 @@ export class AgentSessionStore {
     const parsed = cli === 'claude' ? await this.#claudeHistory(path, sessionId) : await this.#codexHistory(path, sessionId);
     // payload 크기 정리는 여기 한 곳에서만 한다 — CLI 별 파서가 각자 자르면 한 갈래만 빠뜨려도
     // (실제로 codex 의 배열형 tool 출력이 그랬다) 응답 전체가 서버 상한을 넘어 버려진다.
-    const events = parsed.events.map((e, i) => ({
-      ...e,
-      payload: boundHistoryPayload(e.payload),
-      seq: i + 1,
-      id: `${sessionId}:${i + 1}`,
-    }));
-    const withinCount = events.length > this.#historyLimit ? events.slice(events.length - this.#historyLimit) : events;
-    const kept = fitHistoryBytes(withinCount, HISTORY_BODY_MAX_BYTES);
-    const omitted = events.length - kept.length;
+    // 파서는 이미 최근 `historyLimit` 건만 들고 온다(BoundedHistory) — seq/id 는 절대 위치를 유지해
+    // 같은 세션을 다시 읽어도 앞부분이 변하지 않는 한 같은 이벤트가 같은 id 를 갖는다.
+    const events = parsed.events.map((e, i) => {
+      const absolute = parsed.offset + i + 1;
+      return { ...e, seq: absolute, id: `${sessionId}:${absolute}` };
+    });
+    const kept = fitHistoryBytes(events, HISTORY_BODY_MAX_BYTES);
+    const omitted = parsed.total - kept.length;
     const truncated = omitted > 0;
     if (truncated) {
       kept.unshift({
@@ -493,16 +534,21 @@ export class AgentSessionStore {
     };
   }
 
-  async #claudeHistory(path: string, sessionId: string): Promise<{ events: HistoryEvent[]; title: string; cwd: string; createdAt: string | null }> {
-    const events: HistoryEvent[] = [];
+  async #claudeHistory(path: string, sessionId: string): Promise<{ events: HistoryEvent[]; total: number; offset: number; title: string; cwd: string; createdAt: string | null }> {
+    const events = new BoundedHistory<HistoryEvent>(this.#historyLimit);
     let title = '';
     let firstPrompt = '';
     let cwd = '';
     let createdAt: string | null = null;
     let turnId = '';
+    // payload 크기는 **담는 시점에** 정리한다 — 나중에 한 번에 하면 창 안에 원본 blob 이 그대로 남아
+    // 파일이 클수록 메모리를 먹는다(353MB 세션에서 최대 RSS 584MB). 파서가 갈래마다 따로 자르다
+    // 하나를 빠뜨렸던 전례가 있어(codex 배열형 tool 출력) 갈래가 아니라 이 한 줄에서만 자른다.
     const push = (type: string, payload: Record<string, unknown>, createdAtRec: string | undefined) => {
-      events.push({ id: '', seq: 0, turn_id: turnId, type, payload, created_at: createdAtRec || createdAt || new Date().toISOString() });
+      events.push({ id: '', seq: 0, turn_id: turnId, type, payload: boundHistoryPayload(payload), created_at: createdAtRec || createdAt || new Date().toISOString() });
     };
+    const done = (title: string, cwd: string, createdAt: string | null) =>
+      ({ events: events.items(), total: events.total, offset: events.offset, title, cwd, createdAt });
     for await (const rec of this.#lines(path)) {
       if (!cwd && typeof rec.cwd === 'string') cwd = rec.cwd;
       if (!createdAt && typeof rec.timestamp === 'string') createdAt = rec.timestamp;
@@ -516,7 +562,7 @@ export class AgentSessionStore {
         const content = message.content;
         if (typeof content === 'string') {
           if (isSyntheticPrompt(content)) continue;
-          turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.length}`;
+          turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
           if (!firstPrompt) firstPrompt = content;
           push('user_prompt', { text: content }, ts);
           continue;
@@ -526,7 +572,7 @@ export class AgentSessionStore {
           if (!isRecord(block)) continue;
           if (block.type === 'text' && typeof block.text === 'string') {
             if (isSyntheticPrompt(block.text)) continue;
-            turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.length}`;
+            turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
             if (!firstPrompt) firstPrompt = block.text;
             push('user_prompt', { text: block.text }, ts);
           } else if (block.type === 'tool_result') {
@@ -559,19 +605,22 @@ export class AgentSessionStore {
         }
       }
     }
-    return { events, title: cleanTitle(title || firstPrompt), cwd, createdAt };
+    return done(cleanTitle(title || firstPrompt), cwd, createdAt);
   }
 
-  async #codexHistory(path: string, sessionId: string): Promise<{ events: HistoryEvent[]; title: string; cwd: string; createdAt: string | null }> {
-    const events: HistoryEvent[] = [];
+  async #codexHistory(path: string, sessionId: string): Promise<{ events: HistoryEvent[]; total: number; offset: number; title: string; cwd: string; createdAt: string | null }> {
+    const events = new BoundedHistory<HistoryEvent>(this.#historyLimit);
     let firstPrompt = '';
     let cwd = '';
     let createdAt: string | null = null;
     let turnId = '';
     let turnCounter = 0;
+    // payload 크기는 담는 시점에 정리한다 — 이유는 #claudeHistory 의 같은 자리 주석 참조.
     const push = (type: string, payload: Record<string, unknown>, ts: string | undefined) => {
-      events.push({ id: '', seq: 0, turn_id: turnId, type, payload, created_at: ts || createdAt || new Date().toISOString() });
+      events.push({ id: '', seq: 0, turn_id: turnId, type, payload: boundHistoryPayload(payload), created_at: ts || createdAt || new Date().toISOString() });
     };
+    const done = (title: string, cwd: string, createdAt: string | null) =>
+      ({ events: events.items(), total: events.total, offset: events.offset, title, cwd, createdAt });
     for await (const rec of this.#lines(path)) {
       const payload = isRecord(rec.payload) ? rec.payload : {};
       const ts = typeof rec.timestamp === 'string' ? rec.timestamp : undefined;
@@ -651,7 +700,7 @@ export class AgentSessionStore {
         else if (payload.type === 'turn_aborted') push('turn', { phase: 'finished', stop_reason: 'cancelled' }, ts);
       }
     }
-    return { events, title: cleanTitle(firstPrompt), cwd, createdAt };
+    return done(cleanTitle(firstPrompt), cwd, createdAt);
   }
 
   async *#lines(path: string): AsyncGenerator<Record<string, any>> {

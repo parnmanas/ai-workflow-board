@@ -646,3 +646,41 @@ test('an oversized adapter message drops that message only — the turn finishes
   assert.deepEqual(runner.liveStates().map((s) => s.status), ['ready'], 'the session process survives');
   assert.equal(events.some((e) => e.type === 'error'), false, 'no protocol error is surfaced');
 });
+
+// ─── 기억된 설정(approval 모드·모델)을 열 때마다 다시 건다 ─────────────────────
+//
+// 어댑터 프로세스는 매번 자기 기본값으로 시작한다 — 유휴로 회수되거나 다른 세션에 갔다 오면
+// 사용자의 선택이 사라졌다. 서버가 호스트×CLI 로 기억해 둔 값을 open payload 에 실어 보내고,
+// 러너가 세션을 연 직후 다시 건다.
+test('config_defaults are re-applied when the session opens, and values that no longer exist are ignored', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', {
+    request_id: 'rpc-open-def', session_id: null, cwd,
+    config_defaults: { model: 'fake-smart', mode: 'read-only', fast_mode: true, gone: 'nope', fake_fast: 'wrong-type' },
+  }));
+  const opened = server.rpc('rpc-open-def');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const sid = opened.result.session_id;
+  await waitFor(() => server.states(sid).filter((s) => s.reason === 'config_option').length >= 3, 'defaults applied');
+  const latest = server.states(sid).filter((s) => s.config_options).at(-1).config_options;
+  assert.equal(latest.find((o) => o.config_id === 'model').current_value, 'fake-smart', 'the remembered model is restored');
+  assert.equal(latest.find((o) => o.config_id === 'mode').current_value, 'read-only', 'the remembered approval mode is restored');
+  assert.equal(latest.find((o) => o.config_id === 'fast_mode').current_value, true, 'boolean options too');
+  assert.equal(latest.some((o) => o.config_id === 'gone'), false, 'an option the adapter no longer offers is skipped, not an error');
+  await runner.handle(request('close', { session_id: sid }));
+});
+
+test('re-applying skips options already at the wanted value, and a resumed session gets them too', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  // fake 의 기본값은 model=fake-fast — 같은 값을 주면 왕복도 system 행도 없어야 한다
+  await runner.handle(request('open', { request_id: 'rpc-open-same', session_id: null, cwd, config_defaults: { model: 'fake-fast' } }));
+  const sid = server.rpc('rpc-open-same').result.session_id;
+  assert.equal(server.events(sid).some((e) => e.type === 'system' && /Model set to/.test(e.payload.text)), false, 'no needless round trip when it already matches');
+  await runner.handle(request('close', { session_id: sid }));
+
+  // 기존 CLI 세션을 이어 열 때(session/load)도 같은 복원이 걸린다
+  await runner.handle(request('open', { request_id: 'rpc-open-resume-def', session_id: CLAUDE_ID, config_defaults: { model: 'fake-smart' } }));
+  assert.equal(server.rpc('rpc-open-resume-def').ok, true);
+  await waitFor(() => server.events(CLAUDE_ID).some((e) => e.type === 'system' && e.payload.text === 'Model set to Fake Smart.'), 'restored on resume');
+  await runner.handle(request('close', { session_id: CLAUDE_ID }));
+});

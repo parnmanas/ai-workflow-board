@@ -28,6 +28,23 @@ export class AgentSessionCliSetting {
   @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;
 
+  /**
+   * 이 호스트×CLI 세션을 열 때마다 다시 적용할 설정 — `{ [configId]: string | boolean }` JSON.
+   * approval 모드·모델 같은 선택은 어댑터 프로세스 안에만 살아서, 세션이 유휴로 회수되거나
+   * 화면을 옮겼다 돌아오면 어댑터 기본값으로 되돌아간다. 여기 기억해 두고 open 마다 다시 건다.
+   * 레거시 `session/set_mode` 전용 어댑터를 위해 예약 키 `__mode` 를 쓴다.
+   */
+  @Column({ type: 'text', default: '{}' })
+  default_config: string;
+
+  /**
+   * 마지막으로 본 설정 목록(`AgentSessionConfigOption[]` JSON). 선택지는 어댑터가 살아 있어야
+   * 알 수 있는데, 새 세션 모달은 세션이 열리기 **전에** 골라야 한다 — 그래서 마지막 목록을 남긴다.
+   * 표시용 캐시일 뿐이라 비어 있으면 모달이 그 선택기를 감춘다.
+   */
+  @Column({ type: 'text', default: '[]' })
+  known_config_options: string;
+
   @Column({ type: 'varchar', default: '' })
   updated_by: string;
 

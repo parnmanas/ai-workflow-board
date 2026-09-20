@@ -355,18 +355,47 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
 }
 
 /**
+ * 화면이 들고 있는 트랜스크립트 행 수 상한. 매니저가 기록을 돌려줄 때 쓰는 창(4000)과 같은 크기다 —
+ * 긴 세션은 어차피 최근 대화만 보게 되고, 넘치면 앞에서 버린다. 상한이 없으면 오래 켜 둔 세션에서
+ * 배열이 무한히 자라고(메모리) 매 청크마다 전체를 다시 접느라(buildTranscript) 점점 느려진다.
+ */
+export const LIVE_EVENT_WINDOW = 4000;
+const TRIM_MARKER_ID = 'live:trimmed';
+
+function trimMarker(dropped: number, firstKept: AgentSessionEventRecord | undefined): AgentSessionEventRecord {
+  return {
+    id: TRIM_MARKER_ID,
+    seq: 0,
+    turn_id: '',
+    type: 'system',
+    payload: { text: `Earlier messages trimmed (${dropped} events).`, dropped },
+    created_at: firstKept?.created_at ?? new Date().toISOString(),
+  };
+}
+
+/**
  * 라이브 스트림 행을 트랜스크립트 끝에 붙인다. 기록(history)의 seq 와 라이브 seq 는
  * 서로 다른 번호 공간이라(라이브는 프로세스마다 1 부터) 도착 순서대로 이어 붙이고,
  * id 로만 중복을 거른다. 표시용 seq 는 마지막 값 + 1 로 다시 매긴다.
+ * 상한(`LIVE_EVENT_WINDOW`)을 넘으면 앞에서 버리고, 몇 건이 사라졌는지 한 줄로 남긴다
+ * (기록 쪽의 "Earlier history omitted" 와 같은 규약).
  */
 export function appendLiveEvent(
   events: AgentSessionEventRecord[],
   incoming: AgentSessionEventRecord,
+  limit: number = LIVE_EVENT_WINDOW,
 ): AgentSessionEventRecord[] {
   if (!incoming || !incoming.id) return events;
   if (events.some((e) => e.id === incoming.id)) return events;
   const last = events[events.length - 1];
-  return [...events, { ...incoming, seq: (last?.seq ?? 0) + 1 }];
+  const next = [...events, { ...incoming, seq: (last?.seq ?? 0) + 1 }];
+  const hasMarker = next[0]?.id === TRIM_MARKER_ID;
+  const body = hasMarker ? next.slice(1) : next;
+  if (limit <= 0 || body.length <= limit) return next;
+  const overflow = body.length - limit;
+  const kept = body.slice(overflow);
+  const priorDropped = hasMarker ? Number((next[0].payload as { dropped?: unknown })?.dropped) || 0 : 0;
+  return [trimMarker(priorDropped + overflow, kept[0]), ...kept];
 }
 
 /** 아직 결정되지 않은 가장 최근 permission 블록. */

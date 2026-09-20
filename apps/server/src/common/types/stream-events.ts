@@ -957,6 +957,8 @@ export interface AgentSessionRequestPayload {
   /** set_config_option — ACP session config option id 와 값(select 는 value id, boolean 은 true/false). */
   config_id?: string;
   config_value?: string | boolean;
+  /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode). */
+  config_defaults?: Record<string, string | boolean>;
   /** elicitation — 에이전트 질문/폼에 대한 답. content 는 요청 schema 에 맞는 객체(accept 일 때). */
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';

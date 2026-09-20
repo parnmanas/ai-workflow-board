@@ -17,6 +17,7 @@ import {
   AGENT_SESSION_EVENT_BATCH_MAX,
   AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS,
   AGENT_SESSION_EVENT_TYPES,
+  AGENT_SESSION_MODE_DEFAULT_KEY,
   AGENT_SESSION_PROMPT_MAX_CHARS,
   AGENT_SESSION_STATUSES,
   AGENT_SESSION_WAITING_STATUSES,
@@ -73,6 +74,10 @@ export interface AgentSessionCliSettings {
   supports_credential: boolean;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
+  /** 세션을 열 때마다 다시 걸 설정 — `{ [configId]: value }`, `__mode` 는 레거시 set_mode. */
+  default_config: Record<string, string | boolean>;
+  /** 마지막으로 본 선택지 — 세션이 열리기 전(새 세션 모달)에 고를 수 있게 한다. */
+  known_config_options: AgentSessionConfigOption[];
   updated_at: string | null;
 }
 
@@ -330,6 +335,71 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   // ─── CLI 설정 (credential 바인딩) ──────────────────────────────────────
 
+  /** `default_config` 컬럼 파싱 — 형식이 깨졌으면 빈 값으로 본다(설정 하나 때문에 세션을 막지 않는다). */
+  private parseDefaults(raw: string | null | undefined): Record<string, string | boolean> {
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      const out: Record<string, string | boolean> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (!k || k.length > CONFIG_ID_MAX) continue;
+        if (typeof v === 'boolean') out[k] = v;
+        else if (typeof v === 'string' && v.length <= 256) out[k] = v;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
+  private parseKnownOptions(raw: string | null | undefined): AgentSessionConfigOption[] {
+    if (!raw) return [];
+    try {
+      return normalizeConfigOptions(JSON.parse(raw));
+    } catch {
+      return [];
+    }
+  }
+
+  /** 이 호스트×CLI 의 기억된 설정. 세션을 열 때 payload 에 실어 매니저가 다시 건다. */
+  private async configDefaultsFor(workspaceId: string, managerId: string, cli: string): Promise<Record<string, string | boolean> | undefined> {
+    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    const defaults = this.parseDefaults(row?.default_config);
+    return Object.keys(defaults).length ? defaults : undefined;
+  }
+
+  /**
+   * 사용자가 고른 설정을 기억한다 — 어댑터 프로세스는 유휴 회수·재시작마다 기본값으로 돌아가므로,
+   * 기억해 두지 않으면 "갔다가 돌아오면 또 default" 가 된다. row 가 없으면 만든다(credential 없이도 유효).
+   */
+  private async rememberDefault(workspaceId: string, managerId: string, cli: string, key: string, value: string | boolean, userId: string): Promise<void> {
+    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    const next = { ...this.parseDefaults(row?.default_config), [key]: value };
+    if (row) {
+      row.default_config = JSON.stringify(next);
+      row.updated_by = userId;
+      await this.settings.save(row);
+      return;
+    }
+    await this.settings.save(this.settings.create({
+      workspace_id: workspaceId, manager_id: managerId, cli, credential_id: null,
+      default_config: JSON.stringify(next), known_config_options: '[]', updated_by: userId,
+    }));
+  }
+
+  /** 어댑터가 알려 준 선택지를 캐시한다 — 새 세션 모달이 세션 없이도 고를 수 있게. */
+  private async rememberKnownOptions(managerId: string, cli: string, options: AgentSessionConfigOption[]): Promise<void> {
+    if (!options.length) return;
+    const serialized = JSON.stringify(options);
+    const rows = await this.settings.find({ where: { manager_id: managerId, cli } });
+    for (const row of rows) {
+      if (row.known_config_options === serialized) continue;
+      row.known_config_options = serialized;
+      await this.settings.save(row);
+    }
+  }
+
   private credentialRef(cred: Credential): AgentSessionCredentialRef {
     return { id: cred.id, name: cred.name, provider: cred.provider, scope: cred.workspace_id === null ? 'global' : 'workspace' };
   }
@@ -384,11 +454,20 @@ export class AgentSessionsService implements OnModuleDestroy {
       supports_credential: !!SESSION_CLI_CREDENTIAL_PREFIX[cli],
       credential: current ? this.credentialRef(current) : null,
       candidates: candidates.map((c) => this.credentialRef(c)),
+      default_config: this.parseDefaults(row?.default_config),
+      known_config_options: this.parseKnownOptions(row?.known_config_options),
       updated_at: row ? new Date(row.updated_at).toISOString() : null,
     };
   }
 
-  async setCliSettings(workspaceId: string, userId: string, managerId: string, cli: string, credentialIdInput: unknown): Promise<AgentSessionCliSettings> {
+  async setCliSettings(
+    workspaceId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    credentialIdInput: unknown,
+    defaultConfigInput?: unknown,
+  ): Promise<AgentSessionCliSettings> {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
     await this.requireManagerAgent(managerId);
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
@@ -404,12 +483,33 @@ export class AgentSessionsService implements OnModuleDestroy {
       }
     }
     const existing = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    // `default_config` 는 **부분 갱신**이다 — 모달이 approval 모드만 보내도 기억된 모델 선택이 날아가면 안 된다.
+    // 값이 null 이면 그 키를 지운다(= 어댑터 기본값으로 되돌린다).
+    const patch = defaultConfigInput && typeof defaultConfigInput === 'object' && !Array.isArray(defaultConfigInput)
+      ? (defaultConfigInput as Record<string, unknown>)
+      : null;
+    const mergeDefaults = (current: string | null | undefined): string => {
+      if (!patch) return current ?? '{}';
+      const next = this.parseDefaults(current);
+      for (const [key, value] of Object.entries(patch)) {
+        if (!key || key.length > CONFIG_ID_MAX) continue;
+        if (value === null) delete next[key];
+        else if (typeof value === 'boolean') next[key] = value;
+        else if (typeof value === 'string' && value.length <= 256) next[key] = value;
+        else throw new AgentSessionError(400, 'config_value_invalid', `default_config.${key} must be a string, boolean, or null`);
+      }
+      return JSON.stringify(next);
+    };
     if (existing) {
       existing.credential_id = credentialId;
+      existing.default_config = mergeDefaults(existing.default_config);
       existing.updated_by = userId;
       await this.settings.save(existing);
     } else {
-      await this.settings.save(this.settings.create({ workspace_id: workspaceId, manager_id: managerId, cli, credential_id: credentialId, updated_by: userId }));
+      await this.settings.save(this.settings.create({
+        workspace_id: workspaceId, manager_id: managerId, cli, credential_id: credentialId,
+        default_config: mergeDefaults('{}'), known_config_options: '[]', updated_by: userId,
+      }));
     }
     this.logService.info('AgentSession', `cli settings ${managerId.slice(0, 8)}/${cli}: credential=${credentialId ? credentialId.slice(0, 8) : 'none'} by ${userId.slice(0, 8)}`);
     return this.getCliSettings(workspaceId, managerId, cli);
@@ -577,7 +677,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (!sessionId && !cwd) throw new AgentSessionError(400, 'cwd_required', 'A working directory is required for a new session.');
     const title = String(input.title ?? '').trim().slice(0, TITLE_MAX);
     const credentialId = await this.boundCredentialId(workspaceId, managerId, cli);
-    const result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId }, userId);
+    const configDefaults = await this.configDefaultsFor(workspaceId, managerId, cli);
+    const result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults }, userId);
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
     if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
     const state = await this.seedState(rec, managerId, cli, openedId, {
@@ -636,6 +737,8 @@ export class AgentSessionsService implements OnModuleDestroy {
       turn_id: turnId,
       text,
       credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
+      // prompt 도 세션을 (재)열 수 있는 경로다 — 기억된 설정을 같이 보낸다.
+      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
       driver_user_id: userId,
     });
     return { turn_id: turnId, live };
@@ -725,9 +828,13 @@ export class AgentSessionsService implements OnModuleDestroy {
       throw new AgentSessionError(400, 'config_value_invalid', `"${valueInput}" is not one of the offered values for ${option.name}.`);
     }
     const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
+    // 고른 값을 기억한다 — 어댑터는 프로세스가 회수되면 기본값으로 돌아간다.
+    await this.rememberDefault(workspaceId, managerId, cli, configId, valueInput, userId);
     this.emitRequest({
       manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput,
-      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli), driver_user_id: userId,
+      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
+      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      driver_user_id: userId,
     });
     return this.snapshot(state);
   }
@@ -748,9 +855,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (!modeId) throw new AgentSessionError(400, 'mode_id_required');
     // 살아 있지 않은 세션도 받는다 — 매니저가 먼저 열고(prompt 와 같은 경로) 모드를 적용한다.
     const state = await this.settingsTarget(rec, managerId, cli, sessionId, userId);
+    // 레거시 modes 전용 어댑터를 위해 예약 키로 기억한다(config option 으로 오는 어댑터는 그쪽 id 로 기억된다).
+    await this.rememberDefault(workspaceId, managerId, cli, AGENT_SESSION_MODE_DEFAULT_KEY, modeId, userId);
     this.emitRequest({
       manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId,
-      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli), driver_user_id: userId,
+      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
+      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      driver_user_id: userId,
     });
     return this.snapshot(state);
   }
@@ -998,7 +1109,12 @@ export class AgentSessionsService implements OnModuleDestroy {
           .map((m) => ({ id: m.id, name: typeof m.name === 'string' ? m.name : m.id, description: typeof m.description === 'string' ? m.description : undefined }))
         : [];
     }
-    if (patch.config_options !== undefined) state.config_options = normalizeConfigOptions(patch.config_options);
+    if (patch.config_options !== undefined) {
+      state.config_options = normalizeConfigOptions(patch.config_options);
+      // 선택지는 어댑터가 살아 있어야 알 수 있다 — 새 세션 모달이 세션 없이도 고를 수 있게 남긴다(best-effort).
+      void this.rememberKnownOptions(state.manager_id, state.cli, state.config_options)
+        .catch((err) => this.logService.debug('AgentSession', `known config options cache failed: ${err?.message ?? err}`));
+    }
     if (patch.available_commands !== undefined) state.available_commands = normalizeCommands(patch.available_commands);
     if (patch.resume_supported !== undefined) state.resume_supported = !!patch.resume_supported;
     if (patch.last_error !== undefined) state.last_error = patch.last_error ? String(patch.last_error).slice(0, 4000) : null;

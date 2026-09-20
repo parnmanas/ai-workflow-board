@@ -61,6 +61,8 @@ export interface AgentSessionRequest {
   /** set_config_option */
   config_id?: string;
   config_value?: string | boolean;
+  /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode). */
+  config_defaults?: Record<string, string | boolean>;
   /** elicitation — 에이전트 질문/폼에 대한 답 */
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';
@@ -107,6 +109,9 @@ export interface SessionCredential {
 }
 
 /** CLI → 호환 credential provider 접두어(서버 SESSION_CLI_CREDENTIAL_PREFIX 와 같은 규약). */
+/** `config_defaults` 의 예약 키 — 레거시 `session/set_mode`(config option 이 아닌 modes). 서버와 같은 값. */
+const MODE_DEFAULT_KEY = '__mode';
+
 export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
@@ -767,6 +772,9 @@ export class AgentSessionRunner {
         last_error: null,
         reason: resumed ? 'resumed' : 'opened',
       });
+      // 기억된 설정(approval 모드·모델 …)을 다시 건다 — 어댑터는 프로세스마다 기본값으로 시작하므로
+      // 이걸 하지 않으면 유휴 회수·재접속 때마다 사용자의 선택이 사라진다. 실패해도 세션은 연다.
+      await this.#applyConfigDefaults(live, request.config_defaults);
       this.#touch(live);
       return live;
     } catch (err) {
@@ -823,6 +831,32 @@ export class AgentSessionRunner {
         new Error(`Authentication required for ${cli} on this Runtime Host — run \`${cli} login\` there, or bind a credential in CLI settings.${listed}`),
         { code: 'auth_required' },
       );
+    }
+  }
+
+  /**
+   * 서버가 기억해 둔 설정을 세션에 다시 건다. 어댑터가 이미 그 값이면 건너뛴다(불필요한 왕복·system 행 방지).
+   * 목록에 없는 키는 조용히 무시한다 — 어댑터를 바꾸거나 업그레이드하면 없어진 옵션이 있을 수 있다.
+   */
+  async #applyConfigDefaults(live: LiveSession, defaults: Record<string, string | boolean> | undefined): Promise<void> {
+    if (!defaults) return;
+    for (const [key, value] of Object.entries(defaults)) {
+      try {
+        if (key === MODE_DEFAULT_KEY) {
+          if (typeof value !== 'string' || !value || live.currentMode === value) continue;
+          if (!live.availableModes.some((m) => m.id === value)) continue;
+          await live.client.request('session/set_mode', { sessionId: live.sessionId, modeId: value }, { timeoutMs: this.#options.requestTimeoutMs });
+          live.currentMode = value;
+          continue;
+        }
+        const option = live.configOptions.find((o) => o.config_id === key);
+        if (!option || option.current_value === value) continue;
+        if (option.type === 'select' && (typeof value !== 'string' || (option.options.length > 0 && !option.options.some((o) => o.value === value)))) continue;
+        if (option.type === 'boolean' && typeof value !== 'boolean') continue;
+        await this.#setConfigOption(live, key, value);
+      } catch (err: any) {
+        log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] could not restore ${key}: ${redactSecrets(err?.message ?? String(err))}`);
+      }
     }
   }
 

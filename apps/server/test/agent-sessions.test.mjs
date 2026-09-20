@@ -607,7 +607,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   await call(`${base}/api/agent/sessions/rpc/${historyReq.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ok: true, result: {
     session: { session_id: sid, cwd: '/home/parn/repo', title: 'Interactive', updated_at: '2026-09-19T00:00:00.000Z', source: 'awb' },
     events: [], truncated: false,
-    live: { session_id: sid, status: 'ready', cwd: '/home/parn/repo', title: 'Interactive', resume_supported: true, current_mode: 'agent', available_modes: [{ id: 'agent', name: 'Agent' }, { id: 'read-only', name: 'Read only' }], config_options: [{ ...configOptions[0], current_value: 'gpt-smart' }], available_commands: [{ name: 'status', description: 'Status' }] },
+    live: { session_id: sid, status: 'ready', cwd: '/home/parn/repo', title: 'Interactive', resume_supported: true, current_mode: 'agent', available_modes: [{ id: 'agent', name: 'Agent' }, { id: 'read-only', name: 'Read only' }], config_options: [{ ...configOptions[0], current_value: 'gpt-smart' }, { ...configOptions[1], current_value: true }], available_commands: [{ name: 'status', description: 'Status' }] },
   } }) });
   const detail = await detailCall;
   assert.equal(detail.status, 200, detail.text);
@@ -660,6 +660,47 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.equal(blockedByHeartbeat.status, 409, 'a heartbeat-reported waiting state blocks prompting');
   assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'ready' }])).status < 300);
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'ready' && d.reason === 'heartbeat', 4000);
+
+  // 5b. 고른 설정은 호스트×CLI 에 기억되고, 이후 open/prompt payload 에 실려 매니저가 다시 건다.
+  //     이게 없으면 어댑터 프로세스가 회수될 때마다(유휴/다른 세션 왕복) 사용자의 선택이 사라진다.
+  const settingsUrl = `${base}/api/agent-sessions/hosts/${managerId}/codex/settings`;
+  const beforeRemember = await call(settingsUrl, { headers: ownerHeaders });
+  assert.equal(beforeRemember.status, 200, beforeRemember.text);
+  // `__mode` 는 레거시 set_mode 의 예약 키다 — 위 3b 의 mode 변경이 여기 기억됐다(턴 중 409 는 기억되지 않는다).
+  assert.deepEqual(beforeRemember.body.default_config, { model: 'gpt-smart', fast_mode: true, __mode: 'read-only' }, 'the earlier config-option and mode calls were remembered');
+  // 캐시는 "마지막으로 어댑터가 말한 전체 목록" 이다(ACP 의 config_option_update 는 항상 전량을 보낸다).
+  assert.deepEqual(beforeRemember.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'the adapter option list is cached for the new-session modal');
+  assert.deepEqual(beforeRemember.body.known_config_options.find((o) => o.config_id === 'model').options.map((o) => o.value), ['gpt-fast', 'gpt-smart'], 'with its choices, so the modal can render a picker before any session exists');
+  assert.equal(requests.filter((r) => r.op === 'set_config_option').at(-1).config_defaults.model, 'gpt-smart', 'the op carries the full remembered set');
+
+  // 모달이 세션을 열기 전에 고르는 경로 — PUT 은 부분 갱신이고 null 은 키를 지운다
+  const putDefaults = await call(settingsUrl, {
+    method: 'PUT', headers: ownerHeaders,
+    body: JSON.stringify({ credential_id: null, default_config: { mode: 'read-only' } }),
+  });
+  assert.equal(putDefaults.status, 200, putDefaults.text);
+  assert.deepEqual(putDefaults.body.default_config, { model: 'gpt-smart', fast_mode: true, __mode: 'read-only', mode: 'read-only' }, 'a partial patch keeps the other remembered values');
+  const cleared = await call(settingsUrl, {
+    method: 'PUT', headers: ownerHeaders,
+    body: JSON.stringify({ credential_id: null, default_config: { fast_mode: null } }),
+  });
+  assert.equal(cleared.body.default_config.fast_mode, undefined, 'null clears a key (back to the adapter default)');
+  const badDefault = await call(settingsUrl, {
+    method: 'PUT', headers: ownerHeaders,
+    body: JSON.stringify({ credential_id: null, default_config: { mode: { nested: true } } }),
+  });
+  assert.equal(badDefault.status, 400, 'only strings, booleans and null are storable');
+
+  // 새로 여는 세션의 open payload 에 실린다
+  const openWithDefaults = call(`${sessionsUrl}`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ cwd: '/home/parn/repo' }) });
+  await waitFor(() => requests.some((r) => r.op === 'open' && r.cwd === '/home/parn/repo'), 'open rpc');
+  const openReq = requests.find((r) => r.op === 'open' && r.cwd === '/home/parn/repo');
+  assert.deepEqual(openReq.config_defaults, { model: 'gpt-smart', __mode: 'read-only', mode: 'read-only' }, 'the manager is told what to restore');
+  await call(`${base}/api/agent/sessions/rpc/${openReq.request_id}`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({ manager_id: managerId, ok: true, result: { session_id: 'codex-thread-defaults', cwd: '/home/parn/repo', status: 'ready' } }),
+  });
+  assert.equal((await openWithDefaults).status, 201);
 
   // 6. 서버가 처음 보는 세션에 매니저가 먼저 말을 걸면 상태는 배치에서 읽는다 — system 행 하나로 busy 유령을 만들지 않는다
   const { AgentSessionsService } = await import(new URL('../dist/modules/agent-sessions/agent-sessions.service.js', import.meta.url));

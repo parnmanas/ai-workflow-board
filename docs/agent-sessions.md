@@ -77,6 +77,14 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
 config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 — codex-acp 1.12, claude-agent-acp 0.79 실측) 또는
 `configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
+**고른 설정은 기억된다.** 어댑터 프로세스는 매번 자기 기본값으로 시작하므로, 기억해 두지 않으면 유휴 회수·재접속마다
+approval 모드와 모델이 어댑터 기본값으로 돌아간다. `agent_session_cli_settings.default_config` 에 워크스페이스 × 호스트 × CLI
+로 `{ [configId]: value }` 를 남기고(레거시 `session/set_mode` 는 예약 키 `__mode`), open/prompt payload 의 `config_defaults`
+로 매니저에 실어 보내 세션이 열린 직후 다시 건다. 이미 그 값이면 왕복하지 않고, 어댑터가 더는 제공하지 않는 키는 조용히 건너뛴다.
+선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다 — 덕분에 **새 세션 모달이
+세션을 열기 전에** approval 모드와 모델을 고를 수 있다(그 둘만 모달에 두고, 나머지는 세션 헤더에서 바꾼다).
+`PUT …/settings` 의 `default_config` 는 부분 갱신이고 `null` 은 그 키를 지운다(= 어댑터 기본값으로).
+
 설정 변경(`set_config_option` / `set_mode`)은 프로세스가 없는 세션에도 된다 — 서버가 `starting` 으로 올리고 매니저가
 prompt 와 같은 경로로 먼저 연 뒤 적용하므로 **첫 프롬프트 전에 모델·approval 모드를 고를 수 있다**. 턴 중·대기 중에는 409.
 설정 목록 자체는 어댑터가 살아 있어야 오므로, 세션 페이지에 들어오면 `idle` 세션은 자동으로 한 번 연결한다(`POST …/sessions
@@ -92,7 +100,8 @@ Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + �
 
 ## CLI 설정 (credential 바인딩)
 
-Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 를 정한다
+Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 와 **세션마다 다시 걸 설정**
+(`default_config`, 위 "상호작용" 절 참조)을 정한다
 (`agent_session_cli_settings`, `GET/PUT /api/agent-sessions/hosts/:managerId/:cli/settings`, 화면은 호스트 세션
 목록의 "CLI settings"). 비워 두면 장비 운영자의 CLI 로그인(`claude login` / `codex login`)을 그대로 쓴다.
 
@@ -130,6 +139,20 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
 - 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
   턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
 - 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
+
+### 긴 세션 (기록 창과 라이브 창)
+
+기록 파일은 수백 MB 까지 자란다(실측: rolf 의 codex rollout 353MB, ralf 176MB). 어느 쪽도 통째로 다루지 않는다.
+
+- **매니저**: 파싱하면서 최근 `historyEventLimit`(4000) 건만 `BoundedHistory` 에 들고, 창 밖으로 나간 건 즉시 버린다.
+  payload 크기(`boundHistoryPayload`)도 **담는 시점에** 자른다 — 나중에 한 번에 자르면 창 안에 원본 blob 이 남아
+  파일 크기만큼 메모리를 먹는다(353MB 세션에서 최대 RSS 586MB → 293MB, 3.1s → 2.0s). 그 다음 바이트 상한
+  (`HISTORY_BODY_MAX_BYTES` 6MB)에 맞춰 다시 오래된 것부터 버리고, `Earlier history omitted (N events)` 한 줄을 앞에 붙인다.
+  `seq`/`id` 는 창 안 위치가 아니라 **절대 위치**다 — 앞부분이 그대로인 한 같은 이벤트가 같은 id 를 가져야 화면이
+  라이브 행과 중복을 거를 수 있다.
+- **화면**: 라이브 행도 `LIVE_EVENT_WINDOW`(4000)을 넘으면 앞에서 버리고 `Earlier messages trimmed (N events)` 한 줄을
+  남긴다(마커는 항상 하나, 누적 개수만 올라간다). 상한이 없으면 오래 켜 둔 세션에서 배열이 무한히 자라고
+  매 스트림 청크마다 전체를 다시 접느라(`buildTranscript`) 점점 느려진다.
 
 ### 어댑터의 MCP 연결 알림 (`mcp_startup.<server>`)
 
