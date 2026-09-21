@@ -59,7 +59,9 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   기존 세션은 `session/load`(cwd 는 기록에서), 새 세션은 `session/new`. load 재생분은 버린다(UI 가 history 로 이미 가짐).
   유휴 30분(`config.agent_sessions.idle_minutes`) 또는 close 로 프로세스 회수 → 상태 idle/closed, 다음 prompt 가 다시 연다.
 - **클라이언트 `components/sessions`** — 호스트 목록 → 호스트×CLI 세션 목록(장비의 기록) → 트랜스크립트(history + 라이브
-  스트림) + 컴포저. 권한 카드 버튼이 `POST …/permission` 을 부른다. 라이브 행은 도착 순서로 붙이고 id 로만 중복을 거른다.
+  스트림) + 컴포저. 목록은 최근 3일(`SESSION_RECENCY_WINDOW_MS`)을 기준으로 접는다 — **세션 행과 작업 폴더 그룹이 같은 창**을
+  쓴다(`splitRecentSessions` / `splitRecentCwdGroups`). 사이드바가 폴더는 전부 펼쳐 놓고 세션만 접던 어긋남을 없앤 것이고,
+  둘 다 "전부 오래됐으면 가장 최신 하나는 남긴다" 를 지켜 빈 목록이 되지 않는다. 권한 카드 버튼이 `POST …/permission` 을 부른다. 라이브 행은 도착 순서로 붙이고 id 로만 중복을 거른다.
 
 ## 상호작용 (모델 선택 · slash command · 질문/폼 · plan)
 

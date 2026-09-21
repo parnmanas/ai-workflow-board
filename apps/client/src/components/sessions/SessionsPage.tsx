@@ -20,7 +20,7 @@ import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionComposer from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
-import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessionList.logic';
+import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -181,8 +181,6 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
 
 // ─── 호스트 세션 목록 — cwd 기준 그룹 ─────────────────────────────────────
 
-const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-
 function CwdGroupCard({ group, wsId, managerId, onNew }: {
   group: CwdGroup; wsId: string; managerId: string; onNew: (cwd: string) => void;
 }) {
@@ -190,15 +188,8 @@ function CwdGroupCard({ group, wsId, managerId, onNew }: {
   const [showOlder, setShowOlder] = useState(false);
   const latestTime = group.sessions[0]?.updated_at;
 
-  const cutoff = Date.now() - THREE_DAYS_MS;
-  const recentSessions = group.sessions.filter(
-    (s) => s.updated_at && new Date(s.updated_at).getTime() >= cutoff,
-  );
-  // Always show at least the newest session even if everything is old
-  const alwaysVisible = recentSessions.length > 0 ? recentSessions : group.sessions.slice(0, 1);
-  const hiddenSessions = recentSessions.length > 0
-    ? group.sessions.filter((s) => !s.updated_at || new Date(s.updated_at).getTime() < cutoff)
-    : group.sessions.slice(1);
+  // 사이드바와 같은 창을 쓴다(splitRecentSessions) — 두 곳이 어긋나면 같은 폴더가 서로 다르게 보인다.
+  const { visible: alwaysVisible, hidden: hiddenSessions } = splitRecentSessions(group.sessions);
   const displayed = showOlder ? group.sessions : alwaysVisible;
 
   return (
