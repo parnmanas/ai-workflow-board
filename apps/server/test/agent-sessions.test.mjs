@@ -635,11 +635,18 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const idleMode = await call(`${sessionsUrl}/${idleSid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'read-only' }) });
   assert.equal(idleMode.status, 202, idleMode.text);
   assert.equal(requests.filter((r) => r.op === 'set_mode').at(-1).session_id, idleSid);
-  // 턴 중(busy)에는 설정을 바꿀 수 없다 — 위 history 답이 ready 로 되돌렸으므로 매니저가 다시 busy 를 알린 상황을 만든다
+  // 턴 중에도 설정을 바꿀 수 있다 — 어댑터가 받아들이고(codex-acp 실측), 계속 묻는 게 번거로워
+  // "Approve for me" 로 옮기고 싶은 순간이 바로 그때다. 승인 대기 중에도 마찬가지.
   assert.equal((await relay({ state: { status: 'busy', reason: 'turn_started' } })).live.status, 'busy');
   const busyMode = await call(`${sessionsUrl}/${sid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'read-only' }) });
-  assert.equal(busyMode.status, 409, 'settings cannot change mid-turn');
-  assert.equal(busyMode.body.error, 'session_busy');
+  assert.equal(busyMode.status, 202, `mid-turn mode change is accepted: ${busyMode.text}`);
+  assert.equal(busyMode.body.status, 'busy', 'and it does not disturb the running turn');
+  assert.equal(requests.filter((r) => r.op === 'set_mode').at(-1).mode_id, 'read-only');
+  assert.equal((await relay({ state: { status: 'awaiting_permission', reason: 'permission' } })).live.status, 'awaiting_permission');
+  const waitingModel = await call(`${sessionsUrl}/${sid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'gpt-fast' }) });
+  assert.equal(waitingModel.status, 202, `a change while a permission is pending is accepted: ${waitingModel.text}`);
+  assert.equal(waitingModel.body.status, 'awaiting_permission', 'the pending approval is untouched');
+  assert.equal((await relay({ state: { status: 'ready', reason: 'turn_finished' } })).live.status, 'ready');
 
   // 4. awaiting_input 도 유령 되돌림 대상이다 — 매니저 재시작이면 idle 로
   assert.equal((await relay({ state: { status: 'awaiting_input', reason: 'elicitation' } })).live.status, 'awaiting_input');
@@ -657,8 +664,10 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   });
   assert.equal((await relay({ state: { status: 'busy', reason: 'turn_started' } })).live.status, 'busy');
   assert.ok((await heartbeatWith(undefined)).status < 300);
+  // 구버전 매니저는 이 필드를 안 보낸다 — 그 하트비트는 상태를 건드리지 않아야 한다(스냅샷으로 확인).
   const stillBusy = await call(`${sessionsUrl}/${sid}/mode`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ mode_id: 'agent' }) });
-  assert.equal(stillBusy.status, 409, 'an old manager that does not report agent_sessions changes nothing');
+  assert.equal(stillBusy.status, 202, stillBusy.text);
+  assert.equal(stillBusy.body.status, 'busy', 'an old manager that does not report agent_sessions changes nothing');
   assert.ok((await heartbeatWith([])).status < 300, 'heartbeat: no live sessions');
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'idle' && d.reason === 'heartbeat', 4000);
   assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'awaiting_permission' }])).status < 300, 'heartbeat: waiting for approval');
@@ -671,14 +680,24 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   // 5b. 고른 설정은 호스트×CLI 에 기억되고, 이후 open/prompt payload 에 실려 매니저가 다시 건다.
   //     이게 없으면 어댑터 프로세스가 회수될 때마다(유휴/다른 세션 왕복) 사용자의 선택이 사라진다.
   const settingsUrl = `${base}/api/agent-sessions/hosts/${managerId}/codex/settings`;
+  // credential 을 한 번도 묶지 않은 호스트에도 선택지 캐시가 남아야 한다 — row 가 없다고 비워 두면
+  // 새 세션 모달에 아무 선택기도 뜨지 않는다(그 호스트는 row 자체가 없다).
+  const freshWs = await createWorkspace(app, getDataSourceToken, 'agent-sessions-fresh');
+  const freshHeaders = { ...ownerHeaders, 'X-Workspace-Id': freshWs.id };
+  const freshSettings = await call(`${base}/api/agent-sessions/hosts/${managerId}/codex/settings`, { headers: freshHeaders });
+  assert.equal(freshSettings.status, 200, freshSettings.text);
+  assert.deepEqual(freshSettings.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'a workspace with no settings row still sees what the live session offers');
+  assert.deepEqual(freshSettings.body.default_config, {}, 'but nothing is remembered for it yet');
+
   const beforeRemember = await call(settingsUrl, { headers: ownerHeaders });
   assert.equal(beforeRemember.status, 200, beforeRemember.text);
   // `__mode` 는 레거시 set_mode 의 예약 키다 — 위 3b 의 mode 변경이 여기 기억됐다(턴 중 409 는 기억되지 않는다).
-  assert.deepEqual(beforeRemember.body.default_config, { model: 'gpt-smart', fast_mode: true, __mode: 'read-only' }, 'the earlier config-option and mode calls were remembered');
+  // 위에서 고른 값들이 그대로 남아 있다(키마다 마지막 값). `__mode` 는 레거시 set_mode 의 예약 키다.
+  assert.deepEqual(beforeRemember.body.default_config, { model: 'gpt-fast', fast_mode: true, __mode: 'agent' }, 'every config-option and mode call was remembered');
   // 캐시는 "마지막으로 어댑터가 말한 전체 목록" 이다(ACP 의 config_option_update 는 항상 전량을 보낸다).
   assert.deepEqual(beforeRemember.body.known_config_options.map((o) => o.config_id), ['model', 'fast_mode'], 'the adapter option list is cached for the new-session modal');
   assert.deepEqual(beforeRemember.body.known_config_options.find((o) => o.config_id === 'model').options.map((o) => o.value), ['gpt-fast', 'gpt-smart'], 'with its choices, so the modal can render a picker before any session exists');
-  assert.equal(requests.filter((r) => r.op === 'set_config_option').at(-1).config_defaults.model, 'gpt-smart', 'the op carries the full remembered set');
+  assert.equal(requests.filter((r) => r.op === 'set_config_option').at(-1).config_defaults.model, 'gpt-fast', 'the op carries the full remembered set');
 
   // 모달이 세션을 열기 전에 고르는 경로 — PUT 은 부분 갱신이고 null 은 키를 지운다
   const putDefaults = await call(settingsUrl, {
@@ -686,7 +705,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
     body: JSON.stringify({ credential_id: null, default_config: { mode: 'read-only' } }),
   });
   assert.equal(putDefaults.status, 200, putDefaults.text);
-  assert.deepEqual(putDefaults.body.default_config, { model: 'gpt-smart', fast_mode: true, __mode: 'read-only', mode: 'read-only' }, 'a partial patch keeps the other remembered values');
+  assert.deepEqual(putDefaults.body.default_config, { model: 'gpt-fast', fast_mode: true, __mode: 'agent', mode: 'read-only' }, 'a partial patch keeps the other remembered values');
   const cleared = await call(settingsUrl, {
     method: 'PUT', headers: ownerHeaders,
     body: JSON.stringify({ credential_id: null, default_config: { fast_mode: null } }),
@@ -702,7 +721,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const openWithDefaults = call(`${sessionsUrl}`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ cwd: '/home/parn/repo' }) });
   await waitFor(() => requests.some((r) => r.op === 'open' && r.cwd === '/home/parn/repo'), 'open rpc');
   const openReq = requests.find((r) => r.op === 'open' && r.cwd === '/home/parn/repo');
-  assert.deepEqual(openReq.config_defaults, { model: 'gpt-smart', __mode: 'read-only', mode: 'read-only' }, 'the manager is told what to restore');
+  assert.deepEqual(openReq.config_defaults, { model: 'gpt-fast', __mode: 'agent', mode: 'read-only' }, 'the manager is told what to restore');
   await call(`${base}/api/agent/sessions/rpc/${openReq.request_id}`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({ manager_id: managerId, ok: true, result: { session_id: 'codex-thread-defaults', cwd: '/home/parn/repo', status: 'ready' } }),

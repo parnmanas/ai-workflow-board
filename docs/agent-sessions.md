@@ -82,12 +82,16 @@ config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 �
 approval 모드와 모델이 어댑터 기본값으로 돌아간다. `agent_session_cli_settings.default_config` 에 워크스페이스 × 호스트 × CLI
 로 `{ [configId]: value }` 를 남기고(레거시 `session/set_mode` 는 예약 키 `__mode`), open/prompt payload 의 `config_defaults`
 로 매니저에 실어 보내 세션이 열린 직후 다시 건다. 이미 그 값이면 왕복하지 않고, 어댑터가 더는 제공하지 않는 키는 조용히 건너뛴다.
-선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다 — 덕분에 **새 세션 모달이
-세션을 열기 전에** approval 모드와 모델을 고를 수 있다(그 둘만 모달에 두고, 나머지는 세션 헤더에서 바꾼다).
+선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다(세션을 열 때 그 워크스페이스에
+저장하고, 아직 비었으면 지금 살아 있는 세션의 목록으로 답한다 — credential 을 묶은 적 없는 호스트는 row 자체가 없어서 예전엔
+캐시가 영영 비어 있었다). 덕분에 **세션을 열기 전에** approval 모드와 모델을 고를 수 있다: 새 세션 모달과 호스트 목록의
+"CLI settings" 패널 두 곳에서. 그 둘만 여기 두고 나머지 설정은 세션 헤더에서 바꾼다.
 `PUT …/settings` 의 `default_config` 는 부분 갱신이고 `null` 은 그 키를 지운다(= 어댑터 기본값으로).
 
-설정 변경(`set_config_option` / `set_mode`)은 프로세스가 없는 세션에도 된다 — 서버가 `starting` 으로 올리고 매니저가
-prompt 와 같은 경로로 먼저 연 뒤 적용하므로 **첫 프롬프트 전에 모델·approval 모드를 고를 수 있다**. 턴 중·대기 중에는 409.
+설정 변경(`set_config_option` / `set_mode`)은 **언제든 된다**. 프로세스가 없으면 서버가 `starting` 으로 올리고 매니저가
+prompt 와 같은 경로로 먼저 연 뒤 적용하므로 첫 프롬프트 전에도 고를 수 있고, **턴 중에도 승인 대기 중에도 바꿀 수 있다** —
+어댑터가 그 상태에서도 받아들이고(codex-acp 1.12 실측: 턴 중 `set_config_option`·`set_mode` 모두 성공, 대기 중인 permission
+도 그대로 유지), 오히려 그때가 가장 바꾸고 싶은 순간이다(계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우).
 설정 목록 자체는 어댑터가 살아 있어야 오므로, 세션 페이지에 들어오면 `idle` 세션은 자동으로 한 번 연결한다(`POST …/sessions
 {session_id}` → session/load, 터미널의 `--resume` 과 같다). `closed`/`error` 는 헤더의 Connect/Reconnect 버튼으로만 다시 연다.
 

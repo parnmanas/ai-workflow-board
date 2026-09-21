@@ -20,7 +20,6 @@ import {
   AGENT_SESSION_MODE_DEFAULT_KEY,
   AGENT_SESSION_PROMPT_MAX_CHARS,
   AGENT_SESSION_STATUSES,
-  AGENT_SESSION_WAITING_STATUSES,
   agentSessionAcceptsPrompt,
   type AgentSessionAuth,
   type AgentSessionCommand,
@@ -474,6 +473,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
     const candidates = await this.candidateCredentials(workspaceId, cli);
     const current = row?.credential_id ? candidates.find((c) => c.id === row.credential_id) ?? null : null;
+    const cached = this.parseKnownOptions(row?.known_config_options);
     return {
       manager_id: managerId,
       cli,
@@ -481,7 +481,9 @@ export class AgentSessionsService implements OnModuleDestroy {
       credential: current ? this.credentialRef(current) : null,
       candidates: candidates.map((c) => this.credentialRef(c)),
       default_config: this.parseDefaults(row?.default_config),
-      known_config_options: this.parseKnownOptions(row?.known_config_options),
+      // 캐시가 아직 비었으면 지금 살아 있는 세션이 아는 선택지를 그대로 쓴다 — 서버가 재시작한 직후나
+      // 이 호스트에서 세션을 연 적이 없는 워크스페이스에서도 바로 고를 수 있다.
+      known_config_options: cached.length ? cached : this.liveConfigOptions(managerId, cli),
       updated_at: row ? new Date(row.updated_at).toISOString() : null,
     };
   }
@@ -539,6 +541,16 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     this.logService.info('AgentSession', `cli settings ${managerId.slice(0, 8)}/${cli}: credential=${credentialId ? credentialId.slice(0, 8) : 'none'} by ${userId.slice(0, 8)}`);
     return this.getCliSettings(workspaceId, managerId, cli);
+  }
+
+  /** 지금 살아 있는 이 호스트×CLI 세션 중 가장 최근 것이 아는 설정 선택지. */
+  private liveConfigOptions(managerId: string, cli: string): AgentSessionConfigOption[] {
+    let best: LiveState | null = null;
+    for (const state of this.live.values()) {
+      if (state.manager_id !== managerId || state.cli !== cli || !state.config_options.length) continue;
+      if (!best || state.updated_at > best.updated_at) best = state;
+    }
+    return best?.config_options ?? [];
   }
 
   private async boundCredentialId(workspaceId: string, managerId: string, cli: string): Promise<string | null> {
@@ -726,6 +738,9 @@ export class AgentSessionsService implements OnModuleDestroy {
       last_error: null,
     });
     state.driver_user_id = userId;
+    // 선택지를 이 워크스페이스에 남긴다(best-effort) — 다음에 새 세션 모달이 세션 없이도 고를 수 있게.
+    await this.persistKnownOptions(workspaceId, managerId, cli, state.config_options)
+      .catch((err) => this.logService.debug('AgentSession', `known config options persist failed: ${err?.message ?? err}`));
     return this.emitUpdate(state, 'opened');
   }
 
@@ -895,15 +910,16 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /**
-   * 설정 변경(set_mode / set_config_option)의 대상 상태. 진행 중(busy / 대기)이면 409, 프로세스가 없으면
-   * prompt 처럼 `starting` 으로 올려 두고 매니저가 열게 한다 — 첫 프롬프트 전에 모델·approval 모드를 고를 수 있다.
+   * 설정 변경(set_mode / set_config_option)의 대상 상태.
+   *
+   * **턴 중에도 바꿀 수 있다.** 어댑터는 진행 중인 턴에도, permission 을 기다리는 중에도
+   * `session/set_config_option` · `session/set_mode` 를 받아들인다(codex-acp 1.12 실측). 오히려 그때가
+   * 가장 바꾸고 싶은 순간이다 — 계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우.
+   * 프로세스가 없으면 prompt 처럼 `starting` 으로 올려 두고 매니저가 연다(첫 프롬프트 전에도 고를 수 있다).
    */
   private async settingsTarget(rec: InstanceRecord, managerId: string, cli: string, sessionId: string, userId: string): Promise<LiveState> {
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: userId });
-    if (state.status === 'busy' || AGENT_SESSION_WAITING_STATUSES.has(state.status)) {
-      throw new AgentSessionError(409, 'session_busy', 'A turn is in progress — change settings after it finishes.');
-    }
     state.driver_user_id = userId;
     if (state.status === 'idle' || state.status === 'closed' || state.status === 'error') {
       state.status = 'starting';
@@ -912,6 +928,27 @@ export class AgentSessionsService implements OnModuleDestroy {
       this.emitUpdate(state, 'settings');
     }
     return state;
+  }
+
+  /**
+   * 어댑터가 알려 준 선택지를 이 워크스페이스에 남긴다. 세션 목록/모달은 세션이 열리기 **전에** 골라야
+   * 하는데 선택지는 어댑터가 살아 있어야 알 수 있기 때문이다. row 가 없으면 만든다 — credential 을 한 번도
+   * 묶지 않은 호스트에는 row 자체가 없어서, 예전엔 캐시가 영영 비어 있었고 모달에 아무 선택기도 뜨지 않았다.
+   */
+  private async persistKnownOptions(workspaceId: string, managerId: string, cli: string, options: AgentSessionConfigOption[]): Promise<void> {
+    if (!options.length) return;
+    const serialized = JSON.stringify(options);
+    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    if (row) {
+      if (row.known_config_options === serialized) return;
+      row.known_config_options = serialized;
+      await this.settings.save(row);
+      return;
+    }
+    await this.settings.save(this.settings.create({
+      workspace_id: workspaceId, manager_id: managerId, cli, credential_id: null,
+      default_config: '{}', known_config_options: serialized, updated_by: '',
+    }));
   }
 
   async close(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
