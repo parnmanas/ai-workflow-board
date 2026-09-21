@@ -121,6 +121,21 @@ export type AcpSetConfigOptionRequest =
   | { sessionId: string; configId: string; type: 'id'; value: string }
   | { sessionId: string; configId: string; type: 'boolean'; value: boolean };
 
+/**
+ * `_auth/status_update` — 어댑터가 자기 로그인 신원을 알려 주는 push 전용 알림
+ * (claude-agent-acp · codex-acp 가 같은 `_meta` 확장을 구현한다). 연결 단위이고 요청 경로는
+ * 없다. 바뀔 때만 오고, "모른다" 는 침묵으로 표현된다 — `kind:'none'` 은 "로그아웃됨" 이라는 값이다.
+ */
+export const ACP_AUTH_STATUS_METHOD = '_auth/status_update';
+
+export interface AcpAuthStatus {
+  kind: string;
+  label: string;
+  detail?: string;
+  account?: { email?: string; organization?: string; plan?: string };
+  [key: string]: unknown;
+}
+
 export interface AcpAvailableCommand {
   name: string;
   description?: string;

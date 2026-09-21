@@ -59,7 +59,9 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   기존 세션은 `session/load`(cwd 는 기록에서), 새 세션은 `session/new`. load 재생분은 버린다(UI 가 history 로 이미 가짐).
   유휴 30분(`config.agent_sessions.idle_minutes`) 또는 close 로 프로세스 회수 → 상태 idle/closed, 다음 prompt 가 다시 연다.
 - **클라이언트 `components/sessions`** — 호스트 목록 → 호스트×CLI 세션 목록(장비의 기록) → 트랜스크립트(history + 라이브
-  스트림) + 컴포저. 권한 카드 버튼이 `POST …/permission` 을 부른다. 라이브 행은 도착 순서로 붙이고 id 로만 중복을 거른다.
+  스트림) + 컴포저. 목록은 최근 3일(`SESSION_RECENCY_WINDOW_MS`)을 기준으로 접는다 — **세션 행과 작업 폴더 그룹이 같은 창**을
+  쓴다(`splitRecentSessions` / `splitRecentCwdGroups`). 사이드바가 폴더는 전부 펼쳐 놓고 세션만 접던 어긋남을 없앤 것이고,
+  둘 다 "전부 오래됐으면 가장 최신 하나는 남긴다" 를 지켜 빈 목록이 되지 않는다. 권한 카드 버튼이 `POST …/permission` 을 부른다. 라이브 행은 도착 순서로 붙이고 id 로만 중복을 거른다.
 
 ## 상호작용 (모델 선택 · slash command · 질문/폼 · plan)
 
@@ -71,6 +73,7 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 | `available_commands_update` | 스냅샷 `available_commands[]` (`name, description, input_hint?`) | 컴포저에서 `/` 를 치면 자동완성(↑/↓, Enter/Tab 선택, Esc). 선택은 텍스트만 채우고 전송하지 않는다. 명령은 프롬프트 텍스트로 그대로 간다 |
 | `session/request_permission` (`title`/`description`/`toolCall`, claude 의 `_meta.permission`) | `permission_request` 행 + `awaiting_permission` | 권한 카드 → `POST …/permission` |
 | `elicitation/create` (form: JSON Schema, url) — claude 의 AskUserQuestion 등 | `elicitation_request` 행 + **`awaiting_input`** (form 만). url 은 링크 카드만 남기고 바로 accept, 완료는 `elicitation/complete` → `elicitation_decision{decided_by:'agent'}` | 폼 카드(문자열/숫자/불리언/단일·다중 선택, required 검사) → `POST …/elicitation {elicitation_id, action: accept\|decline\|cancel, content}` → op `elicitation` |
+| `_auth/status_update` (claude-agent-acp · codex-acp 공통 `_meta` 확장, push 전용) | 스냅샷 `auth` — 어댑터가 준 신원(`kind`/`label`/`detail`/`account`)에 매니저가 아는 **출처**(`source`: 워크스페이스 Credential 인지 장비 운영자 로그인인지)를 더한 것 | 세션 헤더에 한 줄로 표시(🔑 = credential, 👤 = 운영자 로그인). 어댑터가 알려 주지 않으면 **아무것도 그리지 않는다** — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다 |
 | `plan` / `plan_update` | `plan` 행(`entries[{content, priority, status}]`) — 같은 turn 의 최신 것이 이전 것을 대체 | 체크리스트 카드 |
 | `session_info_update` | 제목 패치 | — |
 
@@ -81,12 +84,16 @@ config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 �
 approval 모드와 모델이 어댑터 기본값으로 돌아간다. `agent_session_cli_settings.default_config` 에 워크스페이스 × 호스트 × CLI
 로 `{ [configId]: value }` 를 남기고(레거시 `session/set_mode` 는 예약 키 `__mode`), open/prompt payload 의 `config_defaults`
 로 매니저에 실어 보내 세션이 열린 직후 다시 건다. 이미 그 값이면 왕복하지 않고, 어댑터가 더는 제공하지 않는 키는 조용히 건너뛴다.
-선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다 — 덕분에 **새 세션 모달이
-세션을 열기 전에** approval 모드와 모델을 고를 수 있다(그 둘만 모달에 두고, 나머지는 세션 헤더에서 바꾼다).
+선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다(세션을 열 때 그 워크스페이스에
+저장하고, 아직 비었으면 지금 살아 있는 세션의 목록으로 답한다 — credential 을 묶은 적 없는 호스트는 row 자체가 없어서 예전엔
+캐시가 영영 비어 있었다). 덕분에 **세션을 열기 전에** approval 모드와 모델을 고를 수 있다: 새 세션 모달과 호스트 목록의
+"CLI settings" 패널 두 곳에서. 그 둘만 여기 두고 나머지 설정은 세션 헤더에서 바꾼다.
 `PUT …/settings` 의 `default_config` 는 부분 갱신이고 `null` 은 그 키를 지운다(= 어댑터 기본값으로).
 
-설정 변경(`set_config_option` / `set_mode`)은 프로세스가 없는 세션에도 된다 — 서버가 `starting` 으로 올리고 매니저가
-prompt 와 같은 경로로 먼저 연 뒤 적용하므로 **첫 프롬프트 전에 모델·approval 모드를 고를 수 있다**. 턴 중·대기 중에는 409.
+설정 변경(`set_config_option` / `set_mode`)은 **언제든 된다**. 프로세스가 없으면 서버가 `starting` 으로 올리고 매니저가
+prompt 와 같은 경로로 먼저 연 뒤 적용하므로 첫 프롬프트 전에도 고를 수 있고, **턴 중에도 승인 대기 중에도 바꿀 수 있다** —
+어댑터가 그 상태에서도 받아들이고(codex-acp 1.12 실측: 턴 중 `set_config_option`·`set_mode` 모두 성공, 대기 중인 permission
+도 그대로 유지), 오히려 그때가 가장 바꾸고 싶은 순간이다(계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우).
 설정 목록 자체는 어댑터가 살아 있어야 오므로, 세션 페이지에 들어오면 `idle` 세션은 자동으로 한 번 연결한다(`POST …/sessions
 {session_id}` → session/load, 터미널의 `--resume` 과 같다). `closed`/`error` 는 헤더의 Connect/Reconnect 버튼으로만 다시 연다.
 
@@ -98,7 +105,7 @@ Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + �
 `awaiting_input` 은 `awaiting_permission` 과 같은 대기 상태다: prompt 는 409 `session_busy`, 유령 되돌림 대상, 프로세스 종료·close 때
 미결 질문은 `elicitation_decision{action:'cancel', decided_by:'system'}` 으로 닫히고, history RPC 가 미결 질문을 같은 id 로 다시 실어 보낸다.
 
-## CLI 설정 (credential 바인딩)
+## CLI 설정 (credential · backend · 기본 설정)
 
 Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 와 **세션마다 다시 걸 설정**
 (`default_config`, 위 "상호작용" 절 참조)을 정한다
@@ -109,12 +116,25 @@ Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → C
   `CLI_TO_CREDENTIAL_PREFIX` 와 같은 규약. 불일치는 400, 다른 워크스페이스 것은 404, hermes 는 아직 미지원(409).
 - 매니저는 open/prompt 요청에 실린 `credential_id` 로 `GET /api/agent/sessions/credential/:id?workspace_id=` 를 부른다.
   서버는 **그 매니저에 바인딩된 credential 만** 복호화해 준다(다른 매니저 키, 바인딩 없는 credential → 403).
+- **기록 링크는 존재만으로 믿지 않는다.** 세션 전용 홈의 기록 디렉터리(`projects` / `sessions`)는 운영자 홈으로
+  심볼릭 링크(Windows 는 junction)하는데, junction 은 끊어져도 경로가 남아 빈 디렉터리처럼 보인다. 그대로 두면
+  codex 가 `no rollout found for thread id …` 로 재개를 거부하고, 그 credential 로 여는 **모든** 세션이 영영
+  재개 불가가 된다(실측: ralf). 그래서 열 때마다 대상의 첫 항목이 링크를 통해 보이는지 확인하고, 안 보이면 다시 만든다.
+  링크가 아니라 내용이 있는 진짜 디렉터리면 지우지 않고 로그만 남긴다.
 - 적용 방식: 운영자 홈의 로그인 파일은 절대 건드리지 않는다. credential 이 묶이면
   `$AWB_AGENT_MANAGER_HOME/session-homes/<cli>/<credential_id>` 를 세션 전용 cli-home 으로 만들고, 기존 어댑터
   `prepareCliHome` 이 자격증명 파일(`.credentials.json` / `auth.json`) 또는 env(`CLAUDE_CODE_OAUTH_TOKEN`,
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)를 만든다. `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 을 그 홈으로 돌리고, 운영자
   셸의 API 키(`authEnvKeys`)는 걷어내며, 워크스페이스 trust 를 시드한다. **기록 디렉터리만**(`projects` / `sessions`)
   운영자 홈으로 심볼릭 링크해 장비의 기존 세션이 그대로 보이고 이어진다.
+- **Backend(Claude backend profile)**: `agent_session_cli_settings.backend_profile_id` 로 이 호스트×CLI 세션이 말을 걸
+  엔드포인트·모델을 고른다(Admin → Claude backends 의 인스턴스 전역 목록). 고르면 open/prompt payload 의 `runtime_profile`
+  로 매니저에 실려 가고, 매니저가 디스패치와 **같은 기계**(`startRuntimeProfile` → `lease.claudeEnv()`)로 `ANTHROPIC_BASE_URL`·
+  모델 env 를 세션 프로세스에 건다. 프로필이 어댑터 사이드카를 요구하면 그 프로세스도 lease 가 관리하고 세션이 닫힐 때 반납한다.
+  claude 전용이다(Claude backend profile 이므로 codex 는 409). 비밀은 CLI 설정에 묶인 credential 에서 오며, 프로필이 특정
+  credential 을 가리키는데 다른 것이 묶여 있으면 거부한다 — 조용히 엉뚱한 키로 붙는 것보다 낫다.
+  **전역 기본값으로 떨어지지 않는다**: 디스패치 경로와 달리, 고르지 않았으면 CLI 기본 엔드포인트를 그대로 쓴다 —
+  세션은 "그 장비의 CLI 를 그대로 몬다" 는 표면이라 조용히 다른 백엔드로 돌아가면 안 된다.
 - 권장 credential 은 `claude_oauth_token`(`claude setup-token`, 1년, 회전 없음). `claude_subscription` 은 회전하는
   토큰이라 여러 장비에서 쓰면 재로그인이 잦다(docs/managed-agent-relogin.md).
 
@@ -215,6 +235,13 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
   `npm uninstall -g @zed-industries/codex-acp && npm i -g @agentclientprotocol/codex-acp` 로 바꾼다. 모델은 세션 헤더의 Model 셀렉트에서 고른다.
 - 같은 세션을 터미널과 AWB 에서 동시에 쓰지 말 것 — 두 프로세스가 같은 JSONL 에 쓴다.
 - Codex 는 어댑터가 `loadSession` 을 지원할 때만 기존 세션을 이어 쓸 수 있다(미지원이면 open 이 `resume_unsupported` 로 실패).
+- 세션 프로세스에는 `AWB_API_KEY`(매니저 키)가 들어간다. 세션 홈의 `config.toml` 이 awb MCP 서버를
+  `bearer_token_env_var = "AWB_API_KEY"` + `required = true` 로 적기 때문이다 — 없으면 codex 가 세션 초기화를 통째로
+  중단한다. **재개는 그 대화에 기록된 MCP 설정을 다시 띄우므로**, 지금 config 를 고쳐도 옛 대화는 이 env 없이는 계속 막힌다
+  (실측: ralf 의 실제 thread 가 env 없이는 실패, 넣으면 12.8s 만에 로드). 같은 키가 이미 ACP `mcpServers` 의 Authorization
+  헤더로 넘어가므로 새로 노출되는 비밀은 없다.
+- 재개가 `Internal error` 로 실패하면 어댑터의 `data.details` 를 그대로 보여 준다 — 대개 `no rollout found for thread id …`
+  이고, 그건 **계정 문제가 아니라** 세션 홈의 기록 링크가 끊어진 것이다(위 "CLI 설정" 참조). 매니저를 올리면 다음 open 에서 스스로 고친다.
 - 세션 프로세스는 매니저 self-update drain 카운트에 포함되고, 매니저 종료(SIGTERM)는 모든 세션 프로세스를 멈춘다(상태 idle).
 - Windows: 어댑터 프로세스는 cross-spawn 으로 띄우므로 npm 배치 shim(`codex-acp.cmd`)과 `npx` 폴백이 모두 동작한다
   (예전엔 node 의 spawn() 이 `spawn npx ENOENT` / `spawn EINVAL` 로 죽어 ralf 에서 세션이 열리지 않았다). 다만 `npx --yes`

@@ -7,7 +7,8 @@
 //   5. 없는 cwd / 알 수 없는 CLI 는 RPC 오류로 응답한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, readlink, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -320,6 +321,9 @@ test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKE
   const home = join(h.sessionHomesDir, 'claude', 'cred-1');
   assert.equal(cap.CLAUDE_CONFIG_DIR, home, 'session-specific cli-home');
   assert.equal(cap.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-test');
+  // 세션 홈의 config.toml 은 awb MCP 서버를 `bearer_token_env_var = "AWB_API_KEY"` + `required = true`
+  // 로 적는다 — 이 값이 없으면 codex 가 세션 초기화를 중단하고 재개가 통째로 실패한다(실측: ralf).
+  assert.equal(cap.AWB_API_KEY, 'manager-key', 'the manager key the config references is in the session env');
   assert.equal(cap.ANTHROPIC_API_KEY, null, 'operator shell key is stripped so it cannot shadow the credential');
   const link = join(home, 'projects');
   assert.ok((await lstat(link)).isSymbolicLink(), 'projects is a symlink');
@@ -683,4 +687,128 @@ test('re-applying skips options already at the wanted value, and a resumed sessi
   assert.equal(server.rpc('rpc-open-resume-def').ok, true);
   await waitFor(() => server.events(CLAUDE_ID).some((e) => e.type === 'system' && e.payload.text === 'Model set to Fake Smart.'), 'restored on resume');
   await runner.handle(request('close', { session_id: CLAUDE_ID }));
+});
+
+// ─── 이 세션이 어떤 계정으로 도는가 ──────────────────────────────────────────────
+//
+// 어댑터가 `_auth/status_update` 로 자기 로그인 신원을 민다(claude-agent-acp · codex-acp 공통 확장).
+// 매니저는 거기에 **출처**(워크스페이스 Credential 인지 장비 운영자 로그인인지 — 어댑터는 모르는 사실)를
+// 더해 상태로 올리고, history 의 live 에도 실어 화면이 다시 들어와도 볼 수 있게 한다.
+test('the adapter-reported account is relayed with the credential source the manager knows', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-auth', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-auth').result.session_id;
+  await waitFor(() => server.states(sid).some((s) => s.auth), 'auth patch');
+  const auth = server.states(sid).filter((s) => s.auth).at(-1).auth;
+  assert.deepEqual(auth, {
+    source: 'operator',
+    kind: 'account',
+    label: 'Fake Max',
+    account: { email: 'probe@example.com', organization: 'Fake Org', plan: 'max' },
+  }, 'no credential bound → the host own login, with the identity the adapter reported');
+
+  await runner.handle(request('history', { request_id: 'rpc-history-auth', session_id: sid }));
+  assert.deepEqual(server.rpc('rpc-history-auth').result.live.auth, auth, 'history carries it so a reopened screen shows the account');
+  await runner.handle(request('close', { session_id: sid }));
+});
+
+test('a session opened with a workspace credential reports source=credential', async (t) => {
+  const { cwd, server, runner } = await harness(t, {
+    credentialFetcher: async () => ({ credential_id: 'cred-auth', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-xxxxxxxxxxxx' } }),
+  });
+  await runner.handle(request('open', { request_id: 'rpc-open-cred-auth', session_id: null, cwd, credential_id: 'cred-auth', workspace_id: 'ws-1' }));
+  const sid = server.rpc('rpc-open-cred-auth').result.session_id;
+  await waitFor(() => server.states(sid).some((s) => s.auth), 'auth patch');
+  assert.equal(server.states(sid).filter((s) => s.auth).at(-1).auth.source, 'credential');
+  await runner.handle(request('close', { session_id: sid }));
+});
+
+// ─── 세션 전용 cli-home 의 기록 링크가 끊어졌을 때 ───────────────────────────────
+//
+// Windows junction 은 끊어져도 경로가 그대로 남아 빈 디렉터리처럼 보인다(실측: ralf 의 credential 홈에서
+// `sessions` 는 있는데 그 아래가 통째로 비어, codex 가 `no rollout found for thread id` 로 재개를 거부했다).
+// 예전에는 "경로가 있으면 성공" 으로 보고 넘어가서 한 번 끊어진 링크가 영영 고쳐지지 않았다 — 그 credential
+// 로 여는 모든 세션의 재개가 실패했다. 이제 내용이 보이는지 확인하고 끊어졌으면 다시 만든다.
+test('a broken session-store link is detected and rebuilt, and a real directory with content is left alone', async (t) => {
+  // credentialHarness 는 세션 전용 cli-home 을 tmp 로 격리해 준다(기존 credential 테스트와 같은 배선).
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  const { cwd, server, runner, root } = h;
+  const open = (requestId) => runner.handle(request('open', { request_id: requestId, session_id: null, cwd, credential_id: 'cred-1', workspace_id: 'ws-1' }));
+  const linkPath = join(h.sessionHomesDir, 'claude', 'cred-1', 'projects');
+  const operatorStore = join(root, 'claude', 'projects');
+
+  // 1. 첫 open 이 링크를 만든다 — 운영자 홈의 기록이 그 링크를 통해 보여야 한다.
+  await open('rpc-link-1');
+  assert.equal(server.rpc('rpc-link-1').ok, true, JSON.stringify(server.rpc('rpc-link-1')));
+  assert.ok((await lstat(linkPath)).isSymbolicLink(), 'the store is linked, not copied');
+  assert.ok(existsSync(join(linkPath, '-work')), 'the operator history is visible through it');
+  assert.ok(existsSync(join(operatorStore, '-work')), 'sanity: the operator store has the recorded session');
+  await runner.handle(request('close', { session_id: server.rpc('rpc-link-1').result.session_id }));
+
+  // 2. 링크를 끊는다(엉뚱한 곳을 가리키게) — 경로는 남아 있지만 기록은 보이지 않는다.
+  await rm(linkPath, { recursive: true, force: true });
+  await symlink(join(root, 'nowhere'), linkPath, 'dir');
+  assert.equal(existsSync(join(linkPath, '-work')), false, 'the history is not visible through the broken link');
+
+  // 3. 다음 open 이 고친다.
+  await open('rpc-link-2');
+  assert.equal(server.rpc('rpc-link-2').ok, true, JSON.stringify(server.rpc('rpc-link-2')));
+  assert.ok(existsSync(join(linkPath, '-work')), 'the link was rebuilt, so sessions can resume again');
+  await runner.handle(request('close', { session_id: server.rpc('rpc-link-2').result.session_id }));
+
+  // 4. 링크가 아니라 내용이 있는 진짜 디렉터리면 지우지 않는다 — 운영자의 자료일 수 있다.
+  await rm(linkPath, { recursive: true, force: true });
+  await mkdir(join(linkPath, 'someone-elses'), { recursive: true });
+  await writeFile(join(linkPath, 'someone-elses', 'keep.txt'), 'keep me');
+  await open('rpc-link-3');
+  assert.equal(server.rpc('rpc-link-3').ok, true, 'the session still opens');
+  assert.ok(existsSync(join(linkPath, 'someone-elses', 'keep.txt')), 'the real directory and its content survive');
+  await runner.handle(request('close', { session_id: server.rpc('rpc-link-3').result.session_id }));
+});
+
+// ─── Claude backend profile (세션을 다른 엔드포인트로 띄우기) ────────────────────
+//
+// CLI 설정에서 고른 backend profile 이 open payload 에 실려 오면, 디스패치 경로와 같은 기계
+// (startRuntimeProfile → lease.claudeEnv())로 엔드포인트·모델 env 를 세션 프로세스에 건다.
+test('a Claude backend profile points the session at its endpoint and model', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  // anthropic-compatible 은 어댑터 사이드카 없이 엔드포인트만 바꾸는 가장 단순한 형태다
+  // (openai-compatible 은 validateRuntimeProfile 이 adapter 를 요구한다).
+  const profile = {
+    id: 'gateway-box',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://gateway.local:8000',
+    model: 'claude-via-gateway',
+    context_window: 200000,
+  };
+  await h.runner.handle(request('open', {
+    request_id: 'rpc-backend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1',
+    runtime_profile: profile,
+  }));
+  const opened = h.server.rpc('rpc-backend');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const cap = await h.capture();
+  assert.equal(cap.ANTHROPIC_BASE_URL, 'http://gateway.local:8000', 'the session talks to the profile endpoint');
+  assert.equal(cap.ANTHROPIC_MODEL, 'claude-via-gateway', 'and uses its model');
+  assert.equal(cap.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '200000', 'context window rides along');
+  assert.equal(cap.CLAUDE_CONFIG_DIR, join(h.sessionHomesDir, 'claude', 'cred-1'), 'the credential cli-home is still used');
+  await h.runner.handle(request('close', { session_id: opened.result.session_id }));
+});
+
+test('no backend profile leaves the endpoint alone, and a broken one fails the open with a named reason', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  await h.runner.handle(request('open', { request_id: 'rpc-nobackend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1' }));
+  assert.equal(h.server.rpc('rpc-nobackend').ok, true);
+  const cap = await h.capture();
+  assert.equal(cap.ANTHROPIC_BASE_URL, null, 'without a profile the CLI keeps its default endpoint');
+  await h.runner.handle(request('close', { session_id: h.server.rpc('rpc-nobackend').result.session_id }));
+
+  await h.runner.handle(request('open', {
+    request_id: 'rpc-badbackend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1',
+    runtime_profile: { id: 'broken', kind: 'claude-backend', protocol: 'anthropic-compatible', base_url: '', model: '' },
+  }));
+  const bad = h.server.rpc('rpc-badbackend');
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /backend profile "broken" is unusable/i, 'the operator is told which profile and why');
 });

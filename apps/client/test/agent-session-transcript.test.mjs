@@ -9,6 +9,7 @@ import {
   buildTranscript,
   canConnect,
   canPrompt,
+  describeSessionAuth,
   describeSessionStatus,
   isWaitingStatus,
   matchSlashCommands,
@@ -23,6 +24,8 @@ import {
   groupSessionsByCwd,
   sessionPath,
   sortSessionsByActivity,
+  splitRecentCwdGroups,
+  splitRecentSessions,
 } from '../src/components/sessions/sessionList.logic.ts';
 
 let seq = 0;
@@ -329,4 +332,70 @@ test('the trim marker renders as a system note and does not disturb folding', ()
   assert.match(blocks[0].text, /Earlier messages trimmed/);
   const assistant = blocks.find((b) => b.kind === 'assistant');
   assert.equal(assistant.text, 'chunk2 chunk3 ', 'surviving chunks of the same turn still merge');
+});
+
+// ─── 세션 계정 표시 ────────────────────────────────────────────────────────────
+test('describeSessionAuth renders the account line, and says nothing when the adapter did not report', () => {
+  assert.equal(describeSessionAuth(null), null, 'not reported → draw nothing (it is not the same as logged out)');
+  assert.equal(describeSessionAuth(undefined), null);
+
+  const operator = describeSessionAuth({ source: 'operator', kind: 'account', label: 'Claude Max', account: { email: 'parn@example.com', organization: 'KakaoVX' } });
+  assert.equal(operator.text, 'Claude Max · parn@example.com');
+  assert.match(operator.title, /Runtime Host's own CLI login/);
+  assert.match(operator.title, /KakaoVX/);
+  assert.equal(operator.tone, 'muted');
+
+  const bound = describeSessionAuth({ source: 'credential', kind: 'api_key', label: 'Anthropic API key', detail: 'ANTHROPIC_API_KEY' }, 'team key');
+  assert.equal(bound.text, 'Anthropic API key · ANTHROPIC_API_KEY', 'detail wins over the email for the second part');
+  assert.match(bound.title, /workspace credential "team key"/);
+
+  const loggedOut = describeSessionAuth({ source: 'operator', kind: 'none', label: 'Not logged in' });
+  assert.equal(loggedOut.text, 'Not logged in');
+  assert.equal(loggedOut.tone, 'danger', 'a known logged-out state is worth noticing');
+
+  const bare = describeSessionAuth({ source: 'operator', kind: 'gateway', label: '' });
+  assert.equal(bare.text, 'gateway', 'falls back to the kind when the adapter sent no label');
+});
+
+// ─── 최근 창(3일) — 세션 행과 작업 폴더가 같은 규칙을 쓴다 ─────────────────────
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = Date.parse('2026-09-21T12:00:00.000Z');
+const sess = (id, agoDays, cwd = '/repo') => ({ cli: 'codex', session_id: id, cwd, title: id, created_at: null, updated_at: new Date(NOW - agoDays * DAY).toISOString(), source: 'cli' });
+
+test('splitRecentSessions keeps the last 3 days and folds the rest, but never shows an empty list', () => {
+  const mixed = [sess('a', 0), sess('b', 2.9), sess('c', 3.1), sess('d', 30)];
+  const split = splitRecentSessions(mixed, NOW);
+  assert.deepEqual(split.visible.map((s) => s.session_id), ['a', 'b']);
+  assert.deepEqual(split.hidden.map((s) => s.session_id), ['c', 'd']);
+
+  const allOld = [sess('x', 10), sess('y', 20)];
+  const oldSplit = splitRecentSessions(allOld, NOW);
+  assert.deepEqual(oldSplit.visible.map((s) => s.session_id), ['x'], 'the newest one still shows');
+  assert.deepEqual(oldSplit.hidden.map((s) => s.session_id), ['y']);
+
+  assert.deepEqual(splitRecentSessions([], NOW), { visible: [], hidden: [] });
+  const undated = [{ session_id: 'n' }];
+  assert.deepEqual(splitRecentSessions(undated, NOW).visible.map((s) => s.session_id), ['n'], 'a session with no timestamp is not hidden away on its own');
+});
+
+test('splitRecentCwdGroups folds working folders whose newest session is older than the window', () => {
+  const groups = groupSessionsByCwd({
+    codex: [sess('fresh', 1, '/repo/active'), sess('stale', 9, '/repo/archive'), sess('older', 40, '/repo/ancient')],
+  });
+  assert.deepEqual(groups.map((g) => g.cwd), ['/repo/active', '/repo/archive', '/repo/ancient'], 'newest folder first');
+  const split = splitRecentCwdGroups(groups, NOW);
+  assert.deepEqual(split.visible.map((g) => g.cwd), ['/repo/active'], 'only folders touched in the window stay open');
+  assert.deepEqual(split.hidden.map((g) => g.cwd), ['/repo/archive', '/repo/ancient']);
+
+  // 폴더 안에 최근 세션이 하나라도 있으면 그 폴더는 최근이다
+  const mixedFolder = groupSessionsByCwd({ codex: [sess('new', 0.5, '/repo/mixed'), sess('old', 40, '/repo/mixed')] });
+  assert.deepEqual(splitRecentCwdGroups(mixedFolder, NOW).visible.map((g) => g.cwd), ['/repo/mixed']);
+
+  // 전부 오래됐으면 가장 최신 폴더 하나는 남긴다 — 빈 목록을 보여 주지 않는다
+  const allOld = groupSessionsByCwd({ codex: [sess('a', 8, '/repo/one'), sess('b', 20, '/repo/two')] });
+  const oldSplit = splitRecentCwdGroups(allOld, NOW);
+  assert.deepEqual(oldSplit.visible.map((g) => g.cwd), ['/repo/one']);
+  assert.deepEqual(oldSplit.hidden.map((g) => g.cwd), ['/repo/two']);
+
+  assert.deepEqual(splitRecentCwdGroups([], NOW), { visible: [], hidden: [] });
 });

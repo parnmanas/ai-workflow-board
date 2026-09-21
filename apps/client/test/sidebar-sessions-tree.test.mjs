@@ -354,3 +354,51 @@ test('⑦ 세션이 전부 3일을 넘겨도 가장 최근 1개는 항상 보인
   assert.equal(hasRow(tree, '제일 묵은 세션'), false, '나머지는 더보기 뒤로 접힌다');
   assert.ok(buttonByText(tree, '+1개 더 보기'), '접힌 개수를 알려주는 더보기 버튼이 없다');
 });
+
+test('⑧ 최근 세션이 없는 작업 폴더는 더보기 뒤로 접히고, 눌러 펴면 드러난다', async (t) => {
+  const { view } = await mountSidebar(t, {
+    sessionsByCli: {
+      claude: [
+        session({ session_id: 's-live', cli: 'claude', cwd: AWB_CWD, title: '살아 있는 작업', updated_at: ago(2 * HOUR) }),
+        session({ session_id: 's-dormant', cli: 'claude', cwd: LEGACY_CWD, title: '잠든 폴더의 세션', updated_at: ago(9 * DAY) }),
+      ],
+      codex: [
+        session({ session_id: 's-ancient', cli: 'codex', cwd: '/srv/ancient', title: '아주 오래된 폴더', updated_at: ago(40 * DAY) }),
+      ],
+    },
+  });
+  const tree = () => hostsTree(view);
+
+  assert.ok(rowByTitle(tree(), AWB_CWD), '최근 세션이 있는 폴더는 바로 보인다');
+  assert.equal(hasRow(tree(), LEGACY_CWD), false, '3일 안에 세션이 없는 폴더는 기본 표시에서 빠진다');
+  assert.equal(hasRow(tree(), '/srv/ancient'), false, '오래된 폴더도 마찬가지');
+  assert.equal(hasRow(tree(), '잠든 폴더의 세션'), false, '접힌 폴더의 세션도 함께 사라진다');
+
+  const more = buttonByText(tree(), '+2개 폴더 더 보기');
+  assert.ok(more, '접힌 폴더 수를 알려주는 더보기 버튼이 없다');
+  click(more);
+  assert.ok(rowByTitle(tree(), LEGACY_CWD) && rowByTitle(tree(), '/srv/ancient'), '펴면 잠든 폴더가 드러난다');
+
+  const fold = buttonByText(tree(), '접기 ↑');
+  assert.ok(fold, '펼친 뒤에는 접기 버튼이 나와야 한다');
+  click(fold);
+  assert.equal(hasRow(tree(), LEGACY_CWD), false, '다시 접으면 잠든 폴더가 숨는다');
+});
+
+test('⑨ 폴더가 전부 3일을 넘겨도 가장 최근 폴더 1개는 항상 보인다', async (t) => {
+  const { view } = await mountSidebar(t, {
+    sessionsByCli: {
+      claude: [
+        session({ session_id: 's-a', cli: 'claude', cwd: AWB_CWD, title: '덜 잠든 폴더의 세션', updated_at: ago(6 * DAY) }),
+        session({ session_id: 's-b', cli: 'claude', cwd: LEGACY_CWD, title: '더 잠든 폴더의 세션', updated_at: ago(20 * DAY) }),
+      ],
+      codex: [],
+    },
+  });
+  const tree = hostsTree(view);
+
+  assert.ok(rowByTitle(tree, AWB_CWD), '전부 오래돼도 가장 최근 폴더는 보인다');
+  assert.ok(rowByTitle(tree, '덜 잠든 폴더의 세션'), '그 폴더의 세션도 하나는 보인다(세션 규칙과 같은 창)');
+  assert.equal(hasRow(tree, LEGACY_CWD), false, '나머지 폴더는 더보기 뒤로 접힌다');
+  assert.ok(buttonByText(tree, '+1개 폴더 더 보기'), '접힌 폴더 수를 알려주는 더보기 버튼이 없다');
+});

@@ -104,6 +104,26 @@ export interface AgentSessionCommand {
  */
 export const AGENT_SESSION_MODE_DEFAULT_KEY = '__mode';
 
+/**
+ * 이 세션이 어떤 계정으로 도는지. 두 축이 있다:
+ *   - `source` — 자격증명의 출처. `'credential'` 은 워크스페이스 Credential(CLI 설정),
+ *     `'operator'` 은 그 장비 운영자의 CLI 로그인(`claude login` / `codex login`) 그대로.
+ *     매니저만 아는 사실이라 매니저가 보고한다.
+ *   - 나머지(`kind`/`label`/`account`) — CLI 가 실제로 쓰고 있는 신원. 어댑터가
+ *     `_auth/status_update` 로 밀어 준다(claude-agent-acp · codex-acp 공통 `_meta` 확장).
+ *     어댑터가 알려 주지 않으면 통째로 null — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다.
+ */
+export interface AgentSessionAuth {
+  source: 'credential' | 'operator';
+  /** 'account' | 'api_key' | 'gateway' | 'external' | 'none' — 어댑터가 준 값 그대로. */
+  kind: string;
+  /** 그 자체로 화면에 쓸 수 있는 한 줄. "Claude Max", "Anthropic API key", "AWS Bedrock". */
+  label: string;
+  /** 두 번째 줄(키 출처, 게이트웨이 호스트 …). 없으면 `account.email` 로 대체한다. */
+  detail?: string;
+  account?: { email?: string; organization?: string; plan?: string };
+}
+
 export const AGENT_SESSION_CONFIG_OPTIONS_MAX = 32;
 export const AGENT_SESSION_COMMANDS_MAX = 200;
 

@@ -24,7 +24,7 @@ import {
 } from './workNavigation';
 import { useWorkNavLists } from '../hooks/useWorkNavLists';
 import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
-import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessions/sessionList.logic';
+import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
@@ -136,6 +136,8 @@ export default function Sidebar({
   const [collapsedHosts, setCollapsedHosts] = React.useState<Set<string>>(() => new Set(foldInit.hosts));
   const [collapsedHostCwds, setCollapsedHostCwds] = React.useState<Set<string>>(() => new Set());
   const [expandedOlderCwds, setExpandedOlderCwds] = React.useState<Set<string>>(() => new Set());
+  // 3일보다 오래된 작업 폴더를 펼쳐 둔 호스트. 세션 행과 같은 창을 쓴다(splitRecentCwdGroups).
+  const [expandedOlderHosts, setExpandedOlderHosts] = React.useState<Set<string>>(() => new Set());
   const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
   const loadAttemptedRef = React.useRef<Set<string>>(new Set());
 
@@ -778,7 +780,13 @@ export default function Sidebar({
                             ) : !hostData?.groups.length ? (
                               <div style={{ padding: '3px 12px 3px 52px', fontSize: 11, color: tokens.colors.textMuted, fontStyle: 'italic' }}>No sessions</div>
                             ) : (
-                              hostData.groups.map((group) => {
+                              (() => {
+                                // 최근 세션이 없는 작업 폴더는 접어 둔다 — 목록 화면이 세션 행에 쓰는 것과 같은 3일 창.
+                                const { visible: visibleGroups, hidden: olderGroups } = splitRecentCwdGroups(hostData.groups);
+                                const olderHostExpanded = expandedOlderHosts.has(host.manager_id);
+                                const shownGroups = olderHostExpanded ? hostData.groups : visibleGroups;
+                                return (<>
+                              {shownGroups.map((group) => {
                                 const cwdKey = `${host.manager_id}:${group.cwd}`;
                                 const cwdExpanded = !collapsedHostCwds.has(cwdKey);
                                 const hasActive = group.sessions.some(
@@ -809,11 +817,7 @@ export default function Sidebar({
                                     </button>
                                     {/* 세션 행 */}
                                     {cwdExpanded && (() => {
-                                      const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
-                                      const recent = group.sessions.filter((s) => s.updated_at && new Date(s.updated_at).getTime() >= cutoff);
-                                      const older = group.sessions.filter((s) => !s.updated_at || new Date(s.updated_at).getTime() < cutoff);
-                                      const alwaysVisible = recent.length > 0 ? recent : group.sessions.slice(0, 1);
-                                      const hidden = recent.length > 0 ? older : group.sessions.slice(1);
+                                      const { visible: alwaysVisible, hidden } = splitRecentSessions(group.sessions);
                                       const olderExpanded = expandedOlderCwds.has(cwdKey);
                                       const displayed = olderExpanded ? group.sessions : alwaysVisible;
                                       return (
@@ -881,7 +885,29 @@ export default function Sidebar({
                                     })()}
                                   </React.Fragment>
                                 );
-                              })
+                              })}
+                              {olderGroups.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedOlderHosts((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(host.manager_id)) next.delete(host.manager_id);
+                                    else next.add(host.manager_id);
+                                    return next;
+                                  })}
+                                  style={{
+                                    width: '100%', textAlign: 'left', border: 'none', background: 'transparent',
+                                    padding: '2px 10px 2px 38px', color: tokens.colors.textMuted,
+                                    cursor: 'pointer', fontSize: 10.5, fontFamily: 'inherit', minHeight: 22,
+                                  }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.color = tokens.colors.textSecondary; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.color = tokens.colors.textMuted; }}
+                                >
+                                  {olderHostExpanded ? '접기 ↑' : `+${olderGroups.length}개 폴더 더 보기`}
+                                </button>
+                              )}
+                                </>);
+                              })()
                             )}
                           </div>
                         )}

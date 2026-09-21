@@ -1188,6 +1188,14 @@ export interface AgentSessionConfigOptionPatch {
   options: Array<{ value: string; name: string; description?: string; group?: string }>;
 }
 
+export interface AgentSessionAuthPatch {
+  source: 'credential' | 'operator';
+  kind: string;
+  label: string;
+  detail?: string;
+  account?: { email?: string; organization?: string; plan?: string };
+}
+
 export interface AgentSessionStatePatch {
   status?: string;
   cwd?: string;
@@ -1198,6 +1206,8 @@ export interface AgentSessionStatePatch {
   config_options?: AgentSessionConfigOptionPatch[] | null;
   /** slash command 목록 — 서버 스냅샷 `available_commands`. */
   available_commands?: Array<{ name: string; description: string; input_hint?: string }> | null;
+  /** 이 세션이 어떤 계정으로 도는지 — 서버 스냅샷 `auth`. */
+  auth?: AgentSessionAuthPatch | null;
   resume_supported?: boolean;
   last_error?: string | null;
   reason?: string;

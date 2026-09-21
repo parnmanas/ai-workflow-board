@@ -82,6 +82,10 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
     CODEX_HOME: process.env.CODEX_HOME ?? null,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
+    AWB_API_KEY: process.env.AWB_API_KEY ?? null,
+    ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? null,
+    ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? null,
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
     cwd: process.cwd(),
   }));
 }
@@ -164,6 +168,13 @@ rl.on('line', (line) => {
   switch (message.method) {
     case 'initialize':
       clientCapabilities = message.params?.clientCapabilities ?? {};
+      // 실제 어댑터(claude-agent-acp · codex-acp)는 initialize 뒤 자기 로그인 신원을 push 한다.
+      // 요청 경로가 없는 알림이고, 클라이언트가 모르면 그냥 버린다.
+      setTimeout(() => send({
+        jsonrpc: '2.0',
+        method: '_auth/status_update',
+        params: { authStatus: { kind: 'account', label: 'Fake Max', account: { email: 'probe@example.com', organization: 'Fake Org', plan: 'max' } } },
+      }), 5);
       result(message.id, {
         protocolVersion: 1,
         agentInfo: { name: 'fake-hermes', version: '0.1.0' },

@@ -11,7 +11,7 @@
 // 기존 chat/ticket 세션 매니저와 달리 AWB Agent identity·프롬프트 래핑·히스토리 재조립이
 // 없다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
 
-import { access, constants as fsConstants, lstat, mkdir, symlink } from 'node:fs/promises';
+import { access, constants as fsConstants, lstat, mkdir, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { delimiter, join } from 'node:path';
 
@@ -25,6 +25,7 @@ import {
   patchAgentSessionState,
   postAgentSessionEvents,
   postAgentSessionRpcResponse,
+  type AgentSessionAuthPatch,
   type AgentSessionConfigOptionPatch,
   type AgentSessionEventInput,
   type AgentSessionRef,
@@ -32,8 +33,16 @@ import {
   type AwbConfig,
 } from './rest.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
+import {
+  runtimeCredentialEnv,
+  startRuntimeProfile,
+  validateRuntimeProfile,
+  type RuntimeLease,
+} from './runtime-profiles.js';
+import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
 import type {
+  AcpAuthStatus,
   AcpElicitationOutcome,
   AcpElicitationRequest,
   AcpMcpServer,
@@ -63,6 +72,8 @@ export interface AgentSessionRequest {
   config_value?: string | boolean;
   /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode). */
   config_defaults?: Record<string, string | boolean>;
+  /** CLI 설정에서 고른 Claude backend profile — 그 엔드포인트·모델로 세션을 띄운다. */
+  runtime_profile?: RuntimeProfileSpec | null;
   /** elicitation — 에이전트 질문/폼에 대한 답 */
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';
@@ -147,6 +158,10 @@ const SESSION_STORE_SUBDIR: Record<string, string> = {
 
 interface SessionAuth {
   label: string;
+  /** backend profile 이 걸렸으면 그 lease — 세션이 닫힐 때 반납한다(어댑터 사이드카가 있으면 함께 정리). */
+  runtimeLease?: RuntimeLease | null;
+  /** 자격증명의 출처 — 워크스페이스 Credential 인지, 그 장비 운영자의 CLI 로그인인지. */
+  source: 'credential' | 'operator';
   env: Record<string, string>;
   stripEnvKeys: string[];
   cliHome: string | null;
@@ -200,6 +215,12 @@ interface LiveSession {
   nonce: string;
   /** 이 프로세스에 적용된 CLI 설정 credential('' = 운영자 로그인). 바인딩이 바뀌면 재오픈한다. */
   credentialId: string;
+  /** 자격증명의 출처 — 매니저가 아는 사실. 어댑터가 알려 주는 신원과 합쳐 `auth` 로 보고한다. */
+  authSource: 'credential' | 'operator';
+  /** 어댑터가 `_auth/status_update` 로 알려 준 신원. 안 알려 주면 null("모른다"). */
+  authStatus: AgentSessionAuthPatch | null;
+  /** backend profile lease — 프로세스를 회수할 때 같이 반납한다. */
+  runtimeLease: RuntimeLease | null;
   closing: boolean;
   exited: boolean;
 }
@@ -645,6 +666,7 @@ export class AgentSessionRunner {
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
       onElicitation: (elicitation) => (live ? this.#onElicitation(live, elicitation) : Promise.resolve({ action: 'cancel' as const })),
+      onAuthStatus: (status) => { if (live) this.#onAuthStatus(live, status); },
       // 한 줄이 상한을 넘으면 그 메시지만 버리고 세션은 살려 둔다 — 잃는 것은 그 출력 하나다.
       maxLineBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
       maxMessageBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
@@ -707,6 +729,9 @@ export class AgentSessionRunner {
         seq: 0,
         nonce: randomUUID().slice(0, 8),
         credentialId: request.credential_id || '',
+        authSource: auth.source,
+        authStatus: null,
+        runtimeLease: auth.runtimeLease ?? null,
         closing: false,
         exited: false,
       };
@@ -726,10 +751,12 @@ export class AgentSessionRunner {
           resumed = true;
         } catch (err: any) {
           if (err?.code === 'auth_required') throw err;
-          // codex-acp 는 옛 rollout 형식의 thread 를 "Internal error" 로만 거부한다 — 무엇을 해야 하는지 알려 준다.
-          const detail = redactSecrets(String(err?.message ?? err));
+          // 어댑터는 `Internal error` 한 줄만 내고 진짜 이유는 `data.details` 에 담는다
+          // (예: `no rollout found for thread id …`). 그것까지 사용자에게 보여 준다.
+          const details = (err?.data as { details?: unknown } | undefined)?.details;
+          const detail = redactSecrets(String(details || err?.message || err));
           throw Object.assign(
-            new Error(`${cli} could not resume this session (${detail}). Older sessions may not be resumable by the adapter — start a new session in the same folder.`),
+            new Error(`${cli} could not resume this session: ${detail}. Fix that and reload, or start a new session in the same folder.`),
             { code: 'resume_failed', cause: err },
           );
         } finally {
@@ -768,6 +795,8 @@ export class AgentSessionRunner {
         available_modes: modeInfo.available,
         config_options: live.configOptions,
         available_commands: live.availableCommands,
+        // 어댑터가 initialize 직후 신원을 밀어 주면 여기 이미 차 있다 — 없으면 나중 push 가 채운다.
+        ...(live.authStatus ? { auth: live.authStatus } : {}),
         resume_supported: loadSupported,
         last_error: null,
         reason: resumed ? 'resumed' : 'opened',
@@ -781,6 +810,7 @@ export class AgentSessionRunner {
       const child = client.process;
       client.close();
       if (child?.pid) await terminateDetachedProcessTree(child.pid, 250, { child }).catch(() => undefined);
+      await auth.runtimeLease?.close().catch(() => undefined);
       throw err;
     }
   }
@@ -793,6 +823,12 @@ export class AgentSessionRunner {
     for (const key of auth.stripEnvKeys) delete env[key];
     Object.assign(env, auth.env);
     env.AWB_URL = this.#config.url;
+    // 세션 홈의 `config.toml` 은 awb MCP 서버를 `bearer_token_env_var = "AWB_API_KEY"` 로 적고
+    // `required = true` 로 표시한다(cli-adapters/codex.ts). 이 값이 없으면 codex 가 세션 초기화를
+    // 통째로 중단한다 — 재개는 **그 대화에 기록된** MCP 설정을 다시 띄우므로 지금 config 를 고쳐도
+    // 옛 대화는 계속 막힌다. 매니저 키는 이미 ACP mcpServers 의 Authorization 헤더로 같은 세션에
+    // 넘어가므로 새로 노출되는 비밀은 없다(managed agent 경로도 같은 변수를 쓴다).
+    env.AWB_API_KEY = this.#config.apiKey;
     env.AWB_MANAGER_ID = this.#options.getManagerId();
     env.AWB_SESSION_CLI = cli;
     env.AWB_SESSION_ID = sessionId;
@@ -832,6 +868,31 @@ export class AgentSessionRunner {
         { code: 'auth_required' },
       );
     }
+  }
+
+  /**
+   * 어댑터가 알려 준 로그인 신원(`_auth/status_update`). 연결 단위 알림이고 바뀔 때만 오므로,
+   * 받은 그대로 상태에 얹어 화면이 "이 세션은 누구로 도는가" 를 보여 줄 수 있게 한다.
+   * 출처(`source`)는 어댑터가 모르는 사실이라 매니저가 채운다.
+   */
+  #onAuthStatus(live: LiveSession, status: AcpAuthStatus): void {
+    const account = status.account && typeof status.account === 'object' ? status.account : undefined;
+    const next: AgentSessionAuthPatch = {
+      source: live.authSource,
+      kind: typeof status.kind === 'string' ? status.kind : 'unknown',
+      label: typeof status.label === 'string' ? status.label : '',
+      ...(typeof status.detail === 'string' && status.detail ? { detail: status.detail } : {}),
+      ...(account ? {
+        account: {
+          ...(typeof account.email === 'string' ? { email: account.email } : {}),
+          ...(typeof account.organization === 'string' ? { organization: account.organization } : {}),
+          ...(typeof account.plan === 'string' ? { plan: account.plan } : {}),
+        },
+      } : {}),
+    };
+    if (JSON.stringify(live.authStatus) === JSON.stringify(next)) return;
+    live.authStatus = next;
+    this.#enqueue(live, [], { auth: next, reason: 'auth' });
   }
 
   /**
@@ -895,9 +956,9 @@ export class AgentSessionRunner {
    * 기존 세션이 그대로 보이고 이어지게 한다.
    */
   async #prepareAuth(cli: string, cwd: string, request: AgentSessionRequest): Promise<SessionAuth> {
-    const none: SessionAuth = { label: 'operator-login', env: {}, stripEnvKeys: [], cliHome: null };
+    const none: SessionAuth = { label: 'operator-login', source: 'operator', env: {}, stripEnvKeys: [], cliHome: null };
     const credentialId = request.credential_id || '';
-    if (!credentialId) return none;
+    if (!credentialId) return this.#withBackend(cli, request, none, '', undefined);
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
     if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
@@ -927,10 +988,74 @@ export class AgentSessionRunner {
     // 운영자 셸의 API 키(ANTHROPIC_API_KEY / OPENAI_API_KEY …)가 credential 을 덮지 않게 걷어낸다.
     const stripEnvKeys = adapter.authEnvKeys().filter((key) => !(key in env));
     await adapter.ensureWorkspaceTrust(cliHome, cwd).catch((err: any) => log(`[agent-session ${cli}] trust seed failed: ${err?.message ?? err}`));
-    return { label: `credential:${credential.provider}`, env, stripEnvKeys, cliHome };
+    const auth: SessionAuth = { label: `credential:${credential.provider}`, source: 'credential', env, stripEnvKeys, cliHome };
+    return this.#withBackend(cli, request, auth, credentialId, prep.extraEnv ?? {});
   }
 
-  /** 세션 전용 cli-home 의 기록 디렉터리를 운영자 홈으로 링크한다(멱등). */
+  /**
+   * CLI 설정에서 고른 Claude backend profile 을 세션에 건다. 디스패치 경로와 같은 기계를 쓴다
+   * (`startRuntimeProfile` → `lease.claudeEnv()`): 엔드포인트·모델 env 를 얹고, 프로필이 어댑터
+   * 사이드카를 요구하면 그 프로세스도 lease 가 관리한다. 세션이 닫힐 때 반납한다.
+   *
+   * 비밀은 **CLI 설정에 묶인 credential** 에서 온다 — 프로필이 특정 credential 을 가리키는데
+   * 다른 것이 묶여 있으면 `runtimeCredentialEnv` 가 거부한다. 그 편이 조용히 엉뚱한 키로 붙는 것보다 낫다.
+   */
+  async #withBackend(
+    cli: string,
+    request: AgentSessionRequest,
+    auth: SessionAuth,
+    credentialId: string,
+    credentialEnv: Record<string, string> | undefined,
+  ): Promise<SessionAuth> {
+    const profile = request.runtime_profile;
+    if (!profile) return auth;
+    if (cli !== 'claude') {
+      throw Object.assign(new Error(`A Claude backend profile cannot be applied to ${cli} sessions.`), { code: 'backend_unsupported' });
+    }
+    try {
+      validateRuntimeProfile(profile);
+    } catch (err: any) {
+      throw Object.assign(new Error(`Claude backend profile "${profile.id}" is unusable: ${err?.message ?? err}`), { code: 'backend_invalid' });
+    }
+    const lease = await startRuntimeProfile(profile, runtimeCredentialEnv(profile, credentialId || null, credentialEnv));
+    log(`[agent-session ${cli}] backend profile ${profile.id} → ${profile.base_url} (${profile.model})`);
+    return {
+      ...auth,
+      label: `${auth.label} backend:${profile.id}`,
+      runtimeLease: lease,
+      // 프로필 env 가 credential env 위에 얹힌다 — 엔드포인트를 고른 쪽이 이긴다.
+      env: { ...auth.env, ...lease.claudeEnv() },
+    };
+  }
+
+  /**
+   * 링크가 실제로 운영자의 기록을 **보여 주는가**. 존재 여부만으로는 알 수 없다 — Windows junction 은
+   * 끊어져도 경로가 그대로 남아 빈 디렉터리처럼 보인다(실측: ralf 의 credential 홈에서 `sessions` 는
+   * 있는데 그 아래가 통째로 비어 codex 가 `no rollout found for thread id` 로 재개를 거부했다).
+   * 대상의 첫 항목이 링크를 통해 보이는지로 판정한다. 대상이 비어 있으면 판정할 수 없으므로 건드리지 않는다.
+   */
+  async #sessionStoreVisible(linkPath: string, target: string): Promise<boolean> {
+    let entries: string[];
+    try {
+      entries = await readdir(target);
+    } catch {
+      return true;
+    }
+    if (!entries.length) return true;
+    try {
+      await stat(join(linkPath, entries[0]));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 세션 전용 cli-home 의 기록 디렉터리를 운영자 홈으로 링크한다(멱등).
+   * 이미 있으면 **내용이 보이는지 확인하고**, 끊어져 있으면 다시 만든다 — 예전에는 경로가 존재하기만
+   * 하면 성공으로 보고 넘어가서, 한 번 끊어진 링크가 영영 고쳐지지 않았다(그 credential 로 여는 모든
+   * 세션의 재개가 실패했다). 링크가 아니라 진짜 디렉터리가 들어 있으면 지우지 않는다 — 운영자의 자료일 수 있다.
+   */
   async #linkSessionStore(cli: string, cliHome: string): Promise<void> {
     const subdir = SESSION_STORE_SUBDIR[cli];
     if (!subdir) return;
@@ -938,11 +1063,23 @@ export class AgentSessionRunner {
     const target = join(operatorHome, subdir);
     const linkPath = join(cliHome, subdir);
     await mkdir(target, { recursive: true });
+    let existing: Awaited<ReturnType<typeof lstat>> | null = null;
     try {
-      const existing = await lstat(linkPath);
-      if (existing.isSymbolicLink() || existing.isDirectory()) return; // 이미 링크됐거나 실제 디렉터리
+      existing = await lstat(linkPath);
     } catch {
       /* 없음 → 만든다 */
+    }
+    if (existing) {
+      if (await this.#sessionStoreVisible(linkPath, target)) return;
+      // 지워도 되는 경우만 지운다: 링크이거나(끊어진 junction 포함), 내용이 없는 디렉터리.
+      // 내용이 있는 진짜 디렉터리는 운영자의 자료일 수 있으므로 손대지 않는다.
+      const empty = (await readdir(linkPath).catch(() => [] as string[])).length === 0;
+      if (!existing.isSymbolicLink() && !empty) {
+        log(`[agent-session ${cli}] ${linkPath} is a real directory that does not mirror ${target} — leaving it alone (sessions started elsewhere will not resume here)`);
+        return;
+      }
+      log(`[agent-session ${cli}] session store link was broken (${linkPath} → ${target}); recreating`);
+      await rm(linkPath, { recursive: true, force: true });
     }
     await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
   }
@@ -996,6 +1133,7 @@ export class AgentSessionRunner {
       title: live.title,
       status: this.#statusOf(live),
       resume_supported: live.loadSupported,
+      auth: live.authStatus,
       current_mode: live.currentMode,
       available_modes: live.availableModes,
       config_options: live.configOptions,
@@ -1408,6 +1546,7 @@ export class AgentSessionRunner {
       return;
     }
     this.#live.delete(key);
+    void live.runtimeLease?.close().catch(() => undefined);
     const detail = `Agent process exited (${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}).`;
     log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] ${detail}`);
     this.#flushBuffers(live, live.turn?.turnId);
@@ -1436,6 +1575,7 @@ export class AgentSessionRunner {
     const pid = child?.pid;
     live.client.close();
     if (pid && child) await terminateDetachedProcessTree(pid, 250, { child }).catch(() => undefined);
+    await live.runtimeLease?.close().catch(() => undefined);
     const text = finalStatus === 'closed'
       ? 'Agent process stopped.'
       : reason === 'idle'

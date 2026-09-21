@@ -3,6 +3,7 @@ import crossSpawn from 'cross-spawn';
 
 import type { RuntimeEvent } from '../runtime-events.js';
 import type {
+  AcpAuthStatus,
   AcpElicitationOutcome,
   AcpElicitationRequest,
   AcpInitializeRequest,
@@ -18,7 +19,7 @@ import type {
   AcpSetConfigOptionRequest,
   AcpUsage,
 } from './acp-types.js';
-import { ACP_PROTOCOL_VERSION } from './acp-types.js';
+import { ACP_AUTH_STATUS_METHOD, ACP_PROTOCOL_VERSION } from './acp-types.js';
 import {
   AcpProtocolError,
   JsonRpcPeer,
@@ -43,6 +44,8 @@ export interface AcpClientSpawnOptions extends JsonRpcPeerOptions {
   onElicitation?: (
     request: AcpElicitationRequest,
   ) => AcpElicitationOutcome | Promise<AcpElicitationOutcome>;
+  /** `_auth/status_update` — 어댑터가 자기 로그인 신원을 알려 줄 때. 모르면 아예 오지 않는다. */
+  onAuthStatus?: (status: AcpAuthStatus) => void;
 }
 
 /** 세션 상태 업데이트 중 정규화하지 않고 원문을 그대로 넘기는 종류 — 러너가 config option / slash command / plan / 제목을 읽는다. */
@@ -206,16 +209,18 @@ export class AcpClient {
   readonly #onEvent?: (event: RuntimeEvent) => void;
   readonly #onPermissionRequest?: AcpClientSpawnOptions['onPermissionRequest'];
   readonly #onElicitation?: AcpClientSpawnOptions['onElicitation'];
+  readonly #onAuthStatus?: AcpClientSpawnOptions['onAuthStatus'];
   readonly #childToolCalls = new Set<string>();
 
   private constructor(
     peer: JsonRpcPeer,
-    options: Pick<AcpClientSpawnOptions, 'onEvent' | 'onPermissionRequest' | 'onElicitation'>,
+    options: Pick<AcpClientSpawnOptions, 'onEvent' | 'onPermissionRequest' | 'onElicitation' | 'onAuthStatus'>,
   ) {
     this.#peer = peer;
     this.#onEvent = options.onEvent;
     this.#onPermissionRequest = options.onPermissionRequest;
     this.#onElicitation = options.onElicitation;
+    this.#onAuthStatus = options.onAuthStatus;
   }
 
   static async spawn(options: AcpClientSpawnOptions): Promise<AcpClient> {
@@ -316,6 +321,11 @@ export class AcpClient {
   #handleNotification(method: string, params: unknown): void {
     if (method === 'session/update') {
       this.#onEvent?.(normalizeUpdate(params, this.#childToolCalls));
+      return;
+    }
+    if (method === ACP_AUTH_STATUS_METHOD) {
+      const status = objectValue(params).authStatus;
+      if (status && typeof status === 'object') this.#onAuthStatus?.(status as AcpAuthStatus);
       return;
     }
     const data = objectValue(params);

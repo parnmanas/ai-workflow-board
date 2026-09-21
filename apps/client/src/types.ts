@@ -3112,6 +3112,18 @@ export interface AgentSessionConfigOption {
   options: Array<{ value: string; name: string; description?: string; group?: string }>;
 }
 
+/**
+ * 이 세션이 어떤 계정으로 도는지. `source` 는 자격증명의 출처(워크스페이스 Credential vs 장비 운영자의
+ * CLI 로그인)로 매니저가 아는 사실이고, 나머지는 CLI 가 실제 쓰는 신원으로 어댑터가 알려 준다.
+ */
+export interface AgentSessionAuth {
+  source: 'credential' | 'operator';
+  kind: string;
+  label: string;
+  detail?: string;
+  account?: { email?: string; organization?: string; plan?: string };
+}
+
 /** 어댑터가 알려 준 slash command — 프롬프트에 `/name …` 로 보낸다. */
 export interface AgentSessionCommand {
   name: string;
@@ -3140,12 +3152,26 @@ export interface AgentSessionHost {
   cli_settings?: Record<string, AgentSessionCredentialRef | null>;
 }
 
+/** 세션을 띄울 Claude backend(엔드포인트·모델). 인스턴스 전역 목록에서 고른다. */
+export interface AgentSessionBackendRef {
+  id: string;
+  name: string;
+  protocol: string;
+  model: string;
+  base_url: string;
+}
+
 export interface AgentSessionCliSettings {
   manager_id: string;
   cli: string;
   supports_credential: boolean;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
+  /** 이 CLI 가 backend profile 을 받을 수 있는가(Claude backend profile 이라 claude 뿐). */
+  supports_backend: boolean;
+  /** 고른 backend — null 이면 CLI 기본 엔드포인트. */
+  backend: AgentSessionBackendRef | null;
+  backend_candidates: AgentSessionBackendRef[];
   /** 세션을 열 때마다 다시 거는 설정 — `{ [configId]: value }`. `__mode` 는 레거시 set_mode. */
   default_config: Record<string, string | boolean>;
   /** 마지막으로 본 선택지 — 세션이 열리기 전에도 고를 수 있게 한다. */
@@ -3181,6 +3207,8 @@ export interface AgentSessionLiveSnapshot {
   available_modes: AgentSessionModeOption[];
   config_options: AgentSessionConfigOption[];
   available_commands: AgentSessionCommand[];
+  /** 어댑터가 알려 주지 않으면 null — "모른다" 이고, 로그아웃(`kind:'none'`)과는 다르다. */
+  auth: AgentSessionAuth | null;
   resume_supported: boolean;
   last_error: string | null;
   driver_user_id: string | null;

@@ -20,12 +20,13 @@ import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionComposer from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
-import { groupSessionsByCwd, sessionPath, type CwdGroup } from './sessionList.logic';
+import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import {
   appendLiveEvent,
   buildTranscript,
   canConnect,
   canPrompt,
+  describeSessionAuth,
   describeSessionStatus,
   isWaitingStatus,
   pendingInteraction,
@@ -180,8 +181,6 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
 
 // ─── 호스트 세션 목록 — cwd 기준 그룹 ─────────────────────────────────────
 
-const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-
 function CwdGroupCard({ group, wsId, managerId, onNew }: {
   group: CwdGroup; wsId: string; managerId: string; onNew: (cwd: string) => void;
 }) {
@@ -189,15 +188,8 @@ function CwdGroupCard({ group, wsId, managerId, onNew }: {
   const [showOlder, setShowOlder] = useState(false);
   const latestTime = group.sessions[0]?.updated_at;
 
-  const cutoff = Date.now() - THREE_DAYS_MS;
-  const recentSessions = group.sessions.filter(
-    (s) => s.updated_at && new Date(s.updated_at).getTime() >= cutoff,
-  );
-  // Always show at least the newest session even if everything is old
-  const alwaysVisible = recentSessions.length > 0 ? recentSessions : group.sessions.slice(0, 1);
-  const hiddenSessions = recentSessions.length > 0
-    ? group.sessions.filter((s) => !s.updated_at || new Date(s.updated_at).getTime() < cutoff)
-    : group.sessions.slice(1);
+  // 사이드바와 같은 창을 쓴다(splitRecentSessions) — 두 곳이 어긋나면 같은 폴더가 서로 다르게 보인다.
+  const { visible: alwaysVisible, hidden: hiddenSessions } = splitRecentSessions(group.sessions);
   const displayed = showOlder ? group.sessions : alwaysVisible;
 
   return (
@@ -482,6 +474,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const busy = status === 'busy' || isWaitingStatus(status) || status === 'starting';
   const title = live?.title || summary?.title || '';
   const cwd = live?.cwd || summary?.cwd || '';
+  // 계정 표시 — Credential 이름은 서버가 id 만 주므로 호스트의 CLI 설정에서 합친다.
+  const authView = useMemo(
+    () => describeSessionAuth(live?.auth, host?.cli_settings?.[cli]?.name),
+    [live?.auth, host, cli],
+  );
   const configOptions = live?.config_options ?? [];
   const commands = live?.available_commands ?? [];
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
@@ -609,13 +606,29 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
               {cwd || '(cwd unknown)'}
             </span>
             <span style={{ fontFamily: MONO, color: tokens.colors.textMuted }} title={sessionId}>{sessionId.slice(0, 8)}</span>
+            {/* 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 줄 때만 나온다(모르면 아무것도 그리지 않는다) */}
+            {authView && (
+              <span
+                data-session-auth={live?.auth?.source ?? ''}
+                title={authView.title}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, maxWidth: 320, overflow: 'hidden',
+                  textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  color: authView.tone === 'danger' ? tokens.colors.dangerLight : tokens.colors.textMuted,
+                }}
+              >
+                <span aria-hidden="true">{live?.auth?.source === 'credential' ? '🔑' : '👤'}</span>
+                {authView.text}
+              </span>
+            )}
           </div>
         </div>
         <StatusPill status={status} />
         {/* 어댑터가 준 세션 설정(모델·reasoning·mode …) — 살아 있는 세션에서만 바꿀 수 있다 */}
         {configOptions.map((option) => {
-          // 턴 중·대기 중·여는 중에는 잠근다. idle/closed/error 면 매니저가 세션을 먼저 열고 적용한다.
-          const controlsDisabled = status === 'busy' || status === 'starting' || isWaitingStatus(status);
+          // 여는 중(starting)에만 잠근다. 턴 중이나 승인 대기 중에도 어댑터는 변경을 받아들이고,
+          // 오히려 그때가 가장 바꾸고 싶은 순간이다(계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우).
+          const controlsDisabled = status === 'starting';
           if (option.type === 'boolean') {
             return (
               <label key={option.config_id} title={option.description} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: tokens.colors.textSecondary, cursor: controlsDisabled ? 'not-allowed' : 'pointer' }}>
@@ -662,7 +675,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           <select
             aria-label="Session mode"
             value={live.current_mode || ''}
-            disabled={status === 'busy' || status === 'starting' || isWaitingStatus(status)}
+            disabled={status === 'starting'}
             onChange={(e) => void setMode(e.target.value)}
             style={{ padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12 }}
           >
