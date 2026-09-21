@@ -114,6 +114,11 @@ Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → C
   `CLI_TO_CREDENTIAL_PREFIX` 와 같은 규약. 불일치는 400, 다른 워크스페이스 것은 404, hermes 는 아직 미지원(409).
 - 매니저는 open/prompt 요청에 실린 `credential_id` 로 `GET /api/agent/sessions/credential/:id?workspace_id=` 를 부른다.
   서버는 **그 매니저에 바인딩된 credential 만** 복호화해 준다(다른 매니저 키, 바인딩 없는 credential → 403).
+- **기록 링크는 존재만으로 믿지 않는다.** 세션 전용 홈의 기록 디렉터리(`projects` / `sessions`)는 운영자 홈으로
+  심볼릭 링크(Windows 는 junction)하는데, junction 은 끊어져도 경로가 남아 빈 디렉터리처럼 보인다. 그대로 두면
+  codex 가 `no rollout found for thread id …` 로 재개를 거부하고, 그 credential 로 여는 **모든** 세션이 영영
+  재개 불가가 된다(실측: ralf). 그래서 열 때마다 대상의 첫 항목이 링크를 통해 보이는지 확인하고, 안 보이면 다시 만든다.
+  링크가 아니라 내용이 있는 진짜 디렉터리면 지우지 않고 로그만 남긴다.
 - 적용 방식: 운영자 홈의 로그인 파일은 절대 건드리지 않는다. credential 이 묶이면
   `$AWB_AGENT_MANAGER_HOME/session-homes/<cli>/<credential_id>` 를 세션 전용 cli-home 으로 만들고, 기존 어댑터
   `prepareCliHome` 이 자격증명 파일(`.credentials.json` / `auth.json`) 또는 env(`CLAUDE_CODE_OAUTH_TOKEN`,
@@ -220,6 +225,8 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
   `npm uninstall -g @zed-industries/codex-acp && npm i -g @agentclientprotocol/codex-acp` 로 바꾼다. 모델은 세션 헤더의 Model 셀렉트에서 고른다.
 - 같은 세션을 터미널과 AWB 에서 동시에 쓰지 말 것 — 두 프로세스가 같은 JSONL 에 쓴다.
 - Codex 는 어댑터가 `loadSession` 을 지원할 때만 기존 세션을 이어 쓸 수 있다(미지원이면 open 이 `resume_unsupported` 로 실패).
+- 재개가 `Internal error` 로 실패하면 어댑터의 `data.details` 를 그대로 보여 준다 — 대개 `no rollout found for thread id …`
+  이고, 그건 **계정 문제가 아니라** 세션 홈의 기록 링크가 끊어진 것이다(위 "CLI 설정" 참조). 매니저를 올리면 다음 open 에서 스스로 고친다.
 - 세션 프로세스는 매니저 self-update drain 카운트에 포함되고, 매니저 종료(SIGTERM)는 모든 세션 프로세스를 멈춘다(상태 idle).
 - Windows: 어댑터 프로세스는 cross-spawn 으로 띄우므로 npm 배치 shim(`codex-acp.cmd`)과 `npx` 폴백이 모두 동작한다
   (예전엔 node 의 spawn() 이 `spawn npx ENOENT` / `spawn EINVAL` 로 죽어 ralf 에서 세션이 열리지 않았다). 다만 `npx --yes`

@@ -11,7 +11,7 @@
 // 기존 chat/ticket 세션 매니저와 달리 AWB Agent identity·프롬프트 래핑·히스토리 재조립이
 // 없다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
 
-import { access, constants as fsConstants, lstat, mkdir, symlink } from 'node:fs/promises';
+import { access, constants as fsConstants, lstat, mkdir, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { delimiter, join } from 'node:path';
 
@@ -737,10 +737,12 @@ export class AgentSessionRunner {
           resumed = true;
         } catch (err: any) {
           if (err?.code === 'auth_required') throw err;
-          // codex-acp 는 옛 rollout 형식의 thread 를 "Internal error" 로만 거부한다 — 무엇을 해야 하는지 알려 준다.
-          const detail = redactSecrets(String(err?.message ?? err));
+          // 어댑터는 `Internal error` 한 줄만 내고 진짜 이유는 `data.details` 에 담는다
+          // (예: `no rollout found for thread id …`). 그것까지 사용자에게 보여 준다.
+          const details = (err?.data as { details?: unknown } | undefined)?.details;
+          const detail = redactSecrets(String(details || err?.message || err));
           throw Object.assign(
-            new Error(`${cli} could not resume this session (${detail}). Older sessions may not be resumable by the adapter — start a new session in the same folder.`),
+            new Error(`${cli} could not resume this session: ${detail}. It may have been started under a different CLI home, or the adapter cannot resume it — start a new session in the same folder.`),
             { code: 'resume_failed', cause: err },
           );
         } finally {
@@ -968,7 +970,34 @@ export class AgentSessionRunner {
     return { label: `credential:${credential.provider}`, source: 'credential', env, stripEnvKeys, cliHome };
   }
 
-  /** 세션 전용 cli-home 의 기록 디렉터리를 운영자 홈으로 링크한다(멱등). */
+  /**
+   * 링크가 실제로 운영자의 기록을 **보여 주는가**. 존재 여부만으로는 알 수 없다 — Windows junction 은
+   * 끊어져도 경로가 그대로 남아 빈 디렉터리처럼 보인다(실측: ralf 의 credential 홈에서 `sessions` 는
+   * 있는데 그 아래가 통째로 비어 codex 가 `no rollout found for thread id` 로 재개를 거부했다).
+   * 대상의 첫 항목이 링크를 통해 보이는지로 판정한다. 대상이 비어 있으면 판정할 수 없으므로 건드리지 않는다.
+   */
+  async #sessionStoreVisible(linkPath: string, target: string): Promise<boolean> {
+    let entries: string[];
+    try {
+      entries = await readdir(target);
+    } catch {
+      return true;
+    }
+    if (!entries.length) return true;
+    try {
+      await stat(join(linkPath, entries[0]));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 세션 전용 cli-home 의 기록 디렉터리를 운영자 홈으로 링크한다(멱등).
+   * 이미 있으면 **내용이 보이는지 확인하고**, 끊어져 있으면 다시 만든다 — 예전에는 경로가 존재하기만
+   * 하면 성공으로 보고 넘어가서, 한 번 끊어진 링크가 영영 고쳐지지 않았다(그 credential 로 여는 모든
+   * 세션의 재개가 실패했다). 링크가 아니라 진짜 디렉터리가 들어 있으면 지우지 않는다 — 운영자의 자료일 수 있다.
+   */
   async #linkSessionStore(cli: string, cliHome: string): Promise<void> {
     const subdir = SESSION_STORE_SUBDIR[cli];
     if (!subdir) return;
@@ -976,11 +1005,23 @@ export class AgentSessionRunner {
     const target = join(operatorHome, subdir);
     const linkPath = join(cliHome, subdir);
     await mkdir(target, { recursive: true });
+    let existing: Awaited<ReturnType<typeof lstat>> | null = null;
     try {
-      const existing = await lstat(linkPath);
-      if (existing.isSymbolicLink() || existing.isDirectory()) return; // 이미 링크됐거나 실제 디렉터리
+      existing = await lstat(linkPath);
     } catch {
       /* 없음 → 만든다 */
+    }
+    if (existing) {
+      if (await this.#sessionStoreVisible(linkPath, target)) return;
+      // 지워도 되는 경우만 지운다: 링크이거나(끊어진 junction 포함), 내용이 없는 디렉터리.
+      // 내용이 있는 진짜 디렉터리는 운영자의 자료일 수 있으므로 손대지 않는다.
+      const empty = (await readdir(linkPath).catch(() => [] as string[])).length === 0;
+      if (!existing.isSymbolicLink() && !empty) {
+        log(`[agent-session ${cli}] ${linkPath} is a real directory that does not mirror ${target} — leaving it alone (sessions started elsewhere will not resume here)`);
+        return;
+      }
+      log(`[agent-session ${cli}] session store link was broken (${linkPath} → ${target}); recreating`);
+      await rm(linkPath, { recursive: true, force: true });
     }
     await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
   }

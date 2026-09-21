@@ -7,7 +7,8 @@
 //   5. 없는 cwd / 알 수 없는 CLI 는 RPC 오류로 응답한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, readlink, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -717,4 +718,47 @@ test('a session opened with a workspace credential reports source=credential', a
   await waitFor(() => server.states(sid).some((s) => s.auth), 'auth patch');
   assert.equal(server.states(sid).filter((s) => s.auth).at(-1).auth.source, 'credential');
   await runner.handle(request('close', { session_id: sid }));
+});
+
+// ─── 세션 전용 cli-home 의 기록 링크가 끊어졌을 때 ───────────────────────────────
+//
+// Windows junction 은 끊어져도 경로가 그대로 남아 빈 디렉터리처럼 보인다(실측: ralf 의 credential 홈에서
+// `sessions` 는 있는데 그 아래가 통째로 비어, codex 가 `no rollout found for thread id` 로 재개를 거부했다).
+// 예전에는 "경로가 있으면 성공" 으로 보고 넘어가서 한 번 끊어진 링크가 영영 고쳐지지 않았다 — 그 credential
+// 로 여는 모든 세션의 재개가 실패했다. 이제 내용이 보이는지 확인하고 끊어졌으면 다시 만든다.
+test('a broken session-store link is detected and rebuilt, and a real directory with content is left alone', async (t) => {
+  // credentialHarness 는 세션 전용 cli-home 을 tmp 로 격리해 준다(기존 credential 테스트와 같은 배선).
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  const { cwd, server, runner, root } = h;
+  const open = (requestId) => runner.handle(request('open', { request_id: requestId, session_id: null, cwd, credential_id: 'cred-1', workspace_id: 'ws-1' }));
+  const linkPath = join(h.sessionHomesDir, 'claude', 'cred-1', 'projects');
+  const operatorStore = join(root, 'claude', 'projects');
+
+  // 1. 첫 open 이 링크를 만든다 — 운영자 홈의 기록이 그 링크를 통해 보여야 한다.
+  await open('rpc-link-1');
+  assert.equal(server.rpc('rpc-link-1').ok, true, JSON.stringify(server.rpc('rpc-link-1')));
+  assert.ok((await lstat(linkPath)).isSymbolicLink(), 'the store is linked, not copied');
+  assert.ok(existsSync(join(linkPath, '-work')), 'the operator history is visible through it');
+  assert.ok(existsSync(join(operatorStore, '-work')), 'sanity: the operator store has the recorded session');
+  await runner.handle(request('close', { session_id: server.rpc('rpc-link-1').result.session_id }));
+
+  // 2. 링크를 끊는다(엉뚱한 곳을 가리키게) — 경로는 남아 있지만 기록은 보이지 않는다.
+  await rm(linkPath, { recursive: true, force: true });
+  await symlink(join(root, 'nowhere'), linkPath, 'dir');
+  assert.equal(existsSync(join(linkPath, '-work')), false, 'the history is not visible through the broken link');
+
+  // 3. 다음 open 이 고친다.
+  await open('rpc-link-2');
+  assert.equal(server.rpc('rpc-link-2').ok, true, JSON.stringify(server.rpc('rpc-link-2')));
+  assert.ok(existsSync(join(linkPath, '-work')), 'the link was rebuilt, so sessions can resume again');
+  await runner.handle(request('close', { session_id: server.rpc('rpc-link-2').result.session_id }));
+
+  // 4. 링크가 아니라 내용이 있는 진짜 디렉터리면 지우지 않는다 — 운영자의 자료일 수 있다.
+  await rm(linkPath, { recursive: true, force: true });
+  await mkdir(join(linkPath, 'someone-elses'), { recursive: true });
+  await writeFile(join(linkPath, 'someone-elses', 'keep.txt'), 'keep me');
+  await open('rpc-link-3');
+  assert.equal(server.rpc('rpc-link-3').ok, true, 'the session still opens');
+  assert.ok(existsSync(join(linkPath, 'someone-elses', 'keep.txt')), 'the real directory and its content survive');
+  await runner.handle(request('close', { session_id: server.rpc('rpc-link-3').result.session_id }));
 });
