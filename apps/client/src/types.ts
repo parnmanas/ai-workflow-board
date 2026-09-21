@@ -3152,12 +3152,26 @@ export interface AgentSessionHost {
   cli_settings?: Record<string, AgentSessionCredentialRef | null>;
 }
 
+/** 세션을 띄울 Claude backend(엔드포인트·모델). 인스턴스 전역 목록에서 고른다. */
+export interface AgentSessionBackendRef {
+  id: string;
+  name: string;
+  protocol: string;
+  model: string;
+  base_url: string;
+}
+
 export interface AgentSessionCliSettings {
   manager_id: string;
   cli: string;
   supports_credential: boolean;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
+  /** 이 CLI 가 backend profile 을 받을 수 있는가(Claude backend profile 이라 claude 뿐). */
+  supports_backend: boolean;
+  /** 고른 backend — null 이면 CLI 기본 엔드포인트. */
+  backend: AgentSessionBackendRef | null;
+  backend_candidates: AgentSessionBackendRef[];
   /** 세션을 열 때마다 다시 거는 설정 — `{ [configId]: value }`. `__mode` 는 레거시 set_mode. */
   default_config: Record<string, string | boolean>;
   /** 마지막으로 본 선택지 — 세션이 열리기 전에도 고를 수 있게 한다. */

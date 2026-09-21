@@ -1348,6 +1348,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         config_id: event.config_id,
         config_value: event.config_value,
         config_defaults: event.config_defaults,
+        runtime_profile: event.runtime_profile ?? null,
         elicitation_id: event.elicitation_id,
         elicitation_action: event.elicitation_action,
         elicitation_content: event.elicitation_content,

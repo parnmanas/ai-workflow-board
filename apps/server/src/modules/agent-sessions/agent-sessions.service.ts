@@ -4,7 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { In, IsNull, Like, Repository } from 'typeorm';
 import { Agent } from '../../entities/Agent';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
+import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
+import { profileEntityToRuntime } from '../../common/claude-backend-registry';
+import type { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { decrypt } from '../../services/encryption.service';
 import { normalizeCredentialFields } from '../../common/credential-fields';
 import { activityEvents } from '../../services/activity.service';
@@ -74,11 +77,29 @@ export interface AgentSessionCliSettings {
   supports_credential: boolean;
   credential: AgentSessionCredentialRef | null;
   candidates: AgentSessionCredentialRef[];
+  /** 이 CLI 가 backend profile 을 받을 수 있는가(Claude backend profile 이라 claude 뿐). */
+  supports_backend: boolean;
+  /** 고른 backend — null 이면 CLI 기본 엔드포인트. */
+  backend: AgentSessionBackendRef | null;
+  /** 인스턴스 전역 backend profile 목록. */
+  backend_candidates: AgentSessionBackendRef[];
   /** 세션을 열 때마다 다시 걸 설정 — `{ [configId]: value }`, `__mode` 는 레거시 set_mode. */
   default_config: Record<string, string | boolean>;
   /** 마지막으로 본 선택지 — 세션이 열리기 전(새 세션 모달)에 고를 수 있게 한다. */
   known_config_options: AgentSessionConfigOption[];
   updated_at: string | null;
+}
+
+/** backend profile 을 받을 수 있는 CLI — Claude backend profile 이므로 claude 뿐이다. */
+const BACKEND_PROFILE_CLIS: ReadonlySet<string> = new Set(['claude']);
+
+/** 화면에 보여 줄 backend profile 투영(비밀 없음). */
+export interface AgentSessionBackendRef {
+  id: string;
+  name: string;
+  protocol: string;
+  model: string;
+  base_url: string;
 }
 
 /** CLI → 호환 credential provider 접두어. agents 화면의 CLI_TO_CREDENTIAL_PREFIX 와 같은 규약. */
@@ -281,6 +302,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     @InjectRepository(Agent) private readonly agents: Repository<Agent>,
     @InjectRepository(AgentSessionCliSetting) private readonly settings: Repository<AgentSessionCliSetting>,
     @InjectRepository(Credential) private readonly credentials: Repository<Credential>,
+    @InjectRepository(ClaudeBackendProfile) private readonly backendProfiles: Repository<ClaudeBackendProfile>,
     private readonly registry: InstanceRegistryService,
     private readonly logService: LogService,
   ) {
@@ -387,6 +409,42 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
   }
 
+  private backendRef(profile: CliRuntimeProfile, name: string): AgentSessionBackendRef {
+    return { id: profile.id, name, protocol: profile.protocol, model: profile.model, base_url: profile.base_url };
+  }
+
+  /** 인스턴스 전역 backend profile 목록(워크스페이스 계층 없음 — claude-backend-registry 와 같은 규약). */
+  private async backendProfileList(): Promise<Array<{ runtime: CliRuntimeProfile; name: string }>> {
+    const rows = await this.backendProfiles.find();
+    const out: Array<{ runtime: CliRuntimeProfile; name: string }> = [];
+    for (const row of rows) {
+      try {
+        out.push({ runtime: profileEntityToRuntime(row), name: row.name });
+      } catch (err: any) {
+        // 깨진 프로필 하나가 세션 설정 화면 전체를 막지 않게 한다.
+        this.logService.warn('AgentSession', `Claude backend profile ${row.id} is unusable: ${err?.message ?? err}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 이 호스트×CLI 에 고른 backend profile. **전역 기본값으로 떨어지지 않는다** — 세션은 장비의 CLI 를
+   * 그대로 모는 표면이라, 고르지 않았는데 다른 엔드포인트로 조용히 돌아가면 안 된다(디스패치 경로와 다른 점).
+   */
+  private async backendProfileFor(workspaceId: string, managerId: string, cli: string): Promise<CliRuntimeProfile | null> {
+    if (!BACKEND_PROFILE_CLIS.has(cli)) return null;
+    const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
+    const pinned = row?.backend_profile_id;
+    if (!pinned) return null;
+    const found = (await this.backendProfileList()).find((p) => p.runtime.id === pinned);
+    if (!found) {
+      this.logService.warn('AgentSession', `Claude backend profile "${pinned}" pinned for ${managerId.slice(0, 8)}/${cli} no longer exists — sessions open on the CLI default`);
+      return null;
+    }
+    return found.runtime;
+  }
+
   /** 이 호스트×CLI 의 기억된 설정. 세션을 열 때 payload 에 실어 매니저가 다시 건다. */
   private async configDefaultsFor(workspaceId: string, managerId: string, cli: string): Promise<Record<string, string | boolean> | undefined> {
     const row = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
@@ -474,12 +532,20 @@ export class AgentSessionsService implements OnModuleDestroy {
     const candidates = await this.candidateCredentials(workspaceId, cli);
     const current = row?.credential_id ? candidates.find((c) => c.id === row.credential_id) ?? null : null;
     const cached = this.parseKnownOptions(row?.known_config_options);
+    const supportsBackend = BACKEND_PROFILE_CLIS.has(cli);
+    const backends = supportsBackend ? await this.backendProfileList() : [];
+    const pinnedBackend = row?.backend_profile_id
+      ? backends.find((b) => b.runtime.id === row.backend_profile_id) ?? null
+      : null;
     return {
       manager_id: managerId,
       cli,
       supports_credential: !!SESSION_CLI_CREDENTIAL_PREFIX[cli],
       credential: current ? this.credentialRef(current) : null,
       candidates: candidates.map((c) => this.credentialRef(c)),
+      supports_backend: supportsBackend,
+      backend: pinnedBackend ? this.backendRef(pinnedBackend.runtime, pinnedBackend.name) : null,
+      backend_candidates: backends.map((b) => this.backendRef(b.runtime, b.name)),
       default_config: this.parseDefaults(row?.default_config),
       // 캐시가 아직 비었으면 지금 살아 있는 세션이 아는 선택지를 그대로 쓴다 — 서버가 재시작한 직후나
       // 이 호스트에서 세션을 연 적이 없는 워크스페이스에서도 바로 고를 수 있다.
@@ -495,6 +561,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     cli: string,
     credentialIdInput: unknown,
     defaultConfigInput?: unknown,
+    backendProfileInput?: unknown,
   ): Promise<AgentSessionCliSettings> {
     if (!CLI_RE.test(cli)) throw new AgentSessionError(400, 'cli_invalid');
     await this.requireManagerAgent(managerId);
@@ -508,6 +575,18 @@ export class AgentSessionsService implements OnModuleDestroy {
       }
       if (!cred.provider.startsWith(prefix)) {
         throw new AgentSessionError(400, 'credential_provider_mismatch', `A ${cli} session needs a ${prefix}* credential, got ${cred.provider}.`);
+      }
+    }
+    // backend profile — undefined 는 "건드리지 않음", null/'' 은 핀 해제, 그 외는 전역 목록에 있어야 한다.
+    let backendProfileId: string | null | undefined;
+    if (backendProfileInput !== undefined) {
+      const raw = typeof backendProfileInput === 'string' ? backendProfileInput.trim() : '';
+      if (!raw) backendProfileId = null;
+      else {
+        if (!BACKEND_PROFILE_CLIS.has(cli)) throw new AgentSessionError(409, 'backend_unsupported', `${cli} sessions cannot take a Claude backend profile.`);
+        const known = (await this.backendProfileList()).some((b) => b.runtime.id === raw);
+        if (!known) throw new AgentSessionError(404, 'backend_profile_not_found', `Claude backend profile "${raw}" does not exist.`);
+        backendProfileId = raw;
       }
     }
     const existing = await this.settings.findOne({ where: { workspace_id: workspaceId, manager_id: managerId, cli } });
@@ -531,11 +610,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (existing) {
       existing.credential_id = credentialId;
       existing.default_config = mergeDefaults(existing.default_config);
+      if (backendProfileId !== undefined) existing.backend_profile_id = backendProfileId;
       existing.updated_by = userId;
       await this.settings.save(existing);
     } else {
       await this.settings.save(this.settings.create({
         workspace_id: workspaceId, manager_id: managerId, cli, credential_id: credentialId,
+        backend_profile_id: backendProfileId ?? null,
         default_config: mergeDefaults('{}'), known_config_options: '[]', updated_by: userId,
       }));
     }
@@ -717,7 +798,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     const title = String(input.title ?? '').trim().slice(0, TITLE_MAX);
     const credentialId = await this.boundCredentialId(workspaceId, managerId, cli);
     const configDefaults = await this.configDefaultsFor(workspaceId, managerId, cli);
-    const result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults }, userId);
+    const runtimeProfile = await this.backendProfileFor(workspaceId, managerId, cli);
+    const result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile }, userId);
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
     if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
     const state = await this.seedState(rec, managerId, cli, openedId, {
@@ -780,8 +862,9 @@ export class AgentSessionsService implements OnModuleDestroy {
       turn_id: turnId,
       text,
       credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
-      // prompt 도 세션을 (재)열 수 있는 경로다 — 기억된 설정을 같이 보낸다.
+      // prompt 도 세션을 (재)열 수 있는 경로다 — 기억된 설정과 backend 를 같이 보낸다.
       config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
       driver_user_id: userId,
     });
     return { turn_id: turnId, live };
@@ -877,6 +960,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_config_option', session_id: sessionId, config_id: configId, config_value: valueInput,
       cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
       config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
       driver_user_id: userId,
     });
     return this.snapshot(state);
@@ -904,6 +988,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       manager_id: managerId, workspace_id: workspaceId, cli, op: 'set_mode', session_id: sessionId, mode_id: modeId,
       cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
       config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
       driver_user_id: userId,
     });
     return this.snapshot(state);

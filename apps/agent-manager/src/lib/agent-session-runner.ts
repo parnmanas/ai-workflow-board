@@ -33,6 +33,13 @@ import {
   type AwbConfig,
 } from './rest.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
+import {
+  runtimeCredentialEnv,
+  startRuntimeProfile,
+  validateRuntimeProfile,
+  type RuntimeLease,
+} from './runtime-profiles.js';
+import type { RuntimeProfileSpec } from './cli-adapters/base.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
 import type {
   AcpAuthStatus,
@@ -65,6 +72,8 @@ export interface AgentSessionRequest {
   config_value?: string | boolean;
   /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode). */
   config_defaults?: Record<string, string | boolean>;
+  /** CLI 설정에서 고른 Claude backend profile — 그 엔드포인트·모델로 세션을 띄운다. */
+  runtime_profile?: RuntimeProfileSpec | null;
   /** elicitation — 에이전트 질문/폼에 대한 답 */
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';
@@ -149,6 +158,8 @@ const SESSION_STORE_SUBDIR: Record<string, string> = {
 
 interface SessionAuth {
   label: string;
+  /** backend profile 이 걸렸으면 그 lease — 세션이 닫힐 때 반납한다(어댑터 사이드카가 있으면 함께 정리). */
+  runtimeLease?: RuntimeLease | null;
   /** 자격증명의 출처 — 워크스페이스 Credential 인지, 그 장비 운영자의 CLI 로그인인지. */
   source: 'credential' | 'operator';
   env: Record<string, string>;
@@ -208,6 +219,8 @@ interface LiveSession {
   authSource: 'credential' | 'operator';
   /** 어댑터가 `_auth/status_update` 로 알려 준 신원. 안 알려 주면 null("모른다"). */
   authStatus: AgentSessionAuthPatch | null;
+  /** backend profile lease — 프로세스를 회수할 때 같이 반납한다. */
+  runtimeLease: RuntimeLease | null;
   closing: boolean;
   exited: boolean;
 }
@@ -718,6 +731,7 @@ export class AgentSessionRunner {
         credentialId: request.credential_id || '',
         authSource: auth.source,
         authStatus: null,
+        runtimeLease: auth.runtimeLease ?? null,
         closing: false,
         exited: false,
       };
@@ -796,6 +810,7 @@ export class AgentSessionRunner {
       const child = client.process;
       client.close();
       if (child?.pid) await terminateDetachedProcessTree(child.pid, 250, { child }).catch(() => undefined);
+      await auth.runtimeLease?.close().catch(() => undefined);
       throw err;
     }
   }
@@ -943,7 +958,7 @@ export class AgentSessionRunner {
   async #prepareAuth(cli: string, cwd: string, request: AgentSessionRequest): Promise<SessionAuth> {
     const none: SessionAuth = { label: 'operator-login', source: 'operator', env: {}, stripEnvKeys: [], cliHome: null };
     const credentialId = request.credential_id || '';
-    if (!credentialId) return none;
+    if (!credentialId) return this.#withBackend(cli, request, none, '', undefined);
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
     if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
@@ -973,7 +988,44 @@ export class AgentSessionRunner {
     // 운영자 셸의 API 키(ANTHROPIC_API_KEY / OPENAI_API_KEY …)가 credential 을 덮지 않게 걷어낸다.
     const stripEnvKeys = adapter.authEnvKeys().filter((key) => !(key in env));
     await adapter.ensureWorkspaceTrust(cliHome, cwd).catch((err: any) => log(`[agent-session ${cli}] trust seed failed: ${err?.message ?? err}`));
-    return { label: `credential:${credential.provider}`, source: 'credential', env, stripEnvKeys, cliHome };
+    const auth: SessionAuth = { label: `credential:${credential.provider}`, source: 'credential', env, stripEnvKeys, cliHome };
+    return this.#withBackend(cli, request, auth, credentialId, prep.extraEnv ?? {});
+  }
+
+  /**
+   * CLI 설정에서 고른 Claude backend profile 을 세션에 건다. 디스패치 경로와 같은 기계를 쓴다
+   * (`startRuntimeProfile` → `lease.claudeEnv()`): 엔드포인트·모델 env 를 얹고, 프로필이 어댑터
+   * 사이드카를 요구하면 그 프로세스도 lease 가 관리한다. 세션이 닫힐 때 반납한다.
+   *
+   * 비밀은 **CLI 설정에 묶인 credential** 에서 온다 — 프로필이 특정 credential 을 가리키는데
+   * 다른 것이 묶여 있으면 `runtimeCredentialEnv` 가 거부한다. 그 편이 조용히 엉뚱한 키로 붙는 것보다 낫다.
+   */
+  async #withBackend(
+    cli: string,
+    request: AgentSessionRequest,
+    auth: SessionAuth,
+    credentialId: string,
+    credentialEnv: Record<string, string> | undefined,
+  ): Promise<SessionAuth> {
+    const profile = request.runtime_profile;
+    if (!profile) return auth;
+    if (cli !== 'claude') {
+      throw Object.assign(new Error(`A Claude backend profile cannot be applied to ${cli} sessions.`), { code: 'backend_unsupported' });
+    }
+    try {
+      validateRuntimeProfile(profile);
+    } catch (err: any) {
+      throw Object.assign(new Error(`Claude backend profile "${profile.id}" is unusable: ${err?.message ?? err}`), { code: 'backend_invalid' });
+    }
+    const lease = await startRuntimeProfile(profile, runtimeCredentialEnv(profile, credentialId || null, credentialEnv));
+    log(`[agent-session ${cli}] backend profile ${profile.id} → ${profile.base_url} (${profile.model})`);
+    return {
+      ...auth,
+      label: `${auth.label} backend:${profile.id}`,
+      runtimeLease: lease,
+      // 프로필 env 가 credential env 위에 얹힌다 — 엔드포인트를 고른 쪽이 이긴다.
+      env: { ...auth.env, ...lease.claudeEnv() },
+    };
   }
 
   /**
@@ -1494,6 +1546,7 @@ export class AgentSessionRunner {
       return;
     }
     this.#live.delete(key);
+    void live.runtimeLease?.close().catch(() => undefined);
     const detail = `Agent process exited (${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}).`;
     log(`[agent-session ${live.cli} ${live.sessionId.slice(0, 8)}] ${detail}`);
     this.#flushBuffers(live, live.turn?.turnId);
@@ -1522,6 +1575,7 @@ export class AgentSessionRunner {
     const pid = child?.pid;
     live.client.close();
     if (pid && child) await terminateDetachedProcessTree(pid, 250, { child }).catch(() => undefined);
+    await live.runtimeLease?.close().catch(() => undefined);
     const text = finalStatus === 'closed'
       ? 'Agent process stopped.'
       : reason === 'idle'

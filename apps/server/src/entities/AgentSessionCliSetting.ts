@@ -38,6 +38,14 @@ export class AgentSessionCliSetting {
   default_config: string;
 
   /**
+   * Claude backend profile(`claude_backend_profiles.id`) — null 이면 CLI 기본 엔드포인트를 그대로 쓴다.
+   * 인스턴스 전역 목록에서 고르며, **전역 기본값으로 떨어지지 않는다**: 세션은 "그 장비의 CLI 를 그대로
+   * 몬다" 는 표면이라, 고르지 않았는데 다른 백엔드로 조용히 돌아가면 안 된다.
+   */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  backend_profile_id: string | null;
+
+  /**
    * 마지막으로 본 설정 목록(`AgentSessionConfigOption[]` JSON). 선택지는 어댑터가 살아 있어야
    * 알 수 있는데, 새 세션 모달은 세션이 열리기 **전에** 골라야 한다 — 그래서 마지막 목록을 남긴다.
    * 표시용 캐시일 뿐이라 비어 있으면 모달이 그 선택기를 감춘다.

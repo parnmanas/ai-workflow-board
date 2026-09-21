@@ -520,7 +520,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
       instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
-      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4242, started_at: new Date().toISOString(),
+      cli: 'codex', cli_adapters: ['codex', 'claude'], acp_session_clis: ['codex', 'claude'], pid: 4242, started_at: new Date().toISOString(),
     }),
   });
   assert.ok((await heartbeat('inst-interactive-1')).status < 300);
@@ -658,7 +658,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
       instance_id: 'inst-interactive-2', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
-      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4242, started_at: new Date().toISOString(),
+      cli: 'codex', cli_adapters: ['codex', 'claude'], acp_session_clis: ['codex', 'claude'], pid: 4242, started_at: new Date().toISOString(),
       ...(agentSessions !== undefined ? { agent_sessions: agentSessions } : {}),
     }),
   });
@@ -699,6 +699,26 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.deepEqual(beforeRemember.body.known_config_options.find((o) => o.config_id === 'model').options.map((o) => o.value), ['gpt-fast', 'gpt-smart'], 'with its choices, so the modal can render a picker before any session exists');
   assert.equal(requests.filter((r) => r.op === 'set_config_option').at(-1).config_defaults.model, 'gpt-fast', 'the op carries the full remembered set');
 
+  // backend(Claude backend profile) — 인스턴스 전역 목록에서 고르고, open payload 에 실린다.
+  const backendRow = { id: 'gw', name: 'Gateway', protocol: 'anthropic-compatible', base_url: 'http://gw.local:9000', model: 'claude-gw', credential_ref: null, config: '{}' };
+  await ds.getRepository('ClaudeBackendProfile').save(backendRow);
+  const withBackends = await call(settingsUrl, { headers: ownerHeaders });
+  assert.equal(withBackends.body.supports_backend, false, 'codex 는 Claude backend profile 을 받지 않는다');
+  const claudeSettingsUrl = `${base}/api/agent-sessions/hosts/${managerId}/claude/settings`;
+  const claudeSettings = await call(claudeSettingsUrl, { headers: ownerHeaders });
+  assert.equal(claudeSettings.status, 200, claudeSettings.text);
+  assert.equal(claudeSettings.body.supports_backend, true);
+  assert.deepEqual(claudeSettings.body.backend_candidates.map((b) => [b.id, b.name, b.model]), [['gw', 'Gateway', 'claude-gw']]);
+  assert.equal(claudeSettings.body.backend, null, '고르기 전에는 CLI 기본 엔드포인트');
+
+  const badBackend = await call(claudeSettingsUrl, { method: 'PUT', headers: ownerHeaders, body: JSON.stringify({ credential_id: null, backend_profile_id: 'nope' }) });
+  assert.equal(badBackend.status, 404, '없는 프로필은 거부한다');
+  const codexBackend = await call(settingsUrl, { method: 'PUT', headers: ownerHeaders, body: JSON.stringify({ credential_id: null, backend_profile_id: 'gw' }) });
+  assert.equal(codexBackend.status, 409, 'codex 에는 붙일 수 없다');
+  const pinned = await call(claudeSettingsUrl, { method: 'PUT', headers: ownerHeaders, body: JSON.stringify({ credential_id: null, backend_profile_id: 'gw' }) });
+  assert.equal(pinned.status, 200, pinned.text);
+  assert.deepEqual([pinned.body.backend.id, pinned.body.backend.base_url], ['gw', 'http://gw.local:9000']);
+
   // 모달이 세션을 열기 전에 고르는 경로 — PUT 은 부분 갱신이고 null 은 키를 지운다
   const putDefaults = await call(settingsUrl, {
     method: 'PUT', headers: ownerHeaders,
@@ -722,6 +742,20 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   await waitFor(() => requests.some((r) => r.op === 'open' && r.cwd === '/home/parn/repo'), 'open rpc');
   const openReq = requests.find((r) => r.op === 'open' && r.cwd === '/home/parn/repo');
   assert.deepEqual(openReq.config_defaults, { model: 'gpt-fast', __mode: 'agent', mode: 'read-only' }, 'the manager is told what to restore');
+  assert.equal(openReq.runtime_profile, null, 'codex sessions carry no Claude backend profile');
+
+  // claude 세션을 열면 핀한 backend 가 payload 에 실린다 — 고르지 않았으면 null(전역 기본값으로 떨어지지 않는다).
+  const claudeOpen = call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ cwd: '/home/parn/repo' }) });
+  await waitFor(() => requests.some((r) => r.op === 'open' && r.cli === 'claude'), 'claude open rpc');
+  const claudeOpenReq = requests.find((r) => r.op === 'open' && r.cli === 'claude');
+  assert.equal(claudeOpenReq.runtime_profile?.id, 'gw');
+  assert.equal(claudeOpenReq.runtime_profile?.base_url, 'http://gw.local:9000');
+  assert.equal(claudeOpenReq.runtime_profile?.model, 'claude-gw');
+  await call(`${base}/api/agent/sessions/rpc/${claudeOpenReq.request_id}`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({ manager_id: managerId, ok: true, result: { session_id: 'claude-backend-1', cwd: '/home/parn/repo', status: 'ready' } }),
+  });
+  assert.equal((await claudeOpen).status, 201);
   await call(`${base}/api/agent/sessions/rpc/${openReq.request_id}`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({ manager_id: managerId, ok: true, result: { session_id: 'codex-thread-defaults', cwd: '/home/parn/repo', status: 'ready' } }),

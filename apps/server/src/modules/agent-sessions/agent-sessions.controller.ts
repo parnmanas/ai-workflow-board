@@ -60,14 +60,15 @@ export class AgentSessionsController {
   }
 
   /**
-   * `{ credential_id: string | null, default_config?: { [configId]: string | boolean | null } }`
+   * `{ credential_id: string | null, default_config?: {...}, backend_profile_id?: string | null }`
    * `default_config` 는 부분 갱신이다 — 보낸 키만 바뀌고, null 이면 그 키를 지운다(어댑터 기본값으로).
+   * `backend_profile_id` 는 생략하면 그대로 두고, null/'' 이면 핀을 지운다(CLI 기본 엔드포인트).
    */
   @Put('hosts/:managerId/:cli/settings')
   async setSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const ws = this.workspaceId(req, res);
     if (!ws) return;
-    return this.run(res, 200, () => this.sessions.setCliSettings(ws, this.userId(req), managerId, cli, body?.credential_id ?? null, body?.default_config));
+    return this.run(res, 200, () => this.sessions.setCliSettings(ws, this.userId(req), managerId, cli, body?.credential_id ?? null, body?.default_config, body?.backend_profile_id));
   }
 
   @Get('hosts/:managerId/:cli/sessions')

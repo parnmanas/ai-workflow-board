@@ -2038,11 +2038,24 @@ export const api = {
   },
   getHostCliSettings: (managerId: string, cli: string) =>
     request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`),
-  /** `defaultConfig` 는 부분 갱신 — 보낸 키만 바뀌고 null 은 그 키를 지운다(어댑터 기본값으로 되돌림). */
-  setHostCliSettings: (managerId: string, cli: string, credentialId: string | null, defaultConfig?: Record<string, string | boolean | null>) =>
+  /**
+   * `defaultConfig` 는 부분 갱신 — 보낸 키만 바뀌고 null 은 그 키를 지운다(어댑터 기본값으로 되돌림).
+   * `backendProfileId` 는 생략하면 그대로 두고, null 이면 핀을 지운다(CLI 기본 엔드포인트).
+   */
+  setHostCliSettings: (
+    managerId: string,
+    cli: string,
+    credentialId: string | null,
+    defaultConfig?: Record<string, string | boolean | null>,
+    backendProfileId?: string | null,
+  ) =>
     request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`, {
       method: 'PUT',
-      body: JSON.stringify({ credential_id: credentialId, ...(defaultConfig ? { default_config: defaultConfig } : {}) }),
+      body: JSON.stringify({
+        credential_id: credentialId,
+        ...(defaultConfig ? { default_config: defaultConfig } : {}),
+        ...(backendProfileId !== undefined ? { backend_profile_id: backendProfileId } : {}),
+      }),
     }),
   listHostSessions: (managerId: string, cli: string) =>
     request<AgentSessionSummary[]>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`),

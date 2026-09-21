@@ -765,3 +765,50 @@ test('a broken session-store link is detected and rebuilt, and a real directory 
   assert.ok(existsSync(join(linkPath, 'someone-elses', 'keep.txt')), 'the real directory and its content survive');
   await runner.handle(request('close', { session_id: server.rpc('rpc-link-3').result.session_id }));
 });
+
+// ─── Claude backend profile (세션을 다른 엔드포인트로 띄우기) ────────────────────
+//
+// CLI 설정에서 고른 backend profile 이 open payload 에 실려 오면, 디스패치 경로와 같은 기계
+// (startRuntimeProfile → lease.claudeEnv())로 엔드포인트·모델 env 를 세션 프로세스에 건다.
+test('a Claude backend profile points the session at its endpoint and model', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  // anthropic-compatible 은 어댑터 사이드카 없이 엔드포인트만 바꾸는 가장 단순한 형태다
+  // (openai-compatible 은 validateRuntimeProfile 이 adapter 를 요구한다).
+  const profile = {
+    id: 'gateway-box',
+    kind: 'claude-backend',
+    protocol: 'anthropic-compatible',
+    base_url: 'http://gateway.local:8000',
+    model: 'claude-via-gateway',
+    context_window: 200000,
+  };
+  await h.runner.handle(request('open', {
+    request_id: 'rpc-backend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1',
+    runtime_profile: profile,
+  }));
+  const opened = h.server.rpc('rpc-backend');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const cap = await h.capture();
+  assert.equal(cap.ANTHROPIC_BASE_URL, 'http://gateway.local:8000', 'the session talks to the profile endpoint');
+  assert.equal(cap.ANTHROPIC_MODEL, 'claude-via-gateway', 'and uses its model');
+  assert.equal(cap.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '200000', 'context window rides along');
+  assert.equal(cap.CLAUDE_CONFIG_DIR, join(h.sessionHomesDir, 'claude', 'cred-1'), 'the credential cli-home is still used');
+  await h.runner.handle(request('close', { session_id: opened.result.session_id }));
+});
+
+test('no backend profile leaves the endpoint alone, and a broken one fails the open with a named reason', async (t) => {
+  const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
+  await h.runner.handle(request('open', { request_id: 'rpc-nobackend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1' }));
+  assert.equal(h.server.rpc('rpc-nobackend').ok, true);
+  const cap = await h.capture();
+  assert.equal(cap.ANTHROPIC_BASE_URL, null, 'without a profile the CLI keeps its default endpoint');
+  await h.runner.handle(request('close', { session_id: h.server.rpc('rpc-nobackend').result.session_id }));
+
+  await h.runner.handle(request('open', {
+    request_id: 'rpc-badbackend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1',
+    runtime_profile: { id: 'broken', kind: 'claude-backend', protocol: 'anthropic-compatible', base_url: '', model: '' },
+  }));
+  const bad = h.server.rpc('rpc-badbackend');
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /backend profile "broken" is unusable/i, 'the operator is told which profile and why');
+});

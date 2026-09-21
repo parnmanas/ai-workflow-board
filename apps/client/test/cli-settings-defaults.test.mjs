@@ -29,9 +29,15 @@ const OPTIONS = [
   { config_id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', current_value: false, options: [] },
 ];
 
+const BACKENDS = [
+  { id: 'vllm', name: 'vLLM box', protocol: 'openai-compatible', model: 'qwen-3', base_url: 'http://gpu:8000' },
+  { id: 'bedrock', name: 'Bedrock', protocol: 'anthropic-compatible', model: 'claude-sonnet', base_url: 'https://bedrock' },
+];
+
 function settings(over = {}) {
   return {
     manager_id: 'm-rolf', cli: 'codex', supports_credential: true, credential: null, candidates: [],
+    supports_backend: false, backend: null, backend_candidates: [],
     default_config: {}, known_config_options: OPTIONS, updated_at: null, ...over,
   };
 }
@@ -48,11 +54,15 @@ function stubApi(t, initial) {
   const original = { get: api.getHostCliSettings, put: api.setHostCliSettings };
   let current = initial;
   api.getHostCliSettings = async () => current;
-  api.setHostCliSettings = async (managerId, cli, credentialId, defaultConfig) => {
-    calls.push({ credentialId, defaultConfig });
+  api.setHostCliSettings = async (managerId, cli, credentialId, defaultConfig, backendProfileId) => {
+    calls.push({ credentialId, defaultConfig, backendProfileId });
     const merged = { ...current.default_config };
     for (const [k, v] of Object.entries(defaultConfig ?? {})) { if (v === null) delete merged[k]; else merged[k] = v; }
-    current = { ...current, credential: null, default_config: merged };
+    // 서버처럼 backend 핀도 반영한다 — undefined 는 그대로, null 은 해제.
+    const backend = backendProfileId === undefined
+      ? current.backend
+      : (backendProfileId ? current.backend_candidates.find((b) => b.id === backendProfileId) ?? null : null);
+    current = { ...current, credential: null, default_config: merged, backend };
     return current;
   };
   t.after(() => { api.getHostCliSettings = original.get; api.setHostCliSettings = original.put; });
@@ -145,5 +155,65 @@ test('a CLI that cannot take an AWB credential can still save its defaults', asy
     view.unmount();
   } finally {
     dom.cleanup();
+  }
+});
+
+// ─── backend (Claude backend profile) ─────────────────────────────────────────
+test('claude 설정에는 backend 선택이 있고, 저장은 바뀐 것만 보낸다', async (t) => {
+  const dom = setupDom();
+  try {
+    stubAudio(t);
+    const calls = stubApi(t, settings({ cli: 'claude', supports_backend: true, backend: null, backend_candidates: BACKENDS }));
+    const view = mount(panel({ cli: 'claude' }));
+    await flush();
+
+    const pick = document.querySelector('select[data-session-backend]');
+    assert.ok(pick, 'backend 선택기가 없다');
+    assert.equal(pick.value, '', '고르지 않았으면 CLI 기본 엔드포인트');
+    assert.deepEqual([...pick.options].map((o) => o.textContent), ['Claude Code default endpoint', 'vLLM box · qwen-3', 'Bedrock · claude-sonnet']);
+    assert.equal(saveButton().disabled, true);
+
+    change(pick, 'vllm');
+    assert.equal(saveButton().disabled, false);
+    click(saveButton());
+    await flush();
+    assert.equal(calls.at(-1).backendProfileId, 'vllm');
+    assert.equal(calls.at(-1).defaultConfig, undefined, '건드리지 않은 기본 설정은 보내지 않는다');
+
+    // 다시 CLI 기본으로 되돌리면 핀 해제(null)
+    change(document.querySelector('select[data-session-backend]'), '');
+    click(saveButton());
+    await flush();
+    assert.equal(calls.at(-1).backendProfileId, null);
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});
+
+test('backend profile 이 하나도 없으면 안내만 보이고, codex 에는 선택기가 아예 없다', async (t) => {
+  const dom = setupDom();
+  try {
+    stubAudio(t);
+    stubApi(t, settings({ cli: 'claude', supports_backend: true, backend_candidates: [] }));
+    const view = mount(panel({ cli: 'claude' }));
+    await flush();
+    assert.ok(document.querySelector('select[data-session-backend]'), '선택기는 있고');
+    assert.match(document.querySelector('[data-cli-settings]').textContent, /No Claude backend profile is defined/);
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+
+  const dom2 = setupDom();
+  try {
+    stubAudio(t);
+    stubApi(t, settings({ cli: 'codex', supports_backend: false }));
+    const view = mount(panel({ cli: 'codex' }));
+    await flush();
+    assert.equal(Boolean(document.querySelector('select[data-session-backend]')), false, 'codex 는 Claude backend profile 을 받지 않는다');
+    view.unmount();
+  } finally {
+    dom2.cleanup();
   }
 });

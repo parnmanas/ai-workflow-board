@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
+import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -16,7 +17,7 @@ import { AgentSessionsService } from './agent-sessions.service';
  * InstanceRegistryService 는 @Global 모듈이 제공한다. docs/agent-sessions.md 참조.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Agent, AgentSessionCliSetting, Credential])],
+  imports: [TypeOrmModule.forFeature([Agent, AgentSessionCliSetting, Credential, ClaudeBackendProfile])],
   controllers: [AgentSessionsController, AgentSessionsAgentController],
   providers: [AgentSessionsService, AuthGuard, PermissionGuard, AgentAuthGuard],
   exports: [AgentSessionsService],

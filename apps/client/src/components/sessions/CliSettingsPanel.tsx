@@ -40,6 +40,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
   const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
   const [selected, setSelected] = useState<string>('');
   const [defaults, setDefaults] = useState<Record<string, string>>({});
+  const [backend, setBackend] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +52,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
       setSettings(data);
       setSelected(data.credential?.id || '');
       setDefaults(defaultsOf(data));
+      setBackend(data.backend?.id || '');
       setError(null);
     } catch (err: any) {
       setError(err?.message || 'Failed to load CLI settings');
@@ -68,6 +70,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
     .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0);
   const savedDefaults = defaultsOf(settings);
   const dirty = (settings?.credential?.id || '') !== selected
+    || (settings?.backend?.id || '') !== backend
     || defaultOptions.some((o) => (defaults[o.config_id] || '') !== (savedDefaults[o.config_id] || ''));
 
   const save = async () => {
@@ -81,10 +84,18 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
         if (value === (savedDefaults[option.config_id] || '')) continue;
         patch[option.config_id] = value || null;
       }
-      const next = await api.setHostCliSettings(managerId, cli, selected || null, Object.keys(patch).length ? patch : undefined);
+      const backendChanged = (settings.backend?.id || '') !== backend;
+      const next = await api.setHostCliSettings(
+        managerId,
+        cli,
+        selected || null,
+        Object.keys(patch).length ? patch : undefined,
+        backendChanged ? (backend || null) : undefined,
+      );
       setSettings(next);
       setSelected(next.credential?.id || '');
       setDefaults(defaultsOf(next));
+      setBackend(next.backend?.id || '');
       onChanged?.(next);
       showToast(next.credential ? `${runtimeLabel(cli)} on ${hostName} now signs in with "${next.credential.name}"` : `${runtimeLabel(cli)} on ${hostName} uses the host's own login`, 'success');
     } catch (err: any) {
@@ -152,6 +163,33 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
               No {runtimeLabel(cli)} credential in this workspace yet. Add one in Settings → Credentials, or log in on the host itself.
             </span>
           )}
+        </div>
+      )}
+      {settings && !error && !loading && settings.supports_backend && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
+          <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
+            Backend that {runtimeLabel(cli)} talks to on {hostName} — leave it on the CLI default to use Anthropic directly.
+          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <select
+              aria-label="Session backend"
+              data-session-backend
+              style={selectStyle}
+              value={backend}
+              disabled={saving}
+              onChange={(e) => setBackend(e.target.value)}
+            >
+              <option value="">{runtimeLabel(cli)} default endpoint</option>
+              {settings.backend_candidates.map((b) => (
+                <option key={b.id} value={b.id} title={b.base_url}>{b.name} · {b.model}</option>
+              ))}
+            </select>
+            {settings.backend_candidates.length === 0 && (
+              <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
+                No Claude backend profile is defined on this instance yet (Admin → Claude backends).
+              </span>
+            )}
+          </div>
         </div>
       )}
       {settings && !error && !loading && (

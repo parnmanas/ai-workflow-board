@@ -959,6 +959,8 @@ export interface AgentSessionRequestPayload {
   config_value?: string | boolean;
   /** open/prompt — 세션이 열린 직후 다시 걸 설정(`{ [configId]: value }`, `__mode` 는 레거시 set_mode). */
   config_defaults?: Record<string, string | boolean>;
+  /** CLI 설정에서 고른 Claude backend profile. 매니저가 그 엔드포인트·모델 env 로 세션을 띄운다. */
+  runtime_profile?: CliRuntimeProfile | null;
   /** elicitation — 에이전트 질문/폼에 대한 답. content 는 요청 schema 에 맞는 객체(accept 일 때). */
   elicitation_id?: string;
   elicitation_action?: 'accept' | 'decline' | 'cancel';

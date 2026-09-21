@@ -105,7 +105,7 @@ Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + �
 `awaiting_input` 은 `awaiting_permission` 과 같은 대기 상태다: prompt 는 409 `session_busy`, 유령 되돌림 대상, 프로세스 종료·close 때
 미결 질문은 `elicitation_decision{action:'cancel', decided_by:'system'}` 으로 닫히고, history RPC 가 미결 질문을 같은 id 로 다시 실어 보낸다.
 
-## CLI 설정 (credential 바인딩)
+## CLI 설정 (credential · backend · 기본 설정)
 
 Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 와 **세션마다 다시 걸 설정**
 (`default_config`, 위 "상호작용" 절 참조)을 정한다
@@ -127,6 +127,14 @@ Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → C
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)를 만든다. `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 을 그 홈으로 돌리고, 운영자
   셸의 API 키(`authEnvKeys`)는 걷어내며, 워크스페이스 trust 를 시드한다. **기록 디렉터리만**(`projects` / `sessions`)
   운영자 홈으로 심볼릭 링크해 장비의 기존 세션이 그대로 보이고 이어진다.
+- **Backend(Claude backend profile)**: `agent_session_cli_settings.backend_profile_id` 로 이 호스트×CLI 세션이 말을 걸
+  엔드포인트·모델을 고른다(Admin → Claude backends 의 인스턴스 전역 목록). 고르면 open/prompt payload 의 `runtime_profile`
+  로 매니저에 실려 가고, 매니저가 디스패치와 **같은 기계**(`startRuntimeProfile` → `lease.claudeEnv()`)로 `ANTHROPIC_BASE_URL`·
+  모델 env 를 세션 프로세스에 건다. 프로필이 어댑터 사이드카를 요구하면 그 프로세스도 lease 가 관리하고 세션이 닫힐 때 반납한다.
+  claude 전용이다(Claude backend profile 이므로 codex 는 409). 비밀은 CLI 설정에 묶인 credential 에서 오며, 프로필이 특정
+  credential 을 가리키는데 다른 것이 묶여 있으면 거부한다 — 조용히 엉뚱한 키로 붙는 것보다 낫다.
+  **전역 기본값으로 떨어지지 않는다**: 디스패치 경로와 달리, 고르지 않았으면 CLI 기본 엔드포인트를 그대로 쓴다 —
+  세션은 "그 장비의 CLI 를 그대로 몬다" 는 표면이라 조용히 다른 백엔드로 돌아가면 안 된다.
 - 권장 credential 은 `claude_oauth_token`(`claude setup-token`, 1년, 회전 없음). `claude_subscription` 은 회전하는
   토큰이라 여러 장비에서 쓰면 재로그인이 잦다(docs/managed-agent-relogin.md).
 
