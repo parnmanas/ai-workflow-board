@@ -9,6 +9,7 @@ import {
   buildTranscript,
   canConnect,
   canPrompt,
+  describeSessionAuth,
   describeSessionStatus,
   isWaitingStatus,
   matchSlashCommands,
@@ -329,4 +330,27 @@ test('the trim marker renders as a system note and does not disturb folding', ()
   assert.match(blocks[0].text, /Earlier messages trimmed/);
   const assistant = blocks.find((b) => b.kind === 'assistant');
   assert.equal(assistant.text, 'chunk2 chunk3 ', 'surviving chunks of the same turn still merge');
+});
+
+// ─── 세션 계정 표시 ────────────────────────────────────────────────────────────
+test('describeSessionAuth renders the account line, and says nothing when the adapter did not report', () => {
+  assert.equal(describeSessionAuth(null), null, 'not reported → draw nothing (it is not the same as logged out)');
+  assert.equal(describeSessionAuth(undefined), null);
+
+  const operator = describeSessionAuth({ source: 'operator', kind: 'account', label: 'Claude Max', account: { email: 'parn@example.com', organization: 'KakaoVX' } });
+  assert.equal(operator.text, 'Claude Max · parn@example.com');
+  assert.match(operator.title, /Runtime Host's own CLI login/);
+  assert.match(operator.title, /KakaoVX/);
+  assert.equal(operator.tone, 'muted');
+
+  const bound = describeSessionAuth({ source: 'credential', kind: 'api_key', label: 'Anthropic API key', detail: 'ANTHROPIC_API_KEY' }, 'team key');
+  assert.equal(bound.text, 'Anthropic API key · ANTHROPIC_API_KEY', 'detail wins over the email for the second part');
+  assert.match(bound.title, /workspace credential "team key"/);
+
+  const loggedOut = describeSessionAuth({ source: 'operator', kind: 'none', label: 'Not logged in' });
+  assert.equal(loggedOut.text, 'Not logged in');
+  assert.equal(loggedOut.tone, 'danger', 'a known logged-out state is worth noticing');
+
+  const bare = describeSessionAuth({ source: 'operator', kind: 'gateway', label: '' });
+  assert.equal(bare.text, 'gateway', 'falls back to the kind when the adapter sent no label');
 });

@@ -684,3 +684,37 @@ test('re-applying skips options already at the wanted value, and a resumed sessi
   await waitFor(() => server.events(CLAUDE_ID).some((e) => e.type === 'system' && e.payload.text === 'Model set to Fake Smart.'), 'restored on resume');
   await runner.handle(request('close', { session_id: CLAUDE_ID }));
 });
+
+// ─── 이 세션이 어떤 계정으로 도는가 ──────────────────────────────────────────────
+//
+// 어댑터가 `_auth/status_update` 로 자기 로그인 신원을 민다(claude-agent-acp · codex-acp 공통 확장).
+// 매니저는 거기에 **출처**(워크스페이스 Credential 인지 장비 운영자 로그인인지 — 어댑터는 모르는 사실)를
+// 더해 상태로 올리고, history 의 live 에도 실어 화면이 다시 들어와도 볼 수 있게 한다.
+test('the adapter-reported account is relayed with the credential source the manager knows', async (t) => {
+  const { cwd, server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-open-auth', session_id: null, cwd }));
+  const sid = server.rpc('rpc-open-auth').result.session_id;
+  await waitFor(() => server.states(sid).some((s) => s.auth), 'auth patch');
+  const auth = server.states(sid).filter((s) => s.auth).at(-1).auth;
+  assert.deepEqual(auth, {
+    source: 'operator',
+    kind: 'account',
+    label: 'Fake Max',
+    account: { email: 'probe@example.com', organization: 'Fake Org', plan: 'max' },
+  }, 'no credential bound → the host own login, with the identity the adapter reported');
+
+  await runner.handle(request('history', { request_id: 'rpc-history-auth', session_id: sid }));
+  assert.deepEqual(server.rpc('rpc-history-auth').result.live.auth, auth, 'history carries it so a reopened screen shows the account');
+  await runner.handle(request('close', { session_id: sid }));
+});
+
+test('a session opened with a workspace credential reports source=credential', async (t) => {
+  const { cwd, server, runner } = await harness(t, {
+    credentialFetcher: async () => ({ credential_id: 'cred-auth', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-xxxxxxxxxxxx' } }),
+  });
+  await runner.handle(request('open', { request_id: 'rpc-open-cred-auth', session_id: null, cwd, credential_id: 'cred-auth', workspace_id: 'ws-1' }));
+  const sid = server.rpc('rpc-open-cred-auth').result.session_id;
+  await waitFor(() => server.states(sid).some((s) => s.auth), 'auth patch');
+  assert.equal(server.states(sid).filter((s) => s.auth).at(-1).auth.source, 'credential');
+  await runner.handle(request('close', { session_id: sid }));
+});

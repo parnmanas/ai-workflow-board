@@ -617,6 +617,13 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.equal(detail.body.live.config_options[0].current_value, 'gpt-smart', 'history live carries the manager-side config state');
   assert.deepEqual(detail.body.live.available_commands.map((c) => c.name), ['status']);
 
+  // 3a2. 계정 정보 — 매니저가 보고한 대로 스냅샷에 실린다(모양이 어긋나면 통째로 null = "모른다")
+  const withAuth = await relay({ state: { auth: { source: 'operator', kind: 'account', label: 'Codex Pro', detail: '', account: { email: 'parn@example.com', organization: 'KakaoVX', plan: 'pro' } }, reason: 'auth' } });
+  assert.deepEqual(withAuth.live.auth, { source: 'operator', kind: 'account', label: 'Codex Pro', account: { email: 'parn@example.com', organization: 'KakaoVX', plan: 'pro' } }, 'empty detail is dropped, the rest is projected');
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.auth?.label === 'Codex Pro', 4000);
+  assert.equal((await relay({ state: { auth: { kind: 'account', label: 'no source' }, reason: 'auth' } })).live.auth, null, 'a payload without a source is not trustworthy — treat it as unknown');
+  assert.equal((await relay({ state: { auth: { source: 'credential', kind: 'api_key', label: 'Anthropic API key' }, reason: 'auth' } })).live.auth.source, 'credential');
+
   // 3b. 프로세스가 없는 세션의 설정 변경은 409 가 아니라 매니저가 열게 한다(starting) — 첫 프롬프트 전에 모델을 고른다
   const idleSid = 'codex-thread-idle';
   const idleSet = await call(`${sessionsUrl}/${idleSid}/config-option`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ config_id: 'model', value: 'gpt-smart' }) });

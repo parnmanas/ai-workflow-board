@@ -10,7 +10,7 @@ import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
-import type { AgentSessionConfigOption, AgentSessionCommand } from './agent-sessions';
+import type { AgentSessionAuth, AgentSessionConfigOption, AgentSessionCommand } from './agent-sessions';
 
 export type StreamEventType =
   | 'board_update'
@@ -993,6 +993,8 @@ export interface AgentSessionLiveSnapshot {
   /** 어댑터가 알려 준 slash command 목록. */
   available_commands: AgentSessionCommand[];
   resume_supported: boolean;
+  /** 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 주지 않으면 null. */
+  auth: AgentSessionAuth | null;
   last_error: string | null;
   driver_user_id: string | null;
   updated_at: string;

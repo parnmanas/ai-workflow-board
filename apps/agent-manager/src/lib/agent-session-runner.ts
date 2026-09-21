@@ -25,6 +25,7 @@ import {
   patchAgentSessionState,
   postAgentSessionEvents,
   postAgentSessionRpcResponse,
+  type AgentSessionAuthPatch,
   type AgentSessionConfigOptionPatch,
   type AgentSessionEventInput,
   type AgentSessionRef,
@@ -34,6 +35,7 @@ import {
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { AcpClient } from './runtime/acp/acp-client.js';
 import type {
+  AcpAuthStatus,
   AcpElicitationOutcome,
   AcpElicitationRequest,
   AcpMcpServer,
@@ -147,6 +149,8 @@ const SESSION_STORE_SUBDIR: Record<string, string> = {
 
 interface SessionAuth {
   label: string;
+  /** 자격증명의 출처 — 워크스페이스 Credential 인지, 그 장비 운영자의 CLI 로그인인지. */
+  source: 'credential' | 'operator';
   env: Record<string, string>;
   stripEnvKeys: string[];
   cliHome: string | null;
@@ -200,6 +204,10 @@ interface LiveSession {
   nonce: string;
   /** 이 프로세스에 적용된 CLI 설정 credential('' = 운영자 로그인). 바인딩이 바뀌면 재오픈한다. */
   credentialId: string;
+  /** 자격증명의 출처 — 매니저가 아는 사실. 어댑터가 알려 주는 신원과 합쳐 `auth` 로 보고한다. */
+  authSource: 'credential' | 'operator';
+  /** 어댑터가 `_auth/status_update` 로 알려 준 신원. 안 알려 주면 null("모른다"). */
+  authStatus: AgentSessionAuthPatch | null;
   closing: boolean;
   exited: boolean;
 }
@@ -645,6 +653,7 @@ export class AgentSessionRunner {
       onEvent: (event) => { if (live) this.#onEvent(live, event); },
       onPermissionRequest: (permission) => (live ? this.#onPermission(live, permission) : Promise.resolve({ outcome: 'cancelled' as const })),
       onElicitation: (elicitation) => (live ? this.#onElicitation(live, elicitation) : Promise.resolve({ action: 'cancel' as const })),
+      onAuthStatus: (status) => { if (live) this.#onAuthStatus(live, status); },
       // 한 줄이 상한을 넘으면 그 메시지만 버리고 세션은 살려 둔다 — 잃는 것은 그 출력 하나다.
       maxLineBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
       maxMessageBytes: this.#options.maxLineBytes ?? SESSION_MAX_LINE_BYTES,
@@ -707,6 +716,8 @@ export class AgentSessionRunner {
         seq: 0,
         nonce: randomUUID().slice(0, 8),
         credentialId: request.credential_id || '',
+        authSource: auth.source,
+        authStatus: null,
         closing: false,
         exited: false,
       };
@@ -768,6 +779,8 @@ export class AgentSessionRunner {
         available_modes: modeInfo.available,
         config_options: live.configOptions,
         available_commands: live.availableCommands,
+        // 어댑터가 initialize 직후 신원을 밀어 주면 여기 이미 차 있다 — 없으면 나중 push 가 채운다.
+        ...(live.authStatus ? { auth: live.authStatus } : {}),
         resume_supported: loadSupported,
         last_error: null,
         reason: resumed ? 'resumed' : 'opened',
@@ -835,6 +848,31 @@ export class AgentSessionRunner {
   }
 
   /**
+   * 어댑터가 알려 준 로그인 신원(`_auth/status_update`). 연결 단위 알림이고 바뀔 때만 오므로,
+   * 받은 그대로 상태에 얹어 화면이 "이 세션은 누구로 도는가" 를 보여 줄 수 있게 한다.
+   * 출처(`source`)는 어댑터가 모르는 사실이라 매니저가 채운다.
+   */
+  #onAuthStatus(live: LiveSession, status: AcpAuthStatus): void {
+    const account = status.account && typeof status.account === 'object' ? status.account : undefined;
+    const next: AgentSessionAuthPatch = {
+      source: live.authSource,
+      kind: typeof status.kind === 'string' ? status.kind : 'unknown',
+      label: typeof status.label === 'string' ? status.label : '',
+      ...(typeof status.detail === 'string' && status.detail ? { detail: status.detail } : {}),
+      ...(account ? {
+        account: {
+          ...(typeof account.email === 'string' ? { email: account.email } : {}),
+          ...(typeof account.organization === 'string' ? { organization: account.organization } : {}),
+          ...(typeof account.plan === 'string' ? { plan: account.plan } : {}),
+        },
+      } : {}),
+    };
+    if (JSON.stringify(live.authStatus) === JSON.stringify(next)) return;
+    live.authStatus = next;
+    this.#enqueue(live, [], { auth: next, reason: 'auth' });
+  }
+
+  /**
    * 서버가 기억해 둔 설정을 세션에 다시 건다. 어댑터가 이미 그 값이면 건너뛴다(불필요한 왕복·system 행 방지).
    * 목록에 없는 키는 조용히 무시한다 — 어댑터를 바꾸거나 업그레이드하면 없어진 옵션이 있을 수 있다.
    */
@@ -895,7 +933,7 @@ export class AgentSessionRunner {
    * 기존 세션이 그대로 보이고 이어지게 한다.
    */
   async #prepareAuth(cli: string, cwd: string, request: AgentSessionRequest): Promise<SessionAuth> {
-    const none: SessionAuth = { label: 'operator-login', env: {}, stripEnvKeys: [], cliHome: null };
+    const none: SessionAuth = { label: 'operator-login', source: 'operator', env: {}, stripEnvKeys: [], cliHome: null };
     const credentialId = request.credential_id || '';
     if (!credentialId) return none;
     const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
@@ -927,7 +965,7 @@ export class AgentSessionRunner {
     // 운영자 셸의 API 키(ANTHROPIC_API_KEY / OPENAI_API_KEY …)가 credential 을 덮지 않게 걷어낸다.
     const stripEnvKeys = adapter.authEnvKeys().filter((key) => !(key in env));
     await adapter.ensureWorkspaceTrust(cliHome, cwd).catch((err: any) => log(`[agent-session ${cli}] trust seed failed: ${err?.message ?? err}`));
-    return { label: `credential:${credential.provider}`, env, stripEnvKeys, cliHome };
+    return { label: `credential:${credential.provider}`, source: 'credential', env, stripEnvKeys, cliHome };
   }
 
   /** 세션 전용 cli-home 의 기록 디렉터리를 운영자 홈으로 링크한다(멱등). */
@@ -996,6 +1034,7 @@ export class AgentSessionRunner {
       title: live.title,
       status: this.#statusOf(live),
       resume_supported: live.loadSupported,
+      auth: live.authStatus,
       current_mode: live.currentMode,
       available_modes: live.availableModes,
       config_options: live.configOptions,

@@ -22,6 +22,7 @@ import {
   AGENT_SESSION_STATUSES,
   AGENT_SESSION_WAITING_STATUSES,
   agentSessionAcceptsPrompt,
+  type AgentSessionAuth,
   type AgentSessionCommand,
   type AgentSessionConfigOption,
   type AgentSessionEventRecord,
@@ -95,6 +96,7 @@ export interface ManagerStatePatch {
   available_modes?: AgentSessionModeOption[] | null;
   config_options?: AgentSessionConfigOption[] | null;
   available_commands?: AgentSessionCommand[] | null;
+  auth?: AgentSessionAuth | null;
   resume_supported?: boolean;
   last_error?: string | null;
   reason?: string;
@@ -112,6 +114,7 @@ interface LiveState {
   available_modes: AgentSessionModeOption[];
   config_options: AgentSessionConfigOption[];
   available_commands: AgentSessionCommand[];
+  auth: AgentSessionAuth | null;
   resume_supported: boolean;
   last_error: string | null;
   driver_user_id: string | null;
@@ -189,6 +192,29 @@ function normalizeConfigOptions(input: unknown): AgentSessionConfigOption[] {
     });
   }
   return out;
+}
+
+/** 매니저가 보고한 계정 정보를 투영한다 — 모양이 어긋나면 통째로 null("모른다"). */
+function normalizeAuth(input: unknown): AgentSessionAuth | null {
+  if (!input || typeof input !== 'object') return null;
+  const r = input as Record<string, unknown>;
+  const source = r.source === 'credential' ? 'credential' : r.source === 'operator' ? 'operator' : null;
+  if (!source) return null;
+  const account = r.account && typeof r.account === 'object' ? (r.account as Record<string, unknown>) : null;
+  const projected = account
+    ? {
+      ...(typeof account.email === 'string' ? { email: account.email.slice(0, 320) } : {}),
+      ...(typeof account.organization === 'string' ? { organization: account.organization.slice(0, 200) } : {}),
+      ...(typeof account.plan === 'string' ? { plan: account.plan.slice(0, 100) } : {}),
+    }
+    : null;
+  return {
+    source,
+    kind: str(r.kind, 32) || 'unknown',
+    label: str(r.label, 200),
+    ...(typeof r.detail === 'string' && r.detail ? { detail: r.detail.slice(0, 200) } : {}),
+    ...(projected && Object.keys(projected).length ? { account: projected } : {}),
+  };
 }
 
 /** 턴이 진행 중일 때만 나오는 이벤트 타입 — 서버가 세션을 처음 보는 배치에서 상태를 추정하는 근거. */
@@ -653,6 +679,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         ...(Array.isArray(reportedLive.available_modes) ? { available_modes: reportedLive.available_modes as AgentSessionModeOption[] } : {}),
         ...(Array.isArray(reportedLive.config_options) ? { config_options: reportedLive.config_options as AgentSessionConfigOption[] } : {}),
         ...(Array.isArray(reportedLive.available_commands) ? { available_commands: reportedLive.available_commands as AgentSessionCommand[] } : {}),
+        ...(reportedLive.auth !== undefined ? { auth: reportedLive.auth as AgentSessionAuth | null } : {}),
         ...(typeof reportedLive.resume_supported === 'boolean' ? { resume_supported: reportedLive.resume_supported } : {}),
       });
     }
@@ -694,6 +721,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 매니저의 open 답에 실린 세션 설정·명령 — 화면이 SSE 패치를 기다리지 않고 바로 셀렉트를 그린다.
       ...(Array.isArray(result?.config_options) ? { config_options: result.config_options } : {}),
       ...(Array.isArray(result?.available_commands) ? { available_commands: result.available_commands } : {}),
+      ...(result?.auth !== undefined ? { auth: result.auth } : {}),
       resume_supported: result?.resume_supported === true,
       last_error: null,
     });
@@ -1084,6 +1112,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       available_modes: [],
       config_options: [],
       available_commands: [],
+      auth: null,
       resume_supported: false,
       last_error: null,
       driver_user_id: seed.driver_user_id,
@@ -1116,6 +1145,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         .catch((err) => this.logService.debug('AgentSession', `known config options cache failed: ${err?.message ?? err}`));
     }
     if (patch.available_commands !== undefined) state.available_commands = normalizeCommands(patch.available_commands);
+    if (patch.auth !== undefined) state.auth = normalizeAuth(patch.auth);
     if (patch.resume_supported !== undefined) state.resume_supported = !!patch.resume_supported;
     if (patch.last_error !== undefined) state.last_error = patch.last_error ? String(patch.last_error).slice(0, 4000) : null;
     state.updated_at = Date.now();
@@ -1141,6 +1171,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       available_modes: state.available_modes,
       config_options: state.config_options,
       available_commands: state.available_commands,
+      auth: state.auth,
       resume_supported: state.resume_supported,
       last_error: state.last_error,
       driver_user_id: state.driver_user_id,

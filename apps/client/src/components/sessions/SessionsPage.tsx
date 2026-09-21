@@ -26,6 +26,7 @@ import {
   buildTranscript,
   canConnect,
   canPrompt,
+  describeSessionAuth,
   describeSessionStatus,
   isWaitingStatus,
   pendingInteraction,
@@ -482,6 +483,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const busy = status === 'busy' || isWaitingStatus(status) || status === 'starting';
   const title = live?.title || summary?.title || '';
   const cwd = live?.cwd || summary?.cwd || '';
+  // 계정 표시 — Credential 이름은 서버가 id 만 주므로 호스트의 CLI 설정에서 합친다.
+  const authView = useMemo(
+    () => describeSessionAuth(live?.auth, host?.cli_settings?.[cli]?.name),
+    [live?.auth, host, cli],
+  );
   const configOptions = live?.config_options ?? [];
   const commands = live?.available_commands ?? [];
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
@@ -609,6 +615,21 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
               {cwd || '(cwd unknown)'}
             </span>
             <span style={{ fontFamily: MONO, color: tokens.colors.textMuted }} title={sessionId}>{sessionId.slice(0, 8)}</span>
+            {/* 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 줄 때만 나온다(모르면 아무것도 그리지 않는다) */}
+            {authView && (
+              <span
+                data-session-auth={live?.auth?.source ?? ''}
+                title={authView.title}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, maxWidth: 320, overflow: 'hidden',
+                  textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  color: authView.tone === 'danger' ? tokens.colors.dangerLight : tokens.colors.textMuted,
+                }}
+              >
+                <span aria-hidden="true">{live?.auth?.source === 'credential' ? '🔑' : '👤'}</span>
+                {authView.text}
+              </span>
+            )}
           </div>
         </div>
         <StatusPill status={status} />

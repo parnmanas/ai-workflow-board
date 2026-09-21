@@ -71,6 +71,7 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 | `available_commands_update` | 스냅샷 `available_commands[]` (`name, description, input_hint?`) | 컴포저에서 `/` 를 치면 자동완성(↑/↓, Enter/Tab 선택, Esc). 선택은 텍스트만 채우고 전송하지 않는다. 명령은 프롬프트 텍스트로 그대로 간다 |
 | `session/request_permission` (`title`/`description`/`toolCall`, claude 의 `_meta.permission`) | `permission_request` 행 + `awaiting_permission` | 권한 카드 → `POST …/permission` |
 | `elicitation/create` (form: JSON Schema, url) — claude 의 AskUserQuestion 등 | `elicitation_request` 행 + **`awaiting_input`** (form 만). url 은 링크 카드만 남기고 바로 accept, 완료는 `elicitation/complete` → `elicitation_decision{decided_by:'agent'}` | 폼 카드(문자열/숫자/불리언/단일·다중 선택, required 검사) → `POST …/elicitation {elicitation_id, action: accept\|decline\|cancel, content}` → op `elicitation` |
+| `_auth/status_update` (claude-agent-acp · codex-acp 공통 `_meta` 확장, push 전용) | 스냅샷 `auth` — 어댑터가 준 신원(`kind`/`label`/`detail`/`account`)에 매니저가 아는 **출처**(`source`: 워크스페이스 Credential 인지 장비 운영자 로그인인지)를 더한 것 | 세션 헤더에 한 줄로 표시(🔑 = credential, 👤 = 운영자 로그인). 어댑터가 알려 주지 않으면 **아무것도 그리지 않는다** — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다 |
 | `plan` / `plan_update` | `plan` 행(`entries[{content, priority, status}]`) — 같은 turn 의 최신 것이 이전 것을 대체 | 체크리스트 카드 |
 | `session_info_update` | 제목 패치 | — |
 

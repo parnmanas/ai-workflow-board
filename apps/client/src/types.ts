@@ -3112,6 +3112,18 @@ export interface AgentSessionConfigOption {
   options: Array<{ value: string; name: string; description?: string; group?: string }>;
 }
 
+/**
+ * 이 세션이 어떤 계정으로 도는지. `source` 는 자격증명의 출처(워크스페이스 Credential vs 장비 운영자의
+ * CLI 로그인)로 매니저가 아는 사실이고, 나머지는 CLI 가 실제 쓰는 신원으로 어댑터가 알려 준다.
+ */
+export interface AgentSessionAuth {
+  source: 'credential' | 'operator';
+  kind: string;
+  label: string;
+  detail?: string;
+  account?: { email?: string; organization?: string; plan?: string };
+}
+
 /** 어댑터가 알려 준 slash command — 프롬프트에 `/name …` 로 보낸다. */
 export interface AgentSessionCommand {
   name: string;
@@ -3181,6 +3193,8 @@ export interface AgentSessionLiveSnapshot {
   available_modes: AgentSessionModeOption[];
   config_options: AgentSessionConfigOption[];
   available_commands: AgentSessionCommand[];
+  /** 어댑터가 알려 주지 않으면 null — "모른다" 이고, 로그아웃(`kind:'none'`)과는 다르다. */
+  auth: AgentSessionAuth | null;
   resume_supported: boolean;
   last_error: string | null;
   driver_user_id: string | null;

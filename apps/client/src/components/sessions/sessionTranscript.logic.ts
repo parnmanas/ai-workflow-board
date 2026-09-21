@@ -13,7 +13,7 @@
  *   - `turn` started 는 블록을 만들지 않고, finished 는 stop_reason 이 end_turn 이
  *     아닐 때만 남긴다(취소/거절/오류를 사용자가 볼 수 있게)
  */
-import type { AgentSessionCommand, AgentSessionEventRecord, AgentSessionStatus } from '../../types';
+import type { AgentSessionAuth, AgentSessionCommand, AgentSessionEventRecord, AgentSessionStatus } from '../../types';
 
 export interface PermissionOptionView {
   option_id: string;
@@ -488,6 +488,34 @@ export function sessionDisplayTitle(session: { title?: string | null; cli?: stri
 /** 프롬프트 전송 가능 여부 — 서버 규칙(진행 중만 불가; idle/closed 는 재오픈)의 UI 거울. */
 export function canPrompt(status: AgentSessionStatus | string | null | undefined): boolean {
   return status !== 'busy' && status !== 'awaiting_permission' && status !== 'awaiting_input' && status !== 'starting';
+}
+
+export interface SessionAuthView {
+  /** 한 줄 표시: "Claude Max · parn@example.com". */
+  text: string;
+  /** 자격증명이 어디서 왔는지 — 화면에서는 tooltip 으로만 보여 준다. */
+  title: string;
+  /** 로그아웃 상태만 눈에 띄게 한다 — 나머지는 조용한 정보다. */
+  tone: 'muted' | 'danger';
+}
+
+/**
+ * 세션 헤더에 쓸 계정 한 줄. 어댑터가 신원을 알려 주지 않으면(=null) 아무것도 그리지 않는다 —
+ * "모른다" 를 "로그아웃" 처럼 보이게 하면 안 된다. 두 번째 줄은 `detail` 우선, 없으면 이메일.
+ * `credentialName` 은 CLI 설정에 묶인 Credential 이름(서버는 id 만 주므로 화면이 합친다).
+ */
+export function describeSessionAuth(auth: AgentSessionAuth | null | undefined, credentialName?: string | null): SessionAuthView | null {
+  if (!auth) return null;
+  const primary = auth.label || auth.kind || 'Unknown account';
+  const secondary = auth.detail || auth.account?.email || '';
+  const org = auth.account?.organization;
+  return {
+    text: [primary, secondary].filter(Boolean).join(' · '),
+    title: auth.source === 'credential'
+      ? `Signed in with the workspace credential${credentialName ? ` "${credentialName}"` : ''}${org ? ` (${org})` : ''}`
+      : `Uses the Runtime Host's own CLI login${org ? ` (${org})` : ''}`,
+    tone: auth.kind === 'none' ? 'danger' : 'muted',
+  };
 }
 
 /** 사용자 결정을 기다리는 상태(permission / 질문·폼). */
