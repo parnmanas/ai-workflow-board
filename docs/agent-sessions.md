@@ -227,6 +227,11 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
   `npm uninstall -g @zed-industries/codex-acp && npm i -g @agentclientprotocol/codex-acp` 로 바꾼다. 모델은 세션 헤더의 Model 셀렉트에서 고른다.
 - 같은 세션을 터미널과 AWB 에서 동시에 쓰지 말 것 — 두 프로세스가 같은 JSONL 에 쓴다.
 - Codex 는 어댑터가 `loadSession` 을 지원할 때만 기존 세션을 이어 쓸 수 있다(미지원이면 open 이 `resume_unsupported` 로 실패).
+- 세션 프로세스에는 `AWB_API_KEY`(매니저 키)가 들어간다. 세션 홈의 `config.toml` 이 awb MCP 서버를
+  `bearer_token_env_var = "AWB_API_KEY"` + `required = true` 로 적기 때문이다 — 없으면 codex 가 세션 초기화를 통째로
+  중단한다. **재개는 그 대화에 기록된 MCP 설정을 다시 띄우므로**, 지금 config 를 고쳐도 옛 대화는 이 env 없이는 계속 막힌다
+  (실측: ralf 의 실제 thread 가 env 없이는 실패, 넣으면 12.8s 만에 로드). 같은 키가 이미 ACP `mcpServers` 의 Authorization
+  헤더로 넘어가므로 새로 노출되는 비밀은 없다.
 - 재개가 `Internal error` 로 실패하면 어댑터의 `data.details` 를 그대로 보여 준다 — 대개 `no rollout found for thread id …`
   이고, 그건 **계정 문제가 아니라** 세션 홈의 기록 링크가 끊어진 것이다(위 "CLI 설정" 참조). 매니저를 올리면 다음 open 에서 스스로 고친다.
 - 세션 프로세스는 매니저 self-update drain 카운트에 포함되고, 매니저 종료(SIGTERM)는 모든 세션 프로세스를 멈춘다(상태 idle).

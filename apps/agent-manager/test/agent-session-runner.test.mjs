@@ -321,6 +321,9 @@ test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKE
   const home = join(h.sessionHomesDir, 'claude', 'cred-1');
   assert.equal(cap.CLAUDE_CONFIG_DIR, home, 'session-specific cli-home');
   assert.equal(cap.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-test');
+  // 세션 홈의 config.toml 은 awb MCP 서버를 `bearer_token_env_var = "AWB_API_KEY"` + `required = true`
+  // 로 적는다 — 이 값이 없으면 codex 가 세션 초기화를 중단하고 재개가 통째로 실패한다(실측: ralf).
+  assert.equal(cap.AWB_API_KEY, 'manager-key', 'the manager key the config references is in the session env');
   assert.equal(cap.ANTHROPIC_API_KEY, null, 'operator shell key is stripped so it cannot shadow the credential');
   const link = join(home, 'projects');
   assert.ok((await lstat(link)).isSymbolicLink(), 'projects is a symlink');

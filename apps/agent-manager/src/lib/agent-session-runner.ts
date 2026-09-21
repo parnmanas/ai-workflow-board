@@ -742,7 +742,7 @@ export class AgentSessionRunner {
           const details = (err?.data as { details?: unknown } | undefined)?.details;
           const detail = redactSecrets(String(details || err?.message || err));
           throw Object.assign(
-            new Error(`${cli} could not resume this session: ${detail}. It may have been started under a different CLI home, or the adapter cannot resume it — start a new session in the same folder.`),
+            new Error(`${cli} could not resume this session: ${detail}. Fix that and reload, or start a new session in the same folder.`),
             { code: 'resume_failed', cause: err },
           );
         } finally {
@@ -808,6 +808,12 @@ export class AgentSessionRunner {
     for (const key of auth.stripEnvKeys) delete env[key];
     Object.assign(env, auth.env);
     env.AWB_URL = this.#config.url;
+    // 세션 홈의 `config.toml` 은 awb MCP 서버를 `bearer_token_env_var = "AWB_API_KEY"` 로 적고
+    // `required = true` 로 표시한다(cli-adapters/codex.ts). 이 값이 없으면 codex 가 세션 초기화를
+    // 통째로 중단한다 — 재개는 **그 대화에 기록된** MCP 설정을 다시 띄우므로 지금 config 를 고쳐도
+    // 옛 대화는 계속 막힌다. 매니저 키는 이미 ACP mcpServers 의 Authorization 헤더로 같은 세션에
+    // 넘어가므로 새로 노출되는 비밀은 없다(managed agent 경로도 같은 변수를 쓴다).
+    env.AWB_API_KEY = this.#config.apiKey;
     env.AWB_MANAGER_ID = this.#options.getManagerId();
     env.AWB_SESSION_CLI = cli;
     env.AWB_SESSION_ID = sessionId;

@@ -82,6 +82,7 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
     CODEX_HOME: process.env.CODEX_HOME ?? null,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
+    AWB_API_KEY: process.env.AWB_API_KEY ?? null,
     cwd: process.cwd(),
   }));
 }
