@@ -94,7 +94,10 @@ type CommandKind =
   // ticket 40110b64 — 호스트의 CLI 를 업그레이드한 뒤 매니저 재시작 없이 모델
   // 목록만 다시 열거한다. args 없음. 재열거 직후 즉시 하트비트 1회를 보내
   // 서버 레지스트리가 다음 정기 tick(최대 30초)을 기다리지 않게 한다.
-  | 'refresh_available_models';
+  | 'refresh_available_models'
+  // 호스트에 설치된 CLI 자체를 최신으로 올린다(`claude update` / `codex update`).
+  // args: { cli? } — 생략하면 대상 에이전트의 CLI. CLI 는 장비 전역이라 **범위는 Runtime Host** 다.
+  | 'update_cli';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -130,6 +133,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'cli_login_start',
   'cli_login_cancel',
   'refresh_available_models',
+  'update_cli',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -208,6 +212,30 @@ export interface CommandHandlerDeps {
    *  콜백만 부른다. Optional 이라 이 dep 없이 만든 레거시 테스트 하네스도 그대로
    *  동작한다 — 대신 그 경우 커맨드는 명확한 사유와 함께 error 로 ack 된다. */
   refreshAvailableModels?: (() => Promise<RefreshAvailableModelsResult>) | null;
+  /** 호스트에 설치된 CLI 자체를 최신으로 올린다(`claude update` / `codex update`).
+   *  어댑터 레지스트리·바이너리 해석·버전 재측정·하트비트가 모두 main.ts 소유라
+   *  여기서는 배선된 콜백만 부른다. refreshAvailableModels 와 같은 이유로 optional —
+   *  이 dep 없이 만든 레거시 테스트 하네스는 명확한 사유와 함께 error 로 ack 된다. */
+  updateCli?: ((cli: string) => Promise<UpdateCliResult>) | null;
+}
+
+/** update_cli 한 번의 결과. */
+export interface UpdateCliResult {
+  /** 이 CLI 가 자체 업데이터를 갖고 있는지(`CliAdapter.cliUpdate()` 가 null 이 아닌지).
+   *  false 면 업데이트를 시도하지도 않았다는 뜻이라 실패가 아니다. */
+  supported: boolean;
+  /** 업데이터가 성공으로 끝났는지. supported=false 면 의미 없다. */
+  ok: boolean;
+  /** 업데이트 직전/직후에 다시 읽은 버전 문자열. 못 읽었으면 null. */
+  before: string | null;
+  after: string | null;
+  /** 실패 사유 또는 업데이터의 마지막 출력 — ack 메시지에 그대로 실린다. */
+  detail: string;
+  /** 사람이 읽는 호스트 이름 — "어느 장비의 CLI 를 올린 건지" 를 ack 에 남긴다. */
+  hostLabel: string;
+  /** 즉시 하트비트 1회가 실제로 서버에 도달했는지. false 여도 커맨드는 성공이며,
+   *  다음 정기 하트비트(최대 30초)가 같은 버전을 다시 싣고 간다. */
+  heartbeatPosted: boolean;
 }
 
 /** refresh_available_models 한 번의 결과. */
@@ -303,6 +331,8 @@ export class AgentManagerCommandHandler {
         return this.#cancelCliLogin(payload);
       case 'refresh_available_models':
         return this.#refreshAvailableModels();
+      case 'update_cli':
+        return this.#updateCli(payload);
     }
   }
 
@@ -1040,6 +1070,45 @@ export class AgentManagerCommandHandler {
    *   - For non-claude managed agents (codex/antigravity), the dir layout doesn't
    *     match — return a "not applicable" success rather than fail loudly.
    */
+  /**
+   * 호스트의 CLI 자체를 올린다 — 어댑터가 알려 주는 자체 업데이터를 돌린다
+   * (`CliAdapter.cliUpdate()`: claude/codex 는 `update` 서브커맨드, 없는 CLI 는 null).
+   *
+   * **범위는 Runtime Host** 다: CLI 는 장비 전역에 설치되므로 한 에이전트의 CLI 를 올리면
+   * 같은 장비의 모든 에이전트·세션이 같은 바이너리를 쓴다. 대상 CLI 는 `args.cli`, 없으면
+   * 그 에이전트가 쓰는 CLI 에서 고른다.
+   *
+   * 끝나면 버전을 다시 읽어 하트비트 캐시를 교체하고 즉시 한 번 보낸다 — 운영자가 정기 tick
+   * (최대 30초)을 기다리지 않고 새 버전을 화면에서 보게 한다.
+   */
+  async #updateCli(payload: AgentManagerCommandPayload): Promise<string> {
+    const update = this.#deps.updateCli;
+    if (!update) throw new Error('update_cli is not wired on this manager');
+    const requested = typeof payload.args?.cli === 'string' ? payload.args.cli.trim() : '';
+    let cli = requested;
+    if (!cli) {
+      const agentId = this.#targetAgentId(payload, 'update_cli');
+      const ctx = this.#deps.contextRegistry?.get(agentId);
+      if (!ctx) {
+        throw new Error(
+          `update_cli: agent=${agentId.slice(0, 8)} is not registered and no cli was given ` +
+            '(pass args.cli, or spawn the agent first)',
+        );
+      }
+      cli = ctx.cli;
+    }
+    const result = await update(cli);
+    if (!result.supported) {
+      return `update_cli: ${cli} has no self-updater — update it on ${result.hostLabel} yourself (for example with npm -g)`;
+    }
+    if (!result.ok) throw new Error(`update_cli ${cli}: ${result.detail}`);
+    const moved = result.before && result.after && result.before !== result.after;
+    return (
+      `update_cli ok: ${cli} ${moved ? `${result.before} → ${result.after}` : `stays at ${result.after ?? result.before ?? 'unknown'}`}` +
+      (result.heartbeatPosted ? '' : ' (version reaches the UI on the next heartbeat)')
+    );
+  }
+
   async #updatePlugins(payload: AgentManagerCommandPayload): Promise<string> {
     const agentId = this.#targetAgentId(payload, 'update_plugins');
     const ctx = this.#deps.contextRegistry?.get(agentId);

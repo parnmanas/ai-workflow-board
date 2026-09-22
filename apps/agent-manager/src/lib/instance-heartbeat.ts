@@ -60,6 +60,10 @@ export interface InstanceMeta {
   // 배선되면 정적 값보다 우선하고, 다른 provider 들과 같은 best-effort 계약을
   // 따른다(throw 하면 정적 스냅샷으로 접고 하트비트는 계속 돈다).
   availableModelsProvider?: (() => Record<string, string[]> | null) | null;
+  // 이 장비에 설치된 CLI 들의 `--version` (cliType → 버전 문자열). `update_cli` 가
+  // CLI 를 올린 뒤 같은 값을 다시 읽어 교체하므로, 모델 목록과 같은 이유로 정적
+  // 값이 아니라 provider 다. 버전을 못 읽은 CLI 는 키가 없다(= 미설치/probe 실패).
+  cliVersionsProvider?: (() => Record<string, string> | null) | null;
   // Agent Session(CLI 직접 세션) — 이 장비에서 ACP 어댑터로 세션을 열 수 있는 CLI
   // (agent-session-runner.ts detectAcpSessionClis). 부팅 시 한 번 계산한 정적 값.
   acpSessionClis?: string[] | null;
@@ -327,6 +331,7 @@ export class InstanceHeartbeat {
         ? meta.availableModels
         : null;
     const availableModelsProvider = meta?.availableModelsProvider ?? null;
+    const cliVersionsProvider = meta?.cliVersionsProvider ?? null;
     const runtimeCapabilities =
       meta?.runtimeCapabilities && typeof meta.runtimeCapabilities === 'object'
         ? meta.runtimeCapabilities
@@ -462,6 +467,18 @@ export class InstanceHeartbeat {
           models = availableModels;
         }
       }
+      // CLI 버전도 모델 목록과 같은 best-effort provider 계약을 따른다 — throw 하면
+      // 이 tick 만 필드를 빼고 하트비트는 계속 돈다.
+      let cliVersions: Record<string, string> | null = null;
+      if (cliVersionsProvider) {
+        try {
+          const live = cliVersionsProvider();
+          cliVersions = live && typeof live === 'object' ? live : null;
+        } catch (err: any) {
+          log(`Instance heartbeat: cli-versions provider failed: ${err?.message ?? err}`);
+          cliVersions = null;
+        }
+      }
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -480,6 +497,7 @@ export class InstanceHeartbeat {
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
         ...(models && Object.keys(models).length ? { available_models: models } : {}),
+        ...(cliVersions && Object.keys(cliVersions).length ? { cli_versions: cliVersions } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
         ...(agentSessions ? { agent_sessions: agentSessions } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),

@@ -62,6 +62,10 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   // ticket 40110b64 — CLI 모델 목록 재열거. 매니저 재시작 없이 끝나는 읽기성
   // 작업이라 restart_manager 와 달리 파괴적이지 않다.
   'refresh_available_models',
+  // 호스트의 CLI 자체를 올린다. 매니저 프로세스는 재시작되지 않지만 설치가
+  // 끝난 뒤 spawn 되는 CLI 는 새 버전이다 — 장비 전역 영향이라 관리자 전용
+  // 경로(다른 verb 와 같은 가드)로만 들어온다.
+  'update_cli',
 ] as const);
 
 /** 세 등급이 모두 알려진 support 값일 때만 `permission_tiers` 를 남긴다.
@@ -521,6 +525,19 @@ export class AgentManagerController {
       if (Object.keys(out).length) available_models = out;
     }
 
+    // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). available_models 와 같은
+    // 관대한 검증 — 문자열 아닌 값은 버린다. `update_cli` 가 CLI 를 올린 직후 매니저가
+    // 즉시 하트비트를 한 번 더 보내므로, 관리자 UI 는 정기 tick 을 기다리지 않고
+    // 새 버전을 본다.
+    let cli_versions: Record<string, string> | undefined;
+    if (body?.cli_versions && typeof body.cli_versions === 'object' && !Array.isArray(body.cli_versions)) {
+      const out: Record<string, string> = {};
+      for (const [cli, version] of Object.entries(body.cli_versions)) {
+        if (typeof version === 'string' && version) out[cli] = version;
+      }
+      if (Object.keys(out).length) cli_versions = out;
+    }
+
     // Per-managed-agent credential metadata (manager-mode only). Each row
     // is opportunistically validated — bad shapes are dropped silently
     // because the heartbeat is best-effort and a rolling-out manager
@@ -730,6 +747,7 @@ export class AgentManagerController {
       active_worktrees,
       active_run_workspaces,
       available_models,
+      cli_versions,
       latest_version,
       update_available,
       install_mode,

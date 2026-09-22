@@ -184,6 +184,11 @@ export class CodexCliAdapter extends CliAdapter {
     this.capabilities = new Set([ADAPTER_CAPABILITIES.NATIVE_MCP]);
   }
 
+  /** `codex update` — "Update Codex to the latest version". */
+  cliUpdate(): { args: string[]; label: string } | null {
+    return { args: ['update'], label: 'codex update' };
+  }
+
   resolveBin(configured?: string | null): string {
     return resolveCliBin('codex', configured);
   }

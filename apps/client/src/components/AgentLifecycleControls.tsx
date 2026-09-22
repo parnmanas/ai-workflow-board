@@ -5,6 +5,7 @@ import { tokens } from '../tokens';
 import { Button, Badge, Input } from './common';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { waitForCommandAck } from './admin/agentManagerModelRefresh';
 
 /**
  * AgentLifecycleControls — per-managed-agent lifecycle surface for the
@@ -40,10 +41,20 @@ import { useConfirm } from '../contexts/ConfirmContext';
  *  what "live" looks like. */
 const HEARTBEAT_STALE_MS = 60_000;
 
+/** Agent.type 에 들어오지만 실제 CLI 가 아닌 값들 — 이 둘에는 올릴 바이너리가
+ *  없으므로 Update CLI 버튼을 아예 감춘다('custom' 은 운영자가 직접 정의한
+ *  실행 파일, 'manager' 는 페어링으로 발급된 매니저 identity). */
+const NON_UPDATABLE_CLI_TYPES = new Set(['custom', 'manager', '']);
+
 interface AgentLifecycleControlsProps {
   agentId: string;
   /** Agent storage directory — seeds the set-working-dir input. */
   workingDir?: string | null;
+  /** 이 에이전트가 쓰는 CLI(claude / codex / …). Update CLI 버튼이 **명시적으로**
+   *  이 값을 실어 보내므로 에이전트가 중지돼 있어도(= 매니저 컨텍스트가 없어도)
+   *  호스트의 CLI 를 올릴 수 있다. 모르면 버튼을 감춘다 — 잘못된 CLI 를 추측해
+   *  올리는 것보다 낫다. */
+  cli?: string | null;
   /** Owning manager's live instance, or null/undefined when the manager is
    *  not currently heartbeating (then every command is disabled). */
   managerInstance?: AgentManagerInstance | null;
@@ -62,6 +73,7 @@ interface AgentLifecycleControlsProps {
 export default function AgentLifecycleControls({
   agentId,
   workingDir,
+  cli,
   managerInstance,
   lifecycleState,
   layout = 'compact',
@@ -121,6 +133,50 @@ export default function AgentLifecycleControls({
     },
     [agentId, instanceId, pending, confirm, showToast, onDispatched],
   );
+
+  // ── update_cli ──────────────────────────────────────────────────
+  // 다른 verb 와 달리 ack 를 직접 기다린다. CLI 업데이터(`claude update` /
+  // `codex update`)는 npm 왕복이라 수십 초가 걸리고, "디스패치됨" 토스트만
+  // 띄우면 운영자는 올라갔는지 실패했는지 끝내 알 수 없다. ack detail 에
+  // `before → after` 가 그대로 담겨 온다. 창 안에 ack 가 안 오면 실패가 아니라
+  // "아직" 이다 — 매니저가 끝내면 다음 하트비트가 새 버전을 싣고 온다.
+  const updatableCli = cli && !NON_UPDATABLE_CLI_TYPES.has(cli) ? cli : null;
+  const currentCliVersion = (updatableCli && managerInstance?.cli_versions?.[updatableCli]) || null;
+  const updateCli = useCallback(async () => {
+    if (!instanceId || !updatableCli || pending) return;
+    const ok = await confirm({
+      title: 'CLI 업데이트',
+      message:
+        `${updatableCli} 를 이 Runtime Host 전체에서 최신 버전으로 올립니다` +
+        `${currentCliVersion ? ` (현재 ${currentCliVersion})` : ''}. ` +
+        '이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?',
+      confirmLabel: '업데이트',
+      // 파괴적 동작이 아니다 — 기본값(빨간 Delete 버튼)을 그대로 두면 문구와
+      // 버튼이 서로 다른 말을 한다.
+      danger: false,
+    });
+    if (!ok) return;
+    setPending('update_cli');
+    try {
+      const resp = await api.sendAgentManagerCommand(instanceId, {
+        command: 'update_cli',
+        args: { agent_id: agentId, cli: updatableCli },
+      });
+      const ack = await waitForCommandAck(resp.command_id, { attempts: 120, intervalMs: 2000 });
+      if (ack.state === 'ok') showToast(ack.detail || `${updatableCli} 업데이트 완료`, 'success');
+      else if (ack.state === 'timeout')
+        showToast(
+          `${updatableCli} 업데이트가 아직 진행 중입니다 — 끝나면 하트비트로 새 버전이 올라옵니다.`,
+          'info',
+        );
+      else showToast(`update_cli 실패: ${ack.detail || ack.state}`, 'error');
+      onDispatched?.();
+    } catch (err: any) {
+      showToast(`명령 실패: ${err?.message || err}`, 'error');
+    } finally {
+      setPending(null);
+    }
+  }, [agentId, updatableCli, currentCliVersion, instanceId, pending, confirm, showToast, onDispatched]);
 
   // The dispatched-but-not-yet-running gap (ticket bfdd80b7): a spawn was just
   // dispatched (local `pending`) or the server reports lifecycle_state='starting',
@@ -227,6 +283,26 @@ export default function AgentLifecycleControls({
             >
               Update plugins
             </Button>
+            {/* update_cli — 이 에이전트가 아니라 **장비**의 CLI 를 올린다. 에이전트가
+                중지돼 있어도 가능하도록 cli 를 명시적으로 실어 보낸다. */}
+            {updatableCli && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!managerOnline || pending !== null}
+                onClick={updateCli}
+                title={
+                  !managerOnline ? managerOfflineTitle
+                    : `update_cli — 이 Runtime Host 의 ${updatableCli} 를 자체 업데이터로 최신화` +
+                      `${currentCliVersion ? ` (현재 ${currentCliVersion})` : ''}. ` +
+                      '장비 전역이라 같은 호스트의 모든 에이전트·세션에 적용됩니다.'
+                }
+              >
+                {pending === 'update_cli'
+                  ? `${updatableCli} 업데이트 중…`
+                  : `Update ${updatableCli}${currentCliVersion ? ` (${currentCliVersion})` : ''}`}
+              </Button>
+            )}
             <Button
               size="sm"
               variant="ghost"

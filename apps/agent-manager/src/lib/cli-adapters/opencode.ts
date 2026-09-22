@@ -148,6 +148,13 @@ export class OpencodeCliAdapter extends CliAdapter {
     return resolveCliBin('opencode', configured);
   }
 
+  /** `opencode upgrade` — "Updates opencode to the latest version or a specific
+   *  version" (opencode.ai/docs/cli). `update` 가 아니라 `upgrade` 다 —
+   *  claude/codex 와 서브커맨드 이름이 갈리므로 어댑터가 알려 주는 이유 그 자체. */
+  cliUpdate(): { args: string[]; label: string } | null {
+    return { args: ['upgrade'], label: 'opencode upgrade' };
+  }
+
   /** model + permission_mode map onto argv; system_prompt_append folds into
    *  the run message (codex parity). allowed/disallowed_tools have no
    *  opencode flag and are warn-skipped by partitionHarness(). */

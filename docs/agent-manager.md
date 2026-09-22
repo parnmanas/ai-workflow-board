@@ -262,6 +262,45 @@ live capability report; it must not infer availability from a runtime name.
 For Hermes, a successful ACP `initialize` handshake is the health probe. A
 `swarm` run is rejected if the probe is not healthy and is never downgraded.
 
+## CLI versions and `update_cli`
+
+The heartbeat carries `cli_versions` (cliType → `--version` output) for every
+runtime this host could resolve, so the admin UI can show what is actually
+installed rather than what is merely registered. A CLI whose version could not
+be read has no key at all — "not installed / probe failed" must not be
+confusable with "installed, version unknown". Managers predating this field
+omit it entirely, and the UI degrades to "no version telemetry".
+
+`update_cli` upgrades a CLI **on the host**, through whatever self-updater the
+adapter declares in `CliAdapter.cliUpdate()`:
+
+| CLI | updater |
+| --- | --- |
+| `claude` | `claude update` |
+| `codex` | `codex update` |
+| `opencode` | `opencode upgrade` |
+| others | none — `cliUpdate()` returns `null` |
+
+The subcommand differs per CLI (`update` vs `upgrade`), which is exactly why the
+adapter owns it instead of the command handler hardcoding one spelling. A CLI
+with no self-updater is **not** an error: the manager acks ok and says to update
+it on that host by hand, naming the host.
+
+Two properties matter when reading the ack:
+
+- **Scope is the Runtime Host, not the agent.** CLIs are installed globally, so
+  upgrading through one agent changes the binary every agent and session on that
+  machine will use. `args.cli` names the target explicitly; omitting it falls
+  back to the CLI of the agent in `args.agent_id`, which requires that agent to
+  be registered. The UI always sends `cli` so a stopped agent can still update.
+- **Versions are re-read on both sides of the run.** The ack reports
+  `before → after` (or `stays at X` when already current), and the manager posts
+  one immediate heartbeat so the new version reaches the UI without waiting for
+  the regular 30s tick. A failed immediate post does not fail the command.
+
+The manager process is not restarted; already-running CLIs keep their old
+binary until they are respawned.
+
 ## Process and session ownership
 
 - Hermes has exactly one isolated ACP process per durable AWB Agent.

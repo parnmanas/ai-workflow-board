@@ -701,6 +701,18 @@ export abstract class CliAdapter {
    * manager skips injection and the spawn shares whatever the manager
    * process inherited (typically the operator's $HOME).
    */
+  /**
+   * 이 CLI 를 최신으로 올리는 방법. 대부분의 CLI 는 자체 업데이터를 갖고 있으므로
+   * 해석된 바이너리에 붙일 argv 만 돌려준다(`claude update`, `codex update`).
+   * 자체 업데이터가 없으면 `null` — 그 CLI 는 장비에서 직접 올려야 한다는 뜻이고,
+   * 호출자는 그 사실을 사용자에게 그대로 알린다(조용히 성공한 척하지 않는다).
+   *
+   * CLI 는 장비 전역에 설치되므로 이 동작의 범위는 **에이전트가 아니라 Runtime Host** 다.
+   */
+  cliUpdate(): { args: string[]; label: string } | null {
+    return null;
+  }
+
   configDirEnv(): string | null {
     return null;
   }

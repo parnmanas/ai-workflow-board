@@ -2199,6 +2199,10 @@ export interface AgentManagerInstance {
   // per-agent model selector in ManagedAgentDialog. Older managers leave
   // this undefined; the UI degrades to a free-text model input then.
   available_models?: Record<string, string[]>;
+  // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). `update_cli` 버튼 옆에
+  // 현재 버전을 보여주고, 업데이트 후 바뀐 값을 그대로 드러낸다. 버전을 못 읽은
+  // CLI 는 키가 없고, 구버전 매니저는 필드 자체를 보내지 않는다.
+  cli_versions?: Record<string, string>;
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.
@@ -2447,7 +2451,10 @@ export type AgentManagerCommandKind =
   | 'restart_manager'
   // ticket 40110b64 — 호스트에 설치된 CLI 들의 모델 목록을 다시 열거한다.
   // 매니저 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다.
-  | 'refresh_available_models';
+  | 'refresh_available_models'
+  // 호스트에 설치된 CLI 자체를 최신으로 올린다(`claude update` / `codex update`).
+  // args: { cli? }. 범위는 에이전트가 아니라 Runtime Host 전체.
+  | 'update_cli';
 
 export interface AgentManagerCommandResult {
   ok: boolean;

@@ -233,6 +233,11 @@ export class ClaudeCliAdapter extends CliAdapter {
     this.capabilities = new Set([PERSISTENT_SESSION, NATIVE_MCP]);
   }
 
+  /** `claude update` — "Check for updates and install if available". */
+  cliUpdate(): { args: string[]; label: string } | null {
+    return { args: ['update'], label: 'claude update' };
+  }
+
   resolveBin(configured?: string | null): string {
     return resolveCliBin('claude', configured);
   }

@@ -378,3 +378,177 @@ test('알 수 없는 verb 는 기존대로 error ack 된다 (KNOWN_COMMANDS 회�
   assert.equal(ack.status, 'error');
   assert.match(ack.detail, /unknown command/);
 });
+
+// ─── update_cli — 호스트에 설치된 CLI 자체를 올린다 ─────────────────────────
+//
+// 실제 업데이터 실행은 cli-update.ts 가, 배선은 main.ts 가 한다. 여기서는 커맨드
+// 계약만 본다: 대상 CLI 해석(args.cli 우선, 없으면 에이전트 컨텍스트),
+// supported/ok 별 ack 문구, 미배선 처리.
+
+/** updateCli dep 을 배선한 핸들러. contextRegistry 는 선택적으로 넘긴다. */
+function updateCliHandler(updateCli, contextRegistry) {
+  return new AgentManagerCommandHandler(
+    { url: 'https://awb.cliupdate.example', apiKey: 'manager-key', delegation: {} },
+    {
+      getInstanceId: () => 'instance-1',
+      registry: registryStub(),
+      ...(contextRegistry ? { contextRegistry } : {}),
+      updateCli,
+    },
+  );
+}
+
+const updateOk = (over = {}) => ({
+  supported: true,
+  ok: true,
+  before: '2.0.0',
+  after: '2.1.0',
+  detail: 'updated',
+  hostLabel: 'rolf',
+  heartbeatPosted: true,
+  ...over,
+});
+
+test('update_cli 는 args.cli 를 그대로 올리고 before → after 를 ack detail 에 담는다', async () => {
+  const seen = [];
+  const handler = updateCliHandler(async (cli) => {
+    seen.push(cli);
+    return updateOk();
+  });
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-1',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'codex' },
+  }));
+
+  assert.deepEqual(seen, ['codex']);
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  assert.match(ack.detail, /update_cli ok: codex 2\.0\.0 → 2\.1\.0/);
+});
+
+test('args.cli 가 없으면 대상 에이전트가 쓰는 CLI 를 올린다', async () => {
+  const seen = [];
+  const handler = updateCliHandler(
+    async (cli) => {
+      seen.push(cli);
+      return updateOk({ before: '1.0.0', after: '1.0.0' });
+    },
+    { get: (id) => (id === 'agent-7' ? { agent_id: 'agent-7', cli: 'claude' } : null) },
+  );
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-from-agent',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { agent_id: 'agent-7' },
+  }));
+
+  assert.deepEqual(seen, ['claude']);
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  // 이미 최신이면 화살표 대신 "그대로" 를 말한다 — 올라가지도 않았는데 올라간
+  // 것처럼 읽히면 안 된다.
+  assert.match(ack.detail, /stays at 1\.0\.0/);
+});
+
+test('에이전트가 등록돼 있지 않고 cli 도 안 주면 무엇을 올릴지 모른다고 error ack 한다', async () => {
+  let called = 0;
+  const handler = updateCliHandler(
+    async () => {
+      called++;
+      return updateOk();
+    },
+    { get: () => null },
+  );
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-unknown-agent',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { agent_id: 'agent-missing' },
+  }));
+
+  assert.equal(called, 0, '대상을 모르면 아무것도 올리지 않는다');
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /is not registered and no cli was given/);
+});
+
+test('자체 업데이터가 없는 CLI 는 실패가 아니라 "직접 올리라" 는 안내로 ok ack 된다', async () => {
+  const handler = updateCliHandler(async () => ({
+    supported: false,
+    ok: false,
+    before: null,
+    after: null,
+    detail: 'no self-updater',
+    hostLabel: 'ralf',
+    heartbeatPosted: true,
+  }));
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-unsupported',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'pi' },
+  }));
+
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  assert.match(ack.detail, /no self-updater/);
+  assert.match(ack.detail, /ralf/, '어느 장비에서 손으로 올려야 하는지 알려준다');
+});
+
+test('업데이터가 실패하면 그 사유 그대로 error ack 된다', async () => {
+  const handler = updateCliHandler(async () => updateOk({
+    ok: false,
+    after: '2.0.0',
+    detail: 'npm ERR! code EACCES',
+  }));
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-failed',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'claude' },
+  }));
+
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /EACCES/);
+});
+
+test('즉시 하트비트가 못 갔으면 성공은 유지하되 그 사실을 detail 에 덧붙인다', async () => {
+  const handler = updateCliHandler(async () => updateOk({ heartbeatPosted: false }));
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-no-post',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'codex' },
+  }));
+
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  assert.match(ack.detail, /next heartbeat/);
+});
+
+test('updateCli dep 이 배선되지 않은 매니저는 명확한 사유로 error ack 한다', async () => {
+  const handler = new AgentManagerCommandHandler(
+    { url: 'https://awb.cliupdate.example', apiKey: 'manager-key', delegation: {} },
+    { getInstanceId: () => 'instance-1', registry: registryStub() },
+  );
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-unwired',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'claude' },
+  }));
+
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /not wired/);
+});
