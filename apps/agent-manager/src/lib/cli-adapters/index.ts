@@ -24,6 +24,7 @@ export { DeepSeekCliAdapter } from './deepseek.js';
 export { AntigravityCliAdapter } from './antigravity.js';
 export { CodexCliAdapter } from './codex.js';
 export { PiCliAdapter } from './pi.js';
+export { OpencodeCliAdapter } from './opencode.js';
 export { RuntimeSelectionError } from '../runtime/runtime-types.js';
 export {
   getRuntimeDescriptor,

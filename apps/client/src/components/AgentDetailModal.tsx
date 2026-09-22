@@ -964,7 +964,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                   </div>
                 </div>
                 {/* Lifecycle controls — Start/Stop/Restart + maintenance
-                    (update_plugins / refresh_mcp_config /
+                    (update_plugins / update_cli / refresh_mcp_config /
                     reload_config) + set working dir. Admin-only; the owning
                     manager instance is resolved from manager_agent_id so a
                     STOPPED agent can still be Started. Running/stopped comes
@@ -975,6 +975,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
                     <AgentLifecycleControls
                       agentId={agentId}
                       workingDir={detail.working_dir}
+                      cli={detail.type}
                       managerInstance={ownerManagerInstance}
                       lifecycleState={detail.lifecycle_state}
                       layout="full"

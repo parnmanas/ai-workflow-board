@@ -22,7 +22,7 @@ import { z } from 'zod';
  *     `ultracode: true` appends the literal PROMPT KEYWORD "ultracode" to the
  *     task text (oneshot) / first user turn (session) — it is NOT a CLI flag.
  *     `model` → `--model`.
- *   - codex / antigravity / pi: model-only (`-m`/`--model`); they gracefully
+ *   - codex / antigravity / pi / opencode: model-only (`-m`/`--model`); they gracefully
  *     skip whatever the preset expresses that they can't (effort / ultracode).
  */
 
@@ -58,6 +58,12 @@ export const EffortPresetSchema = z
       .strict()
       .optional(),
     pi: z
+      .object({
+        model: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    opencode: z
       .object({
         model: z.string().optional(),
       })

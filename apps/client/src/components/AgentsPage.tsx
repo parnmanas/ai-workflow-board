@@ -34,9 +34,10 @@ import type {
  *  picker. Keep this aligned with the server adapter credential mapping.
  *  CLIs whose adapter ships in agent-manager (claude / codex / antigravity) show
  *  only credentials with a matching provider prefix; `custom` skips it. `pi`
- *  has no provider prefix at all — it has no credential concept AWB manages
- *  (see cli-adapters/pi.ts) — so it's deliberately absent from this map,
- *  which is what keeps the credential picker below from rendering for it. */
+ *  and `opencode` have no provider prefix at all — neither has a credential
+ *  concept AWB manages (see cli-adapters/pi.ts, cli-adapters/opencode.ts) —
+ *  so both are deliberately absent from this map, which is what keeps the
+ *  credential picker below from rendering for them. */
 const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
   claude: 'claude_',
   codex: 'codex_',
@@ -358,7 +359,9 @@ export default function AgentsPage() {
     setCreatingManaged(true);
     try {
       // Drop credential_id when the CLI doesn't support per-agent
-      // credentials (only claude / codex / antigravity do); preserves the
+      // credentials (only CLIs with a provider prefix in the map above —
+      // claude / deepseek / codex / antigravity — do; pi / opencode /
+      // custom / hermes don't); preserves the
       // server's null contract for `custom` so it doesn't mis-set an FK.
       const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime];
       const credential_id = supportsCredential && managedForm.credential_id

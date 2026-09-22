@@ -1845,6 +1845,23 @@ export class SubagentManager implements SubagentManagerContract {
       return;
     }
 
+    // opencode `run --format json` tool_use events — the native-MCP path
+    // (per-agent opencode.json `awb` server). Suffix-matched so any MCP
+    // prefix rename (awb_* / mcp__awb__*) keeps working; without this branch
+    // every successful opencode ticket dispatch would be misread as silent
+    // (pi ticket d5a6100d's regression class).
+    if (parsed?.type === 'tool_use') {
+      const part = parsed?.part;
+      const state = part?.state;
+      const completed = state?.status === 'completed';
+      const failed = state?.error != null || state?.isError === true
+        || state?.status === 'failed' || state?.status === 'error';
+      if (completed && !failed && isCommentTool(part?.tool)) {
+        record.commentSent = true;
+      }
+      return;
+    }
+
     if (parsed?.type === 'assistant') {
       const content = parsed?.message?.content;
       if (!Array.isArray(content)) return;

@@ -159,7 +159,7 @@ export interface AgentTriggerPayload {
   // agent-manager maps this onto per-CLI options at spawn — for claude the
   // `claude.effort` block becomes the `--effort` flag and `claude.ultracode`
   // appends the literal "ultracode" PROMPT KEYWORD to the task turn (not a
-  // flag); codex/antigravity take model-only and gracefully skip the rest.
+  // flag); codex/antigravity/pi/opencode take model-only and gracefully skip the rest.
   // Null when the board has no presets or resolution fails — treat as "no
   // effort override, spawn exactly as before".
   effort_preset?: ResolvedEffortPreset | null;
@@ -796,7 +796,13 @@ export type AgentManagerCommand =
   // 없음. 매니저 프로세스는 재시작되지 않고 실행 중 세션도 끊기지 않는다.
   // 재열거 직후 매니저가 즉시 하트비트 1회를 보내므로, 갱신된 available_models
   // 가 다음 정기 하트비트(30초)를 기다리지 않고 인스턴스 레지스트리에 반영된다.
-  | 'refresh_available_models';
+  | 'refresh_available_models'
+  // 호스트에 설치된 CLI 자체를 최신으로 올린다(어댑터의 자체 업데이터 —
+  // `claude update` / `codex update`). args: { cli? } — 생략하면 대상 에이전트가
+  // 쓰는 CLI. **범위는 에이전트가 아니라 Runtime Host** 다: CLI 는 전역 설치라
+  // 같은 장비의 모든 에이전트·세션이 즉시 새 바이너리를 쓴다. 끝나면 매니저가
+  // 버전을 다시 읽어 즉시 하트비트 1회를 보낸다(heartbeat `cli_versions`).
+  | 'update_cli';
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

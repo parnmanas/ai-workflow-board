@@ -109,6 +109,15 @@ export function summarizeCliJsonLine(line: string): string | null {
  *   - `error` / `stream_error` → the error message verbatim
  *   - `system`     → skipped (init/setup noise)
  *
+ * Recognized opencode `run --format json` shapes (`obj.type`):
+ *   - `step_start` → skipped (proves a start, not a death)
+ *   - `tool_use`   → `→ tool(<part.tool>)` + title when present (what it was
+ *                    doing); failed states surface the error
+ *   - `text`       → the model prose (what the agent decided to say instead)
+ *   - `step_finish`→ `result: reason=… cost=… input=… output=…` (THE key
+ *                    diagnostic — token/cost ledger of the finished step)
+ *   - `error`      → `error.data.message` verbatim
+ *
  * Unknown shapes that still carry an obvious error field (`error`/`message`
  * with `is_error`) get a generic fallback so non-claude CLIs aren't silent.
  */
@@ -144,17 +153,65 @@ export function summarizeCliEvent(obj: any): string | null {
     }
     case 'error':
     case 'stream_error': {
+      const errObj = obj.error && typeof obj.error === 'object' ? obj.error : null;
+      const nested = errObj && errObj.data && typeof errObj.data.message === 'string'
+        ? errObj.data.message
+        : null;
       const text =
         typeof obj.error === 'string'
           ? obj.error
-          : typeof obj.message === 'string'
-            ? obj.message
-            : JSON.stringify(obj);
+          : nested
+            ? `${typeof errObj.name === 'string' ? `${errObj.name}: ` : ''}${nested}`
+            : typeof obj.message === 'string'
+              ? obj.message
+              : JSON.stringify(obj);
       return `error: ${clip(text)}`;
     }
     case 'system':
       // init/setup metadata — proves a start, not a death. Skip as noise.
       return null;
+    case 'step_start':
+      // opencode step-open marker — proves a start, not a death. Skip as noise.
+      return null;
+    case 'tool_use': {
+      // opencode finished-tool event: { part: { tool, state: { status,
+      // input, output, title }, ... } }.
+      const part = obj.part && typeof obj.part === 'object' ? obj.part : {};
+      const tool = typeof part.tool === 'string' ? part.tool : '';
+      const state = part.state && typeof part.state === 'object' ? part.state : {};
+      const failed = state.error != null || state.isError === true
+        || state.status === 'failed' || state.status === 'error';
+      const title = typeof state.title === 'string' && state.title.trim()
+        ? ` ${clip(state.title)}`
+        : '';
+      if (failed) {
+        const errText = typeof state.error === 'string'
+          ? state.error
+          : typeof state.output === 'string'
+            ? state.output
+            : '';
+        return `✗ tool(${tool || 'unknown'}) error:${title} ${clip(errText)}`.trim();
+      }
+      return tool ? `→ tool(${tool})${title}` : null;
+    }
+    case 'text': {
+      // opencode model prose: { part: { text } }.
+      const text = obj.part && typeof obj.part.text === 'string' ? obj.part.text : '';
+      return text.trim() ? clip(text) : null;
+    }
+    case 'step_finish': {
+      // opencode step ledger: { part: { reason, cost, tokens: { input,
+      // output, cache: { read, write } } } }.
+      const part = obj.part && typeof obj.part === 'object' ? obj.part : {};
+      const bits = [`result: reason=${typeof part.reason === 'string' ? part.reason : 'stop'}`];
+      if (typeof part.cost === 'number' && Number.isFinite(part.cost)) bits.push(`cost=${part.cost}`);
+      const tokens = part.tokens && typeof part.tokens === 'object' ? part.tokens : null;
+      if (tokens) {
+        if (typeof tokens.input === 'number') bits.push(`input=${tokens.input}`);
+        if (typeof tokens.output === 'number') bits.push(`output=${tokens.output}`);
+      }
+      return bits.join(' ');
+    }
     default: {
       // Unknown event type: keep it only if it obviously reports a failure.
       if (obj.is_error === true || obj.error) {

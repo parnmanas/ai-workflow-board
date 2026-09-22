@@ -22,6 +22,7 @@ import { DeepSeekCliAdapter } from '../dist/lib/cli-adapters/deepseek.js';
 import { CodexCliAdapter } from '../dist/lib/cli-adapters/codex.js';
 import { AntigravityCliAdapter } from '../dist/lib/cli-adapters/antigravity.js';
 import { PiCliAdapter } from '../dist/lib/cli-adapters/pi.js';
+import { OpencodeCliAdapter } from '../dist/lib/cli-adapters/opencode.js';
 import { describeSpawnArgv } from '../dist/lib/cli-adapters/base.js';
 import { createRuntimeCliAdapter, getRuntimeDescriptor } from '../dist/lib/runtime/runtime-registry.js';
 import {
@@ -320,7 +321,7 @@ test('permissionCapabilities: 어떤 CLI 도 approve 를 native 로 주장하지
   // 전용 플래그가 있다는 이유로 native 라고 선언하면 능력을 과장하게 된다.
   for (const adapter of [
     new ClaudeCliAdapter(), new DeepSeekCliAdapter(), new CodexCliAdapter(),
-    new AntigravityCliAdapter(), new PiCliAdapter(),
+    new AntigravityCliAdapter(), new PiCliAdapter(), new OpencodeCliAdapter(),
   ]) {
     const caps = adapter.permissionCapabilities();
     const cli = adapter.constructor.cliType;
@@ -336,17 +337,31 @@ test('permissionCapabilities: 등급별 표현력이 어댑터마다 정확히 �
     assert.deepEqual(caps.tiers, { strict: 'native', approve: 'approximated', trusted: 'native' },
       adapter.constructor.cliType);
   }
-  for (const adapter of [new AntigravityCliAdapter(), new PiCliAdapter()]) {
+  for (const adapter of [new AntigravityCliAdapter(), new PiCliAdapter(), new OpencodeCliAdapter()]) {
     const caps = adapter.permissionCapabilities();
     assert.deepEqual(caps.tiers, { strict: 'approximated', approve: 'approximated', trusted: 'native' },
       adapter.constructor.cliType);
   }
 });
 
+test('opencode: trusted 만 --auto, approve/strict 는 플래그 생략 (approximated)', () => {
+  const opencode = new OpencodeCliAdapter();
+  assert.ok(oneshot(opencode, policy('trusted'), null).includes('--auto'));
+  assert.equal(oneshot(opencode, policy('approve'), null).includes('--auto'), false);
+  assert.equal(oneshot(opencode, policy('strict'), null).includes('--auto'), false);
+  // legacy harness 경로도 동일: bypass → trusted → --auto, plan → strict → 생략.
+  assert.ok(oneshot(opencode, null, { permission_mode: 'bypassPermissions' }).includes('--auto'));
+  assert.equal(oneshot(opencode, null, { permission_mode: 'plan' }).includes('--auto'), false);
+  // describeSpawnArgv 가 --auto 와 run 리터럴을 그대로 보여준다 (진단 가시성).
+  const shown = describeSpawnArgv(oneshot(opencode, policy('trusted'), null));
+  assert.ok(shown.includes('--auto'), shown);
+  assert.ok(shown.split(' ')[0] === 'run', shown);
+});
+
 test('permission_tiers: heartbeat 로 보고되는 런타임 capability 가 어댑터 선언과 일치한다', () => {
   // 운영자가 admin 에서 보는 능력 선언과 실제 spawn 동작이 어긋나면 안 되므로,
   // 두 곳이 같은 상수에서 나오는지 드리프트 가드를 건다.
-  for (const id of ['claude', 'deepseek', 'codex', 'antigravity', 'pi']) {
+  for (const id of ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'opencode']) {
     assert.deepEqual(
       getRuntimeDescriptor(id).capabilities.permission_tiers,
       createRuntimeCliAdapter(id).permissionCapabilities().tiers,
@@ -363,7 +378,7 @@ test('permission_tiers: heartbeat 로 보고되는 런타임 capability 가 어�
 test('decideApproveDispatch: 승인 브리지가 없는 런타임의 approve 는 실행을 차단한다 (리뷰 라운드2 지적 #3)', () => {
   // 정직한 표기만으로는 "사람이 승인한다"가 "묻지 않고 거부한다"로 바뀌는 의미
   // 손실이 사라지지 않는다. 실행을 막고 사람에게 결정을 넘긴다.
-  for (const id of ['claude', 'deepseek', 'codex', 'antigravity', 'pi']) {
+  for (const id of ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'opencode']) {
     const gate = decideApproveDispatch(policy('approve'), { id, native_approvals: false });
     assert.equal(gate.blocked, true, `cli=${id}: approve 가 그대로 실행됐다`);
     assert.equal(gate.reason, APPROVE_BLOCKER_REASON);

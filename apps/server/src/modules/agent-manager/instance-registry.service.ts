@@ -170,6 +170,10 @@ export interface InstanceRecord {
   // model ids), gathered via each adapter's listModels() at boot. Powers the
   // per-agent model selector in the admin UI. Older managers leave undefined.
   available_models?: Record<string, string[]>;
+  // 이 장비에 설치된 CLI 들의 버전(cliType → `--version` 결과). `update_cli` 버튼이
+  // 무엇을 올리는지/올렸는지 UI 가 보여주는 근거. 버전을 못 읽은 CLI 는 키가 없고,
+  // 구버전 매니저는 필드 자체를 보내지 않는다(= 버전 텔레메트리 없음).
+  cli_versions?: Record<string, string>;
   // Self-update fields — Runtime Host heartbeat only.
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.

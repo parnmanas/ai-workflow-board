@@ -9,7 +9,8 @@ import {
 test('server accepts Hermes as an explicit managed runtime', () => {
   assert.deepEqual(
     CLI_TYPES,
-    ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'hermes', 'custom'],
+    ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'opencode', 'hermes', 'custom'],
   );
   assert.equal(ALLOWED_CLI_TYPES.has('hermes'), true);
+  assert.equal(ALLOWED_CLI_TYPES.has('opencode'), true);
 });

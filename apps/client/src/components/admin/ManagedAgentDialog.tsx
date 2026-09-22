@@ -84,8 +84,9 @@ export default function ManagedAgentDialog({
   // directory instead of typing an absolute path.
   const [pickerOpen, setPickerOpen] = useState(false);
   // Per-agent CLI credential. Only claude / codex / antigravity have adapters
-  // that consume credentials; custom and pi CLIs leave this null (pi has no
-  // credential concept at all — see cli-adapters/pi.ts).
+  // that consume credentials; custom, pi and opencode CLIs leave this null
+  // (pi/opencode have no credential concept at all — see
+  // cli-adapters/pi.ts, cli-adapters/opencode.ts).
   const [credentialId, setCredentialId] = useState<string>('');
   const [credentials, setCredentials] = useState<Credential[]>([]);
   // Per-agent default model + the per-CLI candidate lists the owning manager
@@ -309,14 +310,15 @@ export default function ManagedAgentDialog({
         // take-effect-on-restart contract as `model` below.
         // Per-agent credential is only meaningful when an adapter consumes it
         // (claude / codex / antigravity); for `custom` we always send null so a
-        // stale id doesn't linger after the operator switched CLI. `pi` has no
-        // credential concept AWB manages at all (see cli-adapters/pi.ts), so it
-        // is excluded the same way. Switching CLI also clears the credential
+        // stale id doesn't linger after the operator switched CLI. `pi` and
+        // `opencode` have no credential concept AWB manages at all (see
+        // cli-adapters/pi.ts, cli-adapters/opencode.ts), so both are excluded
+        // the same way. Switching CLI also clears the credential
         // selection (see the CLI onChange) so we never persist a credential
         // whose provider prefix mismatches the new CLI — the manager validates
         // `${cli}_…` and would reject it, silently falling back to
         // operator-HOME auth.
-        const supportsCredential = cli !== 'pi' && cli !== 'hermes';
+        const supportsCredential = cli !== 'pi' && cli !== 'opencode' && cli !== 'hermes';
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
@@ -376,7 +378,7 @@ export default function ManagedAgentDialog({
         }
       } else {
         // Create flow.
-        const supportsCredential = cli !== 'pi' && cli !== 'hermes';
+        const supportsCredential = cli !== 'pi' && cli !== 'opencode' && cli !== 'hermes';
         const created = await api.createManagedAgent({
           name: trimmedName,
           cli,
@@ -492,7 +494,7 @@ export default function ManagedAgentDialog({
           showRuntime={false}
           onChange={setRuntimeSelection}
         />
-        {cli && cli !== 'pi' && cli !== 'hermes' && (
+        {cli && cli !== 'pi' && cli !== 'opencode' && cli !== 'hermes' && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               CLI credential

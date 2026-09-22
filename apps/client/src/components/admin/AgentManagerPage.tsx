@@ -511,6 +511,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const [restartAllPending, setRestartAllPending] = useState(false);
   const [updatePending, setUpdatePending] = useState(false);
   const [refreshModelsPending, setRefreshModelsPending] = useState(false);
+  const [updateCliPending, setUpdateCliPending] = useState<string | null>(null);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -699,6 +700,42 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
+  // 호스트에 설치된 CLI 자체를 올린다(`claude update` / `codex update` — 어댑터의
+  // cliUpdate()). refresh_available_models 와 같은 이유로 **ack 를 직접 기다린다**:
+  // 업데이터는 npm 왕복이라 수십 초가 걸리고, 디스패치 토스트만으로는 올라갔는지
+  // 알 수 없다. ack detail 에 `before → after` 가 담겨 온다. 매니저 프로세스는
+  // 재시작되지 않지만, 이후 spawn 되는 CLI 는 새 버전이다.
+  const handleUpdateCli = async (cli: string) => {
+    if (updateCliPending) return;
+    setUpdateCliPending(cli);
+    try {
+      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
+        command: 'update_cli',
+        args: { cli },
+      });
+      const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
+      // CLI 업데이터는 모델 재열거보다 훨씬 오래 걸리므로 창을 넓게 잡는다(~4분).
+      const ack = await waitForCommandAck(resp.command_id, { attempts: 120, intervalMs: 2000 });
+      if (ack.state === 'error') {
+        showToast(`${cli} 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        return;
+      }
+      if (ack.state !== 'ok') {
+        showToast(
+          `update_cli 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
+          'info',
+        );
+        return;
+      }
+      await reloadInstance(inst.instance_id);
+      showToast(ack.detail || `${cli} 업데이트 완료${idTail}`, 'success');
+    } catch (err: any) {
+      showToast(`update_cli failed: ${err?.message || err}`, 'error');
+    } finally {
+      setUpdateCliPending(null);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: '100%' }}>
       {/* Header */}
@@ -825,6 +862,66 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {inst.cli_adapters.length === 0 ? '—' : inst.cli_adapters.join(', ')}
             </dd>
           </div>
+          {/* 이 장비에 설치된 CLI 들의 버전 + 그 자리에서 올리는 버튼. 업데이트
+              대상은 cli_versions(=probe 로 버전을 읽은 것) ∩ cli_adapters(=이
+              매니저가 어댑터를 가진 것)로 좁힌다 — 같은 probe 에 섞여 오는
+              gh/git 은 어댑터가 없어 여기 들어오지 않는다. 자체 업데이터가 없는
+              CLI 는 매니저가 ack 로 그 사실을 그대로 알려준다. */}
+          {inst.mode === 'manager' && inst.cli_versions && Object.keys(inst.cli_versions).length > 0 && (
+            <div style={{ gridColumn: '1 / -1' }}>
+              <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Installed CLI versions
+              </dt>
+              <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {Object.entries(inst.cli_versions)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([cli, version]) => {
+                    const updatable = inst.cli_adapters.includes(cli);
+                    const busy = updateCliPending === cli;
+                    return (
+                      <span
+                        key={cli}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '2px 6px 2px 8px',
+                          border: `1px solid ${tokens.colors.border}`,
+                          borderRadius: tokens.radii.md,
+                          fontSize: 11,
+                        }}
+                      >
+                        <span style={{ fontFamily: 'monospace' }}>{cli} {version}</span>
+                        {updatable && (
+                          <button
+                            onClick={() => handleUpdateCli(cli)}
+                            disabled={updateCliPending !== null}
+                            style={{
+                              padding: '2px 8px',
+                              fontSize: 11,
+                              fontWeight: 600,
+                              background: 'transparent',
+                              color: tokens.colors.textStrong,
+                              border: `1px solid ${tokens.colors.border}`,
+                              borderRadius: tokens.radii.sm,
+                              cursor: busy ? 'wait' : 'pointer',
+                              fontFamily: 'inherit',
+                              opacity: updateCliPending !== null && !busy ? 0.5 : 1,
+                            }}
+                            title={
+                              `update_cli — 이 장비의 ${cli} 를 자체 업데이터로 최신화합니다. ` +
+                              '매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.'
+                            }
+                          >
+                            {busy ? '업데이트 중…' : 'Update'}
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+              </dd>
+            </div>
+          )}
           {inst.mode === 'manager' && (
             <>
               <div style={{ gridColumn: '1 / -1' }}>
@@ -1554,7 +1651,7 @@ function classifyCredential(entry: AgentCredentialEntry | undefined): Credential
       };
     }
     // No expiry metadata. Normal for adapters that don't introspect their
-    // credential file (codex / antigravity); also covers claude operator-HOME
+    // credential file (codex / antigravity / opencode); also covers claude operator-HOME
     // when the operator hasn't run `claude login` yet — in that case the
     // CLI will surface its own "not authenticated" error on first spawn,
     // which is clearer than anything we could synthesize here.

@@ -51,6 +51,7 @@ import { createAdapter } from './lib/cli-adapters/index.js';
 // ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
 import { gatherAvailableModels } from './lib/available-models.js';
+import { runCliUpdate } from './lib/cli-update.js';
 import {
   checkAuxiliaryCli,
   discoverRuntimeCapabilities,
@@ -685,6 +686,11 @@ async function runRuntime(
   // 즉시 다음 전송분부터 새 목록이 실린다.
   let availableModels: Record<string, string[]> = {};
 
+  // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). 부팅 시 CLI 해석 probe 와
+  // 같은 측정으로 채우고, `update_cli` 가 CLI 를 올린 뒤 그 CLI 만 다시 읽어 교체한다.
+  // 하트비트는 provider 로 매 tick 읽어 가므로 교체 즉시 다음 전송분에 실린다.
+  let cliVersions: Record<string, string> = {};
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
@@ -714,6 +720,27 @@ async function runRuntime(
       availableModels = await gatherAvailableModels();
       const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
       return { models: availableModels, heartbeatPosted };
+    },
+    // 호스트에 설치된 CLI 자체를 올린다(`claude update` / `codex update` — 어댑터의
+    // cliUpdate()). 업데이트가 끝나면 그 CLI 의 버전과 모델 목록을 다시 읽어
+    // 하트비트 캐시를 교체하고 즉시 한 번 보낸다 — 운영자가 UI 에서 바로 새 버전을
+    // 보게 한다. 모델 재열거는 best-effort 라 실패해도 업데이트를 실패시키지 않는다.
+    updateCli: async (cli: string) => {
+      const outcome = await runCliUpdate(cli, { log });
+      if (outcome.after) cliVersions = { ...cliVersions, [cli]: outcome.after };
+      else if (outcome.supported) {
+        const { [cli]: _gone, ...rest } = cliVersions;
+        cliVersions = rest;
+      }
+      if (outcome.supported && outcome.ok) {
+        try {
+          availableModels = await gatherAvailableModels();
+        } catch (err: any) {
+          log(`update_cli: model re-enumeration failed after ${cli} update: ${err?.message ?? err}`);
+        }
+      }
+      const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
+      return { ...outcome, heartbeatPosted };
     },
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
@@ -1087,6 +1114,25 @@ async function runRuntime(
       ),
     );
     log(`boot CLI resolution: ${formatCliResolutionSummary(cliResolutionChecks)}`);
+    // 하트비트용 버전 캐시. 두 probe 를 겹쳐 쓴다:
+    //   1) runtimeCapabilities — 등록된 **모든** 런타임(opencode/pi/hermes 포함)의
+    //      버전이 이미 여기 들어 있다. 위 cliResolutionChecks 는 4개만 본다.
+    //   2) cliResolutionChecks — claude/codex/gh/git 은 resolveCliBin 이 고른
+    //      절대경로로 다시 읽은 값이라 더 정확하므로 나중에 덮어쓴다.
+    // 버전을 못 읽은 CLI 는 키를 넣지 않는다 — "미설치/probe 실패" 와 "설치됐지만
+    // 버전 문자열 없음" 이 UI 에서 섞이지 않게 한다.
+    cliVersions = {
+      ...Object.fromEntries(
+        Object.entries(runtimeCapabilities)
+          .filter(([, health]) => health.installed && health.version)
+          .map(([runtimeId, health]) => [runtimeId, health.version as string]),
+      ),
+      ...Object.fromEntries(
+        cliResolutionChecks
+          .filter(([, r]) => r.installed && r.version)
+          .map(([cli, r]) => [cli, r.version as string]),
+      ),
+    };
     // 설치된 CLI 별 모델 목록을 부팅 시 한 번 채운다. 이후 갱신은
     // `refresh_available_models` 커맨드가 같은 열거를 다시 돌려 통째로 교체한다.
     availableModels = await gatherAvailableModels();
@@ -1115,6 +1161,7 @@ async function runRuntime(
       // 캡처해 버려서, `refresh_available_models` 로 교체한 목록이 매니저를
       // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
       availableModelsProvider: () => availableModels,
+      cliVersionsProvider: () => cliVersions,
       acpSessionClis,
       // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
       agentSessionsProvider: () => agentSessionRunner.liveStates(),

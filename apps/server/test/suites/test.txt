@@ -15,6 +15,7 @@ test/agent-error-logs-hermes.test.mjs
 test/agent-fullname-display.test.mjs
 test/agent-fullname-orchestration-typing.test.mjs
 test/agent-manager-refresh-available-models.test.mjs
+test/agent-manager-update-cli.test.mjs
 test/agent-manager-tool-call-telemetry.test.mjs
 test/agent-sessions.test.mjs
 test/agent-status-supervisor-eviction.test.mjs

@@ -34,6 +34,7 @@ export const RUNTIME_OPTIONS: Array<{ value: RuntimeId; label: string }> = [
   { value: 'codex', label: 'Codex' },
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'pi', label: 'PI' },
+  { value: 'opencode', label: 'OpenCode' },
   { value: 'hermes', label: 'Hermes ACP' },
 ];
 

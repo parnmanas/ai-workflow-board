@@ -115,5 +115,5 @@ export const STOP_GRACE_MS = 2_000;
  *  참고), 그래서 이 값을 과하게 늘려 shutdown 을 느리게 만들 필요는 없다. */
 export const STOP_FORCE_KILL_SETTLE_MS = 5_000;
 
-export const KNOWN_CLI_TYPES = ['claude', 'deepseek', 'codex', 'antigravity', 'pi'] as const;
+export const KNOWN_CLI_TYPES = ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'opencode'] as const;
 export type CliType = (typeof KNOWN_CLI_TYPES)[number];
