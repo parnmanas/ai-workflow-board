@@ -159,7 +159,7 @@ export interface AgentTriggerPayload {
   // agent-manager maps this onto per-CLI options at spawn — for claude the
   // `claude.effort` block becomes the `--effort` flag and `claude.ultracode`
   // appends the literal "ultracode" PROMPT KEYWORD to the task turn (not a
-  // flag); codex/antigravity take model-only and gracefully skip the rest.
+  // flag); codex/antigravity/pi/opencode take model-only and gracefully skip the rest.
   // Null when the board has no presets or resolution fails — treat as "no
   // effort override, spawn exactly as before".
   effort_preset?: ResolvedEffortPreset | null;

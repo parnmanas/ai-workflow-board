@@ -1554,7 +1554,7 @@ function classifyCredential(entry: AgentCredentialEntry | undefined): Credential
       };
     }
     // No expiry metadata. Normal for adapters that don't introspect their
-    // credential file (codex / antigravity); also covers claude operator-HOME
+    // credential file (codex / antigravity / opencode); also covers claude operator-HOME
     // when the operator hasn't run `claude login` yet — in that case the
     // CLI will surface its own "not authenticated" error on first spawn,
     // which is clearer than anything we could synthesize here.

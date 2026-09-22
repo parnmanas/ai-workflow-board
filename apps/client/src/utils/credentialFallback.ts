@@ -21,6 +21,8 @@
 //   - antigravity → 호스트 셸 env GEMINI_API_KEY / GOOGLE_API_KEY, 로그인 파일 아님
 //   - pi          → 호스트 ~/.pi/agent/{auth.json,settings.json} (`pi /login`) symlink/copy;
 //                   AWB 가 관리하는 per-agent credential 개념 자체가 없다(ticket d72282ad)
+//   - opencode    → 호스트 ~/.local/share/opencode/auth.json (`opencode auth login`) symlink/copy;
+//                   pi 와 마찬가지로 AWB 가 관리하는 per-agent credential 개념이 없다
 // 어댑터 로직을 바꾸면 아래 문구도 같이 갱신할 것.
 
 export interface CredentialFallbackCopy {
@@ -63,6 +65,11 @@ const FALLBACK_BY_CLI: Record<string, CredentialFallbackCopy> = {
     optionLabel: 'None — pi has no per-agent credential (uses the host pi login)',
     meaning:
       'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: pi has no per-agent credential concept at all, so the manager always points this agent at the host pi login — the config at ~/.pi/agent/{auth.json,settings.json} (a.k.a. "operator HOME") on the manager host, set up via `pi /login` (including a credential-free local llama.cpp server) — on every spawn. Authentication still requires that host login to actually exist; if it is absent pi surfaces its own login error and turns fail.',
+  },
+  opencode: {
+    optionLabel: 'None — opencode has no per-agent credential (uses the host opencode login)',
+    meaning:
+      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: opencode has no per-agent credential concept at all, so the manager always points this agent at the host opencode login — the auth at ~/.local/share/opencode/auth.json (a.k.a. "operator HOME") on the manager host, set up via `opencode auth login` — on every spawn. Authentication still requires that host login to actually exist; if it is absent opencode surfaces its own login error and turns fail.',
   },
 };
 

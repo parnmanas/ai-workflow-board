@@ -104,7 +104,7 @@ awb-agent-manager service uninstall
 ## Runtime selection contract
 
 Runtime ids currently registered by the host are `claude`, `deepseek`,
-`codex`, `antigravity`, `pi`, and `hermes`. Only Hermes is owned through the
+`codex`, `antigravity`, `pi`, `opencode`, and `hermes`. Only Hermes is owned through the
 ACP process supervisor; the others keep their explicit CLI adapter path.
 
 ```json
@@ -166,6 +166,7 @@ resolve the policy the same way.
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write -c approval_policy="never"` | `--sandbox read-only -c approval_policy="never"` |
 | `antigravity` | `--dangerously-skip-permissions` | flag omitted (approximated) | flag omitted (approximated) |
 | `pi` | `--approve` | flag omitted (approximated) | flag omitted (approximated) |
+| `opencode` | `--auto` (`run --auto`) | flag omitted (approximated) | flag omitted (approximated) |
 | `hermes` | ACP permission requests auto-allowed | ACP request bridged to the AWB approval path (the only `native` approve) | ACP request cancelled |
 
 Each runtime declares how faithfully it expresses a tier via
@@ -203,9 +204,12 @@ agents whose `approve` came from the `BackfillAgentRuntimeConfig` migration
 default: each affected agent gets one explicit operator decision instead of a
 silent change in what its trust level means.
 
-`antigravity`/`pi` have no per-tier option at all, so `approve`/`strict` are
-approximated by dropping their auto-approve flag (both run non-interactively, so
-this restricts rather than hangs).
+`antigravity`/`pi`/`opencode` have no per-tier option at all, so `approve`/`strict` are
+approximated by dropping their auto-approve flag (all run non-interactively, so
+this restricts rather than hangs). `opencode` additionally has no per-dispatch
+MCP attribution (no `-c`-style spawn override exists) — its per-agent
+`opencode.json` carries static `awb`/`host` servers only, same posture as
+pi's bridge.
 
 A partially reported or unknown-valued `permission_tiers` is dropped whole by the
 server rather than partially accepted — otherwise a missing tier is

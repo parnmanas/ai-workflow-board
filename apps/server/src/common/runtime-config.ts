@@ -30,6 +30,7 @@ const EXECUTABLE_RUNTIMES = new Set([
   'codex',
   'antigravity',
   'pi',
+  'opencode',
   'hermes',
 ]);
 

@@ -354,6 +354,7 @@ const CANDIDATE_PROVIDERS: Record<string, CandidateProvider> = {
   agy: { unix: agyUnixCandidates, windows: agyWindowsCandidates },
   codex: { unix: codexUnixCandidates, windows: codexWindowsCandidates },
   pi: { unix: piUnixCandidates, windows: piWindowsCandidates },
+  opencode: { unix: opencodeUnixCandidates, windows: opencodeWindowsCandidates },
 };
 
 function parentExeMatching(nameRegex: RegExp): string | null {
@@ -589,4 +590,31 @@ function piUnixCandidates(home: string): string[] {
 function piWindowsCandidates(home: string): string[] {
   const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
   return [join(appdata, 'npm', 'pi.cmd')];
+}
+
+// Opencode (`opencode`, https://opencode.ai) ships as a native binary plus an
+// npm distribution — same install shapes as pi (npm global shim on Windows,
+// well-known unix bin dirs + PATH lookup elsewhere).
+function opencodeUnixCandidates(home: string): string[] {
+  return [
+    join(home, '.npm-global/bin/opencode'),
+    join(home, '.bun/bin/opencode'),
+    join(home, '.local/bin/opencode'),
+    join(home, '.volta/bin/opencode'),
+    join(home, '.npm-packages/bin/opencode'),
+    join(home, 'node_modules/.bin/opencode'),
+    '/usr/local/bin/opencode',
+    '/opt/homebrew/bin/opencode',
+    '/usr/bin/opencode',
+  ];
+}
+
+function opencodeWindowsCandidates(home: string): string[] {
+  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+  return [
+    join(appdata, 'npm', 'opencode.exe'),
+    // Last-resort npm batch shim (pi precedent — selectBinary always prefers
+    // a real .exe first, cross-spawn escapes the shim args).
+    join(appdata, 'npm', 'opencode.cmd'),
+  ];
 }

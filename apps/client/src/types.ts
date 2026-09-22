@@ -1453,7 +1453,7 @@ export interface EnvironmentConfig {
 // flags. The board defines the presets; each preset maps to per-CLI options.
 // Mirror of the server-side contract — both sides must agree byte-for-byte on
 // these JSON keys. Claude gets rich options (effort + ultracode + model);
-// codex/antigravity/pi get model-only (other keys gracefully skipped at dispatch).
+// codex/antigravity/pi/opencode get model-only (other keys gracefully skipped at dispatch).
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export interface EffortPreset {
@@ -1462,10 +1462,11 @@ export interface EffortPreset {
   // claude: real `--effort` flag (session-level) + `ultracode` PROMPT keyword
   // (appended to the task text, NOT a flag) + optional `--model`.
   claude?: { effort?: EffortLevel; ultracode?: boolean; model?: string };
-  // codex / antigravity / pi: model-only (`-m`/`--model`).
+  // codex / antigravity / pi / opencode: model-only (`-m`/`--model`).
   codex?: { model?: string };
   antigravity?: { model?: string };
   pi?: { model?: string };
+  opencode?: { model?: string };
 }
 
 export interface EffortPresetsConfig {
@@ -2476,7 +2477,7 @@ export interface AgentManagerCommandOutcome {
 
 export interface ManagedAgentCreateBody {
   name: string;
-  cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'hermes';
+  cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'opencode' | 'hermes';
   working_dir?: string;
   manager_agent_id: string;
   runtime_config: AgentRuntimeConfig;

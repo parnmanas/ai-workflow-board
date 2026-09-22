@@ -25,7 +25,7 @@ import { credentialFallbackCopy } from '../src/utils/credentialFallback.ts';
 // 여전히 실패하므로, 문구는 host credential 이 "실제로 존재해야 함"을 함께 밝힌다.
 // (리뷰 지적: 예전 "not missing auth" 단정이 host credential 부재 가능성을 오인시킴.)
 
-for (const cli of ['claude', 'codex', 'deepseek', 'antigravity', 'pi', 'custom', 'unknown-future-cli']) {
+for (const cli of ['claude', 'codex', 'deepseek', 'antigravity', 'pi', 'opencode', 'custom', 'unknown-future-cli']) {
   test(`meaning: ${cli} → "정상 fallback 설정" 프레이밍 포함`, () => {
     const { meaning } = credentialFallbackCopy(cli);
     assert.match(meaning, /valid fallback configuration/i, `${cli} meaning 이 반오판 방지 문구를 담아야 함`);
@@ -90,13 +90,20 @@ test('pi → 호스트 pi login / ~/.pi/agent, 항상 fallback(per-agent credent
   assert.match(meaning, /no per-agent credential concept/i);
 });
 
+test('opencode → 호스트 opencode login / auth.json, 항상 fallback(pi 와 같은 credential-free)', () => {
+  const { optionLabel, meaning } = credentialFallbackCopy('opencode');
+  assert.match(optionLabel, /opencode login/);
+  assert.match(meaning, /auth\.json/);
+  assert.match(meaning, /no per-agent credential concept/i);
+});
+
 // ─── 3. 어댑터 문구는 서로 구별된다(예전엔 4곳이 동일 리터럴을 복제했다) ──────────
 
-test('claude/codex/deepseek/antigravity/pi optionLabel 은 모두 서로 다름', () => {
-  const labels = ['claude', 'codex', 'deepseek', 'antigravity', 'pi'].map(
+test('claude/codex/deepseek/antigravity/pi/opencode optionLabel 은 모두 서로 다름', () => {
+  const labels = ['claude', 'codex', 'deepseek', 'antigravity', 'pi', 'opencode'].map(
     (c) => credentialFallbackCopy(c).optionLabel,
   );
-  assert.equal(new Set(labels).size, 5, '어댑터별로 구별되는 라벨이어야 함');
+  assert.equal(new Set(labels).size, 6, '어댑터별로 구별되는 라벨이어야 함');
 });
 
 // ─── 4. 미지/누락 타입 안전 폴백 — 던지지 않고 일반 문구 ─────────────────────────

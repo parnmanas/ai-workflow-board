@@ -2,6 +2,7 @@ import { AntigravityCliAdapter } from '../../cli-adapters/antigravity.js';
 import { ClaudeCliAdapter } from '../../cli-adapters/claude.js';
 import { CodexCliAdapter } from '../../cli-adapters/codex.js';
 import { DeepSeekCliAdapter } from '../../cli-adapters/deepseek.js';
+import { OpencodeCliAdapter } from '../../cli-adapters/opencode.js';
 import { PiCliAdapter } from '../../cli-adapters/pi.js';
 import { requestCapabilities } from '../domain/capabilities.js';
 import { HermesRuntime, type HermesRuntimeOptions } from '../hermes/hermes-runtime.js';
@@ -28,6 +29,7 @@ export function createBuiltinRuntimeRegistry(extensions: readonly RuntimePluginM
     .register(defineRuntimePlugin({ id: 'codex', transport: 'cli', capabilities: requestCapabilities(oneshot(true, 'tokens', TIER_FLAG_PERMISSION_CAPABILITIES.tiers), { streaming: true }), createCliAdapter: () => new CodexCliAdapter() }))
     .register(defineRuntimePlugin({ id: 'antigravity', transport: 'cli', capabilities: requestCapabilities(oneshot(false, 'none', BYPASS_ONLY_PERMISSION_CAPABILITIES.tiers)), createCliAdapter: () => new AntigravityCliAdapter() }))
     .register(defineRuntimePlugin({ id: 'pi', transport: 'cli', capabilities: requestCapabilities(oneshot(true, 'tokens', BYPASS_ONLY_PERMISSION_CAPABILITIES.tiers)), createCliAdapter: () => new PiCliAdapter() }))
+    .register(defineRuntimePlugin({ id: 'opencode', transport: 'cli', capabilities: requestCapabilities(oneshot(true, 'tokens-and-cost', BYPASS_ONLY_PERMISSION_CAPABILITIES.tiers)), createCliAdapter: () => new OpencodeCliAdapter() }))
     .register(defineRuntimePlugin<HermesRuntime>({ id: 'hermes', transport: 'acp', capabilities: requestCapabilities({ protocol: 'acp', session: 'resumable', native_mcp: true, native_approvals: true, steering: true, cancellation: true, usage: 'tokens', collaboration: ['delegated', 'swarm'], skill_delivery: ['filesystem', 'native'], permission_tiers: NATIVE_APPROVAL_PERMISSION_CAPABILITIES.tiers }, { sessionId: true, streaming: true }), createOwner: options => new HermesRuntime(options as HermesRuntimeOptions) }));
   for (const extension of extensions) registry.register(extension);
   return registry.seal();

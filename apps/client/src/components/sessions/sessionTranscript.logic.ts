@@ -547,6 +547,8 @@ export function runtimeLabel(runtime: string): string {
       return 'Hermes';
     case 'deepseek':
       return 'DeepSeek (Claude CLI)';
+    case 'opencode':
+      return 'OpenCode';
     default:
       return runtime || 'CLI';
   }

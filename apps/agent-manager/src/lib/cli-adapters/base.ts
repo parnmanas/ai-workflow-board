@@ -244,6 +244,7 @@ export interface ResolvedEffortPreset {
   codex?: { model?: string };
   antigravity?: { model?: string };
   pi?: { model?: string };
+  opencode?: { model?: string };
 }
 
 /**
@@ -252,10 +253,11 @@ export interface ResolvedEffortPreset {
  *   - codex             → the codex slice (model only)
  *   - antigravity       → the antigravity slice (model only)
  *   - pi                → the pi slice (model only)
+ *   - opencode          → the opencode slice (model only)
  *   - anything else / a null preset → null
  * The return shape is normalized to `{ model?, effort?, ultracode? }` so the
  * spawn site can fold `model` into the model precedence and pass `effort` /
- * `ultracode` straight through (codex / antigravity / pi slices never carry
+ * `ultracode` straight through (codex / antigravity / pi / opencode slices never carry
  * the latter two, so they degrade to model-only automatically).
  */
 export function selectEffortSlice(
@@ -281,6 +283,11 @@ export function selectEffortSlice(
   }
   if (t === 'pi') {
     const s = preset.pi;
+    if (!s) return null;
+    return { model: s.model };
+  }
+  if (t === 'opencode') {
+    const s = preset.opencode;
     if (!s) return null;
     return { model: s.model };
   }
@@ -315,8 +322,8 @@ const SECRET_ARG_PATTERN = /(authorization|api[-_]?key|auth[-_]?token|access[-_]
  * 절대 플래그로 재해석하지 않는다.
  */
 const VALUE_FLAGS = new Set([
-  '-p', '-c', '--cd',
-  '--model', '--effort',
+  '-p', '-c', '--cd', '--dir',
+  '--model', '--effort', '--format', '--session', '--agent', '--title',
   '--output-format', '--input-format',
   '--mcp-config', '--allowedTools', '--disallowedTools', '--append-system-prompt',
   '--permission-mode', '--sandbox',
@@ -328,7 +335,7 @@ const VALUE_FLAGS = new Set([
 const BOOLEAN_FLAGS = new Set([
   '--print', '--verbose', '--strict-mcp-config',
   '--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox',
-  '--skip-git-repo-check', '--json', '--approve', '--no-session',
+  '--auto', '--approve', '--skip-git-repo-check', '--json', '--no-session',
 ]);
 
 /**
@@ -345,6 +352,7 @@ const LOGGABLE_FLAG_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['--sandbox', new Set(['read-only', 'workspace-write', 'danger-full-access'])],
   ['--output-format', new Set(['stream-json', 'json', 'text'])],
   ['--input-format', new Set(['stream-json', 'json', 'text'])],
+  ['--format', new Set(['default', 'json'])],
   ['--effort', new Set(['low', 'medium', 'high', 'max'])],
 ]);
 
@@ -355,7 +363,7 @@ const LOGGABLE_CONFIG_OVERRIDE = /^approval_policy="(never|on-request|on-failure
 
 /** 플래그가 아닌데도 값까지 남겨도 되는 리터럴(서브커맨드). 프롬프트 같은
  *  positional 인자와 구분하기 위해 명시 목록으로만 허용한다. */
-const LOGGABLE_LITERALS = new Set(['exec']);
+const LOGGABLE_LITERALS = new Set(['exec', 'run']);
 
 /**
  * spawn argv 를 진단 로그에 남길 수 있는 형태로 축약한다 (ticket 5851e435).
