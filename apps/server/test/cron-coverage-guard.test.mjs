@@ -113,11 +113,16 @@ test('주석·빈 줄이 섞여도 잡 이름과 if: 만 뽑는다', () => {
 // scripts/audit-deploy-branch-deps.mjs 는 이 export 로 "어떤 브랜치를 추가 감사할지"
 // 를 정한다. 두 가드가 같은 목록을 봐야 "배포되는 곳은 전부 감사한다" 는 불변식이
 // 갈라지지 않는다 — export 가 사라지면 그 스크립트는 import 단계에서 죽는다.
+//
+// 목록이 **실재하지 않는 브랜치**를 가리키면 그 스크립트는 fetch 실패로 fail-closed
+// 되어 schedule run 을 통째로 red 로 만든다(ticket 128d62cd: production.private 이
+// origin 에서 삭제된 뒤 13일간 그랬다). 2026-09 형상에서 배포 트리는 origin/main 을
+// detached 로 체크아웃하므로 대상은 main 이다.
 test('deployBranches() 가 배포 브랜치를 돌려준다 (deploy-branch 감사의 입력)', () => {
   const branches = deployBranches();
   assert.ok(Array.isArray(branches) && branches.length > 0, '배포 브랜치 목록이 비었다');
   assert.ok(
-    branches.includes('production.private'),
-    `배포 브랜치에 production.private 이 없다: ${JSON.stringify(branches)}`,
+    branches.includes('main'),
+    `배포 브랜치에 main 이 없다 — 배포 트리는 origin/main 을 체크아웃한다: ${JSON.stringify(branches)}`,
   );
 });
