@@ -394,6 +394,13 @@ export async function resolveAcpCommandForCli(cli: string): Promise<ResolvedAcpC
       const found = await findOnPath('codex-acp');
       return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/codex-acp'] };
     }
+    case 'opencode': {
+      // opencode 는 ACP 서버를 **자기 안에** 갖고 있다(`opencode acp`) — claude/codex 처럼
+      // 별도 어댑터 패키지를 npx 로 끌어올 필요가 없고, 따라서 어댑터와 CLI 코어의 세대가
+      // 어긋날 일도 없다. 바이너리 해석은 다른 경로와 같은 resolveCliBin 을 쓴다.
+      const found = await findOnPath('opencode');
+      return { command: found ?? 'opencode', args: ['acp'] };
+    }
     case 'hermes': {
       const resolved = await resolveHermesAcpCommand();
       return { command: resolved.command, args: [...resolved.argsPrefix] };
@@ -408,6 +415,7 @@ export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env)
   const out: string[] = [];
   if (env.AWB_ACP_COMMAND_CLAUDE || await findOnPath('claude-agent-acp') || await findOnPath('claude')) out.push('claude');
   if (env.AWB_ACP_COMMAND_CODEX || await findOnPath('codex-acp') || await findOnPath('codex')) out.push('codex');
+  if (env.AWB_ACP_COMMAND_OPENCODE || await findOnPath('opencode')) out.push('opencode');
   if (env.AWB_ACP_COMMAND_HERMES || env.HERMES_ACP_COMMAND || await findOnPath('hermes-acp') || await findOnPath('hermes')) out.push('hermes');
   return out;
 }

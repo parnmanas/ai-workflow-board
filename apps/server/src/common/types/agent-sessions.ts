@@ -65,8 +65,9 @@ export const AGENT_SESSION_REQUEST_OPS = [
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 
-/** 세션을 열 수 있는 CLI. deepseek 는 Claude CLI 홈을 공유하므로 claude 로 흡수된다. */
-export const ACP_SESSION_CLIS: ReadonlySet<string> = new Set(['claude', 'codex', 'hermes']);
+/** 세션을 열 수 있는 CLI. deepseek 는 Claude CLI 홈을 공유하므로 claude 로 흡수된다.
+ *  opencode 는 어댑터 사이드카 없이 자기 자신이 ACP 서버다(`opencode acp`). */
+export const ACP_SESSION_CLIS: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode', 'hermes']);
 
 export interface AgentSessionModeOption {
   id: string;

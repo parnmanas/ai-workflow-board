@@ -2,7 +2,8 @@
 
 Runtime Host 장비에 있는 CLI(Claude Code / Codex / Hermes)의 세션을 AWB 화면에서 직접 모는 표면이다.
 세션의 단위는 **(Runtime Host, CLI, CLI 네이티브 세션 id)** 이고, **AWB 는 세션 내용을 저장하지 않는다.**
-Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessions/…/rollout-*.jsonl` 에
+Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessions/…/rollout-*.jsonl`, opencode 는
+`~/.local/share/opencode/opencode.db`(SQLite) 에
 전문을 이미 갖고 있으므로, 서버는 매니저에게 reverse RPC 로 "이 장비의 이 CLI 에 어떤 세션이 있는가 /
 이 세션의 기록은 무엇인가" 를 묻고, 살아 있는 턴의 스트림만 브라우저로 중계한다. 그 장비에서 터미널로
 쓰던 기존 세션도 그대로 목록에 뜨고 이어서 쓸 수 있다.
@@ -45,7 +46,12 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 - **매니저 `agent-session-store.ts`** — CLI 홈 리더. Claude: `projects/*/*.jsonl` (`agent-*.jsonl` 서브에이전트 파일과
   프롬프트 없는 빈 세션 제외, `custom-title` 우선, sidechain 행 제외). Codex: `sessions/**/rollout-*.jsonl`
   (`session_meta` → id/cwd, developer/environment_context 메시지는 제목에서 제외). 기록은 같은 파일을 트랜스크립트
-  이벤트(`user_prompt / text / reasoning / tool_call / tool_update / turn`)로 접는다. Hermes 는 AWB 가 만든 세션만
+  이벤트(`user_prompt / text / reasoning / tool_call / tool_update / turn`)로 접는다. opencode 는 파일이 아니라
+  **SQLite**(`~/.local/share/opencode/opencode.db`, WAL)에 세션을 넣으므로 그 파일을 직접 열지 않고 opencode 자신의
+  `opencode db "<SQL>" --format json` 에 질의한다 — 스키마의 주인이 opencode 이고 WAL 락도 그쪽이 관리하게 두는 편이
+  안전하며, 매니저에 sqlite 의존성을 새로 들이지 않아도 된다. `session` 테이블에서 `time_archived IS NULL AND
+  parent_id IS NULL` 만 가져온다(보관됨·하위 세션은 사용자가 열 수 없다). 질의 실패(미설치·스키마 변경·타임아웃 10초)는
+  **빈 목록으로 접는다** — 목록 하나가 세션 화면 전체를 못 쓰게 만들면 안 된다. Hermes 는 AWB 가 만든 세션만
   로컬 인덱스(`$AWB_AGENT_MANAGER_HOME/agent-sessions.json`)로 기억한다.
 - **매니저 `agent-session-runner.ts`** — 세션당 ACP 어댑터 프로세스. 명령 우선순위: env `AWB_ACP_COMMAND_<CLI>` →
   PATH 의 `claude-agent-acp` / `codex-acp` / `hermes-acp` → `npx --yes @agentclientprotocol/claude-agent-acp` /
@@ -56,6 +62,13 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   env 는 매니저 프로세스 그대로(운영자 CLI 홈), AWB MCP 서버는 매니저 키로 주입. codex 에는 `NO_BROWSER=1` 을 더해
   브라우저 로그인 auth method 를 숨긴다. `session/new`/`load` 가 auth required(-32000) 로 거부되면 환경에 API 키가 있을 때
   api-key 계열 ACP `authenticate` 를 한 번 시도하고, 아니면 "장비에서 `<cli> login` 하거나 credential 을 묶으라" 는 오류를 낸다.
+  **opencode 만 예외로 사이드카가 없다** — ACP 서버를 자기 안에 갖고 있어 `opencode acp` 를 그대로 띄운다. 어댑터와
+  CLI 코어의 세대가 어긋나는 문제(codex-acp 전례)가 원천적으로 없고 별도 설치도 필요 없다. rolf 실측(opencode 1.18.32):
+  `initialize` 가 `loadSession:true` + `sessionCapabilities{close,fork,list,resume}` 를 주고, `session/new` 가
+  `configOptions`(모델 select, `id` 키)와 `available_commands_update` 를 준다 — 모델 선택·슬래시 커맨드·재개가 모두
+  기존 경로 그대로 동작한다. credential 개념이 없으므로(cli-adapters/opencode.ts) 세션은 운영자 홈에서 돌고, 그 홈의
+  DB 가 위 목록 조회가 읽는 바로 그 DB 다(같은 세션이 양쪽에 보인다). 그래서 `SESSION_STORE_SUBDIR` 에도 opencode
+  항목이 없다 — 링크할 세션 전용 홈 자체가 생기지 않는다.
   기존 세션은 `session/load`(cwd 는 기록에서), 새 세션은 `session/new`. load 재생분은 버린다(UI 가 history 로 이미 가짐).
   유휴 30분(`config.agent_sessions.idle_minutes`) 또는 close 로 프로세스 회수 → 상태 idle/closed, 다음 prompt 가 다시 연다.
 - **클라이언트 `components/sessions`** — 호스트 목록 → 호스트×CLI 세션 목록(장비의 기록) → 트랜스크립트(history + 라이브
