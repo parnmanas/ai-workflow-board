@@ -6,14 +6,21 @@
  *
  * 왜 필요한가(2026-08-21 의존성 감사에서 발견): GitHub 의 `schedule` 트리거는
  * **기본 브랜치에서만** 돈다. 그래서 ci.yml 에 cron 을 달아도 매일 감사되는 건
- * main 의 lockfile 뿐이다. 실제로 NAS 에 배포되는 브랜치는 `production.private`
- * 이고, 그쪽은 **push 될 때만** dependency-audit 이 돈다(2026-08-20 감사에서 push
- * 트리거를 추가해 그렇게 됐다). 즉 배포 브랜치가 몇 주 그대로 떠 있으면, 그 기간에
- * 새로 나온 advisory 는 배포된 트리에 대해 한 번도 평가되지 않는다 — 정작 돌고 있는
- * 코드가 그쪽인데.
+ * main 의 lockfile 뿐이다. 당시 실제로 배포되던 브랜치는 `production.private` 이었고,
+ * 그쪽은 **push 될 때만** dependency-audit 이 돌았다(2026-08-20 감사에서 push 트리거를
+ * 추가해 그렇게 됐다). 즉 배포 브랜치가 몇 주 그대로 떠 있으면, 그 기간에 새로 나온
+ * advisory 는 배포된 트리에 대해 한 번도 평가되지 않는다 — 정작 돌고 있는 코드가
+ * 그쪽인데.
  *
  * 이 스크립트가 그 구멍을 메운다: 배포 브랜치의 package-lock.json 만 꺼내 그대로
- * 감사한다.
+ * 감사한다. 대상 목록의 출처는 audit-ci-branch-coverage.mjs 의 `deployBranches()` 하나뿐이다.
+ *
+ * 2026-09 형상(ticket 128d62cd)에서 배포 대상은 `main` 이다 — 배포 트리가 origin/main 을
+ * detached 로 체크아웃하기 때문이다. 그래서 cron(=main 체크아웃)에서 이 스크립트는 아래
+ * '현재 브랜치' 또는 'lockfile 동일' 경로로 빠진다. 그건 감사를 **건너뛰는** 게 아니라
+ * 같은 run 의 audit-lockfile-advisories.mjs 가 방금 그 트리를 판정했음을 증명하고 넘어가는
+ * 것이다 — 아래 설계 선택 3번과 같은 논리다. 별도 배포 브랜치가 다시 생기면 그 브랜치는
+ * 이 루프에서 실제로 fetch·감사된다.
  *
  * 세 가지 설계 선택:
  *   - **`npm ci` 를 하지 않는다.** lockfile 만 있으면 audit 은 돈다. 설치를 생략하면
@@ -145,7 +152,7 @@ async function main() {
       `\n배포 브랜치 감사 문제 ${failures.length}건:\n` +
         failures.map((f) => `  - ${f}`).join('\n') +
         `\n\n이 브랜치들은 실제로 배포돼 돌고 있는 트리다. \`npm audit fix\` 는 금지 —` +
-        ` 루트 overrides 를 날린다. main 에서 고친 뒤 production.private 로 머지할 것.`,
+        ` 루트 overrides 를 날린다. main 에서 고친 뒤 배포 트리에 반영할 것.`,
     );
     process.exit(1);
   }
