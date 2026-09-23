@@ -3731,3 +3731,143 @@ test.txt 가 사전순이 아니다 — 16번째 step 이 "test/agent-manager-up
   스텝 10 red 에도 스텝 11 이 도는지 + 스텝 10 에 배포 sha 7건이 찍히는지 확인. (c) 배포 sha
   가 `0ddec72f` 에서 움직였는지. (d) `main` 의 `apps/server full test suite (sqlite)` 가 5절
   수정 머지 후 green 인지.
+
+---
+
+## 재검증 로그 — 2026-09-24 (`main` @ `8750a5ca`)
+
+14회차. **`main` 은 moderate/low 양쪽 0건.** 배포된 트리(sha `0ddec72f`)의 7건은 **19일째**
+그대로다. 의존성 축에서는 새 사건이 없는 조용한 회차이고, **코드 변경도 하지 않았다** —
+11·12회차의 "조용한 회차에 변경을 지어내지 말 것" 이 그대로 적용된다. 다만 13회차가 고친
+`main` 의 red 가 **아직도 red** 라는 점이 이번 회차의 유일한 새 관찰이다(5절).
+
+### 1. `main` — 0건, 루트 blob 규칙 6회 연속
+
+`main` tip 이 `06d4d1a9` → `8750a5ca` 으로 1커밋(opencode 세션 UI) 움직였는데 루트 두 blob 은
+**동일**하다:
+
+| 파일 | blob | 판정 |
+| --- | --- | --- |
+| `package.json` | `3a357fd3` | SAME |
+| `package-lock.json` | `e464f1db` | SAME |
+
+8회차 규칙이 **6회 연속**(8·10·11·12·13·14회차) 맞았다. 12회차에 정리한 근거(npm workspaces
+라 루트 lockfile 이 workspace 별 의존성까지 담는다)로 우회 검증은 생략했다.
+
+- `audit-lockfile-advisories --audit-level=moderate` → **0건** (538 패키지 / 579 버전, 출처 npm)
+- `--audit-level=low` → **0건** (동일 규모)
+
+`origin/main` 머지는 충돌 없이 끝났고(agent-session 관련 5파일), 머지 후에도 루트 두 blob 은
+`origin/main` 과 동일하다. lockfile 재생성은 불필요했다.
+
+### 2. overrides — 해소된 버전으로 확인 (11회차 방식 유지)
+
+| 패키지 | 선언 | 해소 | 안전 하한 | 판정 |
+| --- | --- | --- | --- | --- |
+| `multer` | `^2.3.0` | 2.3.0 | ≥2.3.0 | ok |
+| `hono` | `^4.13.5` | 4.13.7 | ≥4.13.5 | ok |
+| `@hono/node-server` | `^2.0.10` | 2.1.1 | — | ok |
+| `js-yaml` (cosmiconfig) | `^4.3.2` | 4.3.2 | ≥4.3.2 | ok |
+| `js-yaml` (@nestjs/swagger) | `^5.2.3` | 5.4.1 | ≥5.2.3 | ok |
+| `picomatch` (×3) | `^4.0.4` | 4.0.7 | — | ok |
+
+8개 항목 전부 살아있고 해소까지 확인됐다. `npm audit fix` 는 쓰지 않았다.
+
+### 3. 배포된 트리 — 여전히 7건, 19일째
+
+`production.private` 는 원격에 **없다**(404 재확인, 원격 브랜치 **10개** — 13회차와 동수).
+10회차 폴백이 이번에도 스스로 sha 를 찾아 감사했다:
+
+```
+FAIL production.private — 원격에 이 브랜치가 없다 (삭제됐거나 이름이 바뀌었다)
+     ↳ 마지막 배포 sha 0ddec72f (2026-09-05T11:38:38Z) — 이 트리를 대신 감사한다.
+     ↳ 배포 sha 0ddec72f — moderate 이상 취약점 7건
+```
+
+- [high] `js-yaml` 4.3.1 / 5.2.3 — GHSA-2883-xcg3-v3hh (취약 `>=4.0.0 <4.3.2`)
+- [high] `multer` 2.2.0 — GHSA-wc9g-mqfw-jrwm / GHSA-qfvm-cv95-jqjf / GHSA-535w-7cp7-47q4 (DoS 3건)
+- [moderate] `hono` 4.13.0 — GHSA-gqvv-2mrq-wpjv / GHSA-g6gw-c38x-mqfc / GHSA-crvj-82cr-hjcx
+
+판정은 의도대로 **exit 1 (fail-closed)**. `gh run list --workflow=deploy.yml` 기준 마지막 배포는
+**2026-09-05 `0ddec72f`** 로 움직이지 않았다. 7회차부터의 오독 주의 그대로 — 브랜치 삭제는
+배포를 롤백하지 않는다.
+
+13회차가 찾은 `fix/prod-dependency-audit-gate` @ `f6b9a0eb` 도 그대로 살아있고, 루트 두 blob 이
+배포 sha 와 **여전히 바이트 동일**하다(`a3cc6b2c` / `37538a2e`, GitHub contents API 로 재확인 —
+shallow 워크트리라 fetch 없이 확인되는 편이 싸다). 취약하지만 비활성이라는 판정도 그대로다.
+
+### 4. 발행 트리 (`npm i -g awb-agent-manager`) — live/next 0건, 드리프트 8 → 9
+
+CI 스텝 11 이 **14일째** 건너뛰어지고 있어 이번에도 수동으로 덮었다:
+
+- live / next 양쪽 **moderate 이상 0건**, install script 0개, 선언 범위 4개 전부 상한 있음
+- lockfile → 실제 해석 드리프트 **9건** (13회차 8건에서 +1: `hono` 4.13.7 → **4.13.8** 신규).
+  나머지 8건은 13회차와 동일. 드리프트 자체는 취약점이 아니라 **lockfile 감사가 본 적 없는
+  버전**이라는 뜻이고, 오늘 기준 그 해석본도 0건이다.
+
+### 5. `main` 의 red — 13회차가 고친 그 한 줄이 머지되지 않아 이틀째 red
+
+이번 회차의 유일한 새 관찰이다. 13회차는 `06d4d1a9` 가 넣은 매니페스트 정렬 위반을 찾아
+한 줄로 고쳤는데, 그 수정이 **PR #10 에만 있고 `main` 에는 없다**. 그래서:
+
+- `origin/main:apps/server/test/suites/test.txt` 에 위반이 **그대로** 남아 있다
+  (`test/agent-manager-update-cli.test.mjs` 가 `tool-call-telemetry` 뒤에 있다)
+- `main` push CI (`35798148540`, `8750a5ca`) 의 `apps/server full test suite (sqlite)` 잡에서
+  **`not ok` 는 정확히 그 한 건** — `매니페스트는 중복 없이 사전순이다` 뿐이다
+
+8회차 규칙("머지되지 않은 PR 의 코드로 CI 동작 변화를 예측하지 말 것")의 **거울상**이다:
+예측이 아니라 **이미 고친 red 가 머지 대기 때문에 계속 red 로 남는다**. 여기서 새로 할 일은
+없다 — 고칠 코드는 이미 이 브랜치에 있고, 남은 건 머지뿐이다. 그래서 이번 회차엔 이 항목을
+**"확인 항목" 이 아니라 "머지 대기 항목" 으로 재분류**한다(스텝 10/11, `remoteBranchExists`,
+`lastDeployedSha` 와 같은 칸).
+
+**감사 범위 밖의 red(추적하지 말 것, 단 범위는 갱신):** 같은 push 런에서
+`agent-manager tests` 가 **ubuntu-latest 와 windows-latest 양쪽** 실패한다(13회차엔
+windows 만). 실패 단언은 `claude 는 update 서브커맨드를 돌리고 전후 버전을 각각 다시 읽는다`
+/ `codex 도 같은 계약을 따른다` — `06d4d1a9` 이 넣은 CLI 업데이트 기능의 회귀이고 의존성과
+무관하다. **`dependency audit` 잡은 이 런에서 success** 이므로 감사 신호는 오염되지 않았다.
+
+### 6. cron — 정상 발화, 익숙한 시그니처
+
+`35842225615` 가 09-23 **09:19:11Z** 에 발화했다. `17 4 * * *` 대비 **+5h02m** 으로 관측 대역
+(+4h21m ~ +5h40m) 안이다. 6회차 규칙(red 인지 **부재**인지부터 가르라)대로 런 존재를 먼저
+확인했다. 스텝별 결론도 익숙한 모양 그대로다:
+
+```
+4~9  가드 + main advisory  -> success
+10   배포 브랜치 lockfile 재감사 -> failure
+11   발행 트리 재감사        -> skipped
+```
+
+머지 대기 전제조건도 재확인했다 — `origin/main` 에서 `remoteBranchExists` / `lastDeployedSha`
+/ `cancelled()` grep 카운트가 **0 / 0 / 0**. 즉 cron 은 아직 달라질 수 **없다**. 8회차 규칙대로
+스텝 11 이 도는지는 #10 머지 전까지 확인 항목이 아니다.
+
+### 이번 회차에 돌린 것
+
+- `audit-lockfile-advisories` moderate / low → **0건 / 0건** (538 / 579)
+- `audit-deploy-branch-deps` → **exit 1**, 배포 sha `0ddec72f` 7건을 게이트가 직접 출력 (3절)
+- `audit-install-scripts` / `audit-action-pins` / `audit-ci-branch-coverage` /
+  `audit-cron-coverage` / `audit-published-deps --offline` → 전부 **exit 0**
+- `audit-published-deps` (전체, 네트워크) → **live/next 양쪽 0건** (4절)
+- 가드 **114/114** (16 + 16 + 42 + 6 + 6 + 20 + 8) — 머지 전후 동일
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다(2절). **코드 변경 없음.**
+
+### 이월
+
+- **운영자 결정 필요 (최우선, 14회차 연속 미해결)** — `production.private` 삭제가 **의도된
+  은퇴인가, 실수인가.** 어느 쪽이든 **NAS 에서 도는 이미지는 `0ddec72f`** 이고 **7건을
+  포함**한다. 배포 sha 는 **19일째** 움직이지 않았다.
+- **PR #10 머지** — 09-11~09-24 기록 + 게이트 수정 3건(브랜치 404 진단, 배포 sha 폴백, 스텝
+  독립성) + 매니페스트 정렬 수정. 뒤의 한 줄은 **지금 `main` 을 red 로 두고 있는 바로 그
+  수정**이다(5절). 머지 하나로 `main` green + cron 동작 갱신이 같이 해결된다.
+- **`fix/prod-dependency-audit-gate` 처리** — 취약하지만 비활성. 보존 / 삭제 **둘 다 운영자
+  판단**이며 이 감사는 브랜치를 지우지도 복원하지도 않는다.
+- **PR #11 / #8** — base 브랜치 삭제로 자동 CLOSED. 복원이 선행돼야 재개 가능.
+- **운영자 인프라 항목 (11회차)** — cron liveness 는 저장소 안 가드로 닫을 수 없다. 외부
+  heartbeat 모니터가 필요하다. **재검토하지 말 것**.
+- **다음 회차 확인 항목** — (a) 루트 두 blob 동일성 먼저. (b) 배포 sha 가 `0ddec72f` 에서
+  움직였는지. (c) 원격 브랜치 수(현재 10).
+- **머지 대기 항목 (확인하지 말 것, #10 머지 전까지 달라질 수 없다)** — cron 스텝 10 의 배포
+  sha 7건 출력, 스텝 10 red 에도 스텝 11 이 도는지, `main` 의 sqlite 잡 green 여부.
