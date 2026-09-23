@@ -5,15 +5,21 @@
 // 여기서 그 파일을 읽어 (1) 목록(제목·cwd·최근 활동) 과 (2) 트랜스크립트 이벤트를 만든다.
 // 이벤트 모양은 라이브 스트림(agent-session-runner)과 같다 — UI 는 둘을 구분하지 않는다.
 //
+// opencode 는 파일이 아니라 SQLite(`~/.local/share/opencode/opencode.db`, WAL)에 세션을 넣는다.
+// 그 파일을 직접 열지 않고 opencode 자신의 `opencode db <SQL> --format json` 으로 질의한다 —
+// 스키마의 주인이 opencode 이고, WAL 락도 그쪽이 관리하게 두는 편이 안전하다.
+//
 // Hermes 는 자체 저장소 포맷을 모르므로 AWB 화면에서 만든 세션만 로컬 인덱스
 // (`$AWB_AGENT_MANAGER_HOME/agent-sessions.json`)로 기억한다. claude/codex 도 AWB 가
 // 만든 세션은 인덱스에 남겨 제목을 보존한다(파일 스캔 결과와 병합).
 
+import { execFile } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { promisify } from 'node:util';
 
 import { AGENT_MANAGER_HOME } from './constants.js';
 
@@ -55,6 +61,9 @@ export interface AwbSessionIndexEntry {
 export interface AgentSessionStoreOptions {
   claudeHome?: string;
   codexHome?: string;
+  /** opencode 의 DB 질의 실행기(기본: `opencode db <sql> --format json`). 테스트가
+   *  실제 CLI 없이 목록 매핑을 검증할 수 있도록 주입 가능하게 둔다. */
+  opencodeQuery?: (sql: string) => Promise<string>;
   indexPath?: string;
   listLimit?: number;
   historyEventLimit?: number;
@@ -64,6 +73,30 @@ export interface AgentSessionStoreOptions {
 const HEAD_BYTES = 256 * 1024;
 const TAIL_BYTES = 64 * 1024;
 const DEFAULT_LIST_LIMIT = 200;
+/** opencode db 질의 상한. 목록 한 번이 세션 화면을 오래 붙잡지 않게 한다. */
+const OPENCODE_QUERY_TIMEOUT_MS = 10_000;
+
+const execFileAsync = promisify(execFile);
+
+/** 기본 opencode 질의 실행기 — CLI 가 자기 DB 를 열게 하고 JSON 만 받아온다. */
+async function defaultOpencodeQuery(sql: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    'opencode',
+    ['db', sql, '--format', 'json', '--log-level', 'ERROR'],
+    { timeout: OPENCODE_QUERY_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+  );
+  return stdout;
+}
+
+/** opencode 의 시각 컬럼은 epoch ms 정수다. 숫자로 못 읽히면 null. */
+function toEpochMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
 const DEFAULT_HISTORY_LIMIT = 4000;
 const TITLE_MAX = 120;
 const TOOL_TEXT_MAX = 16_000;
@@ -279,6 +312,7 @@ export class AgentSessionStore {
   readonly indexPath: string;
   readonly #listLimit: number;
   readonly #historyLimit: number;
+  readonly #opencodeQuery: (sql: string) => Promise<string>;
 
   constructor(options: AgentSessionStoreOptions = {}) {
     const env = options.env ?? process.env;
@@ -287,6 +321,7 @@ export class AgentSessionStore {
     this.indexPath = options.indexPath ?? join(AGENT_MANAGER_HOME, 'agent-sessions.json');
     this.#listLimit = options.listLimit ?? DEFAULT_LIST_LIMIT;
     this.#historyLimit = options.historyEventLimit ?? DEFAULT_HISTORY_LIMIT;
+    this.#opencodeQuery = options.opencodeQuery ?? defaultOpencodeQuery;
   }
 
   // ─── 목록 ───────────────────────────────────────────────────────────────
@@ -297,6 +332,7 @@ export class AgentSessionStore {
     let scanned: SessionSummary[] = [];
     if (cli === 'claude') scanned = await this.#listClaude();
     else if (cli === 'codex') scanned = await this.#listCodex();
+    else if (cli === 'opencode') scanned = await this.#listOpencode();
     const byId = new Map<string, SessionSummary>();
     for (const s of scanned) byId.set(s.session_id, s);
     for (const e of indexed) {
@@ -394,6 +430,58 @@ export class AgentSessionStore {
     if (!SESSION_ID_RE.test(sessionId)) return null;
     if (!firstPrompt && !customTitle) return null; // 빈 세션(프롬프트 없음)
     return { sessionId, cwd, title: cleanTitle(customTitle || firstPrompt), createdAt };
+  }
+
+  /**
+   * opencode 세션 목록. 파일 스캔이 아니라 opencode 자신의 DB 도구에 SQL 을 던진다:
+   * `opencode db "SELECT …" --format json`. 직접 SQLite 를 여는 것보다 이쪽이 나은 이유는
+   * (1) 스키마가 opencode 것이고 (2) WAL 락을 그쪽이 관리하며 (3) agent-manager 에
+   * sqlite 의존성을 새로 들이지 않아도 되기 때문이다.
+   *
+   * 실패(미설치·스키마 변경·타임아웃)는 빈 목록으로 접는다 — 목록 조회 하나가 세션 화면
+   * 전체를 못 쓰게 만들면 안 된다. `time_archived` 가 찍힌 세션은 opencode 에서 보관
+   * 처리된 것이므로 제외한다.
+   */
+  async #listOpencode(): Promise<SessionSummary[]> {
+    const sql =
+      'SELECT id, directory, title, time_created, time_updated FROM session '
+      + 'WHERE time_archived IS NULL AND parent_id IS NULL '
+      + `ORDER BY time_updated DESC LIMIT ${this.#listLimit}`;
+    let stdout: string;
+    try {
+      stdout = await this.#opencodeQuery(sql);
+    } catch {
+      return [];
+    }
+    let rows: unknown;
+    try {
+      rows = JSON.parse(stdout);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(rows)) return [];
+    const out: SessionSummary[] = [];
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      const id = typeof row.id === 'string' ? row.id : '';
+      const cwd = typeof row.directory === 'string' ? row.directory : '';
+      if (!id || !cwd) continue;
+      // 시각은 epoch ms 정수다. 못 읽으면 그 세션만 버리지 말고 updated 를 created 로,
+      // 둘 다 없으면 0 으로 접어 목록에는 남긴다(정렬 맨 뒤로 간다).
+      const created = toEpochMs(row.time_created);
+      const updated = toEpochMs(row.time_updated) ?? created ?? 0;
+      out.push({
+        cli: 'opencode',
+        session_id: id,
+        cwd,
+        title: (typeof row.title === 'string' && row.title.trim()) || '(제목 없음)',
+        created_at: created === null ? null : new Date(created).toISOString(),
+        updated_at: new Date(updated).toISOString(),
+        source: 'cli',
+      });
+    }
+    return out;
   }
 
   async #listCodex(): Promise<SessionSummary[]> {
