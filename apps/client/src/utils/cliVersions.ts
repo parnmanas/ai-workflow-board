@@ -34,6 +34,17 @@ function compareSemver(a: string, b: string): number {
 }
 
 /**
+ * 두 `--version` 문자열의 대소를 비교한다. 어느 한쪽이라도 semver 를 못 뽑으면
+ * null — "비교 불가" 와 "같다" 는 다르다.
+ */
+export function compareCliVersionStrings(a: string | null | undefined, b: string | null | undefined): number | null {
+  const aa = extractSemver(a);
+  const bb = extractSemver(b);
+  if (!aa || !bb) return null;
+  return compareSemver(aa, bb);
+}
+
+/**
  * 설치 버전과 최신 버전을 견준다. 어느 한쪽이 없거나 semver 를 못 뽑으면
  * 'unknown' — 호출자는 그때 버튼을 **잠그지 않는다**.
  *

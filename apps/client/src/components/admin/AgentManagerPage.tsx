@@ -27,7 +27,7 @@ import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
 import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
-import { cliUpdateState } from '../../utils/cliVersions';
+import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersions';
 
 /**
  * Runtime Host administration and observability.
@@ -2856,6 +2856,19 @@ export function InstalledCliVersions({
   const perCli = new Map<string, number>();
   for (const row of installs) perCli.set(row.cli, (perCli.get(row.cli) ?? 0) + 1);
 
+  // 같은 CLI 중 이 호스트에서 가장 높은 버전. "최신" 이라는 라벨이 절대적 주장으로
+  // 읽히지 않게 하려면 이게 필요하다 — snap 설치본은 **자기 채널 기준으로는** 최신일
+  // 수 있지만, 바로 옆 줄에 더 높은 버전이 있는데 "최신" 이라고 쓰면 말이 안 된다
+  // (rolf: 죽은 채널의 snap codex 0.114.0 vs 공식 npm 0.156.1).
+  const newestPerCli = new Map<string, string>();
+  for (const row of installs) {
+    if (!row.version) continue;
+    const best = newestPerCli.get(row.cli);
+    if (!best || (compareCliVersionStrings(row.version, best) ?? 0) > 0) {
+      newestPerCli.set(row.cli, row.version);
+    }
+  }
+
   const sorted = [...installs].sort(
     (a, b) => a.cli.localeCompare(b.cli) || Number(b.active) - Number(a.active) || a.path.localeCompare(b.path),
   );
@@ -2876,6 +2889,23 @@ export function InstalledCliVersions({
               : inst.cli_latest_versions?.[row.cli] ?? null;
           const state = cliUpdateState(row.version, latest);
           const upToDate = state === 'up-to-date';
+          // 자기 채널로는 최신인데 같은 호스트에 더 새 설치본이 있는 경우. 이때
+          // "최신" 은 사실이지만 오해를 부른다 — 무엇 기준인지, 그리고 더 새 것이
+          // 어디 있는지를 함께 말해야 운영자가 다음 행동을 정할 수 있다.
+          const newestOnHost = newestPerCli.get(row.cli) ?? null;
+          const superseded =
+            upToDate &&
+            Boolean(newestOnHost) &&
+            (compareCliVersionStrings(newestOnHost, row.version) ?? 0) > 0;
+          const newerRow = superseded
+            ? sorted.find((r) => r.cli === row.cli && r.version === newestOnHost) ?? null
+            : null;
+          const supersededTitle = newerRow
+            ? `이 설치본은 자기 배포 채널에서는 최신이지만, 같은 호스트의 ` +
+              `${newerRow.path || '다른 설치본'} 이 ${newerRow.version} 으로 더 새롭습니다` +
+              `${newerRow.active ? ' (AWB 는 그쪽을 실행합니다)' : ''}. ` +
+              '이 채널에서는 더 올라갈 곳이 없으므로, 쓰지 않는다면 지우는 편이 낫습니다.'
+            : '';
           const key = row.path || row.cli;
           const busy = pending === key;
           const disabled = pending !== null || upToDate;
@@ -2903,7 +2933,12 @@ export function InstalledCliVersions({
               {state === 'outdated' && (
                 <span style={{ fontWeight: 600, color: tokens.colors.success }}>→ {latest}</span>
               )}
-              {upToDate && <span style={{ color: tokens.colors.textMuted }}>최신</span>}
+              {upToDate && !superseded && <span style={{ color: tokens.colors.textMuted }}>최신</span>}
+              {superseded && (
+                <span style={{ color: tokens.colors.warning, fontWeight: 600 }} title={supersededTitle}>
+                  뒤처짐 · 이 채널 최신
+                </span>
+              )}
               {row.active && (perCli.get(row.cli) ?? 0) > 1 && (
                 <span
                   style={{ color: tokens.colors.textMuted }}
@@ -2945,8 +2980,10 @@ export function InstalledCliVersions({
                     opacity: disabled && !busy ? 0.5 : 1,
                   }}
                   title={
-                    upToDate
-                      ? `${row.cli} 는 이미 최신입니다 (npm latest ${latest}).`
+                    superseded
+                      ? supersededTitle
+                      : upToDate
+                      ? `${row.cli} 는 이 설치본의 배포 채널 기준 최신입니다 (${latest}).`
                       : `update_cli — ${row.path || `이 장비의 ${row.cli}`} 를 올립니다` +
                         `${row.method ? ` (${row.method})` : ''}` +
                         `${state === 'outdated' ? ` · ${row.version} → ${latest}` : ' · 최신 버전 확인 불가 — 눌러서 시도할 수 있습니다'}. ` +

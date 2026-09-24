@@ -283,3 +283,77 @@ test('다른 배포 채널의 설치본은 CLI 단위 npm latest 로 판정하�
   const enabled = buttons(view).filter((b) => !b.disabled);
   assert.equal(enabled.length, 1, '최신을 모르는 snap 행만 누를 수 있다');
 });
+
+test('같은 호스트에 더 새 설치본이 있으면 "최신" 이라고 쓰지 않는다', async (t) => {
+  // rolf 실측: 죽은 채널의 snap codex(0.114.0)는 자기 채널로는 최신이다. 하지만
+  // 바로 옆 줄에 공식 npm 0.156.1 이 있는데 "최신" 이라고 쓰면 말이 안 된다 —
+  // 무엇 기준인지, 더 새 것이 어디 있는지를 함께 말해야 한다.
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+
+  const view = render(t, {
+    ...BASE,
+    cli_installs: [
+      {
+        cli: 'codex',
+        path: '/snap/bin/codex',
+        version: 'codex-cli 0.114.0',
+        method: 'snap package (needs sudo)',
+        updatable: true,
+        needs_sudo: true,
+        latest_version: '0.114.0', // 추적 채널의 최신 = 설치 버전
+        active: false,
+      },
+      {
+        cli: 'codex',
+        path: '/home/parn/.npm-global/bin/codex',
+        version: 'codex-cli 0.156.1',
+        method: 'npm --prefix /home/parn/.npm-global',
+        updatable: true,
+        needs_sudo: false,
+        latest_version: '0.156.1',
+        active: true,
+      },
+    ],
+  });
+  await act(async () => {});
+
+  const text = view.container.textContent;
+  assert.ok(text.includes('뒤처짐'), `더 새 설치본이 있음을 드러내야 한다 — 실제: ${text}`);
+
+  // 두 행 모두 자기 채널로는 최신이라 누를 것이 없다.
+  assert.equal(buttons(view).filter((b) => !b.disabled).length, 0);
+
+  // 뒤처진 행의 설명에 더 새 설치본의 경로·버전이 들어 있어야 운영자가 다음 행동을
+  // 정할 수 있다.
+  const titles = [...view.container.querySelectorAll('[title]')].map((el) => el.getAttribute('title'));
+  const hint = titles.find((t) => t && t.includes('더 새롭습니다'));
+  assert.ok(hint, `더 새 설치본을 짚어 줘야 한다 — 실제 title 들: ${JSON.stringify(titles)}`);
+  assert.ok(hint.includes('/home/parn/.npm-global/bin/codex'), hint);
+  assert.ok(hint.includes('0.156.1'), hint);
+  assert.ok(hint.includes('AWB 는 그쪽을 실행합니다'), `활성 설치본이라는 사실도 알려야 한다 — ${hint}`);
+});
+
+test('더 새 설치본이 없으면 그냥 최신이다 — 경고가 번지지 않는다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const view = render(t, {
+    ...BASE,
+    cli_installs: [
+      {
+        cli: 'claude',
+        path: '/home/parn/.npm-global/bin/claude',
+        version: '2.1.281 (Claude Code)',
+        method: 'npm --prefix /home/parn/.npm-global',
+        updatable: true,
+        needs_sudo: false,
+        latest_version: '2.1.281',
+        active: true,
+      },
+    ],
+  });
+  await act(async () => {});
+  const text = view.container.textContent;
+  assert.ok(text.includes('최신'));
+  assert.equal(text.includes('뒤처짐'), false);
+});
