@@ -181,11 +181,10 @@ export class OrchestrationAgentProvisionerService {
     if (reusable) {
       // `applySpec` sets is_active = 1, which is also how a slot re-adopts an
       // identity that a previous `releaseIdentity` retired.
-      const previousWorkingDir = current!.working_dir;
+      const before = spawnRelevantFields(current!);
       const updated = await this.applySpec(current!, spec, input, workspaceId);
-      const notice = previousWorkingDir !== updated.working_dir
-        ? await this.notifyWorkingDirChanged(updated)
-        : null;
+      const changed = spawnRelevantFields(updated) !== before;
+      const notice = changed ? await this.notifyRuntimeChanged(updated) : null;
       return { agent: updated, created: false, manager_notice: notice };
     }
 
@@ -387,29 +386,40 @@ export class OrchestrationAgentProvisionerService {
   }
 
   /**
-   * Push a changed cwd to a live manager. Without this the manager keeps using
-   * the working_dir it cached at spawn time, so an edited folder would silently
-   * not take effect until the agent restarted.
+   * Re-sync a live Runtime Host after an in-place runtime change.
+   *
+   * `restart_agent`, not `set_working_dir`. The manager caches the whole launch
+   * context (cli, model, working_dir, runtime_config, cli-home) when it first
+   * spawns an identity, and rebuilds that cache from its own on-disk copy on
+   * restart — so a `set_working_dir` would carry a new folder while leaving an
+   * edited CLI or model stale indefinitely. `restart_agent` reaps the identity's
+   * live sessions and then re-reads the canonical record from AWB, which is the
+   * only command that makes every field of an edited slot take effect.
+   *
+   * Reaping matters as much as re-reading: a persistent chat/ticket session is
+   * keyed on (room, agent) with the CLI baked in at spawn, so a still-running
+   * session would keep answering on the OLD CLI even after the context cache is
+   * corrected. It also re-pushes any in-flight ticket work it interrupted.
    */
-  private async notifyWorkingDirChanged(agent: Agent): Promise<string | null> {
+  private async notifyRuntimeChanged(agent: Agent): Promise<string | null> {
     if (!agent.manager_agent_id) return null;
     const inst = this.commands.resolveLiveManagerInstance(agent.manager_agent_id);
     if (!inst) {
-      return 'Runtime Host is offline — the new working folder applies the next time it connects.';
+      return 'Runtime Host is offline — the new runtime applies the next time it connects.';
     }
     try {
       await this.commands.issue(
         inst,
-        'set_working_dir',
-        { agent_id: agent.id, working_dir: agent.working_dir },
+        'restart_agent',
+        { agent_id: agent.id, workspace_id: agent.workspace_id ?? undefined },
         ISSUED_BY,
       );
       return null;
     } catch (e: any) {
-      this.logService.warn('Orchestration', `set_working_dir dispatch failed for ${agent.id.slice(0, 8)}`, {
+      this.logService.warn('Orchestration', `restart_agent dispatch failed for ${agent.id.slice(0, 8)}`, {
         error: e?.message || String(e),
       });
-      return 'Could not notify the Runtime Host of the new working folder — restart the agent to pick it up.';
+      return 'Could not notify the Runtime Host of the change — restart the agent to pick it up.';
     }
   }
 
@@ -540,6 +550,24 @@ function addTo(map: Map<string, Set<string>>, key: string, value: string): void 
   const set = map.get(key) ?? new Set<string>();
   set.add(value);
   map.set(key, set);
+}
+
+/**
+ * The identity fields the Runtime Host bakes into a spawned process. Joined into
+ * one string so the caller can compare before/after with a single `!==` and
+ * cannot forget a field when the spec grows — the failure mode this guards is
+ * silent (the manager keeps running the previous value), so it must not depend
+ * on remembering to extend a condition.
+ */
+function spawnRelevantFields(agent: Agent): string {
+  return [
+    agent.type,
+    agent.model ?? '',
+    agent.working_dir,
+    agent.credential_id ?? '',
+    agent.cli_runtime_profile ?? '',
+    JSON.stringify(agent.runtime_config ?? null),
+  ].join('\u0000');
 }
 
 function clip(value: string, max: number): string {

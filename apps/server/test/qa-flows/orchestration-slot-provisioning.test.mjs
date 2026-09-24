@@ -46,11 +46,15 @@ async function loadServices() {
   const mission = await load(['modules', 'orchestration', 'orchestration-mission.service.js']);
   const runner = await load(['modules', 'orchestration', 'orchestration-runner.service.js']);
   const messaging = await load(['modules', 'chat-rooms', 'room-messaging.service.js']);
+  const registry = await load(['modules', 'agent-manager', 'instance-registry.service.js']);
+  const commands = await load(['modules', 'agent-manager', 'agent-manager-command.service.js']);
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
     OrchestrationMissionService: mission.OrchestrationMissionService,
     OrchestrationRunnerService: runner.OrchestrationRunnerService,
     RoomMessagingService: messaging.RoomMessagingService,
+    InstanceRegistryService: registry.InstanceRegistryService,
+    AgentManagerCommandService: commands.AgentManagerCommandService,
   };
 }
 
@@ -445,6 +449,94 @@ test('Runtime Host catalogue: offers every paired host, its installed CLIs, and 
     `the folder the slot named must be a one-click choice for the next slot, got ${JSON.stringify(entry.working_dirs)}`);
   assert.ok(entry.clis.includes('claude'),
     'the CLI an existing agent on this host runs must be offered even with no heartbeat');
+});
+
+// ─── C. Propagating an edit to the Runtime Host ───────────────────────────────
+
+test('Editing a slot in place tells the Runtime Host to restart the agent — otherwise the host keeps the CLI it cached at spawn', async (t) => {
+  // Found by running this live: a slot edit that changed the CLI never reached
+  // the host. The manager caches the whole launch context (cli, model,
+  // working_dir, runtime_config) when it first spawns an identity and rebuilds
+  // that cache from its own on-disk copy on restart, so it kept spawning the
+  // OLD cli indefinitely while AWB showed the new one. A `set_working_dir`
+  // (what this used to send, and only on a folder change) cannot fix that — it
+  // carries one field. `restart_agent` reaps the identity's live sessions and
+  // re-reads the canonical record, which is the only command that makes every
+  // edited field take effect.
+  const { app, modules, services } = await sharedApp();
+  const { getDataSourceToken } = modules;
+  const teams = app.get(services.OrchestrationTeamService);
+  const registry = app.get(services.InstanceRegistryService);
+  const commands = app.get(services.AgentManagerCommandService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'slot-propagate');
+  const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'propagate-host' });
+  const squad = await buildTeam(app, getDataSourceToken, teams, {
+    workspaceId: ws.id,
+    name: 'Propagate squad',
+    host,
+    team: { created_by: HUMAN.id },
+    members: [{ role_label: 'builder' }],
+  });
+  const memberId = squad.team.members[0].id;
+
+  // A heartbeating instance is what makes the command issuable at all — with no
+  // live host the provisioner correctly degrades to a notice instead.
+  registry.upsert({
+    instance_id: 'slot-propagate-instance',
+    agent_id: host.id,
+    workspace_id: ws.id,
+    mode: 'manager',
+    hostname: 'propagate-host',
+    plugin_version: 'test',
+    cli: 'claude',
+    cli_adapters: ['claude', 'codex'],
+    pid: 1,
+    started_at: new Date().toISOString(),
+    agent_ids: [squad.orchestrator.id, squad.member('builder').id],
+  });
+
+  const issued = [];
+  const originalIssue = commands.issue.bind(commands);
+  commands.issue = async (inst, command, args, issuedBy) => {
+    issued.push({ command, agent_id: args?.agent_id });
+    return { command_id: 'test-command', issued_at: new Date().toISOString() };
+  };
+  t.after(() => { commands.issue = originalIssue; });
+
+  step('Changing the CLI issues restart_agent for that identity');
+  issued.length = 0;
+  await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { cli: 'codex' } });
+  assert.deepEqual(issued, [{ command: 'restart_agent', agent_id: squad.member('builder').id }],
+    `a CLI change must re-sync the host with restart_agent, got ${JSON.stringify(issued)}`);
+
+  step('So does a model-only change — the host caches the model too');
+  issued.length = 0;
+  await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { model: 'gpt-5.6-sol' } });
+  assert.deepEqual(issued.map((i) => i.command), ['restart_agent']);
+
+  step('And a working-folder change');
+  issued.length = 0;
+  await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { working_dir: '/srv/awb-test/moved' } });
+  assert.deepEqual(issued.map((i) => i.command), ['restart_agent']);
+
+  step('A no-op runtime re-submit issues nothing — an edit that changes nothing must not restart a working agent');
+  issued.length = 0;
+  await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { model: 'gpt-5.6-sol' } });
+  assert.deepEqual(issued, [], `re-sending the same runtime must not restart the agent, got ${JSON.stringify(issued)}`);
+
+  step('Editing only the capability blurb issues nothing either — it changes nothing the host spawns with');
+  issued.length = 0;
+  await teams.updateMember(squad.team.id, ws.id, memberId, { capabilities: 'now with a longer blurb' });
+  assert.deepEqual(issued, []);
+
+  step('folder_scope is NOT a host-visible field — flipping it must not restart the agent');
+  issued.length = 0;
+  await teams.updateMember(squad.team.id, ws.id, memberId, { runtime: { folder_scope: 'isolated' } });
+  assert.deepEqual(issued, [],
+    'folder_scope changes where a STEP runs (a per-dispatch decision), not how the identity is spawned');
+  const after = await teams.getTeam(squad.team.id, ws.id);
+  assert.equal(after.members[0].runtime.folder_scope, 'isolated', 'but it is still persisted');
 });
 
 exitAfterTests();
