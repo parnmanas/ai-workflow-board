@@ -48,6 +48,7 @@ async function loadServices() {
   const messaging = await load(['modules', 'chat-rooms', 'room-messaging.service.js']);
   const registry = await load(['modules', 'agent-manager', 'instance-registry.service.js']);
   const commands = await load(['modules', 'agent-manager', 'agent-manager-command.service.js']);
+  const ledger = await load(['modules', 'agent-manager', 'command-ledger.service.js']);
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
     OrchestrationMissionService: mission.OrchestrationMissionService,
@@ -55,6 +56,7 @@ async function loadServices() {
     RoomMessagingService: messaging.RoomMessagingService,
     InstanceRegistryService: registry.InstanceRegistryService,
     AgentManagerCommandService: commands.AgentManagerCommandService,
+    CommandLedgerService: ledger.CommandLedgerService,
   };
 }
 
@@ -537,6 +539,105 @@ test('Editing a slot in place tells the Runtime Host to restart the agent — ot
     'folder_scope changes where a STEP runs (a per-dispatch decision), not how the identity is spawned');
   const after = await teams.getTeam(squad.team.id, ws.id);
   assert.equal(after.members[0].runtime.folder_scope, 'isolated', 'but it is still persisted');
+});
+
+// ─── D. The model dropdown's data source ──────────────────────────────────────
+
+test('Runtime Host model lists can be re-enumerated on demand — a cold CLI must not strand the slot editor on free text', async (t) => {
+  // Reported symptom: opencode offered a text box for the model while other
+  // screens offered a dropdown. Cause: a host enumerates models ONCE at boot by
+  // shelling out to each CLI with a short timeout and treating any failure as
+  // "no models", so a cold or slow CLI leaves its key missing from the heartbeat
+  // — and the slot editor then has nothing to build a <select> from, forever.
+  // The admin agent dialog already solved this with a probe; the fix gives the
+  // roster the same probe under its OWN permission (MANAGE_ACTIONS, not
+  // ADMIN_ACCESS) so authoring a team never requires instance-admin rights.
+  const { app, modules, services } = await sharedApp();
+  const { getDataSourceToken } = modules;
+  const teams = app.get(services.OrchestrationTeamService);
+  const registry = app.get(services.InstanceRegistryService);
+  const commands = app.get(services.AgentManagerCommandService);
+  const ledger = app.get(services.CommandLedgerService);
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'slot-models');
+  const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'models-host' });
+
+  step('A host that never reported a model list for a CLI exposes no options for it');
+  registry.upsert({
+    instance_id: 'slot-models-instance',
+    agent_id: host.id,
+    workspace_id: ws.id,
+    mode: 'manager',
+    hostname: 'models-host',
+    plugin_version: 'test',
+    cli: 'claude',
+    cli_adapters: ['claude', 'opencode'],
+    pid: 1,
+    started_at: new Date().toISOString(),
+    // opencode is installed but reported NO models — the exact cold-enumeration
+    // state that produced the free-text box.
+    available_models: { claude: ['opus', 'sonnet'] },
+  });
+  let hosts = await teams.listRuntimeHosts(ws.id);
+  let entry = hosts.find((h) => h.manager_agent_id === host.id);
+  assert.ok(entry.clis.includes('opencode'), 'opencode is installed on this host');
+  assert.deepEqual(entry.available_models.opencode, undefined,
+    'and reports no models — so the editor has nothing to offer yet');
+
+  step('Refreshing asks the host to re-list, waits for its ack, and returns the filled-in row');
+  // Stand in for the manager: ack the command the way a real host does, which is
+  // what the server-side wait is correlating on — an unrelated heartbeat must not
+  // be mistaken for completion.
+  const originalIssue = commands.issue.bind(commands);
+  commands.issue = async (inst, command, args, issuedBy) => {
+    const res = await originalIssue(inst, command, args, issuedBy);
+    if (command === 'refresh_available_models') {
+      registry.upsert({
+        instance_id: 'slot-models-instance',
+        agent_id: host.id,
+        workspace_id: ws.id,
+        mode: 'manager',
+        hostname: 'models-host',
+        plugin_version: 'test',
+        cli: 'claude',
+        cli_adapters: ['claude', 'opencode'],
+        pid: 1,
+        started_at: new Date().toISOString(),
+        available_models: { claude: ['opus', 'sonnet'], opencode: ['opencode/big-pickle', 'opencode/space-bunny-free'] },
+      });
+      const rec = ledger.get(res.command_id);
+      if (rec) ledger.recordOutcome(rec, 'ok', 'refreshed 2 CLI(s)');
+    }
+    return res;
+  };
+  t.after(() => { commands.issue = originalIssue; });
+
+  const refreshed = await teams.refreshRuntimeHostModels(host.id, ws.id);
+  assert.deepEqual(refreshed.available_models.opencode, ['opencode/big-pickle', 'opencode/space-bunny-free'],
+    'the refreshed row must carry the newly enumerated models, so the editor can render a dropdown');
+
+  step('An offline host is refused rather than silently answered with a stale list');
+  const offlineHost = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'offline-host' });
+  await assert.rejects(
+    () => teams.refreshRuntimeHostModels(offlineHost.id, ws.id),
+    (e) => { assert.equal(e.status, 409); assert.match(e.message, /offline/i); return true; },
+  );
+
+  step('An unknown host id is a 404, not a crash');
+  await assert.rejects(
+    () => teams.refreshRuntimeHostModels('00000000-0000-4000-8000-000000000000', ws.id),
+    (e) => { assert.equal(e.status, 404); return true; },
+  );
+
+  step('A model the host does not list still round-trips — editing a slot must never drop it');
+  const team = await teams.createTeam({
+    workspace_id: ws.id,
+    name: 'Model squad',
+    created_by: HUMAN.id,
+    orchestrator: slotSpec(host.id, { cli: 'opencode', model: 'opencode/retired-model' }),
+  });
+  assert.equal(team.orchestrator_runtime.model, 'opencode/retired-model',
+    'an unlisted model is the operator\'s choice, not an error — the editor prepends it to the dropdown');
 });
 
 exitAfterTests();
