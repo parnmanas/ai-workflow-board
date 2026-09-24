@@ -51,7 +51,7 @@
 // missing piece before persistent managers can route here, hence the
 // capability stays off).
 
-import { execFileSync } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import { promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -135,6 +135,62 @@ function composePrompt(
 /** `opencode models` 는 provider 조회가 붙어 느릴 수 있다 — 열거 하나가 부팅을 붙잡지 않게 한다. */
 const MODEL_LIST_TIMEOUT_MS = 15_000;
 
+/**
+ * Run `opencode <args>` and resolve stdout, or null when it could not be run.
+ *
+ * **cross-spawn, not `execFileSync`.** On Windows `opencode` is an npm global
+ * batch shim (`%APPDATA%\\npm\\opencode.cmd`) with no sibling `.exe` — see
+ * `opencodeWindowsCandidates` in cli-resolver.ts, which resolves to exactly that
+ * as its last resort. Node's `execFileSync` calls CreateProcess directly, which
+ * cannot execute a `.cmd`, so it threw for a shim the shell runs perfectly well.
+ * cross-spawn wraps it in `cmd.exe /d /s /c` with properly escaped args (plain
+ * `shell: true` does not escape, so a path or arg containing a space would be
+ * mis-split) — the same reason every other spawn site in this package uses it.
+ *
+ * Why it mattered: both callers swallow failure into "no data" — `listModels`
+ * returns `[]`, `hasPersistedSession` returns false. With `execFileSync` that
+ * made opencode silently model-less on every Windows host, which surfaced as the
+ * Orchestration slot editor offering a free-text model box there while Linux
+ * hosts got a dropdown. A silently empty result is the worst shape for this:
+ * nothing logs, and the UI's honest fallback looks like a UI bug.
+ *
+ * Async rather than sync because `cross-spawn`'s typings only cover the async
+ * entry point, and both callers are already async — no reason to reach for an
+ * untyped `.sync`. Kills the child on timeout so a wedged CLI cannot hold a
+ * heartbeat's model sweep open.
+ *
+ * Resolves null (not '') when the process could not run or exited non-zero, so a
+ * caller can tell "opencode printed nothing" from "opencode is not runnable
+ * here".
+ */
+function runOpencode(bin: string, args: string[], timeoutMs: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof crossSpawn>;
+    try {
+      child = crossSpawn(bin, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = '';
+    let settled = false;
+    const finish = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* already gone */ }
+      finish(null);
+    }, timeoutMs);
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => { out += chunk; });
+    child.on('error', () => finish(null));
+    child.on('close', (code) => finish(code === 0 ? out : null));
+  });
+}
+
 export class OpencodeCliAdapter extends CliAdapter {
   static cliType = 'opencode';
 
@@ -176,12 +232,8 @@ export class OpencodeCliAdapter extends CliAdapter {
    */
   async listModels(): Promise<string[]> {
     try {
-      const out = execFileSync(this.resolveBin(), ['models'], {
-        encoding: 'utf8',
-        timeout: MODEL_LIST_TIMEOUT_MS,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      const out = await runOpencode(this.resolveBin(), ['models'], MODEL_LIST_TIMEOUT_MS);
+      if (out === null) return [];
       const ids = out
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -290,10 +342,8 @@ export class OpencodeCliAdapter extends CliAdapter {
       return false;
     }
     try {
-      const out = execFileSync(bin, ['session', 'list', '--format', 'json'], {
-        encoding: 'utf8',
-        timeout: SESSION_LIST_TIMEOUT_MS,
-      });
+      const out = await runOpencode(bin, ['session', 'list', '--format', 'json'], SESSION_LIST_TIMEOUT_MS);
+      if (out === null) return false;
       const parsed: unknown = JSON.parse(String(out ?? ''));
       const rows: unknown[] = Array.isArray(parsed)
         ? parsed
