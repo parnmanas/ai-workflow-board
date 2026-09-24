@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -272,4 +272,67 @@ test('describeSpawnArgv keeps opencode flags visible and masks values', () => {
   assert.ok(!shown.includes('anthropic/claude-sonnet-4-5'), shown);
   assert.ok(!shown.includes('/tmp/work'), shown);
   assert.ok(!shown.includes('task'), shown);
+});
+
+// ─── listModels / session probe must run a SHIM, not just a real binary ───────
+//
+// Windows regression (found on a live host): `opencode` installs as an npm batch
+// shim (`%APPDATA%\npm\opencode.cmd`) with no sibling `.exe`, and the resolver
+// deliberately falls back to that shim. The adapter used `execFileSync`, which
+// calls CreateProcess directly and cannot execute a `.cmd` — it failed with
+// EINVAL, and because both callers swallow failure into "no data" the result was
+// silent: opencode reported ZERO models on every Windows host, which surfaced as
+// the Orchestration slot editor showing a free-text model box there while Linux
+// hosts got a dropdown. Measured on that host: execFileSync → EINVAL,
+// cross-spawn → 76 models.
+//
+// POSIX cannot host a `.cmd`, so the portable stand-in is a shim whose PATH
+// resolution and argv escaping exercise the same cross-spawn wrapping: a
+// directory with a SPACE in it (plain `shell: true` would mis-split that) and a
+// non-zero exit path. The structural guard below is what actually pins the
+// Windows behaviour, since only cross-spawn can run a `.cmd` at all.
+
+test('the adapter does not reach for execFileSync — a .cmd shim cannot be exec\'d directly', async () => {
+  const src = await fsp.readFile(new URL('../src/lib/cli-adapters/opencode.ts', import.meta.url), 'utf8');
+  assert.ok(
+    !/\bexecFileSync\s*\(/.test(src),
+    'opencode.ts must not call execFileSync: on Windows the resolved binary is an npm .cmd shim, '
+      + 'which CreateProcess refuses (EINVAL) — every spawn here goes through cross-spawn',
+  );
+  assert.match(src, /from 'cross-spawn'/, 'and it must import cross-spawn to do so');
+});
+
+test('listModels parses, filters and dedupes a shim\'s output, even from a path containing a space', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode models test-'));
+  const shim = join(dir, 'opencode');
+  await fsp.writeFile(
+    shim,
+    // Mirrors real output: a banner line, a blank line, ids, and a duplicate.
+    '#!/bin/sh\n'
+      + 'echo "opencode 1.18.32 — available models"\n'
+      + 'echo ""\n'
+      + 'echo "opencode/big-pickle"\n'
+      + 'echo "opencode/space-bunny-free"\n'
+      + 'echo "opencode/big-pickle"\n'
+      + 'echo "not an id"\n',
+    { mode: 0o755 },
+  );
+  const a = new OpencodeCliAdapter();
+  a.resolveBin = () => shim;
+  const models = await a.listModels();
+  assert.deepEqual(models, ['opencode/big-pickle', 'opencode/space-bunny-free'],
+    'banner/blank/spacey lines are dropped and ids are deduped, order preserved');
+});
+
+test('listModels degrades to [] — never throws — when the binary cannot be run or fails', async () => {
+  const a = new OpencodeCliAdapter();
+  a.resolveBin = () => join(tmpdir(), 'definitely-not-an-opencode-binary-' + Date.now());
+  assert.deepEqual(await a.listModels(), [], 'an unrunnable binary means "no list", not a crashed heartbeat');
+
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-fail-'));
+  const failing = join(dir, 'opencode');
+  await fsp.writeFile(failing, '#!/bin/sh\necho "opencode/should-be-ignored"\nexit 3\n', { mode: 0o755 });
+  a.resolveBin = () => failing;
+  assert.deepEqual(await a.listModels(), [],
+    'a non-zero exit is not a model list — partial stdout from a failed probe must not be trusted');
 });

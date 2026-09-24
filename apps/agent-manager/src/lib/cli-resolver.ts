@@ -371,6 +371,112 @@ function parentExeMatching(nameRegex: RegExp): string | null {
   }
 }
 
+/**
+ * resolveCliBin 이 훑는 후보 경로 목록을 만든다 — well-known 설치 위치를 먼저,
+ * shell PATH lookup 결과를 그다음에(orderResolutionSources — 위 "PATH 우선순위"
+ * 참고). 존재 여부는 여기서 거르지 않는다: selectBinary 가 확장자 규칙까지
+ * 함께 보며 고른다.
+ */
+function gatherResolutionSources(ct: string): string[] {
+  const provider = CANDIDATE_PROVIDERS[ct];
+  const wellKnown = provider
+    ? isWindows
+      ? provider.windows(homedir())
+      : provider.unix(homedir())
+    : [];
+
+  const pathHits: string[] = [];
+  try {
+    const cmd = isWindows
+      ? `where ${ct}`
+      : `command -v ${ct} 2>/dev/null || which ${ct} 2>/dev/null`;
+    const out = execSync(cmd, {
+      encoding: 'utf8',
+      timeout: 2000,
+      shell: isWindows ? undefined : '/bin/sh',
+    }).trim();
+    for (const line of out.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t) pathHits.push(t);
+    }
+  } catch {
+    /* shell 또는 spawn 실패 — 아래 순수 PATH 스캔으로 계속 시도한다 */
+  }
+
+  // 위 shell lookup 은 서브프로세스라 호스트 부하에 좌우된다. 부하가 높으면
+  // 2000ms timeout 에 걸려 빈손으로 돌아오고, well-known 위치에도 없는 CLI 는
+  // PATH 에 멀쩡히 설치돼 있는데도 "executable not found" 로 죽었다
+  // (Windows CI 실측: `where codex` 가 timeout → resolveCliBin throw). PATH 를
+  // 직접 훑는 fallback 은 서브프로세스 없이 같은 후보를 결정적으로 만들어낸다.
+  // 성공 경로의 순서·의미론은 그대로다 — shell lookup 이 결과를 낸 경우 이
+  // 스캔은 아예 돌지 않는다.
+  if (pathHits.length === 0) {
+    pathHits.push(
+      ...scanPathForBinary(ct, process.env.PATH, {
+        isWindows,
+        pathExt: process.env.PATHEXT,
+        exists: fileExecutable,
+      }),
+    );
+  }
+
+  return orderResolutionSources(wellKnown, pathHits);
+}
+
+/**
+ * 이 호스트에서 `cliType` 으로 실행될 수 있는 **모든** 설치본의 절대경로를
+ * resolveCliBin 과 같은 우선순위로 돌려준다(실제로 존재하고 실행 가능한 것만,
+ * realpath 기준 중복 제거). resolveCliBin 은 이 중 첫 번째만 쓰지만, 호출자가
+ * "우리가 쓰는 것 말고 다른 설치본이 있는가" 를 물어야 할 때가 있다.
+ *
+ * 계기(ragnar 실측): `~/.local/bin/claude` 가 well-known 후보로 선택돼 있는
+ * 호스트에서 그 바이너리의 `claude update` 는 **nvm 의 npm prefix** 로 설치해,
+ * 새 버전을 `~/.nvm/.../bin/claude` 에 떨어뜨리고 exit 0 으로 끝났다. 업데이터는
+ * 성공했는데 매니저가 spawn 하는 바이너리는 영원히 구버전이었고, 업데이트
+ * 커맨드는 그것을 성공으로 보고했다. 후보 전체를 볼 수 있어야 그 상황을
+ * "다른 경로가 더 새 버전" 으로 진단할 수 있다.
+ */
+export function listCliBinCandidates(cliType: string): string[] {
+  const ct = String(cliType || 'claude').toLowerCase();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  // resolve 가 보는 후보에 **PATH 전수 스캔**을 덧붙인다. resolve 쪽의 shell
+  // lookup 은 `command -v` 라 PATH 의 첫 히트 하나만 준다 — 그것으로 충분한 것은
+  // "무엇을 실행할까" 를 고를 때뿐이고, "또 뭐가 깔려 있나" 를 물을 때는 나머지가
+  // 바로 답이다(ticket 702d0ebe 의 snap codex 가 npm-global 과 공존하던 상황).
+  // 순서는 그대로 유지되므로 첫 원소는 여전히 resolveCliBin 이 고르는 값이다.
+  const sources = [
+    ...gatherResolutionSources(ct),
+    ...scanPathForBinary(ct, process.env.PATH, {
+      isWindows,
+      pathExt: process.env.PATHEXT,
+      exists: fileExecutable,
+    }),
+  ];
+  for (const candidate of sources) {
+    if (!candidate || !fileExecutable(candidate)) continue;
+    if (isWindows && !WIN_EXE_EXT.test(candidate) && !WIN_SHIM_EXT.test(candidate)) continue;
+    if (isWindows && WIN_SHIM_EXT.test(candidate) && !shimUsable(candidate)) continue;
+    const key = canonicalPathKey(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(candidate);
+  }
+  return out;
+}
+
+/** 두 경로가 같은 실행 파일을 가리키는지 비교할 때 쓰는 정규형. symlink 까지
+ *  풀어 `~/.local/bin/claude` 와 그 대상이 같은 것으로 접힌다 — resolve 결과와
+ *  후보 목록을 비교하는 호출자(listCliBinCandidates 주석의 ragnar 사례)가 같은
+ *  설치본을 "다른 경로" 로 오인하지 않게 한다. */
+export function canonicalPathKey(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 // ct 만으로 키잉하면, 오퍼레이터가 reload_config/SIGHUP으로 delegation.*Bin을
 // 바꿔도(설정·변경·해제) 해당 CLI가 이미 한 번 resolve된 뒤에는 stale 캐시가
 // 계속 반환돼 "재기동 없는 고정"이 첫 spawn 이후엔 조용히 무시됐다(리뷰 지적,
@@ -421,54 +527,7 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
     }
   }
 
-  // well-known 설치 위치를 먼저 모으고, shell PATH lookup 결과는 뒤에 붙인다
-  // (orderResolutionSources — 위 "PATH 우선순위" 참고). selectBinary 가 진짜
-  // `.exe` 를 우선하며 훑고, `.exe` 가 없을 때만 `.cmd`/`.bat` shim(Windows
-  // npm-shim 설치)으로 fallback 한다 — 그래서 bare `spawn("codex")` 가 Windows
-  // 에서 더 이상 ENOENT 나지 않는다.
-  const provider = CANDIDATE_PROVIDERS[ct];
-  const wellKnown = provider
-    ? isWindows
-      ? provider.windows(homedir())
-      : provider.unix(homedir())
-    : [];
-
-  const pathHits: string[] = [];
-  try {
-    const cmd = isWindows
-      ? `where ${ct}`
-      : `command -v ${ct} 2>/dev/null || which ${ct} 2>/dev/null`;
-    const out = execSync(cmd, {
-      encoding: 'utf8',
-      timeout: 2000,
-      shell: isWindows ? undefined : '/bin/sh',
-    }).trim();
-    for (const line of out.split(/\r?\n/)) {
-      const t = line.trim();
-      if (t) pathHits.push(t);
-    }
-  } catch {
-    /* shell 또는 spawn 실패 — 아래 순수 PATH 스캔으로 계속 시도한다 */
-  }
-
-  // 위 shell lookup 은 서브프로세스라 호스트 부하에 좌우된다. 부하가 높으면
-  // 2000ms timeout 에 걸려 빈손으로 돌아오고, well-known 위치에도 없는 CLI 는
-  // PATH 에 멀쩡히 설치돼 있는데도 "executable not found" 로 죽었다
-  // (Windows CI 실측: `where codex` 가 timeout → resolveCliBin throw). PATH 를
-  // 직접 훑는 fallback 은 서브프로세스 없이 같은 후보를 결정적으로 만들어낸다.
-  // 성공 경로의 순서·의미론은 그대로다 — shell lookup 이 결과를 낸 경우 이
-  // 스캔은 아예 돌지 않는다.
-  if (pathHits.length === 0) {
-    pathHits.push(
-      ...scanPathForBinary(ct, process.env.PATH, {
-        isWindows,
-        pathExt: process.env.PATHEXT,
-        exists: fileExecutable,
-      }),
-    );
-  }
-
-  const sources = orderResolutionSources(wellKnown, pathHits);
+  const sources = gatherResolutionSources(ct);
   const picked = selectBinary(ct, sources, { isWindows, exists: fileExecutable, shimUsable });
   if (picked.kind === 'literal') {
     // 못 찾은 경우의 캐시 의미론은 그대로 둔다(정규화 대상도 아니다).
@@ -487,6 +546,16 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
 
 export function _resetResolverCache(): void {
   cache.clear();
+}
+
+/** 한 CLI 의 resolve 캐시만 버린다. 자체 업데이터가 설치 위치를 옮기는 일이
+ *  실제로 있으므로(Claude Code 의 npm → native installer 이전) 업데이트 직후
+ *  다시 해석하려면 캐시가 걸림돌이 된다. 다른 CLI 의 캐시는 건드리지 않는다. */
+export function invalidateCliBinCache(cliType: string): void {
+  const prefix = `${String(cliType || 'claude').toLowerCase()}:`;
+  for (const key of [...cache.keys()]) {
+    if (key.startsWith(prefix)) cache.delete(key);
+  }
 }
 
 function claudeUnixCandidates(home: string): string[] {

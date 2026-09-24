@@ -35,7 +35,10 @@ import {
   type RuntimePermissionTierSupport,
   type RuntimeCapabilityReport,
   type AgentLaunchSpecEntry,
+  type CliInstallEntry,
 } from './instance-registry.service';
+import { SudoTicketService, type SudoTicketScope } from './sudo-ticket.service';
+import { PrivilegedCommandService } from './privileged-command.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
@@ -66,6 +69,10 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   // 끝난 뒤 spawn 되는 CLI 는 새 버전이다 — 장비 전역 영향이라 관리자 전용
   // 경로(다른 verb 와 같은 가드)로만 들어온다.
   'update_cli',
+  // 운영자가 화면에서 승인한 권한 상승 명령 하나. 승인 흐름이 발급하는 경로
+  // (approve 엔드포인트)에서만 디스패치되지만, 다른 verb 와 같은 관리자 가드를
+  // 통과하므로 허용목록에도 명시한다.
+  'run_privileged_command',
 ] as const);
 
 /** 세 등급이 모두 알려진 support 값일 때만 `permission_tiers` 를 남긴다.
@@ -308,6 +315,8 @@ export class AgentManagerController {
     private readonly subagentMonitor: SubagentMonitorService,
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
+    private readonly sudoTickets: SudoTicketService,
+    private readonly privileged: PrivilegedCommandService,
     private readonly commands: AgentManagerCommandService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
@@ -538,6 +547,53 @@ export class AgentManagerController {
       if (Object.keys(out).length) cli_versions = out;
     }
 
+    // 설치본 단위 목록. `cli_versions` 는 CLI 당 한 줄이라 같은 CLI 가 여러 벌
+    // 깔린 호스트(vLLM 백엔드용 두 번째 claude)를 표현하지 못한다 — 화면이 어느
+    // 설치본을 올릴지 고르려면 경로가 필요하다. 행 단위로 검증하고, 모양이
+    // 어긋난 행만 버린다(하트비트는 best-effort).
+    let cli_installs: CliInstallEntry[] | undefined;
+    if (Array.isArray(body?.cli_installs)) {
+      const out: CliInstallEntry[] = [];
+      for (const row of body.cli_installs) {
+        if (!row || typeof row !== 'object') continue;
+        const cli = typeof row.cli === 'string' ? row.cli : '';
+        const path = typeof row.path === 'string' ? row.path : '';
+        if (!cli || !path) continue;
+        out.push({
+          cli,
+          path,
+          version: typeof row.version === 'string' && row.version ? row.version : null,
+          method: typeof row.method === 'string' ? row.method : '',
+          updatable: row.updatable === true,
+          needs_sudo: row.needs_sudo === true,
+          // undefined(구버전 매니저가 안 보냄) 와 null(보냈고 "모른다") 을 구분해
+          // 그대로 나른다 — 화면의 판정이 그 둘에서 달라진다.
+          ...(row.latest_version === undefined
+            ? {}
+            : { latest_version: typeof row.latest_version === 'string' && row.latest_version ? row.latest_version : null }),
+          active: row.active === true,
+        });
+      }
+      if (out.length) cli_installs = out;
+    }
+
+    // 같은 CLI 들의 **최신 배포 버전**(npm 레지스트리). cli_versions 와 짝이며 같은
+    // 관대한 검증을 쓴다. 이 둘이 함께 있어야 UI 가 "올릴 게 있는가" 를 판정할 수
+    // 있다 — 없으면 Update 버튼은 영원히 활성이다. 조회에 실패한 CLI 는 키가 빠져
+    // 오므로, 키 부재를 "최신" 으로 해석하면 안 된다(화면 쪽 계약).
+    let cli_latest_versions: Record<string, string> | undefined;
+    if (
+      body?.cli_latest_versions &&
+      typeof body.cli_latest_versions === 'object' &&
+      !Array.isArray(body.cli_latest_versions)
+    ) {
+      const out: Record<string, string> = {};
+      for (const [cli, version] of Object.entries(body.cli_latest_versions)) {
+        if (typeof version === 'string' && version) out[cli] = version;
+      }
+      if (Object.keys(out).length) cli_latest_versions = out;
+    }
+
     // Per-managed-agent credential metadata (manager-mode only). Each row
     // is opportunistically validated — bad shapes are dropped silently
     // because the heartbeat is best-effort and a rolling-out manager
@@ -748,6 +804,8 @@ export class AgentManagerController {
       active_run_workspaces,
       available_models,
       cli_versions,
+      cli_installs,
+      cli_latest_versions,
       latest_version,
       update_available,
       install_mode,
@@ -1386,6 +1444,277 @@ export class AgentManagerController {
     // ledger before emitting (ack-race safety).
     const { command_id, issued_at } = await this.commands.issue(inst, command, args, user.id);
     return res.status(202).json({ ok: true, command_id, issued_at });
+  }
+
+  // ─── 권한 상승 명령 승인 (세션/채팅 경로) ──────────────────────────────
+  //
+  // agent 는 `request_privileged_command` MCP 툴로 요청만 할 수 있고, 실행은
+  // **운영자가 화면에서 명령을 읽고 승인하면서 비밀번호를 칠 때만** 일어난다.
+  // agent 에게 상시 sudo 를 주면 그 agent 는 root 이고, 프롬프트 인젝션 한 번이
+  // 곧 루트 권한 탈취가 된다. 기본값은 거부다 — 승인 없이 창이 지나면 만료된다.
+
+  @ApiBearerAuth('user-session')
+  @Get('api/admin/agent-manager/privileged-commands')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '승인 대기 중인 권한 상승 명령 목록' })
+  async listPrivilegedCommands(
+    @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    return res.json(this.privileged.listPending(workspaceId));
+  }
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/privileged-commands/:id/approve')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '권한 상승 명령을 승인하고 sudo 비밀번호를 1회용 티켓으로 건넨다' })
+  async approvePrivilegedCommand(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (!password) return res.status(400).json({ error: 'password is required' });
+
+    const pending = this.privileged.get(String(id || ''));
+    if (!pending) return res.status(404).json({ error: 'request not found or expired' });
+    if (pending.status !== 'pending') {
+      return res.status(409).json({ error: `request is already ${pending.status}` });
+    }
+    const inst = this.registry.get(pending.instance_id);
+    if (!inst) return res.status(410).json({ error: 'the requesting manager is no longer online' });
+
+    const approved = this.privileged.approve(pending.request_id, user.id);
+    if (!approved) return res.status(409).json({ error: 'request is no longer pending' });
+
+    // 티켓 scope 를 이 요청에 못 박는다 — 티켓 id 가 새도 다른 명령에 못 쓴다.
+    const ticket = this.sudoTickets.mint({
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      scope: { kind: 'privileged_command', request_id: approved.request_id },
+      password,
+      issued_by: user.id,
+    });
+
+    // args 에 명령을 싣지 않는다. 매니저는 승인된 정본을 다시 받아 간다.
+    const { command_id, issued_at } = await this.commands.issue(
+      inst,
+      'run_privileged_command' as AgentManagerCommand,
+      { request_id: approved.request_id, sudo_ticket: ticket.ticket_id },
+      user.id,
+    );
+    this.logService.info(
+      'AgentManager',
+      `Privileged command approved — ${approved.command} (agent=${approved.agent_name}, host=${approved.hostname})`,
+      {
+        request_id: approved.request_id,
+        command: approved.command,
+        args: approved.args,
+        agent_id: approved.agent_id,
+        instance_id: approved.instance_id,
+        approved_by: user.id,
+      },
+    );
+    return res.status(202).json({ ok: true, command_id, issued_at, request_id: approved.request_id });
+  }
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/privileged-commands/:id/deny')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '권한 상승 명령을 거부한다' })
+  async denyPrivilegedCommand(
+    @Param('id') id: string,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const denied = this.privileged.deny(String(id || ''), user.id);
+    if (!denied) return res.status(404).json({ error: 'request not found, expired, or already decided' });
+    // 거부는 아무것도 만들지 않는다 — @Post 의 기본 201 을 그대로 두면 "생성됨" 으로
+    // 읽힌다. 명시적으로 200 을 쓴다.
+    return res.status(200).json({ ok: true, request_id: denied.request_id, status: denied.status });
+  }
+
+  @ApiSecurity('agent-key')
+  @Get('api/agent/privileged-command/:id')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: '매니저 → 서버: 운영자가 승인한 **정본** argv 를 받아 간다 (실행 직전)',
+  })
+  async claimPrivilegedCommand(
+    @Param('id') id: string,
+    @Query('instance_id') instanceId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const guard = this.requireManagerInstance(req, instanceId);
+    if ('error' in guard) return res.status(guard.status).json({ error: guard.error });
+
+    const claimed = this.privileged.claim(String(id || ''), guard.instance_id);
+    if (!claimed.ok) {
+      const status = claimed.reason === 'wrong_instance' ? 403 : claimed.reason === 'unknown' ? 404 : 409;
+      return res.status(status).json({ error: claimed.reason });
+    }
+    const { request } = claimed;
+    // 매니저가 실행에 필요한 것만 준다. 승인자·이유 같은 것은 여기서 쓸모가 없다.
+    return res.json({
+      request_id: request.request_id,
+      command: request.command,
+      args: request.args,
+      cwd: request.cwd,
+    });
+  }
+
+  @ApiSecurity('agent-key')
+  @Post('api/agent/privileged-command/:id/result')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: '매니저 → 서버: 권한 상승 명령의 실행 결과' })
+  async reportPrivilegedCommandResult(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const instanceId = typeof body?.instance_id === 'string' ? body.instance_id : '';
+    const guard = this.requireManagerInstance(req, instanceId);
+    if ('error' in guard) return res.status(guard.status).json({ error: guard.error });
+
+    const done = this.privileged.complete(String(id || ''), guard.instance_id, {
+      ok: body?.ok === true,
+      output: typeof body?.output === 'string' ? body.output : '',
+      failure: typeof body?.failure === 'string' ? body.failure : null,
+    });
+    if (!done) return res.status(404).json({ error: 'request not found or not awaiting a result' });
+    return res.status(201).json({ ok: true });
+  }
+
+  /** 매니저 전용 엔드포인트의 공통 신원 확인 — 이 API 키가 그 인스턴스를
+   *  소유한 매니저의 것인가. 비밀·정본을 내주기 전에 반드시 통과해야 한다. */
+  private requireManagerInstance(
+    req: Request,
+    instanceId: string,
+  ): { instance_id: string } | { error: string; status: number } {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    if (!callerAgentId) return { error: 'unauthenticated', status: 401 };
+    const id = String(instanceId || '').trim();
+    if (!id) return { error: 'instance_id is required', status: 400 };
+    const inst = this.registry.get(id);
+    if (!inst) return { error: 'instance not found or expired', status: 404 };
+    if (inst.agent_id !== callerAgentId) return { error: 'caller does not own this instance', status: 403 };
+    return { instance_id: inst.instance_id };
+  }
+
+  // ─── 일회용 sudo 티켓 ───────────────────────────────────────────────────
+  //
+  // 운영자가 방금 입력한 비밀번호를, 저장하지 않고 매니저에게 한 번만 건넨다.
+  // 비밀번호는 **이 요청의 바디** 와 **매니저가 직접 당겨 가는 응답** 두 곳에만
+  // 존재하고, SSE 페이로드·커맨드 원장·활동 로그·ack 어디에도 들어가지 않는다.
+  // 자세한 근거는 SudoTicketService 의 docstring 참고.
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/instances/:id/sudo-ticket')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({
+    summary: '권한 상승이 필요한 작업 하나에 쓸 일회용 sudo 티켓을 발급한다 (TTL 120초, 1회용)',
+  })
+  async mintSudoTicket(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const inst = this.registry.get(id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (!password) return res.status(400).json({ error: 'password is required' });
+
+    // scope 는 발급 시점에 고정된다 — 티켓 id 가 새더라도 다른 대상에 쓸 수 없다.
+    const scope = this.parseSudoScope(body?.scope);
+    if (!scope) return res.status(400).json({ error: 'scope is required and must name what the ticket may do' });
+
+    const minted = this.sudoTickets.mint({
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      scope,
+      password,
+      issued_by: user.id,
+    });
+    // 응답에 비밀번호를 되돌려주지 않는다 — 브라우저는 자기가 보낸 값을 이미 안다.
+    return res.status(201).json(minted);
+  }
+
+  @ApiBearerAuth('user-session')
+  @Delete('api/admin/agent-manager/sudo-ticket/:ticketId')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '쓰이지 않은 sudo 티켓을 즉시 폐기한다 (모달을 닫는 등)' })
+  async revokeSudoTicket(
+    @Param('ticketId') ticketId: string,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    this.sudoTickets.revoke(String(ticketId || ''));
+    // 있었는지 없었는지 알려주지 않는다 — 티켓 id 존재 여부는 정보다.
+    return res.json({ ok: true });
+  }
+
+  @ApiSecurity('agent-key')
+  @Get('api/agent/sudo-ticket/:ticketId')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: '매니저 → 서버: sudo 티켓의 비밀번호를 1회 받아 간다 (받는 즉시 서버에서 삭제)',
+  })
+  async consumeSudoTicket(
+    @Param('ticketId') ticketId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    // 신원 없는 호출은 여기서만 거부한다 — `/command/ack` 등 다른 매니저 엔드포인트는
+    // identity 가 없으면 소유권 검사를 건너뛰는데(AGENT_DEV_MODE 에서 가드가 아예
+    // 붙이지 않는다), 이 엔드포인트가 내주는 값은 **root 비밀번호**다. "누가
+    // 집어가는지 모르지만 일단 준다" 는 이 하나에 대해서는 성립하지 않는다.
+    // 대가: AGENT_DEV_MODE=true 로 띄운 개발 환경에서는 sudo 티켓이 동작하지 않는다
+    // (매니저는 "다시 누르세요" 로 보고한다). 의도한 절충이다.
+    if (!callerAgentId) return res.status(401).json({ error: 'unauthenticated' });
+
+    const result = this.sudoTickets.consume(String(ticketId || ''), String(callerAgentId));
+    if (!result.ok) {
+      // 사유를 구분해 돌려준다 — 매니저가 운영자에게 "다시 누르세요"(expired) 와
+      // "이 티켓은 당신 것이 아닙니다"(wrong_manager) 를 다르게 알려야 한다.
+      const status = result.reason === 'wrong_manager' ? 403 : 404;
+      return res.status(status).json({ error: result.reason });
+    }
+    // 이 응답이 비밀번호가 존재하는 마지막 순간이다. 서버 쪽 복사본은 consume()
+    // 이 이미 지웠다.
+    return res.json({ password: result.password, scope: result.scope });
+  }
+
+  /** 티켓 scope 파싱. 알 수 없는 모양은 거부한다 — "무엇에 쓸지 모르는 티켓" 은
+   *  곧 "무엇에든 쓸 수 있는 티켓" 이다. */
+  private parseSudoScope(raw: any): SudoTicketScope | null {
+    if (!raw || typeof raw !== 'object') return null;
+    if (raw.kind === 'cli_update') {
+      const cli = typeof raw.cli === 'string' ? raw.cli.trim() : '';
+      const bin = typeof raw.bin === 'string' ? raw.bin.trim() : '';
+      return cli && bin ? { kind: 'cli_update', cli, bin } : null;
+    }
+    if (raw.kind === 'privileged_command') {
+      const request_id = typeof raw.request_id === 'string' ? raw.request_id.trim() : '';
+      return request_id ? { kind: 'privileged_command', request_id } : null;
+    }
+    return null;
   }
 
   /**

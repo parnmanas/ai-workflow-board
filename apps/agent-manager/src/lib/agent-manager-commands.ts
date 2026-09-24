@@ -95,9 +95,17 @@ type CommandKind =
   // 목록만 다시 열거한다. args 없음. 재열거 직후 즉시 하트비트 1회를 보내
   // 서버 레지스트리가 다음 정기 tick(최대 30초)을 기다리지 않게 한다.
   | 'refresh_available_models'
-  // 호스트에 설치된 CLI 자체를 최신으로 올린다(`claude update` / `codex update`).
-  // args: { cli? } — 생략하면 대상 에이전트의 CLI. CLI 는 장비 전역이라 **범위는 Runtime Host** 다.
-  | 'update_cli';
+  // 호스트에 설치된 CLI 자체를 최신으로 올린다. args: { cli?, bin?, sudo_ticket? } —
+  // cli 를 생략하면 대상 에이전트의 CLI, bin 을 생략하면 지금 해석되는 설치본,
+  // sudo_ticket 은 권한 상승이 필요한 설치본에만 온다(비밀번호가 아니라 티켓 id).
+  // 범위는 에이전트가 아니라 **하나의 설치본**이다: 같은 CLI 를 여러 벌 두는 것은
+  // 정상 구성이라(vLLM 백엔드용 두 번째 claude) "이 장비의 claude" 는 애매하다.
+  | 'update_cli'
+  // 운영자가 화면에서 승인한 권한 상승 명령 하나. args: { request_id, sudo_ticket }.
+  // **실행할 명령은 args 에 없다** — 매니저가 승인된 정본을 서버에서 다시 받아
+  // 간다(claimPrivilegedCommand). 운영자가 읽고 승인한 것과 도는 것이 갈라지면
+  // 승인이라는 개념 자체가 무너지기 때문이다.
+  | 'run_privileged_command';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -134,6 +142,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'cli_login_cancel',
   'refresh_available_models',
   'update_cli',
+  'run_privileged_command',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -216,7 +225,23 @@ export interface CommandHandlerDeps {
    *  어댑터 레지스트리·바이너리 해석·버전 재측정·하트비트가 모두 main.ts 소유라
    *  여기서는 배선된 콜백만 부른다. refreshAvailableModels 와 같은 이유로 optional —
    *  이 dep 없이 만든 레거시 테스트 하네스는 명확한 사유와 함께 error 로 ack 된다. */
-  updateCli?: ((cli: string) => Promise<UpdateCliResult>) | null;
+  updateCli?:
+    | ((cli: string, bin?: string | null, sudoTicket?: string | null) => Promise<UpdateCliResult>)
+    | null;
+  /** 운영자가 승인한 권한 상승 명령 하나를 실행한다. 배선되지 않은 매니저는
+   *  명확한 사유로 error ack 한다 — 조용히 성공한 척하지 않는다. */
+  runPrivilegedCommand?:
+    | ((requestId: string, sudoTicket: string) => Promise<RunPrivilegedCommandResult>)
+    | null;
+}
+
+/** run_privileged_command 한 번의 결과 — ack 문구를 정하는 데 쓴다. */
+export interface RunPrivilegedCommandResult {
+  /** 승인된 명령을 실제로 돌렸는지. */
+  ran: boolean;
+  ok: boolean;
+  /** 사람이 읽는 한 줄. 비밀번호는 절대 여기 담기지 않는다. */
+  detail: string;
 }
 
 /** update_cli 한 번의 결과. */
@@ -233,6 +258,19 @@ export interface UpdateCliResult {
   detail: string;
   /** 사람이 읽는 호스트 이름 — "어느 장비의 CLI 를 올린 건지" 를 ack 에 남긴다. */
   hostLabel: string;
+  /** 실제로 올린 설치본의 경로. before/after 는 이 파일에서 읽은 값이다 —
+   *  어느 설치본의 버전인지가 ack 를 읽는 운영자에게 중요하다(같은 CLI 를
+   *  여러 벌 두는 것은 정상 구성이다: ragnar 의 vLLM 용 두 번째 claude). */
+  resolvedPath?: string | null;
+  /** 그 설치본을 어떻게 올렸는지(`npm --prefix …` / `claude update` / …). */
+  installMethod?: string | null;
+  /** 이 설치본을 올리려면 root 가 필요한지 — UI 가 비밀번호를 물을지 정한다. */
+  needsSudo?: boolean;
+  /** 권한 상승 자체가 실패한 사유(`bad_password` 등). 명령 실패와 구분된다. */
+  sudoFailure?: string | null;
+  /** 같은 CLI 의 다른 설치본들. **실패가 아니다** — 운영자가 "저것도 올릴까" 를
+   *  판단할 수 있도록 그대로 싣는다. */
+  otherInstalls?: Array<{ path: string; version: string | null }>;
   /** 즉시 하트비트 1회가 실제로 서버에 도달했는지. false 여도 커맨드는 성공이며,
    *  다음 정기 하트비트(최대 30초)가 같은 버전을 다시 싣고 간다. */
   heartbeatPosted: boolean;
@@ -333,6 +371,8 @@ export class AgentManagerCommandHandler {
         return this.#refreshAvailableModels();
       case 'update_cli':
         return this.#updateCli(payload);
+      case 'run_privileged_command':
+        return this.#runPrivilegedCommand(payload);
     }
   }
 
@@ -1097,16 +1137,51 @@ export class AgentManagerCommandHandler {
       }
       cli = ctx.cli;
     }
-    const result = await update(cli);
-    if (!result.supported) {
-      return `update_cli: ${cli} has no self-updater — update it on ${result.hostLabel} yourself (for example with npm -g)`;
-    }
+    // args.bin — 같은 CLI 가 여러 벌 깔린 호스트에서 **어느 설치본**을 올릴지.
+    // 생략하면 지금 해석되는 설치본. 이 값은 SSE 로 들어온 임의의 문자열이므로
+    // 실행 전에 매니저가 스스로 열거한 후보 목록과 대조한다(main.ts 의
+    // updateCli 배선) — 여기서는 문자열 정리만 한다.
+    const bin = typeof payload.args?.bin === 'string' ? payload.args.bin.trim() : '';
+    // args.sudo_ticket — 권한 상승이 필요한 설치본을 올릴 때만 온다. **티켓 id 일
+    // 뿐 비밀번호가 아니다**: 매니저가 권한 상승이 실제로 필요한 순간에 이 id 로
+    // 서버에서 비밀번호를 1회 당겨 간다(rest.fetchSudoTicket). 그래서 이 값이
+    // SSE 페이로드·커맨드 원장·활동 로그에 남아도 비밀이 새지 않는다.
+    const sudoTicket = typeof payload.args?.sudo_ticket === 'string' ? payload.args.sudo_ticket.trim() : '';
+    const result = await update(cli, bin || null, sudoTicket || null);
     if (!result.ok) throw new Error(`update_cli ${cli}: ${result.detail}`);
-    const moved = result.before && result.after && result.before !== result.after;
+    // detail 에는 이미 "무엇이 어느 경로에서 어떤 방법으로" 가 들어 있다
+    // (runCliUpdate). installMethod 를 여기서 한 번 더 붙이면 같은 말이 두 번이다 —
+    // 그 필드는 UI 와 로그의 몫으로 둔다.
     return (
-      `update_cli ok: ${cli} ${moved ? `${result.before} → ${result.after}` : `stays at ${result.after ?? result.before ?? 'unknown'}`}` +
+      `update_cli ok: ${result.detail}` +
+      (result.otherInstalls && result.otherInstalls.length
+        ? ` — other installs on this host: ${result.otherInstalls
+            .map((i) => `${i.path}=${i.version ?? 'unknown'}`)
+            .join(', ')}`
+        : '') +
       (result.heartbeatPosted ? '' : ' (version reaches the UI on the next heartbeat)')
     );
+  }
+
+  /**
+   * 운영자가 승인한 권한 상승 명령 하나를 실행한다.
+   *
+   * 여기서 하는 일은 배선된 콜백을 부르는 것뿐이다 — 정본 argv 를 다시 받아 오고
+   * sudo 비밀번호를 티켓으로 당겨 오는 일은 main.ts 가 맡는다. args 에는 명령이
+   * 없다는 사실이 이 커맨드의 요점이라, args 로부터 명령을 조립하는 코드가 여기
+   * 생기지 않도록 의도적으로 얇게 둔다.
+   */
+  async #runPrivilegedCommand(payload: AgentManagerCommandPayload): Promise<string> {
+    const run = this.#deps.runPrivilegedCommand;
+    if (!run) throw new Error('run_privileged_command is not wired on this manager');
+    const requestId = typeof payload.args?.request_id === 'string' ? payload.args.request_id.trim() : '';
+    const sudoTicket = typeof payload.args?.sudo_ticket === 'string' ? payload.args.sudo_ticket.trim() : '';
+    if (!requestId) throw new Error('run_privileged_command: args.request_id is required');
+    if (!sudoTicket) throw new Error('run_privileged_command: args.sudo_ticket is required');
+
+    const result = await run(requestId, sudoTicket);
+    if (!result.ok) throw new Error(`run_privileged_command: ${result.detail}`);
+    return `run_privileged_command ok: ${result.detail}`;
   }
 
   async #updatePlugins(payload: AgentManagerCommandPayload): Promise<string> {

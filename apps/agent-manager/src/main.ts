@@ -47,11 +47,17 @@ import {
 } from './lib/orphan-cleanup.js';
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
-import { createAdapter } from './lib/cli-adapters/index.js';
+import { createAdapter, KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index.js';
 // ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
 import { gatherAvailableModels } from './lib/available-models.js';
-import { runCliUpdate } from './lib/cli-update.js';
+import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
+import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
+import { runWithSudo } from './lib/sudo-runner.js';
+import { describeInstallMethod, detectInstallMethod, type InstallMethod } from './lib/cli-install-method.js';
+import { readSnapChannelLatest } from './lib/snap-channel.js';
+import { canonicalPathKey } from './lib/cli-resolver.js';
+import type { CliInstallEntry } from './lib/instance-heartbeat.js';
 import {
   checkAuxiliaryCli,
   discoverRuntimeCapabilities,
@@ -85,6 +91,9 @@ import {
   postDispatchAckRaw,
   postCommandAckRaw,
   postCliLoginProgressRaw,
+  fetchSudoTicket,
+  claimPrivilegedCommand,
+  postPrivilegedCommandResult,
 } from './lib/rest.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
@@ -691,6 +700,110 @@ async function runRuntime(
   // 하트비트는 provider 로 매 tick 읽어 가므로 교체 즉시 다음 전송분에 실린다.
   let cliVersions: Record<string, string> = {};
 
+  // 같은 CLI 들의 최신 배포 버전(npm 레지스트리). 설치 버전과 짝을 이뤄야 UI 가
+  // "올릴 게 있는가" 를 알 수 있다 — 이 값이 없으면 Update 버튼은 영원히 활성이고
+  // 운영자는 눌러 보기 전엔 최신인지 알 수 없다(실제 신고). 부팅 직후 한 번,
+  // 그다음은 느린 타이머로, 그리고 update_cli 직후에 다시 읽는다.
+  let cliLatestVersions: Record<string, string> = {};
+
+  // 설치본 단위 목록. 한 CLI 가 여러 벌 깔린 호스트(vLLM 백엔드용 두 번째 claude)
+  // 에서는 "cliType → 버전" 하나로는 화면이 무엇을 올릴지 고를 수 없다. 여기에는
+  // 경로·버전·설치 방법·지금 해석되는 것인지까지 싣는다. 열거는 설치본마다
+  // `--version` 한 번이라 부팅과 update_cli 직후에만 돌린다.
+  let cliInstalls: CliInstallEntry[] = [];
+
+  /**
+   * 이 **설치본**의 최신 버전. 채널마다 최신이 다르다:
+   *   - npm 에서 온 설치본 → npm 레지스트리의 latest
+   *   - snap → 그 설치본이 **추적 중인 채널**의 최신(`snap info`). refresh 는 그
+   *     채널 안에서만 올리므로, 채널이 멈춰 있으면 그 값이 곧 도달 가능한 최신이다.
+   *   - 그 밖(homebrew / native installer / 미상) → 모른다(null)
+   *
+   * null 은 "최신이다" 가 아니라 "모른다" 이고, 화면은 모를 때 버튼을 잠그지 않는다.
+   */
+  const latestForInstall = async (
+    cli: string,
+    installPath: string,
+    method: InstallMethod,
+  ): Promise<string | null> => {
+    if (npmLatestApplies(method)) return cliLatestVersions[cli] ?? null;
+    if (method.kind === 'snap') {
+      const name = candidateKeyFor(cli, installPath);
+      const info = await readSnapChannelLatest(name);
+      return info.latest;
+    }
+    return null;
+  };
+
+  const refreshCliInstalls = async (): Promise<void> => {
+    const next: CliInstallEntry[] = [];
+    // 등록된 어댑터 전부를 훑는다 — 미설치 CLI 는 listCliInstalls 가 빈 목록을
+    // 돌려주므로 결과에 들어오지 않는다.
+    for (const cli of KNOWN_ADAPTER_CLI_TYPES) {
+      let active: string | null = null;
+      try {
+        active = createAdapter(cli).resolveBin();
+      } catch {
+        /* 미설치 — 아래 열거가 비면 그대로 건너뛴다. */
+      }
+      // 다른 CLI 의 바이너리를 빌려 쓰는 어댑터(deepseek → claude)는 건너뛴다.
+      // 같은 설치본을 두 이름으로 두 번 싣는 셈이고, 화면에서는 한 번 올리면
+      // 둘 다 올라가는 것을 두 줄로 보여주는 꼴이 된다. 빌려주는 쪽(claude)을
+      // 어차피 이 루프가 따로 열거한다.
+      if (active) {
+        const owner = candidateKeyFor(cli, active);
+        if (owner !== cli && (KNOWN_ADAPTER_CLI_TYPES as readonly string[]).includes(owner)) continue;
+      }
+      try {
+        for (const install of await listCliInstalls(cli)) {
+          next.push({
+            cli,
+            path: install.path,
+            version: install.version,
+            method: describeInstallMethod(install.method),
+            updatable:
+              Boolean(install.method.argv) ||
+              Boolean(install.method.elevatedArgv) ||
+              Boolean(createAdapter(cli).cliUpdate()),
+            needs_sudo: !install.method.argv && Boolean(install.method.elevatedArgv),
+            // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. npm 채널에서 온
+            // 설치본에만 npm 의 latest 를 붙인다.
+            latest_version: await latestForInstall(cli, install.path, install.method),
+            active: Boolean(active && canonicalPathKey(active) === canonicalPathKey(install.path)),
+          });
+        }
+      } catch (err: any) {
+        log(`cli install enumeration failed for ${cli}: ${err?.message ?? err}`);
+      }
+    }
+    cliInstalls = next;
+
+    // `cli_versions` 는 **지금 해석되는 설치본**의 버전이다(지정 없이 spawn 하면
+    // 실행될 그것). 업데이트 결과를 그대로 여기 덮어쓰면, 활성이 아닌 설치본을
+    // 올린 뒤 CLI 전체가 그 버전인 것처럼 보인다 — rolf 실측: snap codex(0.114.0)를
+    // 건드린 순간 모든 에이전트 상세가 codex 를 0.114.0 으로 표시하고 Update 버튼이
+    // 되살아났다(실제 활성 설치본은 npm 의 0.156.1). 그래서 열거 결과의 active 행에서
+    // 되짚는다. 여기서 열거하지 않는 키(gh/git 등 부팅 probe 값)는 건드리지 않는다.
+    const fromActive: Record<string, string> = {};
+    for (const row of next) {
+      if (row.active && row.version) fromActive[row.cli] = row.version;
+    }
+    cliVersions = { ...cliVersions, ...fromActive };
+  };
+
+  const refreshCliLatestVersions = async (): Promise<void> => {
+    const targets = Object.keys(cliVersions);
+    if (targets.length === 0) return;
+    try {
+      const next = await fetchCliLatestVersions(targets, { log });
+      // 통째 교체한다 — 이번 회차에 조회 실패한 CLI 는 키가 빠져야 UI 가
+      // "모름" 으로 접힌다(이전 회차 값을 남기면 낡은 최신이 고정된다).
+      cliLatestVersions = next;
+    } catch (err: any) {
+      log(`cli latest-version refresh failed: ${err?.message ?? err}`);
+    }
+  };
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
@@ -721,26 +834,116 @@ async function runRuntime(
       const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
       return { models: availableModels, heartbeatPosted };
     },
-    // 호스트에 설치된 CLI 자체를 올린다(`claude update` / `codex update` — 어댑터의
-    // cliUpdate()). 업데이트가 끝나면 그 CLI 의 버전과 모델 목록을 다시 읽어
-    // 하트비트 캐시를 교체하고 즉시 한 번 보낸다 — 운영자가 UI 에서 바로 새 버전을
-    // 보게 한다. 모델 재열거는 best-effort 라 실패해도 업데이트를 실패시키지 않는다.
-    updateCli: async (cli: string) => {
-      const outcome = await runCliUpdate(cli, { log });
-      if (outcome.after) cliVersions = { ...cliVersions, [cli]: outcome.after };
-      else if (outcome.supported) {
-        const { [cli]: _gone, ...rest } = cliVersions;
-        cliVersions = rest;
+    // 호스트에 설치된 CLI **한 설치본**을 올린다. 방법은 설치 레이아웃이 정한다
+    // (`npm --prefix <prefix> install -g <pkg>@latest` / `bun add -g` / CLI 자체
+    // 업데이터 …) — cli-install-method.ts 참고. 끝나면 설치 목록·버전·모델을 다시
+    // 읽어 하트비트 캐시를 교체하고 즉시 한 번 보낸다. 모델 재열거는 best-effort
+    // 라 실패해도 업데이트를 실패시키지 않는다.
+    //
+    // `bin` 은 SSE 로 들어온 값이라 **절대 그대로 실행하지 않는다**: 매니저가 스스로
+    // 열거한 설치본 목록에 있는 경로만 받아들인다. 임의 경로를 실행하면 커맨드
+    // 하나가 호스트에서 무엇이든 돌릴 수 있는 통로가 된다.
+    updateCli: async (cli: string, bin?: string | null, sudoTicket?: string | null) => {
+      let target: string | null = null;
+      if (bin) {
+        const known = await listCliInstalls(cli);
+        const match = known.find((i) => i.path === bin || canonicalPathKey(i.path) === canonicalPathKey(bin));
+        if (!match) {
+          throw new Error(
+            `update_cli: ${bin} is not a known ${cli} install on this host ` +
+              `(known: ${known.map((i) => i.path).join(', ') || 'none'})`,
+          );
+        }
+        target = match.path;
       }
-      if (outcome.supported && outcome.ok) {
+      // 이 설치본의 채널 기준 최신. npm 판의 숫자를 snap 설치본에 들이대지 않는다.
+      let targetLatest: string | null = null;
+      try {
+        const probeBin = target ?? createAdapter(cli).resolveBin();
+        targetLatest = await latestForInstall(cli, probeBin, detectInstallMethod(probeBin, createAdapter(cli).updatePackage()));
+      } catch {
+        /* 해석 실패 — 최신을 모른 채로 진행한다(업데이터의 말을 믿되 그렇다고 적는다). */
+      }
+      const outcome = await runCliUpdate(
+        cli,
+        { log },
+        {
+          bin: target,
+          // 최신 버전을 함께 넘긴다 — "버전이 안 움직였다" 를 *이미 최신* 과
+          // *못 올렸다* 로 가르는 유일한 근거다(없으면 업데이터의 종료 코드를
+          // 믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다).
+          latest: targetLatest,
+          // 권한 상승이 실제로 필요한 분기에 도달했을 때만 불린다. 티켓이 안 왔으면
+          // 아예 배선하지 않아, 비밀번호를 당겨 올 수단 자체가 없는 상태로 돈다.
+          getSudoPassword: sudoTicket
+            ? async () => (await fetchSudoTicket(config, sudoTicket))?.password ?? null
+            : null,
+        },
+      );
+      // cliVersions 는 여기서 직접 건드리지 않는다 — 아래 refreshCliInstalls 가
+      // **활성 설치본** 기준으로 되짚는다. 방금 올린 것이 활성이 아닐 수 있다.
+      if (outcome.ok) {
         try {
           availableModels = await gatherAvailableModels();
         } catch (err: any) {
           log(`update_cli: model re-enumeration failed after ${cli} update: ${err?.message ?? err}`);
         }
       }
+      // 설치 목록을 다시 읽어 새 버전이 UI 의 그 행에 바로 반영되게 한다.
+      await refreshCliInstalls();
+      // 최신 버전도 다시 읽는다. 방금 올렸다면 설치 == 최신이 되어 UI 의 버튼이
+      // 곧바로 비활성으로 접히고, 올리지 못했다면 그대로 활성으로 남는다 —
+      // 어느 쪽이든 다음 하트비트 한 번으로 화면이 사실과 맞는다.
+      await refreshCliLatestVersions();
       const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
       return { ...outcome, heartbeatPosted };
+    },
+    // 운영자가 화면에서 승인한 권한 상승 명령 하나를 실행한다.
+    //
+    // 순서가 요점이다: **정본 argv 를 먼저 받아 오고**(claim) 그 다음에 비밀번호를
+    // 당겨 온다. args 에는 명령이 없고, 여기서도 args 로부터 명령을 만들지 않는다 —
+    // 운영자가 화면에서 읽고 승인한 argv 와 실제로 도는 argv 가 같아야 승인이
+    // 의미를 갖는다.
+    runPrivilegedCommand: async (requestId: string, sudoTicket: string) => {
+      const instanceId = instanceHeartbeat._real?.instanceId ?? null;
+      if (!instanceId) return { ran: false, ok: false, detail: 'this manager has no live instance id yet' };
+
+      const approved = await claimPrivilegedCommand(config, instanceId, requestId);
+      if (!approved) {
+        return {
+          ran: false,
+          ok: false,
+          detail: 'could not fetch the approved command (expired, denied, or not ours)',
+        };
+      }
+
+      const printable = `${approved.command} ${approved.args.join(' ')}`.trim();
+      const ticket = await fetchSudoTicket(config, sudoTicket);
+      if (!ticket?.password) {
+        const detail = 'no usable sudo ticket — ask the operator to approve again';
+        await postPrivilegedCommandResult(config, instanceId, requestId, { ok: false, output: '', failure: detail });
+        return { ran: false, ok: false, detail };
+      }
+
+      log(`[privileged] running approved command on behalf of request ${requestId.slice(0, 8)}: ${printable}`);
+      const r = await runWithSudo(
+        { cmd: approved.command, args: approved.args },
+        ticket.password,
+        // cwd 는 sudo-runner 의 계약 밖이다 — 승인 화면이 보여준 것과 다른 곳에서
+        // 돌 여지를 만들지 않기 위해, 현재는 매니저의 작업 디렉터리에서 돈다.
+      );
+      await postPrivilegedCommandResult(config, instanceId, requestId, {
+        ok: r.ok,
+        output: r.output,
+        failure: r.reason,
+      });
+      return {
+        ran: true,
+        ok: r.ok,
+        detail: r.ok
+          ? `ran ${printable} as root`
+          : `${printable} failed (${r.reason ?? 'unknown'})`,
+      };
     },
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {
@@ -951,6 +1154,7 @@ async function runRuntime(
   };
 
   let uploadTimer: NodeJS.Timeout | null = null;
+  let cliLatestTimer: NodeJS.Timeout | null = null;
 
   // Outbox backstop — a POST can fail transiently while the SSE stream itself
   // stays up (single dropped request, brief LB hiccup), in which case no
@@ -1162,6 +1366,8 @@ async function runRuntime(
       // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
       availableModelsProvider: () => availableModels,
       cliVersionsProvider: () => cliVersions,
+      cliLatestVersionsProvider: () => cliLatestVersions,
+      cliInstallsProvider: () => cliInstalls,
       acpSessionClis,
       // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
       agentSessionsProvider: () => agentSessionRunner.liveStates(),
@@ -1333,6 +1539,15 @@ async function runRuntime(
       },
     });
     instanceHeartbeat._real.start();
+    // 최신 CLI 버전 조회는 npm 레지스트리 왕복이라 부팅을 막지 않는다 — 하트비트를
+    // 먼저 띄우고 뒤따라 채운다(첫 tick 은 필드 없이 나가고, 조회가 끝나면 다음
+    // tick 부터 실린다). 이후는 느린 타이머 — CLI 배포는 시간 단위로 움직이고,
+    // 여기서 레지스트리를 자주 치는 것은 화면에 아무것도 더해 주지 않는다.
+    void refreshCliInstalls().then(() => refreshCliLatestVersions());
+    cliLatestTimer = setInterval(() => {
+      void refreshCliInstalls().then(() => refreshCliLatestVersions());
+    }, CLI_LATEST_REFRESH_MS);
+    cliLatestTimer.unref?.();
     const fireUpload = (): void => {
       uploadIfNewErrors(config, agentId, version).catch(() => {});
     };
@@ -1353,6 +1568,7 @@ async function runRuntime(
     log(`agent-manager received ${signal} — terminating subagents (reason=${stopReason})`);
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
+    if (cliLatestTimer) clearInterval(cliLatestTimer);
     updateChecker.stop();
     if (uploadTimer) {
       clearInterval(uploadTimer);

@@ -50,6 +50,7 @@ import type {
   SubagentTranscript,
   AgentLiveSession,
   AgentManagerInstance,
+  PrivilegedCommandRequest,
   PairingTokenMint,
   PairingTokenSafe,
   AgentManagerCommandKind,
@@ -91,7 +92,8 @@ import type {
   OrchestrationMissionListItem,
   OrchestrationMissionDetail,
   OrchestrationTimelineEvent,
-  OrchestrationAssignableAgent,
+  OrchestrationRuntimeHost,
+  OrchestrationSlotSpecInput,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
   OntologyGraphSnapshotResponse,
@@ -760,12 +762,25 @@ export const api = {
   // workspaceId overrides the ambient X-Workspace-Id header for this one call —
   // see getChannels above for why callers reacting to a workspaceId prop change
   // need this instead of relying on the ambient header.
+  // Note: this endpoint HIDES the identities AWB provisions for Orchestration
+  // team slots. Every caller here is a picker ("who should own this ticket /
+  // join this room?") where they are never the right answer — dispatching to
+  // one directly would run work outside the mission that owns it. The
+  // management surfaces see them: `/agents/dashboard` is unfiltered, and
+  // `getAgentsAll` opts in below.
   getAgents: (workspaceId?: string) => {
     const init: RequestInit = {};
     if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
     return request<any[]>('/agents', init);
   },
-  getAgentsAll: () => request<any[]>('/agents?scope=all'),
+  /**
+   * Cross-workspace agent listing for the admin surfaces. `includeOrchestration`
+   * adds the team-slot identities the plain listing hides — the Runtime Host's
+   * managed-agent panel wants them, because they really are running on that host
+   * and an operator debugging it needs to see them.
+   */
+  getAgentsAll: (opts?: { includeOrchestration?: boolean }) =>
+    request<any[]>(`/agents?scope=all${opts?.includeOrchestration ? '&include_orchestration=1' : ''}`),
   // Phase 3 Plan 03-02: dashboard snapshot with current_task + bool-coerced is_online
   getAgentDashboard: (workspaceId: string): Promise<DashboardAgent[]> =>
     request<DashboardAgent[]>(`/agents/dashboard?workspace_id=${encodeURIComponent(workspaceId)}`),
@@ -1693,6 +1708,51 @@ export const api = {
   // is the dispatch ack only; the manager later calls /command/ack with the
   // execution outcome (currently consumed only by server logs, surfacing it
   // in the UI is a future enhancement).
+  /**
+   * 권한 상승이 필요한 작업 하나에 쓸 **일회용** sudo 티켓을 발급받는다.
+   *
+   * 비밀번호는 이 요청 바디에만 실린다 — 돌아오는 것은 티켓 id 뿐이고, 그 id 를
+   * 커맨드 args 에 실어 보낸다. 매니저는 권한 상승이 실제로 필요한 순간에 그 id
+   * 로 서버에서 비밀번호를 1회 당겨 간다. 그래서 SSE 페이로드·커맨드 원장·활동
+   * 로그 어디에도 비밀번호가 남지 않는다.
+   *
+   * 티켓은 120초 뒤 만료되고 1회만 쓸 수 있다. 화면이 커맨드를 끝내 보내지
+   * 않았다면 `revokeSudoTicket` 으로 즉시 태우는 것이 맞다.
+   */
+  mintSudoTicket: (
+    instanceId: string,
+    body: { password: string; scope: { kind: 'cli_update'; cli: string; bin: string } | { kind: 'privileged_command'; request_id: string } },
+  ) =>
+    request<{ ticket_id: string; expires_at: string }>(
+      `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/sudo-ticket`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** 승인 대기 중인 권한 상승 명령 목록(관리자). */
+  listPrivilegedCommands: () =>
+    request<PrivilegedCommandRequest[]>('/admin/agent-manager/privileged-commands'),
+
+  /**
+   * 권한 상승 명령을 승인한다. 비밀번호는 이 요청 바디에만 실리고, 서버가 즉시
+   * 일회용 티켓으로 바꿔 매니저에게 디스패치한다 — 저장되지 않는다.
+   */
+  approvePrivilegedCommand: (requestId: string, password: string) =>
+    request<{ ok: boolean; command_id: string; request_id: string }>(
+      `/admin/agent-manager/privileged-commands/${encodeURIComponent(requestId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ password }) },
+    ),
+
+  denyPrivilegedCommand: (requestId: string) =>
+    request<{ ok: boolean; status: string }>(
+      `/admin/agent-manager/privileged-commands/${encodeURIComponent(requestId)}/deny`,
+      { method: 'POST' },
+    ),
+
+  revokeSudoTicket: (ticketId: string) =>
+    request<{ ok: boolean }>(`/admin/agent-manager/sudo-ticket/${encodeURIComponent(ticketId)}`, {
+      method: 'DELETE',
+    }),
+
   sendAgentManagerCommand: (
     instanceId: string,
     body: { command: AgentManagerCommandKind; args?: Record<string, any> },
@@ -2081,6 +2141,18 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/cancel`,
       { method: 'POST' },
     ),
+  /**
+   * 세션 프로세스를 죽이고 같은 세션 id 로 다시 띄운다.
+   *
+   * 살아 있는 프로세스는 **기동 시점의 CLI 상태**를 물고 있어서, 그 사이에 CLI 를
+   * 올려도 모델 목록·기능이 갱신되지 않는다. 기록은 CLI 홈에 있으므로 재시작해도
+   * 대화는 이어진다 — 죽는 것은 프로세스뿐이다.
+   */
+  restartHostSession: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/restart`,
+      { method: 'POST' },
+    ),
   setHostSessionMode: (managerId: string, cli: string, sessionId: string, modeId: string) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/mode`,
@@ -2362,7 +2434,8 @@ export const api = {
     workspace_id: string;
     name: string;
     description?: string;
-    orchestrator_agent_id: string;
+    /** Orchestrator runtime spec — Runtime Host / CLI / model / working folder. */
+    orchestrator: OrchestrationSlotSpecInput;
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
     max_open_missions?: number;
@@ -2377,7 +2450,8 @@ export const api = {
       workspace_id: string;
       name?: string;
       description?: string;
-      orchestrator_agent_id?: string;
+      /** Partial patch over the orchestrator's stored runtime spec. */
+      orchestrator?: Partial<OrchestrationSlotSpecInput>;
       orchestrator_prompt?: string;
       max_parallel_steps?: number;
       max_open_missions?: number;
@@ -2393,12 +2467,29 @@ export const api = {
     ),
   addOrchestrationTeamMember: (
     teamId: string,
-    data: { workspace_id: string; agent_id: string; role_label?: string; capabilities?: string; max_concurrent?: number },
+    data: {
+      workspace_id: string;
+      /** Runtime spec for the new slot. There is no agent to pick — it is provisioned from this. */
+      runtime?: OrchestrationSlotSpecInput;
+      /** Put the orchestrator itself on the roster as an executing member (ignores `runtime`). */
+      as_orchestrator?: boolean;
+      role_label?: string;
+      capabilities?: string;
+      max_concurrent?: number;
+    },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeamMember: (
     teamId: string,
     memberId: string,
-    data: { workspace_id: string; role_label?: string; capabilities?: string; max_concurrent?: number; position?: number },
+    data: {
+      workspace_id: string;
+      /** Partial patch over the slot's stored runtime spec. Omit to leave it unchanged. */
+      runtime?: Partial<OrchestrationSlotSpecInput>;
+      role_label?: string;
+      capabilities?: string;
+      max_concurrent?: number;
+      position?: number;
+    },
   ) =>
     request<OrchestrationTeam>(`/orchestration/teams/${teamId}/members/${memberId}`, {
       method: 'PATCH',
@@ -2409,11 +2500,21 @@ export const api = {
       `/orchestration/teams/${teamId}/members/${memberId}?workspace_id=${encodeURIComponent(workspaceId)}`,
       { method: 'DELETE' },
     ),
-  listOrchestrationAgents: (workspaceId: string, opts?: { globalOnly?: boolean }) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (opts?.globalOnly) params.set('global_only', 'true');
-    return request<OrchestrationAssignableAgent[]>(`/orchestration/assignable-agents?${params.toString()}`);
-  },
+  /** Runtime Hosts + their CLI / model / working-folder candidates for the team editor. */
+  listOrchestrationRuntimeHosts: (workspaceId: string) =>
+    request<OrchestrationRuntimeHost[]>(
+      `/orchestration/runtime-hosts?workspace_id=${encodeURIComponent(workspaceId)}`,
+    ),
+  /**
+   * Make a Runtime Host re-list its per-CLI models and return its refreshed row.
+   * The server issues the command and awaits the host's ack before replying, so
+   * this resolves with a list that is already current.
+   */
+  refreshOrchestrationRuntimeHostModels: (managerAgentId: string, workspaceId: string) =>
+    request<OrchestrationRuntimeHost>(
+      `/orchestration/runtime-hosts/${encodeURIComponent(managerAgentId)}/refresh-models`,
+      { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) },
+    ),
 
   listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });

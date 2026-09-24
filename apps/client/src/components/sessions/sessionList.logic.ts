@@ -102,3 +102,65 @@ export function groupSessionsByCwd(sessionsByCli: Record<string, AgentSessionSum
   }
   return Array.from(groups.values());
 }
+
+/**
+ * 라이브 SSE 로 들어온 세션 한 건을 그룹 목록에 반영한다 — 있으면 고치고, **없으면 넣는다**.
+ *
+ * 예전에는 이미 목록에 있는 행만 고쳤다. 그래서 방금 만든 세션은 `agent_session_update`
+ * ('opened') 가 와도 조용히 버려졌고, 사이드바는 새로고침하거나 그 호스트 목록을 다시 불러올
+ * 때까지 새 세션을 보여주지 않았다.
+ *
+ * **기존 행은 통째로 갈아끼우지 않는다.** 라이브 스냅샷은 목록 행이 가진 모든 것을 알지
+ * 못한다(`created_at` / `source` / `size_bytes` 는 저장소를 읽어야 나온다) — 덮어쓰면 그
+ * 정보가 사라지고 배지가 바뀐다. 아는 필드만 고친다.
+ *
+ * 재그룹핑은 최초 적재와 **같은 함수**(groupSessionsByCwd)로 한다 — 정렬·그룹 순서 규칙을
+ * 두 벌로 만들면 "새로고침 전후로 순서가 다른" 문제가 생긴다. cwd 가 바뀐 경우도 같은 이유로
+ * 자연히 처리된다(옛 그룹에서 빠지고 새 그룹에 들어간다).
+ */
+export function upsertSessionInGroups(
+  groups: CwdGroup[],
+  patch: {
+    cli: string;
+    session_id: string;
+    cwd: string;
+    title: string;
+    updated_at: string;
+    live_status?: string;
+  },
+): CwdGroup[] {
+  const byCli: Record<string, AgentSessionSummary[]> = {};
+  let existing: (AgentSessionSummary & { cli: string }) | null = null;
+  for (const group of groups) {
+    for (const session of group.sessions) {
+      if (session.cli === patch.cli && session.session_id === patch.session_id) {
+        existing = session;
+        continue;
+      }
+      (byCli[session.cli] ??= []).push(session);
+    }
+  }
+  // 빈 문자열은 "모른다" 로 읽는다 — 어댑터가 제목을 아직 못 정한 시점에 목록의 제목을
+  // 지워 버리면 안 된다(예전 핸들러도 `live.title || row.title` 로 같은 규칙이었다).
+  const merged: AgentSessionSummary = existing
+    ? {
+        ...existing,
+        cwd: patch.cwd || existing.cwd,
+        title: patch.title || existing.title,
+        updated_at: patch.updated_at || existing.updated_at,
+        live_status: patch.live_status,
+      }
+    : {
+        cli: patch.cli,
+        session_id: patch.session_id,
+        cwd: patch.cwd,
+        title: patch.title,
+        // 목록 적재가 아니라 라이브 이벤트로 알게 된 세션이라 저장소 메타는 아직 모른다.
+        created_at: null,
+        updated_at: patch.updated_at,
+        source: 'awb',
+        live_status: patch.live_status,
+      };
+  (byCli[patch.cli] ??= []).push(merged);
+  return groupSessionsByCwd(byCli);
+}

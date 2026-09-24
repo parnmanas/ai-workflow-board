@@ -19,6 +19,10 @@ const CLAUDE_2_1_220_STRINGS = [
   'claude-haiku-4-5',
   'claude-haiku-4-5-20251001-v1',
   'claude-fable-5',
+  // 설치된 2.1.281 바이너리에 실재하는 문자열. 예전 패턴은 fable 분기에만 minor
+  // 자리가 없어서 이걸 통째로 떨어뜨렸고, 그래서 Fable 5.1 을 어느 경로로도 고를
+  // 수 없었다.
+  'claude-fable-5-1',
   'claude-fable-5-mythos-5',
 ];
 
@@ -31,6 +35,9 @@ test('Claude 2.1.220 model scan includes major-only ids and rejects dated/suffix
 
   assert.ok(filtered.includes('claude-opus-5'));
   assert.ok(filtered.includes('claude-sonnet-5'));
+  // family 마다 규칙이 다르면 이런 구멍이 조용히 생긴다 — fable 도 나머지와 같은
+  // major-minor 를 받아들여야 한다.
+  assert.ok(filtered.includes('claude-fable-5-1'), 'fable 도 minor 를 가질 수 있다');
   for (const rejected of [
     'claude-opus-4-20250514',
     'claude-opus-4-5-20251101',
@@ -48,7 +55,8 @@ test('latestPerFamily prefers major 5 over older major-minor ids', () => {
     'claude-opus-5',
     'claude-sonnet-5',
     'claude-haiku-4-5',
-    'claude-fable-5',
+    // 같은 family 안에서는 더 구체적인 minor 가 더 새것이다.
+    'claude-fable-5-1',
   ]);
 });
 
@@ -64,6 +72,6 @@ test('listModels fallback keeps stable aliases first and exposes current curated
     'claude-opus-5',
     'claude-sonnet-5',
     'claude-haiku-4-5',
-    'claude-fable-5',
+    'claude-fable-5-1',
   ]);
 });

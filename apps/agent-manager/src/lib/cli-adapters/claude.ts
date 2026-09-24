@@ -145,19 +145,28 @@ function permissionArgs(
 // Fallback ids used only when binary introspection can't read the installed
 // claude executable. Kept minimal (one current id per family); the live
 // per-install list from scanBinaryStrings() supersedes this whenever available.
+// 바이너리 스캔이 아무것도 못 찾았을 때의 폴백. 스캔이 성공하면 쓰이지 않으므로
+// "지금 맞는 값" 이면 충분하고, 정확한 최신은 언제나 스캔이 정한다.
 const CLAUDE_CURATED_MODELS = [
   'claude-opus-5',
   'claude-sonnet-5',
   'claude-haiku-4-5',
-  'claude-fable-5',
+  'claude-fable-5-1',
 ];
 
 // Claude Code 2.1.220 embeds the newest opus/sonnet ids as major-only
 // (`claude-opus-5`), while older ids may still carry a minor
 // (`claude-opus-4-8`). Keep each numeric component short and require a clean
 // boundary so dated ids and suffixed variants never enter latestPerFamily().
+//
+// **모든 family 가 같은 모양을 쓴다.** 예전에는 fable 만 minor 자리가 없어서
+// (`fable-\d{1,2}`) `claude-fable-5-1` 이 통째로 탈락했다 — 뒤의 `-1` 이 경계
+// lookahead 에 걸려 매치 자체가 성립하지 않는다. 그래서 설치된 CLI 가 Fable 5.1 을
+// 지원하는데도(2.1.281 바이너리에 그 문자열이 실재한다) 모델 목록에 영영 오르지
+// 못했고, 큐레이션 폴백에도 없어 어느 경로로도 고를 수 없었다. family 마다 규칙을
+// 다르게 두면 이런 구멍이 조용히 생긴다.
 export const CLAUDE_MODEL_SCAN_PATTERN =
-  /claude-(?:(?:opus|sonnet|haiku)-\d{1,2}(?:-\d{1,2})?|fable-\d{1,2})(?![\w-])/g;
+  /claude-(?:opus|sonnet|haiku|fable)-\d{1,2}(?:-\d{1,2})?(?![\w-])/g;
 
 // Claude `--effort` accepts a fixed tier set that has shifted across CLI
 // releases — the top tier used to be `xhigh`, now it's `max`. Passing a value
@@ -236,6 +245,10 @@ export class ClaudeCliAdapter extends CliAdapter {
   /** `claude update` — "Check for updates and install if available". */
   cliUpdate(): { args: string[]; label: string } | null {
     return { args: ['update'], label: 'claude update' };
+  }
+
+  updatePackage(): string | null {
+    return '@anthropic-ai/claude-code';
   }
 
   resolveBin(configured?: string | null): string {

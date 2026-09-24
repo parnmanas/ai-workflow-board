@@ -36,8 +36,31 @@ export class OrchestrationTeamMember {
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
 
+  /**
+   * The backing Agent identity this slot dispatches to. Since the roster became
+   * spec-declared it is an OUTPUT, not an input: the operator picks Runtime Host
+   * / CLI / model / working folder and OrchestrationAgentProvisionerService
+   * creates (or updates) the Agent row, writing its id back here. Everything
+   * downstream — SSE scope, MCP api key, ChatRoomParticipant, dispatch — keeps
+   * reading this exact field, which is why the refactor needed no changes there.
+   */
   @Column({ type: 'varchar' })
   agent_id: string;
+
+  /**
+   * How this slot runs: Runtime Host + CLI + model + working folder + folder
+   * scope (`TeamAgentSpec`, common/orchestration-member-spec.ts). This is what
+   * the team editor writes and what `agent_id` above is derived from.
+   *
+   * Nullable for the same reason every other additive column here is: rows
+   * written before the spec-based roster existed carry null, and the migration
+   * back-fills them from their backing Agent. A member whose spec is still null
+   * keeps dispatching exactly as before (`folder_scope` then defaults to
+   * `isolated`, the pre-refactor behaviour) — `parseTeamAgentSpec` degrades to
+   * null rather than throwing, so a legacy row can never break the roster read.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  spec: Record<string, any> | null;
 
   /** Short human/orchestrator-facing role label: 'backend', 'reviewer', 'researcher'. */
   @Column({ type: 'varchar', default: '' })

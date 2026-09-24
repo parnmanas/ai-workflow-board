@@ -26,7 +26,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.ORCHESTRATION_CONFIRM_NOTIFY_PORT || '0';
@@ -132,8 +133,6 @@ async function stage(t, { label } = {}) {
   });
 
   const ws = await createWorkspace(app, getDataSourceToken, `orch-cn-${label}`);
-  const lead = await createAgent(app, getDataSourceToken, ws.id, { name: `lead-${label}` });
-  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: `worker-${label}` });
 
   const mcpFor = async (agent, name) => {
     const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: name });
@@ -144,19 +143,16 @@ async function stage(t, { label } = {}) {
     return client;
   };
 
-  const team = await teams.createTeam({
-    workspace_id: ws.id,
+  // 슬롯 spec 으로 팀을 만들고, AWB 가 프로비저닝한 정체성을 돌려받는다.
+  const squad = await buildTeam(app, getDataSourceToken, teams, {
+    workspaceId: ws.id,
     name: `Notify squad ${label}`,
-    orchestrator_agent_id: lead.id,
-    max_parallel_steps: 2,
-    created_by: HUMAN.id,
+    team: { max_parallel_steps: 2, created_by: HUMAN.id },
+    members: [{ role_label: 'builder', capabilities: 'builds things', max_concurrent: 4 }],
   });
-  await teams.addMember(team.id, ws.id, {
-    agent_id: worker.id,
-    role_label: 'builder',
-    capabilities: 'builds things',
-    max_concurrent: 4,
-  });
+  const team = squad.team;
+  const lead = squad.orchestrator;
+  const worker = squad.member('builder');
 
   const mission = await missions.createMission({
     workspace_id: ws.id,

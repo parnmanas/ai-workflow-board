@@ -264,42 +264,220 @@ For Hermes, a successful ACP `initialize` handshake is the health probe. A
 
 ## CLI versions and `update_cli`
 
-The heartbeat carries `cli_versions` (cliType → `--version` output) for every
-runtime this host could resolve, so the admin UI can show what is actually
-installed rather than what is merely registered. A CLI whose version could not
-be read has no key at all — "not installed / probe failed" must not be
-confusable with "installed, version unknown". Managers predating this field
-omit it entirely, and the UI degrades to "no version telemetry".
+The heartbeat carries three related fields:
 
-`update_cli` upgrades a CLI **on the host**, through whatever self-updater the
-adapter declares in `CliAdapter.cliUpdate()`:
+| field | shape | what it is |
+| --- | --- | --- |
+| `cli_versions` | cliType → `--version` | the **active** install of each CLI (what a bare spawn would run) |
+| `cli_latest_versions` | cliType → npm `latest` | what the registry publishes, so the UI knows whether an update exists |
+| `cli_installs` | array of rows | **every** install of every adapter CLI on this host |
 
-| CLI | updater |
-| --- | --- |
-| `claude` | `claude update` |
-| `codex` | `codex update` |
-| `opencode` | `opencode upgrade` |
-| others | none — `cliUpdate()` returns `null` |
+A CLI whose version could not be read has no key at all — "not installed / probe
+failed" must not be confusable with "installed, version unknown". Managers
+predating a field omit it, and the UI degrades.
 
-The subcommand differs per CLI (`update` vs `upgrade`), which is exactly why the
-adapter owns it instead of the command handler hardcoding one spelling. A CLI
-with no self-updater is **not** an error: the manager acks ok and says to update
-it on that host by hand, naming the host.
+### The unit is an install, not a CLI
 
-Two properties matter when reading the ack:
+One host can legitimately carry several installs of the same CLI. ragnar runs
+claude twice for its vLLM backend: `~/.local` prefix and the nvm prefix, with a
+claude-backend runtime profile's `claude_executable` selecting which one an agent
+uses. So "update claude on this host" is ambiguous — `update_cli` takes
+`args.bin` (an absolute path) and updates exactly that install. Omitting `bin`
+targets the currently-resolved one.
 
-- **Scope is the Runtime Host, not the agent.** CLIs are installed globally, so
-  upgrading through one agent changes the binary every agent and session on that
-  machine will use. `args.cli` names the target explicitly; omitting it falls
-  back to the CLI of the agent in `args.agent_id`, which requires that agent to
-  be registered. The UI always sends `cli` so a stopped agent can still update.
-- **Versions are re-read on both sides of the run.** The ack reports
-  `before → after` (or `stays at X` when already current), and the manager posts
-  one immediate heartbeat so the new version reaches the UI without waiting for
-  the regular 30s tick. A failed immediate post does not fail the command.
+`args.bin` arrives over SSE, so the manager **never spawns it directly**: it is
+matched against the manager's own enumeration (`listCliInstalls`) first, and a
+path that is not a known install of that CLI is rejected. Without that check the
+command would be an arbitrary-execution channel onto the host.
 
-The manager process is not restarted; already-running CLIs keep their old
-binary until they are respawned.
+### How an install gets updated
+
+The CLI's own updater is *not* the primary path, because it does not update
+itself — it updates whatever npm prefix is first on PATH. Measured on ragnar:
+running `claude update` through `~/.local/bin/claude` (2.1.273) installed 2.1.281
+into the **nvm** prefix and exited 0. AWB reported success three times in a row
+while every agent kept running the old build, and an install the operator had
+deliberately pinned got moved.
+
+So `cli-install-method.ts` reads the method off the install layout (via the
+binary's realpath) and drives that method directly:
+
+| layout evidence | method | command |
+| --- | --- | --- |
+| `<prefix>/lib/node_modules/<pkg>` (POSIX) or `<prefix>/node_modules/<pkg>` (Windows) | `npm-prefix` | `npm --prefix <prefix> install -g <pkg>@latest` |
+| `…/.bun/install/global/node_modules/<pkg>` | `bun` | `bun add -g <pkg>@latest` |
+| `…/.volta/…` | `volta` | `volta install <pkg>@latest` |
+| `…/pnpm/global/…` | `pnpm` | `pnpm add -g <pkg>@latest` |
+| `/snap/…` | `snap` | *not run* — reports `sudo snap refresh <name>` |
+| `…/Cellar/…`, `…/linuxbrew/…` | `homebrew` | *not run* — reports `brew upgrade <name>` |
+| prefix found but not writable | `npm-prefix` + `needsElevation` | *not run* — reports `sudo npm --prefix … install -g …` |
+| single executable outside any `node_modules` (native installer, curl script) | `native` | the adapter's `cliUpdate()` |
+| anything else | `unknown` | the adapter's `cliUpdate()` |
+
+The package name comes from the path (`…/node_modules/@scope/name/…`), not from
+`CliAdapter.updatePackage()`. The path is ground truth *for this install*, and it
+makes CLIs whose adapter declares no package (gemini, pi) updatable anyway.
+`updatePackage()` remains the source for the npm-registry `latest` lookup.
+
+Order of attempts:
+
+1. If the layout proves a method, run it. It targets one install and cannot
+   disturb another.
+2. If that command fails (network, unexpected EACCES), fall back to the
+   adapter's `cliUpdate()`. If it *succeeds* there is no fallback — an
+   `npm install -g <pkg>@latest` that left the version alone means already
+   current.
+3. If the layout proves nothing, run `cliUpdate()`.
+4. **snap / Homebrew / write-protected prefixes run nothing at all.** A
+   self-updater there does not replace the binary in place; it creates a *new*
+   install in the PATH npm prefix — the ragnar failure mode, plus collateral
+   damage. The ack carries the exact command the operator should run instead,
+   and it is an `error` ack, not a cheerful `ok`.
+
+### Telling "already current" apart from "could not update"
+
+An unchanged version means one of two things. `cli_latest_versions` is what
+separates them, so the manager passes the CLI's latest into `runCliUpdate`:
+
+- version moved → ok
+- unchanged **and** installed ≥ latest → ok, "already current (npm latest X)"
+- unchanged **and** installed < latest → **error**, naming the attempts and the
+  manual command
+- unchanged and latest unknown → ok if the updater exited 0, but the ack says so
+  ("latest version unknown, so this is the updater's word"). Trusting that exit
+  code unconditionally is exactly what hid the ragnar regression.
+
+Other installs of the same CLI are reported in the ack as **information, not
+failure** — several installs is a supported configuration, and only the operator
+knows whether the other one is meant to stay where it is.
+
+### Why the Update button can be disabled
+
+Pairing `cli_versions` with `cli_latest_versions` lets the UI lock the Update
+button per install. The judgement is **ternary**, not boolean
+(`utils/cliVersions.ts` → `cliUpdateState`):
+
+| state | condition | button |
+| --- | --- | --- |
+| `up-to-date` | installed ≥ latest | disabled, labelled `최신` |
+| `outdated` | installed < latest | enabled, shows `→ <latest>` |
+| `unknown` | either side missing or not semver | **enabled** |
+
+A CLI whose latest could not be read has **no key** — and a missing key means
+"unknown", never "up to date". Locking on unknown would strand a host whose npm
+lookup failed with no way to upgrade at all.
+
+### The latest version belongs to the install, not the CLI
+
+`cli_latest_versions` comes from the npm registry, so it is only a valid
+baseline for installs that *came from* npm (`npm-prefix` / `bun` / `volta` /
+`pnpm` — the package name was read out of their `node_modules` path). Each row
+in `cli_installs` therefore carries its own `latest_version`, and it is `null`
+for any other channel.
+
+Measured on rolf: `/snap/bin/codex` is published by a third party (`jcat`), not
+OpenAI, and that channel's newest build is 0.114.0 from 2026-03-14. The npm
+`@openai/codex` on the same host is 0.156.1 — a number from a completely
+different distribution channel. Comparing the snap against it made
+`sudo snap refresh codex` — which correctly succeeded with nothing to do — get
+reported as a failure, and pinned "→ 0.156.1" on that row forever.
+
+`null` here means **unknown**, never "up to date": the button stays enabled and
+`runCliUpdate` falls back to trusting the updater's exit code (and says so in
+the ack). `undefined` is different again — it means the manager predates the
+field, and the UI falls back to the per-CLI value.
+
+Latest versions are refreshed shortly after boot (never blocking boot — it is a
+registry round trip), every `CLI_LATEST_REFRESH_MS` (3h), and once more right
+after `update_cli` so the button collapses immediately.
+
+The manager process is not restarted; already-running CLIs keep their old binary
+until they are respawned.
+
+`cli_versions`, `cli_latest_versions` and `cli_installs` are all part of the
+server ↔ agent-manager heartbeat contract (`instance-registry.service.ts`,
+`agent-manager.controller.ts`) — change them in one PR on both sides.
+
+## Privilege escalation (sudo)
+
+Two surfaces need root on a Runtime Host: a CLI install under a root-owned npm
+prefix or snap (`update_cli`), and the occasional package install an agent asks
+for during a session or chat. Both use the same primitive and neither stores a
+password.
+
+### The one-shot sudo ticket
+
+```
+browser ──(HTTPS, admin session)──▶ server   password → ticket (memory, TTL 120s, single use)
+server  ──(SSE: ticket id only)───▶ manager
+manager ──(HTTPS, X-Agent-Key)────▶ GET /api/agent/sudo-ticket/:id
+                                   ◀── password once, then deleted server-side
+manager: sudo -S -k -p '' -- <argv>          password on stdin only
+```
+
+Same shape as `GET /api/agent/sessions/credential/:id`, and for the same reason:
+a secret must not ride an SSE payload that flows through the event registry, the
+command ledger, and the activity log. The SSE carries a ticket id, which is
+worthless on its own.
+
+`SudoTicketService` invariants: memory only (a password that survives a restart
+is a *stored* password), single use, TTL 120s, bound to the minting
+instance/agent/scope, and a consume attempt by the wrong manager **burns** the
+ticket — at that point the id has leaked, so keeping it alive for the legitimate
+manager is the worse option.
+
+`GET /api/agent/sudo-ticket/:id` refuses callers without an identity. Other
+manager endpoints (`/command/ack`) skip their ownership check when
+`AGENT_DEV_MODE` leaves the guard without one; this endpoint hands out a root
+password, so "we don't know who is collecting this, but here you go" does not
+apply. The cost is that sudo tickets don't work under `AGENT_DEV_MODE=true`.
+
+### What may be run as root
+
+**Never a command string from the wire.** Two independent paths supply argv, and
+both are server- or manager-authored:
+
+- `update_cli` → `cli-install-method.ts`'s `elevatedArgv`, built by the manager
+  from the install's own layout. Homebrew deliberately has none: brew refuses to
+  run as root and doing it anyway wrecks the install tree's ownership.
+- `run_privileged_command` → the manager re-fetches the **canonical approved
+  argv** from `GET /api/agent/privileged-command/:id`. The dispatch payload
+  carries `request_id` and `sudo_ticket` and no command at all, so what the
+  operator read and approved cannot drift from what runs.
+
+`sudo-runner.ts` passes the password on **stdin only** (argv and env are readable
+from `/proc` by any process on the host) and zeroes the buffer after writing.
+`-k` is not negotiable: a live sudo timestamp cache lets a *wrong* password
+succeed, which would make "is this password correct?" unanswerable. Failures are
+classified four ways — `bad_password` / `not_permitted` / `no_sudo` /
+`command_failed` — because the operator's next move differs for each.
+
+### Session / chat: approval, not a standing capability
+
+Agents never hold sudo. Giving an agent a stored password or a NOPASSWD entry
+makes that agent root, and one prompt injection becomes a root compromise.
+Instead:
+
+1. The agent calls `request_privileged_command({ command, args, cwd?, reason })`.
+   It returns immediately — the call is not held open (same posture as
+   `await_ci_run`).
+2. An operator reads the exact argv and the stated reason in the Runtime Hosts
+   admin page, then either denies it or approves it by typing the host password.
+3. Approval mints a ticket scoped to that request and dispatches
+   `run_privileged_command`.
+4. The manager claims the canonical argv, pulls the password once, runs it, and
+   posts the result back.
+5. The agent collects it with `get_privileged_command_result` (short long-poll;
+   call again while `pending`).
+
+**Denial is the default** — an undecided request expires unexecuted. Each agent
+is capped at `MAX_PENDING_PER_AGENT` outstanding requests so one agent cannot
+bury the operator in approvals until a habitual click gets through. The
+approval service never sees the password; it lives only in the sudo ticket.
+
+The cheaper fix is usually not sudo at all: hand the operator's account
+ownership of the prefix (`chown -R you /usr/local/lib/node_modules`) and the
+password stops crossing the network entirely.
 
 ## Process and session ownership
 

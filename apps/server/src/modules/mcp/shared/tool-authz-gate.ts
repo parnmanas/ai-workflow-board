@@ -119,6 +119,15 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // resolvable caller, never anonymous/sessionless, and leaves the
   // scope-ceiling / workspace-match nuance to the handler that already
   // implements it.
+  // 권한 상승 요청/결과 조회. 게이트는 "세션리스 caller 가 아님" 만 강제하고,
+  // 진짜 인가는 두 군데에 있다: (1) 이 agent 를 감독하는 살아 있는 매니저가
+  // 있는가(없으면 실행될 곳이 없다), (2) 결과는 요청을 만든 agent 만 읽는다.
+  // 둘 다 호출마다 달라지는 리소스 컨텍스트라 게이트가 표현할 수 없다(런북 (d)).
+  // 'full' 로 올리지 않는 이유: 요청 자체는 아무것도 실행하지 않는다 — 실행은
+  // 운영자가 화면에서 승인할 때만 일어나고, 그 경로는 ADMIN_ACCESS 가 지킨다.
+  request_privileged_command: 'caller',
+  get_privileged_command_result: 'caller',
+
   create_user: 'caller',
   update_user: 'caller',
   create_api_key: 'caller',

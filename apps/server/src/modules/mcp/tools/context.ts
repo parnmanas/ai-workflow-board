@@ -61,6 +61,8 @@ import type { WorkspaceScheduleService } from '../../workspace-schedule/workspac
 import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
+import type { PrivilegedCommandService } from '../../agent-manager/privileged-command.service';
+import type { InstanceRegistryService } from '../../agent-manager/instance-registry.service';
 import { MergeLeaseService } from '../../tickets/merge-lease.service';
 import type { HandoffService } from '../../handoff/handoff.service';
 import { BenchmarkService } from '../../benchmarks/benchmark.service';
@@ -187,6 +189,12 @@ export interface ToolContext {
   // standalone-instantiation shape as ticketPrerequisitesService above. Used
   // by ci-wait-tools (await_ci_run / cancel_ci_wait).
   ciWaitService?: CiWaitService;
+  // 권한 상승 승인 대기(세션/채팅). `request_privileged_command` /
+  // `get_privileged_command_result` 가 쓴다. standalone(stdio) 모드에는 매니저
+  // 인스턴스 레지스트리 자체가 없으므로 둘 다 optional 이고, 없으면 그 툴은
+  // "이 서버에서는 쓸 수 없다" 로 명확히 실패한다(조용히 성공하지 않는다).
+  privilegedCommandService?: PrivilegedCommandService;
+  instanceRegistryService?: InstanceRegistryService;
   // Ticket e630b530: 저장소별 랜딩 lease. 위와 마찬가지로 dataSource +
   // activityService 위에서 상태를 갖지 않아 두 모드 모두에서 present.
   // merge-lease-tools (await_merge_lease / release_merge_lease) 가 쓴다.

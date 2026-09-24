@@ -379,11 +379,12 @@ test('알 수 없는 verb 는 기존대로 error ack 된다 (KNOWN_COMMANDS 회�
   assert.match(ack.detail, /unknown command/);
 });
 
-// ─── update_cli — 호스트에 설치된 CLI 자체를 올린다 ─────────────────────────
+// ─── update_cli — 호스트에 깔린 CLI **한 설치본**을 올린다 ──────────────────
 //
-// 실제 업데이터 실행은 cli-update.ts 가, 배선은 main.ts 가 한다. 여기서는 커맨드
-// 계약만 본다: 대상 CLI 해석(args.cli 우선, 없으면 에이전트 컨텍스트),
-// supported/ok 별 ack 문구, 미배선 처리.
+// 실제 업데이터 실행과 방법 선택은 cli-update.ts / cli-install-method.ts 가,
+// 경로 허용목록 검증은 main.ts 가 한다. 여기서는 커맨드 계약만 본다: 대상 CLI
+// 해석(args.cli 우선, 없으면 에이전트 컨텍스트), 대상 설치본(args.bin) 전달,
+// ok/error 별 ack 문구, 미배선 처리.
 
 /** updateCli dep 을 배선한 핸들러. contextRegistry 는 선택적으로 넘긴다. */
 function updateCliHandler(updateCli, contextRegistry) {
@@ -403,8 +404,11 @@ const updateOk = (over = {}) => ({
   ok: true,
   before: '2.0.0',
   after: '2.1.0',
-  detail: 'updated',
+  detail: 'codex 2.0.0 → 2.1.0 at /home/p/.npm-global/bin/codex (npm --prefix /home/p/.npm-global)',
   hostLabel: 'rolf',
+  resolvedPath: '/home/p/.npm-global/bin/codex',
+  installMethod: 'npm --prefix /home/p/.npm-global',
+  otherInstalls: [],
   heartbeatPosted: true,
   ...over,
 });
@@ -427,6 +431,51 @@ test('update_cli 는 args.cli 를 그대로 올리고 before → after 를 ack d
   const ack = ackBody();
   assert.equal(ack.status, 'ok');
   assert.match(ack.detail, /update_cli ok: codex 2\.0\.0 → 2\.1\.0/);
+  // 어느 설치본을 어떤 방법으로 올렸는지가 ack 에 남는다 — 같은 CLI 가 여러 벌
+  // 깔린 호스트에서 "무엇이 올라간 건지" 를 ack 만 보고 알 수 있어야 한다.
+  assert.match(ack.detail, /npm --prefix \/home\/p\/\.npm-global/);
+});
+
+test('args.bin 은 어느 설치본을 올릴지 못 박아 그대로 전달된다', async () => {
+  // 같은 CLI 를 여러 벌 두는 것은 정상 구성이다(vLLM 백엔드용 두 번째 claude).
+  // 그래서 올릴 대상은 CLI 가 아니라 경로이고, 경로가 배선까지 그대로 가야 한다.
+  const seen = [];
+  const handler = updateCliHandler(async (cli, bin) => {
+    seen.push([cli, bin]);
+    return updateOk({ resolvedPath: bin });
+  });
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-pinned',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'claude', bin: '/home/parn/.nvm/versions/node/v22.23.1/bin/claude' },
+  }));
+
+  assert.deepEqual(seen, [['claude', '/home/parn/.nvm/versions/node/v22.23.1/bin/claude']]);
+  assert.equal(ackBody().status, 'ok');
+});
+
+test('같은 CLI 의 다른 설치본은 ack 에 정보로 실린다 — 실패가 아니다', async () => {
+  const handler = updateCliHandler(async () =>
+    updateOk({
+      otherInstalls: [
+        { path: '/home/parn/.nvm/versions/node/v22.23.1/bin/claude', version: '2.1.281 (Claude Code)' },
+      ],
+    }),
+  );
+
+  await handler.handle(JSON.stringify({
+    command_id: 'update-cli-others',
+    instance_id: 'instance-1',
+    command: 'update_cli',
+    args: { cli: 'claude' },
+  }));
+
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok', '여러 벌 깔린 것은 정상 구성이다');
+  assert.match(ack.detail, /other installs on this host/);
+  assert.match(ack.detail, /\.nvm.*=2\.1\.281/);
 });
 
 test('args.cli 가 없으면 대상 에이전트가 쓰는 CLI 를 올린다', async () => {
@@ -434,7 +483,11 @@ test('args.cli 가 없으면 대상 에이전트가 쓰는 CLI 를 올린다', a
   const handler = updateCliHandler(
     async (cli) => {
       seen.push(cli);
-      return updateOk({ before: '1.0.0', after: '1.0.0' });
+      return updateOk({
+        before: '1.0.0',
+        after: '1.0.0',
+        detail: 'claude stays at 1.0.0 at /home/p/.npm-global/bin/claude — already current (npm latest 1.0.0)',
+      });
     },
     { get: (id) => (id === 'agent-7' ? { agent_id: 'agent-7', cli: 'claude' } : null) },
   );
@@ -477,27 +530,33 @@ test('에이전트가 등록돼 있지 않고 cli 도 안 주면 무엇을 올�
   assert.match(ack.detail, /is not registered and no cli was given/);
 });
 
-test('자체 업데이터가 없는 CLI 는 실패가 아니라 "직접 올리라" 는 안내로 ok ack 된다', async () => {
-  const handler = updateCliHandler(async () => ({
-    supported: false,
-    ok: false,
-    before: null,
-    after: null,
-    detail: 'no self-updater',
-    hostLabel: 'ralf',
-    heartbeatPosted: true,
-  }));
+test('우리가 못 올리는 설치본은 error ack 에 운영자가 칠 명령을 그대로 담는다', async () => {
+  // 예전에는 이것을 ok 로 ack 했다. 하지만 "성공" 으로 찍히는 순간 운영자는 올린
+  // 줄 알고 넘어간다 — 올리지 못한 것은 실패로 말하되, 대신 무엇을 치면 되는지
+  // 정확히 준다.
+  const handler = updateCliHandler(async () =>
+    updateOk({
+      ok: false,
+      before: 'codex-cli 0.114.0',
+      after: 'codex-cli 0.114.0',
+      detail:
+        'codex at /snap/bin/codex is codex-cli 0.114.0 and AWB cannot update this install ' +
+        '(snap package) — run on ralf: sudo snap refresh codex',
+      hostLabel: 'ralf',
+      installMethod: 'snap package (run: sudo snap refresh codex)',
+    }),
+  );
 
   await handler.handle(JSON.stringify({
     command_id: 'update-cli-unsupported',
     instance_id: 'instance-1',
     command: 'update_cli',
-    args: { cli: 'pi' },
+    args: { cli: 'codex', bin: '/snap/bin/codex' },
   }));
 
   const ack = ackBody();
-  assert.equal(ack.status, 'ok');
-  assert.match(ack.detail, /no self-updater/);
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /sudo snap refresh codex/);
   assert.match(ack.detail, /ralf/, '어느 장비에서 손으로 올려야 하는지 알려준다');
 });
 

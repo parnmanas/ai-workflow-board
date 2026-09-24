@@ -15,6 +15,8 @@ import { AgentManagerController } from './agent-manager.controller';
 import { InstanceRegistryModule } from './instance-registry.module';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
+import { SudoTicketService } from './sudo-ticket.service';
+import { PrivilegedCommandService } from './privileged-command.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
 import { SkillsModule } from '../skills/skills.module';
@@ -48,6 +50,8 @@ import { SkillsModule } from '../skills/skills.module';
   providers: [
     PairingService,
     CommandLedgerService,
+    SudoTicketService,
+    PrivilegedCommandService,
     AgentManagerCommandService,
     // version-drift / stale self-update health monitor (ticket 7485df07). Runs
     // its own sweep timer; consumes InstanceRegistryService (now global via
@@ -59,6 +63,16 @@ import { SkillsModule } from '../skills/skills.module';
     PermissionGuard,
     WorkspaceGuard,
   ],
-  exports: [PairingService, AgentManagerCommandService],
+  exports: [
+    PairingService,
+    AgentManagerCommandService,
+    // MCP 툴(`request_privileged_command`)이 승인 대기를 만들고 조회한다.
+    // InstanceRegistryService 는 @Global() 이라 여기서 다시 내보낼 필요가 없다.
+    PrivilegedCommandService,
+    // 오케스트레이션 로스터가 커맨드 ack 를 **서버측에서** 기다리는 데 쓴다. 그쪽
+    // 모델 재열거는 MANAGE_ACTIONS 이라 admin 전용 outcome 엔드포인트를 폴링할 수
+    // 없다 — 원장을 직접 읽는 편이 권한 이야기를 하나로 유지한다.
+    CommandLedgerService,
+  ],
 })
 export class AgentManagerModule {}

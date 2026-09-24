@@ -57,7 +57,10 @@ export interface AgentSessionRequest {
   manager_id: string;
   workspace_id?: string;
   cli: string;
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close';
+  /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
+   *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
+   *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -533,6 +536,21 @@ export class AgentSessionRunner {
         case 'close':
           await this.#closeLive(cli, sessionId, 'closed');
           return;
+        case 'restart': {
+          // 프로세스만 죽이고 **같은 세션 id 로** 다시 연다. 기록은 CLI 홈에 있으므로
+          // 대화는 이어지고, 새 프로세스는 지금 디스크에 있는 바이너리를 쓴다 —
+          // 그래서 CLI 를 올린 뒤 모델 목록·기능이 비로소 갱신된다(살아 있는
+          // 프로세스는 기동 시점의 CLI 상태를 계속 물고 있다).
+          if (!sessionId) throw new Error('restart requires an existing session id');
+          await this.#closeLive(cli, sessionId, 'idle', 'restart');
+          const restarted = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
+          this.#enqueue(
+            restarted,
+            [{ type: 'system', payload: { text: 'Session process restarted — it now runs the CLI currently on disk.' } }],
+            { reason: 'restart' },
+          );
+          return;
+        }
         default:
           log(`${tag} unknown op ${String(request.op)}`);
       }

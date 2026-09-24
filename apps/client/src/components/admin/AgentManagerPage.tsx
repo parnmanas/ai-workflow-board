@@ -8,6 +8,8 @@ import type {
   AgentLifecycleState,
   AgentManagerCommandKind,
   AgentManagerInstance,
+  CliInstallEntry,
+  PrivilegedCommandRequest,
   Credential,
   DashboardAgent,
   PairingTokenMint,
@@ -25,6 +27,7 @@ import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
 import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
+import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersions';
 
 /**
  * Runtime Host administration and observability.
@@ -512,6 +515,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const [updatePending, setUpdatePending] = useState(false);
   const [refreshModelsPending, setRefreshModelsPending] = useState(false);
   const [updateCliPending, setUpdateCliPending] = useState<string | null>(null);
+  // 권한 상승이 필요한 설치본의 Update 를 눌렀을 때 뜨는 비밀번호 모달의 대상.
+  // 비밀번호 자체는 이 컴포넌트가 아니라 모달 안에서만 살고, 제출되는 즉시
+  // 티켓으로 바뀌어 사라진다 — 여기에 담아 두지 않는다.
+  const [sudoPrompt, setSudoPrompt] = useState<{ cli: string; bin: string; method: string } | null>(null);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -700,18 +707,23 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
-  // 호스트에 설치된 CLI 자체를 올린다(`claude update` / `codex update` — 어댑터의
-  // cliUpdate()). refresh_available_models 와 같은 이유로 **ack 를 직접 기다린다**:
-  // 업데이터는 npm 왕복이라 수십 초가 걸리고, 디스패치 토스트만으로는 올라갔는지
-  // 알 수 없다. ack detail 에 `before → after` 가 담겨 온다. 매니저 프로세스는
+  // 호스트에 설치된 CLI **한 설치본**을 올린다. 올리는 방법은 매니저가 그 설치본의
+  // 레이아웃에서 정한다(`npm --prefix …` / 자체 업데이터 / …). refresh_available_models
+  // 와 같은 이유로 **ack 를 직접 기다린다**: 업데이터는 npm 왕복이라 수십 초가
+  // 걸리고, 디스패치 토스트만으로는 올라갔는지 알 수 없다. 매니저 프로세스는
   // 재시작되지 않지만, 이후 spawn 되는 CLI 는 새 버전이다.
-  const handleUpdateCli = async (cli: string) => {
+  //
+  // `bin` 은 같은 CLI 가 여러 벌 깔린 호스트에서 어느 설치본인지 못 박는다 —
+  // 생략하면 매니저가 지금 해석되는 설치본을 고른다.
+  const handleUpdateCli = async (cli: string, bin?: string, sudoTicket?: string) => {
     if (updateCliPending) return;
-    setUpdateCliPending(cli);
+    setUpdateCliPending(bin || cli);
     try {
       const resp = await api.sendAgentManagerCommand(inst.instance_id, {
         command: 'update_cli',
-        args: { cli },
+        // sudo_ticket 은 **티켓 id 일 뿐 비밀번호가 아니다**. 매니저가 권한 상승이
+        // 실제로 필요한 순간에 이 id 로 서버에서 1회 당겨 간다.
+        args: { cli, ...(bin ? { bin } : {}), ...(sudoTicket ? { sudo_ticket: sudoTicket } : {}) },
       });
       const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
       // CLI 업데이터는 모델 재열거보다 훨씬 오래 걸리므로 창을 넓게 잡는다(~4분).
@@ -736,8 +748,23 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
+  const sudoModal = sudoPrompt ? (
+    <SudoPasswordModal
+      instanceId={inst.instance_id}
+      hostname={inst.hostname}
+      target={sudoPrompt}
+      onClose={() => setSudoPrompt(null)}
+      onTicket={(ticketId) => {
+        const { cli, bin } = sudoPrompt;
+        setSudoPrompt(null);
+        void handleUpdateCli(cli, bin, ticketId);
+      }}
+    />
+  ) : null;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: '100%' }}>
+      {sudoModal}
       {/* Header */}
       <div
         style={{
@@ -862,65 +889,24 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {inst.cli_adapters.length === 0 ? '—' : inst.cli_adapters.join(', ')}
             </dd>
           </div>
-          {/* 이 장비에 설치된 CLI 들의 버전 + 그 자리에서 올리는 버튼. 업데이트
-              대상은 cli_versions(=probe 로 버전을 읽은 것) ∩ cli_adapters(=이
-              매니저가 어댑터를 가진 것)로 좁힌다 — 같은 probe 에 섞여 오는
-              gh/git 은 어댑터가 없어 여기 들어오지 않는다. 자체 업데이터가 없는
-              CLI 는 매니저가 ack 로 그 사실을 그대로 알려준다. */}
-          {inst.mode === 'manager' && inst.cli_versions && Object.keys(inst.cli_versions).length > 0 && (
-            <div style={{ gridColumn: '1 / -1' }}>
-              <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Installed CLI versions
-              </dt>
-              <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {Object.entries(inst.cli_versions)
-                  .sort(([a], [b]) => a.localeCompare(b))
-                  .map(([cli, version]) => {
-                    const updatable = inst.cli_adapters.includes(cli);
-                    const busy = updateCliPending === cli;
-                    return (
-                      <span
-                        key={cli}
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          padding: '2px 6px 2px 8px',
-                          border: `1px solid ${tokens.colors.border}`,
-                          borderRadius: tokens.radii.md,
-                          fontSize: 11,
-                        }}
-                      >
-                        <span style={{ fontFamily: 'monospace' }}>{cli} {version}</span>
-                        {updatable && (
-                          <button
-                            onClick={() => handleUpdateCli(cli)}
-                            disabled={updateCliPending !== null}
-                            style={{
-                              padding: '2px 8px',
-                              fontSize: 11,
-                              fontWeight: 600,
-                              background: 'transparent',
-                              color: tokens.colors.textStrong,
-                              border: `1px solid ${tokens.colors.border}`,
-                              borderRadius: tokens.radii.sm,
-                              cursor: busy ? 'wait' : 'pointer',
-                              fontFamily: 'inherit',
-                              opacity: updateCliPending !== null && !busy ? 0.5 : 1,
-                            }}
-                            title={
-                              `update_cli — 이 장비의 ${cli} 를 자체 업데이터로 최신화합니다. ` +
-                              '매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.'
-                            }
-                          >
-                            {busy ? '업데이트 중…' : 'Update'}
-                          </button>
-                        )}
-                      </span>
-                    );
-                  })}
-              </dd>
-            </div>
+          {/* 이 장비에 깔린 CLI 설치본들 + 그 자리에서 올리는 버튼.
+              같은 CLI 가 여러 줄일 수 있고 그게 정상이다 — ragnar 는 vLLM 백엔드용
+              으로 claude 를 두 벌 두고 runtime profile 의 `claude_executable` 로
+              고른다. 그래서 행의 단위는 CLI 가 아니라 **설치본(경로)** 이고,
+              Update 는 그 경로를 명시해 보낸다. 구버전 매니저(cli_installs 없음)는
+              예전처럼 CLI 당 한 줄로 접는다. */}
+          {inst.mode === 'manager' && (
+            <InstalledCliVersions
+              inst={inst}
+              pending={updateCliPending}
+              onUpdate={(cli, bin, needsSudo, method) => {
+                // 권한 상승이 필요한 설치본에서만 비밀번호를 묻는다. 필요 없는
+                // 설치본에 대고 묻는 것은 운영자의 root 비밀번호를 괜히 네트워크에
+                // 태우는 일이다.
+                if (needsSudo && bin) setSudoPrompt({ cli, bin, method: method || '' });
+                else void handleUpdateCli(cli, bin);
+              }}
+            />
           )}
           {inst.mode === 'manager' && (
             <>
@@ -1509,6 +1495,11 @@ export default function AgentManagerPage({
           data-testid="mainframe-detail-scroll"
           style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
         >
+          {/* 루트 권한 요청은 사람이 기다리는 상태라 어느 호스트를 보고 있든
+              먼저 눈에 들어와야 한다. 대기 중인 것이 없으면 아무것도 그리지 않는다. */}
+          <div style={{ marginBottom: 8 }}>
+            <PrivilegedCommandApprovals />
+          </div>
           {selected ? (
             <InstanceDetail
               inst={selected}
@@ -1899,7 +1890,10 @@ export function ManagedAgentsSection({
   // currently-active workspace are still visible from this admin page.
   const refresh = useCallback(async () => {
     try {
-      const all = await api.getAgentsAll();
+      // includeOrchestration: identities provisioned for Orchestration team
+      // slots run on this host too, so hiding them here would leave an operator
+      // debugging the machine with an incomplete picture of what it is running.
+      const all = await api.getAgentsAll({ includeOrchestration: true });
       const children = (all as Agent[]).filter((a) => a.manager_agent_id === inst.agent_id);
       setAgents(children);
     } catch (err: any) {
@@ -2570,6 +2564,440 @@ function EditAgentManagerDialog({
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ─── PrivilegedCommandApprovals — agent 가 요청한 root 명령의 승인 대기열 ───────
+//
+// agent 는 요청만 할 수 있고, 실행은 운영자가 **명령을 읽고** 승인하면서 비밀번호를
+// 칠 때만 일어난다. agent 에게 상시 sudo 를 주면 그 agent 가 곧 root 이고, 프롬프트
+// 인젝션 한 번이 루트 권한 탈취가 된다.
+//
+// 화면이 보여주는 argv 가 곧 실행되는 argv 다 — 매니저는 서버가 보관한 정본을 다시
+// 받아 가서 돌린다. 그래서 여기서 읽은 것과 도는 것이 갈라질 수 없다.
+//
+// 기본값은 거부다: 아무도 결정하지 않으면 창이 지나며 만료된다. 그래서 이 패널은
+// "대기 중일 때만" 나타나고, 평소에는 아무것도 그리지 않는다.
+function PrivilegedCommandApprovals() {
+  const { showToast } = useToast();
+  const [requests, setRequests] = useState<PrivilegedCommandRequest[]>([]);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setRequests(await api.listPrivilegedCommands());
+    } catch {
+      // 목록 조회 실패가 화면을 망가뜨리면 안 된다 — 다음 폴링이 복구한다.
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    // 승인 대기는 사람이 기다리는 상태다. 하트비트(30초)보다 촘촘히 본다.
+    const t = setInterval(refresh, 10_000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  if (requests.length === 0) return null;
+
+  const deciding = requests.find((r) => r.request_id === decidingId) ?? null;
+
+  const approve = async () => {
+    if (!deciding || !password || busy) return;
+    setBusy(true);
+    try {
+      await api.approvePrivilegedCommand(deciding.request_id, password);
+      setPassword('');
+      setDecidingId(null);
+      showToast(`승인됨 — ${deciding.hostname} 에서 실행 중입니다.`, 'success');
+      await refresh();
+    } catch (err: any) {
+      setPassword('');
+      showToast(`승인 실패: ${err?.message || err}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deny = async (req: PrivilegedCommandRequest) => {
+    try {
+      await api.denyPrivilegedCommand(req.request_id);
+      showToast('거부했습니다.', 'info');
+      await refresh();
+    } catch (err: any) {
+      showToast(`거부 실패: ${err?.message || err}`, 'error');
+    }
+  };
+
+  return (
+    <div
+      style={{
+        padding: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.warning}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+        루트 권한 요청 {requests.length}건 — 승인 대기
+      </div>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 12, lineHeight: 1.6 }}>
+        아래 명령은 <strong>그대로</strong> root 로 실행됩니다. 승인할 때 입력하는 비밀번호는 저장되지
+        않으며, 일회용 티켓으로 해당 호스트의 매니저에게 한 번만 전달됩니다. 결정하지 않으면 만료되어
+        아무 일도 일어나지 않습니다.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {requests.map((req) => (
+          <div
+            key={req.request_id}
+            style={{
+              padding: 10,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.sm,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
+              <strong>{req.agent_name}</strong> → <code>{req.hostname}</code>
+            </div>
+            <code
+              style={{
+                fontSize: 12,
+                fontFamily: 'monospace',
+                color: tokens.colors.textStrong,
+                wordBreak: 'break-all',
+              }}
+            >
+              sudo {req.command} {req.args.join(' ')}
+            </code>
+            <div style={{ fontSize: 11, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
+              {req.reason}
+            </div>
+            {deciding?.request_id === req.request_id ? (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <Input
+                    type="password"
+                    autoFocus
+                    value={password}
+                    placeholder={`${req.hostname} 의 sudo 비밀번호`}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+                    onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                      if (e.key === 'Enter') void approve();
+                    }}
+                  />
+                </div>
+                <Button size="sm" variant="primary" onClick={approve} disabled={!password || busy}>
+                  {busy ? '실행 중…' : '승인하고 실행'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setPassword('');
+                    setDecidingId(null);
+                  }}
+                >
+                  취소
+                </Button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <Button size="sm" variant="primary" onClick={() => setDecidingId(req.request_id)}>
+                  승인…
+                </Button>
+                <Button size="sm" variant="danger" onClick={() => deny(req)}>
+                  거부
+                </Button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── SudoPasswordModal — 일회용 sudo 비밀번호 입력 ────────────────────────────
+//
+// 비밀번호는 여기서만 존재한다. 제출하면 곧바로 **일회용 티켓**으로 바뀌고(서버
+// 메모리, TTL 120초, 1회용) 이 컴포넌트의 상태는 비워진다. AWB 는 이 값을 어디에도
+// 저장하지 않는다 — DB 에도, 브라우저에도, 로그에도.
+//
+// 커맨드에 실려 나가는 것은 티켓 id 뿐이라, SSE 페이로드·커맨드 원장·활동 로그에
+// 비밀번호가 남지 않는다. 매니저는 권한 상승이 실제로 필요한 순간에 그 id 로
+// 서버에서 한 번만 당겨 간다.
+function SudoPasswordModal({
+  instanceId,
+  hostname,
+  target,
+  onClose,
+  onTicket,
+}: {
+  instanceId: string;
+  hostname: string;
+  target: { cli: string; bin: string; method: string };
+  onClose: () => void;
+  onTicket: (ticketId: string) => void;
+}) {
+  const { showToast } = useToast();
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!password || busy) return;
+    setBusy(true);
+    try {
+      const { ticket_id } = await api.mintSudoTicket(instanceId, {
+        password,
+        // scope 를 발급 시점에 못 박는다 — 티켓 id 가 새더라도 다른 설치본에
+        // 쓸 수 없다.
+        scope: { kind: 'cli_update', cli: target.cli, bin: target.bin },
+      });
+      // 성공하든 말든 화면에서 비밀번호를 즉시 지운다.
+      setPassword('');
+      onTicket(ticket_id);
+    } catch (err: any) {
+      setPassword('');
+      showToast(`sudo 티켓 발급 실패: ${err?.message || err}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      title={`sudo 비밀번호 — ${hostname}`}
+      maxWidth={520}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            취소
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={!password || busy}>
+            {busy ? '확인 중…' : '업데이트'}
+          </Button>
+        </>
+      }
+    >
+      <p style={{ margin: '0 0 10px 0', fontSize: 12, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
+        <code>{target.bin}</code> 는 root 소유라 현재 권한으로는 올릴 수 없습니다.
+        {target.method ? <> 올리는 방법: <code>{target.method}</code>.</> : null}
+      </p>
+      <p style={{ margin: '0 0 12px 0', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
+        입력한 비밀번호는 <strong>저장되지 않습니다</strong>. 서버 메모리에서 120초만 유지되는 일회용
+        티켓으로 바뀌고, 그 호스트의 매니저가 <strong>한 번만</strong> 받아 가 <code>sudo</code> 의 stdin 으로
+        전달합니다. 실행되는 명령은 매니저가 그 설치본의 설치 방식에서 직접 만든 것이며, 이 화면이
+        명령 문자열을 보내지는 않습니다.
+      </p>
+      <Input
+        type="password"
+        autoFocus
+        value={password}
+        placeholder={`${hostname} 의 sudo 비밀번호`}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+        onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+          if (e.key === 'Enter') void submit();
+        }}
+      />
+    </Modal>
+  );
+}
+
+// ─── InstalledCliVersions — 설치본 단위의 버전 + Update ────────────────────────
+//
+// InstanceDetail 과 같은 이유로 노출한다 — 이 패널의 잠금 규칙(최신/구버전/모름)
+// 을 인스턴스 전체를 부팅하지 않고 직접 마운트해 검사하기 위해서다.
+//
+// 한 Runtime Host 에 같은 CLI 가 여러 벌 깔려 있는 것은 정상 구성이다(vLLM
+// 백엔드용 두 번째 claude). 그러므로 화면의 단위는 CLI 가 아니라 설치본이고,
+// 각 행은 자기 경로·버전·설치 방법을 갖는다. Update 는 그 경로를 명시해 보내므로
+// "어느 것이 올라갈지" 가 눌러 보기 전에 결정돼 있다.
+//
+// 버튼 잠금은 삼항이다(utils/cliVersions): 최신이면 잠그고, 구버전이면 목표
+// 버전을 보여주고, **최신을 모르면 잠그지 않는다** — 모른다고 잠그면 npm 조회가
+// 실패한 호스트에서 올릴 길이 사라진다.
+export function InstalledCliVersions({
+  inst,
+  pending,
+  onUpdate,
+}: {
+  inst: AgentManagerInstance;
+  pending: string | null;
+  onUpdate: (cli: string, bin: string | undefined, needsSudo: boolean, method: string) => void;
+}) {
+  // 매니저가 설치본 목록을 보내면 그것이 진실이다. 안 보내면(구버전) cli_versions
+  // 를 CLI 당 한 줄짜리 가짜 설치본으로 접어 같은 렌더 경로를 태운다.
+  const installs: CliInstallEntry[] = inst.cli_installs?.length
+    ? inst.cli_installs
+    : Object.entries(inst.cli_versions ?? {}).map(([cli, version]) => ({
+        cli,
+        path: '',
+        version,
+        method: '',
+        updatable: inst.cli_adapters.includes(cli),
+        // 구버전 매니저는 이 값을 모른다. 모르면 묻지 않는다 — 어차피 그 매니저는
+        // sudo 티켓을 쓸 줄 모르므로, 비밀번호를 받아 봐야 쓰이지 않는다.
+        needs_sudo: false,
+        // latest_version 은 일부러 넣지 않는다(undefined) — 이 합성 행은 CLI 단위
+        // 값으로 접혀야 예전 동작이 그대로 유지된다.
+        active: true,
+      }));
+  if (installs.length === 0) return null;
+
+  const perCli = new Map<string, number>();
+  for (const row of installs) perCli.set(row.cli, (perCli.get(row.cli) ?? 0) + 1);
+
+  // 같은 CLI 중 이 호스트에서 가장 높은 버전. "최신" 이라는 라벨이 절대적 주장으로
+  // 읽히지 않게 하려면 이게 필요하다 — snap 설치본은 **자기 채널 기준으로는** 최신일
+  // 수 있지만, 바로 옆 줄에 더 높은 버전이 있는데 "최신" 이라고 쓰면 말이 안 된다
+  // (rolf: 죽은 채널의 snap codex 0.114.0 vs 공식 npm 0.156.1).
+  const newestPerCli = new Map<string, string>();
+  for (const row of installs) {
+    if (!row.version) continue;
+    const best = newestPerCli.get(row.cli);
+    if (!best || (compareCliVersionStrings(row.version, best) ?? 0) > 0) {
+      newestPerCli.set(row.cli, row.version);
+    }
+  }
+
+  const sorted = [...installs].sort(
+    (a, b) => a.cli.localeCompare(b.cli) || Number(b.active) - Number(a.active) || a.path.localeCompare(b.path),
+  );
+
+  return (
+    <div style={{ gridColumn: '1 / -1' }}>
+      <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        Installed CLI versions
+      </dt>
+      <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {sorted.map((row) => {
+          // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. 매니저가 행마다 알려주면
+          // 그것을 쓴다(snap/brew 는 null — npm 의 숫자를 들이대면 안 되는 채널이다).
+          // 구버전 매니저는 아예 안 보내므로(undefined) 그때만 CLI 단위 값으로 접는다.
+          const latest =
+            row.latest_version !== undefined
+              ? row.latest_version
+              : inst.cli_latest_versions?.[row.cli] ?? null;
+          const state = cliUpdateState(row.version, latest);
+          const upToDate = state === 'up-to-date';
+          // 자기 채널로는 최신인데 같은 호스트에 더 새 설치본이 있는 경우. 이때
+          // "최신" 은 사실이지만 오해를 부른다 — 무엇 기준인지, 그리고 더 새 것이
+          // 어디 있는지를 함께 말해야 운영자가 다음 행동을 정할 수 있다.
+          const newestOnHost = newestPerCli.get(row.cli) ?? null;
+          const superseded =
+            upToDate &&
+            Boolean(newestOnHost) &&
+            (compareCliVersionStrings(newestOnHost, row.version) ?? 0) > 0;
+          const newerRow = superseded
+            ? sorted.find((r) => r.cli === row.cli && r.version === newestOnHost) ?? null
+            : null;
+          const supersededTitle = newerRow
+            ? `이 설치본은 자기 배포 채널에서는 최신이지만, 같은 호스트의 ` +
+              `${newerRow.path || '다른 설치본'} 이 ${newerRow.version} 으로 더 새롭습니다` +
+              `${newerRow.active ? ' (AWB 는 그쪽을 실행합니다)' : ''}. ` +
+              '이 채널에서는 더 올라갈 곳이 없으므로, 쓰지 않는다면 지우는 편이 낫습니다.'
+            : '';
+          const key = row.path || row.cli;
+          const busy = pending === key;
+          const disabled = pending !== null || upToDate;
+          // 같은 CLI 가 한 벌뿐이면 경로는 소음이다 — 여러 벌일 때만 짚어 준다.
+          const showPath = Boolean(row.path) && (perCli.get(row.cli) ?? 0) > 1;
+          return (
+            <span
+              key={`${row.cli}:${key}`}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '2px 6px 2px 8px',
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                fontSize: 11,
+                width: 'fit-content',
+                maxWidth: '100%',
+                flexWrap: 'wrap',
+              }}
+            >
+              <span style={{ fontFamily: 'monospace' }}>
+                {row.cli} {row.version ?? 'unknown'}
+              </span>
+              {state === 'outdated' && (
+                <span style={{ fontWeight: 600, color: tokens.colors.success }}>→ {latest}</span>
+              )}
+              {upToDate && !superseded && <span style={{ color: tokens.colors.textMuted }}>최신</span>}
+              {superseded && (
+                <span style={{ color: tokens.colors.warning, fontWeight: 600 }} title={supersededTitle}>
+                  뒤처짐 · 이 채널 최신
+                </span>
+              )}
+              {row.active && (perCli.get(row.cli) ?? 0) > 1 && (
+                <span
+                  style={{ color: tokens.colors.textMuted }}
+                  title="지정 없이 spawn 하면 실행되는 설치본입니다."
+                >
+                  · 활성
+                </span>
+              )}
+              {showPath && (
+                <span style={{ fontFamily: 'monospace', color: tokens.colors.textMuted }}>{row.path}</span>
+              )}
+              {row.method && (
+                <span style={{ color: tokens.colors.textMuted }} title="이 설치본을 올리는 방법">
+                  ({row.method})
+                </span>
+              )}
+              {row.needs_sudo && (
+                <span
+                  style={{ color: tokens.colors.warning }}
+                  title="이 설치본은 root 소유라, Update 를 누르면 sudo 비밀번호를 한 번 묻습니다. 비밀번호는 저장되지 않습니다."
+                >
+                  🔒 sudo
+                </span>
+              )}
+              {row.updatable && (
+                <button
+                  onClick={() => onUpdate(row.cli, row.path || undefined, row.needs_sudo, row.method)}
+                  disabled={disabled}
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: 'transparent',
+                    color: tokens.colors.textStrong,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.sm,
+                    cursor: busy ? 'wait' : disabled ? 'default' : 'pointer',
+                    fontFamily: 'inherit',
+                    opacity: disabled && !busy ? 0.5 : 1,
+                  }}
+                  title={
+                    superseded
+                      ? supersededTitle
+                      : upToDate
+                      ? `${row.cli} 는 이 설치본의 배포 채널 기준 최신입니다 (${latest}).`
+                      : `update_cli — ${row.path || `이 장비의 ${row.cli}`} 를 올립니다` +
+                        `${row.method ? ` (${row.method})` : ''}` +
+                        `${state === 'outdated' ? ` · ${row.version} → ${latest}` : ' · 최신 버전 확인 불가 — 눌러서 시도할 수 있습니다'}. ` +
+                        '매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.'
+                  }
+                >
+                  {busy ? '업데이트 중…' : 'Update'}
+                </button>
+              )}
+            </span>
+          );
+        })}
+      </dd>
+    </div>
   );
 }
 

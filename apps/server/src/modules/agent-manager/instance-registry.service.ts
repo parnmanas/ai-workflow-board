@@ -19,6 +19,24 @@ import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
  *  agent-manager 쪽 `RuntimePermissionTierSupport` 와 같은 값 집합이다. */
 export type RuntimePermissionTierSupport = 'native' | 'approximated' | 'unsupported';
 
+/** 한 Runtime Host 에 깔린 CLI 설치본 한 줄 (매니저 하트비트 `cli_installs`).
+ *  server·agent-manager 공동 contract — 필드 추가/변경은 같은 PR 로. */
+export interface CliInstallEntry {
+  cli: string;
+  path: string;
+  version: string | null;
+  method: string;
+  updatable: boolean;
+  /** 이 설치본의 최신 배포 버전. npm 채널에서 온 설치본만 값이 있고, snap/brew
+   *  처럼 다른 채널에서 온 것은 null(= 최신을 모른다, "최신이다" 가 아니다).
+   *  구버전 매니저는 이 필드를 보내지 않으므로 undefined 와 null 은 다르다. */
+  latest_version?: string | null;
+  /** 올리려면 root 가 필요한 설치본인지(쓰기 불가 npm prefix, snap). UI 는 이 값이
+   *  true 일 때만 비밀번호를 묻는다 — 필요 없는 비밀번호는 네트워크를 타지 않는다. */
+  needs_sudo: boolean;
+  active: boolean;
+}
+
 export interface RuntimeCapabilityDescriptor {
   protocol: 'stream-json' | 'jsonl' | 'acp';
   session: 'oneshot' | 'persistent' | 'resumable';
@@ -174,6 +192,16 @@ export interface InstanceRecord {
   // 무엇을 올리는지/올렸는지 UI 가 보여주는 근거. 버전을 못 읽은 CLI 는 키가 없고,
   // 구버전 매니저는 필드 자체를 보내지 않는다(= 버전 텔레메트리 없음).
   cli_versions?: Record<string, string>;
+  // 같은 CLI 들의 최신 배포 버전(cliType → npm 레지스트리의 latest). cli_versions
+  // 와 짝을 이뤄 UI 가 Update 버튼을 활성/비활성으로 가른다. 조회에 실패했거나
+  // npm 으로 배포되지 않는 CLI 는 키가 없다 — **키 부재는 "최신" 이 아니라
+  // "모름"** 이고, 화면은 그때 버튼을 잠그지 않는다.
+  cli_latest_versions?: Record<string, string>;
+  // 설치본 단위 목록 — 같은 `cli` 가 여러 줄일 수 있고 그게 정상이다(한 호스트에
+  // vLLM 백엔드용 두 번째 claude 를 두는 구성). `active` 가 "지정 없이 spawn 하면
+  // 실행될 설치본" 이고, `path` 는 `update_cli` 의 `args.bin` 으로 그대로 돌아간다.
+  // 구버전 매니저는 이 필드를 보내지 않으므로 UI 는 `cli_versions` 로 접는다.
+  cli_installs?: CliInstallEntry[];
   // Self-update fields — Runtime Host heartbeat only.
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.

@@ -10,8 +10,11 @@
 //   1. Orchestration team/mission projections read `agent.name` directly, so
 //      the team roster, orchestrator label, step assignee, and the roster the
 //      orchestrator sees in its OWN brief prompt were all bare leaf names.
-//   2. `assignable-agents` did not return manager_name at all, so the team
+//   2. The team picker feed did not return manager_name at all, so the team
 //      pickers could not have rendered the full name even if they wanted to.
+//      That feed is now `runtime-hosts` (a roster slot names a MACHINE, not a
+//      pre-existing agent) — so the assertion moved to the thing that replaced
+//      it, plus the identities the roster itself provisions.
 //   3. The ticket-panel typing indicator rendered the raw agent UUID: the
 //      agent_typing SSE frame carried `actor_name: <agent_id>`.
 //
@@ -67,54 +70,74 @@ await agentRepo.update({ id: orchestrator.id }, { manager_agent_id: mgrA.id });
 await agentRepo.update({ id: memberA.id }, { manager_agent_id: mgrA.id });
 await agentRepo.update({ id: memberB.id }, { manager_agent_id: mgrB.id });
 
-const ORCH_DISPLAY = `${mgrA.name}/${orchestrator.name}`;
 const MEMBER_A_DISPLAY = `${mgrA.name}/${memberA.name}`;
 const MEMBER_B_DISPLAY = `${mgrB.name}/${memberB.name}`;
 
-// ─── 1. The picker feed ──────────────────────────────────────────────────────
-test('assignable-agents carries manager_name so the picker can render <Manager>/<Agent>', async () => {
-  const rows = await teams.listAssignableAgents(ws.id);
-  const a = rows.find((r) => r.id === memberA.id);
-  const b = rows.find((r) => r.id === memberB.id);
-  assert.ok(a && b, 'both managed agents must be assignable');
+// ─── 1. The slot picker feed ─────────────────────────────────────────────────
+// A roster slot names a Runtime Host, so the feed the pickers read is the host
+// catalogue. The display-name contract applies to it verbatim: a host is an
+// Agent row too, and its name is what every slot label is prefixed with.
+test('runtime-hosts feed names every paired Runtime Host and never offers a worker as one', async () => {
+  const hosts = await teams.listRuntimeHosts(ws.id);
+  const a = hosts.find((h) => h.manager_agent_id === mgrA.id);
+  const b = hosts.find((h) => h.manager_agent_id === mgrB.id);
+  assert.ok(a && b, 'both paired managers must be offered as Runtime Hosts');
 
-  assert.equal(a.manager_name, mgrA.name, 'manager_name must be resolved, not left null');
-  assert.equal(b.manager_name, mgrB.name, 'manager_name must be resolved, not left null');
+  assert.equal(a.manager_name, mgrA.name, 'manager_name must be resolved, not left blank');
+  assert.equal(b.manager_name, mgrB.name, 'manager_name must be resolved, not left blank');
 
-  // The whole point: two agents of the same role under different managers stay
-  // distinguishable only because the prefix is there.
-  assert.notEqual(
-    `${a.manager_name}/${a.name}`,
-    `${b.manager_name}/${b.name}`,
-    'two same-named agents under different managers must render distinctly',
+  // The inverse of the old assertion: a worker identity is never a HOST.
+  assert.ok(
+    !hosts.some((h) => h.manager_agent_id === memberA.id || h.manager_agent_id === orchestrator.id),
+    'executable agents must not appear as Runtime Hosts',
   );
 
-  // A manager identity is never an assignable worker.
-  assert.ok(!rows.some((r) => r.id === mgrA.id), 'manager identities must not appear in the picker');
+  // The working-folder picker is seeded from the folders already in use on that
+  // host — this is what makes "share a folder with a teammate" a click.
+  assert.ok(Array.isArray(a.working_dirs), 'a host must report a working-folder candidate list');
 });
 
 // ─── 2. Team projection ──────────────────────────────────────────────────────
+// The roster now PROVISIONS its identities from a spec, so this covers both
+// halves of the contract: the provisioned names are prefixed, and two slots
+// with the same role on different hosts stay distinguishable — which is exactly
+// the ambiguity the prefix exists to remove, and which a roster spread over
+// several machines produces by default.
+const SLOT_SPEC = (managerId, extra = {}) => ({
+  manager_agent_id: managerId,
+  cli: 'hermes',
+  working_dir: '/srv/work/app',
+  runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  ...extra,
+});
+
 test('team view: orchestrator_name and member agent_name are <Manager>/<Agent>', async () => {
   const team = await teams.createTeam({
     workspace_id: ws.id,
     name: 'fullname-team',
-    orchestrator_agent_id: orchestrator.id,
+    orchestrator: SLOT_SPEC(mgrA.id),
   });
-  await teams.addMember(team.id, ws.id, { agent_id: memberA.id, role_label: 'impl' });
-  await teams.addMember(team.id, ws.id, { agent_id: memberB.id, role_label: 'review' });
+  await teams.addMember(team.id, ws.id, { runtime: SLOT_SPEC(mgrA.id), role_label: 'impl' });
+  await teams.addMember(team.id, ws.id, { runtime: SLOT_SPEC(mgrB.id), role_label: 'impl' });
 
   const views = await teams.listTeams(ws.id);
   const view = views.find((t) => t.id === team.id);
   assert.ok(view, 'team must be listed');
 
-  assert.equal(view.orchestrator_name, ORCH_DISPLAY,
-    `orchestrator_name must be "${ORCH_DISPLAY}", got "${view.orchestrator_name}"`);
+  assert.ok(view.orchestrator_name.startsWith(`${mgrA.name}/`),
+    `orchestrator_name must carry the manager prefix, got "${view.orchestrator_name}"`);
 
-  const displays = view.members.map((m) => m.agent_name).sort();
-  assert.deepEqual(displays, [MEMBER_A_DISPLAY, MEMBER_B_DISPLAY].sort(),
-    `member agent_name must carry the manager prefix, got ${JSON.stringify(displays)}`);
+  assert.equal(view.members.length, 2, 'both members must be on the roster');
   assert.ok(view.members.every((m) => m.agent_name.includes('/')),
     'every member label must carry the manager prefix');
+
+  const onA = view.members.find((m) => m.runtime?.manager_agent_id === mgrA.id);
+  const onB = view.members.find((m) => m.runtime?.manager_agent_id === mgrB.id);
+  assert.ok(onA && onB, 'each member must report the host its slot named');
+  assert.ok(onA.agent_name.startsWith(`${mgrA.name}/`), 'member on MgrA is prefixed with MgrA');
+  assert.ok(onB.agent_name.startsWith(`${mgrB.name}/`), 'member on MgrB is prefixed with MgrB');
+  assert.notEqual(onA.agent_name, onB.agent_name,
+    'two identically-configured members on different hosts must render distinctly');
 });
 
 // ─── 3. Mission timeline + step assignee ─────────────────────────────────────
@@ -127,7 +150,7 @@ test('mission: recordEvent canonicalizes an agent actor_name, and assignee_name 
     team_id: team.id,
     title: 'fullname mission',
     objective: 'prove names',
-    orchestrator_agent_id: orchestrator.id,
+    orchestrator_agent_id: team.orchestrator_agent_id,
     created_by_type: 'user',
     created_by: 'tester',
   });
@@ -177,7 +200,10 @@ test('mission: recordEvent canonicalizes an agent actor_name, and assignee_name 
   );
 
   const detail = await missions.getMissionDetail(mission.id);
-  assert.equal(detail.orchestrator_name, ORCH_DISPLAY, 'mission orchestrator_name must be prefixed');
+  assert.equal(detail.orchestrator_name, team.orchestrator_name,
+    'mission orchestrator_name must match the team projection (both go through resolveAgentDisplayName)');
+  assert.ok(detail.orchestrator_name.startsWith(`${mgrA.name}/`),
+    'mission orchestrator_name must be prefixed');
   assert.equal(detail.steps[0].assignee_name, MEMBER_B_DISPLAY,
     `step assignee_name must be "${MEMBER_B_DISPLAY}", got "${detail.steps[0].assignee_name}"`);
 });

@@ -22,7 +22,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { buildTeam } from '../helpers/orchestration-team.mjs';
 
 process.env.PORT = process.env.ORCHESTRATION_EVENTS_CURSOR_PORT || '0';
 
@@ -58,17 +59,15 @@ test('타임라인 커서의 마지막 키가 REST 경로로 전달되어 seq �
   const base = `http://127.0.0.1:${port}`;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'events-cursor-rest');
-  const lead = await createAgent(app, getDataSourceToken, ws.id, { name: 'lead' });
+
   // MANAGE_ACTIONS 가 필요하다 — 이 컨트롤러 전체가 그 권한 뒤에 있다.
   const operator = await createUser(app, getDataSourceToken, { name: 'events-cursor-operator' });
   const token = app.get(AuthService).createSession(operator.id);
 
-  const team = await teams.createTeam({
-    workspace_id: ws.id,
+  const { team } = await buildTeam(app, getDataSourceToken, teams, {
+    workspaceId: ws.id,
     name: 'Cursor squad',
-    orchestrator_agent_id: lead.id,
-    max_parallel_steps: 2,
-    created_by: operator.id,
+    team: { max_parallel_steps: 2, created_by: operator.id },
   });
   const mission = await missions.createMission({
     workspace_id: ws.id,

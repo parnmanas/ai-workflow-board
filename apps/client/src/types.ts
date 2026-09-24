@@ -2158,6 +2158,55 @@ export interface AgentLaunchSpecEntry {
 }
 
 // One Runtime Host instance heartbeating against AWB.
+/** Runtime Host 에 깔린 CLI 설치본 한 줄 (하트비트 `cli_installs`). */
+/**
+ * 세션/채팅의 agent 가 요청하고 운영자 승인을 기다리는 권한 상승 명령 하나.
+ *
+ * agent 는 요청만 할 수 있고 실행은 운영자가 이 명령을 읽고 승인하면서 비밀번호를
+ * 칠 때만 일어난다 — agent 에게 상시 sudo 를 주면 그 agent 가 곧 root 이기 때문이다.
+ * 기본값은 거부다: 승인 없이 창이 지나면 만료된다.
+ */
+export interface PrivilegedCommandRequest {
+  request_id: string;
+  workspace_id: string | null;
+  agent_id: string;
+  agent_name: string;
+  instance_id: string;
+  hostname: string;
+  /** 승인하면 **이대로** 실행된다. 매니저가 서버에서 이 정본을 다시 받아 간다. */
+  command: string;
+  args: string[];
+  cwd: string | null;
+  /** agent 가 밝힌 이유 — 승인 판단의 근거다. */
+  reason: string;
+  status: 'pending' | 'approved' | 'running' | 'done' | 'denied' | 'expired';
+  created_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  ok: boolean | null;
+  output: string;
+  failure: string | null;
+}
+
+export interface CliInstallEntry {
+  cli: string;
+  path: string;
+  version: string | null;
+  /** 사람이 읽는 설치 방법 — `npm --prefix /home/x/.npm-global`, `snap package` 등. */
+  method: string;
+  /** AWB 가 이 설치본을 올릴 수 있는지. false 면 방법만 보여주고 버튼은 감춘다. */
+  updatable: boolean;
+  /** 이 **설치본**의 최신 배포 버전. npm 채널에서 온 설치본만 값이 있고,
+   *  snap/brew 처럼 다른 채널에서 온 것은 `null`(= 모른다). 구버전 매니저는
+   *  아예 보내지 않으므로 `undefined` 와 `null` 은 뜻이 다르다 — 전자는
+   *  CLI 단위 값으로 접고, 후자는 "최신 모름" 으로 둔다. */
+  latest_version?: string | null;
+  /** 올리려면 root 가 필요한지. true 면 Update 를 누를 때 비밀번호를 묻고 일회용
+   *  sudo 티켓을 함께 보낸다. false 면 묻지 않는다. */
+  needs_sudo: boolean;
+  active: boolean;
+}
+
 export interface AgentManagerInstance {
   instance_id: string;
   agent_id: string;
@@ -2203,6 +2252,16 @@ export interface AgentManagerInstance {
   // 현재 버전을 보여주고, 업데이트 후 바뀐 값을 그대로 드러낸다. 버전을 못 읽은
   // CLI 는 키가 없고, 구버전 매니저는 필드 자체를 보내지 않는다.
   cli_versions?: Record<string, string>;
+  // 같은 CLI 들의 최신 배포 버전(cliType → npm latest). 설치 버전과 짝을 이뤄
+  // Update 버튼을 활성/비활성으로 가른다(utils/cliVersions 의 cliUpdateState).
+  // 조회 실패·npm 배포가 아닌 CLI 는 **키가 없고, 그건 "최신" 이 아니라 "모름"**
+  // 이다 — 그 경우 버튼을 잠그면 올릴 수 있는데도 못 올리게 된다.
+  cli_latest_versions?: Record<string, string>;
+  // 설치본 단위 목록 — 같은 `cli` 가 여러 줄일 수 있고 그게 정상이다(한 호스트에
+  // vLLM 백엔드용 두 번째 claude 를 두는 구성). `active` 가 "지정 없이 spawn 하면
+  // 실행될 설치본", `path` 는 `update_cli` 의 `args.bin` 으로 그대로 돌아간다.
+  // 구버전 매니저는 보내지 않으므로, 없으면 화면은 `cli_versions` 한 줄로 접는다.
+  cli_installs?: CliInstallEntry[];
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.
@@ -2710,6 +2769,38 @@ export type OrchestrationStepStatus =
   /** confirm 노드가 사람의 Pass/Fail 판정을 기다리는 durable pause(티켓 5dbe4aa2). */
   | 'awaiting_user';
 
+/** Where a roster slot's step actually runs. See the server's MemberFolderScope. */
+export type OrchestrationFolderScope = 'shared' | 'isolated';
+
+/**
+ * A roster slot's runtime, as declared in the team editor: Runtime Host + CLI +
+ * model + working folder. This — not a pre-existing Agent — is what defines a
+ * team member; the backing Agent identity is provisioned from it server-side.
+ */
+export interface OrchestrationSlotSpecInput {
+  manager_agent_id: string;
+  cli: string;
+  model?: string | null;
+  working_dir: string;
+  folder_scope?: OrchestrationFolderScope;
+  credential_id?: string | null;
+  cli_runtime_profile?: string | null;
+  runtime_config?: Record<string, any> | null;
+}
+
+/** The same spec read back, with the names the UI renders. */
+export interface OrchestrationSlotRuntime extends OrchestrationSlotSpecInput {
+  manager_name: string;
+  manager_online: boolean;
+  model: string | null;
+  folder_scope: OrchestrationFolderScope;
+  credential_id: string | null;
+  cli_runtime_profile: string | null;
+  runtime_config: Record<string, any> | null;
+  /** Other slots on this team in the same folder on the same host. */
+  shared_with: string[];
+}
+
 export interface OrchestrationTeamMember {
   id: string;
   agent_id: string;
@@ -2720,6 +2811,8 @@ export interface OrchestrationTeamMember {
   capabilities: string;
   max_concurrent: number;
   position: number;
+  /** null for a legacy row saved before slots carried a spec — re-save to edit. */
+  runtime: OrchestrationSlotRuntime | null;
 }
 
 export interface OrchestrationTeam {
@@ -2736,6 +2829,7 @@ export interface OrchestrationTeam {
   orchestrator_agent_id: string | null;
   orchestrator_name: string;
   orchestrator_online: boolean;
+  orchestrator_runtime: OrchestrationSlotRuntime | null;
   orchestrator_prompt: string;
   max_parallel_steps: number;
   max_open_missions: number;
@@ -2952,15 +3046,27 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   start_error?: string;
 }
 
-export interface OrchestrationAssignableAgent {
-  id: string;
-  name: string;
-  /** ST-7 — required for the `<Manager>/<Agent>` render via formatAgentDisplayName. */
-  manager_agent_id?: string | null;
-  manager_name?: string | null;
-  type: string;
+/**
+ * A Runtime Host (paired agent-manager machine) a roster slot may be placed on,
+ * with everything the slot editor needs to offer as choices.
+ *
+ * Replaces the old assignable-Agent feed: a team is now built from machines,
+ * CLIs and folders rather than from identities somebody created in advance.
+ */
+export interface OrchestrationRuntimeHost {
+  manager_agent_id: string;
+  manager_name: string;
+  hostname: string;
   is_online: boolean;
-  description: string;
+  instance_id: string | null;
+  last_seen_at: string | null;
+  /** CLIs installed on this host. */
+  clis: string[];
+  /** cliType → model ids this host reported. */
+  available_models: Record<string, string[]>;
+  cli_versions: Record<string, string>;
+  /** Working folders already used on this host — the "share a folder" picker. */
+  working_dirs: string[];
 }
 
 /** Payload of the `orchestration_update` SSE frame (UI-only event). */

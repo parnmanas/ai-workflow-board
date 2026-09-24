@@ -547,9 +547,13 @@ export class AgentSessionsService implements OnModuleDestroy {
       backend: pinnedBackend ? this.backendRef(pinnedBackend.runtime, pinnedBackend.name) : null,
       backend_candidates: backends.map((b) => this.backendRef(b.runtime, b.name)),
       default_config: this.parseDefaults(row?.default_config),
-      // 캐시가 아직 비었으면 지금 살아 있는 세션이 아는 선택지를 그대로 쓴다 — 서버가 재시작한 직후나
-      // 이 호스트에서 세션을 연 적이 없는 워크스페이스에서도 바로 고를 수 있다.
-      known_config_options: cached.length ? cached : this.liveConfigOptions(managerId, cli),
+      // 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다:
+      //   1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP configOptions (가장 정확 — 표시 이름·현재값 포함)
+      //   2) 지금 살아 있는 세션이 아는 선택지 (서버 재시작 직후)
+      //   3) 하트비트의 `available_models` 로 합성한 model 옵션 (세션을 한 번도 연 적 없는 조합)
+      // 3번이 없던 동안에는 "처음 쓰는 호스트×CLI 면 모델을 못 고른다" 가 됐고, 사용자 눈에는
+      // 되는 조합과 안 되는 조합이 뒤섞인 것처럼 보였다.
+      known_config_options: this.withModelFallback(cached.length ? cached : this.liveConfigOptions(managerId, cli), managerId, cli),
       updated_at: row ? new Date(row.updated_at).toISOString() : null,
     };
   }
@@ -625,6 +629,49 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /** 지금 살아 있는 이 호스트×CLI 세션 중 가장 최근 것이 아는 설정 선택지. */
+  /**
+   * 선택지 목록에 model 옵션이 없으면 하트비트의 `available_models[cli]` 로 하나 합성해 덧붙인다.
+   *
+   * ACP 가 주는 값과 어댑터 `listModels()` 가 주는 값은 **같은 id 형식**이다(rolf 실측:
+   * claude `opus/sonnet/haiku`, codex `gpt-6-astra…`, opencode `opencode/big-pickle`). 그래서
+   * 여기서 합성한 값을 그대로 `session/set_config_option` 에 넘겨도 어댑터가 받아들인다.
+   *
+   * 덧붙이기만 하고 **덮어쓰지 않는다** — 실제 세션이 보고한 목록이 항상 더 정확하다
+   * (표시 이름·현재 선택값·CLI 가 실제로 허용하는 부분집합).
+   */
+  private withModelFallback(
+    options: AgentSessionConfigOption[],
+    managerId: string,
+    cli: string,
+  ): AgentSessionConfigOption[] {
+    if (options.some((o) => o.category === 'model')) return options;
+    const models = this.heartbeatModels(managerId, cli);
+    if (!models.length) return options;
+    return [
+      ...options,
+      {
+        config_id: 'model',
+        name: 'Model',
+        description: 'Reported by this Runtime Host; the session may refine the list once it opens.',
+        category: 'model',
+        type: 'select',
+        current_value: null,
+        options: models.map((value) => ({ value, name: value })),
+      },
+    ];
+  }
+
+  /** 이 매니저의 최신 하트비트가 보고한 CLI별 모델 목록. 보고가 없으면 빈 배열. */
+  private heartbeatModels(managerId: string, cli: string): string[] {
+    let best: InstanceRecord | null = null;
+    for (const rec of this.managerRecords()) {
+      if (rec.agent_id !== managerId) continue;
+      if (!best || rec.last_seen_at > best.last_seen_at) best = rec;
+    }
+    const models = best?.available_models?.[cli];
+    return Array.isArray(models) ? models.filter((m) => typeof m === 'string' && !!m) : [];
+  }
+
   private liveConfigOptions(managerId: string, cli: string): AgentSessionConfigOption[] {
     let best: LiveState | null = null;
     for (const state of this.live.values()) {
@@ -1046,6 +1093,37 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.updated_at = Date.now();
     this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'close', session_id: sessionId, driver_user_id: userId });
     return this.emitUpdate(state, 'closed');
+  }
+
+  /**
+   * 세션 프로세스를 죽이고 같은 세션 id 로 다시 연다.
+   *
+   * `close` 와 달리 다음 프롬프트를 기다리지 않는다 — 운영자가 재시작을 누르는 이유는
+   * 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는 것은
+   * 지금 당장 살아 있는 새 프로세스다. 상태를 `starting` 으로 먼저 옮겨 두면 그 사이에
+   * 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt).
+   */
+  async restart(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+    const rec = this.requireHost(workspaceId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const state = this.live.get(liveKey(managerId, cli, sessionId))
+      ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'starting', driver_user_id: userId });
+    state.status = 'starting';
+    state.driver_user_id = userId;
+    state.updated_at = Date.now();
+    // 세션을 **다시 여는** 요청이므로 open/prompt 와 똑같은 개설 컨텍스트를 실어야 한다.
+    // 특히 `credential_id` 를 빠뜨리면 운영자 로그인으로 열리고, 그 다음 op 가 바인딩된
+    // credential 을 싣고 오는 순간 매니저가 "binding changed" 로 또 다시 연다 — 계정이
+    // 바뀌면서 모델 목록도 함께 바뀌어, 방금 고른 모델이 사라지고 설정이 실패한다
+    // (실측: restart 직후 Fable 5.1 이 보였다가 고르면 Internal error 로 떨어졌다).
+    this.emitRequest({
+      manager_id: managerId, workspace_id: workspaceId, cli, op: 'restart', session_id: sessionId,
+      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
+      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
+      driver_user_id: userId,
+    });
+    return this.emitUpdate(state, 'restart');
   }
 
   // ─── 매니저 쓰기 ───────────────────────────────────────────────────────

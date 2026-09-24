@@ -91,6 +91,14 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 | `session_info_update` | 제목 패치 | — |
 
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
+**모델 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다.** (1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP
+`configOptions` — 표시 이름·현재값까지 있어 가장 정확하다. (2) 지금 살아 있는 세션이 아는 선택지(서버 재시작 직후).
+(3) 하트비트 `available_models[cli]` 로 합성한 model 옵션 — **세션을 한 번도 연 적 없는 조합**에서도 고를 수 있게 한다.
+3번이 없던 동안에는 처음 쓰는 호스트×CLI 면 모델을 아예 못 골랐고, 사용자 눈에는 되는 조합과 안 되는 조합이
+뒤섞인 것처럼 보였다. 합성은 **덧붙이기만 하고 덮어쓰지 않는다** — 실제 세션이 보고한 목록이 항상 더 정확하다.
+두 출처의 id 형식이 같기 때문에 성립한다(rolf 실측: claude `opus/sonnet/haiku`, codex `gpt-6-astra…`,
+opencode `opencode/big-pickle` — ACP 값과 어댑터 `listModels()` 값이 일치).
+
 config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 — codex-acp 1.12, claude-agent-acp 0.79 실측) 또는
 `configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
 **고른 설정은 기억된다.** 어댑터 프로세스는 매번 자기 기본값으로 시작하므로, 기억해 두지 않으면 유휴 회수·재접속마다
@@ -274,3 +282,43 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 - 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`(접기 규칙·slash 매칭·schema 정규화), `sessions-navigation.test.mjs`,
   `new-session-modal-host-refresh.test.mjs`(호스트 목록 갱신이 열린 모달을 되돌리지 않는다),
   `session-interactive-ui.test.mjs`(컴포저 자동완성, 질문 폼 렌더·제출).
+
+## 세션 프로세스 재시작 (`restart`)
+
+살아 있는 세션 프로세스는 **기동 시점의 CLI 상태**를 물고 있다. 그 사이에 CLI 를
+업그레이드해도 그 프로세스가 아는 모델 목록·기능은 옛 바이너리의 것이고, 다시 띄우기
+전에는 바뀌지 않는다 — 실측: claude 를 2.1.281 로 올린 뒤에도 돌고 있던 세션에는 새
+모델(Fable 5.1)이 끝내 나타나지 않았고, 프로세스를 죽였다 다시 띄우자 나왔다.
+
+`POST /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/restart` → 서버가
+`agent_session_request` 를 op `restart` 로 보내고, 매니저는 살아 있는 프로세스를 닫은 뒤
+**같은 세션 id 로** 곧바로 다시 연다.
+
+- `close` 와 다른 점은 **다음 프롬프트를 기다리지 않는다**는 것이다. 운영자가 재시작을
+  누르는 이유는 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는
+  것은 지금 살아 있는 새 프로세스다.
+- 기록은 CLI 홈에 있으므로 **대화는 이어진다**. 죽는 것은 프로세스뿐이다.
+- 서버는 요청 즉시 상태를 `starting` 으로 옮긴다 — 그 사이 프롬프트가 끼어들지 못하게
+  하는 것이 `agentSessionAcceptsPrompt` 의 기존 계약이다.
+- 진행 중인 턴이 있으면 끊긴다. UI 는 `starting` 일 때만 버튼을 잠근다: 턴 중이라도
+  운영자가 일부러 죽이려는 것일 수 있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다.
+
+### 다시 여는 op 은 개설 컨텍스트를 반드시 싣는다
+
+`restart` 는 세션을 **다시 여는** 요청이므로 `open`/`prompt` 와 똑같이 `cwd`·`title`·
+`credential_id`·`config_defaults`·`runtime_profile` 을 실어야 한다. 특히
+`credential_id` 를 빠뜨리면 세션이 **운영자 로그인**으로 열리고, 바로 다음 op 가
+바인딩된 credential 을 싣고 오는 순간 매니저의 `#ensureLive` 가 "binding changed" 로
+판단해 또 한 번 다시 연다.
+
+그 두 번의 열기는 **서로 다른 계정**이고, 계정이 다르면 어댑터가 광고하는 모델 목록도
+다르다. 실측된 증상: restart 직후에는 Fable 5.1 이 목록에 보이는데(운영자 로그인 계정의
+권한) 그것을 고르는 순간 세션이 credential 계정으로 다시 열리면서 그 모델이 사라지고
+`set_config_option failed: Internal error` 로 떨어졌다. 화면에서는 "됐다가 안 되는"
+것처럼 보이지만, 실제로는 **고르는 순간 계정이 바뀐 것**이다.
+
+`close` 는 다시 열지 않으므로 이 컨텍스트가 필요 없다 — 다시 여는 op 인지가 기준이다.
+
+`AGENT_SESSION_REQUEST_OPS` 는 서버·agent-manager 공동 contract 다. agent-manager 는
+별도 패키지라 그 타입을 import 할 수 없어 유니온 사본을 두므로, op 추가는 **양쪽을 같은
+PR 로** 고친다(`agent-session-runner.ts` 의 `AgentSessionRequest`).

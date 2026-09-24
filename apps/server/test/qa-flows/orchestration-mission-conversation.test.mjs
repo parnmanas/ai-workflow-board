@@ -51,7 +51,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { buildTeam } from '../helpers/orchestration-team.mjs';
 
 process.env.PORT = process.env.ORCHESTRATION_CONVERSATION_PORT || '0';
 
@@ -120,8 +121,6 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   const base = `http://127.0.0.1:${port}`;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'mission-conversation');
-  const lead = await createAgent(app, getDataSourceToken, ws.id, { name: 'lead' });
-  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
 
   // owner  = 미션을 만든 사람.        admin 이므로 MANAGE_ACTIONS 를 갖는다.
   // peer   = 미션을 만들지 않은 운영자. 역시 admin — join 으로 들어와야 한다.
@@ -148,14 +147,17 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   const join = (missionId, token) =>
     post(`/api/orchestration/missions/${missionId}/join-conversation`, token, { workspace_id: ws.id });
 
-  const team = await teams.createTeam({
-    workspace_id: ws.id,
+  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
+  // AWB 가 만든다 — 그래서 여기서 lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  const squad = await buildTeam(app, getDataSourceToken, teams, {
+    workspaceId: ws.id,
     name: 'Conversation squad',
-    orchestrator_agent_id: lead.id,
-    max_parallel_steps: 2,
-    created_by: owner.id,
+    team: { max_parallel_steps: 2, created_by: owner.id },
+    members: [{ role_label: 'worker' }],
   });
-  await teams.addMember(team.id, ws.id, { agent_id: worker.id, role_label: 'worker' });
+  const team = squad.team;
+  const lead = squad.orchestrator;
+  const worker = squad.member('worker');
 
   // ── 1. 생성자는 시작 직후 바로 말할 수 있다 ────────────────────────────────
   step('미션 생성자가 시작 직후 mission 방에 메시지를 보낸다');

@@ -189,6 +189,10 @@ export class CodexCliAdapter extends CliAdapter {
     return { args: ['update'], label: 'codex update' };
   }
 
+  updatePackage(): string | null {
+    return '@openai/codex';
+  }
+
   resolveBin(configured?: string | null): string {
     return resolveCliBin('codex', configured);
   }
