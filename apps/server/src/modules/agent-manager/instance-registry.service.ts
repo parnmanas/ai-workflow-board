@@ -27,6 +27,9 @@ export interface CliInstallEntry {
   version: string | null;
   method: string;
   updatable: boolean;
+  /** 올리려면 root 가 필요한 설치본인지(쓰기 불가 npm prefix, snap). UI 는 이 값이
+   *  true 일 때만 비밀번호를 묻는다 — 필요 없는 비밀번호는 네트워크를 타지 않는다. */
+  needs_sudo: boolean;
   active: boolean;
 }
 

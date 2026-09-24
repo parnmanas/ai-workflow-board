@@ -39,6 +39,10 @@ export interface CliInstallEntry {
   method: string;
   /** AWB 가 이 설치본을 올릴 수 있는지. false 면 UI 는 방법만 보여주고 버튼을 감춘다. */
   updatable: boolean;
+  /** 올리려면 root 가 필요한지. true 면 UI 는 Update 를 누를 때 비밀번호를 묻고
+   *  일회용 sudo 티켓을 함께 보낸다. false 인 설치본에는 비밀번호를 묻지 않는다 —
+   *  필요 없는 비밀번호를 네트워크에 태우지 않기 위해서다. */
+  needs_sudo: boolean;
   /** 이 CLI 를 지정 없이 spawn 하면 실행될 설치본인지. */
   active: boolean;
 }

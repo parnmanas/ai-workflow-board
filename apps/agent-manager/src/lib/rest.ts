@@ -1280,6 +1280,52 @@ export async function patchAgentSessionState(
   return sendAgentSessionRequest(config, 'PATCH', url, JSON.stringify({ manager_id: ref.manager_id, ...state }), `state(${ref.session_id.slice(0, 8)})`);
 }
 
+/**
+ * 일회용 sudo 티켓의 비밀번호를 서버에서 **한 번** 받아 온다.
+ *
+ * SSE 로 오는 것은 티켓 id 뿐이고 비밀번호는 이 HTTPS 왕복으로만 온다 — 세션
+ * credential 이 `GET /api/agent/sessions/credential/:id` 로 오는 것과 같은 모양,
+ * 같은 이유다(비밀값을 이벤트 페이로드·원장·활동 로그에 남기지 않는다).
+ *
+ * 서버는 응답을 내주는 즉시 자기 쪽 복사본을 지운다. 그러므로 **실패해도 재시도
+ * 하지 않는다** — 같은 id 로 두 번째는 언제나 404 다. 운영자가 다시 누르는 것이
+ * 정상 복구 경로다.
+ *
+ * 반환값은 절대 로그에 남기지 않는다(호출부 포함).
+ */
+export async function fetchSudoTicket(
+  config: AwbConfig,
+  ticketId: string,
+): Promise<{ password: string; scope: Record<string, any> } | null> {
+  if (!ticketId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/sudo-ticket/${encodeURIComponent(ticketId)}`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      let reason = `http_${resp.status}`;
+      try {
+        reason = (await resp.json())?.error || reason;
+      } catch {
+        /* 본문 없음 — 상태 코드만으로 충분하다 */
+      }
+      // 사유만 남긴다. 비밀번호는 실패 경로에도 존재하지 않는다.
+      log(`sudo ticket fetch failed: ${reason}`);
+      return null;
+    }
+    const body = await resp.json();
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (!password) return null;
+    return { password, scope: body?.scope && typeof body.scope === 'object' ? body.scope : {} };
+  } catch (err: any) {
+    log(`sudo ticket fetch error: ${err?.message ?? err}`);
+    return null;
+  }
+}
+
 /** CLI 설정으로 이 매니저에 묶인 credential 원문(복호화됨). 204/403/404 → null (운영자 로그인으로 진행). */
 export async function fetchSessionCredential(
   config: AwbConfig,

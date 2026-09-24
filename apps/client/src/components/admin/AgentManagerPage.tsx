@@ -514,6 +514,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const [updatePending, setUpdatePending] = useState(false);
   const [refreshModelsPending, setRefreshModelsPending] = useState(false);
   const [updateCliPending, setUpdateCliPending] = useState<string | null>(null);
+  // 권한 상승이 필요한 설치본의 Update 를 눌렀을 때 뜨는 비밀번호 모달의 대상.
+  // 비밀번호 자체는 이 컴포넌트가 아니라 모달 안에서만 살고, 제출되는 즉시
+  // 티켓으로 바뀌어 사라진다 — 여기에 담아 두지 않는다.
+  const [sudoPrompt, setSudoPrompt] = useState<{ cli: string; bin: string; method: string } | null>(null);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -710,13 +714,15 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   //
   // `bin` 은 같은 CLI 가 여러 벌 깔린 호스트에서 어느 설치본인지 못 박는다 —
   // 생략하면 매니저가 지금 해석되는 설치본을 고른다.
-  const handleUpdateCli = async (cli: string, bin?: string) => {
+  const handleUpdateCli = async (cli: string, bin?: string, sudoTicket?: string) => {
     if (updateCliPending) return;
     setUpdateCliPending(bin || cli);
     try {
       const resp = await api.sendAgentManagerCommand(inst.instance_id, {
         command: 'update_cli',
-        args: { cli, ...(bin ? { bin } : {}) },
+        // sudo_ticket 은 **티켓 id 일 뿐 비밀번호가 아니다**. 매니저가 권한 상승이
+        // 실제로 필요한 순간에 이 id 로 서버에서 1회 당겨 간다.
+        args: { cli, ...(bin ? { bin } : {}), ...(sudoTicket ? { sudo_ticket: sudoTicket } : {}) },
       });
       const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
       // CLI 업데이터는 모델 재열거보다 훨씬 오래 걸리므로 창을 넓게 잡는다(~4분).
@@ -741,8 +747,23 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
+  const sudoModal = sudoPrompt ? (
+    <SudoPasswordModal
+      instanceId={inst.instance_id}
+      hostname={inst.hostname}
+      target={sudoPrompt}
+      onClose={() => setSudoPrompt(null)}
+      onTicket={(ticketId) => {
+        const { cli, bin } = sudoPrompt;
+        setSudoPrompt(null);
+        void handleUpdateCli(cli, bin, ticketId);
+      }}
+    />
+  ) : null;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: '100%' }}>
+      {sudoModal}
       {/* Header */}
       <div
         style={{
@@ -877,7 +898,13 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
             <InstalledCliVersions
               inst={inst}
               pending={updateCliPending}
-              onUpdate={handleUpdateCli}
+              onUpdate={(cli, bin, needsSudo, method) => {
+                // 권한 상승이 필요한 설치본에서만 비밀번호를 묻는다. 필요 없는
+                // 설치본에 대고 묻는 것은 운영자의 root 비밀번호를 괜히 네트워크에
+                // 태우는 일이다.
+                if (needsSudo && bin) setSudoPrompt({ cli, bin, method: method || '' });
+                else void handleUpdateCli(cli, bin);
+              }}
             />
           )}
           {inst.mode === 'manager' && (
@@ -2534,6 +2561,94 @@ function EditAgentManagerDialog({
   );
 }
 
+// ─── SudoPasswordModal — 일회용 sudo 비밀번호 입력 ────────────────────────────
+//
+// 비밀번호는 여기서만 존재한다. 제출하면 곧바로 **일회용 티켓**으로 바뀌고(서버
+// 메모리, TTL 120초, 1회용) 이 컴포넌트의 상태는 비워진다. AWB 는 이 값을 어디에도
+// 저장하지 않는다 — DB 에도, 브라우저에도, 로그에도.
+//
+// 커맨드에 실려 나가는 것은 티켓 id 뿐이라, SSE 페이로드·커맨드 원장·활동 로그에
+// 비밀번호가 남지 않는다. 매니저는 권한 상승이 실제로 필요한 순간에 그 id 로
+// 서버에서 한 번만 당겨 간다.
+function SudoPasswordModal({
+  instanceId,
+  hostname,
+  target,
+  onClose,
+  onTicket,
+}: {
+  instanceId: string;
+  hostname: string;
+  target: { cli: string; bin: string; method: string };
+  onClose: () => void;
+  onTicket: (ticketId: string) => void;
+}) {
+  const { showToast } = useToast();
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!password || busy) return;
+    setBusy(true);
+    try {
+      const { ticket_id } = await api.mintSudoTicket(instanceId, {
+        password,
+        // scope 를 발급 시점에 못 박는다 — 티켓 id 가 새더라도 다른 설치본에
+        // 쓸 수 없다.
+        scope: { kind: 'cli_update', cli: target.cli, bin: target.bin },
+      });
+      // 성공하든 말든 화면에서 비밀번호를 즉시 지운다.
+      setPassword('');
+      onTicket(ticket_id);
+    } catch (err: any) {
+      setPassword('');
+      showToast(`sudo 티켓 발급 실패: ${err?.message || err}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      title={`sudo 비밀번호 — ${hostname}`}
+      maxWidth={520}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            취소
+          </Button>
+          <Button variant="primary" onClick={submit} disabled={!password || busy}>
+            {busy ? '확인 중…' : '업데이트'}
+          </Button>
+        </>
+      }
+    >
+      <p style={{ margin: '0 0 10px 0', fontSize: 12, color: tokens.colors.textSecondary, lineHeight: 1.6 }}>
+        <code>{target.bin}</code> 는 root 소유라 현재 권한으로는 올릴 수 없습니다.
+        {target.method ? <> 올리는 방법: <code>{target.method}</code>.</> : null}
+      </p>
+      <p style={{ margin: '0 0 12px 0', fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
+        입력한 비밀번호는 <strong>저장되지 않습니다</strong>. 서버 메모리에서 120초만 유지되는 일회용
+        티켓으로 바뀌고, 그 호스트의 매니저가 <strong>한 번만</strong> 받아 가 <code>sudo</code> 의 stdin 으로
+        전달합니다. 실행되는 명령은 매니저가 그 설치본의 설치 방식에서 직접 만든 것이며, 이 화면이
+        명령 문자열을 보내지는 않습니다.
+      </p>
+      <Input
+        type="password"
+        autoFocus
+        value={password}
+        placeholder={`${hostname} 의 sudo 비밀번호`}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+        onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+          if (e.key === 'Enter') void submit();
+        }}
+      />
+    </Modal>
+  );
+}
+
 // ─── InstalledCliVersions — 설치본 단위의 버전 + Update ────────────────────────
 //
 // InstanceDetail 과 같은 이유로 노출한다 — 이 패널의 잠금 규칙(최신/구버전/모름)
@@ -2554,7 +2669,7 @@ export function InstalledCliVersions({
 }: {
   inst: AgentManagerInstance;
   pending: string | null;
-  onUpdate: (cli: string, bin?: string) => void;
+  onUpdate: (cli: string, bin: string | undefined, needsSudo: boolean, method: string) => void;
 }) {
   // 매니저가 설치본 목록을 보내면 그것이 진실이다. 안 보내면(구버전) cli_versions
   // 를 CLI 당 한 줄짜리 가짜 설치본으로 접어 같은 렌더 경로를 태운다.
@@ -2566,6 +2681,9 @@ export function InstalledCliVersions({
         version,
         method: '',
         updatable: inst.cli_adapters.includes(cli),
+        // 구버전 매니저는 이 값을 모른다. 모르면 묻지 않는다 — 어차피 그 매니저는
+        // sudo 티켓을 쓸 줄 모르므로, 비밀번호를 받아 봐야 쓰이지 않는다.
+        needs_sudo: false,
         active: true,
       }));
   if (installs.length === 0) return null;
@@ -2631,9 +2749,17 @@ export function InstalledCliVersions({
                   ({row.method})
                 </span>
               )}
+              {row.needs_sudo && (
+                <span
+                  style={{ color: tokens.colors.warning }}
+                  title="이 설치본은 root 소유라, Update 를 누르면 sudo 비밀번호를 한 번 묻습니다. 비밀번호는 저장되지 않습니다."
+                >
+                  🔒 sudo
+                </span>
+              )}
               {row.updatable && (
                 <button
-                  onClick={() => onUpdate(row.cli, row.path || undefined)}
+                  onClick={() => onUpdate(row.cli, row.path || undefined, row.needs_sudo, row.method)}
                   disabled={disabled}
                   style={{
                     padding: '2px 8px',

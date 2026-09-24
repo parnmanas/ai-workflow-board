@@ -95,8 +95,9 @@ type CommandKind =
   // 목록만 다시 열거한다. args 없음. 재열거 직후 즉시 하트비트 1회를 보내
   // 서버 레지스트리가 다음 정기 tick(최대 30초)을 기다리지 않게 한다.
   | 'refresh_available_models'
-  // 호스트에 설치된 CLI 자체를 최신으로 올린다. args: { cli?, bin? } — cli 를
-  // 생략하면 대상 에이전트의 CLI, bin 을 생략하면 지금 해석되는 설치본.
+  // 호스트에 설치된 CLI 자체를 최신으로 올린다. args: { cli?, bin?, sudo_ticket? } —
+  // cli 를 생략하면 대상 에이전트의 CLI, bin 을 생략하면 지금 해석되는 설치본,
+  // sudo_ticket 은 권한 상승이 필요한 설치본에만 온다(비밀번호가 아니라 티켓 id).
   // 범위는 에이전트가 아니라 **하나의 설치본**이다: 같은 CLI 를 여러 벌 두는 것은
   // 정상 구성이라(vLLM 백엔드용 두 번째 claude) "이 장비의 claude" 는 애매하다.
   | 'update_cli';
@@ -218,7 +219,9 @@ export interface CommandHandlerDeps {
    *  어댑터 레지스트리·바이너리 해석·버전 재측정·하트비트가 모두 main.ts 소유라
    *  여기서는 배선된 콜백만 부른다. refreshAvailableModels 와 같은 이유로 optional —
    *  이 dep 없이 만든 레거시 테스트 하네스는 명확한 사유와 함께 error 로 ack 된다. */
-  updateCli?: ((cli: string, bin?: string | null) => Promise<UpdateCliResult>) | null;
+  updateCli?:
+    | ((cli: string, bin?: string | null, sudoTicket?: string | null) => Promise<UpdateCliResult>)
+    | null;
 }
 
 /** update_cli 한 번의 결과. */
@@ -241,6 +244,10 @@ export interface UpdateCliResult {
   resolvedPath?: string | null;
   /** 그 설치본을 어떻게 올렸는지(`npm --prefix …` / `claude update` / …). */
   installMethod?: string | null;
+  /** 이 설치본을 올리려면 root 가 필요한지 — UI 가 비밀번호를 물을지 정한다. */
+  needsSudo?: boolean;
+  /** 권한 상승 자체가 실패한 사유(`bad_password` 등). 명령 실패와 구분된다. */
+  sudoFailure?: string | null;
   /** 같은 CLI 의 다른 설치본들. **실패가 아니다** — 운영자가 "저것도 올릴까" 를
    *  판단할 수 있도록 그대로 싣는다. */
   otherInstalls?: Array<{ path: string; version: string | null }>;
@@ -1113,7 +1120,12 @@ export class AgentManagerCommandHandler {
     // 실행 전에 매니저가 스스로 열거한 후보 목록과 대조한다(main.ts 의
     // updateCli 배선) — 여기서는 문자열 정리만 한다.
     const bin = typeof payload.args?.bin === 'string' ? payload.args.bin.trim() : '';
-    const result = await update(cli, bin || null);
+    // args.sudo_ticket — 권한 상승이 필요한 설치본을 올릴 때만 온다. **티켓 id 일
+    // 뿐 비밀번호가 아니다**: 매니저가 권한 상승이 실제로 필요한 순간에 이 id 로
+    // 서버에서 비밀번호를 1회 당겨 간다(rest.fetchSudoTicket). 그래서 이 값이
+    // SSE 페이로드·커맨드 원장·활동 로그에 남아도 비밀이 새지 않는다.
+    const sudoTicket = typeof payload.args?.sudo_ticket === 'string' ? payload.args.sudo_ticket.trim() : '';
+    const result = await update(cli, bin || null, sudoTicket || null);
     if (!result.ok) throw new Error(`update_cli ${cli}: ${result.detail}`);
     // detail 에는 이미 "무엇이 어느 경로에서 어떤 방법으로" 가 들어 있다
     // (runCliUpdate). installMethod 를 여기서 한 번 더 붙이면 같은 말이 두 번이다 —

@@ -62,6 +62,7 @@ test('같은 CLI 의 설치본마다 한 줄씩 나오고 Update 는 그 경로�
           version: '2.1.273 (Claude Code)',
           method: 'npm --prefix /home/parn/.local',
           updatable: true,
+          needs_sudo: false,
           active: true,
         },
         {
@@ -70,6 +71,7 @@ test('같은 CLI 의 설치본마다 한 줄씩 나오고 Update 는 그 경로�
           version: '2.1.281 (Claude Code)',
           method: 'npm --prefix /home/parn/.nvm/versions/node/v22.23.1',
           updatable: true,
+          needs_sudo: false,
           active: false,
         },
       ],
@@ -107,6 +109,7 @@ test('이미 최신인 설치본만 잠긴다 — 최신을 모르는 설치본�
         version: '2.1.281 (Claude Code)',
         method: 'npm --prefix /x',
         updatable: true,
+        needs_sudo: false,
         active: true,
       },
       {
@@ -115,6 +118,7 @@ test('이미 최신인 설치본만 잠긴다 — 최신을 모르는 설치본�
         version: 'codex-cli 0.153.4',
         method: 'npm --prefix /x',
         updatable: true,
+        needs_sudo: false,
         active: true,
       },
     ],
@@ -140,6 +144,7 @@ test('우리가 못 올리는 설치본은 방법만 보여주고 버튼이 없�
         version: 'codex-cli 0.114.0',
         method: 'snap package (run: sudo snap refresh codex)',
         updatable: false,
+        needs_sudo: true,
         active: false,
       },
     ],
@@ -178,4 +183,55 @@ test('구버전 매니저(cli_installs 없음)는 예전처럼 CLI 당 한 줄�
     click(buttons(view)[0]);
   });
   assert.deepEqual(sent, [['claude', undefined]], '경로를 모르면 매니저가 고르게 둔다');
+});
+
+test('root 소유 설치본은 sudo 가 필요하다고 표시하고, Update 는 그 사실을 호출자에게 넘긴다', async (t) => {
+  // 비밀번호를 묻는 결정은 이 패널이 하지 않는다 — 매니저가 보고한 needs_sudo 를
+  // 그대로 위로 올려서, 필요 없는 설치본에 대고 비밀번호를 묻는 일이 없게 한다.
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+
+  const sent = [];
+  const view = render(
+    t,
+    {
+      ...BASE,
+      cli_latest_versions: { claude: '2.1.281' },
+      cli_installs: [
+        {
+          cli: 'claude',
+          path: '/usr/local/bin/claude',
+          version: '2.1.92 (Claude Code)',
+          method: 'npm --prefix /usr/local (needs sudo)',
+          updatable: true,
+          needs_sudo: true,
+          active: false,
+        },
+        {
+          cli: 'claude',
+          path: '/home/parn/.npm-global/bin/claude',
+          version: '2.1.273 (Claude Code)',
+          method: 'npm --prefix /home/parn/.npm-global',
+          updatable: true,
+          needs_sudo: false,
+          active: true,
+        },
+      ],
+    },
+    (cli, bin, needsSudo) => sent.push([cli, bin, needsSudo]),
+  );
+  await act(async () => {});
+
+  assert.ok(view.container.textContent.includes('sudo'), 'root 소유임을 행에서 알 수 있어야 한다');
+
+  const enabled = buttons(view).filter((b) => !b.disabled);
+  assert.equal(enabled.length, 2, '둘 다 구버전이라 둘 다 누를 수 있다');
+  for (const b of enabled) {
+    await act(async () => {
+      click(b);
+    });
+  }
+  const bySudo = Object.fromEntries(sent.map(([, bin, needsSudo]) => [bin, needsSudo]));
+  assert.equal(bySudo['/usr/local/bin/claude'], true, 'root 소유 설치본만 비밀번호를 묻게 한다');
+  assert.equal(bySudo['/home/parn/.npm-global/bin/claude'], false);
 });

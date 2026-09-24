@@ -2167,6 +2167,9 @@ export interface CliInstallEntry {
   method: string;
   /** AWB 가 이 설치본을 올릴 수 있는지. false 면 방법만 보여주고 버튼은 감춘다. */
   updatable: boolean;
+  /** 올리려면 root 가 필요한지. true 면 Update 를 누를 때 비밀번호를 묻고 일회용
+   *  sudo 티켓을 함께 보낸다. false 면 묻지 않는다. */
+  needs_sudo: boolean;
   active: boolean;
 }
 

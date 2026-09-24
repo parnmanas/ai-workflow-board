@@ -1707,6 +1707,31 @@ export const api = {
   // is the dispatch ack only; the manager later calls /command/ack with the
   // execution outcome (currently consumed only by server logs, surfacing it
   // in the UI is a future enhancement).
+  /**
+   * 권한 상승이 필요한 작업 하나에 쓸 **일회용** sudo 티켓을 발급받는다.
+   *
+   * 비밀번호는 이 요청 바디에만 실린다 — 돌아오는 것은 티켓 id 뿐이고, 그 id 를
+   * 커맨드 args 에 실어 보낸다. 매니저는 권한 상승이 실제로 필요한 순간에 그 id
+   * 로 서버에서 비밀번호를 1회 당겨 간다. 그래서 SSE 페이로드·커맨드 원장·활동
+   * 로그 어디에도 비밀번호가 남지 않는다.
+   *
+   * 티켓은 120초 뒤 만료되고 1회만 쓸 수 있다. 화면이 커맨드를 끝내 보내지
+   * 않았다면 `revokeSudoTicket` 으로 즉시 태우는 것이 맞다.
+   */
+  mintSudoTicket: (
+    instanceId: string,
+    body: { password: string; scope: { kind: 'cli_update'; cli: string; bin: string } | { kind: 'privileged_command'; request_id: string } },
+  ) =>
+    request<{ ticket_id: string; expires_at: string }>(
+      `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/sudo-ticket`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  revokeSudoTicket: (ticketId: string) =>
+    request<{ ok: boolean }>(`/admin/agent-manager/sudo-ticket/${encodeURIComponent(ticketId)}`, {
+      method: 'DELETE',
+    }),
+
   sendAgentManagerCommand: (
     instanceId: string,
     body: { command: AgentManagerCommandKind; args?: Record<string, any> },

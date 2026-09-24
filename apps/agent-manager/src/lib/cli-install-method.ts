@@ -35,9 +35,16 @@ export type InstallMethodKind =
 
 export interface InstallMethod {
   kind: InstallMethodKind;
-  /** 이 설치본을 올리는 명령. null 이면 우리가 직접 올릴 수 없다는 뜻이다
-   *  (`manualCommand` 또는 CLI 자체 업데이터로 넘어간다). */
+  /** 이 설치본을 **현재 사용자 권한으로** 올리는 명령. null 이면 그 권한으로는
+   *  올릴 수 없다는 뜻이다(`elevatedArgv`/`manualCommand`/CLI 자체 업데이터로 넘어간다). */
   argv: { cmd: string; args: string[] } | null;
+  /** 같은 일을 **root 로** 하는 명령. 운영자가 비밀번호를 준 경우에만 쓰인다.
+   *  `argv` 가 있으면 여기는 null 이다 — 안 올려도 되는 권한을 올리지 않는다.
+   *
+   *  Homebrew 는 의도적으로 null 이다: brew 는 root 로 실행하는 것을 스스로
+   *  거부하고, 억지로 돌리면 설치 트리의 소유권이 망가진다. 권한 상승이 답이
+   *  아닌 경우까지 "sudo 하면 된다" 로 뭉뚱그리면 안 된다. */
+  elevatedArgv: { cmd: string; args: string[] } | null;
   /** 사람이 읽는 한 줄 설명 — ack 와 UI 에 그대로 실린다. */
   label: string;
   /** 우리가 못 돌리는 경우 운영자가 직접 칠 명령(권한 상승이 필요한 경우 포함). */
@@ -137,13 +144,19 @@ export function detectInstallMethod(
   // 경로에서 읽어낸 패키지가 우선 — 어댑터의 선언보다 이 설치본에 관한 사실이다.
   const pkg = npmPackageFromRealPath(real) ?? pkgHint;
 
-  const none = (kind: InstallMethodKind, label: string, manualCommand: string | null): InstallMethod => ({
+  const none = (
+    kind: InstallMethodKind,
+    label: string,
+    manualCommand: string | null,
+    elevatedArgv: { cmd: string; args: string[] } | null = null,
+  ): InstallMethod => ({
     kind,
     argv: null,
+    elevatedArgv,
     label,
     manualCommand,
     prefix: null,
-    needsElevation: false,
+    needsElevation: Boolean(elevatedArgv),
   });
 
   // snap / homebrew Cellar 는 우리 권한 밖이거나 formula 이름을 경로에서 신뢰성
@@ -152,9 +165,15 @@ export function detectInstallMethod(
   // 처럼 중간 경로가 끼어 마지막 조각이 패키지 이름이 아닐 수 있다.
   const invokedName = (link.split('/').pop() ?? '').replace(/\.(exe|cmd|bat)$/i, '');
   if (real.startsWith('/snap/') || link.startsWith('/snap/')) {
-    return none('snap', 'snap package', `sudo snap refresh ${invokedName || '<package>'}`);
+    return none(
+      'snap',
+      'snap package',
+      `sudo snap refresh ${invokedName || '<package>'}`,
+      invokedName ? { cmd: 'snap', args: ['refresh', invokedName] } : null,
+    );
   }
   if (real.includes('/Cellar/') || real.includes('/linuxbrew/')) {
+    // brew 는 root 실행을 스스로 거부한다 — 권한 상승은 답이 아니라 새 고장이다.
     return none('homebrew', 'Homebrew formula', `brew upgrade ${invokedName || '<formula>'}`);
   }
 
@@ -165,6 +184,7 @@ export function detectInstallMethod(
       ? {
           kind: 'volta',
           argv: { cmd: 'volta', args: ['install', `${pkg}@latest`] },
+          elevatedArgv: null,
           label: 'volta install',
           manualCommand: `volta install ${pkg}@latest`,
           prefix: null,
@@ -177,6 +197,7 @@ export function detectInstallMethod(
       ? {
           kind: 'bun',
           argv: { cmd: 'bun', args: ['add', '-g', `${pkg}@latest`] },
+          elevatedArgv: null,
           label: 'bun add -g',
           manualCommand: `bun add -g ${pkg}@latest`,
           prefix: null,
@@ -189,6 +210,7 @@ export function detectInstallMethod(
       ? {
           kind: 'pnpm',
           argv: { cmd: 'pnpm', args: ['add', '-g', `${pkg}@latest`] },
+          elevatedArgv: null,
           label: 'pnpm add -g',
           manualCommand: `pnpm add -g ${pkg}@latest`,
           prefix: null,
@@ -204,9 +226,12 @@ export function detectInstallMethod(
     const root = windows ? `${prefix}${win32.sep}node_modules` : posix.join(prefix, 'lib', 'node_modules');
     const canWrite = writable(root);
     const manual = `npm --prefix ${prefix} install -g ${pkg}@latest`;
+    const npmArgv = { cmd: 'npm', args: ['--prefix', prefix, 'install', '-g', `${pkg}@latest`] };
     return {
       kind: 'npm-prefix',
-      argv: canWrite ? { cmd: 'npm', args: ['--prefix', prefix, 'install', '-g', `${pkg}@latest`] } : null,
+      argv: canWrite ? npmArgv : null,
+      // 쓸 수 없는 prefix 는 root 로는 올릴 수 있다 — 운영자가 비밀번호를 준 경우에만.
+      elevatedArgv: canWrite ? null : npmArgv,
       label: `npm --prefix ${prefix}`,
       manualCommand: canWrite ? manual : `sudo ${manual}`,
       prefix,
@@ -230,6 +255,9 @@ export function detectInstallMethod(
 
 /** 사람이 읽는 한 줄 — ack·UI·로그가 같은 문구를 쓰게 한다. */
 export function describeInstallMethod(method: InstallMethod): string {
+  if (method.needsElevation && method.elevatedArgv) {
+    return `${method.label} (needs sudo)`;
+  }
   if (method.needsElevation && method.manualCommand) {
     return `${method.label} (write-protected — run: ${method.manualCommand})`;
   }

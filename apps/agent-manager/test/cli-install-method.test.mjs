@@ -66,18 +66,49 @@ test('스코프 없는 패키지도 한 조각으로 읽는다', () => {
   assert.equal(npmPackageFromRealPath('/usr/bin/git'), null);
 });
 
-test('prefix 에 쓸 수 없으면 돌리지 않고 sudo 명령을 알려준다', () => {
-  // 매니저가 sudo 를 쓰는 일은 없다. 돌려 봐야 EACCES 이고, 그 실패 메시지보다
-  // "이 명령을 직접 치세요" 가 낫다.
+test('쓸 수 없는 prefix 는 현재 권한으로 돌리지 않고, root 로 돌릴 argv 를 따로 내놓는다', () => {
+  // 현재 사용자로 돌려 봐야 EACCES 다. 그렇다고 못 올리는 것은 아니고, 운영자가
+  // 비밀번호를 준 경우에 한해 같은 명령을 root 로 돌릴 수 있다 — 그래서 두 argv 를
+  // 나눠 둔다. 권한 상승 수단이 없는 호출자는 manualCommand 를 그대로 보여주면 된다.
   const bin = '/usr/local/bin/claude';
   const real = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js';
   const m = detectInstallMethod(bin, null, probes({ [bin]: real }, new Set()));
 
   assert.equal(m.kind, 'npm-prefix');
-  assert.equal(m.argv, null);
+  assert.equal(m.argv, null, '현재 권한으로는 돌리지 않는다');
   assert.equal(m.needsElevation, true);
+  assert.deepEqual(m.elevatedArgv, {
+    cmd: 'npm',
+    args: ['--prefix', '/usr/local', 'install', '-g', '@anthropic-ai/claude-code@latest'],
+  });
   assert.match(m.manualCommand, /^sudo npm --prefix \/usr\/local install -g @anthropic-ai\/claude-code@latest$/);
-  assert.match(describeInstallMethod(m), /write-protected/);
+  assert.match(describeInstallMethod(m), /needs sudo/);
+});
+
+test('snap 은 root 로 refresh 할 수 있지만 Homebrew 는 아니다', () => {
+  // brew 는 root 실행을 스스로 거부하고 억지로 돌리면 설치 트리 소유권이 망가진다.
+  // "권한만 올리면 다 된다" 로 뭉뚱그리면 안 되는 대표 사례다.
+  const snap = detectInstallMethod('/snap/bin/codex', null, probes({}));
+  assert.deepEqual(snap.elevatedArgv, { cmd: 'snap', args: ['refresh', 'codex'] });
+  assert.equal(snap.needsElevation, true);
+
+  const brew = detectInstallMethod('/opt/homebrew/bin/codex', null, probes({
+    '/opt/homebrew/bin/codex': '/opt/homebrew/Cellar/codex/0.1/bin/codex',
+  }));
+  assert.equal(brew.elevatedArgv, null, 'brew 는 sudo 로 돌리면 안 된다');
+  assert.equal(brew.needsElevation, false);
+  assert.equal(brew.manualCommand, 'brew upgrade codex');
+});
+
+test('현재 권한으로 올릴 수 있는 설치본에는 권한 상승 argv 를 만들지 않는다', () => {
+  // 안 올려도 되는 권한은 올리지 않는다.
+  const bin = '/home/parn/.npm-global/bin/claude';
+  const m = detectInstallMethod(bin, null, probes({
+    [bin]: '/home/parn/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe',
+  }));
+  assert.ok(m.argv);
+  assert.equal(m.elevatedArgv, null);
+  assert.equal(m.needsElevation, false);
 });
 
 test('bun / volta / pnpm 은 일반 npm prefix 규칙보다 먼저 잡는다', () => {

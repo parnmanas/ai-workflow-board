@@ -35,6 +35,7 @@ import {
   type InstallMethod,
 } from './cli-install-method.js';
 import { probeRuntimeCommand } from './runtime/probe-command.js';
+import { runWithSudo, type SudoFailure } from './sudo-runner.js';
 import { compareSemver } from './self-update.js';
 
 /** 업데이터가 이만큼 안 끝나면 죽인다. npm 레지스트리 왕복 + 설치라 넉넉히 잡되,
@@ -60,6 +61,11 @@ export interface CliUpdateOutcome {
   resolvedPath: string | null;
   /** 그 설치본의 설치 방법(사람이 읽는 한 줄). */
   installMethod: string | null;
+  /** 이 설치본을 올리려면 권한 상승이 필요한지. UI 가 비밀번호를 물을지 정한다. */
+  needsSudo: boolean;
+  /** 권한 상승 자체가 실패한 사유. `bad_password` 면 UI 는 다시 묻기만 하면 된다 —
+   *  명령이 실패한 것과 섞이면 운영자가 엉뚱한 곳을 고치러 간다. */
+  sudoFailure: SudoFailure | null;
   /** 시도 순서대로의 기록 — 자체 업데이터가 헛돌고 prefix 방법이 구한 경우를
    *  ack 만 보고도 알 수 있게 한다. */
   attempts: CliUpdateAttempt[];
@@ -85,6 +91,9 @@ export interface CliUpdateDeps {
   resolveBin?: (cli: string) => string;
   /** 업데이터가 설치 위치를 옮겼을 수 있으므로 resolve 캐시를 버린다. */
   invalidateResolved?: (cli: string) => void;
+  /** 권한 상승 실행. 기본은 sudo-runner. 테스트가 반드시 갈아끼운다 — 주입이 없으면
+   *  테스트가 러너 장비에서 **진짜 sudo 인증 실패**를 일으켜 auth 로그를 더럽힌다. */
+  runSudo?: typeof runWithSudo;
   hostLabel?: string;
   log?: (msg: string) => void;
 }
@@ -97,6 +106,10 @@ export interface CliUpdateOptions {
    *  *이미 최신* 과 *못 올렸다* 로 가를 수 있다 — 없으면 업데이터의 종료 코드를
    *  믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다. */
   latest?: string | null;
+  /** 권한 상승이 실제로 필요할 때만 불린다. 일회용 sudo 티켓을 서버에서 당겨
+   *  오는 함수이고, **여기서 불리지 않으면 티켓은 소비되지 않는다** — 권한 상승이
+   *  필요 없는 설치본을 올릴 때 비밀번호를 괜히 네트워크에 태우지 않는다. */
+  getSudoPassword?: (() => Promise<string | null>) | null;
 }
 
 function defaultRun(
@@ -242,6 +255,8 @@ export async function runCliUpdate(
     hostLabel,
     resolvedPath: null,
     installMethod: null,
+    needsSudo: false,
+    sudoFailure: null,
     attempts,
     otherInstalls: [],
     ...extra,
@@ -261,14 +276,21 @@ export async function runCliUpdate(
   }
 
   const method = detectMethod(bin, pkg);
-  // 올릴 방법이 아예 없다 — 자체 업데이터도, 증명된 설치 방법도. 조용히 성공한
-  // 척하지 않고 무엇을 해야 하는지 그대로 알려준다.
-  if ((!updater || managedElsewhere(method)) && !method.argv) {
+  // 권한 상승으로 올릴 수 있고, 이번 호출에 비밀번호를 받아올 수단이 함께 왔는가.
+  // 둘 중 하나라도 없으면 이 설치본은 지금 올릴 수 없다.
+  const canElevate = Boolean(method.elevatedArgv) && Boolean(options.getSudoPassword);
+  // 올릴 방법이 아예 없다 — 자체 업데이터도, 증명된 설치 방법도, 권한 상승도.
+  // 조용히 성공한 척하지 않고 무엇을 해야 하는지 그대로 알려준다.
+  if ((!updater || managedElsewhere(method)) && !method.argv && !canElevate) {
     return fail(
       method.manualCommand
         ? `${cli} at ${bin} is a ${method.label}; AWB cannot update it from here — run: ${method.manualCommand} (on ${hostLabel})`
         : `${cli} at ${bin} has no self-updater and its install layout is not recognised — update it on ${hostLabel} yourself`,
-      { resolvedPath: bin, installMethod: describeInstallMethod(method) },
+      {
+        resolvedPath: bin,
+        installMethod: describeInstallMethod(method),
+        needsSudo: Boolean(method.elevatedArgv),
+      },
     );
   }
 
@@ -289,9 +311,37 @@ export async function runCliUpdate(
   // 1) 설치 레이아웃에서 증명된 방법이 있으면 그것부터 — 대상이 정확하고 다른
   //    설치본을 건드리지 않는다. 실패했을 때만 CLI 자체 업데이터로 물러선다
   //    (npm 재설치가 성공했는데 버전이 그대로면 그건 이미 최신이라는 뜻이다).
+  let sudoFailure: SudoFailure | null = null;
   if (method.argv) {
     const ok = await attempt(method.label, method.argv.cmd, method.argv.args);
     if (!ok && updater) await attempt(`${updater.label} (fallback)`, bin, updater.args);
+  } else if (canElevate && method.elevatedArgv) {
+    // 권한 상승 경로. 비밀번호는 **여기서 처음** 당겨 온다 — 이 분기에 오지 않으면
+    // 티켓은 소비되지 않는다. 받아 온 원문은 runWithSudo 안에서 stdin 으로만 나가고,
+    // 이 스코프 밖으로는 새지 않는다(ack·로그·outcome 어디에도 담지 않는다).
+    const password = await options.getSudoPassword!().catch(() => null);
+    if (!password) {
+      return fail(
+        `${cli} at ${bin} needs root to update (${method.label}) but no usable sudo ticket arrived — ` +
+          'press Update again and enter the password.',
+        {
+          supported: true,
+          resolvedPath: bin,
+          installMethod: describeInstallMethod(method),
+          needsSudo: true,
+        },
+      );
+    }
+    const printable = `sudo ${method.elevatedArgv.cmd} ${method.elevatedArgv.args.join(' ')}`.trim();
+    log(`[cli-update] ${cli}: trying ${method.label} with elevation — ${printable}`);
+    const r = await (deps.runSudo ?? runWithSudo)(method.elevatedArgv, password);
+    sudoFailure = r.reason;
+    attempts.push({
+      method: `${method.label} (sudo)`,
+      command: printable,
+      ok: r.ok,
+      output: tail(r.output),
+    });
   } else if (updater && !managedElsewhere(method)) {
     // 2) 증명이 안 되는 설치(native installer, curl 설치)는 CLI 자신이 제일 잘 안다.
     await attempt(updater.label, bin, updater.args);
@@ -334,10 +384,25 @@ export async function runCliUpdate(
   const atLatest = latest ? (compareCliVersions(after, latest) ?? -1) >= 0 : null;
   // 여기까지 왔으면 반드시 한 번은 시도했다 — 시도할 방법이 하나도 없는 설치본은
   // 위에서 이미 돌아갔다(managedElsewhere / 업데이터 없음).
-  const ok = changed || (atLatest === null ? Boolean(lastAttempt?.ok) : atLatest);
+  // 권한 상승이 실패했으면 버전 비교로 덮지 않는다. 비밀번호가 틀려서 아무것도
+  // 안 돌았는데 "이미 최신" 으로 읽히면, 운영자는 올라간 줄 알고 넘어간다.
+  const ok =
+    sudoFailure === null && (changed || (atLatest === null ? Boolean(lastAttempt?.ok) : atLatest));
 
   let detail: string;
-  if (changed) {
+  if (sudoFailure === 'bad_password') {
+    detail = `${cli} at ${target}: the sudo password was rejected — nothing was changed.`;
+  } else if (sudoFailure === 'not_permitted') {
+    detail =
+      `${cli} at ${target}: this account may not run that command as root on ${hostLabel} ` +
+      `(${method.manualCommand ?? method.label}) — nothing was changed.`;
+  } else if (sudoFailure === 'no_sudo') {
+    detail = `${cli} at ${target}: no sudo on ${hostLabel}, so this install cannot be updated from AWB.`;
+  } else if (sudoFailure) {
+    detail =
+      `${cli} at ${target} is still ${after ?? 'unknown'} — ` +
+      `${lastAttempt?.method ?? 'sudo'}: ${lastAttempt?.output || sudoFailure}`;
+  } else if (changed) {
     detail = `${cli} ${before ?? 'unknown'} → ${after} at ${target} (${lastAttempt?.method ?? 'update'})`;
   } else if (ok) {
     detail =
@@ -365,6 +430,8 @@ export async function runCliUpdate(
     hostLabel,
     resolvedPath: target,
     installMethod: describeInstallMethod(method),
+    needsSudo: Boolean(method.elevatedArgv),
+    sudoFailure,
     attempts,
     otherInstalls,
   };

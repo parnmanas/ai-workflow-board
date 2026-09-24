@@ -328,6 +328,153 @@ test('빌려 쓰는 어댑터는 실제 바이너리 이름으로 후보를 센�
   assert.deepEqual(asked, ['claude'], 'cliType 이 아니라 해석된 바이너리 이름으로 묻는다');
 });
 
+// ─── 권한 상승 경로 ─────────────────────────────────────────────────────────
+//
+// 비밀번호는 **권한 상승이 실제로 필요한 분기에 도달했을 때만** 당겨 온다. 이게
+// 무너지면, 권한이 필요 없는 설치본을 올릴 때도 운영자의 root 비밀번호가 괜히
+// 네트워크를 타고 호스트까지 간다.
+
+/** root 로만 올릴 수 있는 설치본(쓰기 불가 prefix / snap). */
+const elevatedOnly = (label = 'npm --prefix /usr/local') => ({
+  kind: 'npm-prefix',
+  argv: null,
+  elevatedArgv: { cmd: 'npm', args: ['--prefix', '/usr/local', 'install', '-g', 'p@latest'] },
+  label,
+  manualCommand: `sudo ${label} install -g p@latest`,
+  prefix: '/usr/local',
+  needsElevation: true,
+});
+
+test('권한 상승이 필요 없으면 비밀번호를 아예 요청하지 않는다', async () => {
+  let asked = 0;
+  await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: () => npmMethod('/p', '@anthropic-ai/claude-code'),
+      run: async () => ({ ok: true, output: '' }),
+      probeVersion: async () => '2.1.281',
+    },
+    {
+      bin: NPM_CLAUDE,
+      getSudoPassword: async () => {
+        asked++;
+        return 'pw';
+      },
+    },
+  );
+  assert.equal(asked, 0, '필요 없는데 비밀번호를 당겨 오면 티켓이 헛되이 소비된다');
+});
+
+test('권한 상승 수단이 없으면 시도하지 않고 칠 명령을 돌려준다', async () => {
+  let ran = 0;
+  const result = await runCliUpdate(
+    'claude',
+    {
+      hostLabel: 'rolf',
+      listCandidates: noOtherInstalls,
+      detectMethod: () => elevatedOnly(),
+      run: async () => {
+        ran++;
+        return { ok: true, output: '' };
+      },
+      probeVersion: async () => '2.1.92 (Claude Code)',
+    },
+    { bin: '/usr/local/bin/claude' },
+  );
+
+  assert.equal(ran, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.needsSudo, true, 'UI 가 비밀번호를 물어야 한다는 신호');
+  assert.match(result.detail, /sudo npm --prefix \/usr\/local/);
+});
+
+test('비밀번호가 오면 그 설치본을 root 로 올린다', async () => {
+  // 실제 sudo 실행은 sudo-runner 가 덮는다. 여기서는 "그 경로로, 그 비밀번호로
+  // 갔는가" 만 본다. runSudo 를 주입하지 않으면 러너에서 진짜 인증 실패가 일어난다.
+  const sudoCalls = [];
+  let asked = 0;
+  const result = await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: () => elevatedOnly(),
+      run: async () => {
+        throw new Error('권한 상승 경로에서는 일반 run 을 쓰지 않는다');
+      },
+      runSudo: async (argv, password) => {
+        sudoCalls.push({ argv, password });
+        return { ok: true, output: 'added 1 package', reason: null };
+      },
+      probeVersion: (() => {
+        let n = 0;
+        return async () => (n++ === 0 ? '2.1.92 (Claude Code)' : '2.1.281 (Claude Code)');
+      })(),
+    },
+    {
+      bin: '/usr/local/bin/claude',
+      getSudoPassword: async () => {
+        asked++;
+        return 'pw';
+      },
+    },
+  );
+
+  assert.equal(asked, 1, '권한 상승 분기에 도달했을 때 정확히 한 번만 당겨 온다');
+  assert.equal(result.needsSudo, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.attempts.length, 1);
+  assert.match(result.attempts[0].method, /sudo/);
+  assert.deepEqual(sudoCalls, [
+    {
+      argv: { cmd: 'npm', args: ['--prefix', '/usr/local', 'install', '-g', 'p@latest'] },
+      password: 'pw',
+    },
+  ]);
+});
+
+test('비밀번호를 못 받아 오면 다시 누르라고만 말한다 — 조용히 성공하지 않는다', async () => {
+  const result = await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: () => elevatedOnly(),
+      run: async () => ({ ok: true, output: '' }),
+      probeVersion: async () => '2.1.92 (Claude Code)',
+    },
+    { bin: '/usr/local/bin/claude', getSudoPassword: async () => null },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.needsSudo, true);
+  assert.match(result.detail, /press Update again/);
+});
+
+test('비밀번호가 틀리면 "이미 최신" 으로 읽히지 않는다', async () => {
+  // 버전이 안 움직였다는 사실만 보면 "이미 최신" 과 구분되지 않는다. 그렇게 읽히면
+  // 운영자는 올라간 줄 알고 넘어간다.
+  const result = await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: () => elevatedOnly(),
+      probeVersion: async () => '2.1.92 (Claude Code)',
+      run: async () => ({ ok: true, output: '' }),
+      runSudo: async () => ({ ok: false, output: 'Sorry, try again.', reason: 'bad_password' }),
+    },
+    {
+      bin: '/usr/local/bin/claude',
+      getSudoPassword: async () => 'definitely-wrong',
+      // 설치 == 최신이라, sudo 실패를 무시하면 "이미 최신" 으로 접혀 버린다.
+      latest: '2.1.92 (Claude Code)',
+    },
+  );
+
+  assert.equal(result.ok, false, 'sudo 가 실패했으면 버전 비교로 덮지 않는다');
+  assert.equal(result.sudoFailure, 'bad_password');
+  assert.match(result.detail, /password was rejected/);
+});
+
 test('버전 문자열의 장식은 비교 전에 벗긴다 — 못 벗기면 비교를 포기한다', () => {
   assert.equal(extractSemver('2.1.281 (Claude Code)'), '2.1.281');
   assert.equal(extractSemver('codex-cli 0.153.4'), '0.153.4');

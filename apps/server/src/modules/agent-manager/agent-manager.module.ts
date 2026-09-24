@@ -15,6 +15,7 @@ import { AgentManagerController } from './agent-manager.controller';
 import { InstanceRegistryModule } from './instance-registry.module';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
+import { SudoTicketService } from './sudo-ticket.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
 import { SkillsModule } from '../skills/skills.module';
@@ -48,6 +49,7 @@ import { SkillsModule } from '../skills/skills.module';
   providers: [
     PairingService,
     CommandLedgerService,
+    SudoTicketService,
     AgentManagerCommandService,
     // version-drift / stale self-update health monitor (ticket 7485df07). Runs
     // its own sweep timer; consumes InstanceRegistryService (now global via

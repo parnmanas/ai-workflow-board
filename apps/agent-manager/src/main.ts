@@ -89,6 +89,7 @@ import {
   postDispatchAckRaw,
   postCommandAckRaw,
   postCliLoginProgressRaw,
+  fetchSudoTicket,
 } from './lib/rest.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
@@ -732,7 +733,11 @@ async function runRuntime(
             path: install.path,
             version: install.version,
             method: describeInstallMethod(install.method),
-            updatable: Boolean(install.method.argv) || Boolean(createAdapter(cli).cliUpdate()),
+            updatable:
+              Boolean(install.method.argv) ||
+              Boolean(install.method.elevatedArgv) ||
+              Boolean(createAdapter(cli).cliUpdate()),
+            needs_sudo: !install.method.argv && Boolean(install.method.elevatedArgv),
             active: Boolean(active && canonicalPathKey(active) === canonicalPathKey(install.path)),
           });
         }
@@ -795,7 +800,7 @@ async function runRuntime(
     // `bin` 은 SSE 로 들어온 값이라 **절대 그대로 실행하지 않는다**: 매니저가 스스로
     // 열거한 설치본 목록에 있는 경로만 받아들인다. 임의 경로를 실행하면 커맨드
     // 하나가 호스트에서 무엇이든 돌릴 수 있는 통로가 된다.
-    updateCli: async (cli: string, bin?: string | null) => {
+    updateCli: async (cli: string, bin?: string | null, sudoTicket?: string | null) => {
       let target: string | null = null;
       if (bin) {
         const known = await listCliInstalls(cli);
@@ -811,10 +816,18 @@ async function runRuntime(
       const outcome = await runCliUpdate(
         cli,
         { log },
-        // 최신 버전을 함께 넘긴다 — "버전이 안 움직였다" 를 *이미 최신* 과
-        // *못 올렸다* 로 가르는 유일한 근거다(없으면 업데이터의 종료 코드를
-        // 믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다).
-        { bin: target, latest: cliLatestVersions[cli] ?? null },
+        {
+          bin: target,
+          // 최신 버전을 함께 넘긴다 — "버전이 안 움직였다" 를 *이미 최신* 과
+          // *못 올렸다* 로 가르는 유일한 근거다(없으면 업데이터의 종료 코드를
+          // 믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다).
+          latest: cliLatestVersions[cli] ?? null,
+          // 권한 상승이 실제로 필요한 분기에 도달했을 때만 불린다. 티켓이 안 왔으면
+          // 아예 배선하지 않아, 비밀번호를 당겨 올 수단 자체가 없는 상태로 돈다.
+          getSudoPassword: sudoTicket
+            ? async () => (await fetchSudoTicket(config, sudoTicket))?.password ?? null
+            : null,
+        },
       );
       if (outcome.after) cliVersions = { ...cliVersions, [cli]: outcome.after };
       if (outcome.ok) {

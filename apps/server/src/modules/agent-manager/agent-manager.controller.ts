@@ -37,6 +37,7 @@ import {
   type AgentLaunchSpecEntry,
   type CliInstallEntry,
 } from './instance-registry.service';
+import { SudoTicketService, type SudoTicketScope } from './sudo-ticket.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
@@ -309,6 +310,7 @@ export class AgentManagerController {
     private readonly subagentMonitor: SubagentMonitorService,
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
+    private readonly sudoTickets: SudoTicketService,
     private readonly commands: AgentManagerCommandService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
@@ -557,6 +559,7 @@ export class AgentManagerController {
           version: typeof row.version === 'string' && row.version ? row.version : null,
           method: typeof row.method === 'string' ? row.method : '',
           updatable: row.updatable === true,
+          needs_sudo: row.needs_sudo === true,
           active: row.active === true,
         });
       }
@@ -1430,6 +1433,112 @@ export class AgentManagerController {
     // ledger before emitting (ack-race safety).
     const { command_id, issued_at } = await this.commands.issue(inst, command, args, user.id);
     return res.status(202).json({ ok: true, command_id, issued_at });
+  }
+
+  // ─── 일회용 sudo 티켓 ───────────────────────────────────────────────────
+  //
+  // 운영자가 방금 입력한 비밀번호를, 저장하지 않고 매니저에게 한 번만 건넨다.
+  // 비밀번호는 **이 요청의 바디** 와 **매니저가 직접 당겨 가는 응답** 두 곳에만
+  // 존재하고, SSE 페이로드·커맨드 원장·활동 로그·ack 어디에도 들어가지 않는다.
+  // 자세한 근거는 SudoTicketService 의 docstring 참고.
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/instances/:id/sudo-ticket')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({
+    summary: '권한 상승이 필요한 작업 하나에 쓸 일회용 sudo 티켓을 발급한다 (TTL 120초, 1회용)',
+  })
+  async mintSudoTicket(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const inst = this.registry.get(id);
+    if (!inst) return res.status(404).json({ error: 'Instance not found or expired' });
+
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (!password) return res.status(400).json({ error: 'password is required' });
+
+    // scope 는 발급 시점에 고정된다 — 티켓 id 가 새더라도 다른 대상에 쓸 수 없다.
+    const scope = this.parseSudoScope(body?.scope);
+    if (!scope) return res.status(400).json({ error: 'scope is required and must name what the ticket may do' });
+
+    const minted = this.sudoTickets.mint({
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      scope,
+      password,
+      issued_by: user.id,
+    });
+    // 응답에 비밀번호를 되돌려주지 않는다 — 브라우저는 자기가 보낸 값을 이미 안다.
+    return res.status(201).json(minted);
+  }
+
+  @ApiBearerAuth('user-session')
+  @Delete('api/admin/agent-manager/sudo-ticket/:ticketId')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '쓰이지 않은 sudo 티켓을 즉시 폐기한다 (모달을 닫는 등)' })
+  async revokeSudoTicket(
+    @Param('ticketId') ticketId: string,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    this.sudoTickets.revoke(String(ticketId || ''));
+    // 있었는지 없었는지 알려주지 않는다 — 티켓 id 존재 여부는 정보다.
+    return res.json({ ok: true });
+  }
+
+  @ApiSecurity('agent-key')
+  @Get('api/agent/sudo-ticket/:ticketId')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: '매니저 → 서버: sudo 티켓의 비밀번호를 1회 받아 간다 (받는 즉시 서버에서 삭제)',
+  })
+  async consumeSudoTicket(
+    @Param('ticketId') ticketId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    // 신원 없는 호출은 여기서만 거부한다 — `/command/ack` 등 다른 매니저 엔드포인트는
+    // identity 가 없으면 소유권 검사를 건너뛰는데(AGENT_DEV_MODE 에서 가드가 아예
+    // 붙이지 않는다), 이 엔드포인트가 내주는 값은 **root 비밀번호**다. "누가
+    // 집어가는지 모르지만 일단 준다" 는 이 하나에 대해서는 성립하지 않는다.
+    // 대가: AGENT_DEV_MODE=true 로 띄운 개발 환경에서는 sudo 티켓이 동작하지 않는다
+    // (매니저는 "다시 누르세요" 로 보고한다). 의도한 절충이다.
+    if (!callerAgentId) return res.status(401).json({ error: 'unauthenticated' });
+
+    const result = this.sudoTickets.consume(String(ticketId || ''), String(callerAgentId));
+    if (!result.ok) {
+      // 사유를 구분해 돌려준다 — 매니저가 운영자에게 "다시 누르세요"(expired) 와
+      // "이 티켓은 당신 것이 아닙니다"(wrong_manager) 를 다르게 알려야 한다.
+      const status = result.reason === 'wrong_manager' ? 403 : 404;
+      return res.status(status).json({ error: result.reason });
+    }
+    // 이 응답이 비밀번호가 존재하는 마지막 순간이다. 서버 쪽 복사본은 consume()
+    // 이 이미 지웠다.
+    return res.json({ password: result.password, scope: result.scope });
+  }
+
+  /** 티켓 scope 파싱. 알 수 없는 모양은 거부한다 — "무엇에 쓸지 모르는 티켓" 은
+   *  곧 "무엇에든 쓸 수 있는 티켓" 이다. */
+  private parseSudoScope(raw: any): SudoTicketScope | null {
+    if (!raw || typeof raw !== 'object') return null;
+    if (raw.kind === 'cli_update') {
+      const cli = typeof raw.cli === 'string' ? raw.cli.trim() : '';
+      const bin = typeof raw.bin === 'string' ? raw.bin.trim() : '';
+      return cli && bin ? { kind: 'cli_update', cli, bin } : null;
+    }
+    if (raw.kind === 'privileged_command') {
+      const request_id = typeof raw.request_id === 'string' ? raw.request_id.trim() : '';
+      return request_id ? { kind: 'privileged_command', request_id } : null;
+    }
+    return null;
   }
 
   /**
