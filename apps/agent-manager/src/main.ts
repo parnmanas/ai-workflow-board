@@ -54,7 +54,8 @@ import { gatherAvailableModels } from './lib/available-models.js';
 import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
 import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
 import { runWithSudo } from './lib/sudo-runner.js';
-import { describeInstallMethod } from './lib/cli-install-method.js';
+import { describeInstallMethod, detectInstallMethod, type InstallMethod } from './lib/cli-install-method.js';
+import { readSnapChannelLatest } from './lib/snap-channel.js';
 import { canonicalPathKey } from './lib/cli-resolver.js';
 import type { CliInstallEntry } from './lib/instance-heartbeat.js';
 import {
@@ -710,6 +711,30 @@ async function runRuntime(
   // 경로·버전·설치 방법·지금 해석되는 것인지까지 싣는다. 열거는 설치본마다
   // `--version` 한 번이라 부팅과 update_cli 직후에만 돌린다.
   let cliInstalls: CliInstallEntry[] = [];
+
+  /**
+   * 이 **설치본**의 최신 버전. 채널마다 최신이 다르다:
+   *   - npm 에서 온 설치본 → npm 레지스트리의 latest
+   *   - snap → 그 설치본이 **추적 중인 채널**의 최신(`snap info`). refresh 는 그
+   *     채널 안에서만 올리므로, 채널이 멈춰 있으면 그 값이 곧 도달 가능한 최신이다.
+   *   - 그 밖(homebrew / native installer / 미상) → 모른다(null)
+   *
+   * null 은 "최신이다" 가 아니라 "모른다" 이고, 화면은 모를 때 버튼을 잠그지 않는다.
+   */
+  const latestForInstall = async (
+    cli: string,
+    installPath: string,
+    method: InstallMethod,
+  ): Promise<string | null> => {
+    if (npmLatestApplies(method)) return cliLatestVersions[cli] ?? null;
+    if (method.kind === 'snap') {
+      const name = candidateKeyFor(cli, installPath);
+      const info = await readSnapChannelLatest(name);
+      return info.latest;
+    }
+    return null;
+  };
+
   const refreshCliInstalls = async (): Promise<void> => {
     const next: CliInstallEntry[] = [];
     // 등록된 어댑터 전부를 훑는다 — 미설치 CLI 는 listCliInstalls 가 빈 목록을
@@ -743,9 +768,7 @@ async function runRuntime(
             needs_sudo: !install.method.argv && Boolean(install.method.elevatedArgv),
             // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. npm 채널에서 온
             // 설치본에만 npm 의 latest 를 붙인다.
-            latest_version: npmLatestApplies(install.method)
-              ? cliLatestVersions[cli] ?? null
-              : null,
+            latest_version: await latestForInstall(cli, install.path, install.method),
             active: Boolean(active && canonicalPathKey(active) === canonicalPathKey(install.path)),
           });
         }
@@ -754,6 +777,18 @@ async function runRuntime(
       }
     }
     cliInstalls = next;
+
+    // `cli_versions` 는 **지금 해석되는 설치본**의 버전이다(지정 없이 spawn 하면
+    // 실행될 그것). 업데이트 결과를 그대로 여기 덮어쓰면, 활성이 아닌 설치본을
+    // 올린 뒤 CLI 전체가 그 버전인 것처럼 보인다 — rolf 실측: snap codex(0.114.0)를
+    // 건드린 순간 모든 에이전트 상세가 codex 를 0.114.0 으로 표시하고 Update 버튼이
+    // 되살아났다(실제 활성 설치본은 npm 의 0.156.1). 그래서 열거 결과의 active 행에서
+    // 되짚는다. 여기서 열거하지 않는 키(gh/git 등 부팅 probe 값)는 건드리지 않는다.
+    const fromActive: Record<string, string> = {};
+    for (const row of next) {
+      if (row.active && row.version) fromActive[row.cli] = row.version;
+    }
+    cliVersions = { ...cliVersions, ...fromActive };
   };
 
   const refreshCliLatestVersions = async (): Promise<void> => {
@@ -821,6 +856,14 @@ async function runRuntime(
         }
         target = match.path;
       }
+      // 이 설치본의 채널 기준 최신. npm 판의 숫자를 snap 설치본에 들이대지 않는다.
+      let targetLatest: string | null = null;
+      try {
+        const probeBin = target ?? createAdapter(cli).resolveBin();
+        targetLatest = await latestForInstall(cli, probeBin, detectInstallMethod(probeBin, createAdapter(cli).updatePackage()));
+      } catch {
+        /* 해석 실패 — 최신을 모른 채로 진행한다(업데이터의 말을 믿되 그렇다고 적는다). */
+      }
       const outcome = await runCliUpdate(
         cli,
         { log },
@@ -829,7 +872,7 @@ async function runRuntime(
           // 최신 버전을 함께 넘긴다 — "버전이 안 움직였다" 를 *이미 최신* 과
           // *못 올렸다* 로 가르는 유일한 근거다(없으면 업데이터의 종료 코드를
           // 믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다).
-          latest: cliLatestVersions[cli] ?? null,
+          latest: targetLatest,
           // 권한 상승이 실제로 필요한 분기에 도달했을 때만 불린다. 티켓이 안 왔으면
           // 아예 배선하지 않아, 비밀번호를 당겨 올 수단 자체가 없는 상태로 돈다.
           getSudoPassword: sudoTicket
@@ -837,7 +880,8 @@ async function runRuntime(
             : null,
         },
       );
-      if (outcome.after) cliVersions = { ...cliVersions, [cli]: outcome.after };
+      // cliVersions 는 여기서 직접 건드리지 않는다 — 아래 refreshCliInstalls 가
+      // **활성 설치본** 기준으로 되짚는다. 방금 올린 것이 활성이 아닐 수 있다.
       if (outcome.ok) {
         try {
           availableModels = await gatherAvailableModels();

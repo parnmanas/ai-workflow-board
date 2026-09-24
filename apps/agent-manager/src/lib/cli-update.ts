@@ -402,8 +402,11 @@ export async function runCliUpdate(
   // 최신 버전을 알면 둘을 가를 수 있다. 모르면 업데이터의 종료 코드를 믿는
   // 수밖에 없는데, 그걸 믿은 것이 정확히 ragnar 회귀였으므로 detail 에 그
   // 불확실성을 적는다.
-  // 배포 채널이 다른 설치본에는 npm 의 latest 를 들이대지 않는다(npmLatestApplies).
-  const latest = npmLatestApplies(method) ? options.latest ?? null : null;
+  // `latest` 는 **이 설치본의 채널 기준** 최신이다(호출자가 그렇게 골라서 넘긴다 —
+  // npm 설치본은 npm 레지스트리, snap 은 추적 채널의 `snap info`). 그래서 여기서는
+  // 채널을 다시 따지지 않는다. 값이 없으면 "모른다" 로 두고 업데이터의 말을 믿되,
+  // 그 불확실성을 detail 에 적는다.
+  const latest = options.latest ?? null;
   const atLatest = latest ? (compareCliVersions(after, latest) ?? -1) >= 0 : null;
   // 여기까지 왔으면 반드시 한 번은 시도했다 — 시도할 방법이 하나도 없는 설치본은
   // 위에서 이미 돌아갔다(managedElsewhere / 업데이터 없음).
@@ -432,11 +435,11 @@ export async function runCliUpdate(
       `${cli} stays at ${after ?? before ?? 'unknown'} at ${target} — already current` +
       (atLatest === null
         ? ` per ${lastAttempt?.method ?? 'the updater'} (latest version unknown, so this is the updater's word)`
-        : ` (npm latest ${latest})`);
+        : ` (latest ${latest})`);
   } else {
     detail =
       `${cli} at ${target} is still ${after ?? 'unknown'}` +
-      (latest ? ` while npm latest is ${latest}` : '') +
+      (latest ? ` while the latest available is ${latest}` : '') +
       ' — ' +
       attempts.map((a) => `${a.method}: ${a.ok ? 'ok but no change' : a.output || 'failed'}`).join(' | ') +
       (method.manualCommand ? ` — run on ${hostLabel}: ${method.manualCommand}` : '');

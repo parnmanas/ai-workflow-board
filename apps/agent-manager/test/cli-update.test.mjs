@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { runCliUpdate, listCliInstalls, extractSemver, compareCliVersions } = await import(
+const { runCliUpdate, listCliInstalls, npmLatestApplies, extractSemver, compareCliVersions } = await import(
   '../dist/lib/cli-update.js'
 );
 
@@ -205,11 +205,11 @@ test('버전이 안 움직였을 때 최신 버전을 알면 *이미 최신* 과
 
   const stale = await runCliUpdate('claude', deps, { bin: NPM_CLAUDE, latest: '2.1.281' });
   assert.equal(stale.ok, false, '최신이 더 위에 있는데 안 움직였으면 실패다');
-  assert.match(stale.detail, /npm latest is 2\.1\.281/);
+  assert.match(stale.detail, /latest available is 2\.1\.281/);
 
   const current = await runCliUpdate('claude', deps, { bin: NPM_CLAUDE, latest: '2.1.273' });
   assert.equal(current.ok, true);
-  assert.match(current.detail, /already current \(npm latest 2\.1\.273\)/);
+  assert.match(current.detail, /already current \(latest 2\.1\.273\)/);
 
   const unknown = await runCliUpdate('claude', deps, { bin: NPM_CLAUDE, latest: null });
   assert.equal(unknown.ok, true, '최신을 모르면 업데이터의 말을 믿는다');
@@ -475,11 +475,12 @@ test('비밀번호가 틀리면 "이미 최신" 으로 읽히지 않는다', asy
   assert.match(result.detail, /password was rejected/);
 });
 
-test('다른 배포 채널의 설치본에는 npm latest 를 들이대지 않는다 (rolf 의 비공식 snap codex)', async () => {
-  // rolf 실측: /snap/bin/codex 는 OpenAI 가 아니라 제3자(jcat)가 올린 스냅이고
-  // 그 채널의 최신이 0.114.0 이다. 같은 호스트의 npm 최신은 0.156.1 이지만 **다른
-  // 채널의 숫자**다. 그걸 기준으로 쓰면 `snap refresh` 가 "올릴 게 없다" 로 올바르게
-  // 끝난 것을 실패로 보고하고, 화면은 영원히 "→ 0.156.1" 을 띄운다.
+test('snap 설치본은 **그 채널의** 최신으로 판정한다 (rolf 의 비공식 snap codex)', async () => {
+  // rolf 실측: /snap/bin/codex 는 OpenAI 가 아니라 제3자(jcat)가 올린 스냅이고,
+  // 추적 중인 latest/stable 이 0.114.0(2026-03-14)에서 멈춰 있다. `snap refresh` 는
+  // 그 채널 안에서만 올리므로 "올릴 것 없음" 이 정답이다. 같은 호스트의 npm 최신
+  // (0.156.1)은 **다른 배포 채널의 숫자**라 판정 근거가 될 수 없다 — 호출자가
+  // 채널에 맞는 값을 골라 넘기고, 여기서는 그 값을 그대로 쓴다.
   const snap = {
     kind: 'snap',
     argv: null,
@@ -489,30 +490,49 @@ test('다른 배포 채널의 설치본에는 npm latest 를 들이대지 않는
     prefix: null,
     needsElevation: true,
   };
-  const result = await runCliUpdate(
-    'codex',
-    {
-      hostLabel: 'Rolf',
-      listCandidates: noOtherInstalls,
-      detectMethod: () => snap,
-      probeVersion: async () => 'codex-cli 0.114.0',
-      runSudo: async () => ({ ok: true, output: 'snap "codex" has no updates available', reason: null }),
-    },
-    {
-      bin: '/snap/bin/codex',
-      // npm 채널의 숫자. 이 설치본에는 해당되지 않는다.
-      latest: '0.156.1',
-      getSudoPassword: async () => 'pw',
-    },
+  const run = (latest) =>
+    runCliUpdate(
+      'codex',
+      {
+        hostLabel: 'Rolf',
+        listCandidates: noOtherInstalls,
+        detectMethod: () => snap,
+        probeVersion: async () => 'codex-cli 0.114.0',
+        runSudo: async () => ({ ok: true, output: 'snap "codex" has no updates available', reason: null }),
+      },
+      { bin: '/snap/bin/codex', latest, getSudoPassword: async () => 'pw' },
+    );
+
+  // 채널의 최신에 이미 도달 — 성공이고, 화면은 이 값으로 버튼을 잠글 수 있다.
+  const atChannelLatest = await run('0.114.0');
+  assert.equal(atChannelLatest.ok, true);
+  assert.match(atChannelLatest.detail, /already current \(latest 0\.114\.0\)/);
+  assert.doesNotMatch(
+    atChannelLatest.detail,
+    /updater's word/,
+    '채널 최신을 아는데도 "모른다" 로 접으면 버튼이 영원히 눌린다',
   );
 
-  assert.equal(result.ok, true, '채널의 최신에 이미 도달했으면 성공이다');
-  assert.doesNotMatch(result.detail, /0\.156\.1/, '다른 채널의 숫자를 판정 근거로 쓰지 않는다');
-  assert.match(result.detail, /already current/);
+  // 채널에 더 새 것이 있는데 안 움직였다면 그건 진짜 실패다.
+  const behindChannel = await run('0.154.0');
+  assert.equal(behindChannel.ok, false);
+  assert.match(behindChannel.detail, /latest available is 0\.154\.0/);
 });
 
-test('npm 채널 설치본에는 npm latest 가 그대로 적용된다', async () => {
-  // 위 규칙이 "latest 를 아예 안 쓴다" 로 번지면 ragnar 회귀가 돌아온다.
+test('호출자가 채널에 맞는 최신을 고른다 — npmLatestApplies', () => {
+  // npm 레지스트리에서 온 설치본에만 npm 의 latest 가 적용된다. 이 구분이 무너지면
+  // 한쪽에서는 snap 을 npm 숫자로 재고(거짓 실패), 다른 쪽에서는 npm 설치본의
+  // latest 를 버려 ragnar 회귀(남의 prefix 를 올리고 exit 0)가 돌아온다.
+  const of = (kind) => ({ kind, argv: null, elevatedArgv: null, label: kind, manualCommand: null, prefix: null, needsElevation: false });
+  for (const kind of ['npm-prefix', 'bun', 'volta', 'pnpm']) {
+    assert.equal(npmLatestApplies(of(kind)), true, kind);
+  }
+  for (const kind of ['snap', 'homebrew', 'native', 'unknown']) {
+    assert.equal(npmLatestApplies(of(kind)), false, kind);
+  }
+});
+
+test('npm 채널 설치본은 npm latest 로 그대로 판정된다', async () => {
   for (const kind of ['npm-prefix', 'bun', 'volta', 'pnpm']) {
     const result = await runCliUpdate(
       'claude',
@@ -525,7 +545,7 @@ test('npm 채널 설치본에는 npm latest 가 그대로 적용된다', async (
       { bin: NPM_CLAUDE, latest: '2.1.281' },
     );
     assert.equal(result.ok, false, `${kind}: 최신이 더 위에 있는데 안 움직였으면 실패다`);
-    assert.match(result.detail, /npm latest is 2\.1\.281/);
+    assert.match(result.detail, /latest available is 2\.1\.281/);
   }
 });
 
