@@ -528,10 +528,11 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'correct_confirmed_ticket_duplicate',
-    'Correct a previously confirmed false-positive canonical link. Atomically clears the link, resolves the stale dispatch intent, opens one fresh intent, and re-dispatches the selected ticket role. The canonical ticket is not modified.',
+    'Correct a previously confirmed false-positive canonical link. Atomically clears the link and resolves the stale dispatch intent regardless of which column the ticket sits in — unlinking is a data correction, not a dispatch.\n\n' +
+    'Re-dispatch is BEST-EFFORT on top of that: when the current column routes the selected role (non-terminal column, role has a holder, ticket not pending) the call also opens one fresh intent and emits exactly one wire trigger. Otherwise it unlinks only and reports `dispatch_skipped_reason` — typically for a ticket still sitting in an intake column, which resumes through normal backlog promotion instead (the call nudges that re-evaluation immediately). The canonical ticket is never modified.',
     {
       ticket_id: z.string().describe('Incorrectly linked report ticket id'),
-      role: z.literal('assignee').optional().default('assignee').describe('Role to redispatch (currently assignee)'),
+      role: z.literal('assignee').optional().default('assignee').describe('Role to redispatch when the current column routes it (currently assignee). A non-routing column unlinks only.'),
     },
     async ({ ticket_id, role }, extra: { sessionId?: string }) => {
       if (!triggerLoopService) return err('Duplicate correction requires the integrated dispatch service');
@@ -544,6 +545,20 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           caller?.agentName || '',
           caller?.agentId || '',
         );
+        // 해제만 된 경우 — 열린 intent 가 없으므로 깨울 대상도, 기록할
+        // trigger 도 없다. 승격 재평가 신호는 서비스가 커밋 직후 이미 쐈다.
+        if (!corrected.intentId) {
+          return ok({
+            ticket: await loadTicketFull(dataSource, corrected.ticket.id),
+            previous_canonical_ticket_id: corrected.previousCanonicalId,
+            dispatch_intent_id: null,
+            dispatch_attempted: 0,
+            dispatch_landed: 0,
+            dispatch_trigger_ids: [],
+            dispatch_generation: 0,
+            dispatch_skipped_reason: corrected.dispatchSkippedReason,
+          });
+        }
         const triggerId = await triggerLoopService.emitAgentTrigger(
           corrected.ticket,
           corrected.agentId,
@@ -570,6 +585,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           dispatch_landed: triggerId ? 1 : 0,
           dispatch_trigger_ids: triggerId ? [triggerId] : [],
           dispatch_generation: corrected.generation,
+          dispatch_skipped_reason: '',
         });
       } catch (e: any) {
         return err(e?.message || 'Confirmed duplicate correction rejected');

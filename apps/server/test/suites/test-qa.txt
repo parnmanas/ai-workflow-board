@@ -44,6 +44,7 @@ test/qa-flows/cross-board-handoff.test.mjs
 test/qa-flows/deployment-gate.test.mjs
 test/qa-flows/dispatch-intent-pg-race.test.mjs
 test/qa-flows/dispatch-reconciler-loop.test.mjs
+test/qa-flows/duplicate-correction-intake-promotion.test.mjs
 test/qa-flows/feature-intake-e2e.test.mjs
 test/qa-flows/focus-collapse-per-agent.test.mjs
 test/qa-flows/focus-lease-deadlock.test.mjs

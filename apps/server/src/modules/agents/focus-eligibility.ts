@@ -125,10 +125,18 @@ export function isFocusEligible(ticket: FocusEligibilityInput | null | undefined
  */
 export const FOCUS_RELEASED_EVENT = 'focus_released';
 
+/**
+ * 승격 재평가 신호의 사유. 대부분은 부적격화(= lease 해제)지만, 그 반대
+ * 방향 — 부적격 사유가 걷혀 티켓이 다시 승격 후보가 된 경우 — 도 같은 버스로
+ * 알린다. 리스너가 하는 일은 어느 쪽이든 `tryPromote(boardId)` 한 번이라,
+ * 사유는 감사 로그용 라벨일 뿐 분기 조건이 아니다.
+ */
+export type PromotionRecheckReason = FocusIneligibilityReason | 'duplicate_link_corrected';
+
 export interface FocusReleasedPayload {
   ticket_id: string;
   board_id: string;
-  reason: FocusIneligibilityReason;
+  reason: PromotionRecheckReason;
 }
 
 /**
@@ -155,6 +163,43 @@ export async function emitFocusReleased(
   ticket: { id: string; column_id?: string | null },
   reason: FocusIneligibilityReason,
 ): Promise<void> {
+  return emitBoardPromotionSignal(dataSource, ticket, reason, isLeaseCapableColumn);
+}
+
+/**
+ * 승격 재평가 요청 — `emitFocusReleased` 와 같은 이벤트를 쓰되 **컬럼 게이트가
+ * 없다** (ticket 83c5e25c).
+ *
+ * 해제가 아니라 자격 *회복* 을 알리는 쪽이다. 확정된 중복 링크를 정정하면
+ * 티켓은 승격 후보 쿼리의 `t.canonical_ticket_id IS NULL` 조건을 다시
+ * 통과하는데, 그 티켓이 앉아 있는 곳은 대개 intake 컬럼이라
+ * `isLeaseCapableColumn` 가 false 다 — `emitFocusReleased` 로는 신호가 나가지
+ * 않는다. 그러면 링크를 풀어도 다음 `agent_idle` 이나 5분 level sweep 까지
+ * 보드가 멈춰 있고, 이는 이 정정 도구가 없애려는 증상 그 자체다.
+ *
+ * 게이트를 두지 않는 근거: 리스너는 보드 단위 `tryPromote` 한 번이고, 승격
+ * 자격 검사는 그 안에서 다시 하므로 헛호출은 값싼 no-op 이다. 반대로
+ * 게이트를 잘못 좁히면 교착이 조용히 남는다. 발행 규약(커밋 후 호출, 실패는
+ * 삼킴)은 `emitFocusReleased` 와 같다.
+ */
+export async function emitPromotionRecheck(
+  dataSource: DataSource,
+  ticket: { id: string; column_id?: string | null },
+  reason: PromotionRecheckReason,
+): Promise<void> {
+  return emitBoardPromotionSignal(dataSource, ticket, reason, () => true);
+}
+
+/**
+ * 두 발행 경로의 공통 본체. 차이는 컬럼 게이트 하나뿐이라, 본문을 복제하면
+ * 한쪽만 고쳐져 갈라지기 쉽다.
+ */
+async function emitBoardPromotionSignal(
+  dataSource: DataSource,
+  ticket: { id: string; column_id?: string | null },
+  reason: PromotionRecheckReason,
+  columnGate: (column: { kind?: string | null; is_terminal?: boolean | number | null } | null) => boolean,
+): Promise<void> {
   try {
     if (!ticket?.id || !ticket.column_id) return;
     const column = await dataSource
@@ -162,7 +207,7 @@ export async function emitFocusReleased(
       .findOne({ where: { id: ticket.column_id }, select: ['id', 'board_id', 'kind', 'is_terminal'] });
     const boardId = column?.board_id || '';
     if (!boardId) return;
-    if (!isLeaseCapableColumn(column)) return;
+    if (!columnGate(column || null)) return;
     const payload: FocusReleasedPayload = { ticket_id: ticket.id, board_id: boardId, reason };
     activityEvents.emit(FOCUS_RELEASED_EVENT, payload);
   } catch {
