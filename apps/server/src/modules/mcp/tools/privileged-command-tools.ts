@@ -112,7 +112,7 @@ export function registerPrivilegedCommandTools(server: McpServer, ctx: ToolConte
       const existing = svc.get(String(request_id || ''));
       if (!existing) return err('unknown or expired request_id');
       if (existing.agent_id !== caller.agentId) {
-        return err('this request belongs to a different agent', { status: 403 } as any);
+        return err('this request belongs to a different agent', { status: 403 });
       }
 
       if (existing.status === 'pending' || existing.status === 'approved' || existing.status === 'running') {
