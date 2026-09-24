@@ -275,6 +275,9 @@ export default function ManagedAgentDialog({
   // 또는 그때 열거에 실패한 CLI 는 드롭다운이 빈 채로 남았고, 사용자가 "모델 목록 새로고침"
   // 버튼의 존재를 알아야만 채울 수 있었다 — 되는 조합과 안 되는 조합이 뒤섞여 보인 이유다.
   //
+  // 이 다이얼로그는 부모가 조건부로 렌더하므로 자체 open 플래그가 없다 — 마운트돼 있다는
+  // 것 자체가 열려 있다는 뜻이다. (전역 `window.open` 때문에 `!open` 을 써도 타입 검사는
+  // 통과하지만 런타임에는 뜻이 없다.)
   // 이 다이얼로그의 cli 타입에는 'custom' 이 없다(어댑터 있는 런타임만).
   // 조합당 한 번만 시도한다(attemptedRef). 모델 개념이 없거나 열거를 지원하지 않는 CLI
   // (antigravity / pi) 에서 매번 재시도해 매니저를 두드리면 안 되고, 그 경우 자유 입력으로
@@ -282,7 +285,7 @@ export default function ManagedAgentDialog({
   // 성공 토스트는 소음이다.
   const modelProbeAttempted = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!open || !resolvedInstanceId || !cli) return;
+    if (!resolvedInstanceId || !cli) return;
     if ((availableModelsByCli[cli] || []).length > 0) return;
     const key = `${resolvedInstanceId}:${cli}`;
     if (modelProbeAttempted.current.has(key)) return;
@@ -291,7 +294,7 @@ export default function ManagedAgentDialog({
     // handleRefreshModels 는 매 렌더 새로 만들어지므로 의존성에 넣지 않는다 — 넣으면
     // 이 effect 가 렌더마다 다시 돌아 attemptedRef 가 막아주기 전에 요청이 겹친다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, resolvedInstanceId, cli, availableModelsByCli]);
+  }, [resolvedInstanceId, cli, availableModelsByCli]);
 
   const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
   // Candidate models for the selected CLI. When the manager reported a list we

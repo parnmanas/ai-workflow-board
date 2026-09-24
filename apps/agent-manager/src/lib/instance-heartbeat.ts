@@ -27,6 +27,22 @@ import type { AgentLaunchSpecEntry } from './launch-spec.js';
 
 export type InstanceMode = 'manager';
 
+/** 이 호스트에 깔린 CLI 설치본 한 줄. 같은 `cli` 가 여러 줄 나올 수 있고,
+ *  그게 정상이다 — `active` 가 "지정이 없을 때 spawn 되는 그것" 을 가리킨다. */
+export interface CliInstallEntry {
+  cli: string;
+  /** 절대 경로. `update_cli` 의 `args.bin` 으로 그대로 되돌아온다. */
+  path: string;
+  /** 그 경로의 `--version`. 못 읽었으면 null. */
+  version: string | null;
+  /** 사람이 읽는 설치 방법(`npm --prefix /home/x/.npm-global`, `snap package` …). */
+  method: string;
+  /** AWB 가 이 설치본을 올릴 수 있는지. false 면 UI 는 방법만 보여주고 버튼을 감춘다. */
+  updatable: boolean;
+  /** 이 CLI 를 지정 없이 spawn 하면 실행될 설치본인지. */
+  active: boolean;
+}
+
 export interface InstanceMeta {
   mode: InstanceMode;
   version: string;
@@ -64,6 +80,16 @@ export interface InstanceMeta {
   // CLI 를 올린 뒤 같은 값을 다시 읽어 교체하므로, 모델 목록과 같은 이유로 정적
   // 값이 아니라 provider 다. 버전을 못 읽은 CLI 는 키가 없다(= 미설치/probe 실패).
   cliVersionsProvider?: (() => Record<string, string> | null) | null;
+  // 같은 CLI 들의 **최신 배포 버전** (cliType → 버전). cli-latest.ts 가 npm
+  // 레지스트리에서 느린 타이머로 채운다. 설치 버전과 짝을 이뤄 UI 가 "올릴 게
+  // 있는가" 를 판정한다 — 이것 없이는 Update 버튼이 영원히 활성으로 남는다.
+  // 조회에 실패한 CLI 는 키가 없다(= 최신을 모름 ≠ 최신임).
+  cliLatestVersionsProvider?: (() => Record<string, string> | null) | null;
+  // 설치본 단위 목록. `cli_versions` 는 CLI 당 한 줄이라, 같은 CLI 가 여러 벌
+  // 깔린 호스트(vLLM 백엔드용 두 번째 claude)를 표현하지 못한다 — 화면이 어느
+  // 설치본을 올릴지 고르려면 경로가 필요하다. 구버전 서버는 이 필드를 무시하고
+  // `cli_versions` 만 읽으므로 둘 다 싣는다.
+  cliInstallsProvider?: (() => CliInstallEntry[] | null) | null;
   // Agent Session(CLI 직접 세션) — 이 장비에서 ACP 어댑터로 세션을 열 수 있는 CLI
   // (agent-session-runner.ts detectAcpSessionClis). 부팅 시 한 번 계산한 정적 값.
   acpSessionClis?: string[] | null;
@@ -332,6 +358,8 @@ export class InstanceHeartbeat {
         : null;
     const availableModelsProvider = meta?.availableModelsProvider ?? null;
     const cliVersionsProvider = meta?.cliVersionsProvider ?? null;
+    const cliLatestVersionsProvider = meta?.cliLatestVersionsProvider ?? null;
+    const cliInstallsProvider = meta?.cliInstallsProvider ?? null;
     const runtimeCapabilities =
       meta?.runtimeCapabilities && typeof meta.runtimeCapabilities === 'object'
         ? meta.runtimeCapabilities
@@ -479,6 +507,26 @@ export class InstanceHeartbeat {
           cliVersions = null;
         }
       }
+      let cliLatestVersions: Record<string, string> | null = null;
+      if (cliLatestVersionsProvider) {
+        try {
+          const live = cliLatestVersionsProvider();
+          cliLatestVersions = live && typeof live === 'object' ? live : null;
+        } catch (err: any) {
+          log(`Instance heartbeat: cli-latest-versions provider failed: ${err?.message ?? err}`);
+          cliLatestVersions = null;
+        }
+      }
+      let cliInstalls: CliInstallEntry[] | null = null;
+      if (cliInstallsProvider) {
+        try {
+          const live = cliInstallsProvider();
+          cliInstalls = Array.isArray(live) ? live : null;
+        } catch (err: any) {
+          log(`Instance heartbeat: cli-installs provider failed: ${err?.message ?? err}`);
+          cliInstalls = null;
+        }
+      }
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
@@ -498,6 +546,10 @@ export class InstanceHeartbeat {
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
         ...(models && Object.keys(models).length ? { available_models: models } : {}),
         ...(cliVersions && Object.keys(cliVersions).length ? { cli_versions: cliVersions } : {}),
+        ...(cliLatestVersions && Object.keys(cliLatestVersions).length
+          ? { cli_latest_versions: cliLatestVersions }
+          : {}),
+        ...(cliInstalls && cliInstalls.length ? { cli_installs: cliInstalls } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
         ...(agentSessions ? { agent_sessions: agentSessions } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),

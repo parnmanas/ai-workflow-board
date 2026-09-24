@@ -157,7 +157,7 @@ async function mountSidebar(t, options = {}) {
     }
     pause() {}
   };
-  const { uninstall } = installFakeEventSource();
+  const { uninstall, FakeEventSource } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
   const restoreFetch = installFetchStub({ hosts, sessionsByCli, permissions });
@@ -207,7 +207,20 @@ async function mountSidebar(t, options = {}) {
     dom.cleanup();
   });
 
-  return { view };
+  /** 서버가 driver 에게 보내는 세션 SSE 를 그대로 흘려 넣는다. */
+  const emitSessionUpdate = async (session, reason = 'opened') => {
+    for (const es of FakeEventSource.instances) {
+      es.emit('agent_session_update', {
+        event_type: 'agent_session_update',
+        session,
+        reason,
+        timestamp: session.updated_at,
+      });
+    }
+    await flush();
+  };
+
+  return { view, emitSessionUpdate };
 }
 
 const sessionsSection = (view) => view.container.querySelector('section[aria-labelledby="sidebar-sessions-heading"]');
@@ -401,4 +414,76 @@ test('⑨ 폴더가 전부 3일을 넘겨도 가장 최근 폴더 1개는 항상
   assert.ok(rowByTitle(tree, '덜 잠든 폴더의 세션'), '그 폴더의 세션도 하나는 보인다(세션 규칙과 같은 창)');
   assert.equal(hasRow(tree, LEGACY_CWD), false, '나머지 폴더는 더보기 뒤로 접힌다');
   assert.ok(buttonByText(tree, '+1개 폴더 더 보기'), '접힌 폴더 수를 알려주는 더보기 버튼이 없다');
+});
+
+// ⑩ 세션을 만들면 사이드바에 **즉시** 뜬다.
+//
+// 서버는 세션이 열리는 즉시 driver 에게 `agent_session_update{reason:'opened'}` 를 보낸다.
+// 그런데 사이드바 핸들러는 **이미 목록에 있는 행만** 고쳤기 때문에, 처음 보는 세션은 조용히
+// 버려졌다 — 새로고침하거나 그 호스트 목록을 다시 부를 때까지 보이지 않았다.
+test('⑩ 새 세션 SSE 가 오면 목록을 다시 묻지 않고 바로 트리에 나타난다', async (t) => {
+  const { view, emitSessionUpdate } = await mountSidebar(t);
+  const tree = () => hostsTree(view);
+
+  assert.equal(hasRow(tree(), '방금 만든 세션'), false, '아직 없어야 한다');
+
+  await emitSessionUpdate({
+    manager_id: MANAGER_ID,
+    manager_name: HOST.name,
+    cli: 'claude',
+    session_id: 's-brand-new',
+    cwd: AWB_CWD,
+    title: '방금 만든 세션',
+    status: 'running',
+    updated_at: ago(0),
+  });
+
+  assert.equal(hasRow(tree(), '방금 만든 세션'), true, '새 세션이 바로 보여야 한다');
+  // 기존 세션들은 그대로다 — 새 행 하나가 목록을 갈아치우면 안 된다.
+  assert.equal(hasRow(tree(), 'awb 리뷰'), true);
+  assert.equal(hasRow(tree(), 'codex 실험'), true);
+});
+
+test('⑪ 아직 없던 working folder 의 세션이면 폴더 그룹째 새로 생긴다', async (t) => {
+  const { view, emitSessionUpdate } = await mountSidebar(t);
+  const tree = () => hostsTree(view);
+  const NEW_CWD = '/srv/brand-new-repo';
+
+  assert.equal(hasRow(tree(), NEW_CWD), false, '아직 없어야 한다');
+
+  await emitSessionUpdate({
+    manager_id: MANAGER_ID,
+    manager_name: HOST.name,
+    cli: 'codex',
+    session_id: 's-new-folder',
+    cwd: NEW_CWD,
+    title: '새 폴더 세션',
+    status: 'running',
+    updated_at: ago(0),
+  });
+
+  assert.equal(hasRow(tree(), NEW_CWD), true, 'cwd 그룹이 새로 생겨야 한다');
+  assert.equal(hasRow(tree(), '새 폴더 세션'), true);
+});
+
+test('⑫ 이미 있는 세션의 갱신은 행을 갈아끼우지 않고 아는 필드만 고친다', async (t) => {
+  const { view, emitSessionUpdate } = await mountSidebar(t);
+  const tree = () => hostsTree(view);
+
+  // 제목이 빈 갱신(어댑터가 아직 제목을 못 정한 시점)이 목록의 제목을 지우면 안 된다.
+  await emitSessionUpdate({
+    manager_id: MANAGER_ID,
+    manager_name: HOST.name,
+    cli: 'claude',
+    session_id: 's-awb-claude',
+    cwd: AWB_CWD,
+    title: '',
+    status: 'running',
+    updated_at: ago(0),
+  }, 'prompt');
+
+  assert.equal(hasRow(tree(), 'awb 리뷰'), true, '빈 제목이 기존 제목을 덮으면 안 된다');
+  // 중복 행이 생기지 않았는지 — 같은 세션이 두 번 그려지면 upsert 가 아니라 append 다.
+  const rows = [...tree().querySelectorAll('button[title="awb 리뷰"]')];
+  assert.equal(rows.length, 1, `같은 세션이 한 행이어야 한다 (실제 ${rows.length})`);
 });

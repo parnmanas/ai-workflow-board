@@ -10,6 +10,9 @@
 //      ack detail(`before → after`)이 화면에 그대로 노출된다.
 //   3) 실제 CLI 가 아닌 type('custom' / 'manager')에는 버튼이 아예 없다 —
 //      올릴 바이너리가 없는데 버튼을 주면 실패 토스트만 낳는다.
+//   4) 이미 최신이면 버튼이 잠긴다. 잠그는 근거는 매니저가 보고한
+//      `cli_latest_versions` 뿐이고, 그 값이 **없으면 잠그지 않는다** —
+//      "최신을 모른다" 를 "최신이다" 로 읽으면 올릴 길이 사라진다.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -28,7 +31,7 @@ const AGENT_ID = 'agent-cli-update';
 const COMMAND_ID = 'cmd-cliupdate01';
 const ACK_DETAIL = 'update_cli ok: claude 2.0.0 → 2.1.0';
 
-function managerInstance(cliVersions) {
+function managerInstance(cliVersions, cliLatestVersions) {
   return {
     instance_id: INSTANCE_ID,
     agent_id: 'mgr-1',
@@ -43,6 +46,7 @@ function managerInstance(cliVersions) {
     last_seen_at: new Date().toISOString(),
     agent_ids: [AGENT_ID],
     ...(cliVersions ? { cli_versions: cliVersions } : {}),
+    ...(cliLatestVersions ? { cli_latest_versions: cliLatestVersions } : {}),
   };
 }
 
@@ -188,4 +192,67 @@ test('실제 CLI 가 아닌 type 에는 Update 버튼이 없다', async (t) => {
     // 기존 유지보수 버튼은 그대로 있어야 한다 — 감춘 것이 이 버튼뿐임을 못 박는다.
     assert.ok(buttonWith(view.container, 'Update plugins'), 'update_plugins 는 그대로다');
   }
+});
+
+test('이미 최신이면 Update 버튼이 잠기고, 최신을 모르면 잠기지 않는다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  stubApi(t, {
+    sendAgentManagerCommand: async () => {
+      throw new Error('잠긴 버튼에서는 아무것도 나가면 안 된다');
+    },
+  });
+
+  // 설치 == 최신. 신고된 증상: 올릴 게 없는데도 버튼이 계속 눌렸다.
+  const upToDate = mountControls(t, {
+    agentId: AGENT_ID,
+    cli: 'claude',
+    managerInstance: managerInstance(
+      { claude: '2.1.281 (Claude Code)' },
+      { claude: '2.1.281' },
+    ),
+    layout: 'full',
+  });
+  await act(async () => {});
+  const lockedButton = [...upToDate.container.querySelectorAll('button')].find((button) =>
+    button.textContent.includes('(최신)'),
+  );
+  assert.ok(lockedButton, `최신 표시가 버튼에 보여야 한다 — 실제: ${upToDate.container.textContent}`);
+  assert.equal(lockedButton.disabled, true, '이미 최신이면 눌리지 않는다');
+  // 눌러도 확인 다이얼로그조차 뜨지 않는다(disabled 를 우회하는 경로가 없다).
+  await act(async () => {
+    click(lockedButton);
+  });
+  assert.equal(buttonWith(upToDate.container, '업데이트') ?? null, null);
+
+  // 최신을 **모르는** 경우(매니저가 npm 조회에 실패했거나 npm 배포가 아닌 CLI).
+  const unknownLatest = mountControls(t, {
+    agentId: AGENT_ID,
+    cli: 'claude',
+    managerInstance: managerInstance({ claude: '2.1.281 (Claude Code)' }),
+    layout: 'full',
+  });
+  await act(async () => {});
+  const openButton = buttonWith(unknownLatest.container, 'Update claude');
+  assert.ok(openButton);
+  assert.equal(openButton.disabled, false, '모른다는 이유로 잠그면 올릴 길이 사라진다');
+
+  // 구버전이면 버튼에 목표 버전까지 보인다 — 눌러 보기 전에 뭐가 바뀌는지 안다.
+  const outdated = mountControls(t, {
+    agentId: AGENT_ID,
+    cli: 'claude',
+    managerInstance: managerInstance(
+      { claude: '2.1.273 (Claude Code)' },
+      { claude: '2.1.281' },
+    ),
+    layout: 'full',
+  });
+  await act(async () => {});
+  const outdatedButton = buttonWith(outdated.container, 'Update claude');
+  assert.ok(outdatedButton);
+  assert.equal(outdatedButton.disabled, false);
+  assert.ok(
+    outdatedButton.textContent.includes('→ 2.1.281'),
+    `목표 버전이 버튼에 보여야 한다 — 실제: ${outdatedButton.textContent}`,
+  );
 });

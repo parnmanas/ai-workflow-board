@@ -95,8 +95,10 @@ type CommandKind =
   // 목록만 다시 열거한다. args 없음. 재열거 직후 즉시 하트비트 1회를 보내
   // 서버 레지스트리가 다음 정기 tick(최대 30초)을 기다리지 않게 한다.
   | 'refresh_available_models'
-  // 호스트에 설치된 CLI 자체를 최신으로 올린다(`claude update` / `codex update`).
-  // args: { cli? } — 생략하면 대상 에이전트의 CLI. CLI 는 장비 전역이라 **범위는 Runtime Host** 다.
+  // 호스트에 설치된 CLI 자체를 최신으로 올린다. args: { cli?, bin? } — cli 를
+  // 생략하면 대상 에이전트의 CLI, bin 을 생략하면 지금 해석되는 설치본.
+  // 범위는 에이전트가 아니라 **하나의 설치본**이다: 같은 CLI 를 여러 벌 두는 것은
+  // 정상 구성이라(vLLM 백엔드용 두 번째 claude) "이 장비의 claude" 는 애매하다.
   | 'update_cli';
 
 // Primary required field per credential provider — the one that carries the
@@ -216,7 +218,7 @@ export interface CommandHandlerDeps {
    *  어댑터 레지스트리·바이너리 해석·버전 재측정·하트비트가 모두 main.ts 소유라
    *  여기서는 배선된 콜백만 부른다. refreshAvailableModels 와 같은 이유로 optional —
    *  이 dep 없이 만든 레거시 테스트 하네스는 명확한 사유와 함께 error 로 ack 된다. */
-  updateCli?: ((cli: string) => Promise<UpdateCliResult>) | null;
+  updateCli?: ((cli: string, bin?: string | null) => Promise<UpdateCliResult>) | null;
 }
 
 /** update_cli 한 번의 결과. */
@@ -233,6 +235,15 @@ export interface UpdateCliResult {
   detail: string;
   /** 사람이 읽는 호스트 이름 — "어느 장비의 CLI 를 올린 건지" 를 ack 에 남긴다. */
   hostLabel: string;
+  /** 실제로 올린 설치본의 경로. before/after 는 이 파일에서 읽은 값이다 —
+   *  어느 설치본의 버전인지가 ack 를 읽는 운영자에게 중요하다(같은 CLI 를
+   *  여러 벌 두는 것은 정상 구성이다: ragnar 의 vLLM 용 두 번째 claude). */
+  resolvedPath?: string | null;
+  /** 그 설치본을 어떻게 올렸는지(`npm --prefix …` / `claude update` / …). */
+  installMethod?: string | null;
+  /** 같은 CLI 의 다른 설치본들. **실패가 아니다** — 운영자가 "저것도 올릴까" 를
+   *  판단할 수 있도록 그대로 싣는다. */
+  otherInstalls?: Array<{ path: string; version: string | null }>;
   /** 즉시 하트비트 1회가 실제로 서버에 도달했는지. false 여도 커맨드는 성공이며,
    *  다음 정기 하트비트(최대 30초)가 같은 버전을 다시 싣고 간다. */
   heartbeatPosted: boolean;
@@ -1097,14 +1108,23 @@ export class AgentManagerCommandHandler {
       }
       cli = ctx.cli;
     }
-    const result = await update(cli);
-    if (!result.supported) {
-      return `update_cli: ${cli} has no self-updater — update it on ${result.hostLabel} yourself (for example with npm -g)`;
-    }
+    // args.bin — 같은 CLI 가 여러 벌 깔린 호스트에서 **어느 설치본**을 올릴지.
+    // 생략하면 지금 해석되는 설치본. 이 값은 SSE 로 들어온 임의의 문자열이므로
+    // 실행 전에 매니저가 스스로 열거한 후보 목록과 대조한다(main.ts 의
+    // updateCli 배선) — 여기서는 문자열 정리만 한다.
+    const bin = typeof payload.args?.bin === 'string' ? payload.args.bin.trim() : '';
+    const result = await update(cli, bin || null);
     if (!result.ok) throw new Error(`update_cli ${cli}: ${result.detail}`);
-    const moved = result.before && result.after && result.before !== result.after;
+    // detail 에는 이미 "무엇이 어느 경로에서 어떤 방법으로" 가 들어 있다
+    // (runCliUpdate). installMethod 를 여기서 한 번 더 붙이면 같은 말이 두 번이다 —
+    // 그 필드는 UI 와 로그의 몫으로 둔다.
     return (
-      `update_cli ok: ${cli} ${moved ? `${result.before} → ${result.after}` : `stays at ${result.after ?? result.before ?? 'unknown'}`}` +
+      `update_cli ok: ${result.detail}` +
+      (result.otherInstalls && result.otherInstalls.length
+        ? ` — other installs on this host: ${result.otherInstalls
+            .map((i) => `${i.path}=${i.version ?? 'unknown'}`)
+            .join(', ')}`
+        : '') +
       (result.heartbeatPosted ? '' : ' (version reaches the UI on the next heartbeat)')
     );
   }

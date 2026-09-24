@@ -713,6 +713,20 @@ export abstract class CliAdapter {
     return null;
   }
 
+  /**
+   * 이 CLI 의 **최신 배포 버전**을 물어볼 npm 레지스트리 스펙. `null` 이면
+   * "최신이 무엇인지 확인할 방법이 없다" 는 뜻이고, 호출자는 업데이트 가능
+   * 여부를 아예 판정하지 않는다(모른다는 것을 "최신" 으로 둔갑시키지 않는다).
+   *
+   * cliUpdate() 와 짝이다: 업데이터가 있는 CLI 만 여기에 값을 준다 — "새 버전이
+   * 있다" 를 보여주면서 올릴 경로를 못 주면 화면이 막다른 길이 된다.
+   * 같은 바이너리를 공유하는 어댑터(deepseek → claude)는 상속으로 같은 패키지를
+   * 그대로 물려받으며, 그게 맞다: 설치본이 하나이므로 최신 기준도 하나다.
+   */
+  updatePackage(): string | null {
+    return null;
+  }
+
   configDirEnv(): string | null {
     return null;
   }

@@ -6,6 +6,7 @@ import { Button, Badge, Input } from './common';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { waitForCommandAck } from './admin/agentManagerModelRefresh';
+import { cliUpdateState } from '../utils/cliVersions';
 
 /**
  * AgentLifecycleControls — per-managed-agent lifecycle surface for the
@@ -135,21 +136,37 @@ export default function AgentLifecycleControls({
   );
 
   // ── update_cli ──────────────────────────────────────────────────
-  // 다른 verb 와 달리 ack 를 직접 기다린다. CLI 업데이터(`claude update` /
-  // `codex update`)는 npm 왕복이라 수십 초가 걸리고, "디스패치됨" 토스트만
-  // 띄우면 운영자는 올라갔는지 실패했는지 끝내 알 수 없다. ack detail 에
-  // `before → after` 가 그대로 담겨 온다. 창 안에 ack 가 안 오면 실패가 아니라
-  // "아직" 이다 — 매니저가 끝내면 다음 하트비트가 새 버전을 싣고 온다.
+  // 다른 verb 와 달리 ack 를 직접 기다린다. 업데이트는 npm 왕복이라 수십 초가
+  // 걸리고, "디스패치됨" 토스트만 띄우면 운영자는 올라갔는지 실패했는지 끝내 알
+  // 수 없다. ack detail 에 `before → after` 와 **어느 경로를 어떤 방법으로** 올렸는지가
+  // 그대로 담겨 온다. 창 안에 ack 가 안 오면 실패가 아니라 "아직" 이다 — 매니저가
+  // 끝내면 다음 하트비트가 새 버전을 싣고 온다.
+  //
+  // 여기서는 경로(args.bin)를 싣지 않는다: 이 화면의 단위는 에이전트이고, 그
+  // 에이전트가 쓰는 것은 **지금 해석되는 설치본**이기 때문이다. 같은 CLI 의 다른
+  // 설치본을 골라 올리는 것은 Runtime Hosts 화면(InstalledCliVersions)의 일이다.
   const updatableCli = cli && !NON_UPDATABLE_CLI_TYPES.has(cli) ? cli : null;
   const currentCliVersion = (updatableCli && managerInstance?.cli_versions?.[updatableCli]) || null;
+  const latestCliVersion = (updatableCli && managerInstance?.cli_latest_versions?.[updatableCli]) || null;
+  // 이미 최신이면 버튼을 잠근다 — 올릴 게 없는데도 계속 눌리면, 운영자는 눌러
+  // 보는 것 말고는 최신 여부를 알 방법이 없다. 최신을 **모르는** 경우(매니저가
+  // 조회에 실패했거나 npm 배포가 아닌 CLI)는 잠그지 않는다.
+  const cliUpToDate = cliUpdateState(currentCliVersion, latestCliVersion) === 'up-to-date';
+  // 버튼이 곧 상태 표시다: 무엇이 깔려 있고 무엇으로 가는지를 누르기 전에 읽는다.
+  const cliVersionSuffix = currentCliVersion
+    ? ` (${currentCliVersion}${latestCliVersion && !cliUpToDate ? ` → ${latestCliVersion}` : ''})`
+    : '';
   const updateCli = useCallback(async () => {
-    if (!instanceId || !updatableCli || pending) return;
+    if (!instanceId || !updatableCli || pending || cliUpToDate) return;
     const ok = await confirm({
       title: 'CLI 업데이트',
       message:
-        `${updatableCli} 를 이 Runtime Host 전체에서 최신 버전으로 올립니다` +
-        `${currentCliVersion ? ` (현재 ${currentCliVersion})` : ''}. ` +
-        '이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?',
+        `이 에이전트가 쓰는 ${updatableCli} 설치본을 최신 버전으로 올립니다` +
+        `${currentCliVersion ? ` (현재 ${currentCliVersion}` : ''}` +
+        `${currentCliVersion && latestCliVersion ? ` → ${latestCliVersion}` : ''}` +
+        `${currentCliVersion ? ')' : ''}. ` +
+        '올리는 방법은 그 설치본의 설치 방식이 정합니다(npm prefix 재설치 / CLI 자체 업데이터 …). ' +
+        '같은 설치본을 쓰는 이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?',
       confirmLabel: '업데이트',
       // 파괴적 동작이 아니다 — 기본값(빨간 Delete 버튼)을 그대로 두면 문구와
       // 버튼이 서로 다른 말을 한다.
@@ -176,7 +193,17 @@ export default function AgentLifecycleControls({
     } finally {
       setPending(null);
     }
-  }, [agentId, updatableCli, currentCliVersion, instanceId, pending, confirm, showToast, onDispatched]);
+  }, [
+    agentId,
+    updatableCli,
+    currentCliVersion,
+    cliUpToDate,
+    instanceId,
+    pending,
+    confirm,
+    showToast,
+    onDispatched,
+  ]);
 
   // The dispatched-but-not-yet-running gap (ticket bfdd80b7): a spawn was just
   // dispatched (local `pending`) or the server reports lifecycle_state='starting',
@@ -289,18 +316,24 @@ export default function AgentLifecycleControls({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={!managerOnline || pending !== null}
+                disabled={!managerOnline || pending !== null || cliUpToDate}
                 onClick={updateCli}
                 title={
                   !managerOnline ? managerOfflineTitle
-                    : `update_cli — 이 Runtime Host 의 ${updatableCli} 를 자체 업데이터로 최신화` +
-                      `${currentCliVersion ? ` (현재 ${currentCliVersion})` : ''}. ` +
-                      '장비 전역이라 같은 호스트의 모든 에이전트·세션에 적용됩니다.'
+                    : cliUpToDate
+                    ? `${updatableCli} 는 이미 최신입니다 (npm latest ${latestCliVersion}).`
+                    : `update_cli — 이 에이전트가 쓰는 ${updatableCli} 설치본을 최신화` +
+                      `${currentCliVersion ? ` (현재 ${currentCliVersion})` : ''}` +
+                      `${latestCliVersion ? ` → ${latestCliVersion}` : ' (최신 버전 확인 불가 — 눌러서 시도할 수 있습니다)'}. ` +
+                      '방법은 설치 방식이 정합니다. 같은 설치본을 쓰는 이 호스트의 다른 에이전트·세션에도 적용됩니다 — ' +
+                      '다른 설치본을 고르려면 Runtime Hosts 화면을 쓰세요.'
                 }
               >
                 {pending === 'update_cli'
                   ? `${updatableCli} 업데이트 중…`
-                  : `Update ${updatableCli}${currentCliVersion ? ` (${currentCliVersion})` : ''}`}
+                  : cliUpToDate
+                  ? `${updatableCli} ${currentCliVersion} (최신)`
+                  : `Update ${updatableCli}${cliVersionSuffix}`}
               </Button>
             )}
             <Button

@@ -24,7 +24,7 @@ import {
 } from './workNavigation';
 import { useWorkNavLists } from '../hooks/useWorkNavLists';
 import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
-import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, type CwdGroup } from './sessions/sessionList.logic';
+import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
@@ -320,23 +320,28 @@ export default function Sidebar({
     setHostSessions((prev) => ({ ...prev, [managerId]: { groups: groupSessionsByCwd(byCliMap), loading: false, loaded: true } }));
   }, []);
 
-  // 라이브 상태 갱신 — 세션 페이지가 받는 것과 같은 driver 전용 SSE. 목록을 다시 묻지 않고 행만 고친다.
+  // 라이브 상태 갱신 — 세션 페이지가 받는 것과 같은 driver 전용 SSE. 목록을 다시 묻지 않고
+  // 그 자리에서 반영한다. **이미 있는 행은 고치고, 처음 보는 세션은 넣는다** — 방금 만든
+  // 세션이 사이드바에 바로 뜨는 경로가 이것이다(서버는 열리는 즉시 reason:'opened' 로 쏜다).
+  // 예전에는 있는 행만 고쳐서, 새 세션은 새로고침하거나 그 호스트 목록을 다시 부를 때까지
+  // 보이지 않았다.
   useBoardStreamEvent('agent_session_update', React.useCallback((data: AgentSessionUpdateEvent) => {
     const live = data?.session;
     if (!live) return;
     setHostSessions((prev) => {
       const entry = prev[live.manager_id];
-      if (!entry) return prev;
-      let touched = false;
-      const groups = entry.groups.map((g) => ({
-        ...g,
-        sessions: g.sessions.map((row) => {
-          if (row.cli !== live.cli || row.session_id !== live.session_id) return row;
-          touched = true;
-          return { ...row, live_status: live.status, title: live.title || row.title };
-        }),
-      }));
-      return touched ? { ...prev, [live.manager_id]: { ...entry, groups } } : prev;
+      // 아직 이 호스트의 목록을 불러온 적이 없으면 넣지 않는다 — 펼칠 때 서버에서 통째로
+      // 받아오므로, 여기서 한 건만 심어 두면 "그 세션 하나만 있는 목록" 처럼 보인다.
+      if (!entry?.loaded) return prev;
+      const groups = upsertSessionInGroups(entry.groups, {
+        cli: live.cli,
+        session_id: live.session_id,
+        cwd: live.cwd,
+        title: live.title,
+        updated_at: live.updated_at,
+        live_status: live.status,
+      });
+      return { ...prev, [live.manager_id]: { ...entry, groups } };
     });
   }, []));
   // 매니저가 재시작하거나 사라지면(인스턴스 등록/제거) 그 장비의 목록을 다시 묻는다 — 프로세스가 전부

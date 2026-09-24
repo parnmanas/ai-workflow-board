@@ -158,6 +158,10 @@ export class OpencodeCliAdapter extends CliAdapter {
     return { args: ['upgrade'], label: 'opencode upgrade' };
   }
 
+  updatePackage(): string | null {
+    return 'opencode-ai';
+  }
+
   /**
    * `opencode models` — 한 줄에 하나씩 `provider/model` 을 찍는다. 다른 어댑터처럼
    * 설정 파일을 추측해 읽지 않고 CLI 에게 직접 묻는 이유는, opencode 의 모델 목록이

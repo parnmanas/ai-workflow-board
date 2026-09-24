@@ -2158,6 +2158,18 @@ export interface AgentLaunchSpecEntry {
 }
 
 // One Runtime Host instance heartbeating against AWB.
+/** Runtime Host 에 깔린 CLI 설치본 한 줄 (하트비트 `cli_installs`). */
+export interface CliInstallEntry {
+  cli: string;
+  path: string;
+  version: string | null;
+  /** 사람이 읽는 설치 방법 — `npm --prefix /home/x/.npm-global`, `snap package` 등. */
+  method: string;
+  /** AWB 가 이 설치본을 올릴 수 있는지. false 면 방법만 보여주고 버튼은 감춘다. */
+  updatable: boolean;
+  active: boolean;
+}
+
 export interface AgentManagerInstance {
   instance_id: string;
   agent_id: string;
@@ -2203,6 +2215,16 @@ export interface AgentManagerInstance {
   // 현재 버전을 보여주고, 업데이트 후 바뀐 값을 그대로 드러낸다. 버전을 못 읽은
   // CLI 는 키가 없고, 구버전 매니저는 필드 자체를 보내지 않는다.
   cli_versions?: Record<string, string>;
+  // 같은 CLI 들의 최신 배포 버전(cliType → npm latest). 설치 버전과 짝을 이뤄
+  // Update 버튼을 활성/비활성으로 가른다(utils/cliVersions 의 cliUpdateState).
+  // 조회 실패·npm 배포가 아닌 CLI 는 **키가 없고, 그건 "최신" 이 아니라 "모름"**
+  // 이다 — 그 경우 버튼을 잠그면 올릴 수 있는데도 못 올리게 된다.
+  cli_latest_versions?: Record<string, string>;
+  // 설치본 단위 목록 — 같은 `cli` 가 여러 줄일 수 있고 그게 정상이다(한 호스트에
+  // vLLM 백엔드용 두 번째 claude 를 두는 구성). `active` 가 "지정 없이 spawn 하면
+  // 실행될 설치본", `path` 는 `update_cli` 의 `args.bin` 으로 그대로 돌아간다.
+  // 구버전 매니저는 보내지 않으므로, 없으면 화면은 `cli_versions` 한 줄로 접는다.
+  cli_installs?: CliInstallEntry[];
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.

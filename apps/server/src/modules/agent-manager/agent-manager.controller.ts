@@ -35,6 +35,7 @@ import {
   type RuntimePermissionTierSupport,
   type RuntimeCapabilityReport,
   type AgentLaunchSpecEntry,
+  type CliInstallEntry,
 } from './instance-registry.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
@@ -538,6 +539,47 @@ export class AgentManagerController {
       if (Object.keys(out).length) cli_versions = out;
     }
 
+    // 설치본 단위 목록. `cli_versions` 는 CLI 당 한 줄이라 같은 CLI 가 여러 벌
+    // 깔린 호스트(vLLM 백엔드용 두 번째 claude)를 표현하지 못한다 — 화면이 어느
+    // 설치본을 올릴지 고르려면 경로가 필요하다. 행 단위로 검증하고, 모양이
+    // 어긋난 행만 버린다(하트비트는 best-effort).
+    let cli_installs: CliInstallEntry[] | undefined;
+    if (Array.isArray(body?.cli_installs)) {
+      const out: CliInstallEntry[] = [];
+      for (const row of body.cli_installs) {
+        if (!row || typeof row !== 'object') continue;
+        const cli = typeof row.cli === 'string' ? row.cli : '';
+        const path = typeof row.path === 'string' ? row.path : '';
+        if (!cli || !path) continue;
+        out.push({
+          cli,
+          path,
+          version: typeof row.version === 'string' && row.version ? row.version : null,
+          method: typeof row.method === 'string' ? row.method : '',
+          updatable: row.updatable === true,
+          active: row.active === true,
+        });
+      }
+      if (out.length) cli_installs = out;
+    }
+
+    // 같은 CLI 들의 **최신 배포 버전**(npm 레지스트리). cli_versions 와 짝이며 같은
+    // 관대한 검증을 쓴다. 이 둘이 함께 있어야 UI 가 "올릴 게 있는가" 를 판정할 수
+    // 있다 — 없으면 Update 버튼은 영원히 활성이다. 조회에 실패한 CLI 는 키가 빠져
+    // 오므로, 키 부재를 "최신" 으로 해석하면 안 된다(화면 쪽 계약).
+    let cli_latest_versions: Record<string, string> | undefined;
+    if (
+      body?.cli_latest_versions &&
+      typeof body.cli_latest_versions === 'object' &&
+      !Array.isArray(body.cli_latest_versions)
+    ) {
+      const out: Record<string, string> = {};
+      for (const [cli, version] of Object.entries(body.cli_latest_versions)) {
+        if (typeof version === 'string' && version) out[cli] = version;
+      }
+      if (Object.keys(out).length) cli_latest_versions = out;
+    }
+
     // Per-managed-agent credential metadata (manager-mode only). Each row
     // is opportunistically validated — bad shapes are dropped silently
     // because the heartbeat is best-effort and a rolling-out manager
@@ -748,6 +790,8 @@ export class AgentManagerController {
       active_run_workspaces,
       available_models,
       cli_versions,
+      cli_installs,
+      cli_latest_versions,
       latest_version,
       update_available,
       install_mode,

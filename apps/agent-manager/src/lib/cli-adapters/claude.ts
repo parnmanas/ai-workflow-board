@@ -238,6 +238,10 @@ export class ClaudeCliAdapter extends CliAdapter {
     return { args: ['update'], label: 'claude update' };
   }
 
+  updatePackage(): string | null {
+    return '@anthropic-ai/claude-code';
+  }
+
   resolveBin(configured?: string | null): string {
     return resolveCliBin('claude', configured);
   }

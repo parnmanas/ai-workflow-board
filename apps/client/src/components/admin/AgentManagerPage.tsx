@@ -8,6 +8,7 @@ import type {
   AgentLifecycleState,
   AgentManagerCommandKind,
   AgentManagerInstance,
+  CliInstallEntry,
   Credential,
   DashboardAgent,
   PairingTokenMint,
@@ -25,6 +26,7 @@ import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
 import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
+import { cliUpdateState } from '../../utils/cliVersions';
 
 /**
  * Runtime Host administration and observability.
@@ -700,18 +702,21 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
-  // 호스트에 설치된 CLI 자체를 올린다(`claude update` / `codex update` — 어댑터의
-  // cliUpdate()). refresh_available_models 와 같은 이유로 **ack 를 직접 기다린다**:
-  // 업데이터는 npm 왕복이라 수십 초가 걸리고, 디스패치 토스트만으로는 올라갔는지
-  // 알 수 없다. ack detail 에 `before → after` 가 담겨 온다. 매니저 프로세스는
+  // 호스트에 설치된 CLI **한 설치본**을 올린다. 올리는 방법은 매니저가 그 설치본의
+  // 레이아웃에서 정한다(`npm --prefix …` / 자체 업데이터 / …). refresh_available_models
+  // 와 같은 이유로 **ack 를 직접 기다린다**: 업데이터는 npm 왕복이라 수십 초가
+  // 걸리고, 디스패치 토스트만으로는 올라갔는지 알 수 없다. 매니저 프로세스는
   // 재시작되지 않지만, 이후 spawn 되는 CLI 는 새 버전이다.
-  const handleUpdateCli = async (cli: string) => {
+  //
+  // `bin` 은 같은 CLI 가 여러 벌 깔린 호스트에서 어느 설치본인지 못 박는다 —
+  // 생략하면 매니저가 지금 해석되는 설치본을 고른다.
+  const handleUpdateCli = async (cli: string, bin?: string) => {
     if (updateCliPending) return;
-    setUpdateCliPending(cli);
+    setUpdateCliPending(bin || cli);
     try {
       const resp = await api.sendAgentManagerCommand(inst.instance_id, {
         command: 'update_cli',
-        args: { cli },
+        args: { cli, ...(bin ? { bin } : {}) },
       });
       const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
       // CLI 업데이터는 모델 재열거보다 훨씬 오래 걸리므로 창을 넓게 잡는다(~4분).
@@ -862,65 +867,18 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {inst.cli_adapters.length === 0 ? '—' : inst.cli_adapters.join(', ')}
             </dd>
           </div>
-          {/* 이 장비에 설치된 CLI 들의 버전 + 그 자리에서 올리는 버튼. 업데이트
-              대상은 cli_versions(=probe 로 버전을 읽은 것) ∩ cli_adapters(=이
-              매니저가 어댑터를 가진 것)로 좁힌다 — 같은 probe 에 섞여 오는
-              gh/git 은 어댑터가 없어 여기 들어오지 않는다. 자체 업데이터가 없는
-              CLI 는 매니저가 ack 로 그 사실을 그대로 알려준다. */}
-          {inst.mode === 'manager' && inst.cli_versions && Object.keys(inst.cli_versions).length > 0 && (
-            <div style={{ gridColumn: '1 / -1' }}>
-              <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Installed CLI versions
-              </dt>
-              <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {Object.entries(inst.cli_versions)
-                  .sort(([a], [b]) => a.localeCompare(b))
-                  .map(([cli, version]) => {
-                    const updatable = inst.cli_adapters.includes(cli);
-                    const busy = updateCliPending === cli;
-                    return (
-                      <span
-                        key={cli}
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          padding: '2px 6px 2px 8px',
-                          border: `1px solid ${tokens.colors.border}`,
-                          borderRadius: tokens.radii.md,
-                          fontSize: 11,
-                        }}
-                      >
-                        <span style={{ fontFamily: 'monospace' }}>{cli} {version}</span>
-                        {updatable && (
-                          <button
-                            onClick={() => handleUpdateCli(cli)}
-                            disabled={updateCliPending !== null}
-                            style={{
-                              padding: '2px 8px',
-                              fontSize: 11,
-                              fontWeight: 600,
-                              background: 'transparent',
-                              color: tokens.colors.textStrong,
-                              border: `1px solid ${tokens.colors.border}`,
-                              borderRadius: tokens.radii.sm,
-                              cursor: busy ? 'wait' : 'pointer',
-                              fontFamily: 'inherit',
-                              opacity: updateCliPending !== null && !busy ? 0.5 : 1,
-                            }}
-                            title={
-                              `update_cli — 이 장비의 ${cli} 를 자체 업데이터로 최신화합니다. ` +
-                              '매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.'
-                            }
-                          >
-                            {busy ? '업데이트 중…' : 'Update'}
-                          </button>
-                        )}
-                      </span>
-                    );
-                  })}
-              </dd>
-            </div>
+          {/* 이 장비에 깔린 CLI 설치본들 + 그 자리에서 올리는 버튼.
+              같은 CLI 가 여러 줄일 수 있고 그게 정상이다 — ragnar 는 vLLM 백엔드용
+              으로 claude 를 두 벌 두고 runtime profile 의 `claude_executable` 로
+              고른다. 그래서 행의 단위는 CLI 가 아니라 **설치본(경로)** 이고,
+              Update 는 그 경로를 명시해 보낸다. 구버전 매니저(cli_installs 없음)는
+              예전처럼 CLI 당 한 줄로 접는다. */}
+          {inst.mode === 'manager' && (
+            <InstalledCliVersions
+              inst={inst}
+              pending={updateCliPending}
+              onUpdate={handleUpdateCli}
+            />
           )}
           {inst.mode === 'manager' && (
             <>
@@ -2573,6 +2531,139 @@ function EditAgentManagerDialog({
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ─── InstalledCliVersions — 설치본 단위의 버전 + Update ────────────────────────
+//
+// InstanceDetail 과 같은 이유로 노출한다 — 이 패널의 잠금 규칙(최신/구버전/모름)
+// 을 인스턴스 전체를 부팅하지 않고 직접 마운트해 검사하기 위해서다.
+//
+// 한 Runtime Host 에 같은 CLI 가 여러 벌 깔려 있는 것은 정상 구성이다(vLLM
+// 백엔드용 두 번째 claude). 그러므로 화면의 단위는 CLI 가 아니라 설치본이고,
+// 각 행은 자기 경로·버전·설치 방법을 갖는다. Update 는 그 경로를 명시해 보내므로
+// "어느 것이 올라갈지" 가 눌러 보기 전에 결정돼 있다.
+//
+// 버튼 잠금은 삼항이다(utils/cliVersions): 최신이면 잠그고, 구버전이면 목표
+// 버전을 보여주고, **최신을 모르면 잠그지 않는다** — 모른다고 잠그면 npm 조회가
+// 실패한 호스트에서 올릴 길이 사라진다.
+export function InstalledCliVersions({
+  inst,
+  pending,
+  onUpdate,
+}: {
+  inst: AgentManagerInstance;
+  pending: string | null;
+  onUpdate: (cli: string, bin?: string) => void;
+}) {
+  // 매니저가 설치본 목록을 보내면 그것이 진실이다. 안 보내면(구버전) cli_versions
+  // 를 CLI 당 한 줄짜리 가짜 설치본으로 접어 같은 렌더 경로를 태운다.
+  const installs: CliInstallEntry[] = inst.cli_installs?.length
+    ? inst.cli_installs
+    : Object.entries(inst.cli_versions ?? {}).map(([cli, version]) => ({
+        cli,
+        path: '',
+        version,
+        method: '',
+        updatable: inst.cli_adapters.includes(cli),
+        active: true,
+      }));
+  if (installs.length === 0) return null;
+
+  const perCli = new Map<string, number>();
+  for (const row of installs) perCli.set(row.cli, (perCli.get(row.cli) ?? 0) + 1);
+
+  const sorted = [...installs].sort(
+    (a, b) => a.cli.localeCompare(b.cli) || Number(b.active) - Number(a.active) || a.path.localeCompare(b.path),
+  );
+
+  return (
+    <div style={{ gridColumn: '1 / -1' }}>
+      <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        Installed CLI versions
+      </dt>
+      <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {sorted.map((row) => {
+          const latest = inst.cli_latest_versions?.[row.cli] ?? null;
+          const state = cliUpdateState(row.version, latest);
+          const upToDate = state === 'up-to-date';
+          const key = row.path || row.cli;
+          const busy = pending === key;
+          const disabled = pending !== null || upToDate;
+          // 같은 CLI 가 한 벌뿐이면 경로는 소음이다 — 여러 벌일 때만 짚어 준다.
+          const showPath = Boolean(row.path) && (perCli.get(row.cli) ?? 0) > 1;
+          return (
+            <span
+              key={`${row.cli}:${key}`}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '2px 6px 2px 8px',
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                fontSize: 11,
+                width: 'fit-content',
+                maxWidth: '100%',
+                flexWrap: 'wrap',
+              }}
+            >
+              <span style={{ fontFamily: 'monospace' }}>
+                {row.cli} {row.version ?? 'unknown'}
+              </span>
+              {state === 'outdated' && (
+                <span style={{ fontWeight: 600, color: tokens.colors.success }}>→ {latest}</span>
+              )}
+              {upToDate && <span style={{ color: tokens.colors.textMuted }}>최신</span>}
+              {row.active && (perCli.get(row.cli) ?? 0) > 1 && (
+                <span
+                  style={{ color: tokens.colors.textMuted }}
+                  title="지정 없이 spawn 하면 실행되는 설치본입니다."
+                >
+                  · 활성
+                </span>
+              )}
+              {showPath && (
+                <span style={{ fontFamily: 'monospace', color: tokens.colors.textMuted }}>{row.path}</span>
+              )}
+              {row.method && (
+                <span style={{ color: tokens.colors.textMuted }} title="이 설치본을 올리는 방법">
+                  ({row.method})
+                </span>
+              )}
+              {row.updatable && (
+                <button
+                  onClick={() => onUpdate(row.cli, row.path || undefined)}
+                  disabled={disabled}
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: 'transparent',
+                    color: tokens.colors.textStrong,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.sm,
+                    cursor: busy ? 'wait' : disabled ? 'default' : 'pointer',
+                    fontFamily: 'inherit',
+                    opacity: disabled && !busy ? 0.5 : 1,
+                  }}
+                  title={
+                    upToDate
+                      ? `${row.cli} 는 이미 최신입니다 (npm latest ${latest}).`
+                      : `update_cli — ${row.path || `이 장비의 ${row.cli}`} 를 올립니다` +
+                        `${row.method ? ` (${row.method})` : ''}` +
+                        `${state === 'outdated' ? ` · ${row.version} → ${latest}` : ' · 최신 버전 확인 불가 — 눌러서 시도할 수 있습니다'}. ` +
+                        '매니저는 재시작되지 않지만 이후 spawn 되는 에이전트·세션은 새 버전을 씁니다.'
+                  }
+                >
+                  {busy ? '업데이트 중…' : 'Update'}
+                </button>
+              )}
+            </span>
+          );
+        })}
+      </dd>
+    </div>
   );
 }
 
