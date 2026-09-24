@@ -1899,7 +1899,10 @@ export function ManagedAgentsSection({
   // currently-active workspace are still visible from this admin page.
   const refresh = useCallback(async () => {
     try {
-      const all = await api.getAgentsAll();
+      // includeOrchestration: identities provisioned for Orchestration team
+      // slots run on this host too, so hiding them here would leave an operator
+      // debugging the machine with an incomplete picture of what it is running.
+      const all = await api.getAgentsAll({ includeOrchestration: true });
       const children = (all as Agent[]).filter((a) => a.manager_agent_id === inst.agent_id);
       setAgents(children);
     } catch (err: any) {

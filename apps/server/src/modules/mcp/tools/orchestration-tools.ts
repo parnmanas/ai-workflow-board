@@ -798,7 +798,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     'list_orchestration_teams',
     'Teams and their rosters are authored by humans in the AWB UI — this tool only reads them. List the ' +
       'orchestration teams you belong to, as orchestrator or member. Use it to find the team_id you need for ' +
-      'create_orchestration_mission, or to see who your teammates are.',
+      'create_orchestration_mission, or to see who your teammates are. Each member carries a `runtime` block ' +
+      '(Runtime Host, CLI, model, working folder, folder_scope, and who shares that folder): members sharing ' +
+      'one folder on one host can hand work over through the filesystem, members elsewhere must exchange ' +
+      'results through step artifacts.',
     {},
     async (_args, extra) => {
       const svc = teams();

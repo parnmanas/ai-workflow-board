@@ -91,7 +91,8 @@ import type {
   OrchestrationMissionListItem,
   OrchestrationMissionDetail,
   OrchestrationTimelineEvent,
-  OrchestrationAssignableAgent,
+  OrchestrationRuntimeHost,
+  OrchestrationSlotSpecInput,
   OntologyGraphStatusResponse,
   OntologyGraphRefreshResponse,
   OntologyGraphSnapshotResponse,
@@ -760,12 +761,25 @@ export const api = {
   // workspaceId overrides the ambient X-Workspace-Id header for this one call —
   // see getChannels above for why callers reacting to a workspaceId prop change
   // need this instead of relying on the ambient header.
+  // Note: this endpoint HIDES the identities AWB provisions for Orchestration
+  // team slots. Every caller here is a picker ("who should own this ticket /
+  // join this room?") where they are never the right answer — dispatching to
+  // one directly would run work outside the mission that owns it. The
+  // management surfaces see them: `/agents/dashboard` is unfiltered, and
+  // `getAgentsAll` opts in below.
   getAgents: (workspaceId?: string) => {
     const init: RequestInit = {};
     if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
     return request<any[]>('/agents', init);
   },
-  getAgentsAll: () => request<any[]>('/agents?scope=all'),
+  /**
+   * Cross-workspace agent listing for the admin surfaces. `includeOrchestration`
+   * adds the team-slot identities the plain listing hides — the Runtime Host's
+   * managed-agent panel wants them, because they really are running on that host
+   * and an operator debugging it needs to see them.
+   */
+  getAgentsAll: (opts?: { includeOrchestration?: boolean }) =>
+    request<any[]>(`/agents?scope=all${opts?.includeOrchestration ? '&include_orchestration=1' : ''}`),
   // Phase 3 Plan 03-02: dashboard snapshot with current_task + bool-coerced is_online
   getAgentDashboard: (workspaceId: string): Promise<DashboardAgent[]> =>
     request<DashboardAgent[]>(`/agents/dashboard?workspace_id=${encodeURIComponent(workspaceId)}`),
@@ -2362,7 +2376,8 @@ export const api = {
     workspace_id: string;
     name: string;
     description?: string;
-    orchestrator_agent_id: string;
+    /** Orchestrator runtime spec — Runtime Host / CLI / model / working folder. */
+    orchestrator: OrchestrationSlotSpecInput;
     orchestrator_prompt?: string;
     max_parallel_steps?: number;
     max_open_missions?: number;
@@ -2377,7 +2392,8 @@ export const api = {
       workspace_id: string;
       name?: string;
       description?: string;
-      orchestrator_agent_id?: string;
+      /** Partial patch over the orchestrator's stored runtime spec. */
+      orchestrator?: Partial<OrchestrationSlotSpecInput>;
       orchestrator_prompt?: string;
       max_parallel_steps?: number;
       max_open_missions?: number;
@@ -2393,12 +2409,29 @@ export const api = {
     ),
   addOrchestrationTeamMember: (
     teamId: string,
-    data: { workspace_id: string; agent_id: string; role_label?: string; capabilities?: string; max_concurrent?: number },
+    data: {
+      workspace_id: string;
+      /** Runtime spec for the new slot. There is no agent to pick — it is provisioned from this. */
+      runtime?: OrchestrationSlotSpecInput;
+      /** Put the orchestrator itself on the roster as an executing member (ignores `runtime`). */
+      as_orchestrator?: boolean;
+      role_label?: string;
+      capabilities?: string;
+      max_concurrent?: number;
+    },
   ) => request<OrchestrationTeam>(`/orchestration/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify(data) }),
   updateOrchestrationTeamMember: (
     teamId: string,
     memberId: string,
-    data: { workspace_id: string; role_label?: string; capabilities?: string; max_concurrent?: number; position?: number },
+    data: {
+      workspace_id: string;
+      /** Partial patch over the slot's stored runtime spec. Omit to leave it unchanged. */
+      runtime?: Partial<OrchestrationSlotSpecInput>;
+      role_label?: string;
+      capabilities?: string;
+      max_concurrent?: number;
+      position?: number;
+    },
   ) =>
     request<OrchestrationTeam>(`/orchestration/teams/${teamId}/members/${memberId}`, {
       method: 'PATCH',
@@ -2409,11 +2442,11 @@ export const api = {
       `/orchestration/teams/${teamId}/members/${memberId}?workspace_id=${encodeURIComponent(workspaceId)}`,
       { method: 'DELETE' },
     ),
-  listOrchestrationAgents: (workspaceId: string, opts?: { globalOnly?: boolean }) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (opts?.globalOnly) params.set('global_only', 'true');
-    return request<OrchestrationAssignableAgent[]>(`/orchestration/assignable-agents?${params.toString()}`);
-  },
+  /** Runtime Hosts + their CLI / model / working-folder candidates for the team editor. */
+  listOrchestrationRuntimeHosts: (workspaceId: string) =>
+    request<OrchestrationRuntimeHost[]>(
+      `/orchestration/runtime-hosts?workspace_id=${encodeURIComponent(workspaceId)}`,
+    ),
 
   listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });

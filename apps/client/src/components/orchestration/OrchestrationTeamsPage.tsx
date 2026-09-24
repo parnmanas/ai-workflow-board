@@ -1,22 +1,43 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
-import type { OrchestrationAssignableAgent, OrchestrationTeam } from '../../types';
-import { formatAgentDisplayName } from '../../utils/agentName';
+import type {
+  ClaudeBackendProfile,
+  Credential,
+  OrchestrationRuntimeHost,
+  OrchestrationSlotRuntime,
+  OrchestrationTeam,
+  OrchestrationTeamMember,
+} from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Input, Modal, Select } from '../common';
 import { LabeledTextarea } from './OrchestrationPage';
 import { TEAMS_CHANGED_EVENT } from '../workNavigation';
+import TeamSlotRuntimeFields, {
+  emptySlotDraft,
+  slotDraftFromRuntime,
+  slotDraftProblem,
+  slotDraftToSpec,
+  type SlotDraft,
+  type SlotNeighbour,
+} from './TeamSlotRuntimeFields';
 
 /**
  * Team roster management.
  *
+ * A roster slot is declared as **Runtime Host + CLI + model + working folder**
+ * (see TeamSlotRuntimeFields) rather than picked from a list of Agents someone
+ * created first. That is the whole point of this screen: a team spanning three
+ * machines is built here, in one pass, and AWB provisions the agent identities
+ * behind it. Slots on one host that name the same folder share a working tree —
+ * which is how members hand work to each other and reuse one checkout.
+ *
  * The orchestrator is a required, first-class field rather than "a member with
  * a special role_label": the mission state machine addresses it directly and
  * the whole feature is undefined without one, so the UI refuses to create a
- * team until one is picked.
+ * team until one is configured.
  *
  * `capabilities` gets the most visual weight of any member field because it is
  * the text the orchestrator actually reasons over when assigning work — a team
@@ -36,11 +57,13 @@ export default function OrchestrationTeamsPage() {
   const { showToast } = useToast();
 
   const [teams, setTeams] = useState<OrchestrationTeam[]>([]);
-  const [agents, setAgents] = useState<OrchestrationAssignableAgent[]>([]);
-  // 글로벌 팀 로스터에는 글로벌(workspace 비종속) 에이전트만 들어갈 수 있다 — 별도
-  // 목록으로 유지하는 이유는 OrchestrationAssignableAgent가 workspace_id를
-  // 갖고 있지 않아 클라이언트 쪽에서 필터링할 수 없기 때문.
-  const [globalAgents, setGlobalAgents] = useState<OrchestrationAssignableAgent[]>([]);
+  // Slot pickers are fed by machines, not by agents: Runtime Hosts with the CLIs
+  // they have installed, the models they enumerated, and the working folders
+  // already in use on them. Credentials / backend profiles are the optional
+  // per-slot auth knobs the same form offers.
+  const [hosts, setHosts] = useState<OrchestrationRuntimeHost[]>([]);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [backendProfiles, setBackendProfiles] = useState<ClaudeBackendProfile[]>([]);
   const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<OrchestrationTeam | null>(null);
@@ -57,15 +80,17 @@ export default function OrchestrationTeamsPage() {
     if (!wsId) return;
     setLoading(true);
     try {
-      const [teamList, agentList, globalAgentList, workspaceList] = await Promise.all([
+      const [teamList, hostList, credentialList, profileList, workspaceList] = await Promise.all([
         api.listOrchestrationTeams(wsId),
-        api.listOrchestrationAgents(wsId).catch(() => [] as OrchestrationAssignableAgent[]),
-        api.listOrchestrationAgents(wsId, { globalOnly: true }).catch(() => [] as OrchestrationAssignableAgent[]),
+        api.listOrchestrationRuntimeHosts(wsId).catch(() => [] as OrchestrationRuntimeHost[]),
+        api.listCredentials(wsId, { includeAllScopes: true }).catch(() => [] as Credential[]),
+        api.listClaudeBackendProfiles().then((r) => r.profiles).catch(() => [] as ClaudeBackendProfile[]),
         api.getWorkspaces().catch(() => [] as any[]),
       ]);
       setTeams(teamList);
-      setAgents(agentList);
-      setGlobalAgents(globalAgentList);
+      setHosts(hostList);
+      setCredentials(credentialList);
+      setBackendProfiles(profileList);
       setWorkspaces(workspaceList.map((w: any) => ({ id: w.id, name: w.name })));
     } catch (e: any) {
       showToast(e?.message || 'Failed to load teams', 'error');
@@ -249,9 +274,10 @@ export default function OrchestrationTeamsPage() {
                   <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: tokens.colors.accentLight, textTransform: 'uppercase' }}>
                     Orchestrator
                   </div>
-                  <div style={{ marginTop: 3, fontSize: 13, color: tokens.colors.textPrimary, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ marginTop: 3, fontSize: 13, color: tokens.colors.textPrimary, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <OnlineDot online={team.orchestrator_online} />
                     {team.orchestrator_name || '(agent missing)'}
+                    <RuntimeChip runtime={team.orchestrator_runtime} />
                     <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
                       · plans and delegates · up to {team.max_parallel_steps} step(s) in parallel ·{' '}
                       {team.max_open_missions > 0
@@ -301,6 +327,9 @@ export default function OrchestrationTeamsPage() {
                                 max {m.max_concurrent} concurrent
                               </span>
                             </div>
+                            <div style={{ marginTop: 4 }}>
+                              <RuntimeChip runtime={m.runtime} />
+                            </div>
                             <div style={{ marginTop: 2, fontSize: 11, color: m.capabilities ? tokens.colors.textSecondary : tokens.colors.warningLight, lineHeight: 1.45 }}>
                               {m.capabilities ||
                                 'No capability description — the orchestrator has nothing to match work against. Edit this member.'}
@@ -308,9 +337,11 @@ export default function OrchestrationTeamsPage() {
                           </div>
                           <MemberEditButton
                             team={team}
-                            memberId={m.id}
+                            member={m}
                             wsId={wsId}
-                            initial={{ role_label: m.role_label, capabilities: m.capabilities, max_concurrent: m.max_concurrent }}
+                            hosts={hosts}
+                            credentials={credentials}
+                            backendProfiles={backendProfiles}
                             onSaved={replaceTeam}
                             disabled={!canWrite(team)}
                           />
@@ -338,8 +369,9 @@ export default function OrchestrationTeamsPage() {
       <TeamFormModal
         isOpen={showForm}
         wsId={wsId}
-        agents={agents}
-        globalAgents={globalAgents}
+        hosts={hosts}
+        credentials={credentials}
+        backendProfiles={backendProfiles}
         workspaces={workspaces}
         team={editing}
         onClose={() => setShowForm(false)}
@@ -352,7 +384,9 @@ export default function OrchestrationTeamsPage() {
       <AddMemberModal
         team={memberTarget}
         wsId={wsId}
-        agents={memberTarget?.is_global ? globalAgents : agents}
+        hosts={hosts}
+        credentials={credentials}
+        backendProfiles={backendProfiles}
         onClose={() => setMemberTarget(null)}
         onSaved={(team) => {
           setMemberTarget(null);
@@ -369,6 +403,64 @@ export default function OrchestrationTeamsPage() {
       />
     </div>
   );
+}
+
+/**
+ * One-line summary of where a slot runs. Shown on every roster row because
+ * "which machine / folder is this member on" is now the defining fact about a
+ * member — with several hosts in play, two rows are otherwise indistinguishable.
+ */
+function RuntimeChip({ runtime }: { runtime: OrchestrationSlotRuntime | null }) {
+  if (!runtime) {
+    return (
+      <span style={{ fontSize: 11, color: tokens.colors.warningLight }}>
+        No runtime recorded — open Edit and save to set the host, CLI and working folder.
+      </span>
+    );
+  }
+  const shared = runtime.folder_scope === 'shared';
+  return (
+    <span style={{ fontSize: 11, color: tokens.colors.textMuted, display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
+      <span title={runtime.manager_online ? 'Runtime Host online' : 'Runtime Host offline'}>
+        {runtime.manager_online ? '🟢' : '⚪'} {runtime.manager_name}
+      </span>
+      <span>·</span>
+      <span>{runtime.cli}{runtime.model ? ` (${runtime.model})` : ''}</span>
+      <span>·</span>
+      <code style={{ fontSize: 10, color: tokens.colors.textSecondary }}>{runtime.working_dir}</code>
+      <span style={{ color: shared ? tokens.colors.accentLight : tokens.colors.textMuted }}>
+        {shared
+          ? runtime.shared_with.length
+            ? `· shared with ${runtime.shared_with.join(', ')}`
+            : '· works in this folder directly'
+          : '· isolated per-step folder'}
+      </span>
+    </span>
+  );
+}
+
+/** Every OTHER slot on a team, for the folder-sharing hints in the slot form. */
+function neighboursOf(team: OrchestrationTeam | null, exclude?: { memberId?: string; orchestrator?: boolean }): SlotNeighbour[] {
+  if (!team) return [];
+  const out: SlotNeighbour[] = [];
+  if (!exclude?.orchestrator && team.orchestrator_runtime) {
+    out.push({
+      label: team.orchestrator_name || 'orchestrator',
+      manager_agent_id: team.orchestrator_runtime.manager_agent_id,
+      working_dir: team.orchestrator_runtime.working_dir,
+      folder_scope: team.orchestrator_runtime.folder_scope,
+    });
+  }
+  for (const m of team.members) {
+    if (exclude?.memberId === m.id || !m.runtime) continue;
+    out.push({
+      label: m.agent_name || m.role_label || 'member',
+      manager_agent_id: m.runtime.manager_agent_id,
+      working_dir: m.runtime.working_dir,
+      folder_scope: m.runtime.folder_scope,
+    });
+  }
+  return out;
 }
 
 function OnlineDot({ online }: { online: boolean }) {
@@ -390,8 +482,9 @@ function OnlineDot({ online }: { online: boolean }) {
 export function TeamFormModal({
   isOpen,
   wsId,
-  agents,
-  globalAgents,
+  hosts,
+  credentials,
+  backendProfiles,
   workspaces,
   team,
   onClose,
@@ -399,8 +492,9 @@ export function TeamFormModal({
 }: {
   isOpen: boolean;
   wsId: string;
-  agents: OrchestrationAssignableAgent[];
-  globalAgents: OrchestrationAssignableAgent[];
+  hosts: OrchestrationRuntimeHost[];
+  credentials: Credential[];
+  backendProfiles: ClaudeBackendProfile[];
   workspaces: { id: string; name: string }[];
   team: OrchestrationTeam | null;
   onClose: () => void;
@@ -409,7 +503,7 @@ export function TeamFormModal({
   const { showToast } = useToast();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [orchestratorId, setOrchestratorId] = useState('');
+  const [orchestrator, setOrchestrator] = useState<SlotDraft>(emptySlotDraft);
   const [prompt, setPrompt] = useState('');
   const [parallel, setParallel] = useState(3);
   const [openMissionsCap, setOpenMissionsCap] = useState(1);
@@ -421,14 +515,14 @@ export function TeamFormModal({
   const [saving, setSaving] = useState(false);
 
   const effectiveGlobal = team ? team.is_global : isGlobal;
-  const orchestratorPool = effectiveGlobal ? globalAgents : agents;
+  const orchestratorProblem = slotDraftProblem(orchestrator);
 
   // 편집 모달의 읽기 전용 스코프 표시용 — 생성 Select의 global 옵션 라벨과 문구를 맞춰
   // 완료 조건("생성/편집 표기 통일")을 만족시킨다. workspace 이름 해석에 실패해도
   // "(undefined)" 같은 값이 나오지 않도록 이름이 없으면 접미사를 붙이지 않는다.
   const scopeLabel = (() => {
     if (!team) return null;
-    if (team.is_global) return 'Global — visible to every workspace, global agents only';
+    if (team.is_global) return 'Global — visible to every workspace';
     const wsName = workspaces.find((w) => w.id === team.workspace_id)?.name;
     return wsName ? `This workspace (${wsName})` : 'This workspace';
   })();
@@ -443,28 +537,20 @@ export function TeamFormModal({
     setEnabled(team?.enabled ?? true);
     setIsGlobal(team?.is_global ?? false);
     setAllowedWorkspaceIds(team?.allowed_workspace_ids ?? []);
+    setOrchestrator(slotDraftFromRuntime(team?.orchestrator_runtime ?? null));
   }, [isOpen, team]);
-
-  // 위 effect와 분리한 이유는 후보 POOL이 바뀔 때도(open/team 변경 때뿐 아니라)
-  // 다시 실행되어야 하기 때문이다. 두 가지를 모두 커버한다: 모달이 열릴 때 부모의
-  // agents/globalAgents fetch가 아직 진행 중인 경우(New team 버튼은 그 로딩 완료를
-  // 기다리지 않는다), 그리고 스코프 토글이 새 팀 생성 중 현재 선택값 아래에서 pool을
-  // 바꿔버리는 경우. functional update는 현재 선택값이 더 이상 유효하지 않을 때만
-  // 교체하므로, 사용자가 의도적으로 고른 값을 덮어쓰는 일은 없다.
-  useEffect(() => {
-    if (!isOpen) return;
-    setOrchestratorId((prev) =>
-      orchestratorPool.some((a) => a.id === prev) ? prev : team?.orchestrator_agent_id || orchestratorPool[0]?.id || '',
-    );
-  }, [isOpen, team, orchestratorPool]);
 
   const toggleAllowedWorkspace = (id: string) => {
     setAllowedWorkspaceIds((prev) => (prev.includes(id) ? prev.filter((w) => w !== id) : [...prev, id]));
   };
 
   const submit = async () => {
-    if (!name.trim() || !orchestratorId) {
-      showToast('Name and orchestrator are required', 'error');
+    if (!name.trim()) {
+      showToast('Team name is required', 'error');
+      return;
+    }
+    if (orchestratorProblem) {
+      showToast(orchestratorProblem, 'error');
       return;
     }
     setSaving(true);
@@ -474,7 +560,7 @@ export function TeamFormModal({
             workspace_id: wsId,
             name: name.trim(),
             description: description.trim(),
-            orchestrator_agent_id: orchestratorId,
+            orchestrator: slotDraftToSpec(orchestrator),
             orchestrator_prompt: prompt.trim(),
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
@@ -485,7 +571,7 @@ export function TeamFormModal({
             workspace_id: wsId,
             name: name.trim(),
             description: description.trim(),
-            orchestrator_agent_id: orchestratorId,
+            orchestrator: slotDraftToSpec(orchestrator),
             orchestrator_prompt: prompt.trim(),
             max_parallel_steps: parallel,
             max_open_missions: openMissionsCap,
@@ -551,28 +637,26 @@ export function TeamFormModal({
             label="Scope"
             options={[
               { value: 'workspace', label: 'This workspace' },
-              { value: 'global', label: 'Global — visible to every workspace, global agents only' },
+              { value: 'global', label: 'Global — visible to every workspace' },
             ]}
             value={isGlobal ? 'global' : 'workspace'}
             onChange={(e) => setIsGlobal(e.target.value === 'global')}
           />
         )}
-        <Select
-          label="Orchestrator agent (required)"
-          options={orchestratorPool.map((a) => ({
-            value: a.id,
-            label: `${formatAgentDisplayName(a)}${a.is_online ? '' : ' (offline)'}`,
-          }))}
-          value={orchestratorId}
-          onChange={(e) => setOrchestratorId(e.target.value)}
-          placeholder={
-            orchestratorPool.length
-              ? undefined
-              : effectiveGlobal
-                ? 'No global agents available'
-                : 'No assignable agents in this workspace'
-          }
-        />
+        <SlotSection
+          title="Orchestrator"
+          subtitle="The agent that plans the mission and delegates its steps. It is created from this configuration — you do not have to make an agent first."
+          problem={orchestratorProblem}
+        >
+          <TeamSlotRuntimeFields
+            value={orchestrator}
+            onChange={setOrchestrator}
+            hosts={hosts}
+            credentials={credentials}
+            backendProfiles={backendProfiles}
+            neighbours={neighboursOf(team, { orchestrator: true })}
+          />
+        </SlotSection>
         <LabeledTextarea
           label="Standing instructions (optional)"
           hint="Appended to every mission brief for this team — house rules, review policy, tech constraints."
@@ -639,44 +723,97 @@ export function TeamFormModal({
   );
 }
 
+/**
+ * Visual grouping for a slot's runtime form, with the "what is still missing"
+ * line rendered next to the fields instead of only on a failed submit — the
+ * form has enough inputs that a toast alone leaves the operator hunting.
+ */
+function SlotSection({
+  title,
+  subtitle,
+  problem,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  problem: string | null;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${tokens.colors.border}`,
+        borderRadius: 8,
+        padding: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 14,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: tokens.colors.textPrimary }}>{title}</div>
+        <div style={{ marginTop: 2, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>{subtitle}</div>
+      </div>
+      {children}
+      {problem && <div style={{ fontSize: 11, color: tokens.colors.warningLight }}>{problem}</div>}
+    </div>
+  );
+}
+
 function AddMemberModal({
   team,
   wsId,
-  agents,
+  hosts,
+  credentials,
+  backendProfiles,
   onClose,
   onSaved,
 }: {
   team: OrchestrationTeam | null;
   wsId: string;
-  agents: OrchestrationAssignableAgent[];
+  hosts: OrchestrationRuntimeHost[];
+  credentials: Credential[];
+  backendProfiles: ClaudeBackendProfile[];
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
 }) {
   const { showToast } = useToast();
-  const [agentId, setAgentId] = useState('');
+  const [draft, setDraft] = useState<SlotDraft>(emptySlotDraft);
   const [roleLabel, setRoleLabel] = useState('');
   const [capabilities, setCapabilities] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(1);
+  // Put the orchestrator itself on the roster instead of adding a new worker.
+  // A slot mints an identity, so re-entering the orchestrator's own settings
+  // would give you a second agent that merely looks like it — this is the only
+  // way to express "the planner also runs a step".
+  const [asOrchestrator, setAsOrchestrator] = useState(false);
   const [saving, setSaving] = useState(false);
-
-  const available = agents.filter((a) => !team?.members.some((m) => m.agent_id === a.id));
 
   useEffect(() => {
     if (!team) return;
-    setAgentId(available[0]?.id || '');
+    // Seed from the orchestrator's slot: on a single-machine team that is
+    // almost always right, and on a multi-machine one it still puts a valid host
+    // and CLI in the form so only the folder has to change.
+    setDraft(team.orchestrator_runtime ? slotDraftFromRuntime(team.orchestrator_runtime) : emptySlotDraft());
     setRoleLabel('');
     setCapabilities('');
     setMaxConcurrent(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setAsOrchestrator(false);
   }, [team]);
 
+  const problem = asOrchestrator ? null : slotDraftProblem(draft);
+
   const submit = async () => {
-    if (!team || !agentId) return;
+    if (!team) return;
+    if (problem) {
+      showToast(problem, 'error');
+      return;
+    }
     setSaving(true);
     try {
       const saved = await api.addOrchestrationTeamMember(team.id, {
         workspace_id: wsId,
-        agent_id: agentId,
+        ...(asOrchestrator ? { as_orchestrator: true } : { runtime: slotDraftToSpec(draft) }),
         role_label: roleLabel.trim(),
         capabilities: capabilities.trim(),
         max_concurrent: maxConcurrent,
@@ -695,31 +832,19 @@ function AddMemberModal({
       isOpen={!!team}
       onClose={onClose}
       title={`Add member to ${team?.name ?? ''}`}
-      maxWidth={560}
+      maxWidth={620}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={submit} loading={saving} disabled={!agentId}>
+          <Button variant="primary" onClick={submit} loading={saving} disabled={!!problem}>
             Add
           </Button>
         </>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {available.length === 0 ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-            Every assignable agent in this workspace is already on this team.
-          </div>
-        ) : (
-          <Select
-            label="Agent"
-            options={available.map((a) => ({ value: a.id, label: `${formatAgentDisplayName(a)}${a.is_online ? '' : ' (offline)'}` }))}
-            value={agentId}
-            onChange={(e) => setAgentId(e.target.value)}
-          />
-        )}
         <Input
           label="Role label"
           value={roleLabel}
@@ -728,7 +853,7 @@ function AddMemberModal({
         />
         <LabeledTextarea
           label="Capabilities"
-          hint="What this agent is good at, what it has access to, what it should not be given. The orchestrator reads this verbatim when deciding who gets which step."
+          hint="What this member is good at, what it has access to, what it should not be given. The orchestrator reads this verbatim when deciding who gets which step."
           value={capabilities}
           onChange={setCapabilities}
           rows={4}
@@ -742,6 +867,37 @@ function AddMemberModal({
           value={maxConcurrent}
           onChange={(e) => setMaxConcurrent(Number(e.target.value))}
         />
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: tokens.colors.textSecondary }}>
+          <input
+            type="checkbox"
+            checked={asOrchestrator}
+            onChange={(e) => setAsOrchestrator(e.target.checked)}
+            disabled={!team?.orchestrator_agent_id}
+          />
+          <span>
+            This member is the orchestrator itself
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2, lineHeight: 1.5 }}>
+              Lets the agent that plans the mission also execute steps, on its own runtime. Re-entering its
+              settings below would create a second, separate agent instead.
+            </div>
+          </span>
+        </label>
+        {!asOrchestrator && (
+          <SlotSection
+            title="Runtime"
+            subtitle="Which machine, CLI, model and folder this member runs on. Point two members at the same folder on the same host to let them work in one tree."
+            problem={problem}
+          >
+            <TeamSlotRuntimeFields
+              value={draft}
+              onChange={setDraft}
+              hosts={hosts}
+              credentials={credentials}
+              backendProfiles={backendProfiles}
+              neighbours={neighboursOf(team)}
+            />
+          </SlotSection>
+        )}
       </div>
     </Modal>
   );
@@ -749,38 +905,52 @@ function AddMemberModal({
 
 function MemberEditButton({
   team,
-  memberId,
+  member,
   wsId,
-  initial,
+  hosts,
+  credentials,
+  backendProfiles,
   onSaved,
   disabled,
 }: {
   team: OrchestrationTeam;
-  memberId: string;
+  member: OrchestrationTeamMember;
   wsId: string;
-  initial: { role_label: string; capabilities: string; max_concurrent: number };
+  hosts: OrchestrationRuntimeHost[];
+  credentials: Credential[];
+  backendProfiles: ClaudeBackendProfile[];
   onSaved: (team: OrchestrationTeam) => void;
   disabled?: boolean;
 }) {
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
-  const [roleLabel, setRoleLabel] = useState(initial.role_label);
-  const [capabilities, setCapabilities] = useState(initial.capabilities);
-  const [maxConcurrent, setMaxConcurrent] = useState(initial.max_concurrent);
+  const [roleLabel, setRoleLabel] = useState(member.role_label);
+  const [capabilities, setCapabilities] = useState(member.capabilities);
+  const [maxConcurrent, setMaxConcurrent] = useState(member.max_concurrent);
+  const [draft, setDraft] = useState<SlotDraft>(emptySlotDraft);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    setRoleLabel(initial.role_label);
-    setCapabilities(initial.capabilities);
-    setMaxConcurrent(initial.max_concurrent);
-  }, [open, initial.role_label, initial.capabilities, initial.max_concurrent]);
+    setRoleLabel(member.role_label);
+    setCapabilities(member.capabilities);
+    setMaxConcurrent(member.max_concurrent);
+    setDraft(slotDraftFromRuntime(member.runtime));
+  }, [open, member]);
+
+  const isOrchestratorRow = member.agent_id === team.orchestrator_agent_id;
+  const problem = isOrchestratorRow ? null : slotDraftProblem(draft);
 
   const submit = async () => {
+    if (problem) {
+      showToast(problem, 'error');
+      return;
+    }
     setSaving(true);
     try {
-      const saved = await api.updateOrchestrationTeamMember(team.id, memberId, {
+      const saved = await api.updateOrchestrationTeamMember(team.id, member.id, {
         workspace_id: wsId,
+        ...(isOrchestratorRow ? {} : { runtime: slotDraftToSpec(draft) }),
         role_label: roleLabel.trim(),
         capabilities: capabilities.trim(),
         max_concurrent: maxConcurrent,
@@ -809,13 +979,13 @@ function MemberEditButton({
         isOpen={open}
         onClose={() => setOpen(false)}
         title="Edit member"
-        maxWidth={560}
+        maxWidth={620}
         footer={
           <>
             <Button variant="secondary" onClick={() => setOpen(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={submit} loading={saving}>
+            <Button variant="primary" onClick={submit} loading={saving} disabled={!!problem}>
               Save
             </Button>
           </>
@@ -838,6 +1008,28 @@ function MemberEditButton({
             value={maxConcurrent}
             onChange={(e) => setMaxConcurrent(Number(e.target.value))}
           />
+          {isOrchestratorRow ? (
+            <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+              This member is the team&apos;s orchestrator. Its runtime is edited on the team itself — the server
+              rejects a runtime change from here, because applying one would split it into a second agent that
+              merely looked like the orchestrator.
+            </div>
+          ) : (
+            <SlotSection
+              title="Runtime"
+              subtitle="Changing the machine gives this member a new identity on that host; changing the folder or model edits the one it already has."
+              problem={problem}
+            >
+              <TeamSlotRuntimeFields
+                value={draft}
+                onChange={setDraft}
+                hosts={hosts}
+                credentials={credentials}
+                backendProfiles={backendProfiles}
+                neighbours={neighboursOf(team, { memberId: member.id })}
+              />
+            </SlotSection>
+          )}
         </div>
       </Modal>
     </>

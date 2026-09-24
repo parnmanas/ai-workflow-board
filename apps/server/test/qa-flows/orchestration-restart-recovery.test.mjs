@@ -31,7 +31,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createWorkspace } from '../helpers/fixtures.mjs';
+import { createWorkspace } from '../helpers/fixtures.mjs';
+import { buildTeam } from '../helpers/orchestration-team.mjs';
 
 const MIN = 60_000;
 const HUMAN = { type: 'user', id: 'qa-operator', name: 'QA Operator' };
@@ -102,22 +103,17 @@ test('실제 서버 재시작: 새 프로세스의 부팅 스윕이 스스로 �
   const svcA = await services(a.app);
 
   const ws = await createWorkspace(a.app, getDataSourceToken, 'orch-restart');
-  const lead = await createAgent(a.app, getDataSourceToken, ws.id, { name: 'lead-restart' });
-  const worker = await createAgent(a.app, getDataSourceToken, ws.id, { name: 'worker-restart' });
-
-  const team = await svcA.teams.createTeam({
-    workspace_id: ws.id,
+  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
+  // AWB 가 프로비저닝한다 — 만들어진 것을 돌려받는다.
+  const squad = await buildTeam(a.app, getDataSourceToken, svcA.teams, {
+    workspaceId: ws.id,
     name: 'Restart squad',
-    orchestrator_agent_id: lead.id,
-    max_parallel_steps: 4,
-    created_by: HUMAN.id,
+    team: { max_parallel_steps: 4, created_by: HUMAN.id },
+    members: [{ role_label: 'builder', capabilities: 'builds', max_concurrent: 4 }],
   });
-  await svcA.teams.addMember(team.id, ws.id, {
-    agent_id: worker.id,
-    role_label: 'builder',
-    capabilities: 'builds',
-    max_concurrent: 4,
-  });
+  const team = squad.team;
+  const lead = squad.orchestrator;
+  const worker = squad.member('builder');
 
   const mission = await svcA.missions.createMission({
     workspace_id: ws.id,
@@ -237,22 +233,17 @@ test('orchestrator 세션 재시작: 대화 맥락과 진행 상태를 그대로
   const ds = app.get(getDataSourceToken());
 
   const ws = await createWorkspace(app, getDataSourceToken, 'orch-orch-restart');
-  const lead = await createAgent(app, getDataSourceToken, ws.id, { name: 'lead-sess' });
-  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker-sess' });
-
-  const team = await svc.teams.createTeam({
-    workspace_id: ws.id,
+  // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
+  // AWB 가 프로비저닝한다 — 만들어진 것을 돌려받는다.
+  const squad = await buildTeam(app, getDataSourceToken, svc.teams, {
+    workspaceId: ws.id,
     name: 'Session squad',
-    orchestrator_agent_id: lead.id,
-    max_parallel_steps: 4,
-    created_by: HUMAN.id,
+    team: { max_parallel_steps: 4, created_by: HUMAN.id },
+    members: [{ role_label: 'builder', capabilities: 'builds', max_concurrent: 4 }],
   });
-  await svc.teams.addMember(team.id, ws.id, {
-    agent_id: worker.id,
-    role_label: 'builder',
-    capabilities: 'builds',
-    max_concurrent: 4,
-  });
+  const team = squad.team;
+  const lead = squad.orchestrator;
+  const worker = squad.member('builder');
   const mission = await svc.missions.createMission({
     workspace_id: ws.id,
     team_id: team.id,

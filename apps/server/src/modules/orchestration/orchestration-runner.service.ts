@@ -108,6 +108,11 @@ import {
 } from './orchestration-graph';
 import { expandGraphTemplate } from './orchestration-graph-templates';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
+import {
+  MemberFolderScope,
+  TeamAgentSpec,
+  parseTeamAgentSpec,
+} from '../../common/orchestration-member-spec';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 /** Synthetic sender the dispatch messages are attributed to, mirroring QA/Actions. */
@@ -2304,24 +2309,50 @@ export class OrchestrationRunnerService {
       await this.missionRepo.save(mission);
     }
 
-    // 이 step의 격리된 작업폴더 + repo를 해석한다(티켓 2dc3c62f):
-    // `.awb/orch/` 아래 `<mission-leaf>/<step_key>` — 같은 미션의 동시 진행
-    // step끼리 폴더를 공유하는 일이 없다. `missionLeaf`는 getMissionDetail의
-    // `resolved_workspace_folder` 계산과 정확히 동일하다 — leaf를
-    // buildRunProvision이 step id로부터 유도하게 두지 않고 미리 계산해두는
-    // 이유는 그 메서드의 문서 참고.
+    // 이 step이 어디서 도는가 — 담당 슬롯의 `folder_scope`가 결정한다.
+    //
+    //   isolated: `.awb/orch/<mission-leaf>/<step_key>`를 프로비저닝한다(티켓
+    //     2dc3c62f). 같은 미션의 동시 진행 step끼리 폴더를 공유하지 않으며,
+    //     mission.repo_ref가 있으면 매니저가 그 폴더에 체크아웃까지 해 준다.
+    //     `missionLeaf`는 getMissionDetail의 `resolved_workspace_folder` 계산과
+    //     정확히 동일하다 — leaf를 buildRunProvision이 step id로부터 유도하게
+    //     두지 않고 미리 계산해두는 이유는 그 메서드의 문서 참고.
+    //
+    //   shared: **RunProvision을 아예 보내지 않는다.** 그러면 매니저는 폴더를
+    //     따로 만들지도 pin하지도 않고, subagent는 그 에이전트의 working_dir
+    //     자체에서 스폰된다 — 같은 폴더를 가리키는 슬롯끼리 한 트리를 공유하게
+    //     되는 지점이고, 이 기능의 목적이다.
+    //
+    //     여기서 폴더를 "working_dir 루트"로 프로비저닝하지 **않는** 것이
+    //     핵심이다: provision은 `checkout_mode: 'fresh'`에서 대상 폴더를
+    //     `rm -rf` 하므로, 그 대상이 운영자의 실제 작업폴더가 되는 순간
+    //     복구 불가능한 파괴가 된다. 따라서 shared 슬롯은 repo_ref/checkout_mode를
+    //     의도적으로 무시하며(프롬프트가 이를 명시한다), 공유 폴더의 체크아웃
+    //     준비는 운영자의 몫이다 — 애초에 "이미 준비된 트리를 공유한다"가
+    //     shared를 고르는 이유다.
+    const memberRow = await this.memberRepo.findOne({
+      where: { team_id: mission.team_id, agent_id: agentId },
+    });
+    // 스펙이 없는 레거시 member 행은 이 기능 도입 전과 동일하게 동작해야 한다 →
+    // isolated. `parseTeamAgentSpec`이 깨진 스펙도 null로 낮추므로, 읽기 실패가
+    // 조용히 공유 모드로 넘어가(= 격리를 잃어) 버리는 일은 없다.
+    const slotSpec = parseTeamAgentSpec(memberRow?.spec);
+    const folderScope: MemberFolderScope = slotSpec?.folder_scope ?? 'isolated';
+
     const missionLeaf = mission.workspace_folder || mission.id.slice(0, 8);
     const stepWorkspaceFolder = `${missionLeaf}/${step.step_key}`;
-    const runProvision: RunProvision = await buildRunProvision(this.dataSource, {
-      kind: 'orchestration',
-      id: step.id,
-      runId: step.id,
-      workspaceId: mission.workspace_id,
-      boardId: null,
-      workspaceFolder: stepWorkspaceFolder,
-      repoRef: mission.repo_ref,
-      checkoutMode: mission.checkout_mode,
-    });
+    const runProvision: RunProvision | null = folderScope === 'shared'
+      ? null
+      : await buildRunProvision(this.dataSource, {
+          kind: 'orchestration',
+          id: step.id,
+          runId: step.id,
+          workspaceId: mission.workspace_id,
+          boardId: null,
+          workspaceFolder: stepWorkspaceFolder,
+          repoRef: mission.repo_ref,
+          checkoutMode: mission.checkout_mode,
+        });
 
     // graph 모드에서는 **반드시** graphNode를 넘긴다. null이면 프롬프트에서 visit
     // 안내가 빠지는데, reportStep은 graph 미션의 모든 보고에 visit을 요구하므로
@@ -2340,7 +2371,16 @@ export class OrchestrationRunnerService {
       dependencies,
       confirmFeedback: this.confirmFeedbackFor(mission, step, allSteps),
       isRetry: step.attempt > 1 || !!opts?.recovery,
-      workspaceFolder: runProvision.workspace_folder,
+      workspaceFolder: runProvision?.workspace_folder,
+      sharedFolder: folderScope === 'shared' && slotSpec
+        ? {
+            working_dir: slotSpec.working_dir,
+            // 이 트리를 같이 쓰는 같은 팀의 다른 슬롯들. 프롬프트가 이름을 불러
+            // 주지 않으면 담당자는 자기 폴더가 사유지라고 가정하고 서로의 파일을
+            // 덮어쓴다 — 공유는 알려줘야 협업이 되고, 모르면 사고가 된다.
+            shared_with: await this.folderMates(mission.team_id, slotSpec, agentId),
+          }
+        : null,
       graphNode: graphNode
         ? {
             kind: graphNode.kind,
@@ -2359,7 +2399,7 @@ export class OrchestrationRunnerService {
         : null,
     });
 
-    await this.postToRoom(room.id, mission.workspace_id, prompt, runProvision);
+    await this.postToRoom(room.id, mission.workspace_id, prompt, runProvision ?? undefined);
 
     await this.missions.recordEvent(mission, {
       type: 'step_dispatched',
@@ -3029,15 +3069,74 @@ export class OrchestrationRunnerService {
       this.agentRepo,
       present.map((m) => m.agent!),
     );
-    return present
-      .map((m) => ({
+    const specs = new Map(present.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]));
+    const hostIds = Array.from(
+      new Set(Array.from(specs.values()).filter((sp): sp is NonNullable<typeof sp> => !!sp).map((sp) => sp.manager_agent_id)),
+    );
+    const hostNameById = new Map(
+      (hostIds.length ? await this.agentRepo.find({ where: { id: In(hostIds) }, select: { id: true, name: true } as any }) : [])
+        .map((h) => [h.id, h.name]),
+    );
+    return present.map((m) => {
+      const spec = specs.get(m.agent_id) ?? null;
+      return {
         agent_id: m.agent_id,
         agent_name: displayById.get(m.agent_id) ?? m.agent!.name,
         role_label: m.role_label,
         capabilities: m.capabilities,
         max_concurrent: m.max_concurrent,
         is_online: !!m.agent!.is_online,
-      }));
+        // Where this member physically runs. The orchestrator plans better with
+        // it than without: two members in one folder on one host can hand work
+        // over through the filesystem, while members on different machines need
+        // their results carried in step artifacts. Without this in the roster the
+        // orchestrator cannot tell those two situations apart and has to assume
+        // the pessimistic one for everybody.
+        runtime: spec
+          ? {
+              host_name: hostNameById.get(spec.manager_agent_id) ?? '(unknown host)',
+              cli: spec.cli,
+              model: spec.model,
+              working_dir: spec.working_dir,
+              folder_scope: spec.folder_scope,
+              folder_mates: present
+                .filter((other) => {
+                  if (other.agent_id === m.agent_id) return false;
+                  const os = specs.get(other.agent_id);
+                  return !!os
+                    && os.manager_agent_id === spec.manager_agent_id
+                    && os.working_dir === spec.working_dir;
+                })
+                .map((other) => displayById.get(other.agent_id) ?? other.agent!.name),
+            }
+          : null,
+      };
+    });
+  }
+
+  /**
+   * Other members of this team whose slot points at the same (host, folder) as
+   * `spec` — the people the dispatched agent is literally sharing a directory
+   * with. Named in the work order so a shared tree reads as collaboration
+   * rather than as an unexplained race.
+   */
+  private async folderMates(
+    teamId: string,
+    spec: TeamAgentSpec,
+    selfAgentId: string,
+  ): Promise<string[]> {
+    const members = await this.memberRepo.find({ where: { team_id: teamId } });
+    const mates = members.filter((m) => {
+      if (m.agent_id === selfAgentId) return false;
+      const other = parseTeamAgentSpec(m.spec);
+      return !!other
+        && other.manager_agent_id === spec.manager_agent_id
+        && other.working_dir === spec.working_dir;
+    });
+    if (mates.length === 0) return [];
+    const agents = await this.agentRepo.find({ where: { id: In(mates.map((m) => m.agent_id)) } });
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    return mates.map((m) => displayById.get(m.agent_id) ?? m.agent_id.slice(0, 8));
   }
 
   /**

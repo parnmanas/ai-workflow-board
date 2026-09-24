@@ -226,9 +226,18 @@ export default function MissionDetailPage() {
               <Prose text={mission.acceptance_criteria} muted />
             </>
           )}
-          <SubHeading>Workspace</SubHeading>
+          <SubHeading>Step workspace</SubHeading>
           <div style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
             {mission.resolved_workspace_folder}
+          </div>
+          {/* Qualify the path: it is the root for ISOLATED slots only. A member
+              whose slot uses the shared folder scope runs in its own working
+              folder instead, so stating this unconditionally would send someone
+              looking for that member's files in a directory that never exists. */}
+          <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+            Relative to each member&apos;s working folder, for members whose roster slot uses the
+            <strong> isolated</strong> folder scope — each step gets its own subfolder here. Members set to
+            <strong> shared</strong> run in their working folder directly; the Teams screen shows which is which.
           </div>
         </Section>
 

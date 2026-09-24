@@ -10,9 +10,41 @@ import { traceEvent } from './trace.mjs';
 
 const stamp = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const runtimeHostKeysByAgent = new Map();
+// host agent id → its api key, so several agents under one host share one key
+// (a real manager runs one SSE stream for all of them).
+const hostKeysByHost = new Map();
 
 export function runtimeHostKeyForAgent(agentId) {
   return runtimeHostKeysByAgent.get(agentId) || null;
+}
+
+/**
+ * Register a Runtime Host api key for an agent this fixture did NOT create —
+ * an identity AWB provisioned itself for an Orchestration team slot.
+ *
+ * `createAgent` mints the host + key together, but a provisioned identity
+ * arrives already linked to a host the test made separately, so the map has no
+ * entry and `VirtualAgent.start()` refuses to subscribe. Mints one key per host
+ * and reuses it for every agent under that host, matching how a real manager
+ * fans one SSE stream out to all its managed agents.
+ */
+export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '' } = {}) {
+  if (!agentId || runtimeHostKeysByAgent.has(agentId)) return runtimeHostKeysByAgent.get(agentId) ?? null;
+  const ds = app.get(getDataSourceToken());
+  const agent = await ds.getRepository('Agent').findOne({ where: { id: agentId } });
+  const hostId = agent?.manager_agent_id;
+  if (!hostId) return null;
+  let key = hostKeysByHost.get(hostId);
+  if (!key) {
+    const minted = await createApiKey(app, getDataSourceToken, hostId, {
+      workspaceId,
+      label: `runtime-host-${hostId.slice(0, 8)}`,
+    });
+    key = minted.raw_key;
+    hostKeysByHost.set(hostId, key);
+  }
+  runtimeHostKeysByAgent.set(agentId, key);
+  return key;
 }
 
 // Built-in role slug list mirrored from server-side BUILTIN_ROLES — the

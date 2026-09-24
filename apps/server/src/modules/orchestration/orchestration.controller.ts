@@ -158,22 +158,24 @@ export class OrchestrationController {
     }
   }
 
-  /** Agents the UI may offer as orchestrator / member for this workspace. */
-  @Get('assignable-agents')
-  async assignableAgents(
-    @Query('workspace_id') workspaceId: string,
-    @Query('global_only') globalOnly: string,
-    @Res() res: Response,
-  ) {
+  /**
+   * Runtime Hosts a roster slot may be placed on, with the CLI / model /
+   * working-folder candidates for each.
+   *
+   * Replaces the old `assignable-agents` picker feed. Nothing narrows by
+   * workspace the way that endpoint did (`global_only`): a Runtime Host is a
+   * machine, not a workspace member — the same one legitimately runs slots for
+   * several workspaces, and the identity the slot gets is stamped with the
+   * TEAM's scope by the provisioner rather than inherited from a pre-existing
+   * agent. So the workspace-vs-global roster split has nothing left to gate
+   * here, and hiding a host would only make a team un-editable.
+   */
+  @Get('runtime-hosts')
+  async runtimeHosts(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
     try {
-      // global_only(티켓 1b62b437) — 글로벌 팀 picker용: 글로벌(workspace 비종속)
-      // 에이전트만 글로벌 팀의 orchestrator가 되거나 로스터에 들어갈 수 있다.
-      const agents = await this.teams.listAssignableAgents(workspaceId, { globalOnly: globalOnly === 'true' });
-      // The service already carries manager_name so the picker can render the
-      // canonical `<Manager>/<Agent>` identity — pass the rows through as-is.
-      return res.json(agents);
+      return res.json(await this.teams.listRuntimeHosts(workspaceId));
     } catch (e: any) {
-      return fail(res, e, 'Failed to list agents');
+      return fail(res, e, 'Failed to list Runtime Hosts');
     }
   }
 

@@ -2710,6 +2710,38 @@ export type OrchestrationStepStatus =
   /** confirm 노드가 사람의 Pass/Fail 판정을 기다리는 durable pause(티켓 5dbe4aa2). */
   | 'awaiting_user';
 
+/** Where a roster slot's step actually runs. See the server's MemberFolderScope. */
+export type OrchestrationFolderScope = 'shared' | 'isolated';
+
+/**
+ * A roster slot's runtime, as declared in the team editor: Runtime Host + CLI +
+ * model + working folder. This — not a pre-existing Agent — is what defines a
+ * team member; the backing Agent identity is provisioned from it server-side.
+ */
+export interface OrchestrationSlotSpecInput {
+  manager_agent_id: string;
+  cli: string;
+  model?: string | null;
+  working_dir: string;
+  folder_scope?: OrchestrationFolderScope;
+  credential_id?: string | null;
+  cli_runtime_profile?: string | null;
+  runtime_config?: Record<string, any> | null;
+}
+
+/** The same spec read back, with the names the UI renders. */
+export interface OrchestrationSlotRuntime extends OrchestrationSlotSpecInput {
+  manager_name: string;
+  manager_online: boolean;
+  model: string | null;
+  folder_scope: OrchestrationFolderScope;
+  credential_id: string | null;
+  cli_runtime_profile: string | null;
+  runtime_config: Record<string, any> | null;
+  /** Other slots on this team in the same folder on the same host. */
+  shared_with: string[];
+}
+
 export interface OrchestrationTeamMember {
   id: string;
   agent_id: string;
@@ -2720,6 +2752,8 @@ export interface OrchestrationTeamMember {
   capabilities: string;
   max_concurrent: number;
   position: number;
+  /** null for a legacy row saved before slots carried a spec — re-save to edit. */
+  runtime: OrchestrationSlotRuntime | null;
 }
 
 export interface OrchestrationTeam {
@@ -2736,6 +2770,7 @@ export interface OrchestrationTeam {
   orchestrator_agent_id: string | null;
   orchestrator_name: string;
   orchestrator_online: boolean;
+  orchestrator_runtime: OrchestrationSlotRuntime | null;
   orchestrator_prompt: string;
   max_parallel_steps: number;
   max_open_missions: number;
@@ -2952,15 +2987,27 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   start_error?: string;
 }
 
-export interface OrchestrationAssignableAgent {
-  id: string;
-  name: string;
-  /** ST-7 — required for the `<Manager>/<Agent>` render via formatAgentDisplayName. */
-  manager_agent_id?: string | null;
-  manager_name?: string | null;
-  type: string;
+/**
+ * A Runtime Host (paired agent-manager machine) a roster slot may be placed on,
+ * with everything the slot editor needs to offer as choices.
+ *
+ * Replaces the old assignable-Agent feed: a team is now built from machines,
+ * CLIs and folders rather than from identities somebody created in advance.
+ */
+export interface OrchestrationRuntimeHost {
+  manager_agent_id: string;
+  manager_name: string;
+  hostname: string;
   is_online: boolean;
-  description: string;
+  instance_id: string | null;
+  last_seen_at: string | null;
+  /** CLIs installed on this host. */
+  clis: string[];
+  /** cliType → model ids this host reported. */
+  available_models: Record<string, string[]>;
+  cli_versions: Record<string, string>;
+  /** Working folders already used on this host — the "share a folder" picker. */
+  working_dirs: string[];
 }
 
 /** Payload of the `orchestration_update` SSE frame (UI-only event). */

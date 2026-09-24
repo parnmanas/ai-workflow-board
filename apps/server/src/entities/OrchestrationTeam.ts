@@ -63,9 +63,31 @@ export class OrchestrationTeam {
   @Column({ type: 'text', default: '' })
   description: string;
 
-  /** Agent.id of the orchestrator. Enforced non-empty by the service layer. */
+  /**
+   * Agent.id of the orchestrator. Enforced non-empty by the service layer.
+   *
+   * Like a member's `agent_id`, this is now DERIVED from `orchestrator_spec`
+   * below — the operator declares Runtime Host / CLI / model / folder and
+   * OrchestrationAgentProvisionerService writes the resulting identity here.
+   */
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestrator_agent_id: string | null;
+
+  /**
+   * The orchestrator's runtime spec — same `TeamAgentSpec` shape as
+   * `OrchestrationTeamMember.spec`, so both slots are authored by one form and
+   * validated by one function.
+   *
+   * The orchestrator gets a spec rather than staying an Agent picker because the
+   * inconsistency was worse than the symmetry: the roster is the thing you edit
+   * most, and leaving one slot on the old "go create an Agent first" flow would
+   * mean a team still could not be built end-to-end on one screen — the actual
+   * complaint this refactor answers. Its `folder_scope` defaults to `shared` too
+   * and matters for the same reason: the orchestrator often wants to read the
+   * artifacts its members left in the shared tree.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  orchestrator_spec: Record<string, any> | null;
 
   /**
    * Extra standing instructions injected into every Mission's orchestrator

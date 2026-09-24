@@ -97,6 +97,24 @@ export class Agent {
   @Column({ type: 'varchar', nullable: true, default: null })
   cli_runtime_profile: string | null;
 
+  // Who created this identity and therefore owns its lifecycle.
+  //   ''               — an operator (or an agent via create_agent) made it; it
+  //                      lives until someone deletes it. The default, and what
+  //                      every pre-existing row carries.
+  //   'orchestration'  — AWB provisioned it for an Orchestration team slot from
+  //                      that slot's Runtime Host / CLI / model / working folder
+  //                      (see modules/orchestration/orchestration-agent-provisioner.service.ts).
+  //                      Edited when the slot is edited, deleted when the slot
+  //                      is. Filtered out of `GET /api/agents` by default so
+  //                      building a 5-member team does not add 5 rows to every
+  //                      agent picker in the product; `?include_orchestration=1`
+  //                      opts back in (the AI Agents admin page does, so these
+  //                      identities stay inspectable — presence, logs, cwd).
+  // Kept as free text rather than an enum so a future owner category is an
+  // additive change with no migration on the column type.
+  @Column({ type: 'varchar', default: '' })
+  origin: string;
+
   @Column({ type: 'simple-json', nullable: true, default: null })
   runtime_config: Record<string, any> | null;
 

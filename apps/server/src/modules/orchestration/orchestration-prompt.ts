@@ -33,6 +33,24 @@ export interface RosterEntry {
   capabilities: string;
   max_concurrent: number;
   is_online: boolean;
+  /**
+   * Where this member physically runs — host, CLI, model, working folder, and
+   * who shares that folder. null for a legacy member row with no stored spec.
+   *
+   * This is planning-relevant, not decoration: members sharing one folder on one
+   * host can hand work over through the filesystem, members on different machines
+   * cannot. An orchestrator that cannot see the difference has to assume the
+   * pessimistic case for the whole team.
+   */
+  runtime?: {
+    host_name: string;
+    cli: string;
+    model: string | null;
+    working_dir: string;
+    folder_scope: 'shared' | 'isolated';
+    /** Other members in the same folder on the same host. */
+    folder_mates: string[];
+  } | null;
 }
 
 function section(title: string, body: string): string {
@@ -43,16 +61,63 @@ function section(title: string, body: string): string {
 
 function renderRoster(roster: RosterEntry[]): string {
   if (roster.length === 0) return '(no members — you cannot delegate; report this immediately)';
-  return roster
+  const lines = roster
     .map((m) => {
       const bits = [`- **${m.agent_name}** (agent_id: \`${m.agent_id}\`)`];
       if (m.role_label) bits.push(`  - role: ${m.role_label}`);
       bits.push(`  - concurrent step capacity: ${m.max_concurrent}`);
       bits.push(`  - currently: ${m.is_online ? 'online' : 'offline (work will queue until it connects)'}`);
       if (m.capabilities) bits.push(`  - capabilities: ${m.capabilities}`);
+      const rt = m.runtime;
+      if (rt) {
+        bits.push(
+          `  - runs: ${rt.cli}${rt.model ? ` (${rt.model})` : ''} on host **${rt.host_name}** in \`${rt.working_dir}\``,
+        );
+        if (rt.folder_scope === 'shared') {
+          bits.push(
+            rt.folder_mates.length
+              ? `  - **shares that folder with: ${rt.folder_mates.join(', ')}** — files written there are visible to them`
+              : `  - works directly in that folder (no per-step scratch copy)`,
+          );
+        } else {
+          bits.push(`  - each step gets its own isolated scratch folder under that path`);
+        }
+      }
       return bits.join('\n');
     })
     .join('\n');
+
+  // State the consequence once, after the list, rather than per member: the
+  // orchestrator needs to know that co-located members are a capability
+  // (hand work over in place) AND a hazard (concurrent steps in one tree).
+  const sharedGroups = new Map<string, string[]>();
+  for (const m of roster) {
+    const rt = m.runtime;
+    if (!rt || rt.folder_scope !== 'shared' || rt.folder_mates.length === 0) continue;
+    const key = `${rt.host_name}\u0000${rt.working_dir}`;
+    const group = sharedGroups.get(key) ?? [];
+    group.push(m.agent_name);
+    sharedGroups.set(key, group);
+  }
+  if (sharedGroups.size === 0) return lines;
+
+  const notes = Array.from(sharedGroups.entries()).map(([key, names]) => {
+    const [host, dir] = key.split('\u0000');
+    return `- \`${dir}\` on **${host}**: ${names.join(', ')}`;
+  });
+  return [
+    lines,
+    '',
+    '**Shared working folders.** These members are in the same directory on the same machine:',
+    ...notes,
+    '',
+    'Plan with that in mind. Two members in one folder can pass work through the filesystem —',
+    'one writes a file, the next reads it — so you do not have to route everything through step',
+    'artifacts. But they share ONE working tree: do not run two steps that edit the same files,',
+    'switch git branches, or rebuild the same target at the same time in one folder. Sequence',
+    'those with `depends_on` instead. Members in different folders are fully independent and',
+    'must exchange results through step result summaries and artifacts.',
+  ].join('\n');
 }
 
 /**
@@ -256,8 +321,20 @@ export function renderStepPrompt(args: {
   orchestratorName: string;
   dependencies: DependencyContext[];
   isRetry: boolean;
-  /** agent-manager가 스폰 전에 프로비저닝하는 working_dir-relative 폴더(티켓 2dc3c62f). */
+  /**
+   * agent-manager가 스폰 전에 프로비저닝하는 working_dir-relative 폴더(티켓
+   * 2dc3c62f). `isolated` 슬롯에만 있다 — `shared` 슬롯은 폴더를 프로비저닝하지
+   * 않으므로 대신 `sharedFolder` 가 채워진다.
+   */
   workspaceFolder?: string;
+  /**
+   * `shared` folder_scope 슬롯이 그대로 쓰는 working_dir 과, 같은 폴더를 쓰는
+   * 팀원들. `workspaceFolder` 와 상호배타다.
+   */
+  sharedFolder?: {
+    working_dir: string;
+    shared_with: string[];
+  } | null;
   /**
    * 그래프 모드에서 이 step이 맡은 node의 실행 계약(티켓 1ca9e49b). null이면
    * 기존 wave 프롬프트와 한 글자도 다르지 않다.
@@ -299,6 +376,32 @@ export function renderStepPrompt(args: {
           `you were spawned. Work only here; do not \`cd\` elsewhere or clone a fresh copy yourself.`,
       ),
     );
+  } else if (args.sharedFolder) {
+    // A shared slot starts in the operator's real working folder, which may
+    // already hold a checkout, a build, and other members' work in progress.
+    // The two things the agent must be told are therefore the opposite of the
+    // isolated case: nothing was prepared for you, and you are not alone.
+    const mates = args.sharedFolder.shared_with;
+    const body = [
+      `\`${args.sharedFolder.working_dir}\` — your current directory, and it is your **shared team working ` +
+        `folder**, not a scratch copy. Nothing here was wiped or re-cloned for this step: treat whatever is ` +
+        `already present as the team's state.`,
+      '',
+      mates.length
+        ? `**You are sharing this folder with: ${mates.join(', ')}.** They may be working in it right now.`
+        : `No other team member currently shares this folder.`,
+      '',
+      'Rules for a shared folder:',
+      '- Do not delete, reset, or re-clone the tree, and do not run destructive cleanups ' +
+        '(`git clean -fdx`, `rm -rf`) over files you did not create.',
+      '- Do not switch the git branch or stash unless your task is explicitly about that — ' +
+        'a teammate mid-edit loses their work.',
+      '- Leave files you produce where teammates can find them and say where they are in your report; ' +
+        'that is how work is handed over here instead of through artifacts.',
+      '- If you find the folder in an unexpected state (a conflicted merge, a half-finished change ' +
+        'that is not yours), report it as a blocker rather than "fixing" it.',
+    ].join('\n');
+    lines.push(section('Shared working folder (read this before you touch anything)', body));
   }
   lines.push(section('Your task', step.instructions));
   if (step.acceptance_criteria) lines.push(section('Done when', step.acceptance_criteria));

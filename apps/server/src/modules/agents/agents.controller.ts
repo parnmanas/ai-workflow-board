@@ -28,6 +28,7 @@ import { LogService } from '../../services/log.service';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { findOrFail } from '../../common/find-or-fail';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
+import { ORCHESTRATION_AGENT_ORIGIN } from '../../common/orchestration-member-spec';
 import {
   type AgentRuntimeConfig,
   AgentRuntimeConfigError,
@@ -123,12 +124,39 @@ export class AgentsController {
     return res.json(result);
   }
 
+  /**
+   * Identities AWB provisioned for an Orchestration team slot
+   * (`Agent.origin === 'orchestration'`) are hidden unless the caller opts in
+   * with `?include_orchestration=1`.
+   *
+   * They are real, fully functional agents — but they are created implicitly, N
+   * per team, as a side effect of filling in a roster. Leaving them in the
+   * default listing would push the team roster's internals into every agent
+   * picker in the product (ticket assignee, chat participants, handoff target),
+   * where they are never the right answer: dispatching to one directly would run
+   * work outside the mission that owns it. The AI Agents admin page opts in, so
+   * they stay inspectable (presence, subagent logs, working dir) where an
+   * operator would actually go looking for them.
+   */
   @Get()
-  async list(@Req() req: Request, @CurrentWorkspaceId() workspaceId: string | null, @Query('scope') scope: string, @Res() res: Response) {
+  async list(
+    @Req() req: Request,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Query('scope') scope: string,
+    @Query('include_orchestration') includeOrchestration: string,
+    @Res() res: Response,
+  ) {
+    // Filter in memory rather than in the WHERE clause: the workspace branch is
+    // already an OR-array of conditions, and adding the predicate to each branch
+    // is where a future branch silently forgets it.
+    const withOrigins = <T extends { origin?: string }>(rows: T[]): T[] =>
+      includeOrchestration === '1' || includeOrchestration === 'true'
+        ? rows
+        : rows.filter((a) => a.origin !== ORCHESTRATION_AGENT_ORIGIN);
     // Admin can request all agents across workspaces with ?scope=all
     const isAdmin = (req as any).currentUser?.role === 'admin';
     if (scope === 'all' && isAdmin) {
-      const agents = await this.agentRepo.find({ order: { name: 'ASC' } });
+      const agents = withOrigins(await this.agentRepo.find({ order: { name: 'ASC' } }));
       const named = await this._enrichManagerNames(agents);
       return res.json(await this._enrichLiveData(named));
     }
@@ -138,10 +166,12 @@ export class AgentsController {
     // workspace id). Surface them in every workspace's AI Agents tab via a
     // `type: 'manager'` branch so the listing doesn't depend on the storage
     // shape of workspace_id at all.
-    const agents = await this.agentRepo.find({
-      where: [...agentWorkspaceWhere(workspaceId), { type: 'manager' }],
-      order: { name: 'ASC' },
-    });
+    const agents = withOrigins(
+      await this.agentRepo.find({
+        where: [...agentWorkspaceWhere(workspaceId), { type: 'manager' }],
+        order: { name: 'ASC' },
+      }),
+    );
     const named = await this._enrichManagerNames(agents);
     return res.json(await this._enrichLiveData(named));
   }

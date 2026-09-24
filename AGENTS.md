@@ -276,6 +276,8 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 ## Orchestration mode (팀 기반 자율 업무 오케스트레이션)
 
 - 칸반 보드와 같은 레벨의 두 번째 작업 표면. Team(오케스트레이터 1 + 멤버 N) 에게 Mission 을 통째로 맡기면, 오케스트레이터 Agent 가 런타임에 Step DAG 계획을 세우고 팀원에게 배분한다.
+- **로스터는 Agent 를 고르는 게 아니라 slot 을 선언한다**: `Runtime Host + CLI + model + working folder + folder_scope` (`apps/server/src/common/orchestration-member-spec.ts` 의 `TeamAgentSpec`, `OrchestrationTeamMember.spec` / `OrchestrationTeam.orchestrator_spec` 에 저장). backing Agent 행은 `orchestration-agent-provisioner.service.ts` 가 만들고(`Agent.origin='orchestration'`), 그래서 dispatch/SSE/MCP contract 는 **하나도 바뀌지 않았다** — 전부 그대로 `agent_id` 를 본다. 이 origin 행은 `GET /api/agents` 기본 목록에서 숨는다(`?include_orchestration=1` 로 옵트인, `/agents/dashboard` 는 필터 없음). 운영자가 만든 Agent 는 절대 수정/삭제하지 않는다 — slot spec 을 고치면 새 팀 소유 정체성을 발급한다.
+- `folder_scope`: `shared`(기본, step 이 `working_dir` 자체에서 돌고 **RunProvision 을 보내지 않는다** — provision 의 `fresh` 가 운영자 작업폴더를 `rm -rf` 하므로) / `isolated`(기존 `.awb/orch/<mission>/<step>` 격리 + repo 체크아웃). 같은 Host·같은 폴더를 가리키는 slot 끼리 한 working tree 를 공유하는 것이 이 모델의 요점이고, 플래닝 로스터와 step work order 가 공유 사실·동시 편집 위험을 모두 명시한다.
 - Location: `apps/server/src/modules/orchestration/` · MCP 툴 `modules/mcp/tools/orchestration-tools.ts` · UI `apps/client/src/components/orchestration/`
 - **디스패치는 QA/Action 런과 같은 ChatRoom 파이프라인을 재사용한다** — `chat_rooms.orchestration_mission_id/_step_id` 로 표시하고 기존 `is_action_room` SSE 마커를 켠다. 따라서 **agent-manager 변경 없음, SSE contract 변경 없음**. `run_provision` 은 v1 범위 밖 (붙이려면 `RunProvision.kind` 에 `'orchestration'` 추가 → agent-manager `run-provisioner.ts` 파서와 같은 PR).
 - `orchestration_update` SSE 는 `consensus_update` 와 같은 **UI 전용** 이벤트 (user-only filter) — agent 비소비이므로 agent-manager contract 무관.

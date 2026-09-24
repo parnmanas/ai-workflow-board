@@ -16,11 +16,75 @@
 
 | 개념 | 설명 |
 | --- | --- |
-| **Team** | Agent 로스터. **오케스트레이터 1명 필수** + 멤버 N명. |
-| **Member** | 팀원 Agent. `capabilities` 문구가 오케스트레이터의 배정 판단에 그대로 쓰인다. |
+| **Team** | 로스터. **오케스트레이터 1명 필수** + 멤버 N명. |
+| **Slot** | 로스터의 한 자리(오케스트레이터 또는 멤버). **Runtime Host + CLI + model + working folder** 로 선언하며, 그 뒤의 Agent 정체성은 AWB 가 만든다. |
+| **Member** | 팀원 slot. `capabilities` 문구가 오케스트레이터의 배정 판단에 그대로 쓰인다. |
 | **Mission** | 팀에 맡기는 업무 한 건. objective / context / acceptance_criteria 로 기술. |
 | **Step** | 오케스트레이터가 만든 계획의 노드. `depends_on` 으로 DAG 를 이룬다. |
 | **Timeline** | Mission 안에서 일어난 모든 일의 append-only 기록 (UI 관찰 표면). |
+
+---
+
+## 로스터 — slot 과 backing agent
+
+팀을 만들 때 **Agent 를 미리 만들어 둘 필요가 없다.** slot 하나는 다음 튜플이다:
+
+| 필드 | 의미 |
+| --- | --- |
+| `manager_agent_id` | 이 slot 이 도는 Runtime Host(페어링된 agent-manager 장비). |
+| `cli` | 그 장비에 설치된 CLI (`claude`/`codex`/`hermes`/…). `custom` 은 매니저가 자동 spawn 하지 못하므로 제외. |
+| `model` | 그 CLI 에 넘길 모델. 비우면 CLI 기본값. 후보는 Host 하트비트의 `available_models`. |
+| `working_dir` | 그 장비의 **절대 경로**. 매니저는 working_dir 없이는 spawn 을 거부한다. |
+| `folder_scope` | `shared`(기본) / `isolated`. 아래 참고. |
+| `credential_id` · `cli_runtime_profile` · `runtime_config` | 선택 — 관리자 Agent 생성 폼과 같은 노브. |
+
+`OrchestrationAgentProvisionerService` 가 이 spec 으로부터 **backing Agent 행을
+직접 만든다**. dispatch·SSE 스코프·MCP api key·ChatRoomParticipant·
+`<Manager>/<Agent>` 표시 규약이 전부 Agent 정체성에 걸려 있으므로 Agent 행 자체는
+남되, 이제 로스터 편집의 **입력이 아니라 출력**이다.
+
+소유권 규칙 두 가지:
+
+1. **우리가 만든 행만 우리가 고친다.** provisioner 가 만든 행은
+   `Agent.origin='orchestration'` 을 달고, slot 편집 시 제자리 수정, slot 삭제 시
+   함께 삭제된다. 운영자가 만든 Agent(= 이 기능 이전 로스터에서 마이그레이션된
+   전부)는 절대 건드리지 않는다 — 그런 slot 의 spec 을 바꾸면 **새** 팀 소유
+   정체성을 발급한다. 운영자의 Agent 를 팀 편집의 부작용으로 바꿔버리면 그
+   Agent 를 쓰는 티켓·채팅까지 같이 바뀐다.
+2. **팀 소유 정체성은 slot 하나에만 속한다.** spec 이 똑같아도 재사용하지 않는다 —
+   두 멤버가 같은 폴더를 공유하면서도 각자 step 을 배정받으려면 서로 다른 정체성이
+   필요하기 때문이다.
+
+Host 가 바뀌면 정체성을 **재발급**한다(제자리 수정이 아니다): 매니저가 per-agent
+cli-home 과 api key 를 소유하므로, 정체성만 다른 장비로 옮기면 그 상태가 예전
+장비에 남아 고아가 된다.
+
+`Agent.origin='orchestration'` 행은 `GET /api/agents` 기본 목록에서 **숨는다**
+(`?include_orchestration=1` 로 옵트인). 그 목록의 소비자는 전부 picker(티켓 담당자,
+채팅 참여자)이고 거기서 팀 slot 정체성은 정답인 적이 없다 — 직접 디스패치하면 그
+정체성을 소유한 미션 밖에서 일이 돌아간다. 관리 표면은 계속 보인다:
+`/agents/dashboard`(AI Agents 화면)는 필터링하지 않고, Runtime Host 의 managed-agent
+패널은 명시적으로 옵트인한다.
+
+### folder_scope — 폴더를 공유한다는 것
+
+| 값 | step 의 cwd | RunProvision | 쓰임새 |
+| --- | --- | --- | --- |
+| `shared`(기본) | `working_dir` **그 자체** | **보내지 않음** | 같은 Host·같은 폴더를 가리키는 slot 끼리 한 트리를 공유한다. 파일로 일을 주고받고, 체크아웃/빌드 산출물을 함께 쓴다. |
+| `isolated` | `<working_dir>/.awb/orch/<mission>/<step_key>` | 보냄(+ 미션 repo 체크아웃) | 이 기능 이전 동작. 같은 repo 에 충돌하는 빌드를 부채살로 펼칠 때. |
+
+`shared` 가 RunProvision 을 **아예 보내지 않는** 것이 핵심이다. provision 은
+`checkout_mode:'fresh'` 에서 대상 폴더를 `rm -rf` 하므로, 그 대상이 운영자의 실제
+작업폴더가 되는 순간 복구 불가능한 파괴가 된다. 따라서 `shared` slot 은 미션의
+`repo_ref`/`checkout_mode` 를 **무시하며**(step 프롬프트가 이를 명시한다) 공유 폴더의
+체크아웃 준비는 운영자의 몫이다 — 애초에 "이미 준비된 트리를 공유한다"가 `shared` 를
+고르는 이유다.
+
+대가도 실재한다: 동시에 도는 두 step 이 한 working tree 를 공유하므로 서로의 파일을
+덮어쓸 수 있다. 그래서 (1) 플래닝 브리핑의 로스터가 어느 멤버끼리 폴더를 공유하는지
+명시하고 `depends_on` 으로 순서를 잡으라고 지시하며, (2) step work order 가 담당자에게
+공유 사실과 금지 행위(트리 리셋·브랜치 전환·`git clean -fdx`)를 알린다. 파괴적 동시
+편집을 하는 멤버는 `max_concurrent: 1` 로 두는 것이 안전하다.
 
 Mission 은 **티켓이 아니다.** 티켓 수명주기는 컬럼 이동이 구동하지만 Mission 은
 런타임에 작성·수정되는 계획이 구동한다. 두 모델을 한 엔티티에 욱여넣으면
@@ -814,7 +878,7 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 
 | 대상 | 생성 경로 | 비고 |
 | --- | --- | --- |
-| **Team**(로스터·오케스트레이터 지정) | **영구히 사람 전용** — UI/REST만 | 로스터는 "이 Agent 가 누구에게 일을 시켜도 되는가"라는 권한 범위 그 자체라, Agent 가 자기 지휘 범위를 스스로 넓히는 것은 어떤 가드로도 정당화하지 않는다. `create_orchestration_team` MCP 툴은 존재하지 않고, 앞으로도 추가하지 않는다. |
+| **Team**(로스터·오케스트레이터 지정) | **영구히 사람 전용** — UI/REST만 | 로스터는 "이 Agent 가 누구에게 일을 시켜도 되는가"라는 권한 범위 그 자체라, Agent 가 자기 지휘 범위를 스스로 넓히는 것은 어떤 가드로도 정당화하지 않는다. `create_orchestration_team` MCP 툴은 존재하지 않고, 앞으로도 추가하지 않는다. slot 이 Agent 를 **생성**하게 된 뒤로 이 경계는 더 강해졌다 — 로스터 쓰기는 이제 장비에 프로세스를 띄울 정체성을 발급하는 행위다. |
 | **Mission** | 사람(UI, `start:true` 로 즉시 브리핑) **또는** 그 Team 의 오케스트레이터 Agent 자신(`create_orchestration_mission` MCP 툴) | 사람이 이미 Team 을 만들며 권한을 승인해 둔 상태이므로, 오케스트레이터의 Mission 자기-생성은 새 자율성 표면이 아니라 **이미 승인된 권한의 반복 행사**다. |
 
 `create_orchestration_mission` 입력은 `team_id` / `title` / `objective` / `context?` /
@@ -876,7 +940,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 
 | 툴 | 용도 |
 | --- | --- |
-| `list_orchestration_teams` | 내가 오케스트레이터·멤버로 속한 Team 목록 (`create_orchestration_mission` 의 `team_id` 발견 경로) |
+| `list_orchestration_teams` | 내가 오케스트레이터·멤버로 속한 Team 목록 (`create_orchestration_mission` 의 `team_id` 발견 경로). 각 멤버의 `runtime` 블록에 Host·CLI·model·working folder·`folder_scope`·`shared_with` 가 실린다 |
 | `list_orchestration_missions` | 내가 속한 Mission 목록·상태 (기본 non-terminal 만, `include_finished` 로 확장) |
 | `create_orchestration_mission` | 내가 오케스트레이터인 Team 에 한해 Mission 생성(+즉시 브리핑) — "미션 생성 주체" 절 참고 |
 | `list_orchestration_graph_templates` | 내장 실행 그래프 템플릿 카탈로그(용도·파라미터·예시). 읽기 전용이며 미션을 건드리지 않는다 |
