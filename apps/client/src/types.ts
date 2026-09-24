@@ -2159,6 +2159,35 @@ export interface AgentLaunchSpecEntry {
 
 // One Runtime Host instance heartbeating against AWB.
 /** Runtime Host 에 깔린 CLI 설치본 한 줄 (하트비트 `cli_installs`). */
+/**
+ * 세션/채팅의 agent 가 요청하고 운영자 승인을 기다리는 권한 상승 명령 하나.
+ *
+ * agent 는 요청만 할 수 있고 실행은 운영자가 이 명령을 읽고 승인하면서 비밀번호를
+ * 칠 때만 일어난다 — agent 에게 상시 sudo 를 주면 그 agent 가 곧 root 이기 때문이다.
+ * 기본값은 거부다: 승인 없이 창이 지나면 만료된다.
+ */
+export interface PrivilegedCommandRequest {
+  request_id: string;
+  workspace_id: string | null;
+  agent_id: string;
+  agent_name: string;
+  instance_id: string;
+  hostname: string;
+  /** 승인하면 **이대로** 실행된다. 매니저가 서버에서 이 정본을 다시 받아 간다. */
+  command: string;
+  args: string[];
+  cwd: string | null;
+  /** agent 가 밝힌 이유 — 승인 판단의 근거다. */
+  reason: string;
+  status: 'pending' | 'approved' | 'running' | 'done' | 'denied' | 'expired';
+  created_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  ok: boolean | null;
+  output: string;
+  failure: string | null;
+}
+
 export interface CliInstallEntry {
   cli: string;
   path: string;

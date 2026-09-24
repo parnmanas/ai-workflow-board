@@ -1281,6 +1281,77 @@ export async function patchAgentSessionState(
 }
 
 /**
+ * 운영자가 승인한 권한 상승 명령의 **정본** argv 를 받아 온다(실행 직전).
+ *
+ * SSE 페이로드에는 request_id 만 오고 명령은 오지 않는다. 명령을 페이로드로
+ * 받으면 "운영자가 화면에서 읽고 승인한 것" 과 "실제로 도는 것" 이 갈라질 여지가
+ * 생기고, 그 순간 승인이라는 개념 자체가 무의미해진다. 그래서 여기서 다시 받아 온다.
+ */
+export async function claimPrivilegedCommand(
+  config: AwbConfig,
+  instanceId: string,
+  requestId: string,
+): Promise<{ request_id: string; command: string; args: string[]; cwd: string | null } | null> {
+  try {
+    const qs = new URLSearchParams({ instance_id: instanceId });
+    const url = `${trimSlash(config.url)}/api/agent/privileged-command/${encodeURIComponent(requestId)}?${qs}`;
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      let reason = `http_${resp.status}`;
+      try {
+        reason = (await resp.json())?.error || reason;
+      } catch {
+        /* 본문 없음 */
+      }
+      log(`privileged command claim failed: ${reason}`);
+      return null;
+    }
+    const body = await resp.json();
+    if (!body || typeof body.command !== 'string') return null;
+    return {
+      request_id: String(body.request_id ?? requestId),
+      command: body.command,
+      args: Array.isArray(body.args) ? body.args.map((a: unknown) => String(a)) : [],
+      cwd: typeof body.cwd === 'string' && body.cwd ? body.cwd : null,
+    };
+  } catch (err: any) {
+    log(`privileged command claim error: ${err?.message ?? err}`);
+    return null;
+  }
+}
+
+/** 권한 상승 명령의 실행 결과를 서버에 돌려준다 — 요청한 agent 가 이걸 읽는다. */
+export async function postPrivilegedCommandResult(
+  config: AwbConfig,
+  instanceId: string,
+  requestId: string,
+  result: { ok: boolean; output: string; failure?: string | null },
+): Promise<boolean> {
+  try {
+    const url = `${trimSlash(config.url)}/api/agent/privileged-command/${encodeURIComponent(requestId)}/result`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ instance_id: instanceId, ...result }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) log(`privileged command result post failed: HTTP ${resp.status}`);
+    return resp.ok;
+  } catch (err: any) {
+    log(`privileged command result post error: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/**
  * 일회용 sudo 티켓의 비밀번호를 서버에서 **한 번** 받아 온다.
  *
  * SSE 로 오는 것은 티켓 id 뿐이고 비밀번호는 이 HTTPS 왕복으로만 온다 — 세션

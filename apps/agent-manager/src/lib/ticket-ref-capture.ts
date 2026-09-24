@@ -599,6 +599,10 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 이관 — EXCLUDE 아님.)
  */
 export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
+  // 권한 상승 승인 흐름 — 티켓을 만들지도 바꾸지도 않는다. 결과는 호출한 agent 가
+  // 자기 턴에서 읽고 쓰는 것이고, 채팅에 카드로 띄울 티켓 참조가 없다.
+  request_privileged_command: 'non-ticket',
+  get_privileged_command_result: 'non-ticket',
   // read (59) — get_agent 및 get_board_summary 는 F-3(ticket 3ca88253)로 AGENT_ACTION_TOOLS
   // / BOARD_ACTION_TOOLS 로 이관됨(EXCLUDE 아님). list_agents/get_board 는 여전히 read.
   fetch_github_info: 'read', get_action: 'read',

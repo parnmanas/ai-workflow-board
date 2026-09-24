@@ -53,6 +53,7 @@ import { createAdapter, KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index
 import { gatherAvailableModels } from './lib/available-models.js';
 import { candidateKeyFor, listCliInstalls, runCliUpdate } from './lib/cli-update.js';
 import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
+import { runWithSudo } from './lib/sudo-runner.js';
 import { describeInstallMethod } from './lib/cli-install-method.js';
 import { canonicalPathKey } from './lib/cli-resolver.js';
 import type { CliInstallEntry } from './lib/instance-heartbeat.js';
@@ -90,6 +91,8 @@ import {
   postCommandAckRaw,
   postCliLoginProgressRaw,
   fetchSudoTicket,
+  claimPrivilegedCommand,
+  postPrivilegedCommandResult,
 } from './lib/rest.js';
 import type { RuntimeProfileSpec } from './lib/cli-adapters/base.js';
 import { RuntimeSupervisor } from './lib/runtime/runtime-supervisor.js';
@@ -845,6 +848,53 @@ async function runRuntime(
       await refreshCliLatestVersions();
       const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
       return { ...outcome, heartbeatPosted };
+    },
+    // 운영자가 화면에서 승인한 권한 상승 명령 하나를 실행한다.
+    //
+    // 순서가 요점이다: **정본 argv 를 먼저 받아 오고**(claim) 그 다음에 비밀번호를
+    // 당겨 온다. args 에는 명령이 없고, 여기서도 args 로부터 명령을 만들지 않는다 —
+    // 운영자가 화면에서 읽고 승인한 argv 와 실제로 도는 argv 가 같아야 승인이
+    // 의미를 갖는다.
+    runPrivilegedCommand: async (requestId: string, sudoTicket: string) => {
+      const instanceId = instanceHeartbeat._real?.instanceId ?? null;
+      if (!instanceId) return { ran: false, ok: false, detail: 'this manager has no live instance id yet' };
+
+      const approved = await claimPrivilegedCommand(config, instanceId, requestId);
+      if (!approved) {
+        return {
+          ran: false,
+          ok: false,
+          detail: 'could not fetch the approved command (expired, denied, or not ours)',
+        };
+      }
+
+      const printable = `${approved.command} ${approved.args.join(' ')}`.trim();
+      const ticket = await fetchSudoTicket(config, sudoTicket);
+      if (!ticket?.password) {
+        const detail = 'no usable sudo ticket — ask the operator to approve again';
+        await postPrivilegedCommandResult(config, instanceId, requestId, { ok: false, output: '', failure: detail });
+        return { ran: false, ok: false, detail };
+      }
+
+      log(`[privileged] running approved command on behalf of request ${requestId.slice(0, 8)}: ${printable}`);
+      const r = await runWithSudo(
+        { cmd: approved.command, args: approved.args },
+        ticket.password,
+        // cwd 는 sudo-runner 의 계약 밖이다 — 승인 화면이 보여준 것과 다른 곳에서
+        // 돌 여지를 만들지 않기 위해, 현재는 매니저의 작업 디렉터리에서 돈다.
+      );
+      await postPrivilegedCommandResult(config, instanceId, requestId, {
+        ok: r.ok,
+        output: r.output,
+        failure: r.reason,
+      });
+      return {
+        ran: true,
+        ok: r.ok,
+        detail: r.ok
+          ? `ran ${printable} as root`
+          : `${printable} failed (${r.reason ?? 'unknown'})`,
+      };
     },
     requestStreamReconnect: () => eventStreamRef?.reconnect(),
     reloadConfig: async () => {

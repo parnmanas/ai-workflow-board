@@ -378,6 +378,87 @@ until they are respawned.
 server ↔ agent-manager heartbeat contract (`instance-registry.service.ts`,
 `agent-manager.controller.ts`) — change them in one PR on both sides.
 
+## Privilege escalation (sudo)
+
+Two surfaces need root on a Runtime Host: a CLI install under a root-owned npm
+prefix or snap (`update_cli`), and the occasional package install an agent asks
+for during a session or chat. Both use the same primitive and neither stores a
+password.
+
+### The one-shot sudo ticket
+
+```
+browser ──(HTTPS, admin session)──▶ server   password → ticket (memory, TTL 120s, single use)
+server  ──(SSE: ticket id only)───▶ manager
+manager ──(HTTPS, X-Agent-Key)────▶ GET /api/agent/sudo-ticket/:id
+                                   ◀── password once, then deleted server-side
+manager: sudo -S -k -p '' -- <argv>          password on stdin only
+```
+
+Same shape as `GET /api/agent/sessions/credential/:id`, and for the same reason:
+a secret must not ride an SSE payload that flows through the event registry, the
+command ledger, and the activity log. The SSE carries a ticket id, which is
+worthless on its own.
+
+`SudoTicketService` invariants: memory only (a password that survives a restart
+is a *stored* password), single use, TTL 120s, bound to the minting
+instance/agent/scope, and a consume attempt by the wrong manager **burns** the
+ticket — at that point the id has leaked, so keeping it alive for the legitimate
+manager is the worse option.
+
+`GET /api/agent/sudo-ticket/:id` refuses callers without an identity. Other
+manager endpoints (`/command/ack`) skip their ownership check when
+`AGENT_DEV_MODE` leaves the guard without one; this endpoint hands out a root
+password, so "we don't know who is collecting this, but here you go" does not
+apply. The cost is that sudo tickets don't work under `AGENT_DEV_MODE=true`.
+
+### What may be run as root
+
+**Never a command string from the wire.** Two independent paths supply argv, and
+both are server- or manager-authored:
+
+- `update_cli` → `cli-install-method.ts`'s `elevatedArgv`, built by the manager
+  from the install's own layout. Homebrew deliberately has none: brew refuses to
+  run as root and doing it anyway wrecks the install tree's ownership.
+- `run_privileged_command` → the manager re-fetches the **canonical approved
+  argv** from `GET /api/agent/privileged-command/:id`. The dispatch payload
+  carries `request_id` and `sudo_ticket` and no command at all, so what the
+  operator read and approved cannot drift from what runs.
+
+`sudo-runner.ts` passes the password on **stdin only** (argv and env are readable
+from `/proc` by any process on the host) and zeroes the buffer after writing.
+`-k` is not negotiable: a live sudo timestamp cache lets a *wrong* password
+succeed, which would make "is this password correct?" unanswerable. Failures are
+classified four ways — `bad_password` / `not_permitted` / `no_sudo` /
+`command_failed` — because the operator's next move differs for each.
+
+### Session / chat: approval, not a standing capability
+
+Agents never hold sudo. Giving an agent a stored password or a NOPASSWD entry
+makes that agent root, and one prompt injection becomes a root compromise.
+Instead:
+
+1. The agent calls `request_privileged_command({ command, args, cwd?, reason })`.
+   It returns immediately — the call is not held open (same posture as
+   `await_ci_run`).
+2. An operator reads the exact argv and the stated reason in the Runtime Hosts
+   admin page, then either denies it or approves it by typing the host password.
+3. Approval mints a ticket scoped to that request and dispatches
+   `run_privileged_command`.
+4. The manager claims the canonical argv, pulls the password once, runs it, and
+   posts the result back.
+5. The agent collects it with `get_privileged_command_result` (short long-poll;
+   call again while `pending`).
+
+**Denial is the default** — an undecided request expires unexecuted. Each agent
+is capped at `MAX_PENDING_PER_AGENT` outstanding requests so one agent cannot
+bury the operator in approvals until a habitual click gets through. The
+approval service never sees the password; it lives only in the sudo ticket.
+
+The cheaper fix is usually not sudo at all: hand the operator's account
+ownership of the prefix (`chown -R you /usr/local/lib/node_modules`) and the
+password stops crossing the network entirely.
+
 ## Process and session ownership
 
 - Hermes has exactly one isolated ACP process per durable AWB Agent.

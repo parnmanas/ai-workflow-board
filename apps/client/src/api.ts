@@ -50,6 +50,7 @@ import type {
   SubagentTranscript,
   AgentLiveSession,
   AgentManagerInstance,
+  PrivilegedCommandRequest,
   PairingTokenMint,
   PairingTokenSafe,
   AgentManagerCommandKind,
@@ -1725,6 +1726,26 @@ export const api = {
     request<{ ticket_id: string; expires_at: string }>(
       `/admin/agent-manager/instances/${encodeURIComponent(instanceId)}/sudo-ticket`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** 승인 대기 중인 권한 상승 명령 목록(관리자). */
+  listPrivilegedCommands: () =>
+    request<PrivilegedCommandRequest[]>('/admin/agent-manager/privileged-commands'),
+
+  /**
+   * 권한 상승 명령을 승인한다. 비밀번호는 이 요청 바디에만 실리고, 서버가 즉시
+   * 일회용 티켓으로 바꿔 매니저에게 디스패치한다 — 저장되지 않는다.
+   */
+  approvePrivilegedCommand: (requestId: string, password: string) =>
+    request<{ ok: boolean; command_id: string; request_id: string }>(
+      `/admin/agent-manager/privileged-commands/${encodeURIComponent(requestId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ password }) },
+    ),
+
+  denyPrivilegedCommand: (requestId: string) =>
+    request<{ ok: boolean; status: string }>(
+      `/admin/agent-manager/privileged-commands/${encodeURIComponent(requestId)}/deny`,
+      { method: 'POST' },
     ),
 
   revokeSudoTicket: (ticketId: string) =>

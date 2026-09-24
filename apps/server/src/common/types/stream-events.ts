@@ -802,7 +802,15 @@ export type AgentManagerCommand =
   // 쓰는 CLI. **범위는 에이전트가 아니라 Runtime Host** 다: CLI 는 전역 설치라
   // 같은 장비의 모든 에이전트·세션이 즉시 새 바이너리를 쓴다. 끝나면 매니저가
   // 버전을 다시 읽어 즉시 하트비트 1회를 보낸다(heartbeat `cli_versions`).
-  | 'update_cli';
+  | 'update_cli'
+  // 세션/채팅의 agent 가 요청하고 **운영자가 화면에서 승인한** 권한 상승 명령
+  // 하나를 실행한다. args: { request_id, sudo_ticket }.
+  //
+  // args 에는 실행할 명령이 **없다**. 매니저는 승인된 정본 argv 를
+  // `GET /api/agent/privileged-command/:id` 로 다시 받아 가서 실행한다 — 운영자가
+  // 화면에서 읽고 승인한 것과 실제로 도는 것이 갈라지면 승인이라는 개념 자체가
+  // 무너지기 때문이다. sudo_ticket 도 비밀번호가 아니라 1회용 티켓 id 다.
+  | 'run_privileged_command';
 
 export interface AgentManagerCommandPayload {
   // The dispatch correlation id — manager echoes it on /command/ack so the

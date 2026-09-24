@@ -100,7 +100,12 @@ type CommandKind =
   // sudo_ticket 은 권한 상승이 필요한 설치본에만 온다(비밀번호가 아니라 티켓 id).
   // 범위는 에이전트가 아니라 **하나의 설치본**이다: 같은 CLI 를 여러 벌 두는 것은
   // 정상 구성이라(vLLM 백엔드용 두 번째 claude) "이 장비의 claude" 는 애매하다.
-  | 'update_cli';
+  | 'update_cli'
+  // 운영자가 화면에서 승인한 권한 상승 명령 하나. args: { request_id, sudo_ticket }.
+  // **실행할 명령은 args 에 없다** — 매니저가 승인된 정본을 서버에서 다시 받아
+  // 간다(claimPrivilegedCommand). 운영자가 읽고 승인한 것과 도는 것이 갈라지면
+  // 승인이라는 개념 자체가 무너지기 때문이다.
+  | 'run_privileged_command';
 
 // Primary required field per credential provider — the one that carries the
 // actual auth secret. When the server returns a credential row with this
@@ -137,6 +142,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'cli_login_cancel',
   'refresh_available_models',
   'update_cli',
+  'run_privileged_command',
 ]);
 
 export interface AgentManagerCommandPayload {
@@ -222,6 +228,20 @@ export interface CommandHandlerDeps {
   updateCli?:
     | ((cli: string, bin?: string | null, sudoTicket?: string | null) => Promise<UpdateCliResult>)
     | null;
+  /** 운영자가 승인한 권한 상승 명령 하나를 실행한다. 배선되지 않은 매니저는
+   *  명확한 사유로 error ack 한다 — 조용히 성공한 척하지 않는다. */
+  runPrivilegedCommand?:
+    | ((requestId: string, sudoTicket: string) => Promise<RunPrivilegedCommandResult>)
+    | null;
+}
+
+/** run_privileged_command 한 번의 결과 — ack 문구를 정하는 데 쓴다. */
+export interface RunPrivilegedCommandResult {
+  /** 승인된 명령을 실제로 돌렸는지. */
+  ran: boolean;
+  ok: boolean;
+  /** 사람이 읽는 한 줄. 비밀번호는 절대 여기 담기지 않는다. */
+  detail: string;
 }
 
 /** update_cli 한 번의 결과. */
@@ -351,6 +371,8 @@ export class AgentManagerCommandHandler {
         return this.#refreshAvailableModels();
       case 'update_cli':
         return this.#updateCli(payload);
+      case 'run_privileged_command':
+        return this.#runPrivilegedCommand(payload);
     }
   }
 
@@ -1139,6 +1161,27 @@ export class AgentManagerCommandHandler {
         : '') +
       (result.heartbeatPosted ? '' : ' (version reaches the UI on the next heartbeat)')
     );
+  }
+
+  /**
+   * 운영자가 승인한 권한 상승 명령 하나를 실행한다.
+   *
+   * 여기서 하는 일은 배선된 콜백을 부르는 것뿐이다 — 정본 argv 를 다시 받아 오고
+   * sudo 비밀번호를 티켓으로 당겨 오는 일은 main.ts 가 맡는다. args 에는 명령이
+   * 없다는 사실이 이 커맨드의 요점이라, args 로부터 명령을 조립하는 코드가 여기
+   * 생기지 않도록 의도적으로 얇게 둔다.
+   */
+  async #runPrivilegedCommand(payload: AgentManagerCommandPayload): Promise<string> {
+    const run = this.#deps.runPrivilegedCommand;
+    if (!run) throw new Error('run_privileged_command is not wired on this manager');
+    const requestId = typeof payload.args?.request_id === 'string' ? payload.args.request_id.trim() : '';
+    const sudoTicket = typeof payload.args?.sudo_ticket === 'string' ? payload.args.sudo_ticket.trim() : '';
+    if (!requestId) throw new Error('run_privileged_command: args.request_id is required');
+    if (!sudoTicket) throw new Error('run_privileged_command: args.sudo_ticket is required');
+
+    const result = await run(requestId, sudoTicket);
+    if (!result.ok) throw new Error(`run_privileged_command: ${result.detail}`);
+    return `run_privileged_command ok: ${result.detail}`;
   }
 
   async #updatePlugins(payload: AgentManagerCommandPayload): Promise<string> {

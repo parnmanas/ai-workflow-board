@@ -9,6 +9,7 @@ import type {
   AgentManagerCommandKind,
   AgentManagerInstance,
   CliInstallEntry,
+  PrivilegedCommandRequest,
   Credential,
   DashboardAgent,
   PairingTokenMint,
@@ -1494,6 +1495,11 @@ export default function AgentManagerPage({
           data-testid="mainframe-detail-scroll"
           style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
         >
+          {/* 루트 권한 요청은 사람이 기다리는 상태라 어느 호스트를 보고 있든
+              먼저 눈에 들어와야 한다. 대기 중인 것이 없으면 아무것도 그리지 않는다. */}
+          <div style={{ marginBottom: 8 }}>
+            <PrivilegedCommandApprovals />
+          </div>
           {selected ? (
             <InstanceDetail
               inst={selected}
@@ -2558,6 +2564,163 @@ function EditAgentManagerDialog({
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ─── PrivilegedCommandApprovals — agent 가 요청한 root 명령의 승인 대기열 ───────
+//
+// agent 는 요청만 할 수 있고, 실행은 운영자가 **명령을 읽고** 승인하면서 비밀번호를
+// 칠 때만 일어난다. agent 에게 상시 sudo 를 주면 그 agent 가 곧 root 이고, 프롬프트
+// 인젝션 한 번이 루트 권한 탈취가 된다.
+//
+// 화면이 보여주는 argv 가 곧 실행되는 argv 다 — 매니저는 서버가 보관한 정본을 다시
+// 받아 가서 돌린다. 그래서 여기서 읽은 것과 도는 것이 갈라질 수 없다.
+//
+// 기본값은 거부다: 아무도 결정하지 않으면 창이 지나며 만료된다. 그래서 이 패널은
+// "대기 중일 때만" 나타나고, 평소에는 아무것도 그리지 않는다.
+function PrivilegedCommandApprovals() {
+  const { showToast } = useToast();
+  const [requests, setRequests] = useState<PrivilegedCommandRequest[]>([]);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setRequests(await api.listPrivilegedCommands());
+    } catch {
+      // 목록 조회 실패가 화면을 망가뜨리면 안 된다 — 다음 폴링이 복구한다.
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    // 승인 대기는 사람이 기다리는 상태다. 하트비트(30초)보다 촘촘히 본다.
+    const t = setInterval(refresh, 10_000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  if (requests.length === 0) return null;
+
+  const deciding = requests.find((r) => r.request_id === decidingId) ?? null;
+
+  const approve = async () => {
+    if (!deciding || !password || busy) return;
+    setBusy(true);
+    try {
+      await api.approvePrivilegedCommand(deciding.request_id, password);
+      setPassword('');
+      setDecidingId(null);
+      showToast(`승인됨 — ${deciding.hostname} 에서 실행 중입니다.`, 'success');
+      await refresh();
+    } catch (err: any) {
+      setPassword('');
+      showToast(`승인 실패: ${err?.message || err}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deny = async (req: PrivilegedCommandRequest) => {
+    try {
+      await api.denyPrivilegedCommand(req.request_id);
+      showToast('거부했습니다.', 'info');
+      await refresh();
+    } catch (err: any) {
+      showToast(`거부 실패: ${err?.message || err}`, 'error');
+    }
+  };
+
+  return (
+    <div
+      style={{
+        padding: 16,
+        background: tokens.colors.surfaceCard,
+        border: `1px solid ${tokens.colors.warning}`,
+        borderRadius: tokens.radii.md,
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+        루트 권한 요청 {requests.length}건 — 승인 대기
+      </div>
+      <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 12, lineHeight: 1.6 }}>
+        아래 명령은 <strong>그대로</strong> root 로 실행됩니다. 승인할 때 입력하는 비밀번호는 저장되지
+        않으며, 일회용 티켓으로 해당 호스트의 매니저에게 한 번만 전달됩니다. 결정하지 않으면 만료되어
+        아무 일도 일어나지 않습니다.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {requests.map((req) => (
+          <div
+            key={req.request_id}
+            style={{
+              padding: 10,
+              border: `1px solid ${tokens.colors.border}`,
+              borderRadius: tokens.radii.sm,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
+              <strong>{req.agent_name}</strong> → <code>{req.hostname}</code>
+            </div>
+            <code
+              style={{
+                fontSize: 12,
+                fontFamily: 'monospace',
+                color: tokens.colors.textStrong,
+                wordBreak: 'break-all',
+              }}
+            >
+              sudo {req.command} {req.args.join(' ')}
+            </code>
+            <div style={{ fontSize: 11, color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
+              {req.reason}
+            </div>
+            {deciding?.request_id === req.request_id ? (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <Input
+                    type="password"
+                    autoFocus
+                    value={password}
+                    placeholder={`${req.hostname} 의 sudo 비밀번호`}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+                    onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                      if (e.key === 'Enter') void approve();
+                    }}
+                  />
+                </div>
+                <Button size="sm" variant="primary" onClick={approve} disabled={!password || busy}>
+                  {busy ? '실행 중…' : '승인하고 실행'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setPassword('');
+                    setDecidingId(null);
+                  }}
+                >
+                  취소
+                </Button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <Button size="sm" variant="primary" onClick={() => setDecidingId(req.request_id)}>
+                  승인…
+                </Button>
+                <Button size="sm" variant="danger" onClick={() => deny(req)}>
+                  거부
+                </Button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

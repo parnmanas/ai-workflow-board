@@ -16,6 +16,7 @@ import { InstanceRegistryModule } from './instance-registry.module';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { SudoTicketService } from './sudo-ticket.service';
+import { PrivilegedCommandService } from './privileged-command.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
 import { SkillsModule } from '../skills/skills.module';
@@ -50,6 +51,7 @@ import { SkillsModule } from '../skills/skills.module';
     PairingService,
     CommandLedgerService,
     SudoTicketService,
+    PrivilegedCommandService,
     AgentManagerCommandService,
     // version-drift / stale self-update health monitor (ticket 7485df07). Runs
     // its own sweep timer; consumes InstanceRegistryService (now global via
@@ -61,6 +63,12 @@ import { SkillsModule } from '../skills/skills.module';
     PermissionGuard,
     WorkspaceGuard,
   ],
-  exports: [PairingService, AgentManagerCommandService],
+  exports: [
+    PairingService,
+    AgentManagerCommandService,
+    // MCP 툴(`request_privileged_command`)이 승인 대기를 만들고 조회한다.
+    // InstanceRegistryService 는 @Global() 이라 여기서 다시 내보낼 필요가 없다.
+    PrivilegedCommandService,
+  ],
 })
 export class AgentManagerModule {}

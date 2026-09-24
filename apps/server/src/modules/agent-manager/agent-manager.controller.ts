@@ -38,6 +38,7 @@ import {
   type CliInstallEntry,
 } from './instance-registry.service';
 import { SudoTicketService, type SudoTicketScope } from './sudo-ticket.service';
+import { PrivilegedCommandService } from './privileged-command.service';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
@@ -68,6 +69,10 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   // 끝난 뒤 spawn 되는 CLI 는 새 버전이다 — 장비 전역 영향이라 관리자 전용
   // 경로(다른 verb 와 같은 가드)로만 들어온다.
   'update_cli',
+  // 운영자가 화면에서 승인한 권한 상승 명령 하나. 승인 흐름이 발급하는 경로
+  // (approve 엔드포인트)에서만 디스패치되지만, 다른 verb 와 같은 관리자 가드를
+  // 통과하므로 허용목록에도 명시한다.
+  'run_privileged_command',
 ] as const);
 
 /** 세 등급이 모두 알려진 support 값일 때만 `permission_tiers` 를 남긴다.
@@ -311,6 +316,7 @@ export class AgentManagerController {
     private readonly logService: LogService,
     private readonly commandLedger: CommandLedgerService,
     private readonly sudoTickets: SudoTicketService,
+    private readonly privileged: PrivilegedCommandService,
     private readonly commands: AgentManagerCommandService,
     private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
@@ -1433,6 +1439,171 @@ export class AgentManagerController {
     // ledger before emitting (ack-race safety).
     const { command_id, issued_at } = await this.commands.issue(inst, command, args, user.id);
     return res.status(202).json({ ok: true, command_id, issued_at });
+  }
+
+  // ─── 권한 상승 명령 승인 (세션/채팅 경로) ──────────────────────────────
+  //
+  // agent 는 `request_privileged_command` MCP 툴로 요청만 할 수 있고, 실행은
+  // **운영자가 화면에서 명령을 읽고 승인하면서 비밀번호를 칠 때만** 일어난다.
+  // agent 에게 상시 sudo 를 주면 그 agent 는 root 이고, 프롬프트 인젝션 한 번이
+  // 곧 루트 권한 탈취가 된다. 기본값은 거부다 — 승인 없이 창이 지나면 만료된다.
+
+  @ApiBearerAuth('user-session')
+  @Get('api/admin/agent-manager/privileged-commands')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '승인 대기 중인 권한 상승 명령 목록' })
+  async listPrivilegedCommands(
+    @CurrentUser() user: CurrentUserData | undefined,
+    @CurrentWorkspaceId() workspaceId: string | null,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    return res.json(this.privileged.listPending(workspaceId));
+  }
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/privileged-commands/:id/approve')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '권한 상승 명령을 승인하고 sudo 비밀번호를 1회용 티켓으로 건넨다' })
+  async approvePrivilegedCommand(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (!password) return res.status(400).json({ error: 'password is required' });
+
+    const pending = this.privileged.get(String(id || ''));
+    if (!pending) return res.status(404).json({ error: 'request not found or expired' });
+    if (pending.status !== 'pending') {
+      return res.status(409).json({ error: `request is already ${pending.status}` });
+    }
+    const inst = this.registry.get(pending.instance_id);
+    if (!inst) return res.status(410).json({ error: 'the requesting manager is no longer online' });
+
+    const approved = this.privileged.approve(pending.request_id, user.id);
+    if (!approved) return res.status(409).json({ error: 'request is no longer pending' });
+
+    // 티켓 scope 를 이 요청에 못 박는다 — 티켓 id 가 새도 다른 명령에 못 쓴다.
+    const ticket = this.sudoTickets.mint({
+      instance_id: inst.instance_id,
+      agent_id: inst.agent_id,
+      scope: { kind: 'privileged_command', request_id: approved.request_id },
+      password,
+      issued_by: user.id,
+    });
+
+    // args 에 명령을 싣지 않는다. 매니저는 승인된 정본을 다시 받아 간다.
+    const { command_id, issued_at } = await this.commands.issue(
+      inst,
+      'run_privileged_command' as AgentManagerCommand,
+      { request_id: approved.request_id, sudo_ticket: ticket.ticket_id },
+      user.id,
+    );
+    this.logService.info(
+      'AgentManager',
+      `Privileged command approved — ${approved.command} (agent=${approved.agent_name}, host=${approved.hostname})`,
+      {
+        request_id: approved.request_id,
+        command: approved.command,
+        args: approved.args,
+        agent_id: approved.agent_id,
+        instance_id: approved.instance_id,
+        approved_by: user.id,
+      },
+    );
+    return res.status(202).json({ ok: true, command_id, issued_at, request_id: approved.request_id });
+  }
+
+  @ApiBearerAuth('user-session')
+  @Post('api/admin/agent-manager/privileged-commands/:id/deny')
+  @UseGuards(PermissionGuard)
+  @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
+  @ApiOperation({ summary: '권한 상승 명령을 거부한다' })
+  async denyPrivilegedCommand(
+    @Param('id') id: string,
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Res() res: Response,
+  ) {
+    if (!user) return res.status(401).json({ error: 'unauthenticated' });
+    const denied = this.privileged.deny(String(id || ''), user.id);
+    if (!denied) return res.status(404).json({ error: 'request not found, expired, or already decided' });
+    // 거부는 아무것도 만들지 않는다 — @Post 의 기본 201 을 그대로 두면 "생성됨" 으로
+    // 읽힌다. 명시적으로 200 을 쓴다.
+    return res.status(200).json({ ok: true, request_id: denied.request_id, status: denied.status });
+  }
+
+  @ApiSecurity('agent-key')
+  @Get('api/agent/privileged-command/:id')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({
+    summary: '매니저 → 서버: 운영자가 승인한 **정본** argv 를 받아 간다 (실행 직전)',
+  })
+  async claimPrivilegedCommand(
+    @Param('id') id: string,
+    @Query('instance_id') instanceId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const guard = this.requireManagerInstance(req, instanceId);
+    if ('error' in guard) return res.status(guard.status).json({ error: guard.error });
+
+    const claimed = this.privileged.claim(String(id || ''), guard.instance_id);
+    if (!claimed.ok) {
+      const status = claimed.reason === 'wrong_instance' ? 403 : claimed.reason === 'unknown' ? 404 : 409;
+      return res.status(status).json({ error: claimed.reason });
+    }
+    const { request } = claimed;
+    // 매니저가 실행에 필요한 것만 준다. 승인자·이유 같은 것은 여기서 쓸모가 없다.
+    return res.json({
+      request_id: request.request_id,
+      command: request.command,
+      args: request.args,
+      cwd: request.cwd,
+    });
+  }
+
+  @ApiSecurity('agent-key')
+  @Post('api/agent/privileged-command/:id/result')
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: '매니저 → 서버: 권한 상승 명령의 실행 결과' })
+  async reportPrivilegedCommandResult(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const instanceId = typeof body?.instance_id === 'string' ? body.instance_id : '';
+    const guard = this.requireManagerInstance(req, instanceId);
+    if ('error' in guard) return res.status(guard.status).json({ error: guard.error });
+
+    const done = this.privileged.complete(String(id || ''), guard.instance_id, {
+      ok: body?.ok === true,
+      output: typeof body?.output === 'string' ? body.output : '',
+      failure: typeof body?.failure === 'string' ? body.failure : null,
+    });
+    if (!done) return res.status(404).json({ error: 'request not found or not awaiting a result' });
+    return res.status(201).json({ ok: true });
+  }
+
+  /** 매니저 전용 엔드포인트의 공통 신원 확인 — 이 API 키가 그 인스턴스를
+   *  소유한 매니저의 것인가. 비밀·정본을 내주기 전에 반드시 통과해야 한다. */
+  private requireManagerInstance(
+    req: Request,
+    instanceId: string,
+  ): { instance_id: string } | { error: string; status: number } {
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    if (!callerAgentId) return { error: 'unauthenticated', status: 401 };
+    const id = String(instanceId || '').trim();
+    if (!id) return { error: 'instance_id is required', status: 400 };
+    const inst = this.registry.get(id);
+    if (!inst) return { error: 'instance not found or expired', status: 404 };
+    if (inst.agent_id !== callerAgentId) return { error: 'caller does not own this instance', status: 403 };
+    return { instance_id: inst.instance_id };
   }
 
   // ─── 일회용 sudo 티켓 ───────────────────────────────────────────────────
