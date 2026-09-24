@@ -777,3 +777,64 @@ test('interactive contract: config options + commands in the snapshot, set_confi
 
   stream.close();
 });
+
+// 세션 모달의 모델 선택지가 "되는 조합 / 안 되는 조합" 으로 갈리던 문제.
+//
+// 선택지의 출처는 세 단계다: (1) 이 호스트×CLI 로 세션을 열었을 때 캐시한 ACP configOptions,
+// (2) 지금 살아 있는 세션의 선택지, (3) 하트비트의 available_models 로 합성한 model 옵션.
+// 3번이 없던 동안에는 **한 번도 세션을 연 적 없는 조합**이면 모델을 아예 못 골랐다.
+// 여기서 보는 것은 그 마지막 단계와, 그것이 앞 단계를 덮지 않는다는 것이다.
+test('세션 CLI 설정: 세션을 연 적 없는 호스트×CLI 도 하트비트가 보고한 모델로 고를 수 있다', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'model-fallback');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
+  const token = app.get(AuthService).createSession(owner.id);
+  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+
+  // 매니저가 CLI별 모델 목록을 보고한다. 세션은 아직 한 번도 연 적이 없다.
+  await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST',
+    headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: 'inst-models', agent_id: managerId, mode: 'manager', hostname: 'rolf',
+      plugin_version: 'test', cli: 'mixed', cli_adapters: ['claude', 'opencode'],
+      acp_session_clis: ['claude', 'opencode'], pid: 1, started_at: new Date().toISOString(),
+      available_models: { claude: ['opus', 'sonnet'], opencode: ['opencode/big-pickle'] },
+    }),
+  });
+
+  const settings = async (cli) => {
+    const resp = await call(`${base}/api/agent-sessions/hosts/${managerId}/${cli}/settings`, { headers });
+    assert.equal(resp.status, 200, resp.text);
+    return resp.body;
+  };
+
+  const opencode = await settings('opencode');
+  const modelOption = opencode.known_config_options.find((o) => o.category === 'model');
+  assert.ok(modelOption, '세션을 연 적 없어도 모델 선택지가 있어야 한다');
+  assert.equal(modelOption.config_id, 'model');
+  assert.equal(modelOption.type, 'select');
+  assert.deepEqual(modelOption.options.map((o) => o.value), ['opencode/big-pickle']);
+  // 합성한 값은 "지금 고른 것" 이 아니다 — 세션이 열리면 어댑터가 실제 현재값을 알려준다.
+  assert.equal(modelOption.current_value, null);
+
+  const claude = await settings('claude');
+  assert.deepEqual(
+    claude.known_config_options.find((o) => o.category === 'model').options.map((o) => o.value),
+    ['opus', 'sonnet'],
+  );
+
+  // 보고된 모델이 없는 CLI 는 빈 선택지 그대로다 — 없는 목록을 지어내지 않는다.
+  const unknown = await settings('codex');
+  assert.equal(unknown.known_config_options.some((o) => o.category === 'model'), false);
+});

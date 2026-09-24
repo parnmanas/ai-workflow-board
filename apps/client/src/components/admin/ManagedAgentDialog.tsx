@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import type { Agent, ClaudeBackendProfile, Credential } from '../../types';
@@ -226,8 +226,9 @@ export default function ManagedAgentDialog({
   // 완료 판정은 발급된 command_id 의 ack 로만 한다 — 하트비트 도착을 완료로 쓰면
   // 커맨드와 무관한 30초 정기 하트비트가 조건을 충족시켜 재열거 전 목록을 "갱신됨"
   // 으로 보여준다(리뷰 지적). 성공 ack 이후에만 목록을 다시 읽어 후보를 교체한다.
-  const handleRefreshModels = async () => {
+  const handleRefreshModels = async (opts: { silent?: boolean } = {}) => {
     if (!resolvedInstanceId || refreshingModels) return;
+    const quiet = opts.silent === true;
     setRefreshingModels(true);
     try {
       const resp = await api.sendAgentManagerCommand(resolvedInstanceId, {
@@ -235,23 +236,26 @@ export default function ManagedAgentDialog({
       });
       const ack = await waitForCommandAck(resp.command_id);
       if (ack.state === 'error') {
-        showToast(`모델 목록 갱신 실패 — ${ack.detail || '사유 미상'}`, 'error');
+        if (!quiet) showToast(`모델 목록 갱신 실패 — ${ack.detail || '사유 미상'}`, 'error');
         return;
       }
       if (ack.state !== 'ok') {
-        showToast(
-          '모델 재열거를 요청했지만 매니저 응답을 아직 받지 못했습니다. ' +
-            '잠시 뒤 이 창을 다시 열면 반영돼 있습니다.',
-          'info',
-        );
+        if (!quiet) {
+          showToast(
+            '모델 재열거를 요청했지만 매니저 응답을 아직 받지 못했습니다. ' +
+              '잠시 뒤 이 창을 다시 열면 반영돼 있습니다.',
+            'info',
+          );
+        }
         return;
       }
       const fresh = await reloadInstance(resolvedInstanceId);
       if (!fresh) {
-        showToast('이 agent 를 관리하는 Runtime Host 를 찾지 못했습니다.', 'error');
+        if (!quiet) showToast('이 agent 를 관리하는 Runtime Host 를 찾지 못했습니다.', 'error');
         return;
       }
       setAvailableModelsByCli(fresh.available_models || {});
+      if (quiet) return;
       const registrySummary = summarizeModelCounts(fresh.available_models);
       showToast(
         `모델 목록 갱신 완료 — ${ack.detail || '매니저가 결과를 보고하지 않았습니다'}` +
@@ -259,11 +263,35 @@ export default function ManagedAgentDialog({
         'success',
       );
     } catch (err: any) {
-      showToast(`모델 목록 갱신 실패: ${err?.message || err}`, 'error');
+      if (!quiet) showToast(`모델 목록 갱신 실패: ${err?.message || err}`, 'error');
     } finally {
       setRefreshingModels(false);
     }
   };
+
+  // 호스트와 CLI 를 고르면 그 조합의 모델 목록을 **그 자리에서** 가져온다.
+  //
+  // 예전에는 매니저가 부팅 시점에 열거해 둔 목록만 보여줬다. 그래서 부팅 뒤에 설치한 CLI,
+  // 또는 그때 열거에 실패한 CLI 는 드롭다운이 빈 채로 남았고, 사용자가 "모델 목록 새로고침"
+  // 버튼의 존재를 알아야만 채울 수 있었다 — 되는 조합과 안 되는 조합이 뒤섞여 보인 이유다.
+  //
+  // 이 다이얼로그의 cli 타입에는 'custom' 이 없다(어댑터 있는 런타임만).
+  // 조합당 한 번만 시도한다(attemptedRef). 모델 개념이 없거나 열거를 지원하지 않는 CLI
+  // (antigravity / pi) 에서 매번 재시도해 매니저를 두드리면 안 되고, 그 경우 자유 입력으로
+  // 떨어지는 기존 동작이 정답이기 때문이다. 조용히 돈다 — 사용자가 요청한 적 없는 작업의
+  // 성공 토스트는 소음이다.
+  const modelProbeAttempted = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!open || !resolvedInstanceId || !cli) return;
+    if ((availableModelsByCli[cli] || []).length > 0) return;
+    const key = `${resolvedInstanceId}:${cli}`;
+    if (modelProbeAttempted.current.has(key)) return;
+    modelProbeAttempted.current.add(key);
+    void handleRefreshModels({ silent: true });
+    // handleRefreshModels 는 매 렌더 새로 만들어지므로 의존성에 넣지 않는다 — 넣으면
+    // 이 effect 가 렌더마다 다시 돌아 attemptedRef 가 막아주기 전에 요청이 겹친다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, resolvedInstanceId, cli, availableModelsByCli]);
 
   const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
   // Candidate models for the selected CLI. When the manager reported a list we
@@ -539,7 +567,7 @@ export default function ManagedAgentDialog({
             </div>
             {resolvedInstanceId && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-                <Button variant="ghost" onClick={handleRefreshModels} disabled={refreshingModels || busy}>
+                <Button variant="ghost" onClick={() => void handleRefreshModels()} disabled={refreshingModels || busy}>
                   {refreshingModels ? '모델 갱신 중…' : '모델 목록 새로고침'}
                 </Button>
                 <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>

@@ -91,6 +91,14 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 | `session_info_update` | 제목 패치 | — |
 
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
+**모델 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다.** (1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP
+`configOptions` — 표시 이름·현재값까지 있어 가장 정확하다. (2) 지금 살아 있는 세션이 아는 선택지(서버 재시작 직후).
+(3) 하트비트 `available_models[cli]` 로 합성한 model 옵션 — **세션을 한 번도 연 적 없는 조합**에서도 고를 수 있게 한다.
+3번이 없던 동안에는 처음 쓰는 호스트×CLI 면 모델을 아예 못 골랐고, 사용자 눈에는 되는 조합과 안 되는 조합이
+뒤섞인 것처럼 보였다. 합성은 **덧붙이기만 하고 덮어쓰지 않는다** — 실제 세션이 보고한 목록이 항상 더 정확하다.
+두 출처의 id 형식이 같기 때문에 성립한다(rolf 실측: claude `opus/sonnet/haiku`, codex `gpt-6-astra…`,
+opencode `opencode/big-pickle` — ACP 값과 어댑터 `listModels()` 값이 일치).
+
 config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 — codex-acp 1.12, claude-agent-acp 0.79 실측) 또는
 `configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
 **고른 설정은 기억된다.** 어댑터 프로세스는 매번 자기 기본값으로 시작하므로, 기억해 두지 않으면 유휴 회수·재접속마다

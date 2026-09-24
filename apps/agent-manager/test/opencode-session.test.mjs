@@ -113,3 +113,24 @@ test('id 나 directory 가 없는 행은 버리고 나머지는 살린다', asyn
   const rows = await store.listSessions('opencode');
   assert.deepEqual(rows.map((r) => r.session_id).sort(), ['ses_abc123', 'ses_ok']);
 });
+
+// 모델 열거 — 에이전트 생성 화면의 모델 드롭다운이 읽는 값.
+//
+// opencode 는 `listModels()` 가 없어 항상 빈 목록이었고, 그래서 그 CLI 를 고르면
+// 드롭다운이 비어 자유 입력으로 떨어졌다. 여기서 보는 것은 (1) 이제 열거한다는 것과
+// (2) 그 id 형식이 ACP config option 값과 같아서 두 화면이 같은 값을 쓴다는 것이다.
+// opencode 가 설치돼 있지 않은 환경에서도 계약(빈 배열, throw 없음)은 지켜져야 한다.
+
+const { createAdapter } = await import('../dist/lib/cli-adapters/index.js');
+
+test('opencode 어댑터가 모델을 열거한다 (미설치 환경에서는 빈 배열, throw 없음)', async () => {
+  const models = await createAdapter('opencode').listModels();
+  assert.ok(Array.isArray(models), 'listModels 는 언제나 배열이다');
+  for (const id of models) {
+    // ACP `session/new` 의 model option 값과 같은 형식이어야 두 화면이 같은 값을 쓴다.
+    assert.match(id, /^[^\s]+\/[^\s]+$/, `provider/model 형식이어야 한다: ${id}`);
+  }
+  if (models.length) {
+    assert.equal(new Set(models).size, models.length, '중복이 없어야 한다');
+  }
+});

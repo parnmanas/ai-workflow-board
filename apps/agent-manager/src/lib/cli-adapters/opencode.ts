@@ -132,6 +132,9 @@ function composePrompt(
   return parts.join('\n\n');
 }
 
+/** `opencode models` 는 provider 조회가 붙어 느릴 수 있다 — 열거 하나가 부팅을 붙잡지 않게 한다. */
+const MODEL_LIST_TIMEOUT_MS = 15_000;
+
 export class OpencodeCliAdapter extends CliAdapter {
   static cliType = 'opencode';
 
@@ -153,6 +156,37 @@ export class OpencodeCliAdapter extends CliAdapter {
    *  claude/codex 와 서브커맨드 이름이 갈리므로 어댑터가 알려 주는 이유 그 자체. */
   cliUpdate(): { args: string[]; label: string } | null {
     return { args: ['upgrade'], label: 'opencode upgrade' };
+  }
+
+  /**
+   * `opencode models` — 한 줄에 하나씩 `provider/model` 을 찍는다. 다른 어댑터처럼
+   * 설정 파일을 추측해 읽지 않고 CLI 에게 직접 묻는 이유는, opencode 의 모델 목록이
+   * 로그인한 provider 에 따라 달라지고 그 계산을 아는 건 opencode 자신뿐이기 때문이다.
+   *
+   * 여기서 돌려주는 id 는 ACP `session/new` 의 model config option 값과 **같은 형식**이다
+   * (rolf 실측: 양쪽 다 `opencode/big-pickle`). 그래서 에이전트 생성 화면에서 고른 모델을
+   * 세션에도 그대로 쓸 수 있다.
+   *
+   * 실패(미설치·네트워크·형식 변경)는 빈 배열 — 열거는 best-effort 라 한 CLI 의 실패가
+   * 다른 CLI 의 목록까지 없애면 안 된다(gatherAvailableModels 계약).
+   */
+  async listModels(): Promise<string[]> {
+    try {
+      const out = execFileSync(this.resolveBin(), ['models'], {
+        encoding: 'utf8',
+        timeout: MODEL_LIST_TIMEOUT_MS,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const ids = out
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        // 배너/빈 줄/경고를 걸러낸다 — 실제 id 는 공백 없는 `provider/model` 이다.
+        .filter((line) => !!line && !/\s/.test(line) && line.includes('/'));
+      return [...new Set(ids)];
+    } catch {
+      return [];
+    }
   }
 
   /** model + permission_mode map onto argv; system_prompt_append folds into

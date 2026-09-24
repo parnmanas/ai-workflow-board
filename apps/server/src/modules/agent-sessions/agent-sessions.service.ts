@@ -547,9 +547,13 @@ export class AgentSessionsService implements OnModuleDestroy {
       backend: pinnedBackend ? this.backendRef(pinnedBackend.runtime, pinnedBackend.name) : null,
       backend_candidates: backends.map((b) => this.backendRef(b.runtime, b.name)),
       default_config: this.parseDefaults(row?.default_config),
-      // 캐시가 아직 비었으면 지금 살아 있는 세션이 아는 선택지를 그대로 쓴다 — 서버가 재시작한 직후나
-      // 이 호스트에서 세션을 연 적이 없는 워크스페이스에서도 바로 고를 수 있다.
-      known_config_options: cached.length ? cached : this.liveConfigOptions(managerId, cli),
+      // 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다:
+      //   1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP configOptions (가장 정확 — 표시 이름·현재값 포함)
+      //   2) 지금 살아 있는 세션이 아는 선택지 (서버 재시작 직후)
+      //   3) 하트비트의 `available_models` 로 합성한 model 옵션 (세션을 한 번도 연 적 없는 조합)
+      // 3번이 없던 동안에는 "처음 쓰는 호스트×CLI 면 모델을 못 고른다" 가 됐고, 사용자 눈에는
+      // 되는 조합과 안 되는 조합이 뒤섞인 것처럼 보였다.
+      known_config_options: this.withModelFallback(cached.length ? cached : this.liveConfigOptions(managerId, cli), managerId, cli),
       updated_at: row ? new Date(row.updated_at).toISOString() : null,
     };
   }
@@ -625,6 +629,49 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /** 지금 살아 있는 이 호스트×CLI 세션 중 가장 최근 것이 아는 설정 선택지. */
+  /**
+   * 선택지 목록에 model 옵션이 없으면 하트비트의 `available_models[cli]` 로 하나 합성해 덧붙인다.
+   *
+   * ACP 가 주는 값과 어댑터 `listModels()` 가 주는 값은 **같은 id 형식**이다(rolf 실측:
+   * claude `opus/sonnet/haiku`, codex `gpt-6-astra…`, opencode `opencode/big-pickle`). 그래서
+   * 여기서 합성한 값을 그대로 `session/set_config_option` 에 넘겨도 어댑터가 받아들인다.
+   *
+   * 덧붙이기만 하고 **덮어쓰지 않는다** — 실제 세션이 보고한 목록이 항상 더 정확하다
+   * (표시 이름·현재 선택값·CLI 가 실제로 허용하는 부분집합).
+   */
+  private withModelFallback(
+    options: AgentSessionConfigOption[],
+    managerId: string,
+    cli: string,
+  ): AgentSessionConfigOption[] {
+    if (options.some((o) => o.category === 'model')) return options;
+    const models = this.heartbeatModels(managerId, cli);
+    if (!models.length) return options;
+    return [
+      ...options,
+      {
+        config_id: 'model',
+        name: 'Model',
+        description: 'Reported by this Runtime Host; the session may refine the list once it opens.',
+        category: 'model',
+        type: 'select',
+        current_value: null,
+        options: models.map((value) => ({ value, name: value })),
+      },
+    ];
+  }
+
+  /** 이 매니저의 최신 하트비트가 보고한 CLI별 모델 목록. 보고가 없으면 빈 배열. */
+  private heartbeatModels(managerId: string, cli: string): string[] {
+    let best: InstanceRecord | null = null;
+    for (const rec of this.managerRecords()) {
+      if (rec.agent_id !== managerId) continue;
+      if (!best || rec.last_seen_at > best.last_seen_at) best = rec;
+    }
+    const models = best?.available_models?.[cli];
+    return Array.isArray(models) ? models.filter((m) => typeof m === 'string' && !!m) : [];
+  }
+
   private liveConfigOptions(managerId: string, cli: string): AgentSessionConfigOption[] {
     let best: LiveState | null = null;
     for (const state of this.live.values()) {
