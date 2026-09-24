@@ -1111,7 +1111,18 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.status = 'starting';
     state.driver_user_id = userId;
     state.updated_at = Date.now();
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'restart', session_id: sessionId, driver_user_id: userId });
+    // 세션을 **다시 여는** 요청이므로 open/prompt 와 똑같은 개설 컨텍스트를 실어야 한다.
+    // 특히 `credential_id` 를 빠뜨리면 운영자 로그인으로 열리고, 그 다음 op 가 바인딩된
+    // credential 을 싣고 오는 순간 매니저가 "binding changed" 로 또 다시 연다 — 계정이
+    // 바뀌면서 모델 목록도 함께 바뀌어, 방금 고른 모델이 사라지고 설정이 실패한다
+    // (실측: restart 직후 Fable 5.1 이 보였다가 고르면 Internal error 로 떨어졌다).
+    this.emitRequest({
+      manager_id: managerId, workspace_id: workspaceId, cli, op: 'restart', session_id: sessionId,
+      cwd: state.cwd, title: state.title, credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
+      config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),
+      runtime_profile: await this.backendProfileFor(workspaceId, managerId, cli),
+      driver_user_id: userId,
+    });
     return this.emitUpdate(state, 'restart');
   }
 

@@ -303,6 +303,22 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 - 진행 중인 턴이 있으면 끊긴다. UI 는 `starting` 일 때만 버튼을 잠근다: 턴 중이라도
   운영자가 일부러 죽이려는 것일 수 있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다.
 
+### 다시 여는 op 은 개설 컨텍스트를 반드시 싣는다
+
+`restart` 는 세션을 **다시 여는** 요청이므로 `open`/`prompt` 와 똑같이 `cwd`·`title`·
+`credential_id`·`config_defaults`·`runtime_profile` 을 실어야 한다. 특히
+`credential_id` 를 빠뜨리면 세션이 **운영자 로그인**으로 열리고, 바로 다음 op 가
+바인딩된 credential 을 싣고 오는 순간 매니저의 `#ensureLive` 가 "binding changed" 로
+판단해 또 한 번 다시 연다.
+
+그 두 번의 열기는 **서로 다른 계정**이고, 계정이 다르면 어댑터가 광고하는 모델 목록도
+다르다. 실측된 증상: restart 직후에는 Fable 5.1 이 목록에 보이는데(운영자 로그인 계정의
+권한) 그것을 고르는 순간 세션이 credential 계정으로 다시 열리면서 그 모델이 사라지고
+`set_config_option failed: Internal error` 로 떨어졌다. 화면에서는 "됐다가 안 되는"
+것처럼 보이지만, 실제로는 **고르는 순간 계정이 바뀐 것**이다.
+
+`close` 는 다시 열지 않으므로 이 컨텍스트가 필요 없다 — 다시 여는 op 인지가 기준이다.
+
 `AGENT_SESSION_REQUEST_OPS` 는 서버·agent-manager 공동 contract 다. agent-manager 는
 별도 패키지라 그 타입을 import 할 수 없어 유니온 사본을 두므로, op 추가는 **양쪽을 같은
 PR 로** 고친다(`agent-session-runner.ts` 의 `AgentSessionRequest`).

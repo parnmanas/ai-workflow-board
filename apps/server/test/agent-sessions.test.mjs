@@ -360,6 +360,17 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const prompt = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/prompt`, { method: 'POST', headers, body: JSON.stringify({ text: 'hi' }) });
   assert.equal(prompt.status, 202);
   assert.equal(requests.find((r) => r.op === 'prompt').credential_id, claudeToken.id);
+  // restart 도 세션을 **다시 여는** 요청이다 — 개설 컨텍스트를 빠뜨리면 운영자 로그인으로
+  // 열리고, 다음 op 가 바인딩된 credential 을 싣고 오는 순간 매니저가 계정을 바꿔 다시
+  // 연다. 그러면 모델 목록이 통째로 달라져서 방금 고른 모델이 사라지고 설정이 실패한다
+  // (실측: restart 직후 Fable 5.1 이 보였다가 고르면 Internal error).
+  const restartCred = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-cred/restart`, { method: 'POST', headers });
+  assert.equal(restartCred.status, 202);
+  const restartReq = requests.find((r) => r.op === 'restart');
+  assert.ok(restartReq, 'restart 요청이 나가야 한다');
+  assert.equal(restartReq.credential_id, claudeToken.id, 'restart 는 세션이 쓰던 계정 그대로 다시 열어야 한다');
+  assert.equal(restartReq.workspace_id, ws.id);
+  assert.equal(restartReq.cwd, '/home/parn/repo', '다시 열 때 cwd 도 함께 실어야 한다');
 
   // manager fetches the decrypted material — only for a bound credential, only as the bound manager
   const fetched = await call(`${base}/api/agent/sessions/credential/${claudeToken.id}?workspace_id=${ws.id}`, { headers: { 'X-Agent-Key': managerKey } });
