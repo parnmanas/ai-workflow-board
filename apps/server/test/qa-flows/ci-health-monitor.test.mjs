@@ -252,6 +252,64 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     assert.equal(systemMsgs.length, 1, 'no second chat alert inside the re-alert cooldown');
   });
 
+  // ─── ticket 0ef405f9: 가짜 복구 차단 ─────────────────────────────────────
+  // 성공한 CI run 이 하나도 없는 main 에 "CI 복구" 알림이 두 차례 발송됐고, 그때마다
+  // alert 행과 추적 티켓 연결이 함께 사라졌다. 아래 두 테스트는 그 전이를 production
+  // 경로(sweep())에서 막는지 본다 — 순수 함수 판정이 아니라 행·메시지·카운터로 단언한다.
+  // 위치가 중요하다: 3번(진짜 복구)이 행을 지우므로 반드시 그 앞에서 돌아야 한다.
+
+  await t.test('2b. 같은 초에 생성된 다른 workflow 의 success 가 응답 앞자리에 섞여 와도 복구로 판정하지 않는다 (ticket 0ef405f9)', async () => {
+    const priorAlert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.ok(priorAlert, '사전 조건: red alert 행이 남아 있어야 이 전이를 시험할 수 있다');
+
+    // 실제 사건 모양: 푸시 1회가 CI(failure, workflow 555) 와 Publish(success, 다른
+    // workflow) 를 같은 created_at 으로 띄운다. 응답이 success 를 먼저 내밀어도 이 workflow
+    // 에 성공 run 은 없다.
+    const foreignSuccess = { ...run('publish-run-5', 'success', redRuns[0].created_at), workflow_id: 909 };
+    fetchState.runs = [foreignSuccess, ...redRuns];
+
+    const stats = await monitor.sweep(new Date(NOW.getTime() + 500));
+    assert.equal(stats.recovered, 0, '다른 workflow 의 성공은 이 workflow 의 복구가 아니다');
+
+    const alert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.ok(alert, 'alert 행이 살아 있어야 한다 — 가짜 복구는 감시 상태까지 지운다');
+    assert.equal(alert.streak, 5, '스트릭이 초기화되면 안 된다');
+    assert.equal(alert.created_ticket_id, priorAlert.created_ticket_id, '추적 티켓 연결이 유지돼야 한다');
+
+    const systemMsgs = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system');
+    assert.equal(systemMsgs.length, 1, '복구 메시지가 발송되면 안 된다 (1번에서 보낸 red 알림 1건만)');
+  });
+
+  await t.test('2c. 이 workflow 의 success 로 보이더라도 기록된 실패 run 보다 최신이 아니면 복구로 판정하지 않고 관측 가능하게 남긴다 (ticket 0ef405f9)', async () => {
+    const priorAlert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.equal(priorAlert.last_run_at, redRuns[0].created_at, '하한선(last_run_at)이 red 근거 run 의 생성 시각으로 기록돼 있어야 한다');
+
+    // 응답에서 최신 실패들이 빠지고 과거의 green 만 남은 모양 — workflow 필터로는 걸러낼
+    // 수 없는 형태라 단조성 게이트가 유일한 방어선이다.
+    fetchState.runs = [run('run-0', 'success', minutesAgo(24 * 60))];
+
+    const warnBefore = logService.query({ level: 'warn', category: 'CI' }).length;
+    const stats = await monitor.sweep(new Date(NOW.getTime() + 1500));
+
+    assert.equal(stats.recovered, 0, '기존 red 근거보다 오래된 success 는 복구가 아니다');
+    assert.equal(stats.stale_green_rejected, 1, '거부는 카운터로 관측돼야 한다 — 조용히 넘기면 이 모니터의 존재 이유와 모순된다');
+
+    const warnAfter = logService.query({ level: 'warn', category: 'CI' });
+    assert.ok(warnAfter.length > warnBefore, '거부는 CI 카테고리 warn 로그로도 남아야 한다');
+    const rejectLog = warnAfter.find((e) => JSON.stringify(e.meta || {}).includes('run-0'));
+    assert.ok(rejectLog, '어떤 run 을 왜 거부했는지 로그에서 식별할 수 있어야 한다');
+
+    const alert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.ok(alert, 'alert 행이 살아 있어야 한다');
+    assert.equal(alert.streak, 5, '거부된 평가는 행을 건드리지 않는다');
+    assert.equal(alert.created_ticket_id, priorAlert.created_ticket_id);
+
+    const systemMsgs = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system');
+    assert.equal(systemMsgs.length, 1, '복구 메시지가 발송되면 안 된다');
+
+    fetchState.runs = redRuns; // 다음 테스트를 위해 원래 red 픽스처로 되돌린다
+  });
+
   await t.test('3. recovery: newest run flips green — recovery message + ticket comment, alert row deleted, ticket left open', async () => {
     const priorAlert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     const trackedTicketId = priorAlert.created_ticket_id;

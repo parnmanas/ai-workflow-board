@@ -32,6 +32,14 @@ function rawApiRun(id, conclusion, minutesAgo, event) {
   return raw;
 }
 
+// 절대 시각으로 raw run 을 만든다 — ticket 0ef405f9 의 실제 run 목록은 같은 초를 공유하는
+// 쌍이 핵심이라 minutesAgo 상대 시각으로는 그 동률을 그대로 재현할 수 없다.
+function rawApiRunAt(id, conclusion, iso, event, workflowId) {
+  const raw = { id, status: 'completed', conclusion, event, html_url: `https://github.com/x/y/actions/runs/${id}`, created_at: iso, updated_at: iso };
+  if (workflowId !== undefined) raw.workflow_id = workflowId;
+  return raw;
+}
+
 function makeFakeFetch(rawRuns) {
   return async (url) => {
     const u = String(url);
@@ -207,6 +215,124 @@ test('wire path: raw GitHub 응답에 event 키 자체가 없으면 listWorkflow
     assert.equal(res.isRed, true);
     assert.equal(res.streak, 3);
   });
+});
+
+// --- 복구 오탐 회귀 (ticket 0ef405f9) -----------------------------------------
+// 성공한 CI run 이 하나도 없는 main 에 "CI 복구" 알림이 두 차례 발송됐다. 아래 픽스처는
+// 그 사건의 실제 run 목록이다 — 푸시 1회가 CI(failure) 와 Publish(success) 를 **같은 초**
+// 에 띄우는 저장소이고, 그 동률에서 응답 순서에 기대면 남의 workflow 성공이 이 workflow 의
+// 복구로 읽힌다. 방어선은 셋: (1) 응답의 workflow 밖 run 제거, (2) (created_at, id) 로
+// 최신순 재구성, (3) 기존 red 근거보다 최신이 아닌 green 거부(단조성 게이트).
+
+const INCIDENT_WORKFLOW_ID = '304034069';  // CI
+const PUBLISH_WORKFLOW_ID = '309135221';   // Publish agent-manager
+// 가짜 복구가 실제로 발송된 sweep 시각
+const INCIDENT_NOW = new Date('2026-09-24T06:05:22.000Z');
+
+// 티켓 본문의 8건 — main 브랜치, workflow 무관, 최신순. 같은 초를 공유하는 쌍이 3개 있고
+// 그때마다 Publish(success) 의 run id 가 CI(failure) 보다 작다.
+function incidentRawRuns() {
+  return [
+    rawApiRunAt(35939081971, 'success', '2026-09-24T00:35:14Z', 'push', PUBLISH_WORKFLOW_ID),
+    rawApiRunAt(35939082088, 'failure', '2026-09-24T00:35:14Z', 'push', INCIDENT_WORKFLOW_ID),
+    rawApiRunAt(35842225615, 'failure', '2026-09-23T09:19:11Z', 'schedule', INCIDENT_WORKFLOW_ID),
+    rawApiRunAt(35798148426, 'success', '2026-09-22T23:35:31Z', 'push', PUBLISH_WORKFLOW_ID),
+    rawApiRunAt(35798148540, 'failure', '2026-09-22T23:35:31Z', 'push', INCIDENT_WORKFLOW_ID),
+    rawApiRunAt(35709645137, 'failure', '2026-09-22T09:18:38Z', 'schedule', INCIDENT_WORKFLOW_ID),
+    rawApiRunAt(35705473920, 'failure', '2026-09-22T08:33:39Z', 'push', INCIDENT_WORKFLOW_ID),
+    rawApiRunAt(35705473915, 'success', '2026-09-22T08:33:39Z', 'push', PUBLISH_WORKFLOW_ID),
+  ];
+}
+
+test('완료 기준 1·2 (wire): 같은 푸시의 Publish=success / CI=failure 가 한 응답에 섞여 와도 CI workflow 의 상태는 red 로 유지된다', async () => {
+  await withGithubToken(async () => {
+    const github = new GitHubConnectorService(null);
+    // 응답이 workflow 경계를 지키지 못하고 repo 전체 run 을 돌려준 상황을 그대로 넣는다.
+    const runs = await github.listWorkflowRuns('parnmanas', 'ai-workflow-board', INCIDENT_WORKFLOW_ID, 'main', null, makeFakeFetch(incidentRawRuns()));
+
+    assert.equal(runs.length, 5, '요청한 workflow(CI) 의 run 5건만 남아야 한다');
+    assert.ok(
+      runs.every((r) => r.workflow_id === INCIDENT_WORKFLOW_ID),
+      `다른 workflow 의 run 이 남아 있다: ${runs.filter((r) => r.workflow_id !== INCIDENT_WORKFLOW_ID).map((r) => r.id).join(', ')}`,
+    );
+    assert.equal(runs[0].id, '35939082088', '최신순 첫 run 은 CI 의 최신 실패 run 이어야 한다');
+
+    const res = evaluateRedStreak(runs, INCIDENT_NOW, CONFIG);
+    assert.equal(res.isGreen, false, '성공한 CI run 이 없는데 복구로 판정되면 안 된다');
+    assert.equal(res.isRed, true, '연속 3회 push 실패가 그대로 red 여야 한다');
+    assert.equal(res.streak, 3);
+    assert.equal(res.lastRun.id, '35939082088');
+  });
+});
+
+test('완료 기준 1 (정렬): 같은 created_at 의 타 workflow success 가 목록 앞자리에 와도 최신 run 은 id 로 결정된다', () => {
+  // 필터를 뚫고 들어왔다고 가정해도 — 같은 초라면 run id 가 큰 쪽(나중에 만들어진 쪽)이
+  // 최신이다. 응답이 준 순서를 그대로 믿던 시절의 오판이 여기서 막힌다.
+  const publishSuccess = { id: '35939081971', workflow_id: PUBLISH_WORKFLOW_ID, status: 'completed', conclusion: 'success', event: 'push', html_url: '', created_at: '2026-09-24T00:35:14Z', updated_at: '2026-09-24T00:35:14Z', head_sha: '' };
+  const ciFailure = { id: '35939082088', workflow_id: INCIDENT_WORKFLOW_ID, status: 'completed', conclusion: 'failure', event: 'push', html_url: '', created_at: '2026-09-24T00:35:14Z', updated_at: '2026-09-24T00:35:14Z', head_sha: '' };
+
+  const res = evaluateRedStreak([publishSuccess, ciFailure], INCIDENT_NOW, CONFIG);
+  assert.equal(res.lastRun.id, '35939082088', '같은 초 동률은 run id 내림차순으로 깨야 한다');
+  assert.equal(res.isGreen, false);
+});
+
+test('완료 기준 3: 기존 red 근거보다 최신인 success 는 그대로 복구(green)로 판정된다 — 회귀 없음', () => {
+  // 2026-09-17 의 실제 복구 사례 모양: 5연속 실패 뒤 더 최신 push success 가 들어왔다.
+  const runs = [run(4, 'success', 5), run(3, 'failure', 20), run(2, 'failure', 40), run(1, 'failure', 60)];
+  const evidence = { lastFailedRunId: '3', lastFailedAt: runs[1].created_at };
+  const res = evaluateRedStreak(runs, NOW, CONFIG, evidence);
+  assert.equal(res.isGreen, true, '실패보다 최신인 success 는 진짜 복구다');
+  assert.equal(res.staleGreenRun, null);
+});
+
+test('단조성 게이트: 기록된 실패 run 보다 오래된 success 는 복구로 인정하지 않는다 (상태 유지 + 관측 가능)', () => {
+  // 응답에서 최신 실패들이 누락돼 과거의 green 이 첫 자리로 올라온 모양 — 사건의 09-23
+  // 케이스가 이것이다(성공 run 은 09-22 06:34 뿐이었다).
+  const staleGreen = run(10, 'success', 24 * 60);       // 24시간 전 성공
+  const res = evaluateRedStreak([staleGreen], NOW, CONFIG, {
+    lastFailedRunId: '20',
+    lastFailedAt: new Date(NOW.getTime() - 60 * 60_000).toISOString(), // 1시간 전 실패가 red 근거
+  });
+  assert.equal(res.isGreen, false, '기존 실패보다 오래된 success 는 복구가 아니다');
+  assert.equal(res.isRed, false, 'red 를 새로 트립하지도 않는다 — 기존 상태를 그대로 둔다');
+  assert.ok(res.staleGreenRun, '거부된 green run 이 호출자에게 노출돼야 로그로 남길 수 있다');
+  assert.equal(res.staleGreenRun.id, '10');
+});
+
+test('단조성 게이트: 기록된 실패와 created_at 이 같은 success 는 복구로 인정하지 않는다 (형제 run)', () => {
+  const sameSecond = new Date(NOW.getTime() - 30 * 60_000).toISOString();
+  const siblingSuccess = { id: '35939081971', workflow_id: PUBLISH_WORKFLOW_ID, status: 'completed', conclusion: 'success', event: 'push', html_url: '', created_at: sameSecond, updated_at: sameSecond, head_sha: '' };
+  const res = evaluateRedStreak([siblingSuccess], NOW, CONFIG, { lastFailedRunId: '35939082088', lastFailedAt: sameSecond });
+  assert.equal(res.isGreen, false, '한 푸시가 나란히 띄운 형제 run 은 그 실패를 고친 run 이 아니다');
+  assert.ok(res.staleGreenRun);
+});
+
+test('단조성 게이트: 같은 run 이 재실행되어 green 으로 뒤집힌 경우는 복구로 인정한다', () => {
+  // run_attempt 증가는 run id 와 created_at 을 바꾸지 않는다 — 시각 비교만 하면 이 진짜
+  // 복구가 영원히 거부돼 alert 행이 갇힌다.
+  const at = new Date(NOW.getTime() - 30 * 60_000).toISOString();
+  const rerun = { id: '777', workflow_id: INCIDENT_WORKFLOW_ID, status: 'completed', conclusion: 'success', event: 'push', html_url: '', created_at: at, updated_at: new Date(NOW.getTime() - 60_000).toISOString(), head_sha: '' };
+  const res = evaluateRedStreak([rerun], NOW, CONFIG, { lastFailedRunId: '777', lastFailedAt: at });
+  assert.equal(res.isGreen, true, '같은 run 의 재실행 flip 은 진짜 복구다');
+  assert.equal(res.staleGreenRun, null);
+});
+
+test('단조성 게이트: 하한선이 비어 있으면(이 필드 이전에 만들어진 행) 게이트하지 않는다', () => {
+  const runs = [run(4, 'success', 5), run(3, 'failure', 20)];
+  const res = evaluateRedStreak(runs, NOW, CONFIG, { lastFailedRunId: '3', lastFailedAt: '' });
+  assert.equal(res.isGreen, true, '비교 대상이 없는 것은 검증 실패가 아니다 — 다음 sweep 이 값을 채운다');
+});
+
+test('정렬: 응답이 뒤죽박죽 순서로 와도 판정은 (created_at, id) 기준으로 동일하다', () => {
+  const ordered = [run(4, 'failure', 5), run(3, 'failure', 20), run(2, 'failure', 40), run(1, 'success', 60)];
+  const shuffled = [ordered[2], ordered[0], ordered[3], ordered[1]];
+  const a = evaluateRedStreak(ordered, NOW, CONFIG);
+  const b = evaluateRedStreak(shuffled, NOW, CONFIG);
+  assert.deepEqual(
+    { isRed: b.isRed, isGreen: b.isGreen, streak: b.streak, last: b.lastRun.id },
+    { isRed: a.isRed, isGreen: a.isGreen, streak: a.streak, last: a.lastRun.id },
+  );
+  assert.equal(b.lastRun.id, '4', '입력 순서와 무관하게 가장 최신 run 이 선택돼야 한다');
 });
 
 test('readConfigFromEnv: CI_MONITOR_MIN_RUNS / CI_MONITOR_CREATE_TICKET env overrides are honored', () => {
