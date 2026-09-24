@@ -2493,6 +2493,16 @@ export const api = {
     request<OrchestrationRuntimeHost[]>(
       `/orchestration/runtime-hosts?workspace_id=${encodeURIComponent(workspaceId)}`,
     ),
+  /**
+   * Make a Runtime Host re-list its per-CLI models and return its refreshed row.
+   * The server issues the command and awaits the host's ack before replying, so
+   * this resolves with a list that is already current.
+   */
+  refreshOrchestrationRuntimeHostModels: (managerAgentId: string, workspaceId: string) =>
+    request<OrchestrationRuntimeHost>(
+      `/orchestration/runtime-hosts/${encodeURIComponent(managerAgentId)}/refresh-models`,
+      { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) },
+    ),
 
   listOrchestrationMissions: (workspaceId: string, opts?: { teamId?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });

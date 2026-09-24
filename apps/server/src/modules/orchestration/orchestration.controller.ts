@@ -179,6 +179,31 @@ export class OrchestrationController {
     }
   }
 
+  /**
+   * Make a Runtime Host re-list its per-CLI models, and return its refreshed
+   * catalogue row.
+   *
+   * A host enumerates models once at boot by shelling out to each CLI with a
+   * short timeout; a cold one (opencode was the case that surfaced this) reports
+   * nothing and the slot editor then offers free text for that CLI forever. This
+   * is the same probe the admin agent dialog runs, exposed under MANAGE_ACTIONS
+   * so building a roster does not require instance-admin rights.
+   */
+  @Post('runtime-hosts/:managerAgentId/refresh-models')
+  async refreshRuntimeHostModels(
+    @Param('managerAgentId') managerAgentId: string,
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    try {
+      const host = await this.teams.refreshRuntimeHostModels(managerAgentId, body?.workspace_id);
+      if (!host) return res.status(404).json({ error: 'Runtime Host not found' });
+      return res.json(host);
+    } catch (e: any) {
+      return fail(res, e, 'Failed to refresh Runtime Host models');
+    }
+  }
+
   // ── Missions ──────────────────────────────────────────────────────────────
 
   @Get('missions')

@@ -113,6 +113,13 @@ export default function OrchestrationTeamsPage() {
 
   // 목록을 바꾸는 경로는 전부 이 헬퍼를 거친다 — 사이드바가 변경을 놓치지 않도록
   // 상태 갱신과 방송을 한곳에서 처리한다(단순 조회인 load()는 제외).
+  // A host that just re-listed its models replaces its row in place, so the model
+  // dropdown fills in for every slot form currently open on that host — and stays
+  // filled if the operator closes and reopens the modal.
+  const replaceHost = useCallback((host: OrchestrationRuntimeHost) => {
+    setHosts((prev) => prev.map((h) => (h.manager_agent_id === host.manager_agent_id ? host : h)));
+  }, []);
+
   const commitTeams = useCallback((updater: (prev: OrchestrationTeam[]) => OrchestrationTeam[]) => {
     setTeams(updater);
     broadcastTeamsChanged();
@@ -340,6 +347,7 @@ export default function OrchestrationTeamsPage() {
                             member={m}
                             wsId={wsId}
                             hosts={hosts}
+                            onHostRefreshed={replaceHost}
                             credentials={credentials}
                             backendProfiles={backendProfiles}
                             onSaved={replaceTeam}
@@ -370,6 +378,7 @@ export default function OrchestrationTeamsPage() {
         isOpen={showForm}
         wsId={wsId}
         hosts={hosts}
+        onHostRefreshed={replaceHost}
         credentials={credentials}
         backendProfiles={backendProfiles}
         workspaces={workspaces}
@@ -385,6 +394,7 @@ export default function OrchestrationTeamsPage() {
         team={memberTarget}
         wsId={wsId}
         hosts={hosts}
+        onHostRefreshed={replaceHost}
         credentials={credentials}
         backendProfiles={backendProfiles}
         onClose={() => setMemberTarget(null)}
@@ -485,6 +495,7 @@ export function TeamFormModal({
   hosts,
   credentials,
   backendProfiles,
+  onHostRefreshed,
   workspaces,
   team,
   onClose,
@@ -495,6 +506,7 @@ export function TeamFormModal({
   hosts: OrchestrationRuntimeHost[];
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
+  onHostRefreshed(host: OrchestrationRuntimeHost): void;
   workspaces: { id: string; name: string }[];
   team: OrchestrationTeam | null;
   onClose: () => void;
@@ -654,6 +666,8 @@ export function TeamFormModal({
             hosts={hosts}
             credentials={credentials}
             backendProfiles={backendProfiles}
+            onHostRefreshed={onHostRefreshed}
+            workspaceId={wsId}
             neighbours={neighboursOf(team, { orchestrator: true })}
           />
         </SlotSection>
@@ -766,6 +780,7 @@ function AddMemberModal({
   hosts,
   credentials,
   backendProfiles,
+  onHostRefreshed,
   onClose,
   onSaved,
 }: {
@@ -774,6 +789,7 @@ function AddMemberModal({
   hosts: OrchestrationRuntimeHost[];
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
+  onHostRefreshed(host: OrchestrationRuntimeHost): void;
   onClose: () => void;
   onSaved: (team: OrchestrationTeam) => void;
 }) {
@@ -894,6 +910,8 @@ function AddMemberModal({
               hosts={hosts}
               credentials={credentials}
               backendProfiles={backendProfiles}
+              onHostRefreshed={onHostRefreshed}
+              workspaceId={wsId}
               neighbours={neighboursOf(team)}
             />
           </SlotSection>
@@ -910,6 +928,7 @@ function MemberEditButton({
   hosts,
   credentials,
   backendProfiles,
+  onHostRefreshed,
   onSaved,
   disabled,
 }: {
@@ -919,6 +938,7 @@ function MemberEditButton({
   hosts: OrchestrationRuntimeHost[];
   credentials: Credential[];
   backendProfiles: ClaudeBackendProfile[];
+  onHostRefreshed(host: OrchestrationRuntimeHost): void;
   onSaved: (team: OrchestrationTeam) => void;
   disabled?: boolean;
 }) {
@@ -1026,6 +1046,8 @@ function MemberEditButton({
                 hosts={hosts}
                 credentials={credentials}
                 backendProfiles={backendProfiles}
+                onHostRefreshed={onHostRefreshed}
+                workspaceId={wsId}
                 neighbours={neighboursOf(team, { memberId: member.id })}
               />
             </SlotSection>

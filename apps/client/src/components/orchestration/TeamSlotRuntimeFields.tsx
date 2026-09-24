@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type {
   ClaudeBackendProfile,
@@ -124,8 +125,11 @@ export default function TeamSlotRuntimeFields({
   credentials,
   backendProfiles,
   neighbours = [],
+  onHostRefreshed,
+  workspaceId,
   disabled = false,
 }: {
+  workspaceId: string;
   value: SlotDraft;
   onChange(next: SlotDraft): void;
   hosts: OrchestrationRuntimeHost[];
@@ -133,10 +137,20 @@ export default function TeamSlotRuntimeFields({
   backendProfiles: ClaudeBackendProfile[];
   /** Other slots on this team — drives the shared-folder hint and the folder suggestions. */
   neighbours?: SlotNeighbour[];
+  /**
+   * Replace one host row after it re-listed its models. Required for the model
+   * dropdown to fill itself in: a host enumerates models once at boot by
+   * shelling out to each CLI with a short timeout, so a cold CLI (opencode is
+   * the one that surfaced this) reports nothing and this form would otherwise
+   * offer free text for it forever.
+   */
+  onHostRefreshed?(host: OrchestrationRuntimeHost): void;
   disabled?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [customFolder, setCustomFolder] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [modelProbeNote, setModelProbeNote] = useState<string | null>(null);
 
   const host = hosts.find((h) => h.manager_agent_id === value.manager_agent_id) ?? null;
   const cli = value.runtime.runtime || '';
@@ -176,6 +190,68 @@ export default function TeamSlotRuntimeFields({
   }, [neighbours, value.manager_agent_id, value.working_dir]);
 
   const modelOptions = host && cli ? host.available_models[cli] ?? [] : [];
+
+  /**
+   * Ask the host to re-list its models. Shared by the automatic probe below and
+   * the explicit button, so both report the same way.
+   */
+  const refreshModels = useCallback(
+    async (opts: { silent?: boolean } = {}) => {
+      if (!host || !onHostRefreshed || refreshingModels) return;
+      setRefreshingModels(true);
+      if (!opts.silent) setModelProbeNote('Asking the host to list its models…');
+      try {
+        const fresh = await api.refreshOrchestrationRuntimeHostModels(host.manager_agent_id, workspaceId);
+        onHostRefreshed(fresh);
+        const found = cli ? (fresh.available_models[cli] ?? []).length : 0;
+        setModelProbeNote(
+          found > 0
+            ? null
+            : `${host.manager_name} reported no model list for ${cli || 'this CLI'} — type a model id, or leave it blank for the CLI default.`,
+        );
+      } catch (e: any) {
+        // Never block authoring on this: the free-text input below still works.
+        setModelProbeNote(opts.silent ? null : e?.message || 'Could not refresh the model list.');
+      } finally {
+        setRefreshingModels(false);
+      }
+    },
+    [host, onHostRefreshed, refreshingModels, cli, workspaceId],
+  );
+
+  /**
+   * Probe once per (host, CLI) when the list is empty. Same contract as the admin
+   * agent dialog's probe: silent, and at most one attempt per combination so a
+   * CLI that genuinely has no model concept (antigravity, pi) does not hammer the
+   * host on every render — falling back to free text is the right answer there.
+   */
+  const probed = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!host || !cli || !onHostRefreshed) return;
+    if (modelOptions.length > 0) return;
+    if (!host.is_online) return; // an offline host cannot re-list anything
+    const key = `${host.manager_agent_id}:${cli}`;
+    if (probed.current.has(key)) return;
+    probed.current.add(key);
+    void refreshModels({ silent: true });
+    // refreshModels is re-created per render; depending on it would re-run this
+    // before the attempted-set can block the duplicate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host, cli, modelOptions.length, onHostRefreshed]);
+
+  /**
+   * Options for the dropdown, with the saved value prepended when the host does
+   * not list it. Without that, editing a slot whose model was typed by hand (or
+   * enumerated by an older host build) would render as "Default" — telling the
+   * operator the model is unset while the slot still carries it.
+   */
+  const modelSelectOptions = [
+    { value: '', label: `Default — let ${cli || 'the CLI'} decide (no --model)` },
+    ...modelOptions.map((m) => ({ value: m, label: m })),
+    ...(value.model && !modelOptions.includes(value.model)
+      ? [{ value: value.model, label: `${value.model} (not listed by this host)` }]
+      : []),
+  ];
   // Credential providers are prefixed by CLI (`claude_subscription`,
   // `codex_api_key`, …) — same filter the admin agent dialog uses.
   const eligibleCredentials = cli ? credentials.filter((c) => c.provider.startsWith(`${cli}_`)) : [];
@@ -232,32 +308,45 @@ export default function TeamSlotRuntimeFields({
         }}
       />
 
-      {modelOptions.length > 0 ? (
-        <Select
-          label="Model"
-          value={modelOptions.includes(value.model) ? value.model : ''}
-          disabled={disabled || !cli}
-          options={[
-            { value: '', label: `Default for ${cli || 'this CLI'}` },
-            ...modelOptions.map((m) => ({ value: m, label: m })),
-          ]}
-          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ model: e.target.value })}
-        />
-      ) : (
-        <Input
-          label="Model"
-          value={value.model}
-          disabled={disabled || !cli}
-          placeholder={cli ? `Leave blank for the ${cli} default` : 'Pick a CLI first'}
-          onChange={(e) => patch({ model: e.target.value })}
-        />
-      )}
-      {cli && modelOptions.length === 0 && value.manager_agent_id && (
-        <Hint>
-          This host has not reported a model list for {cli}. Type a model id, or leave it blank to use the CLI&apos;s
-          own default.
-        </Hint>
-      )}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {modelOptions.length > 0 || (value.model && modelSelectOptions.length > 1) ? (
+            <Select
+              label="Model"
+              value={value.model}
+              disabled={disabled || !cli}
+              options={modelSelectOptions}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ model: e.target.value })}
+            />
+          ) : (
+            <Input
+              label="Model"
+              value={value.model}
+              disabled={disabled || !cli}
+              placeholder={
+                refreshingModels
+                  ? 'Asking the host for its model list…'
+                  : cli
+                    ? `Leave blank for the ${cli} default`
+                    : 'Pick a CLI first'
+              }
+              onChange={(e) => patch({ model: e.target.value })}
+            />
+          )}
+        </div>
+        {host && cli && onHostRefreshed && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={disabled || refreshingModels || !host.is_online}
+            title={host.is_online ? 'Make this host re-list its models' : 'Host is offline'}
+            onClick={() => void refreshModels()}
+          >
+            {refreshingModels ? 'Listing…' : 'Refresh'}
+          </Button>
+        )}
+      </div>
+      {modelProbeNote && <Hint>{modelProbeNote}</Hint>}
 
       {/* ── Working folder ─────────────────────────────────────────────── */}
       {folderOptions.length > 0 && !customFolder ? (

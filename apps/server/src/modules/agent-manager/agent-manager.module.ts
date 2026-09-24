@@ -69,6 +69,10 @@ import { SkillsModule } from '../skills/skills.module';
     // MCP 툴(`request_privileged_command`)이 승인 대기를 만들고 조회한다.
     // InstanceRegistryService 는 @Global() 이라 여기서 다시 내보낼 필요가 없다.
     PrivilegedCommandService,
+    // 오케스트레이션 로스터가 커맨드 ack 를 **서버측에서** 기다리는 데 쓴다. 그쪽
+    // 모델 재열거는 MANAGE_ACTIONS 이라 admin 전용 outcome 엔드포인트를 폴링할 수
+    // 없다 — 원장을 직접 읽는 편이 권한 이야기를 하나로 유지한다.
+    CommandLedgerService,
   ],
 })
 export class AgentManagerModule {}

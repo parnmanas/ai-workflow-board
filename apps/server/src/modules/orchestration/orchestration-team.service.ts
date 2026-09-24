@@ -131,6 +131,12 @@ export class OrchestrationTeamService {
     return this.provisioner.listRuntimeHosts(workspaceId);
   }
 
+  /** Re-enumerate one host's per-CLI model lists (slot editor's model dropdown). */
+  refreshRuntimeHostModels(managerAgentId: string, workspaceId: string): Promise<RuntimeHostView | null> {
+    if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
+    return this.provisioner.refreshHostModels(managerAgentId, workspaceId);
+  }
+
   /**
    * Validate a slot spec from REST/MCP input. Wraps the shape error as an
    * orchestration HTTP error so the controller's `fail()` reports 400 with the

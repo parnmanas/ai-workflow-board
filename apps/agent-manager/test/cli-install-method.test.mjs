@@ -20,6 +20,27 @@ const probes = (realMap, writableSet = null) => ({
   windows: false,
 });
 
+/** ralf 실측: npm 이 Windows 전역 설치에 떨어뜨리는 배치 shim(축약). 실행 대상이
+ *  본문에 그대로 적혀 있고, 그게 레이아웃 판정의 유일한 단서다. */
+const WIN_SHIM = String.raw`@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
+`;
+
 test('npm prefix 설치는 prefix 를 박은 재설치 명령을 만든다', () => {
   const bin = '/home/parn/.local/bin/claude';
   const m = detectInstallMethod(
@@ -182,4 +203,72 @@ test('Windows npm 레이아웃(`<prefix>\\node_modules`)에서도 prefix 를 뽑
     npmPrefixFromRealPath('C:/nvm/v22/lib/node_modules/@openai/codex/bin/codex.exe', true),
     'C:\\nvm\\v22',
   );
+});
+
+test('Windows npm shim 은 본문의 실행 대상으로 prefix·패키지를 읽는다 (ralf 실측)', () => {
+  // shim 파일 자체는 prefix 바로 밑에 있고 node_modules 안에 없다. 경로만 보면
+  // 레이아웃을 못 알아보고 `unknown` 으로 떨어져, CLI 자체 업데이터로 넘어가
+  // **PATH 의 다른 prefix** 만 올라간다 — ralf 의 %APPDATA%\npm\codex 가 0.147.0 에
+  // 멈춰 있던 이유가 정확히 이것이다.
+  const shim = 'C:/Users/user/AppData/Roaming/npm/codex.cmd';
+  const m = detectInstallMethod(shim, null, {
+    realpath: (p) => p,
+    readText: (p) => (p === shim ? WIN_SHIM : null),
+    writable: () => true,
+    windows: true,
+  });
+
+  assert.equal(m.kind, 'npm-prefix');
+  assert.equal(m.prefix, 'C:\\Users\\user\\AppData\\Roaming\\npm');
+  assert.deepEqual(m.argv, {
+    cmd: 'npm',
+    args: [
+      '--prefix',
+      'C:\\Users\\user\\AppData\\Roaming\\npm',
+      'install',
+      '-g',
+      '@openai/codex@latest',
+    ],
+  });
+});
+
+test('shim 을 못 읽거나 대상이 node_modules 밖이면 원래 경로로 판정한다', () => {
+  const shim = 'C:/tools/codex.cmd';
+  // 읽기 실패 → 예전처럼 경로만 보고 판정(여기서는 unknown).
+  const unread = detectInstallMethod(shim, '@openai/codex', {
+    realpath: (p) => p,
+    readText: () => null,
+    writable: () => true,
+    windows: true,
+  });
+  assert.equal(unread.kind, 'unknown');
+  assert.equal(unread.argv, null, '추측해서 엉뚱한 prefix 로 npm 을 돌리지 않는다');
+
+  // node_modules 를 안 거치는 shim 도 마찬가지다.
+  const standalone = detectInstallMethod(shim, '@openai/codex', {
+    realpath: (p) => p,
+    readText: () => '@ECHO off\r\n"%dp0%\\codex.exe" %*\r\n',
+    writable: () => true,
+    windows: true,
+  });
+  assert.equal(standalone.kind, 'unknown');
+});
+
+test('POSIX 경로는 shim 파싱을 아예 타지 않는다', () => {
+  // `.cmd`/`.bat` 가 아니면 읽지도 않는다 — 불필요한 파일 IO 와 오탐을 막는다.
+  let reads = 0;
+  const bin = '/home/parn/.npm-global/bin/codex';
+  const m = detectInstallMethod(bin, null, {
+    realpath: (p) =>
+      p === bin ? '/home/parn/.npm-global/lib/node_modules/@openai/codex/bin/codex.js' : p,
+    readText: () => {
+      reads++;
+      return null;
+    },
+    writable: () => true,
+    windows: false,
+  });
+  assert.equal(reads, 0);
+  assert.equal(m.kind, 'npm-prefix');
+  assert.equal(m.prefix, '/home/parn/.npm-global');
 });

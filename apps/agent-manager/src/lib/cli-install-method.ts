@@ -18,8 +18,9 @@
 // 서지 않으면 `unknown` 을 내고 호출자가 CLI 자체 업데이터로 넘어가게 한다 —
 // 틀린 prefix 로 npm 을 돌리는 것보다 낫다.
 
-import { accessSync, constants as fsConstants, realpathSync } from 'node:fs';
+import { accessSync, constants as fsConstants, readFileSync, realpathSync } from 'node:fs';
 import { posix, sep, win32 } from 'node:path';
+import { parseWindowsShimTargets } from './cli-resolver.js';
 
 /** 설치 방법. `manual` 은 "우리가 올릴 수 없다" 는 뜻이고, 그때는 운영자가
  *  직접 돌릴 명령을 `manualCommand` 로 그대로 알려준다. */
@@ -58,6 +59,8 @@ export interface InstallMethod {
 export interface InstallMethodProbes {
   /** 심링크까지 푼 실제 경로. 기본은 fs.realpathSync. */
   realpath?: (p: string) => string;
+  /** 텍스트 파일 읽기. Windows 배치 shim 의 실행 대상을 뽑는 데 쓴다. */
+  readText?: (p: string) => string | null;
   /** 쓰기 가능 여부. 기본은 fs.accessSync(W_OK). */
   writable?: (p: string) => boolean;
   /** 테스트/Windows 분기용. 기본은 현재 플랫폼. */
@@ -69,6 +72,14 @@ function defaultRealpath(p: string): string {
     return realpathSync(p);
   } catch {
     return p;
+  }
+}
+
+function defaultReadText(p: string): string | null {
+  try {
+    return readFileSync(p, 'utf8');
+  } catch {
+    return null;
   }
 }
 
@@ -139,8 +150,19 @@ export function detectInstallMethod(
   const windows = probes.windows ?? process.platform === 'win32';
   const realpath = probes.realpath ?? defaultRealpath;
   const writable = probes.writable ?? defaultWritable;
-  const real = toPosix(realpath(bin));
+  const readText = probes.readText ?? defaultReadText;
   const link = toPosix(bin);
+  // Windows 의 npm 전역 설치는 **shim 파일 자체**가 prefix 바로 밑에 있고, 패키지는
+  // 형제 `node_modules` 안에 있다(`<prefix>\codex.cmd` + `<prefix>\node_modules\…`).
+  // 그래서 shim 경로만 보면 node_modules 가 없어 레이아웃을 못 알아본다 — ralf 실측:
+  // `%APPDATA%\npm\codex.cmd` 가 `unknown` 으로 떨어져 prefix 를 못 박고, CLI 자체
+  // 업데이터로 넘어가 **PATH 의 다른 prefix**(nvm4w)만 올라갔다. 그 설치본은 영원히
+  // 0.147.0 에 머물렀다.
+  //
+  // shim 본문은 실행 대상을 그대로 적어 둔다(`%dp0%\node_modules\@openai\codex\bin\codex.js`).
+  // cli-resolver 가 죽은 shim 판별용으로 이미 쓰는 파서를 그대로 재사용해, 그 대상을
+  // 레이아웃 판정의 입력으로 삼는다.
+  const real = toPosix(resolveShimTarget(bin, readText, realpath) ?? realpath(bin));
   // 경로에서 읽어낸 패키지가 우선 — 어댑터의 선언보다 이 설치본에 관한 사실이다.
   const pkg = npmPackageFromRealPath(real) ?? pkgHint;
 
@@ -251,6 +273,22 @@ export function detectInstallMethod(
     return none('native', 'native installer (self-updater)', null);
   }
   return none('unknown', 'unrecognised install layout', null);
+}
+
+/** 배치 shim 이면 그 안에 적힌 실행 대상(`node_modules` 아래의 실제 파일)을 돌려준다.
+ *  shim 이 아니거나 대상을 못 찾으면 null — 호출자는 원래 경로로 진행한다. */
+function resolveShimTarget(
+  bin: string,
+  readText: (p: string) => string | null,
+  realpath: (p: string) => string,
+): string | null {
+  if (!/\.(cmd|bat)$/i.test(bin)) return null;
+  const contents = readText(bin);
+  if (!contents) return null;
+  const target = parseWindowsShimTargets(contents, bin).find((t) => /[\\/]node_modules[\\/]/i.test(t));
+  if (!target) return null;
+  // 대상 자체가 다시 심링크일 수 있다(드물지만 무해하다).
+  return realpath(target);
 }
 
 /** 사람이 읽는 한 줄 — ack·UI·로그가 같은 문구를 쓰게 한다. */
