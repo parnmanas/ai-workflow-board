@@ -475,6 +475,60 @@ test('비밀번호가 틀리면 "이미 최신" 으로 읽히지 않는다', asy
   assert.match(result.detail, /password was rejected/);
 });
 
+test('다른 배포 채널의 설치본에는 npm latest 를 들이대지 않는다 (rolf 의 비공식 snap codex)', async () => {
+  // rolf 실측: /snap/bin/codex 는 OpenAI 가 아니라 제3자(jcat)가 올린 스냅이고
+  // 그 채널의 최신이 0.114.0 이다. 같은 호스트의 npm 최신은 0.156.1 이지만 **다른
+  // 채널의 숫자**다. 그걸 기준으로 쓰면 `snap refresh` 가 "올릴 게 없다" 로 올바르게
+  // 끝난 것을 실패로 보고하고, 화면은 영원히 "→ 0.156.1" 을 띄운다.
+  const snap = {
+    kind: 'snap',
+    argv: null,
+    elevatedArgv: { cmd: 'snap', args: ['refresh', 'codex'] },
+    label: 'snap package',
+    manualCommand: 'sudo snap refresh codex',
+    prefix: null,
+    needsElevation: true,
+  };
+  const result = await runCliUpdate(
+    'codex',
+    {
+      hostLabel: 'Rolf',
+      listCandidates: noOtherInstalls,
+      detectMethod: () => snap,
+      probeVersion: async () => 'codex-cli 0.114.0',
+      runSudo: async () => ({ ok: true, output: 'snap "codex" has no updates available', reason: null }),
+    },
+    {
+      bin: '/snap/bin/codex',
+      // npm 채널의 숫자. 이 설치본에는 해당되지 않는다.
+      latest: '0.156.1',
+      getSudoPassword: async () => 'pw',
+    },
+  );
+
+  assert.equal(result.ok, true, '채널의 최신에 이미 도달했으면 성공이다');
+  assert.doesNotMatch(result.detail, /0\.156\.1/, '다른 채널의 숫자를 판정 근거로 쓰지 않는다');
+  assert.match(result.detail, /already current/);
+});
+
+test('npm 채널 설치본에는 npm latest 가 그대로 적용된다', async () => {
+  // 위 규칙이 "latest 를 아예 안 쓴다" 로 번지면 ragnar 회귀가 돌아온다.
+  for (const kind of ['npm-prefix', 'bun', 'volta', 'pnpm']) {
+    const result = await runCliUpdate(
+      'claude',
+      {
+        listCandidates: noOtherInstalls,
+        detectMethod: () => ({ ...npmMethod('/p', '@anthropic-ai/claude-code'), kind }),
+        run: async () => ({ ok: true, output: '' }),
+        probeVersion: async () => '2.1.273 (Claude Code)',
+      },
+      { bin: NPM_CLAUDE, latest: '2.1.281' },
+    );
+    assert.equal(result.ok, false, `${kind}: 최신이 더 위에 있는데 안 움직였으면 실패다`);
+    assert.match(result.detail, /npm latest is 2\.1\.281/);
+  }
+});
+
 test('버전 문자열의 장식은 비교 전에 벗긴다 — 못 벗기면 비교를 포기한다', () => {
   assert.equal(extractSemver('2.1.281 (Claude Code)'), '2.1.281');
   assert.equal(extractSemver('codex-cli 0.153.4'), '0.153.4');

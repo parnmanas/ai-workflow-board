@@ -235,3 +235,51 @@ test('root 소유 설치본은 sudo 가 필요하다고 표시하고, Update 는
   assert.equal(bySudo['/usr/local/bin/claude'], true, 'root 소유 설치본만 비밀번호를 묻게 한다');
   assert.equal(bySudo['/home/parn/.npm-global/bin/claude'], false);
 });
+
+test('다른 배포 채널의 설치본은 CLI 단위 npm latest 로 판정하지 않는다 (snap)', async (t) => {
+  // rolf 실측: snap codex 는 제3자 패키지라 채널 최신이 0.114.0 이다. CLI 단위
+  // npm latest(0.156.1)를 그 행에 들이대면 영원히 "→ 0.156.1" 이 뜨고 버튼이
+  // 잠기지 않는다. 최신은 CLI 가 아니라 설치본에 속한다.
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+
+  const view = render(t, {
+    ...BASE,
+    cli_latest_versions: { codex: '0.156.1' },
+    cli_installs: [
+      {
+        cli: 'codex',
+        path: '/snap/bin/codex',
+        version: 'codex-cli 0.114.0',
+        method: 'snap package (needs sudo)',
+        updatable: true,
+        needs_sudo: true,
+        // 매니저가 "이 채널의 최신은 모른다" 고 명시한다.
+        latest_version: null,
+        active: false,
+      },
+      {
+        cli: 'codex',
+        path: '/home/parn/.npm-global/bin/codex',
+        version: 'codex-cli 0.156.1',
+        method: 'npm --prefix /home/parn/.npm-global',
+        updatable: true,
+        needs_sudo: false,
+        latest_version: '0.156.1',
+        active: true,
+      },
+    ],
+  });
+  await act(async () => {});
+
+  const text = view.container.textContent;
+  assert.equal(
+    text.includes('→ 0.156.1'),
+    false,
+    `snap 행에 다른 채널의 목표 버전이 뜨면 안 된다 — 실제: ${text}`,
+  );
+  assert.ok(text.includes('최신'), 'npm 설치본은 최신으로 잠긴다');
+
+  const enabled = buttons(view).filter((b) => !b.disabled);
+  assert.equal(enabled.length, 1, '최신을 모르는 snap 행만 누를 수 있다');
+});

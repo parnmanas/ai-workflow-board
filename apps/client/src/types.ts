@@ -2196,6 +2196,11 @@ export interface CliInstallEntry {
   method: string;
   /** AWB 가 이 설치본을 올릴 수 있는지. false 면 방법만 보여주고 버튼은 감춘다. */
   updatable: boolean;
+  /** 이 **설치본**의 최신 배포 버전. npm 채널에서 온 설치본만 값이 있고,
+   *  snap/brew 처럼 다른 채널에서 온 것은 `null`(= 모른다). 구버전 매니저는
+   *  아예 보내지 않으므로 `undefined` 와 `null` 은 뜻이 다르다 — 전자는
+   *  CLI 단위 값으로 접고, 후자는 "최신 모름" 으로 둔다. */
+  latest_version?: string | null;
   /** 올리려면 root 가 필요한지. true 면 Update 를 누를 때 비밀번호를 묻고 일회용
    *  sudo 티켓을 함께 보낸다. false 면 묻지 않는다. */
   needs_sudo: boolean;

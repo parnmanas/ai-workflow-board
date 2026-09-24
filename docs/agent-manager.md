@@ -367,6 +367,26 @@ A CLI whose latest could not be read has **no key** — and a missing key means
 "unknown", never "up to date". Locking on unknown would strand a host whose npm
 lookup failed with no way to upgrade at all.
 
+### The latest version belongs to the install, not the CLI
+
+`cli_latest_versions` comes from the npm registry, so it is only a valid
+baseline for installs that *came from* npm (`npm-prefix` / `bun` / `volta` /
+`pnpm` — the package name was read out of their `node_modules` path). Each row
+in `cli_installs` therefore carries its own `latest_version`, and it is `null`
+for any other channel.
+
+Measured on rolf: `/snap/bin/codex` is published by a third party (`jcat`), not
+OpenAI, and that channel's newest build is 0.114.0 from 2026-03-14. The npm
+`@openai/codex` on the same host is 0.156.1 — a number from a completely
+different distribution channel. Comparing the snap against it made
+`sudo snap refresh codex` — which correctly succeeded with nothing to do — get
+reported as a failure, and pinned "→ 0.156.1" on that row forever.
+
+`null` here means **unknown**, never "up to date": the button stays enabled and
+`runCliUpdate` falls back to trusting the updater's exit code (and says so in
+the ack). `undefined` is different again — it means the manager predates the
+field, and the UI falls back to the per-CLI value.
+
 Latest versions are refreshed shortly after boot (never blocking boot — it is a
 registry round trip), every `CLI_LATEST_REFRESH_MS` (3h), and once more right
 after `update_cli` so the button collapses immediately.

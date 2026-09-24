@@ -51,7 +51,7 @@ import { createAdapter, KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index
 // ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
 import { gatherAvailableModels } from './lib/available-models.js';
-import { candidateKeyFor, listCliInstalls, runCliUpdate } from './lib/cli-update.js';
+import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
 import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
 import { runWithSudo } from './lib/sudo-runner.js';
 import { describeInstallMethod } from './lib/cli-install-method.js';
@@ -741,6 +741,11 @@ async function runRuntime(
               Boolean(install.method.elevatedArgv) ||
               Boolean(createAdapter(cli).cliUpdate()),
             needs_sudo: !install.method.argv && Boolean(install.method.elevatedArgv),
+            // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. npm 채널에서 온
+            // 설치본에만 npm 의 latest 를 붙인다.
+            latest_version: npmLatestApplies(install.method)
+              ? cliLatestVersions[cli] ?? null
+              : null,
             active: Boolean(active && canonicalPathKey(active) === canonicalPathKey(install.path)),
           });
         }

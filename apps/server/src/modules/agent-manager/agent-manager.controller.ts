@@ -566,6 +566,11 @@ export class AgentManagerController {
           method: typeof row.method === 'string' ? row.method : '',
           updatable: row.updatable === true,
           needs_sudo: row.needs_sudo === true,
+          // undefined(구버전 매니저가 안 보냄) 와 null(보냈고 "모른다") 을 구분해
+          // 그대로 나른다 — 화면의 판정이 그 둘에서 달라진다.
+          ...(row.latest_version === undefined
+            ? {}
+            : { latest_version: typeof row.latest_version === 'string' && row.latest_version ? row.latest_version : null }),
           active: row.active === true,
         });
       }

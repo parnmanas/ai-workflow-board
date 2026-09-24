@@ -27,6 +27,10 @@ export interface CliInstallEntry {
   version: string | null;
   method: string;
   updatable: boolean;
+  /** 이 설치본의 최신 배포 버전. npm 채널에서 온 설치본만 값이 있고, snap/brew
+   *  처럼 다른 채널에서 온 것은 null(= 최신을 모른다, "최신이다" 가 아니다).
+   *  구버전 매니저는 이 필드를 보내지 않으므로 undefined 와 null 은 다르다. */
+  latest_version?: string | null;
   /** 올리려면 root 가 필요한 설치본인지(쓰기 불가 npm prefix, snap). UI 는 이 값이
    *  true 일 때만 비밀번호를 묻는다 — 필요 없는 비밀번호는 네트워크를 타지 않는다. */
   needs_sudo: boolean;

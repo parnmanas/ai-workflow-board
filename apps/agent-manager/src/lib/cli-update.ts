@@ -192,6 +192,28 @@ export function candidateKeyFor(cli: string, resolvedPath: string): string {
   return name || cli;
 }
 
+/**
+ * npm 레지스트리의 "latest" 를 이 설치본의 기준으로 삼아도 되는가.
+ *
+ * 삼으면 안 되는 경우가 실제로 있다(rolf 실측): `/snap/bin/codex` 는 OpenAI 가
+ * 아니라 제3자(`jcat`)가 올린 스냅이고 그 채널의 최신이 0.114.0 이다. 같은
+ * 호스트의 npm 최신은 0.156.1 이지만 **다른 배포 채널의 숫자**라 비교 대상이
+ * 아니다. 그걸 기준으로 쓰면 `snap refresh` 가 "올릴 게 없다" 로 올바르게 끝난
+ * 것을 실패로 보고하고, 화면은 영원히 "→ 0.156.1" 을 띄운다.
+ *
+ * npm 트리에서 패키지 이름을 읽어낸 설치본(npm prefix / bun / volta / pnpm)만
+ * 참이다 — 그것들은 정말로 npm 레지스트리에서 온다. 나머지(snap / homebrew /
+ * native installer / 미상)는 **모른다**, 그리고 모르는 것은 모른다고 둔다.
+ */
+export function npmLatestApplies(method: InstallMethod): boolean {
+  return (
+    method.kind === 'npm-prefix' ||
+    method.kind === 'bun' ||
+    method.kind === 'volta' ||
+    method.kind === 'pnpm'
+  );
+}
+
 /** 이 설치본은 우리가 못 건드리는 패키지 매니저가 소유하고 있는가. 그렇다면 CLI
  *  자체 업데이터를 돌리는 것은 **해롭다**: 제자리를 갈아 끼우는 대신 PATH 위 npm
  *  prefix 에 새 설치를 만들어, 대상은 그대로인데 남의 설치본만 바뀐다. */
@@ -380,7 +402,8 @@ export async function runCliUpdate(
   // 최신 버전을 알면 둘을 가를 수 있다. 모르면 업데이터의 종료 코드를 믿는
   // 수밖에 없는데, 그걸 믿은 것이 정확히 ragnar 회귀였으므로 detail 에 그
   // 불확실성을 적는다.
-  const latest = options.latest ?? null;
+  // 배포 채널이 다른 설치본에는 npm 의 latest 를 들이대지 않는다(npmLatestApplies).
+  const latest = npmLatestApplies(method) ? options.latest ?? null : null;
   const atLatest = latest ? (compareCliVersions(after, latest) ?? -1) >= 0 : null;
   // 여기까지 왔으면 반드시 한 번은 시도했다 — 시도할 방법이 하나도 없는 설치본은
   // 위에서 이미 돌아갔다(managedElsewhere / 업데이터 없음).

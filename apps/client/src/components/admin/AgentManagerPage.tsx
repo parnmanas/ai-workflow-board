@@ -2847,6 +2847,8 @@ export function InstalledCliVersions({
         // 구버전 매니저는 이 값을 모른다. 모르면 묻지 않는다 — 어차피 그 매니저는
         // sudo 티켓을 쓸 줄 모르므로, 비밀번호를 받아 봐야 쓰이지 않는다.
         needs_sudo: false,
+        // latest_version 은 일부러 넣지 않는다(undefined) — 이 합성 행은 CLI 단위
+        // 값으로 접혀야 예전 동작이 그대로 유지된다.
         active: true,
       }));
   if (installs.length === 0) return null;
@@ -2865,7 +2867,13 @@ export function InstalledCliVersions({
       </dt>
       <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', flexDirection: 'column', gap: 4 }}>
         {sorted.map((row) => {
-          const latest = inst.cli_latest_versions?.[row.cli] ?? null;
+          // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. 매니저가 행마다 알려주면
+          // 그것을 쓴다(snap/brew 는 null — npm 의 숫자를 들이대면 안 되는 채널이다).
+          // 구버전 매니저는 아예 안 보내므로(undefined) 그때만 CLI 단위 값으로 접는다.
+          const latest =
+            row.latest_version !== undefined
+              ? row.latest_version
+              : inst.cli_latest_versions?.[row.cli] ?? null;
           const state = cliUpdateState(row.version, latest);
           const upToDate = state === 'up-to-date';
           const key = row.path || row.cli;

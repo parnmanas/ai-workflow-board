@@ -39,6 +39,11 @@ export interface CliInstallEntry {
   method: string;
   /** AWB 가 이 설치본을 올릴 수 있는지. false 면 UI 는 방법만 보여주고 버튼을 감춘다. */
   updatable: boolean;
+  /** 이 **설치본**의 최신 배포 버전. 배포 채널이 npm 인 설치본만 값이 있고,
+   *  snap/homebrew 처럼 다른 채널에서 온 설치본은 `null` 이다 — 그쪽 최신을
+   *  npm 의 숫자로 판정하면 올바르게 끝난 업데이트를 실패로 읽는다(rolf 의
+   *  비공식 snap codex 실측). `null` 은 "최신이다" 가 아니라 "모른다" 다. */
+  latest_version: string | null;
   /** 올리려면 root 가 필요한지. true 면 UI 는 Update 를 누를 때 비밀번호를 묻고
    *  일회용 sudo 티켓을 함께 보낸다. false 인 설치본에는 비밀번호를 묻지 않는다 —
    *  필요 없는 비밀번호를 네트워크에 태우지 않기 위해서다. */
