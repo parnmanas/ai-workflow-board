@@ -78,6 +78,11 @@ export interface CliUpdateDeps {
   listCandidates?: (cli: string) => string[];
   /** 설치 방법 판정. 기본은 cli-install-method. */
   detectMethod?: (bin: string, pkg: string | null) => InstallMethod;
+  /** 이 CLI 가 지정 없이 어느 실행 파일로 해석되는지. 기본은 어댑터의 resolveBin.
+   *  테스트가 갈아끼운다 — 이걸 주입할 수 없으면 "그 CLI 가 러너 장비에 깔려
+   *  있는가" 에 결과가 좌우된다(board lesson: CLI resolver 테스트는 호스트 설치에
+   *  의존하지 말 것). */
+  resolveBin?: (cli: string) => string;
   /** 업데이터가 설치 위치를 옮겼을 수 있으므로 resolve 캐시를 버린다. */
   invalidateResolved?: (cli: string) => void;
   hostLabel?: string;
@@ -188,7 +193,7 @@ function managedElsewhere(method: InstallMethod): boolean {
  */
 export async function listCliInstalls(
   cli: string,
-  deps: Pick<CliUpdateDeps, 'probeVersion' | 'listCandidates' | 'detectMethod'> = {},
+  deps: Pick<CliUpdateDeps, 'probeVersion' | 'listCandidates' | 'detectMethod' | 'resolveBin'> = {},
 ): Promise<Array<{ path: string; version: string | null; method: InstallMethod }>> {
   const probeVersion = deps.probeVersion ?? defaultProbeVersion;
   const listCandidates = deps.listCandidates ?? listCliBinCandidates;
@@ -199,7 +204,7 @@ export async function listCliInstalls(
   try {
     const adapter = createAdapter(cli);
     pkg = adapter.updatePackage();
-    key = candidateKeyFor(cli, adapter.resolveBin());
+    key = candidateKeyFor(cli, (deps.resolveBin ?? ((c) => createAdapter(c).resolveBin()))(cli));
   } catch {
     // 해석 실패(미설치) — 이름 그대로 열거해 본다. 후보가 없으면 빈 배열이다.
   }

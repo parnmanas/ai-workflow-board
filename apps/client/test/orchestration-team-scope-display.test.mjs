@@ -39,8 +39,15 @@ async function mountModal(t, { team, workspaces = [] }) {
     React.createElement(TeamFormModal, {
       isOpen: true,
       wsId: 'ws-1',
-      agents: [],
-      globalAgents: [],
+      // 로스터가 "Agent 고르기" 에서 "Runtime Host·CLI·모델·작업폴더 slot 선언" 으로
+      // 바뀌면서(ticket e1eeddca) 이 모달의 prop 도 agents/globalAgents →
+      // hosts/credentials/backendProfiles 로 바뀌었다. 이 테스트가 옛 prop 을 계속
+      // 넘기는 바람에 hosts 가 undefined 로 들어가 TeamSlotRuntimeFields 가
+      // `hosts.find` 에서 터졌다(main CI red). 스코프 표시만 보는 테스트라 세 목록은
+      // 비워도 충분하다 — 빈 배열은 "이 호스트에 아무것도 없다" 로 정상 렌더된다.
+      hosts: [],
+      credentials: [],
+      backendProfiles: [],
       workspaces,
       team,
       onClose: () => {},

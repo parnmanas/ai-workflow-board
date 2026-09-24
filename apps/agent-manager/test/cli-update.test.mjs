@@ -26,6 +26,13 @@ const { runCliUpdate, listCliInstalls, extractSemver, compareCliVersions } = awa
 /** 이 호스트에 다른 설치본이 없다 — 대부분의 테스트가 보려는 상황. */
 const noOtherInstalls = () => [];
 
+// 모든 테스트는 대상 경로를 **명시**한다(`{ bin }`) 또는 해석을 주입한다.
+// 경로를 안 주면 runCliUpdate 가 어댑터의 resolveBin 을 타고, 그러면 "이 러너에
+// claude 가 깔려 있는가" 가 결과를 가른다 — CI 를 실제로 빨갛게 만든 실수다
+// (board lesson: CLI resolver 테스트는 호스트 설치에 의존하지 말 것).
+const NPM_CLAUDE = '/home/parn/.npm-global/bin/claude';
+const NATIVE_CLAUDE = '/home/parn/.local/bin/claude';
+
 /** npm prefix 아래 정상 설치 — 가장 흔한 모양. */
 const npmMethod = (prefix, pkg) => ({
   kind: 'npm-prefix',
@@ -83,46 +90,54 @@ test('npm prefix 설치본은 그 prefix 를 박아 올린다 — 자체 업데�
 
 test('증명된 방법이 없으면 CLI 자체 업데이터에 맡긴다', async () => {
   const runs = [];
-  const result = await runCliUpdate('claude', {
-    listCandidates: noOtherInstalls,
-    detectMethod: unknownMethod,
-    run: async (cmd, args) => {
-      runs.push([cmd, ...args]);
-      return { ok: true, output: '' };
+  const result = await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: unknownMethod,
+      run: async (cmd, args) => {
+        runs.push([cmd, ...args]);
+        return { ok: true, output: '' };
+      },
+      probeVersion: (() => {
+        let n = 0;
+        return async () => (n++ === 0 ? '2.0.0' : '2.1.0');
+      })(),
     },
-    probeVersion: (() => {
-      let n = 0;
-      return async () => (n++ === 0 ? '2.0.0' : '2.1.0');
-    })(),
-  });
+    { bin: NATIVE_CLAUDE },
+  );
 
   assert.equal(runs.length, 1);
   assert.deepEqual(runs[0].slice(1), ['update'], 'claude 어댑터의 update 서브커맨드');
-  assert.match(runs[0][0], /claude/, '어댑터가 해석한 바이너리로 돌린다');
+  assert.equal(runs[0][0], NATIVE_CLAUDE, '그 설치본을 직접 돌린다');
   assert.equal(result.ok, true);
 });
 
 test('prefix 방법이 실패하면 자체 업데이터로 물러선다', async () => {
   const runs = [];
-  const result = await runCliUpdate('claude', {
-    listCandidates: noOtherInstalls,
-    detectMethod: () => npmMethod('/home/parn/.npm-global', '@anthropic-ai/claude-code'),
-    run: async (cmd, args) => {
-      runs.push(cmd);
-      // npm 은 실패, 자체 업데이터는 성공.
-      return cmd === 'npm'
-        ? { ok: false, output: 'npm ERR! ETIMEDOUT' }
-        : { ok: true, output: 'updated' };
+  const result = await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: () => npmMethod('/home/parn/.npm-global', '@anthropic-ai/claude-code'),
+      run: async (cmd) => {
+        runs.push(cmd);
+        // npm 은 실패, 자체 업데이터는 성공.
+        return cmd === 'npm'
+          ? { ok: false, output: 'npm ERR! ETIMEDOUT' }
+          : { ok: true, output: 'updated' };
+      },
+      probeVersion: (() => {
+        let n = 0;
+        return async () => (n++ === 0 ? '2.0.0' : '2.1.0');
+      })(),
     },
-    probeVersion: (() => {
-      let n = 0;
-      return async () => (n++ === 0 ? '2.0.0' : '2.1.0');
-    })(),
-  });
+    { bin: NPM_CLAUDE },
+  );
 
   assert.equal(runs.length, 2, 'npm → 자체 업데이터');
   assert.equal(runs[0], 'npm');
-  assert.match(runs[1], /claude/);
+  assert.equal(runs[1], NPM_CLAUDE);
   assert.equal(result.ok, true);
   assert.equal(result.attempts.length, 2);
   assert.equal(result.attempts[0].ok, false);
@@ -130,15 +145,19 @@ test('prefix 방법이 실패하면 자체 업데이터로 물러선다', async 
 
 test('prefix 방법이 성공했으면 자체 업데이터를 덧돌리지 않는다 — npm 재설치는 그 자체로 최종이다', async () => {
   const runs = [];
-  const result = await runCliUpdate('claude', {
-    listCandidates: noOtherInstalls,
-    detectMethod: () => npmMethod('/p', '@anthropic-ai/claude-code'),
-    run: async (cmd) => {
-      runs.push(cmd);
-      return { ok: true, output: 'up to date' };
+  const result = await runCliUpdate(
+    'claude',
+    {
+      listCandidates: noOtherInstalls,
+      detectMethod: () => npmMethod('/p', '@anthropic-ai/claude-code'),
+      run: async (cmd) => {
+        runs.push(cmd);
+        return { ok: true, output: 'up to date' };
+      },
+      probeVersion: async () => '2.1.281 (Claude Code)',
     },
-    probeVersion: async () => '2.1.281 (Claude Code)',
-  });
+    { bin: NPM_CLAUDE },
+  );
 
   assert.deepEqual(runs, ['npm']);
   assert.equal(result.ok, true, '버전이 그대로여도 npm 이 성공했으면 이미 최신이다');
@@ -154,16 +173,20 @@ for (const [kind, label, manual, elevation] of [
     // 여기에 `codex update` 를 돌리면 제자리가 아니라 PATH 위 npm prefix 에 새
     // 설치가 생긴다 — 대상은 그대로인데 남의 설치본만 바뀌는 ragnar 패턴이다.
     let ran = 0;
-    const result = await runCliUpdate('codex', {
-      hostLabel: 'rolf',
-      listCandidates: noOtherInstalls,
-      detectMethod: () => unmanageable(kind, label, manual, elevation),
-      run: async () => {
-        ran++;
-        return { ok: true, output: '' };
+    const result = await runCliUpdate(
+      'codex',
+      {
+        hostLabel: 'rolf',
+        listCandidates: noOtherInstalls,
+        detectMethod: () => unmanageable(kind, label, manual, elevation),
+        run: async () => {
+          ran++;
+          return { ok: true, output: '' };
+        },
+        probeVersion: async () => 'codex-cli 0.114.0',
       },
-      probeVersion: async () => 'codex-cli 0.114.0',
-    });
+      { bin: '/snap/bin/codex' },
+    );
 
     assert.equal(ran, 0, '실행하지 않는다');
     assert.equal(result.ok, false);
@@ -180,15 +203,15 @@ test('버전이 안 움직였을 때 최신 버전을 알면 *이미 최신* 과
     probeVersion: async () => '2.1.273 (Claude Code)',
   };
 
-  const stale = await runCliUpdate('claude', deps, { latest: '2.1.281' });
+  const stale = await runCliUpdate('claude', deps, { bin: NPM_CLAUDE, latest: '2.1.281' });
   assert.equal(stale.ok, false, '최신이 더 위에 있는데 안 움직였으면 실패다');
   assert.match(stale.detail, /npm latest is 2\.1\.281/);
 
-  const current = await runCliUpdate('claude', deps, { latest: '2.1.273' });
+  const current = await runCliUpdate('claude', deps, { bin: NPM_CLAUDE, latest: '2.1.273' });
   assert.equal(current.ok, true);
   assert.match(current.detail, /already current \(npm latest 2\.1\.273\)/);
 
-  const unknown = await runCliUpdate('claude', deps, { latest: null });
+  const unknown = await runCliUpdate('claude', deps, { bin: NPM_CLAUDE, latest: null });
   assert.equal(unknown.ok, true, '최신을 모르면 업데이터의 말을 믿는다');
   assert.match(unknown.detail, /latest version unknown/, '다만 그 불확실성을 적는다');
 });
@@ -273,6 +296,7 @@ test('알 수 없는 CLI 는 throw 대신 해석 실패 사유를 담아 돌아�
 
 test('listCliInstalls 는 같은 CLI 의 설치본을 전부 돌려준다 — update_cli 의 허용목록이기도 하다', async () => {
   const rows = await listCliInstalls('claude', {
+    resolveBin: () => NPM_CLAUDE,
     listCandidates: (key) => {
       assert.equal(key, 'claude');
       return ['/a/bin/claude', '/b/bin/claude'];
@@ -293,6 +317,8 @@ test('listCliInstalls 는 같은 CLI 의 설치본을 전부 돌려준다 — up
 test('빌려 쓰는 어댑터는 실제 바이너리 이름으로 후보를 센다 (deepseek → claude)', async () => {
   const asked = [];
   await listCliInstalls('deepseek', {
+    // 해석을 주입한다 — 안 그러면 "러너 장비에 claude 가 깔려 있는가" 가 결과를 가른다.
+    resolveBin: () => NPM_CLAUDE,
     listCandidates: (key) => {
       asked.push(key);
       return [];
