@@ -282,3 +282,27 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 - 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`(접기 규칙·slash 매칭·schema 정규화), `sessions-navigation.test.mjs`,
   `new-session-modal-host-refresh.test.mjs`(호스트 목록 갱신이 열린 모달을 되돌리지 않는다),
   `session-interactive-ui.test.mjs`(컴포저 자동완성, 질문 폼 렌더·제출).
+
+## 세션 프로세스 재시작 (`restart`)
+
+살아 있는 세션 프로세스는 **기동 시점의 CLI 상태**를 물고 있다. 그 사이에 CLI 를
+업그레이드해도 그 프로세스가 아는 모델 목록·기능은 옛 바이너리의 것이고, 다시 띄우기
+전에는 바뀌지 않는다 — 실측: claude 를 2.1.281 로 올린 뒤에도 돌고 있던 세션에는 새
+모델(Fable 5.1)이 끝내 나타나지 않았고, 프로세스를 죽였다 다시 띄우자 나왔다.
+
+`POST /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/restart` → 서버가
+`agent_session_request` 를 op `restart` 로 보내고, 매니저는 살아 있는 프로세스를 닫은 뒤
+**같은 세션 id 로** 곧바로 다시 연다.
+
+- `close` 와 다른 점은 **다음 프롬프트를 기다리지 않는다**는 것이다. 운영자가 재시작을
+  누르는 이유는 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는
+  것은 지금 살아 있는 새 프로세스다.
+- 기록은 CLI 홈에 있으므로 **대화는 이어진다**. 죽는 것은 프로세스뿐이다.
+- 서버는 요청 즉시 상태를 `starting` 으로 옮긴다 — 그 사이 프롬프트가 끼어들지 못하게
+  하는 것이 `agentSessionAcceptsPrompt` 의 기존 계약이다.
+- 진행 중인 턴이 있으면 끊긴다. UI 는 `starting` 일 때만 버튼을 잠근다: 턴 중이라도
+  운영자가 일부러 죽이려는 것일 수 있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다.
+
+`AGENT_SESSION_REQUEST_OPS` 는 서버·agent-manager 공동 contract 다. agent-manager 는
+별도 패키지라 그 타입을 import 할 수 없어 유니온 사본을 두므로, op 추가는 **양쪽을 같은
+PR 로** 고친다(`agent-session-runner.ts` 의 `AgentSessionRequest`).

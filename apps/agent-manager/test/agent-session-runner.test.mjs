@@ -213,6 +213,36 @@ test('open(new) → prompt stream → permission relay → turn finished, and th
   assert.equal(server.events(sid).at(-1).state.status, 'closed');
 });
 
+test('restart kills the process and reopens the SAME session — 새 프로세스, 같은 대화', async (t) => {
+  // 살아 있는 세션 프로세스는 **기동 시점의 CLI 상태**를 물고 있다. CLI 를 올려도 그
+  // 프로세스가 아는 모델 목록·기능은 옛 바이너리의 것이라, 다시 띄우기 전에는 바뀌지
+  // 않는다(실측: claude 업그레이드 뒤에도 돌고 있던 세션에는 새 모델이 끝내 안 나왔다).
+  // close 와 다른 점은 **다음 프롬프트를 기다리지 않는다**는 것이다.
+  const { server, runner } = await harness(t);
+  await runner.handle(request('open', { request_id: 'rpc-restart-open', session_id: CLAUDE_ID }));
+  const sid = CLAUDE_ID;
+  const before = runner._snapshot()[0]?.pid;
+  assert.ok(before, '재시작 전에 살아 있는 프로세스가 있어야 한다');
+
+  await runner.handle(request('restart', { session_id: sid }));
+
+  const after = runner._snapshot()[0]?.pid;
+  assert.ok(after, '재시작 뒤에도 프로세스가 살아 있어야 한다 — close 와 달리 즉시 되살린다');
+  assert.notEqual(after, before, '프로세스는 실제로 새로 떠야 한다');
+  assert.equal(runner._snapshot()[0]?.session_id, sid, '같은 세션 id 로 다시 연다 — 새 대화가 아니다');
+  await waitFor(
+    () => server.events(sid).some((e) => /restarted/i.test(e.payload?.text || '')),
+    'restart 를 알리는 system 이벤트',
+  );
+});
+
+test('restart 는 열려 있는 세션을 요구한다 — 세션 id 없이는 되살릴 대상이 없다', async (t) => {
+  const { server, runner } = await harness(t);
+  await runner.handle(request('restart', { session_id: null }));
+  // 조용히 넘어가지 않는다. 에러 이벤트로 드러나야 운영자가 이유를 안다.
+  assert.equal(runner._snapshot().length, 0);
+});
+
 test('open(existing id) resumes via session/load using the cwd recorded in the CLI home', async (t) => {
   const { cwd, server, runner } = await harness(t);
   await runner.handle(request('open', { request_id: 'rpc-resume', session_id: CLAUDE_ID }));

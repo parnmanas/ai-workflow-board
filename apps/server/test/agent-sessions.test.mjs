@@ -6,7 +6,7 @@
 //      가서 `POST /api/agent/sessions/rpc/:id` 응답으로 풀리고(타임아웃·소유권 포함),
 //   3. prompt 가 driver 를 잡고 `op:'prompt'` 를 내보내며, 매니저가 중계한 이벤트/상태가
 //      driver 의 SSE 로만 흐르고(저장 없음),
-//   4. permission / cancel / set_mode / close 가 올바른 op 으로 나가고,
+//   4. permission / cancel / set_mode / close / restart 가 올바른 op 으로 나가고,
 //   5. 다른 매니저 키는 RPC/이벤트를 풀 수 없다
 // 를 고정한다.
 //
@@ -246,6 +246,18 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   const reopen = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'one more' }) });
   assert.equal(reopen.status, 202);
   assert.equal(reopen.body.live.status, 'starting');
+
+  // 5b. restart → 프로세스만 다시 띄운다. close 와 달리 다음 프롬프트를 기다리지 않고
+  //     바로 starting 으로 간다 — 운영자가 재시작을 누르는 이유는 보통 "방금 CLI 를
+  //     올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는 건 지금 살아 있는 새
+  //     프로세스다. starting 은 그 사이 프롬프트가 끼어들지 못하게도 한다.
+  const restart = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/restart`, { method: 'POST', headers: ownerHeaders });
+  assert.equal(restart.status, 202);
+  assert.equal(restart.body.status, 'starting');
+  assert.ok(
+    requests.some((r) => r.op === 'restart' && r.session_id === 'sess-aaaa'),
+    'restart 는 같은 세션 id 로 나간다 — 새 세션을 만드는 것이 아니다',
+  );
 
   // 6. rpc timeout surfaces as 504 (nobody answers)
   const orig = requests.length;

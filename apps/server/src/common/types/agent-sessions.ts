@@ -62,6 +62,15 @@ export const AGENT_SESSION_REQUEST_OPS = [
   'set_mode',    // { mode_id }
   'set_config_option', // { config_id, config_value: string | boolean } — 모델·reasoning 등 ACP session config option
   'close',       // 프로세스 종료
+  // 프로세스를 죽이고 **같은 세션 id 로** 다시 연다. close 와 달리 다음 프롬프트를
+  // 기다리지 않고 즉시 되살린다.
+  //
+  // 왜 필요한가: 살아 있는 세션 프로세스는 **기동 시점의 CLI 상태**를 물고 있다.
+  // 그 사이에 CLI 를 업그레이드해도 그 프로세스가 아는 모델 목록·기능은 옛 바이너리의
+  // 것이고, 다시 띄우기 전에는 바뀌지 않는다(실측: claude 를 올린 뒤에도 돌고 있던
+  // 세션에는 새 모델이 끝내 나타나지 않았다). 기록은 CLI 홈에 있으므로 재시작해도
+  // 대화는 이어진다 — 죽는 것은 프로세스뿐이다.
+  'restart',
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 

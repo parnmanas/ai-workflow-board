@@ -2141,6 +2141,18 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/cancel`,
       { method: 'POST' },
     ),
+  /**
+   * 세션 프로세스를 죽이고 같은 세션 id 로 다시 띄운다.
+   *
+   * 살아 있는 프로세스는 **기동 시점의 CLI 상태**를 물고 있어서, 그 사이에 CLI 를
+   * 올려도 모델 목록·기능이 갱신되지 않는다. 기록은 CLI 홈에 있으므로 재시작해도
+   * 대화는 이어진다 — 죽는 것은 프로세스뿐이다.
+   */
+  restartHostSession: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionLiveSnapshot>(
+      `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/restart`,
+      { method: 'POST' },
+    ),
   setHostSessionMode: (managerId: string, cli: string, sessionId: string, modeId: string) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/mode`,

@@ -537,6 +537,22 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     }
   }, [managerId, cli, sessionId, showToast]);
 
+  /**
+   * 세션 프로세스를 죽이고 같은 세션 id 로 다시 띄운다.
+   *
+   * 살아 있는 프로세스는 **기동 시점의 CLI 상태**를 물고 있다 — CLI 를 올려도 그
+   * 프로세스가 아는 모델 목록·기능은 옛 바이너리의 것이고, 다시 띄우기 전에는 바뀌지
+   * 않는다. 기록은 CLI 홈에 있어서 대화는 이어진다.
+   */
+  const restart = useCallback(async () => {
+    try {
+      await api.restartHostSession(managerId, cli, sessionId);
+      showToast('Restarting the session process…', 'info');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to restart', 'error');
+    }
+  }, [managerId, cli, sessionId, showToast]);
+
   const setMode = useCallback(async (modeId: string) => {
     try {
       await api.setHostSessionMode(managerId, cli, sessionId, modeId);
@@ -624,6 +640,38 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </div>
         </div>
         <StatusPill status={status} />
+        {/* 프로세스만 다시 띄운다. CLI 를 올린 뒤 새 모델·기능이 보이지 않을 때 쓰는
+            정식 경로다 — 살아 있는 프로세스는 기동 시점의 CLI 를 계속 물고 있다.
+            여는 중(starting)에만 잠근다: 턴 중이라도 운영자가 일부러 죽이려는 것일 수
+            있고, 그걸 막으면 멈춘 세션을 되살릴 길이 없어진다. */}
+        <button
+          type="button"
+          onClick={() => void restart()}
+          disabled={status === 'starting'}
+          title={
+            status === 'starting'
+              ? '이미 프로세스를 여는 중입니다.'
+              : '세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ' +
+                '새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ' +
+                '진행 중인 턴이 있으면 끊깁니다.'
+          }
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '3px 8px',
+            fontSize: 11.5,
+            background: 'transparent',
+            color: tokens.colors.textSecondary,
+            border: `1px solid ${tokens.colors.border}`,
+            borderRadius: tokens.radii.sm,
+            cursor: status === 'starting' ? 'not-allowed' : 'pointer',
+            opacity: status === 'starting' ? 0.5 : 1,
+            fontFamily: 'inherit',
+          }}
+        >
+          <span aria-hidden="true">⟳</span> Restart
+        </button>
         {/* 어댑터가 준 세션 설정(모델·reasoning·mode …) — 살아 있는 세션에서만 바꿀 수 있다 */}
         {configOptions.map((option) => {
           // 여는 중(starting)에만 잠근다. 턴 중이나 승인 대기 중에도 어댑터는 변경을 받아들이고,

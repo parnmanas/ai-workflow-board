@@ -188,6 +188,19 @@ export class AgentSessionsController {
     return this.run(res, 202, () => this.sessions.setMode(ws, this.userId(req), managerId, cli, sessionId, body?.mode_id));
   }
 
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/restart')
+  async restart(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    return this.run(res, 202, () => this.sessions.restart(ws, this.userId(req), managerId, cli, sessionId));
+  }
+
   @Post('hosts/:managerId/:cli/sessions/:sessionId/close')
   async close(
     @Param('managerId') managerId: string,

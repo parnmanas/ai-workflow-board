@@ -10,7 +10,12 @@ import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
-import type { AgentSessionAuth, AgentSessionConfigOption, AgentSessionCommand } from './agent-sessions';
+import type {
+  AgentSessionAuth,
+  AgentSessionConfigOption,
+  AgentSessionCommand,
+  AgentSessionRequestOp,
+} from './agent-sessions';
 
 export type StreamEventType =
   | 'board_update'
@@ -957,7 +962,10 @@ export interface AgentSessionRequestPayload {
   /** 요청을 낸 워크스페이스 — credential 조회 스코프. */
   workspace_id: string;
   cli: string;
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close';
+  // 유니온을 여기 다시 적지 않는다 — `AGENT_SESSION_REQUEST_OPS`(agent-sessions.ts)가
+  // 단일 원천이다. 예전에는 같은 목록이 두 벌이라, 상수에 op 를 추가해도 이 타입이
+  // 따라오지 않아 컴파일러가 서버 코드를 막았다(실제로 'restart' 추가 때 걸렸다).
+  op: AgentSessionRequestOp;
   request_id?: string;
   /** open(신규)일 때만 null. */
   session_id?: string | null;

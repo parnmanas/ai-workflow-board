@@ -1095,6 +1095,26 @@ export class AgentSessionsService implements OnModuleDestroy {
     return this.emitUpdate(state, 'closed');
   }
 
+  /**
+   * 세션 프로세스를 죽이고 같은 세션 id 로 다시 연다.
+   *
+   * `close` 와 달리 다음 프롬프트를 기다리지 않는다 — 운영자가 재시작을 누르는 이유는
+   * 보통 "방금 CLI 를 올렸으니 새 바이너리로 다시 띄워라" 이고, 그때 원하는 것은
+   * 지금 당장 살아 있는 새 프로세스다. 상태를 `starting` 으로 먼저 옮겨 두면 그 사이에
+   * 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt).
+   */
+  async restart(workspaceId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+    const rec = this.requireHost(workspaceId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const state = this.live.get(liveKey(managerId, cli, sessionId))
+      ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'starting', driver_user_id: userId });
+    state.status = 'starting';
+    state.driver_user_id = userId;
+    state.updated_at = Date.now();
+    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'restart', session_id: sessionId, driver_user_id: userId });
+    return this.emitUpdate(state, 'restart');
+  }
+
   // ─── 매니저 쓰기 ───────────────────────────────────────────────────────
 
   relayEvents(managerId: string, cli: string, sessionId: string, itemsInput: unknown, patch?: ManagerStatePatch | null): { relayed: number; live: AgentSessionLiveSnapshot | null } {
