@@ -9,7 +9,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { randomUUID } from 'crypto';
 import { dispatchBackoffMs, readReconcilerConfig } from '../agents/dispatch-intent.service';
 import { isDuplicateDecisionPending } from './ticket-duplicate-pending';
-import { emitFocusReleased } from '../agents/focus-eligibility';
+import { emitFocusReleased, emitPromotionRecheck } from '../agents/focus-eligibility';
 
 export interface DuplicateIntake {
   title: string;
@@ -36,6 +36,32 @@ export interface DuplicateAssessment {
   canonical_ticket_id: string | null;
   ambiguous: boolean;
   candidates: DuplicateMatch[];
+}
+
+/**
+ * 확정 오탐 정정이 재dispatch 를 건너뛴 사유 (ticket 83c5e25c).
+ *
+ * 링크 해제는 컬럼과 무관한 **데이터 정정**이라 항상 수행된다. 재dispatch 는
+ * 그 위에 얹는 편의이고, 지금 컬럼에서 그 role 을 깨울 수 없으면 조용히
+ * 건너뛴다 — 빈 문자열이 아니면 "해제만 했다" 는 뜻이다.
+ */
+export type DuplicateCorrectionDispatchSkip =
+  | ''
+  | 'no_board_column'
+  | 'terminal_column'
+  | 'role_not_routed_in_current_column'
+  | 'role_has_no_holder'
+  | 'ticket_pending';
+
+export interface ConfirmedLinkCorrection {
+  ticket: Ticket;
+  previousCanonicalId: string;
+  /** 건너뛴 경우 빈 문자열 — 새 intent 를 만들지 않았다는 뜻. */
+  intentId: string;
+  generation: number;
+  leaseOwner: string;
+  agentId: string;
+  dispatchSkippedReason: DuplicateCorrectionDispatchSkip;
 }
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
@@ -263,24 +289,61 @@ export class TicketDuplicateService {
   }
 
   /**
-   * 확정된 오탐 연결을 해제하고 해당 역할의 dispatch 채무를 새로 연다.
-   * 동일 트랜잭션에서 이전 intent를 종료한 뒤 새 pending intent를 만들므로,
-   * 동시 정정 요청 중 하나만 canonical 전이를 소유하고 재dispatch할 수 있다.
+   * 지금 컬럼에서 이 role 을 재dispatch 할 수 있는지 판정한다. 판정 실패는
+   * **거부가 아니라 건너뜀**이다 (ticket 83c5e25c) — 링크 해제 자체는 컬럼과
+   * 무관한 정정이므로 여기서 throw 하면 안 된다.
+   *
+   * pending 4종을 모두 본다: `TriggerLoopService._emitTrigger` 가 그 4종을
+   * 모두 게이트하므로, 일부만 보고 intent 를 열면 트리거는 드롭되는데 열린
+   * dispatch 채무만 남는 유령 행이 된다.
+   */
+  private _dispatchSkipReason(
+    report: Ticket,
+    column: BoardColumn | null,
+    role: string,
+  ): DuplicateCorrectionDispatchSkip {
+    if (report.pending_user_action || report.pending_on_tickets || report.pending_ci_wait || report.pending_merge_lease) return 'ticket_pending';
+    if (!column) return 'no_board_column';
+    if ((column as any).is_terminal === true || (column as any).kind === 'terminal') return 'terminal_column';
+    let routedRoles: string[] = [];
+    try { routedRoles = JSON.parse((column as any).role_routing || '[]'); } catch { routedRoles = []; }
+    if (!Array.isArray(routedRoles) || !routedRoles.includes(role)) return 'role_not_routed_in_current_column';
+    if (role === 'assignee' && !report.assignee_id) return 'role_has_no_holder';
+    return '';
+  }
+
+  /**
+   * 확정된 오탐 연결을 해제하고, 가능하면 해당 역할의 dispatch 채무를 새로
+   * 연다. 동일 트랜잭션에서 이전 intent를 종료한 뒤 새 pending intent를
+   * 만들므로, 동시 정정 요청 중 하나만 canonical 전이를 소유하고 재dispatch할
+   * 수 있다.
+   *
+   * **해제와 재dispatch 는 분리된다 (ticket 83c5e25c).** 예전에는 "지금 컬럼이
+   * 그 role 을 라우팅하지 않는다"·"terminal 컬럼이다"·"assignee 미배정"·
+   * "pending 이다" 가 전부 throw 였다. 그런데 duplicate intake 는 report 티켓을
+   * **intake 컬럼에 둔 채로** 링크하고 intake 는 assignee 를 라우팅하지
+   * 않으므로, 오링크가 가장 흔히 생기는 바로 그 상태에서 교정 도구가 항상
+   * 거부됐다 — 잘못 묶인 티켓이 영구히 dispatch 차단된 채 방치됐다. 이제
+   * 해제는 항상 수행하고, 재dispatch 는 `_dispatchSkipReason` 이 비었을 때만
+   * 하는 best-effort 다.
+   *
+   * 해제만 한 경우의 재개 경로는 **role dispatch 가 아니라 승격**이다: 링크가
+   * 풀리면 티켓은 `BacklogPromotionService` 의 후보 쿼리
+   * (`t.canonical_ticket_id IS NULL`)를 다시 통과하고, 승격이 곧 목적지 컬럼
+   * role holder 에게 트리거를 발행한다. 그 재평가를 즉시 깨우려고 커밋 뒤
+   * `emitPromotionRecheck` 를 쏜다.
    */
   async correctConfirmedLink(
     reportId: string,
     role: string,
     actorName: string,
     actorId: string,
-  ): Promise<{ ticket: Ticket; previousCanonicalId: string; intentId: string; generation: number; leaseOwner: string; agentId: string }> {
-    return this.dataSource.transaction(async manager => {
+  ): Promise<ConfirmedLinkCorrection> {
+    const corrected = await this.dataSource.transaction(async manager => {
       const tickets = manager.getRepository(Ticket);
       const report = await tickets.findOne({ where: { id: reportId } });
       if (!report) throw new Error('Ticket not found');
       if (!report.canonical_ticket_id) throw new Error('Ticket has no confirmed canonical link to correct');
-      if (report.pending_user_action || report.pending_on_tickets) {
-        throw new Error('Pending ticket cannot be redispatched');
-      }
       const previousCanonicalId = report.canonical_ticket_id;
       const canonical = await tickets.findOne({ where: { id: previousCanonicalId } });
       if (!canonical || canonical.workspace_id !== report.workspace_id || canonical.id === report.id) {
@@ -289,18 +352,7 @@ export class TicketDuplicateService {
       const column = report.column_id
         ? await manager.getRepository(BoardColumn).findOne({ where: { id: report.column_id } })
         : null;
-      if (!column) throw new Error('Ticket has no dispatchable board column');
-      if ((column as any).is_terminal === true || (column as any).kind === 'terminal') {
-        throw new Error('Ticket column is terminal or not dispatchable');
-      }
-      let routedRoles: string[] = [];
-      try { routedRoles = JSON.parse((column as any).role_routing || '[]'); } catch { routedRoles = []; }
-      if (!Array.isArray(routedRoles) || !routedRoles.includes(role)) {
-        throw new Error(`Role ${role} is not routed in the current column`);
-      }
-      if (role === 'assignee' && !report.assignee_id) {
-        throw new Error('Assignee is not assigned');
-      }
+      const dispatchSkippedReason = this._dispatchSkipReason(report, column, role);
 
       // compare-and-swap으로 정정 소유권을 획득한다. PostgreSQL READ COMMITTED에서는
       // 두 호출이 위에서 기존 canonical을 함께 읽을 수 있지만, 그 값을 NULL로 바꾸는
@@ -326,10 +378,13 @@ export class TicketDuplicateService {
         lease_owner: '',
         lease_expires_at: null,
       });
+      // 재dispatch 가 가능할 때만 새 채무를 연다. 건너뛴 경우 열린 intent 가
+      // 없다는 사실 자체가 "이 정정은 아무도 깨우지 않았다" 는 신호다 —
+      // 트리거가 드롭될 것을 알면서 intent 만 남기면 유령 행이 된다.
       const dispatchConfig = readReconcilerConfig();
-      const freshIntent = await intents.save(intents.create({
+      const freshIntent = dispatchSkippedReason ? null : await intents.save(intents.create({
         workspace_id: report.workspace_id,
-        board_id: column.board_id || '',
+        board_id: column?.board_id || '',
         ticket_id: report.id,
         role,
         agent_id: role === 'assignee' ? (report.assignee_id || '') : '',
@@ -360,7 +415,10 @@ export class TicketDuplicateService {
         ticket_id: report.id,
         author_type: 'system',
         author: 'Duplicate correction',
-        content: `Incorrect canonical link ${previousCanonicalId} was removed; ${role} dispatch was re-issued.`,
+        content: dispatchSkippedReason
+          ? `Incorrect canonical link ${previousCanonicalId} was removed; ${role} dispatch was not re-issued `
+            + `(${dispatchSkippedReason}). The ticket resumes through its normal column workflow.`
+          : `Incorrect canonical link ${previousCanonicalId} was removed; ${role} dispatch was re-issued.`,
         type: 'system',
       });
       await manager.getRepository(ActivityLog).save({
@@ -380,11 +438,23 @@ export class TicketDuplicateService {
       return {
         ticket: saved,
         previousCanonicalId,
-        intentId: freshIntent.id,
-        generation: freshIntent.dispatch_generation,
-        leaseOwner: freshIntent.lease_owner,
-        agentId: freshIntent.agent_id,
+        intentId: freshIntent?.id || '',
+        generation: freshIntent?.dispatch_generation || 0,
+        leaseOwner: freshIntent?.lease_owner || '',
+        agentId: freshIntent?.agent_id || '',
+        dispatchSkippedReason,
       };
     });
+
+    // 해제만 하고 아무도 깨우지 못한 경우 — 이 티켓은 방금 승격 후보 자격을
+    // 되찾았다. 이 신호가 없으면 다음 `agent_idle` 이나 5분 level sweep 까지
+    // 보드가 그대로 멈춰 있고, intake 컬럼에 잠긴 티켓에는 그 `agent_idle`
+    // 조차 이 티켓과 무관하게 올 때까지 기다려야 한다. 트랜잭션이 커밋된
+    // 뒤에 쏜다 — sql.js 는 단일 커넥션이라 커밋 전 발행은 리스너의 쓰기가
+    // 발행자의 트랜잭션과 겹친다.
+    if (corrected.dispatchSkippedReason) {
+      await emitPromotionRecheck(this.dataSource, corrected.ticket, 'duplicate_link_corrected');
+    }
+    return corrected;
   }
 }

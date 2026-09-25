@@ -236,6 +236,17 @@ test('the ten pre-existing pending_on_tickets gate sites also check pending_ci_w
       file: path.join(SRC_DIR, 'modules', 'agents', 'agent-workload.service.ts'),
       patterns: [/\.andWhere\('t\.pending_ci_wait = :falseVal'\)/],
     },
+    {
+      // ticket 83c5e25c — 확정 오탐 정정의 재dispatch 게이트. 이 자리는 예전에
+      // 4종 중 2종만 봤고, 그 상태에서 pending_ci_wait 인 티켓을 정정하면
+      // intent 는 열리는데 `_emitTrigger` 가 트리거를 드롭해 열린 채 아무도
+      // 안 가는 유령 dispatch 채무가 남았다. (참고: 이 목록의 길이는 테스트
+      // 이름의 숫자가 아니라 이 배열이 기준이다.)
+      file: path.join(SRC_DIR, 'modules', 'tickets', 'ticket-duplicate.service.ts'),
+      patterns: [
+        /pending_user_action \|\| report\.pending_on_tickets \|\| report\.pending_ci_wait \|\| report\.pending_merge_lease\) return 'ticket_pending'/,
+      ],
+    },
   ];
 
   for (const site of sites) {
