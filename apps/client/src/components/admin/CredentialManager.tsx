@@ -8,6 +8,8 @@ import { relativeTime } from '../../utils/time';
 import { useAuth } from '../../contexts/AuthContext';
 import CliCredentialImport from './CliCredentialImport';
 import CliAutoLogin from './CliAutoLogin';
+import { cliCredentialProviders, useCliCatalog, type FlattenedCredentialProvider } from '../../cli/catalog';
+import { providerColor, providerIcon } from '../../cli/presentation';
 
 export const CREDENTIAL_REVEAL_TTL_MS = 30_000;
 
@@ -23,21 +25,6 @@ const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   verticalAlign: 'middle',
 });
 
-const PROVIDERS = [
-  { value: 'github', label: 'GitHub', icon: 'G' },
-  { value: 'gitlab', label: 'GitLab', icon: 'L' },
-  { value: 'openai', label: 'OpenAI', icon: 'O' },
-  { value: 'custom', label: 'Custom', icon: 'C' },
-  { value: 'claude_subscription', label: 'Claude · Subscription', icon: 'CS' },
-  { value: 'claude_api_key', label: 'Claude · API Key', icon: 'CK' },
-  { value: 'claude_oauth_token', label: 'Claude · OAuth Token', icon: 'CO' },
-  { value: 'deepseek_api_key', label: 'DeepSeek · API Key', icon: 'DS' },
-  { value: 'codex_subscription', label: 'Codex · Subscription', icon: 'OS' },
-  { value: 'codex_api_key', label: 'Codex · API Key', icon: 'OK' },
-  { value: 'antigravity_subscription', label: 'Antigravity · Subscription', icon: 'AS' },
-  { value: 'antigravity_api_key', label: 'Antigravity · API Key', icon: 'AK' },
-];
-
 interface FieldDef {
   label: string;
   placeholder: string;
@@ -46,59 +33,78 @@ interface FieldDef {
   multiline?: boolean;
 }
 
-const PROVIDER_FIELD_LABELS: Record<string, Record<string, FieldDef>> = {
-  github: { token: { label: 'Personal Access Token', placeholder: 'ghp_...' } },
-  gitlab: { token: { label: 'Access Token', placeholder: 'glpat-...' } },
-  openai: { api_key: { label: 'API Key', placeholder: 'sk-...' } },
-  custom: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } },
-  claude_subscription: {
-    credentials_json: {
-      label: '.credentials.json',
-      placeholder: 'Paste the contents of ~/.claude/.credentials.json here (the file `claude login` produced).',
-      multiline: true,
-    },
+interface ProviderOption {
+  value: string;
+  label: string;
+  icon: string;
+}
+
+/** Providers that are NOT tied to an LLM CLI (git hosts, generic API key,
+ *  free-form secret). These stay local — the CLI catalog only knows CLIs. */
+const NON_CLI_PROVIDERS: Array<ProviderOption & { fields: Record<string, FieldDef> }> = [
+  { value: 'github', label: 'GitHub', icon: 'G', fields: { token: { label: 'Personal Access Token', placeholder: 'ghp_...' } } },
+  { value: 'gitlab', label: 'GitLab', icon: 'L', fields: { token: { label: 'Access Token', placeholder: 'glpat-...' } } },
+  { value: 'openai', label: 'OpenAI', icon: 'O', fields: { api_key: { label: 'API Key', placeholder: 'sk-...' } } },
+  { value: 'custom', label: 'Custom', icon: 'C', fields: { token: { label: 'Token / Secret', placeholder: 'Enter secret value' } } },
+];
+
+/** Labels / placeholders for CLI credential fields, keyed by FIELD NAME (the
+ *  catalog says which fields a provider has; this only decorates them). A
+ *  `provider:field` key overrides the plain field key where the same field
+ *  name means a different env var per CLI (`api_key`). Anything else gets a
+ *  generic label derived from the field name. */
+const FIELD_LABELS: Record<string, FieldDef> = {
+  credentials_json: {
+    label: '.credentials.json',
+    placeholder: 'Paste the contents of ~/.claude/.credentials.json here (the file `claude login` produced).',
   },
-  claude_api_key: {
-    api_key: { label: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...' },
+  api_key: { label: 'API Key', placeholder: 'sk-...' },
+  'claude_api_key:api_key': { label: 'ANTHROPIC_API_KEY', placeholder: 'sk-ant-...' },
+  'deepseek_api_key:api_key': { label: 'DeepSeek API Key', placeholder: 'sk-... (from platform.deepseek.com)' },
+  'codex_api_key:api_key': { label: 'OPENAI_API_KEY', placeholder: 'sk-...' },
+  'antigravity_api_key:api_key': { label: 'GEMINI_API_KEY', placeholder: 'AI...' },
+  oauth_token: {
+    label: 'CLAUDE_CODE_OAUTH_TOKEN',
+    placeholder: 'Run `claude setup-token` on one machine and paste the output (sk-ant-oat...). Valid ~1 year, does NOT rotate, shared by every agent — no per-machine daily re-login.',
+    multiline: true,
   },
-  claude_oauth_token: {
-    oauth_token: {
-      label: 'CLAUDE_CODE_OAUTH_TOKEN',
-      placeholder: 'Run `claude setup-token` on one machine and paste the output (sk-ant-oat...). Valid ~1 year, does NOT rotate, shared by every agent — no per-machine daily re-login.',
-      multiline: true,
-    },
+  model: { label: 'Model', placeholder: 'deepseek-chat (default) · or deepseek-reasoner' },
+  base_url: { label: 'Base URL', placeholder: 'https://api.deepseek.com/anthropic (default)' },
+  auth_json: {
+    label: 'auth.json',
+    placeholder: 'Paste the contents of the auth.json the CLI login produced (`codex login` → ~/.codex/auth.json, `opencode auth login` → ~/.local/share/opencode/auth.json; one opencode file can hold several providers — paste it whole).',
   },
-  deepseek_api_key: {
-    api_key: { label: 'DeepSeek API Key', placeholder: 'sk-... (from platform.deepseek.com)' },
-    model: { label: 'Model (optional)', placeholder: 'deepseek-chat (default) · or deepseek-reasoner' },
-    base_url: { label: 'Base URL (optional)', placeholder: 'https://api.deepseek.com/anthropic (default)' },
+  config_toml: {
+    label: 'config.toml',
+    placeholder: 'Paste the contents of ~/.codex/config.toml — model / provider preferences. Leave blank to use codex defaults.',
   },
-  codex_subscription: {
-    auth_json: {
-      label: 'auth.json',
-      placeholder: 'Paste the contents of ~/.codex/auth.json (produced by `codex login`).',
-      multiline: true,
-    },
-    config_toml: {
-      label: 'config.toml (optional)',
-      placeholder: 'Paste the contents of ~/.codex/config.toml — model / provider preferences. Leave blank to use codex defaults.',
-      multiline: true,
-    },
-  },
-  codex_api_key: {
-    api_key: { label: 'OPENAI_API_KEY', placeholder: 'sk-...' },
-  },
-  antigravity_subscription: {
-    oauth_creds_json: {
-      label: 'oauth_creds.json',
-      placeholder: 'Paste the contents of the Antigravity OAuth credential file (from the OAuth flow at antigravity.google).',
-      multiline: true,
-    },
-  },
-  antigravity_api_key: {
-    api_key: { label: 'GEMINI_API_KEY', placeholder: 'AI...' },
+  oauth_creds_json: {
+    label: 'oauth_creds.json',
+    placeholder: 'Paste the contents of the Antigravity OAuth credential file (from the OAuth flow at antigravity.google).',
   },
 };
+
+function genericFieldDef(field: string): FieldDef {
+  return { label: field.replace(/_/g, ' '), placeholder: `Enter ${field.replace(/_/g, ' ')}` };
+}
+
+/** Field definitions for a CLI credential provider from its catalog
+ *  descriptor: field order, multiline and optional-ness come from the catalog;
+ *  labels/placeholders from FIELD_LABELS. */
+function cliProviderFieldDefs(provider: FlattenedCredentialProvider): Record<string, FieldDef> {
+  const required = new Set(provider.required);
+  const multiline = new Set(provider.multiline);
+  const defs: Record<string, FieldDef> = {};
+  for (const field of provider.fields) {
+    const base = FIELD_LABELS[`${provider.id}:${field}`] ?? FIELD_LABELS[field] ?? genericFieldDef(field);
+    defs[field] = {
+      ...base,
+      label: required.has(field) ? base.label : `${base.label} (optional)`,
+      multiline: base.multiline || multiline.has(field),
+    };
+  }
+  return defs;
+}
 
 export default function CredentialManager({
   workspaceId,
@@ -117,6 +123,14 @@ export default function CredentialManager({
 }) {
   const { showToast } = useToast();
   const { user } = useAuth();
+  // CLI credential providers come from the catalog (re-rendered once the
+  // server catalog lands); non-CLI providers are the local table above.
+  const catalog = useCliCatalog();
+  const cliProviders = cliCredentialProviders(catalog);
+  const providerOptions: ProviderOption[] = [
+    ...NON_CLI_PROVIDERS.map(({ value, label, icon }) => ({ value, label, icon })),
+    ...cliProviders.map((p) => ({ value: p.id, label: p.label, icon: providerIcon(p.id) })),
+  ];
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -225,8 +239,12 @@ export default function CredentialManager({
     setTimeout(() => setCopiedField((current) => current === field ? '' : current), 2_000);
   };
 
-  const getFieldDefs = (provider: string) =>
-    PROVIDER_FIELD_LABELS[provider] || PROVIDER_FIELD_LABELS.custom;
+  const getFieldDefs = (provider: string): Record<string, FieldDef> => {
+    const cliProvider = cliProviders.find((p) => p.id === provider);
+    if (cliProvider) return cliProviderFieldDefs(cliProvider);
+    return NON_CLI_PROVIDERS.find((p) => p.value === provider)?.fields
+      ?? NON_CLI_PROVIDERS.find((p) => p.value === 'custom')!.fields;
+  };
 
   const startCreate = () => {
     setFormName('');
@@ -309,24 +327,6 @@ export default function CredentialManager({
   if (!globalMode && !effectiveWsId) {
     return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Select a workspace first.</div>;
   }
-
-  const providerColor = (p: string) => {
-    const map: Record<string, string> = {
-      github: '#24292f',
-      gitlab: '#fc6d26',
-      openai: '#10a37f',
-      custom: tokens.colors.textSecondary,
-      claude_subscription: '#cc785c',
-      claude_api_key: '#cc785c',
-      claude_oauth_token: '#cc785c',
-      deepseek_api_key: '#4d6bfe',
-      codex_subscription: '#10a37f',
-      codex_api_key: '#10a37f',
-      antigravity_subscription: '#4285f4',
-      antigravity_api_key: '#4285f4',
-    };
-    return map[p] || tokens.colors.textSecondary;
-  };
 
   return (
     <div>
@@ -425,7 +425,7 @@ export default function CredentialManager({
                           verticalAlign: 'middle',
                         }}
                       >
-                        {PROVIDERS.find((p) => p.value === c.provider)?.icon || 'C'}
+                        {providerOptions.find((p) => p.value === c.provider)?.icon || 'C'}
                       </span>
                       {c.name}
                     </td>
@@ -521,7 +521,7 @@ export default function CredentialManager({
                 onChange={(e) => { setFormProvider(e.target.value); setFormFields({}); setStoredFieldPreviews({}); }}
                 style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
               >
-                {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                {providerOptions.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
               </select>
             </div>
           </div>

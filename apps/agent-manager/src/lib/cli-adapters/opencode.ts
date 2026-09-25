@@ -20,12 +20,27 @@
 // The `host` local server is forked from this same manager binary
 // (`mcp-host`, like codex/antigravity).
 //
-// Credential-free like pi: opencode provider auth (`opencode auth login` →
-// `~/.local/share/opencode/auth.json`, or provider env keys) lives in the
-// operator's real home. prepareCliHome symlinks that auth file into the
-// per-agent HOME so a spawned agent inherits whatever the operator set up,
-// without AWB ever touching a secret. There is no `opencode_*` credential
-// provider and none is needed for v1.
+// Auth has two modes, and the DEFAULT is still credential-free: opencode
+// provider auth (`opencode auth login` → `~/.local/share/opencode/auth.json`,
+// or provider env keys) lives in the operator's real home, and prepareCliHome
+// symlinks that file into the per-agent HOME so a spawned agent inherits
+// whatever the operator set up, without AWB ever touching a secret.
+//
+// Bind an `opencode_auth` credential and that file is supplied by AWB instead,
+// through `OPENCODE_AUTH_CONTENT` — an env var opencode reads the auth JSON
+// from, which REPLACES the file wholesale (verified on opencode 1.18.32: with
+// both present only the env credential is listed, and the on-disk file is left
+// untouched). The credential holds one field, `auth_json`, the verbatim
+// contents of an `auth.json` that an `opencode auth login` produced (the
+// Credentials screen can harvest one over the web: cli-login.ts). opencode logs
+// in PER PROVIDER, so that one file may carry openai, github-copilot, anthropic
+// … at once; AWB does not model the providers, it just carries the file.
+//
+// Going through the env rather than writing the file is what keeps the two
+// modes from colliding: the operator's auth.json is never read, never written
+// and never even shadowed on disk, and — because the data dir stays where it
+// was — a credentialled agent's opencode sessions still land in the same store
+// the Sessions screen lists.
 //
 // Per-dispatch MCP attribution (X-AWB-Subagent-Ticket-Id/Role, ticket
 // 702d0ebe for codex) is DELIBERATELY absent: opencode has no `-c`-style
@@ -635,6 +650,16 @@ export class OpencodeCliAdapter extends CliAdapter {
     };
   }
 
+  authEnvKeys(): string[] {
+    // Only stripped for agents that HAVE a credential (subagent-manager /
+    // base-session-manager / agent-session-runner all gate on that). An
+    // operator shell that exports a provider key would otherwise compete with
+    // the credential's OPENCODE_AUTH_CONTENT for the same provider. Deliberately
+    // NOT including GITHUB_TOKEN: opencode's github-copilot auth lives in the
+    // auth file, while the env var is what an agent's `gh`/git tooling uses.
+    return ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'];
+  }
+
   configDirEnv(): string {
     // opencode exposes OPENCODE_CONFIG/OPENCODE_CONFIG_DIR overrides, but
     // neither is a plain "config home" redirect with documented file
@@ -647,12 +672,9 @@ export class OpencodeCliAdapter extends CliAdapter {
 
   async prepareCliHome(
     cliHomeDir: string,
-    _credential?: AdapterCredential | null,
+    credential?: AdapterCredential | null,
     mcp?: AdapterMcpContext | null,
   ): Promise<{ extraEnv: Record<string, string> }> {
-    // Opencode is credential-free (see file banner): always inherit the
-    // operator's own `opencode auth login` state, whatever provider it was
-    // set up for — never branch on a per-agent credential kind.
     const opencodeConfigDir = join(cliHomeDir, '.config', 'opencode');
     await fsp.mkdir(opencodeConfigDir, { recursive: true, mode: 0o700 });
 
@@ -662,12 +684,19 @@ export class OpencodeCliAdapter extends CliAdapter {
     const operatorConfigPath = join(operatorHome, '.config', 'opencode', 'opencode.json');
     const operatorAuthPath = join(operatorHome, '.local', 'share', 'opencode', 'auth.json');
 
-    // Inherit provider auth (any `opencode auth login` provider, including
-    // env-key setups whose keys live outside this file — the symlink only
-    // carries what the file carries, same best-effort posture as pi).
+    // Provider auth: from the bound credential if there is one (env, see file
+    // banner), else inherited from the operator.
     const agentDataDir = join(cliHomeDir, '.local', 'share', 'opencode');
     await fsp.mkdir(agentDataDir, { recursive: true, mode: 0o700 });
-    await this.#linkIfPresent(operatorAuthPath, join(agentDataDir, 'auth.json'));
+    const boundAuthJson = credential?.provider?.startsWith('opencode_')
+      ? (credential.fields?.auth_json ?? '').trim()
+      : '';
+    if (!boundAuthJson) {
+      // Inherit provider auth (any `opencode auth login` provider, including
+      // env-key setups whose keys live outside this file — the symlink only
+      // carries what the file carries, same best-effort posture as pi).
+      await this.#linkIfPresent(operatorAuthPath, join(agentDataDir, 'auth.json'));
+    }
 
     // Merge operator config (provider/model preferences) with the AWB MCP
     // servers. Gate the awb/host injection on url only (codex #prepareConfig
@@ -727,8 +756,14 @@ export class OpencodeCliAdapter extends CliAdapter {
     // manager's own environment. Data (auth.json / sessions / logs) is left on
     // its default resolution on purpose: on Windows that is the operator's live
     // `opencode auth login` state, which is exactly what a credential-free
-    // adapter wants to inherit.
-    return { extraEnv: { XDG_CONFIG_HOME: join(cliHomeDir, '.config') } };
+    // adapter wants to inherit — and with a bound credential the auth no longer
+    // comes from that directory at all, so it needs no pinning either.
+    return {
+      extraEnv: {
+        XDG_CONFIG_HOME: join(cliHomeDir, '.config'),
+        ...(boundAuthJson ? { OPENCODE_AUTH_CONTENT: boundAuthJson } : {}),
+      },
+    };
   }
 
   async #linkIfPresent(src: string, dst: string): Promise<void> {

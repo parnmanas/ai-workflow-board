@@ -57,7 +57,8 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, basename, posix, win32 } from 'node:path';
-import { KNOWN_CLI_TYPES } from './constants.js';
+import type { CliBinarySpec } from './clis/cli-module.js';
+import { DEFAULT_CLI_ID } from './constants.js';
 import { log } from './logging.js';
 
 const isWindows = process.platform === 'win32';
@@ -324,38 +325,79 @@ export function orderResolutionSources(wellKnown: string[], pathHits: string[]):
   return [...wellKnown, ...pathHits];
 }
 
-/** claude/codex delegation override 를 CLI 타입에 맞게 고른다(ticket ce65cf25).
- *  claude 는 runtime-lease(Hermes 백엔드 프로필) override 를 delegation.claudeBin
- *  보다 우선한다 — 기존 동작 그대로. codex 는 delegation.codexBin 만 본다(별도
- *  runtime-lease 개념 없음). 다른 CLI 타입은 override 가 아예 없다 — 이전처럼
- *  null. subagent-manager/base-session-manager 양쪽이 이 하나의 순수 함수를
- *  공유해 같은 판정을 중복 구현하지 않는다. */
+// ─── CLI 별 바이너리 스펙 레지스트리 ────────────────────────────────────────
+//
+// 어느 CLI 가 어떤 실행 파일 이름을 쓰고 어디에 설치되는지는 `clis/<id>/index.ts` 의
+// `binary` 슬라이스가 선언하고, `clis/builtin.ts` 가 로드될 때 여기 등록한다. 이 파일은
+// CLI 이름을 하나도 모른다 — 등록되지 않은 이름은 generic 후보(표준 bin 디렉터리 +
+// PATH)로 처리한다. 이 파일이 `clis/` 를 import 하면 어댑터 → 리졸버 → 모듈 → 어댑터
+// 순환이 되므로 등록은 반드시 바깥에서 한다.
+
+const specsByName = new Map<string, CliBinarySpec>();
+const specsById = new Map<string, CliBinarySpec>();
+
+export function registerCliBinarySpec(cliId: string, spec: CliBinarySpec): void {
+  specsById.set(cliId.toLowerCase(), spec);
+  // 빌려 쓰는 쪽(deepseek → claude)은 이름 표를 덮어쓰지 않는다 — 주인이 선언한 후보가 남는다.
+  if (!spec.borrowsFrom || !specsByName.has(spec.name.toLowerCase())) {
+    specsByName.set(spec.name.toLowerCase(), spec);
+  }
+}
+
+/** 등록된 CLI id 인가(`configured` 가 다른 CLI 의 이름을 새는지 판정할 때). */
+export function isRegisteredCliId(id: string): boolean {
+  return specsById.has(id.toLowerCase());
+}
+
+/** 실행 파일 이름 또는 CLI id 로 스펙을 찾는다. */
+export function binarySpecFor(nameOrId: string): CliBinarySpec | null {
+  const key = nameOrId.toLowerCase();
+  return specsByName.get(key) ?? specsById.get(key) ?? null;
+}
+
+/** 운영자 delegation override 를 CLI 타입에 맞게 고른다(ticket ce65cf25).
+ *  runtime-lease(Claude backend profile) 의 실행 파일 override 가 있으면 그것이
+ *  `delegation.<key>` 보다 우선한다 — 호출자는 runtime profile 을 받을 수 있는 CLI
+ *  (`dispatch.runtimeProfile`)에만 그 값을 넘긴다. `delegationKey` 를 선언하지 않은
+ *  CLI 는 override 가 아예 없다(null). subagent-manager/base-session-manager 양쪽이
+ *  이 하나의 순수 함수를 공유해 같은 판정을 중복 구현하지 않는다. */
 export function resolveBinOverride(
   cliType: string,
-  delegation: { claudeBin?: string | null; codexBin?: string | null } | null | undefined,
-  claudeExecutableOverride?: string | null,
+  delegation: object | null | undefined,
+  runtimeProfileExecutableOverride?: string | null,
 ): string | null {
-  if (cliType === 'claude') {
-    return claudeExecutableOverride ?? delegation?.claudeBin ?? null;
-  }
-  if (cliType === 'codex') {
-    return delegation?.codexBin ?? null;
-  }
-  return null;
+  const key = specsById.get(String(cliType || '').toLowerCase())?.delegationKey;
+  if (!key) return null;
+  const configured = (delegation as Record<string, unknown> | null | undefined)?.[key];
+  return runtimeProfileExecutableOverride ?? (typeof configured === 'string' && configured ? configured : null);
 }
 
-interface CandidateProvider {
-  unix: (home: string) => string[];
-  windows: (home: string) => string[];
+/** 등록되지 않은 CLI 의 기본 후보 — npm/bun/volta 전역 bin 디렉터리와 시스템 bin. */
+function genericUnixCandidates(name: string, home: string): string[] {
+  return [
+    join(home, `.npm-global/bin/${name}`),
+    join(home, `.bun/bin/${name}`),
+    join(home, `.local/bin/${name}`),
+    join(home, `.volta/bin/${name}`),
+    join(home, `.npm-packages/bin/${name}`),
+    join(home, `node_modules/.bin/${name}`),
+    `/usr/local/bin/${name}`,
+    `/opt/homebrew/bin/${name}`,
+    `/usr/bin/${name}`,
+  ];
 }
 
-const CANDIDATE_PROVIDERS: Record<string, CandidateProvider> = {
-  claude: { unix: claudeUnixCandidates, windows: claudeWindowsCandidates },
-  agy: { unix: agyUnixCandidates, windows: agyWindowsCandidates },
-  codex: { unix: codexUnixCandidates, windows: codexWindowsCandidates },
-  pi: { unix: piUnixCandidates, windows: piWindowsCandidates },
-  opencode: { unix: opencodeUnixCandidates, windows: opencodeWindowsCandidates },
-};
+function genericWindowsCandidates(name: string, home: string): string[] {
+  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+  return [join(appdata, 'npm', `${name}.exe`), join(appdata, 'npm', `${name}.cmd`)];
+}
+
+function wellKnownCandidates(name: string): string[] {
+  const spec = specsByName.get(name);
+  const home = homedir();
+  if (isWindows) return spec?.windowsCandidates ? spec.windowsCandidates(home) : genericWindowsCandidates(name, home);
+  return spec?.unixCandidates ? spec.unixCandidates(home) : genericUnixCandidates(name, home);
+}
 
 function parentExeMatching(nameRegex: RegExp): string | null {
   try {
@@ -378,12 +420,7 @@ function parentExeMatching(nameRegex: RegExp): string | null {
  * 함께 보며 고른다.
  */
 function gatherResolutionSources(ct: string): string[] {
-  const provider = CANDIDATE_PROVIDERS[ct];
-  const wellKnown = provider
-    ? isWindows
-      ? provider.windows(homedir())
-      : provider.unix(homedir())
-    : [];
+  const wellKnown = wellKnownCandidates(ct);
 
   const pathHits: string[] = [];
   try {
@@ -437,7 +474,7 @@ function gatherResolutionSources(ct: string): string[] {
  * "다른 경로가 더 새 버전" 으로 진단할 수 있다.
  */
 export function listCliBinCandidates(cliType: string): string[] {
-  const ct = String(cliType || 'claude').toLowerCase();
+  const ct = String(cliType || DEFAULT_CLI_ID).toLowerCase();
   const seen = new Set<string>();
   const out: string[] = [];
   // resolve 가 보는 후보에 **PATH 전수 스캔**을 덧붙인다. resolve 쪽의 shell
@@ -487,7 +524,7 @@ export function canonicalPathKey(p: string): string {
 const cache = new Map<string, string>();
 
 export function resolveCliBin(cliType: string, configured?: string | null): string {
-  const ct = String(cliType || 'claude').toLowerCase();
+  const ct = String(cliType || DEFAULT_CLI_ID).toLowerCase();
 
   let effectiveOverride: string | null = null;
   if (configured && configured !== ct) {
@@ -496,7 +533,7 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
     // legacy `delegation.claudeBin` default leaking through. Ignore it
     // and fall through to normal lookup so codex / antigravity spawns find
     // their actual binary instead of launching claude with foreign argv.
-    if ((KNOWN_CLI_TYPES as readonly string[]).includes(configured)) {
+    if (isRegisteredCliId(configured)) {
       log(
         `[cli-resolver:${ct}] ignoring configured="${configured}" — it names a different known CLI; falling through to lookup`,
       );
@@ -518,11 +555,12 @@ export function resolveCliBin(cliType: string, configured?: string | null): stri
     return configuredPath;
   }
 
-  if (ct === 'claude') {
-    const viaParent = parentExeMatching(/claude/i);
+  const parentPattern = specsByName.get(ct)?.parentExePattern;
+  if (parentPattern) {
+    const viaParent = parentExeMatching(parentPattern);
     if (viaParent) {
       cache.set(key, viaParent);
-      log(`[cli-resolver:claude] resolved via parent /proc/${process.ppid}/exe: ${viaParent}`);
+      log(`[cli-resolver:${ct}] resolved via parent /proc/${process.ppid}/exe: ${viaParent}`);
       return viaParent;
     }
   }
@@ -552,138 +590,8 @@ export function _resetResolverCache(): void {
  *  실제로 있으므로(Claude Code 의 npm → native installer 이전) 업데이트 직후
  *  다시 해석하려면 캐시가 걸림돌이 된다. 다른 CLI 의 캐시는 건드리지 않는다. */
 export function invalidateCliBinCache(cliType: string): void {
-  const prefix = `${String(cliType || 'claude').toLowerCase()}:`;
+  const prefix = `${String(cliType || DEFAULT_CLI_ID).toLowerCase()}:`;
   for (const key of [...cache.keys()]) {
     if (key.startsWith(prefix)) cache.delete(key);
   }
-}
-
-function claudeUnixCandidates(home: string): string[] {
-  return [
-    join(home, '.npm-global/bin/claude'),
-    join(home, '.bun/bin/claude'),
-    join(home, '.local/bin/claude'),
-    join(home, '.volta/bin/claude'),
-    join(home, '.npm-packages/bin/claude'),
-    join(home, 'node_modules/.bin/claude'),
-    '/usr/local/bin/claude',
-    '/opt/homebrew/bin/claude',
-    '/usr/bin/claude',
-  ];
-}
-
-function claudeWindowsCandidates(home: string): string[] {
-  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
-  const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-  return [
-    // npm 패키지 내부의 bin 경로는 설치 레이아웃이 아니며 claude.exe가 존재하지
-    // 않을 수 있다. npm이 보장하는 전역 shim을 직접 resolve한다.
-    join(appdata, 'npm', 'claude.exe'),
-    join(localAppData, 'Programs', 'anthropic', 'claude-code', 'claude.exe'),
-    // Last-resort npm 배치 shim — 위 .exe 경로가 하나도 없을 때만 도달한다
-    // (selectBinary 는 항상 .exe 를 우선). 매니저가 %APPDATA%\npm 이 빠진 PATH 로
-    // 서비스 실행될 때도 견고하다.
-    join(appdata, 'npm', 'claude.cmd'),
-  ];
-}
-
-function agyUnixCandidates(home: string): string[] {
-  return [
-    join(home, '.local/bin/agy'),
-    join(home, '.npm-global/bin/agy'),
-    join(home, '.bun/bin/agy'),
-    join(home, '.volta/bin/agy'),
-    join(home, '.npm-packages/bin/agy'),
-    join(home, 'node_modules/.bin/agy'),
-    '/usr/local/bin/agy',
-    '/opt/homebrew/bin/agy',
-    '/usr/bin/agy',
-  ];
-}
-
-function agyWindowsCandidates(home: string): string[] {
-  const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-  return [
-    join(localAppData, 'Antigravity', 'agy.exe'),
-    join(localAppData, 'Programs', 'google', 'antigravity', 'agy.exe'),
-  ];
-}
-
-function codexUnixCandidates(home: string): string[] {
-  return [
-    join(home, '.npm-global/bin/codex'),
-    join(home, '.bun/bin/codex'),
-    join(home, '.local/bin/codex'),
-    join(home, '.volta/bin/codex'),
-    join(home, '.npm-packages/bin/codex'),
-    join(home, 'node_modules/.bin/codex'),
-    '/usr/local/bin/codex',
-    '/opt/homebrew/bin/codex',
-    '/usr/bin/codex',
-  ];
-}
-
-function codexWindowsCandidates(home: string): string[] {
-  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
-  const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-  const pkgBin = join(appdata, 'npm', 'node_modules', '@openai', 'codex', 'bin');
-  return [
-    join(pkgBin, 'codex.exe'),
-    join(appdata, 'npm', 'codex.exe'),
-    join(localAppData, 'Programs', 'openai', 'codex', 'codex.exe'),
-    // npm 글로벌 설치는 형제 .exe 없이 이 배치 shim 만 ship 한다 — ticket e299c6b3
-    // 의 대표 repro. .exe 가 없으면 selectBinary 가 이걸로 fallback 하고 cross-spawn
-    // 이 인자를 escape 해 cmd.exe 로 실행한다.
-    join(appdata, 'npm', 'codex.cmd'),
-  ];
-}
-
-// Pi (`@earendil-works/pi-coding-agent`) is a pure TypeScript/Node CLI, not
-// a compiled binary like codex — `npm install -g` and the `pi.dev/install.sh`
-// curl installer both drop a JS entrypoint, so unlike codex there is no
-// sibling `.exe` to prefer on Windows, only the npm batch shim.
-function piUnixCandidates(home: string): string[] {
-  return [
-    join(home, '.npm-global/bin/pi'),
-    join(home, '.bun/bin/pi'),
-    join(home, '.local/bin/pi'),
-    join(home, '.volta/bin/pi'),
-    join(home, '.npm-packages/bin/pi'),
-    join(home, 'node_modules/.bin/pi'),
-    '/usr/local/bin/pi',
-    '/opt/homebrew/bin/pi',
-    '/usr/bin/pi',
-  ];
-}
-
-function piWindowsCandidates(home: string): string[] {
-  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
-  return [join(appdata, 'npm', 'pi.cmd')];
-}
-
-// Opencode (`opencode`, https://opencode.ai) ships as a native binary plus an
-// npm distribution — same install shapes as pi (npm global shim on Windows,
-// well-known unix bin dirs + PATH lookup elsewhere).
-function opencodeUnixCandidates(home: string): string[] {
-  return [
-    join(home, '.npm-global/bin/opencode'),
-    join(home, '.bun/bin/opencode'),
-    join(home, '.local/bin/opencode'),
-    join(home, '.volta/bin/opencode'),
-    join(home, '.npm-packages/bin/opencode'),
-    join(home, 'node_modules/.bin/opencode'),
-    '/usr/local/bin/opencode',
-    '/opt/homebrew/bin/opencode',
-    '/usr/bin/opencode',
-  ];
-}
-
-function opencodeWindowsCandidates(home: string): string[] {
-  const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
-  return [
-    join(appdata, 'npm', 'opencode.exe'),
-    // Last-resort npm batch shim (pi precedent — selectBinary always prefers
-    // a real .exe first, cross-spawn escapes the shim args).
-    join(appdata, 'npm', 'opencode.cmd'),
-  ];
 }

@@ -56,6 +56,8 @@ test/ci-health-monitor.test.mjs
 test/ci-wait-resume-presence.test.mjs
 test/ci-wait-resume.test.mjs
 test/claim-verification-same-second-move.test.mjs
+test/cli-catalog-endpoint.test.mjs
+test/cli-catalog.test.mjs
 test/clone-policy.test.mjs
 test/column-role-policy-glob.test.mjs
 test/comment-author-role.test.mjs

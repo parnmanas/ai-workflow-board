@@ -14,13 +14,13 @@
  * so stripping can only ever remove damage. The blob fields that ARE
  * legitimately multi-line (a pasted `.credentials.json` / `auth.json` /
  * `config.toml`) are only end-trimmed, never touched inside.
+ *
+ * Which fields are blobs is declared per credential provider in
+ * cli-catalog.ts (`multiline`); this is the union across every provider.
  */
-export const MULTILINE_CREDENTIAL_FIELDS: readonly string[] = [
-  'credentials_json',
-  'auth_json',
-  'config_toml',
-  'oauth_creds_json',
-];
+import { catalogMultilineFields } from './cli-catalog';
+
+export const MULTILINE_CREDENTIAL_FIELDS: readonly string[] = catalogMultilineFields();
 
 /** Normalize one credential field value. Non-strings pass through untouched. */
 export function normalizeCredentialField(field: string, value: unknown): unknown {

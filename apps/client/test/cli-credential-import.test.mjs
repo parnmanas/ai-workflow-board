@@ -18,14 +18,24 @@ const resourceManagerSource = fs.readFileSync(
   new URL('../src/components/admin/ResourceManager.tsx', import.meta.url),
   'utf8',
 );
+// The per-CLI facts (login command, file path, harvest provider/field) moved
+// out of the component into the CLI catalog; the component reads them via
+// `cliLoginInfo`. Lock the facts where they now live and the wiring in the
+// component.
+const catalogSource = fs.readFileSync(
+  new URL('../src/cli/catalog.ts', import.meta.url),
+  'utf8',
+);
 
 test('Credentials exposes the Codex and Claude CLI login credential importer, wired to refresh its own list', () => {
   assert.match(credentialManagerSource, /<CliCredentialImport/);
   assert.match(credentialManagerSource, /onCreated=\{loadCredentials\}/);
-  assert.match(source, /codex login/);
-  assert.match(source, /claude auth login/);
-  assert.match(source, /~\/\.codex\/auth\.json/);
-  assert.match(source, /~\/\.claude\/\.credentials\.json/);
+  assert.match(source, /cliLoginInfo\(/, 'importer reads login facts from the catalog');
+  assert.match(source, /loginCapableClis\(/, 'importer offers every login-capable CLI');
+  assert.match(catalogSource, /codex login/);
+  assert.match(catalogSource, /claude auth login/);
+  assert.match(catalogSource, /~\/\.codex\/auth\.json/);
+  assert.match(catalogSource, /~\/\.claude\/\.credentials\.json/);
 });
 
 test('the importer is no longer rendered on the Resources page (weak adjacency â€” see ticket bd1c767a)', () => {
@@ -34,16 +44,19 @@ test('the importer is no longer rendered on the Resources page (weak adjacency â
 });
 
 test('CLI login imports use the existing encrypted subscription credential API', () => {
-  assert.match(source, /provider: 'codex_subscription'/);
-  assert.match(source, /field: 'auth_json'/);
-  assert.match(source, /provider: 'claude_subscription'/);
-  assert.match(source, /field: 'credentials_json'/);
+  assert.match(catalogSource, /harvest_provider: 'codex_subscription'/);
+  assert.match(catalogSource, /harvest_field: 'auth_json'/);
+  assert.match(catalogSource, /harvest_provider: 'claude_subscription'/);
+  assert.match(catalogSource, /harvest_field: 'credentials_json'/);
+  assert.match(source, /provider: login\.harvest_provider/);
+  assert.match(source, /field: login\.harvest_field/);
   assert.match(source, /await api\.createCredential\(/);
   assert.match(source, /validateJsonFile\(credentialJson\)/);
 });
 
 test('Codex config is optional and credential scope follows the host page scope selection', () => {
-  assert.match(source, /config_toml: configToml/);
+  assert.match(catalogSource, /extra_file_field: 'config_toml'/);
+  assert.match(source, /\[details\.extraFile\]: extraFileContents/);
   assert.match(source, /scope: createScope === 'global' \? 'global' : 'workspace'/);
   assert.match(source, /workspace_id: createScope === 'global' \? undefined : workspaceId/);
 });

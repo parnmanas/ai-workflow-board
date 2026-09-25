@@ -253,9 +253,11 @@ test('legacy backend-launch rows fail with an actionable migration error', () =>
 
 test('trigger dispatch resolves and validates Claude backend profiles only for Claude agents', () => {
   const guard = triggerSource.match(
-    /if \(agent\?\.type === 'claude'\) \{[\s\S]*?runtimeProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
+    // 게이트는 cli-catalog.ts 의 `sessions.backend_profile`(오늘은 claude 뿐)로 판정한다 —
+    // 리터럴 'claude' 비교로 되돌리지 말 것.
+    /if \(agent && cliDescriptor\(agent\.type\)\?\.sessions\.backend_profile\) \{[\s\S]*?runtimeProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
   );
-  assert.ok(guard, 'profile resolution and credential validation must share an agent.type === claude guard');
+  assert.ok(guard, 'profile resolution and credential validation must share one cliDescriptor(...).sessions.backend_profile guard');
   assert.match(guard[0], /\{ source: 'run', value: ticket\.cli_runtime_profile \}[\s\S]*source: 'agent'[\s\S]*source: 'board'/);
   assert.match(
     triggerSource,

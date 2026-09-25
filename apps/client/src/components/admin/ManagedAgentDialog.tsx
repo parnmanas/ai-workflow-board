@@ -18,11 +18,18 @@ import {
 import RuntimeConfigFields, {
   buildRuntimeConfig,
   EMPTY_RUNTIME_SELECTION,
-  RUNTIME_OPTIONS,
+  runtimeOptions,
   runtimeSelectionFromAgent,
-  type RuntimeId,
   type RuntimeSelection,
 } from './RuntimeConfigFields';
+import {
+  cliCredentialPrefix,
+  cliModelSelectable,
+  cliRuntimeConfig,
+  cliSupportsBackendProfile,
+  cliSupportsCredential,
+  useCliCatalog,
+} from '../../cli/catalog';
 
 /**
  * ManagedAgentDialog — create / edit form for an agent-manager-supervised
@@ -83,12 +90,12 @@ export default function ManagedAgentDialog({
   // filesystem via the existing fs reverse-RPC. Lets the user click a
   // directory instead of typing an absolute path.
   const [pickerOpen, setPickerOpen] = useState(false);
-  // Per-agent CLI credential. Only claude / codex / antigravity have adapters
-  // that consume credentials; custom, pi and opencode CLIs leave this null
-  // (pi/opencode have no credential concept at all — see
-  // cli-adapters/pi.ts, cli-adapters/opencode.ts).
+  // Per-agent CLI credential. claude / codex / antigravity / deepseek / opencode
+  // have adapters that consume one; custom, pi and hermes leave this null
+  // (pi has no credential concept at all — see cli-adapters/pi.ts).
   const [credentialId, setCredentialId] = useState<string>('');
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const catalog = useCliCatalog();
   // Per-agent default model + the per-CLI candidate lists the owning manager
   // reported via its heartbeat (`available_models`). The list is best-effort
   // and per-install dynamic; when a CLI has no enumeration we fall back to a
@@ -105,11 +112,13 @@ export default function ManagedAgentDialog({
   const [resolvedInstanceId, setResolvedInstanceId] = useState<string | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const [availableRuntimeIds, setAvailableRuntimeIds] = useState<string[]>([]);
-  // 이 manager의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
+  // 이 manager의 마지막 heartbeat가 보고한 런타임별 named profile 목록
+  // (`runtime_capabilities[<cli>].profiles`). 선택된 CLI 의 목록은 아래
+  // `namedProfiles` 로 파생한다(카탈로그가 `runtime_config.profiles` 를 켠 CLI 만).
   // `undefined`(`[]`이 아님)는 "Host가 아직 이 값을 리포트하지 않음"을 뜻하며,
   // RuntimeConfigFields가 빈 드롭다운 대신 자유 입력으로 폴백할 수 있도록
   // 의도적으로 구분한다.
-  const [hermesProfiles, setHermesProfiles] = useState<string[] | undefined>(undefined);
+  const [profilesByCli, setProfilesByCli] = useState<Record<string, string[] | undefined>>({});
   // ticket 5851e435 — 런타임별 권한 등급 표현력. approve 선택 시 경고를 띄운다.
   const [permissionTiers, setPermissionTiers] = useState<
     Record<string, Record<'strict' | 'approve' | 'trusted', string> | undefined> | undefined
@@ -197,7 +206,13 @@ export default function ManagedAgentDialog({
             .filter(([, health]) => health.installed && health.healthy)
             .map(([runtimeId]) => runtimeId),
         );
-        setHermesProfiles(match?.runtime_capabilities?.hermes?.profiles);
+        setProfilesByCli(
+          Object.fromEntries(
+            Object.entries(match?.runtime_capabilities || {}).map(
+              ([runtimeId, health]) => [runtimeId, health.profiles],
+            ),
+          ),
+        );
         setPermissionTiers(
           match?.runtime_capabilities
             ? Object.fromEntries(
@@ -213,7 +228,7 @@ export default function ManagedAgentDialog({
           setResolvedInstanceId(null);
           setAvailableModelsByCli({});
           setAvailableRuntimeIds([]);
-          setHermesProfiles(undefined);
+          setProfilesByCli({});
           setPermissionTiers(undefined);
         }
       });
@@ -296,7 +311,15 @@ export default function ManagedAgentDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedInstanceId, cli, availableModelsByCli]);
 
-  const eligibleCredentials = credentials.filter((c) => c.provider.startsWith(`${cli}_`));
+  // Credential providers are prefixed by CLI (a catalog fact); CLIs with no
+  // credential concept get an empty list (and no picker — see below).
+  const credentialPrefix = cliCredentialPrefix(cli);
+  const eligibleCredentials = credentialPrefix
+    ? credentials.filter((c) => c.provider.startsWith(credentialPrefix))
+    : [];
+  // Named profiles reported by the Host for the selected CLI — only CLIs
+  // whose catalog descriptor enables `runtime_config.profiles` render them.
+  const namedProfiles = cliRuntimeConfig(cli).profiles ? profilesByCli[cli] : undefined;
   // Candidate models for the selected CLI. When the manager reported a list we
   // render a dropdown (prepending the saved value if it's not in the list, so
   // editing never silently drops a hand-typed model); otherwise a free-text
@@ -340,16 +363,15 @@ export default function ManagedAgentDialog({
         // per-agent cli-home + adapter from the new CLI). Same
         // take-effect-on-restart contract as `model` below.
         // Per-agent credential is only meaningful when an adapter consumes it
-        // (claude / codex / antigravity); for `custom` we always send null so a
-        // stale id doesn't linger after the operator switched CLI. `pi` and
-        // `opencode` have no credential concept AWB manages at all (see
-        // cli-adapters/pi.ts, cli-adapters/opencode.ts), so both are excluded
-        // the same way. Switching CLI also clears the credential
+        // (claude / codex / antigravity / deepseek / opencode); for `custom` we
+        // always send null so a stale id doesn't linger after the operator
+        // switched CLI. `pi` has no credential concept AWB manages at all (see
+        // cli-adapters/pi.ts), so it is excluded the same way. Switching CLI also clears the credential
         // selection (see the CLI onChange) so we never persist a credential
         // whose provider prefix mismatches the new CLI — the manager validates
         // `${cli}_…` and would reject it, silently falling back to
         // operator-HOME auth.
-        const supportsCredential = cli !== 'pi' && cli !== 'opencode' && cli !== 'hermes';
+        const supportsCredential = cliSupportsCredential(cli);
         await api.updateAgent(agent.id, {
           name: trimmedName,
           description,
@@ -357,8 +379,9 @@ export default function ManagedAgentDialog({
           runtime_config: runtimeConfig,
           working_dir: trimmedWorkingDir,
           credential_id: supportsCredential && credentialId ? credentialId : null,
-          // null clears (CLI default); custom CLIs have no model concept.
-          model: cli !== 'hermes' && model.trim() ? model.trim() : null,
+          // null clears (CLI default); CLIs without a model concept
+          // (`model_selectable: false`) always send null.
+          model: cliModelSelectable(cli) && model.trim() ? model.trim() : null,
           cli_runtime_profile: runtimeProfileForAgentUpdate(
             cli, runtimeProfile, runtimeProfiles, runtimeProfilesState,
           ),
@@ -409,7 +432,7 @@ export default function ManagedAgentDialog({
         }
       } else {
         // Create flow.
-        const supportsCredential = cli !== 'pi' && cli !== 'opencode' && cli !== 'hermes';
+        const supportsCredential = cliSupportsCredential(cli);
         const created = await api.createManagedAgent({
           name: trimmedName,
           cli,
@@ -418,7 +441,7 @@ export default function ManagedAgentDialog({
           runtime_config: runtimeConfig,
           description: description.trim() || undefined,
           credential_id: supportsCredential && credentialId ? credentialId : undefined,
-          model: cli !== 'hermes' && model.trim() ? model.trim() : undefined,
+          model: cliModelSelectable(cli) && model.trim() ? model.trim() : undefined,
           cli_runtime_profile: runtimeProfileForManagedAgentCreate(
             cli, runtimeProfile, runtimeProfiles, runtimeProfilesState,
           ),
@@ -496,12 +519,12 @@ export default function ManagedAgentDialog({
             value={runtimeSelection.runtime}
             options={[
               { value: '', label: availableRuntimeIds.length ? 'Select a runtime' : 'No healthy runtime reported by this Host' },
-              ...RUNTIME_OPTIONS.filter((option) => availableRuntimeIds.includes(option.value)),
+              ...runtimeOptions(catalog).filter((option) => availableRuntimeIds.includes(option.value)),
             ]}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
               setRuntimeSelection({
                 ...EMPTY_RUNTIME_SELECTION,
-                runtime: e.target.value as RuntimeId | '',
+                runtime: e.target.value,
               });
               // Model candidates AND the per-agent credential are per-CLI: a
               // value valid for the old CLI is meaningless (and, for the
@@ -520,12 +543,12 @@ export default function ManagedAgentDialog({
         <RuntimeConfigFields
           value={runtimeSelection}
           availableRuntimeIds={availableRuntimeIds}
-          hermesProfiles={hermesProfiles}
+          namedProfiles={namedProfiles}
           permissionTiers={permissionTiers}
           showRuntime={false}
           onChange={setRuntimeSelection}
         />
-        {cli && cli !== 'pi' && cli !== 'opencode' && cli !== 'hermes' && (
+        {cli && cliSupportsCredential(cli) && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               CLI credential
@@ -543,7 +566,7 @@ export default function ManagedAgentDialog({
             </div>
           </div>
         )}
-        {cli && cli !== 'hermes' && (
+        {cli && cliModelSelectable(cli) && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               Default model
@@ -580,7 +603,7 @@ export default function ManagedAgentDialog({
             )}
           </div>
         )}
-        {cli === 'claude' && (
+        {cliSupportsBackendProfile(cli) && (
           <div>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
               Claude backend profile

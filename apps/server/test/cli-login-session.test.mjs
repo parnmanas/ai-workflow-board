@@ -138,7 +138,8 @@ test('startSession happy path for claude: creates a starting session, issues cli
 
   assert.equal(session.status, 'starting');
   assert.equal(commandService.calls.length, 1);
-  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'claude' });
+  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'claude', cli_provider: '', cli_method: '' },
+    'cli_provider/cli_method 는 opencode 전용이지만 항상 실어 보낸다 — 값이 없으면 빈 문자열');
   assert.equal(sessionRepo.rows.get(session.id).command_id, 'cmd-xyz');
 });
 
@@ -177,7 +178,8 @@ test('startSession happy path: creates a starting session, issues cli_login_star
 
   assert.equal(commandService.calls.length, 1);
   assert.equal(commandService.calls[0].command, 'cli_login_start');
-  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'codex' });
+  assert.deepEqual(commandService.calls[0].args, { session_id: session.id, cli: 'codex', cli_provider: '', cli_method: '' },
+    'cli_provider/cli_method 는 opencode 전용이지만 항상 실어 보낸다 — 값이 없으면 빈 문자열');
   assert.equal(commandService.calls[0].issuedBy, 'user-1');
 
   // Persisted row must carry the same command_id (not just the return value).
@@ -759,4 +761,118 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
   } finally {
     await app.close();
   }
+});
+
+// ─── opencode — provider 단위 로그인 ──────────────────────────────────────
+//
+// codex/claude 는 CLI 자신이 계정이지만 opencode 는 그 안의 provider 로
+// 로그인한다. 그래서 세션이 `-p/-m` 두 값을 들고 다니고, 커맨드에 그대로 실린다.
+
+test('startSession for opencode: requires cli_provider + cli_method and forwards both in the command', async () => {
+  const { instance, commandService } = service();
+  await assert.rejects(
+    () => instance.startSession({
+      workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
+      instanceId: 'inst-1', triggeredById: 'user-1',
+    }),
+    /cli_provider and cli_method/,
+  );
+  await assert.rejects(
+    () => instance.startSession({
+      workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
+      cliProvider: 'openai', instanceId: 'inst-1', triggeredById: 'user-1',
+    }),
+    /cli_provider and cli_method/,
+    'provider alone is not enough — without the method label the CLI stalls on a TTY picker',
+  );
+  assert.equal(commandService.calls.length, 0, 'nothing is dispatched until the pair is complete');
+
+  const session = await instance.startSession({
+    workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'My Opencode',
+    cliProvider: 'openai', cliMethod: 'ChatGPT Pro/Plus (headless)',
+    instanceId: 'inst-1', triggeredById: 'user-1',
+  });
+  assert.equal(session.status, 'starting');
+  assert.equal(session.cli_provider, 'openai');
+  assert.equal(session.cli_method, 'ChatGPT Pro/Plus (headless)');
+  assert.deepEqual(commandService.calls[0].args, {
+    session_id: session.id,
+    cli: 'opencode',
+    cli_provider: 'openai',
+    cli_method: 'ChatGPT Pro/Plus (headless)',
+  });
+});
+
+test('applyProgress: succeeded stores an opencode_auth credential from auth_json and never echoes the secret back', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'Opencode (openai)',
+    cliProvider: 'openai', cliMethod: 'ChatGPT Pro/Plus (headless)',
+    instanceId: 'inst-1', triggeredById: 'user-1',
+  });
+  const SECRET = `opencode-refresh-${randomUUID()}`;
+  const updated = await s.instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'succeeded',
+    credentialFields: { auth_json: JSON.stringify({ openai: { type: 'oauth', refresh: SECRET } }) },
+  });
+
+  assert.equal(updated.status, 'succeeded');
+  assert.equal(s.credRepo.saved.length, 1);
+  assert.equal(s.credRepo.saved[0].provider, 'opencode_auth');
+  assert.equal(s.credRepo.saved[0].workspace_id, 'w1');
+  // 어느 provider 로 만든 credential 인지는 설명문에 남는다 — auth.json 자체는
+  // 여러 provider 를 담을 수 있어 이름만으로는 구분이 안 된다.
+  assert.match(s.credRepo.saved[0].description, /opencode \/ openai/);
+  assert.ok(!JSON.stringify(updated).includes(SECRET), 'the session object must never carry the raw secret');
+  assert.ok(!s.credRepo.saved[0].encrypted_data.includes(SECRET), 'the stored credential must be encrypted');
+});
+
+test('applyProgress: an opencode session without auth_json fails instead of creating an empty credential', async () => {
+  const s = service();
+  const session = await s.instance.startSession({
+    workspaceId: 'w1', isGlobal: false, cli: 'opencode', credentialName: 'Opencode',
+    cliProvider: 'openai', cliMethod: 'M', instanceId: 'inst-1', triggeredById: 'user-1',
+  });
+  await assert.rejects(
+    () => s.instance.applyProgress({
+      sessionId: session.id,
+      callerAgentId: 'manager-agent-1',
+      commandId: session.command_id,
+      status: 'succeeded',
+      credentialFields: { config_toml: 'model = "x"' },
+    }),
+    /credential_fields\.auth_json is required/,
+  );
+  assert.equal(s.credRepo.saved.length, 0);
+});
+
+// 회귀: url 만 온 보고가 통째로 버려졌다. claude 는 코드가 아예 없어 url 만
+// 보내고, opencode 는 url 줄과 code 줄이 따로 오므로 둘 다 이 경로를 탄다 —
+// 예전 `url && code` 조건 아래서는 승인 링크가 화면에 끝내 뜨지 않았다.
+test('applyProgress: a url-only awaiting_user report is stored (claude has no code; opencode sends them separately)', async () => {
+  const { instance, session } = await seededStarting();
+  const first = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    verificationUrl: 'https://auth.openai.com/codex/device',
+  });
+  assert.equal(first.status, 'awaiting_user');
+  assert.equal(first.verification_url, 'https://auth.openai.com/codex/device', 'the url must survive on its own');
+  assert.ok(!first.user_code);
+
+  // 뒤따라 오는 code-만 보고는 url 을 지우지 않는다.
+  const second = await instance.applyProgress({
+    sessionId: session.id,
+    callerAgentId: 'manager-agent-1',
+    commandId: session.command_id,
+    status: 'awaiting_user',
+    userCode: 'WZ1E-3RVM7',
+  });
+  assert.equal(second.verification_url, 'https://auth.openai.com/codex/device');
+  assert.equal(second.user_code, 'WZ1E-3RVM7');
 });

@@ -61,6 +61,7 @@ import {
   type LaunchModeSpec,
 } from './launch-spec-render.js';
 import { resolveBinOverride } from './cli-resolver.js';
+import { cliDispatch } from './clis/index.js';
 import { MODEL_ROUTING_ENV_KEYS } from './runtime-profiles.js';
 import {
   resolveEffectivePermissionPolicy,
@@ -180,7 +181,7 @@ export function computeAgentLaunchSpec(
   deps: ComputeLaunchSpecDeps = {},
 ): AgentLaunchSpecEntry {
   const now = (deps.now ?? (() => new Date()))().toISOString();
-  const profile = ctx.cli === 'claude' ? (deps.runtimeProfileOverride ?? null) : null;
+  const profile = cliDispatch(ctx.cli).runtimeProfile ? (deps.runtimeProfileOverride ?? null) : null;
   const permission = resolveEffectivePermissionPolicy({
     trust: ctx.runtime_config?.permission_mode ?? null,
     // harness 는 디스패치 시점 입력이라 여기서는 비어 있다. 지어내지 않는다 —

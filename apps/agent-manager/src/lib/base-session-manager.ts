@@ -14,9 +14,11 @@ import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
-import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS } from './constants.js';
+import { SUBAGENTS_BASE_DIR, STOP_GRACE_MS, DEFAULT_CLI_ID } from './constants.js';
 import { log } from './logging.js';
 import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
+import { cliDispatch } from './clis/index.js';
+import { selectEffortSlice } from './clis/effort.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
@@ -35,7 +37,6 @@ import {
   describeSpawnArgv,
   partitionHarness,
   resolveModelChain,
-  selectEffortSlice,
 } from './cli-adapters/base.js';
 import { recordActualLaunch } from './launch-spec-recorder.js';
 import {
@@ -525,7 +526,7 @@ export class BaseSessionManager {
 
   /** Default-claude getter for legacy callers that introspect the manager. */
   protected get _adapter(): CliAdapter {
-    return this._adapterFor('claude');
+    return this._adapterFor(DEFAULT_CLI_ID);
   }
 
   protected _adapterFor(cli: string | null | undefined): CliAdapter {
@@ -723,7 +724,7 @@ export class BaseSessionManager {
     // The server normally filters Claude backend profiles before emitting the
     // dispatch event. Keep the manager boundary defensive as older/mixed
     // servers may still send one for a non-Claude agent.
-    const claudeRuntimeProfile = adapter.cliType === 'claude' ? runtimeProfile : null;
+    const claudeRuntimeProfile = cliDispatch(adapter.cliType).runtimeProfile ? runtimeProfile : null;
     // Ticket ee26302d: declares the compact MCP tool profile to the AWB
     // server when this profile's context_window is small. `{}` (no header,
     // i.e. full) for every profile without a small context_window,
@@ -817,9 +818,7 @@ export class BaseSessionManager {
       const sessionMode = await adapter.hasPersistedSession(agentContext?.cli_home_dir, sessionKey)
         ? 'resume'
         : 'persistent';
-      if (adapter.cliType === 'claude') {
-        log(`${this.#logTag} Claude lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
-      }
+      log(`${this.#logTag} ${adapter.cliType} lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
       // spec 을 리터럴로 두 번 쓰지 않고 변수로 뽑는다 (ticket 20fff298 리뷰 3R) —
       // SubagentManager.spawn 사이트와 같은 이유다. 실행 사양 기록이 **최종
       // descriptor 를 만든 그 spec** 을 그대로 받아야 실제 argv 에 인자별 출처를

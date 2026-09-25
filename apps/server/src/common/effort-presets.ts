@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CLI_CATALOG, type CliDescriptor, type CliEffortKey, type CliType } from './cli-catalog';
 
 /**
  * Ticket-level abstract "effort preset" → per-CLI option mapping.
@@ -30,58 +31,66 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'max']);
 
-/** Per-CLI option blocks. Claude supports the rich set; codex/antigravity model-only. */
-export const EffortPresetSchema = z
-  .object({
-    /** Stable slug, e.g. 'standard'. Referenced by Ticket.effort_preset. */
-    id: z.string().min(1),
-    /** Human label shown in the board settings UI / ticket picker. */
-    label: z.string().min(1),
-    claude: z
-      .object({
-        effort: EffortLevelSchema.optional(),
-        ultracode: z.boolean().optional(),
-        model: z.string().optional(),
-      })
-      .strict()
-      .optional(),
-    codex: z
-      .object({
-        model: z.string().optional(),
-      })
-      .strict()
-      .optional(),
-    antigravity: z
-      .object({
-        model: z.string().optional(),
-      })
-      .strict()
-      .optional(),
-    pi: z
-      .object({
-        model: z.string().optional(),
-      })
-      .strict()
-      .optional(),
-    opencode: z
-      .object({
-        model: z.string().optional(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
+/** Per-CLI option block — the keys a descriptor's `effort.keys` may pick from. */
+export interface EffortCliOptions {
+  effort?: EffortLevel;
+  ultracode?: boolean;
+  model?: string;
+}
 
-export const EffortPresetsConfigSchema = z
-  .object({
-    /** Preset id used when a ticket leaves `effort_preset` unset. */
-    default: z.string().min(1),
-    presets: z.array(EffortPresetSchema),
-  })
-  .strict();
+const EFFORT_KEY_SCHEMAS: Record<CliEffortKey, z.ZodTypeAny> = {
+  effort: EffortLevelSchema,
+  ultracode: z.boolean(),
+  model: z.string(),
+};
 
-export type EffortPreset = z.infer<typeof EffortPresetSchema>;
-export type EffortPresetsConfig = z.infer<typeof EffortPresetsConfigSchema>;
+/**
+ * Build the preset schema from the CLI catalog: one `.strict()` block per
+ * descriptor that owns an effort block (a `slice_key` descriptor such as
+ * deepseek reads another CLI's block and gets none of its own). Exported so
+ * the catalog test can build the schema for a fixture copy of the catalog.
+ */
+export function buildEffortPresetSchema(catalog: readonly CliDescriptor[] = CLI_CATALOG) {
+  const cliBlocks: Record<string, z.ZodTypeAny> = {};
+  for (const d of catalog) {
+    if (!d.effort || d.effort.slice_key) continue;
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const key of d.effort.keys) shape[key] = EFFORT_KEY_SCHEMAS[key].optional();
+    cliBlocks[d.id] = z.object(shape).strict().optional();
+  }
+  return z
+    .object({
+      /** Stable slug, e.g. 'standard'. Referenced by Ticket.effort_preset. */
+      id: z.string().min(1),
+      /** Human label shown in the board settings UI / ticket picker. */
+      label: z.string().min(1),
+      ...cliBlocks,
+    })
+    .strict();
+}
+
+export function buildEffortPresetsConfigSchema(catalog: readonly CliDescriptor[] = CLI_CATALOG) {
+  return z
+    .object({
+      /** Preset id used when a ticket leaves `effort_preset` unset. */
+      default: z.string().min(1),
+      presets: z.array(buildEffortPresetSchema(catalog)),
+    })
+    .strict();
+}
+
+/** Per-CLI option blocks, derived from cli-catalog.ts (claude: rich set; codex/antigravity/pi/opencode: model-only). */
+export const EffortPresetSchema = buildEffortPresetSchema();
+
+export const EffortPresetsConfigSchema = buildEffortPresetsConfigSchema();
+
+// The schema shape is built at runtime, so the static types are declared
+// explicitly (rather than z.infer'd) to keep `preset.claude?.effort` typed.
+export type EffortPreset = { id: string; label: string } & Partial<Record<CliType, EffortCliOptions>>;
+export interface EffortPresetsConfig {
+  default: string;
+  presets: EffortPreset[];
+}
 /** The single matched preset shipped on the SSE agent_trigger payload. */
 export type ResolvedEffortPreset = EffortPreset;
 
@@ -111,7 +120,7 @@ export function parseEffortPresets(raw: string | null | undefined): EffortPreset
   try {
     const parsed = EffortPresetsConfigSchema.safeParse(JSON.parse(raw));
     if (!parsed.success) return BUILTIN_EFFORT_PRESETS;
-    return parsed.data;
+    return parsed.data as EffortPresetsConfig;
   } catch {
     return BUILTIN_EFFORT_PRESETS;
   }
@@ -135,7 +144,7 @@ export function validateEffortPresetsInput(
       .join('; ');
     return { ok: false, error: `Invalid effort_presets: ${issues}` };
   }
-  const value = parsed.data;
+  const value = parsed.data as EffortPresetsConfig;
   if (value.presets.length > 0 && !value.presets.some(p => p.id === value.default)) {
     return { ok: false, error: `Invalid effort_presets: default '${value.default}' does not match any preset id` };
   }

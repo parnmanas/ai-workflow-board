@@ -2,13 +2,23 @@ import React from 'react';
 import type {
   AgentRuntimeConfig,
   ExecutionStrategy,
-  ManagedAgentCreateBody,
   RuntimePermissionMode,
 } from '../../types';
 import { Input, Select } from '../common';
 import { tokens } from '../../tokens';
+import {
+  cliCatalog,
+  cliCollaboration,
+  cliLabel,
+  cliRuntimeConfig,
+  executableClis,
+  useCliCatalog,
+  type CliCollaboration,
+  type CliDescriptor,
+} from '../../cli/catalog';
 
-export type RuntimeId = ManagedAgentCreateBody['cli'];
+/** Catalog CLI id (the server validates it against the catalog). */
+export type RuntimeId = string;
 
 export interface RuntimeSelection {
   runtime: RuntimeId | '';
@@ -28,22 +38,19 @@ export const EMPTY_RUNTIME_SELECTION: RuntimeSelection = {
   maxIterations: '',
 };
 
-export const RUNTIME_OPTIONS: Array<{ value: RuntimeId; label: string }> = [
-  { value: 'claude', label: 'Claude Code' },
-  { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'codex', label: 'Codex' },
-  { value: 'antigravity', label: 'Antigravity' },
-  { value: 'pi', label: 'PI' },
-  { value: 'opencode', label: 'OpenCode' },
-  { value: 'hermes', label: 'Hermes ACP' },
-];
+/** Runtime <select> options — every executable CLI in the catalog. Pass the
+ *  catalog from `useCliCatalog()` inside components so the list refreshes
+ *  once the server catalog replaces the static mirror. */
+export function runtimeOptions(catalog: CliDescriptor[] = cliCatalog()): Array<{ value: RuntimeId; label: string }> {
+  return executableClis(catalog).map((d) => ({ value: d.id, label: d.label }));
+}
 
 export function runtimeSelectionFromAgent(
   runtime: string | undefined,
   config: AgentRuntimeConfig | null | undefined,
 ): RuntimeSelection {
-  const knownRuntime = RUNTIME_OPTIONS.some((option) => option.value === runtime)
-    ? runtime as RuntimeId
+  const knownRuntime = runtime && executableClis().some((d) => d.id === runtime)
+    ? runtime
     : '';
   return {
     runtime: knownRuntime,
@@ -61,12 +68,30 @@ export function buildRuntimeConfig(selection: RuntimeSelection): AgentRuntimeCon
     strategy: selection.strategy,
     permission_mode: selection.permissionMode,
   };
-  if (selection.runtime === 'hermes') {
-    if (selection.profile.trim()) config.profile = selection.profile.trim();
+  // Which extra knobs a runtime accepts is a catalog fact (`runtime_config`),
+  // not a CLI-id branch.
+  const knobs = cliRuntimeConfig(selection.runtime);
+  if (knobs.profiles && selection.profile.trim()) config.profile = selection.profile.trim();
+  if (knobs.child_limits) {
     if (selection.maxChildren) config.max_children = Number(selection.maxChildren);
     if (selection.maxIterations) config.max_iterations = Number(selection.maxIterations);
   }
   return config;
+}
+
+const STRATEGY_COPY: Record<CliCollaboration, (label: string) => string> = {
+  single: (label) => `Single — one ${label} session`,
+  delegated: (label) => `Delegated — ${label} creates child workers`,
+  swarm: (label) => `Swarm — coordinated ${label} workers`,
+};
+
+/** Strategy options for a runtime, from its catalog `collaboration` list. A
+ *  runtime that only ever runs single gets the plain "Single" label. */
+export function strategyOptionsFor(runtime: string): Array<{ value: ExecutionStrategy; label: string }> {
+  const modes = cliCollaboration(runtime);
+  if (modes.length <= 1) return [{ value: 'single', label: 'Single' }];
+  const label = cliLabel(runtime);
+  return modes.map((mode) => ({ value: mode, label: STRATEGY_COPY[mode](label) }));
 }
 
 interface RuntimeConfigFieldsProps {
@@ -85,13 +110,14 @@ interface RuntimeConfigFieldsProps {
    * 띄우지 않는다(보고된 적 없는 사실을 지어내지 않는다).
    */
   permissionTiers?: Record<string, Record<'strict' | 'approve' | 'trusted', string> | undefined>;
-  /** 선택된 Runtime Host의 마지막 heartbeat가 보고한 Hermes 프로파일 이름 목록.
+  /** 선택된 Runtime Host의 마지막 heartbeat가 보고한, 이 런타임의 named profile
+   *  목록(`runtime_capabilities[<runtime>].profiles`). 카탈로그가
+   *  `runtime_config.profiles` 를 켠 런타임에서만 렌더된다.
    *  `undefined` = Host가 아직 이 값을 리포트하지 않음(오프라인 Host, 또는 이
    *  기능보다 구버전 manager) — 편집이 막히지 않도록 자유 입력으로 폴백한다.
    *  `[]` = Host는 리포트했지만 named profile이 없음 — 역시 자유 입력 폴백.
-   *  선택된 Runtime Host가 바뀔 때마다 Host의 `runtime_capabilities.hermes.profiles`
-   *  에서 다시 파생시켜 목록이 최신 상태를 유지하게 할 것. */
-  hermesProfiles?: string[];
+   *  선택된 Runtime Host가 바뀔 때마다 다시 파생시켜 목록을 최신으로 유지할 것. */
+  namedProfiles?: string[];
 }
 
 export default function RuntimeConfigFields({
@@ -100,9 +126,10 @@ export default function RuntimeConfigFields({
   availableRuntimeIds,
   disabled = false,
   showRuntime = true,
-  hermesProfiles,
+  namedProfiles,
   permissionTiers,
 }: RuntimeConfigFieldsProps) {
+  const catalog = useCliCatalog();
   // ticket 5851e435 — approve 를 골랐는데 그 런타임이 승인 요청을 실제로
   // 만들지 못하면(native 가 아니면) 경고한다. 매니저는 이 조합의 spawn 을
   // 거부하므로, 저장 후 디스패치가 막히기 전에 여기서 먼저 알린다.
@@ -114,16 +141,13 @@ export default function RuntimeConfigFields({
   const available = availableRuntimeIds
     ? new Set(availableRuntimeIds)
     : null;
-  const runtimeOptions = RUNTIME_OPTIONS
-    .filter((option) => !available || available.has(option.value))
-    .map((option) => ({ value: option.value, label: option.label }));
-  const strategyOptions = value.runtime === 'hermes'
-    ? [
-        { value: 'single', label: 'Single — one Hermes session' },
-        { value: 'delegated', label: 'Delegated — Hermes creates child workers' },
-        { value: 'swarm', label: 'Swarm — coordinated Hermes workers' },
-      ]
-    : [{ value: 'single', label: 'Single' }];
+  const options = runtimeOptions(catalog)
+    .filter((option) => !available || available.has(option.value));
+  const strategyOptions = strategyOptionsFor(value.runtime);
+  const knobs = cliRuntimeConfig(value.runtime);
+  const showKnobs = knobs.profiles || knobs.child_limits;
+  const knobCount = (knobs.profiles ? 1 : 0) + (knobs.child_limits ? 2 : 0);
+  const runtimeName = value.runtime ? cliLabel(value.runtime) : 'Runtime';
 
   return (
     <>
@@ -133,13 +157,13 @@ export default function RuntimeConfigFields({
           value={value.runtime}
           disabled={disabled}
           options={[
-            { value: '', label: runtimeOptions.length ? 'Select a runtime' : 'No healthy runtime reported by this Host' },
-            ...runtimeOptions,
+            { value: '', label: options.length ? 'Select a runtime' : 'No healthy runtime reported by this Host' },
+            ...options,
           ]}
           onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
             onChange({
               ...EMPTY_RUNTIME_SELECTION,
-              runtime: event.target.value as RuntimeId | '',
+              runtime: event.target.value,
             });
           }}
         />
@@ -188,63 +212,69 @@ export default function RuntimeConfigFields({
             + `옮기세요.`}
         </div>
       )}
-      {value.runtime === 'hermes' && (
+      {showKnobs && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+          gridTemplateColumns: `repeat(${knobCount}, minmax(0, 1fr))`,
           gap: 8,
           padding: 10,
           border: `1px solid ${tokens.colors.border}`,
           borderRadius: tokens.radii.md,
         }}>
-          {hermesProfiles && hermesProfiles.length > 0 ? (
-            <div>
-              <Select
-                label="Hermes profile"
+          {knobs.profiles && (
+            namedProfiles && namedProfiles.length > 0 ? (
+              <div>
+                <Select
+                  label={`${runtimeName} profile`}
+                  value={value.profile}
+                  options={[
+                    { value: '', label: 'Default — no explicit profile' },
+                    ...namedProfiles.map((profile) => ({ value: profile, label: profile })),
+                    ...(value.profile && !namedProfiles.includes(value.profile)
+                      ? [{ value: value.profile, label: `${value.profile} (Host에 없음)`, disabled: true }]
+                      : []),
+                  ]}
+                  onChange={(event: React.ChangeEvent<HTMLSelectElement>) =>
+                    onChange({ ...value, profile: event.target.value })
+                  }
+                />
+                {value.profile && !namedProfiles.includes(value.profile) && (
+                  <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 2, lineHeight: 1.5 }}>
+                    저장된 프로파일 "{value.profile}"이(가) 이 Host에 더 이상 없습니다. 목록에서 다시 선택하거나 그대로 두면 값은 유지됩니다.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <Input
+                label={`${runtimeName} profile`}
                 value={value.profile}
-                options={[
-                  { value: '', label: 'Default — no explicit profile' },
-                  ...hermesProfiles.map((profile) => ({ value: profile, label: profile })),
-                  ...(value.profile && !hermesProfiles.includes(value.profile)
-                    ? [{ value: value.profile, label: `${value.profile} (Host에 없음)`, disabled: true }]
-                    : []),
-                ]}
-                onChange={(event: React.ChangeEvent<HTMLSelectElement>) =>
-                  onChange({ ...value, profile: event.target.value })
-                }
+                placeholder={namedProfiles ? 'optional — Host에 등록된 프로파일 없음' : 'optional'}
+                onChange={(event) => onChange({ ...value, profile: event.target.value })}
               />
-              {value.profile && !hermesProfiles.includes(value.profile) && (
-                <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 2, lineHeight: 1.5 }}>
-                  저장된 프로파일 "{value.profile}"이(가) 이 Host에 더 이상 없습니다. 목록에서 다시 선택하거나 그대로 두면 값은 유지됩니다.
-                </div>
-              )}
-            </div>
-          ) : (
-            <Input
-              label="Hermes profile"
-              value={value.profile}
-              placeholder={hermesProfiles ? 'optional — Host에 등록된 프로파일 없음' : 'optional'}
-              onChange={(event) => onChange({ ...value, profile: event.target.value })}
-            />
+            )
           )}
-          <Input
-            label="Max children"
-            type="number"
-            min={1}
-            max={1000}
-            value={value.maxChildren}
-            placeholder="optional"
-            onChange={(event) => onChange({ ...value, maxChildren: event.target.value })}
-          />
-          <Input
-            label="Max iterations"
-            type="number"
-            min={1}
-            max={1000}
-            value={value.maxIterations}
-            placeholder="optional"
-            onChange={(event) => onChange({ ...value, maxIterations: event.target.value })}
-          />
+          {knobs.child_limits && (
+            <>
+              <Input
+                label="Max children"
+                type="number"
+                min={1}
+                max={1000}
+                value={value.maxChildren}
+                placeholder="optional"
+                onChange={(event) => onChange({ ...value, maxChildren: event.target.value })}
+              />
+              <Input
+                label="Max iterations"
+                type="number"
+                min={1}
+                max={1000}
+                value={value.maxIterations}
+                placeholder="optional"
+                onChange={(event) => onChange({ ...value, maxIterations: event.target.value })}
+              />
+            </>
+          )}
         </div>
       )}
     </>

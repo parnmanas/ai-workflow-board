@@ -72,9 +72,10 @@ test('_checkManagerCapabilityGate special-cases comment_summary the same way eve
   assert.match(body, /status: 503/, 'must throw with the same 503 shape the sibling gates use');
 });
 
-test('_checkManagerCapabilityGate is scoped to Claude-type agents only (nested inside the same `agent?.type === \'claude\'` block as profile resolution)', () => {
+test('_checkManagerCapabilityGate is scoped to backend-profile CLIs only (nested inside the same `cliDescriptor(agent.type)?.sessions.backend_profile` block as profile resolution)', () => {
   const src = code(SRC_PATH);
-  const claudeBlockMatch = src.match(/if \(agent\?\.type === 'claude'\) \{[\s\S]*?\n    \}/);
-  assert.ok(claudeBlockMatch, 'could not isolate the agent?.type === "claude" block');
+  // 게이트는 cli-catalog.ts 의 `sessions.backend_profile`(오늘은 claude 뿐)로 판정한다.
+  const claudeBlockMatch = src.match(/if \(agent && cliDescriptor\(agent\.type\)\?\.sessions\.backend_profile\) \{[\s\S]*?\n    \}/);
+  assert.ok(claudeBlockMatch, 'could not isolate the cliDescriptor(...).sessions.backend_profile block');
   assert.match(claudeBlockMatch[0], /_checkManagerCapabilityGate\(/, 'the gate call must live inside the claude-only block — non-Claude CLIs never resolve a runtimeProfile and must not be gated by it');
 });

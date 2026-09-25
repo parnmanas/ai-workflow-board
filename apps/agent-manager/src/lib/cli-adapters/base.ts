@@ -236,62 +236,39 @@ export interface EffortSlice {
 
 /** The single matched/board-default preset shipped on the trigger event. Null
  *  on the wire (or after a defensive parse) means "no effort override — spawn
- *  exactly as before", mirroring the harness null-safe contract. */
+ *  exactly as before", mirroring the harness null-safe contract.
+ *
+ *  Per-CLI slices are keyed by the CLI's effort slice key (`claude`, `codex`,
+ *  …) — which keys exist and what each may carry is declared by the CLI
+ *  module (`clis/<id>/index.ts` → `effort`), not here. */
 export interface ResolvedEffortPreset {
   id: string;
   label?: string;
-  claude?: EffortSlice;
-  codex?: { model?: string };
-  antigravity?: { model?: string };
-  pi?: { model?: string };
-  opencode?: { model?: string };
+  [sliceKey: string]: EffortSlice | string | undefined;
 }
 
+export type EffortSliceKey = 'model' | 'effort' | 'ultracode';
+
 /**
- * Pick the per-CLI slice of a resolved effort preset for `cliType`:
- *   - claude / deepseek → the rich `claude` slice (model + effort + ultracode)
- *   - codex             → the codex slice (model only)
- *   - antigravity       → the antigravity slice (model only)
- *   - pi                → the pi slice (model only)
- *   - opencode          → the opencode slice (model only)
- *   - anything else / a null preset → null
- * The return shape is normalized to `{ model?, effort?, ultracode? }` so the
- * spawn site can fold `model` into the model precedence and pass `effort` /
- * `ultracode` straight through (codex / antigravity / pi / opencode slices never carry
- * the latter two, so they degrade to model-only automatically).
+ * Pure slice pick: read `preset[sliceKey]` and keep only `keys`. The CLI-aware
+ * wrapper that knows which slice/keys a CLI type uses is
+ * `clis/effort.ts#selectEffortSlice` — this file must stay ignorant of CLI
+ * names (it is imported by every adapter, so importing the registry here
+ * would be circular).
  */
-export function selectEffortSlice(
-  cliType: string,
+export function pickEffortSlice(
   preset: ResolvedEffortPreset | null | undefined,
-): { model?: string; effort?: string; ultracode?: boolean } | null {
+  sliceKey: string,
+  keys: readonly EffortSliceKey[],
+): EffortSlice | null {
   if (!preset) return null;
-  const t = String(cliType || '').toLowerCase();
-  if (t === 'claude' || t === 'deepseek') {
-    const s = preset.claude;
-    if (!s) return null;
-    return { model: s.model, effort: s.effort, ultracode: s.ultracode };
-  }
-  if (t === 'codex') {
-    const s = preset.codex;
-    if (!s) return null;
-    return { model: s.model };
-  }
-  if (t === 'antigravity') {
-    const s = preset.antigravity;
-    if (!s) return null;
-    return { model: s.model };
-  }
-  if (t === 'pi') {
-    const s = preset.pi;
-    if (!s) return null;
-    return { model: s.model };
-  }
-  if (t === 'opencode') {
-    const s = preset.opencode;
-    if (!s) return null;
-    return { model: s.model };
-  }
-  return null;
+  const raw = preset[sliceKey];
+  if (!raw || typeof raw !== 'object') return null;
+  const out: EffortSlice = {};
+  if (keys.includes('model') && typeof raw.model === 'string') out.model = raw.model;
+  if (keys.includes('effort') && typeof raw.effort === 'string') out.effort = raw.effort;
+  if (keys.includes('ultracode') && typeof raw.ultracode === 'boolean') out.ultracode = raw.ultracode;
+  return out;
 }
 
 /** One-line summary of an applied harness for spawn-site logs — the

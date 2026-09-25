@@ -5,39 +5,57 @@ import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, Select } from '../common';
+import { cliLabel, cliLoginInfo, loginCapableClis, useCliCatalog, type CliLoginDescriptor } from '../../cli/catalog';
+import { defaultLoginCli } from '../../cli/presentation';
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'timed_out', 'cancelled']);
 const POLL_INTERVAL_MS = 3000;
 
-type CliProvider = 'codex' | 'claude';
+/**
+ * Some CLIs log in per **provider inside the CLI** rather than as one account
+ * (`login.provider_scoped`, e.g. opencode's `-p <provider> -m <method>`). The
+ * catalog ships presets for the combinations that finish in a browser; API-key
+ * providers are quicker to add from the Credentials screen. Method strings are
+ * matched verbatim by the CLI, so anything outside the presets stays a free
+ * text entry (a CLI growing its list never needs a UI change).
+ */
+const PROVIDER_CUSTOM = '__custom__';
 
-const CLI_LABELS: Record<CliProvider, string> = {
-  codex: 'Codex',
-  claude: 'Claude',
-};
+function presetId(index: number): string {
+  return `preset-${index}`;
+}
 
 // 로그인 다이얼로그 설명문에만 쓰는 안내용 커맨드 문자열 — 실제 spawn은
 // agent-manager의 CliLoginManager가 담당(apps/agent-manager/src/lib/cli-login.ts).
-const CLI_LOGIN_COMMAND: Record<CliProvider, string> = {
-  codex: 'codex login --device-auth',
-  claude: 'claude auth login',
-};
-
-function cliLabelOf(cli: string): string {
-  return CLI_LABELS[cli as CliProvider] ?? cli;
+// provider_scoped CLI 는 카탈로그 커맨드의 <provider>/<method> 자리에 현재 선택을 채운다.
+export function cliLoginCommand(cli: string, provider: string, method: string): string {
+  const login = cliLoginInfo(cli);
+  if (!login) return '';
+  if (!login.provider_scoped) return login.command;
+  return login.command
+    .replace('<provider>', provider || '<provider>')
+    .replace('<method>', method || '<method>');
 }
 
-function instanceLabel(inst: CliLoginInstanceOption, provider: CliProvider): string {
-  const installed = provider === 'claude' ? inst.claude_installed : inst.codex_installed;
-  const healthy = provider === 'claude' ? inst.claude_healthy : inst.codex_healthy;
-  const label = CLI_LABELS[provider].toLowerCase();
+/** Install/health of `cli` on a Runtime Host: the keyed `clis` map first,
+ *  then the legacy flat `<cli>_installed` / `<cli>_healthy` keys. */
+function cliHealthOf(inst: CliLoginInstanceOption, cli: string): { installed: boolean; healthy: boolean } {
+  const keyed = inst.clis?.[cli];
+  if (keyed) return { installed: !!keyed.installed, healthy: !!keyed.healthy };
+  const flat = inst as unknown as Record<string, unknown>;
+  return { installed: !!flat[`${cli}_installed`], healthy: !!flat[`${cli}_healthy`] };
+}
+
+export function instanceLabel(inst: CliLoginInstanceOption, cli: string): string {
+  const { installed, healthy } = cliHealthOf(inst, cli);
+  const label = cliLabel(cli).toLowerCase();
   if (installed && healthy) return inst.hostname;
   if (installed) return `${inst.hostname} (${label} installed, health unknown)`;
   return `${inst.hostname} (${label} not detected — may still work)`;
 }
 
 function statusMessage(session: CliLoginSession): string {
-  const label = cliLabelOf(session.cli);
+  const label = cliLabel(session.cli);
   switch (session.status) {
     case 'starting':
       return `Starting ${label} login on the Runtime Host…`;
@@ -62,6 +80,10 @@ function statusMessage(session: CliLoginSession): string {
   }
 }
 
+function defaultCredentialName(cli: string): string {
+  return `${cliLabel(cli)} login`;
+}
+
 export default function CliAutoLogin({
   workspaceId,
   createScope = 'workspace',
@@ -72,17 +94,30 @@ export default function CliAutoLogin({
   onCreated?: () => void | Promise<void>;
 }) {
   const { showToast } = useToast();
+  const catalog = useCliCatalog();
+  const loginClis = loginCapableClis(catalog);
   const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState<CliProvider>('codex');
+  const [provider, setProvider] = useState<string>(() => defaultLoginCli());
   const [instances, setInstances] = useState<CliLoginInstanceOption[]>([]);
   const [instancesLoading, setInstancesLoading] = useState(false);
   const [instanceId, setInstanceId] = useState('');
-  const [credentialName, setCredentialName] = useState(`${CLI_LABELS.codex} login`);
+  const [credentialName, setCredentialName] = useState(() => defaultCredentialName(defaultLoginCli()));
+  // provider_scoped CLI 전용 — 프리셋 id 또는 직접 입력.
+  const [providerPreset, setProviderPreset] = useState<string>(presetId(0));
+  const [customProvider, setCustomProvider] = useState('');
+  const [customMethod, setCustomMethod] = useState('');
   const [starting, setStarting] = useState(false);
   const [session, setSession] = useState<CliLoginSession | null>(null);
   const [error, setError] = useState('');
 
   const isGlobal = createScope === 'global';
+  const login: CliLoginDescriptor | null = cliLoginInfo(provider);
+  const providerScoped = !!login?.provider_scoped;
+  const presets = login?.presets ?? [];
+  const presetIndex = providerPreset.startsWith('preset-') ? Number(providerPreset.slice('preset-'.length)) : -1;
+  const preset = providerScoped && presetIndex >= 0 ? presets[presetIndex] ?? null : null;
+  const scopedProvider = (preset ? preset.provider : customProvider).trim();
+  const scopedMethod = (preset ? preset.method : customMethod).trim();
 
   const loadInstances = useCallback(async () => {
     setInstancesLoading(true);
@@ -102,21 +137,22 @@ export default function CliAutoLogin({
     if (open && !session) void loadInstances();
   }, [open, session, loadInstances]);
 
-  const reset = (nextProvider: CliProvider = provider) => {
+  const reset = (nextProvider: string = provider) => {
     setSession(null);
     setError('');
     setProvider(nextProvider);
-    setCredentialName(`${CLI_LABELS[nextProvider]} login`);
+    setCredentialName(defaultCredentialName(nextProvider));
   };
 
-  const changeProvider = (next: CliProvider) => {
+  const changeProvider = (next: string) => {
     // Only overwrite the name if it still matches the outgoing provider's
     // default — an operator-typed custom name must never be clobbered by a
     // provider switch.
-    if (!credentialName.trim() || credentialName === `${CLI_LABELS[provider]} login`) {
-      setCredentialName(`${CLI_LABELS[next]} login`);
+    if (!credentialName.trim() || credentialName === defaultCredentialName(provider)) {
+      setCredentialName(defaultCredentialName(next));
     }
     setProvider(next);
+    setProviderPreset(presetId(0));
   };
 
   const close = () => {
@@ -136,6 +172,12 @@ export default function CliAutoLogin({
       setError('Select a Runtime Host instance first.');
       return;
     }
+    if (providerScoped && (!scopedProvider || !scopedMethod)) {
+      // 빈 채로 보내면 CLI 가 선택 UI 를 띄우려다 파이프 뒤에서 멎는다 — 서버도
+      // 막지만, 여기서 막으면 왕복 없이 바로 알려줄 수 있다.
+      setError(`Enter both the ${cliLabel(provider)} provider and the login method.`);
+      return;
+    }
     setStarting(true);
     setError('');
     try {
@@ -143,6 +185,7 @@ export default function CliAutoLogin({
         scope: isGlobal ? 'global' : 'workspace',
         workspace_id: isGlobal ? undefined : workspaceId,
         cli: provider,
+        ...(providerScoped ? { cli_provider: scopedProvider, cli_method: scopedMethod } : {}),
         credential_name: credentialName.trim(),
         instance_id: instanceId,
       });
@@ -215,7 +258,7 @@ export default function CliAutoLogin({
       <Modal
         isOpen={open}
         onClose={close}
-        title={`${cliLabelOf(session?.cli ?? provider)} Login`}
+        title={`${cliLabel(session?.cli ?? provider)} Login`}
         maxWidth={520}
         footer={
           !session ? (
@@ -248,18 +291,50 @@ export default function CliAutoLogin({
         {!session ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ fontSize: tokens.typography.fontSizeMd, color: tokens.colors.textSecondary }}>
-              AWB runs <code>{CLI_LOGIN_COMMAND[provider]}</code> on a Runtime Host for you — no terminal or
-              file upload needed. You'll just approve the login in your browser.
+              AWB runs <code>{cliLoginCommand(provider, scopedProvider, scopedMethod)}</code> on a Runtime
+              Host for you — no terminal or file upload needed. You'll just approve the login in your browser.
             </div>
             <Select
               label="CLI"
               value={provider}
-              onChange={(e) => changeProvider(e.target.value as CliProvider)}
-              options={[
-                { value: 'codex', label: CLI_LABELS.codex },
-                { value: 'claude', label: CLI_LABELS.claude },
-              ]}
+              onChange={(e) => changeProvider(e.target.value)}
+              options={loginClis.map((d) => ({ value: d.id, label: d.label }))}
             />
+            {providerScoped && (
+              <>
+                <Select
+                  label={`${cliLabel(provider)} Provider`}
+                  value={providerPreset}
+                  onChange={(e) => setProviderPreset(e.target.value)}
+                  options={[
+                    ...presets.map((p, index) => ({ value: presetId(index), label: p.label })),
+                    { value: PROVIDER_CUSTOM, label: 'Other (enter manually)…' },
+                  ]}
+                />
+                {!preset && (
+                  <>
+                    <Input
+                      label="Provider id"
+                      placeholder="e.g. openai"
+                      value={customProvider}
+                      onChange={(e) => setCustomProvider(e.target.value)}
+                    />
+                    <Input
+                      label="Login method"
+                      placeholder='exact label, e.g. ChatGPT Pro/Plus (headless)'
+                      value={customMethod}
+                      onChange={(e) => setCustomMethod(e.target.value)}
+                    />
+                  </>
+                )}
+                <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
+                  {cliLabel(provider)} logs in per provider. Only methods that finish in a browser work here —
+                  providers that just want an API key pasted are quicker to add with "Import from File".
+                  Run <code>{cliLoginCommand(provider, '<provider>', '?')}</code> on the host to see the
+                  exact method labels it accepts.
+                </div>
+              </>
+            )}
             <Select
               label="Runtime Host"
               value={instanceId}
@@ -329,7 +404,7 @@ export default function CliAutoLogin({
                 }}
               >
                 <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
-                  Couldn't recognize the login prompt automatically — here's what {cliLabelOf(session.cli)} printed.
+                  Couldn't recognize the login prompt automatically — here's what {cliLabel(session.cli)} printed.
                   Look for a URL (and a one-time code, if shown) below.
                 </div>
                 <pre

@@ -26,6 +26,8 @@ import {
   resolveCliBin,
   _resetResolverCache,
 } from '../dist/lib/cli-resolver.js';
+// 바이너리 후보 표는 CLI 모듈이 선언하고 builtin 목록 로드 시 리졸버에 등록된다.
+import '../dist/lib/clis/builtin.js';
 
 test('orderResolutionSources: well-known candidates are ordered before PATH hits', () => {
   const ordered = orderResolutionSources(['/well/known/codex'], ['/path/hit/codex']);

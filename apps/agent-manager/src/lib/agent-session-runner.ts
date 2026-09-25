@@ -13,9 +13,11 @@
 
 import { access, constants as fsConstants, lstat, mkdir, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 
-import { AgentSessionStore, resolveClaudeHome, resolveCodexHome, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
+import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
+import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
+import { findOnPath } from './find-on-path.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { normalizeCredentialFields } from './credential-fields.js';
 import { log } from './logging.js';
@@ -49,7 +51,6 @@ import type {
   AcpPermissionOutcome,
   AcpPermissionRequest,
 } from './runtime/acp/acp-types.js';
-import { resolveHermesAcpCommand } from './runtime/hermes/hermes-command.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
 
 /** 서버 payload (apps/server/src/common/types/stream-events.ts AgentSessionRequestPayload). */
@@ -122,23 +123,23 @@ export interface SessionCredential {
   fields: Record<string, string>;
 }
 
-/** CLI → 호환 credential provider 접두어(서버 SESSION_CLI_CREDENTIAL_PREFIX 와 같은 규약). */
 /** `config_defaults` 의 예약 키 — 레거시 `session/set_mode`(config option 이 아닌 modes). 서버와 같은 값. */
 const MODE_DEFAULT_KEY = '__mode';
 
-export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = {
-  claude: 'claude_',
-  codex: 'codex_',
-};
+/** 세션에 AWB credential 을 묶을 수 있는 CLI 의 provider 접두어(서버 SESSION_CLI_CREDENTIAL_PREFIX
+ *  와 같은 규약) — 세션 슬라이스와 credential 슬라이스를 **둘 다** 가진 모듈만. */
+export function sessionCredentialPrefix(cli: string): string | null {
+  const module = findCliModule(cli);
+  if (!module?.sessions || !module.credentials) return null;
+  return module.credentials.prefix;
+}
 
-/** provider 별 비어 있으면 안 되는 필드 — agent-manager-commands.ts 의 REQUIRED_CREDENTIAL_FIELDS 와 같은 규약. */
-const SESSION_REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
-  claude_subscription: ['credentials_json'],
-  claude_api_key: ['api_key'],
-  claude_oauth_token: ['oauth_token'],
-  codex_subscription: ['auth_json'],
-  codex_api_key: ['api_key'],
-};
+/** 위 함수의 표 형태 — 테스트·로그용. */
+export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = Object.fromEntries(
+  cliModulesWith('sessions')
+    .filter((m) => m.credentials)
+    .map((m) => [m.id, m.credentials!.prefix]),
+);
 
 /**
  * 오류 문구에서 bearer 토큰/API 키를 가린다. CLI/SDK 오류가 헤더 값을 그대로 인용하는
@@ -152,12 +153,6 @@ export function redactSecrets(text: string): string {
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-<redacted>')
     .replace(/(api[_-]?key|oauth[_-]?token|access[_-]?token|refresh[_-]?token)(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, '$1$2<redacted>');
 }
-
-/** CLI 홈 안에서 세션 기록이 사는 하위 디렉터리 — 세션 전용 홈에서 운영자 홈으로 링크한다. */
-const SESSION_STORE_SUBDIR: Record<string, string> = {
-  claude: 'projects',
-  codex: 'sessions',
-};
 
 interface SessionAuth {
   label: string;
@@ -243,7 +238,8 @@ const MAX_TOOL_TEXT_CHARS = 16_000;
 const SESSION_MAX_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_PAYLOAD_CHARS = 200_000;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
-export const ACP_SESSION_CLIS = ['claude', 'codex', 'hermes'] as const;
+/** Agent Session 을 열 수 있는 CLI(세션 슬라이스를 선언한 모듈). */
+export const ACP_SESSION_CLIS: readonly string[] = cliModulesWith('sessions').map((m) => m.id);
 
 function truncateText(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}\n…[truncated ${value.length - max} chars]` : value;
@@ -354,22 +350,7 @@ export function mcpStartupServerOf(toolCallId: string): string | null {
   return m ? m[1] : null;
 }
 
-export async function findOnPath(name: string): Promise<string | null> {
-  const candidates = process.platform === 'win32' ? [`${name}.cmd`, `${name}.exe`, name] : [name];
-  for (const dir of (process.env.PATH || '').split(delimiter)) {
-    if (!dir) continue;
-    for (const candidate of candidates) {
-      const full = join(dir, candidate);
-      try {
-        await access(full, fsConstants.X_OK);
-        return full;
-      } catch {
-        /* next */
-      }
-    }
-  }
-  return null;
-}
+export { findOnPath };
 
 function parseCommandLine(line: string): ResolvedAcpCommand {
   const parts = line.trim().split(/\s+/).filter(Boolean);
@@ -379,49 +360,30 @@ function parseCommandLine(line: string): ResolvedAcpCommand {
 /**
  * CLI 별 ACP 어댑터 명령. 우선순위:
  *   1. env AWB_ACP_COMMAND_<CLI> (예: AWB_ACP_COMMAND_CLAUDE="node /opt/acp.js")
- *   2. PATH 의 어댑터 바이너리(claude-agent-acp / codex-acp / hermes-acp)
- *   3. npx --yes <패키지> (claude / codex)
+ *   2. 모듈의 `sessions.resolveAcpCommand` (PATH 의 어댑터 바이너리 → npx 패키지 등)
  */
 export async function resolveAcpCommandForCli(cli: string): Promise<ResolvedAcpCommand> {
   const envOverride = process.env[`AWB_ACP_COMMAND_${cli.toUpperCase()}`]?.trim();
   if (envOverride) return parseCommandLine(envOverride);
-  switch (cli) {
-    case 'claude': {
-      const found = await findOnPath('claude-agent-acp');
-      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
-    }
-    case 'codex': {
-      // `@agentclientprotocol/codex-acp` 가 유지되는 어댑터다 — 설치된 codex CLI 와 같은 세대의 코어를
-      // 번들해 최신 모델을 쓴다. zed-industries 것은 2026-07 에 archive 됐고 옛 코어라 새 모델을
-      // "requires a newer version of Codex" 로 거부한다.
-      const found = await findOnPath('codex-acp');
-      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/codex-acp'] };
-    }
-    case 'opencode': {
-      // opencode 는 ACP 서버를 **자기 안에** 갖고 있다(`opencode acp`) — claude/codex 처럼
-      // 별도 어댑터 패키지를 npx 로 끌어올 필요가 없고, 따라서 어댑터와 CLI 코어의 세대가
-      // 어긋날 일도 없다. 바이너리 해석은 다른 경로와 같은 resolveCliBin 을 쓴다.
-      const found = await findOnPath('opencode');
-      return { command: found ?? 'opencode', args: ['acp'] };
-    }
-    case 'hermes': {
-      const resolved = await resolveHermesAcpCommand();
-      return { command: resolved.command, args: [...resolved.argsPrefix] };
-    }
-    default:
-      throw new Error(`No ACP adapter is known for CLI "${cli}".`);
-  }
+  const sessions = cliSessions(cli);
+  if (!sessions) throw new Error(`No ACP adapter is known for CLI "${cli}".`);
+  const resolved = await sessions.resolveAcpCommand(findOnPath);
+  return { command: resolved.command, args: [...resolved.args] };
 }
 
-/** 이 장비에서 세션을 열 수 있는 CLI — 하트비트 `acp_session_clis`. PATH 만 본다(spawn 없음). */
+/** 이 장비에서 세션을 열 수 있는 CLI — 하트비트 `acp_session_clis`. PATH 만 본다(spawn 없음).
+ *  `env` 는 override 변수(`AWB_ACP_COMMAND_<CLI>`, `HERMES_ACP_COMMAND`)를 읽는 곳이고,
+ *  실행 파일 탐색은 언제나 프로세스의 PATH 를 쓴다(예전 동작 그대로). */
 export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
   const out: string[] = [];
-  if (env.AWB_ACP_COMMAND_CLAUDE || await findOnPath('claude-agent-acp') || await findOnPath('claude')) out.push('claude');
-  if (env.AWB_ACP_COMMAND_CODEX || await findOnPath('codex-acp') || await findOnPath('codex')) out.push('codex');
-  if (env.AWB_ACP_COMMAND_OPENCODE || await findOnPath('opencode')) out.push('opencode');
-  if (env.AWB_ACP_COMMAND_HERMES || env.HERMES_ACP_COMMAND || await findOnPath('hermes-acp') || await findOnPath('hermes')) out.push('hermes');
+  for (const module of cliModulesWith('sessions')) {
+    if (env[`AWB_ACP_COMMAND_${module.id.toUpperCase()}`] || (await module.sessions.detect(env, (name) => findOnPath(name)))) {
+      out.push(module.id);
+    }
+  }
   return out;
 }
+
 
 export class AgentSessionRunner {
   readonly #config: AwbConfig;
@@ -858,9 +820,8 @@ export class AgentSessionRunner {
     env.AWB_MANAGER_ID = this.#options.getManagerId();
     env.AWB_SESSION_CLI = cli;
     env.AWB_SESSION_ID = sessionId;
-    // codex-acp: 매니저 프로세스에는 브라우저가 없다 — ChatGPT 브라우저 로그인 auth method 를 숨겨
-    // 어댑터가 장비의 codex 로그인(auth.json)이나 API 키만 쓰게 한다.
-    if (cli === 'codex' && env.NO_BROWSER === undefined) env.NO_BROWSER = '1';
+    // CLI 별 env 보정(codex-acp 의 NO_BROWSER 등)은 모듈이 선언한다.
+    cliSessions(cli)?.adjustEnv?.(env as Record<string, string>);
     return env;
   }
 
@@ -985,7 +946,7 @@ export class AgentSessionRunner {
     const none: SessionAuth = { label: 'operator-login', source: 'operator', env: {}, stripEnvKeys: [], cliHome: null };
     const credentialId = request.credential_id || '';
     if (!credentialId) return this.#withBackend(cli, request, none, '', undefined);
-    const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
+    const prefix = sessionCredentialPrefix(cli);
     if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
       ?? ((id: string, ws: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, ws));
@@ -998,7 +959,7 @@ export class AgentSessionRunner {
     // 생성부터 실패한다 — managed-agent 경로와 같은 규칙으로 정리한다.
     const { fields, repaired } = normalizeCredentialFields(fetched.fields);
     if (repaired.length) log(`[agent-session ${cli}] credential ${fetched.credential_id.slice(0, 8)} whitespace repaired in: ${repaired.join(', ')}`);
-    const missing = (SESSION_REQUIRED_CREDENTIAL_FIELDS[fetched.provider] ?? []).filter((key) => !fields[key]);
+    const missing = (requiredCredentialFields(fetched.provider) ?? []).filter((key) => !fields[key]);
     if (missing.length) {
       throw Object.assign(new Error(`CLI settings credential ${fetched.provider} is missing ${missing.join(', ')} — re-save it in Settings → Credentials.`), { code: 'credential_incomplete' });
     }
@@ -1035,7 +996,7 @@ export class AgentSessionRunner {
   ): Promise<SessionAuth> {
     const profile = request.runtime_profile;
     if (!profile) return auth;
-    if (cli !== 'claude') {
+    if (!cliSessions(cli)?.supportsBackendProfile) {
       throw Object.assign(new Error(`A Claude backend profile cannot be applied to ${cli} sessions.`), { code: 'backend_unsupported' });
     }
     try {
@@ -1083,9 +1044,11 @@ export class AgentSessionRunner {
    * 세션의 재개가 실패했다). 링크가 아니라 진짜 디렉터리가 들어 있으면 지우지 않는다 — 운영자의 자료일 수 있다.
    */
   async #linkSessionStore(cli: string, cliHome: string): Promise<void> {
-    const subdir = SESSION_STORE_SUBDIR[cli];
-    if (!subdir) return;
-    const operatorHome = cli === 'claude' ? resolveClaudeHome(this.#options.baseEnv ?? process.env) : resolveCodexHome(this.#options.baseEnv ?? process.env);
+    const sessions = cliSessions(cli);
+    const subdir = sessions?.storeSubdir;
+    if (!sessions || !subdir) return;
+    const env = this.#options.baseEnv ?? process.env;
+    const operatorHome = sessions.operatorHome(env);
     const target = join(operatorHome, subdir);
     const linkPath = join(cliHome, subdir);
     await mkdir(target, { recursive: true });

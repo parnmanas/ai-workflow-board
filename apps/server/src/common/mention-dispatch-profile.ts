@@ -6,6 +6,7 @@ import { Board } from '../entities/Board';
 import { Workspace } from '../entities/Workspace';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from './harness-config';
 import { resolveEffortPreset, ResolvedEffortPreset } from './effort-presets';
+import { cliDescriptor } from './cli-catalog';
 import { CliRuntimeProfile } from './cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from './claude-backend-registry';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from './environment-config';
@@ -85,7 +86,7 @@ export async function resolveMentionDispatchExtras(
     // 다시 조회하므로 이 catch가 명시 프로파일 오류를 삼키지 않는다.
   }
 
-  if (agent.type !== 'claude') return extras;
+  if (!cliDescriptor(agent.type)?.sessions.backend_profile) return extras;
 
   let runtimeProfile: CliRuntimeProfile | null;
   try {

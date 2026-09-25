@@ -66,9 +66,11 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   CLI 코어의 세대가 어긋나는 문제(codex-acp 전례)가 원천적으로 없고 별도 설치도 필요 없다. rolf 실측(opencode 1.18.32):
   `initialize` 가 `loadSession:true` + `sessionCapabilities{close,fork,list,resume}` 를 주고, `session/new` 가
   `configOptions`(모델 select, `id` 키)와 `available_commands_update` 를 준다 — 모델 선택·슬래시 커맨드·재개가 모두
-  기존 경로 그대로 동작한다. credential 개념이 없으므로(cli-adapters/opencode.ts) 세션은 운영자 홈에서 돌고, 그 홈의
-  DB 가 위 목록 조회가 읽는 바로 그 DB 다(같은 세션이 양쪽에 보인다). 그래서 `SESSION_STORE_SUBDIR` 에도 opencode
-  항목이 없다 — 링크할 세션 전용 홈 자체가 생기지 않는다.
+  기존 경로 그대로 동작한다. credential 을 안 묶으면 세션은 운영자 홈에서 돌고, 그 홈의 DB 가 위 목록 조회가 읽는
+  바로 그 DB 다(같은 세션이 양쪽에 보인다). `opencode_auth` credential 을 묶으면 전용 홈이 생기므로 그때는 데이터
+  디렉터리(`.local/share/opencode`, DB 가 그 안에 있다)를 운영자 홈으로 링크한다(모듈의 `sessions.storeSubdir`) — 계정
+  격리는 그 디렉터리가 아니라 `OPENCODE_AUTH_CONTENT` env 가 맡으므로(cli-adapters/opencode.ts) 기록을 공유해도
+  자격증명은 섞이지 않는다.
   기존 세션은 `session/load`(cwd 는 기록에서), 새 세션은 `session/new`. load 재생분은 버린다(UI 가 history 로 이미 가짐).
   유휴 30분(`config.agent_sessions.idle_minutes`) 또는 close 로 프로세스 회수 → 상태 idle/closed, 다음 prompt 가 다시 연다.
 - **클라이언트 `components/sessions`** — 호스트 목록 → 호스트×CLI 세션 목록(장비의 기록) → 트랜스크립트(history + 라이브
@@ -133,8 +135,8 @@ Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → C
 (`agent_session_cli_settings`, `GET/PUT /api/agent-sessions/hosts/:managerId/:cli/settings`, 화면은 호스트 세션
 목록의 "CLI settings"). 비워 두면 장비 운영자의 CLI 로그인(`claude login` / `codex login`)을 그대로 쓴다.
 
-- 후보는 워크스페이스 + global credential 중 provider 접두어가 CLI 와 맞는 것(`claude_*`, `codex_*`) — agents 화면의
-  `CLI_TO_CREDENTIAL_PREFIX` 와 같은 규약. 불일치는 400, 다른 워크스페이스 것은 404, hermes 는 아직 미지원(409).
+- 후보는 워크스페이스 + global credential 중 provider 접두어가 CLI 와 맞는 것(`claude_*`, `codex_*`, `opencode_*`) —
+  agents 화면의 `CLI_TO_CREDENTIAL_PREFIX` 와 같은 규약. 불일치는 400, 다른 워크스페이스 것은 404, hermes 는 아직 미지원(409).
 - 매니저는 open/prompt 요청에 실린 `credential_id` 로 `GET /api/agent/sessions/credential/:id?workspace_id=` 를 부른다.
   서버는 **그 매니저에 바인딩된 credential 만** 복호화해 준다(다른 매니저 키, 바인딩 없는 credential → 403).
 - **기록 링크는 존재만으로 믿지 않는다.** 세션 전용 홈의 기록 디렉터리(`projects` / `sessions`)는 운영자 홈으로

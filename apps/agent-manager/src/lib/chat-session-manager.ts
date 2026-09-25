@@ -13,6 +13,8 @@ import {
   type SessionRecord,
 } from './base-session-manager.js';
 import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-adapters/base.js';
+import { cliDispatch } from './clis/index.js';
+import { DEFAULT_CLI_ID } from './constants.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { fetchChatRoomHistory, fetchOrdinaryWorkBoardCandidates, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
@@ -325,7 +327,7 @@ export class ChatSessionManager
       // Prep attachments using the session's adapter capability — only
       // fetch image bytes when the live CLI can actually consume them
       // (PERSISTENT_SESSION + native vision content blocks → Claude).
-      const canEmitImages = sess.adapter.has(PERSISTENT_SESSION) && sess.cli_type === 'claude';
+      const canEmitImages = sess.adapter.has(PERSISTENT_SESSION) && !!cliDispatch(sess.cli_type).inlineImages;
       const prepared = await prepareChatAttachments(this._config, spec.roomId, spec.attachments, {
         fetchImages: canEmitImages,
       });
@@ -386,8 +388,8 @@ export class ChatSessionManager
     // First-turn attachment prep. Only Claude (persistent session + native
     // vision) gets image bytes fetched here — other CLIs hand-off through
     // the legacy oneshot path, which prepares attachments without images.
-    const cli = String(spec.agentContext?.cli || 'claude').toLowerCase();
-    const canEmitImages = cli === 'claude';
+    const cli = String(spec.agentContext?.cli || DEFAULT_CLI_ID).toLowerCase();
+    const canEmitImages = !!cliDispatch(cli).inlineImages;
     const preparedFirstTurn = await prepareChatAttachments(
       this._config,
       spec.roomId,

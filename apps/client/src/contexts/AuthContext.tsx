@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
 import { User } from '../types';
+import { loadCliCatalog } from '../cli/catalog';
 
 interface WorkspaceEntry {
   id: string;
@@ -154,6 +155,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('auth-expired', handler);
     return () => window.removeEventListener('auth-expired', handler);
   }, []);
+
+  // Load the LLM CLI catalog once a session exists (the endpoint needs a
+  // logged-in user; `isAuthenticated` is false for pending users / users
+  // without a workspace, so key on the user instead). Failure keeps the
+  // static mirror — nothing here blocks.
+  useEffect(() => {
+    if (!state.user) return;
+    void loadCliCatalog();
+  }, [state.user?.id]);
 
   // Periodic session health check (every 60s while authenticated)
   useEffect(() => {

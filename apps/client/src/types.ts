@@ -1036,10 +1036,16 @@ export interface CliLoginInstanceOption {
   instance_id: string;
   hostname: string;
   workspace_id: string | null;
-  codex_installed: boolean;
-  codex_healthy: boolean;
-  claude_installed: boolean;
-  claude_healthy: boolean;
+  /** Per-CLI install/health keyed by catalog CLI id — the shape new servers
+   *  send alongside the legacy flat keys below. Readers check this first. */
+  clis?: Record<string, { installed: boolean; healthy: boolean }>;
+  // Legacy flat keys (older servers) — kept so the picker degrades gracefully.
+  codex_installed?: boolean;
+  codex_healthy?: boolean;
+  claude_installed?: boolean;
+  claude_healthy?: boolean;
+  opencode_installed?: boolean;
+  opencode_healthy?: boolean;
 }
 
 export type CliLoginSessionStatus =
@@ -1056,6 +1062,9 @@ export interface CliLoginSession {
   workspace_id: string;
   is_global: boolean;
   cli: string;
+  /** opencode 전용 — 어느 provider 로, 어느 방식으로 로그인했는지(`-p`/`-m`). 다른 CLI 는 ''. */
+  cli_provider: string;
+  cli_method: string;
   credential_name: string;
   status: CliLoginSessionStatus;
   verification_url: string | null;
@@ -1452,21 +1461,33 @@ export interface EnvironmentConfig {
 // A Ticket carries an ABSTRACT effort option (a preset id), NOT CLI-specific
 // flags. The board defines the presets; each preset maps to per-CLI options.
 // Mirror of the server-side contract — both sides must agree byte-for-byte on
-// these JSON keys. Claude gets rich options (effort + ultracode + model);
-// codex/antigravity/pi/opencode get model-only (other keys gracefully skipped at dispatch).
+// these JSON keys. Which keys each CLI honours comes from the CLI catalog
+// (`cli/catalog.ts` → `effort.keys`): claude gets effort + ultracode + model;
+// model-only CLIs get `model` (other keys gracefully skipped at dispatch).
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
+/** One CLI's slice of a preset. Which keys apply is a catalog fact. */
+export interface EffortCliOptions {
+  effort?: EffortLevel;
+  ultracode?: boolean;
+  model?: string;
+}
 
 export interface EffortPreset {
   id: string;    // stable slug, e.g. 'standard'
   label: string; // human label shown in UI
+  // Named keys kept for compatibility with existing callers; the index
+  // signature lets slices for CLIs this build doesn't know survive a
+  // load → edit → save round-trip untouched.
   // claude: real `--effort` flag (session-level) + `ultracode` PROMPT keyword
   // (appended to the task text, NOT a flag) + optional `--model`.
-  claude?: { effort?: EffortLevel; ultracode?: boolean; model?: string };
+  claude?: EffortCliOptions;
   // codex / antigravity / pi / opencode: model-only (`-m`/`--model`).
-  codex?: { model?: string };
-  antigravity?: { model?: string };
-  pi?: { model?: string };
-  opencode?: { model?: string };
+  codex?: EffortCliOptions;
+  antigravity?: EffortCliOptions;
+  pi?: EffortCliOptions;
+  opencode?: EffortCliOptions;
+  [cli: string]: string | EffortCliOptions | undefined;
 }
 
 export interface EffortPresetsConfig {
@@ -2543,7 +2564,8 @@ export interface AgentManagerCommandOutcome {
 
 export interface ManagedAgentCreateBody {
   name: string;
-  cli: 'claude' | 'deepseek' | 'codex' | 'antigravity' | 'pi' | 'opencode' | 'hermes';
+  /** Catalog CLI id — validated by the server catalog, not a client union. */
+  cli: string;
   working_dir?: string;
   manager_agent_id: string;
   runtime_config: AgentRuntimeConfig;

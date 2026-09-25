@@ -114,9 +114,10 @@ test('CLI auto-login modal defaults to Codex, offers Claude, and switching provi
   assert.equal(nameInput.value, 'Codex login');
 
   await changeSelect(cliSelect, 'claude');
-  assert.match(container.textContent, /Claude Login/);
+  // Labels come from the CLI catalog now (`Claude Code`, not the old local `Claude`).
+  assert.match(container.textContent, /Claude Code Login/);
   assert.match(container.textContent, /claude auth login/);
-  assert.equal(nameInput.value, 'Claude login', 'switching provider must refresh the untouched default name');
+  assert.equal(nameInput.value, 'Claude Code login', 'switching provider must refresh the untouched default name');
 
   await flush(); // let listCliLoginInstances' auto-select populate Runtime Host
   await act(async () => {
@@ -174,8 +175,8 @@ test("'Try Again' after a failed claude attempt resets to a clean claude form, n
   // of the current provider) would leave stale/garbage state instead of a
   // clean pre-session form with claude's real default name and title.
   const nameInputAfterReset = container.querySelector('input');
-  assert.equal(nameInputAfterReset.value, 'Claude login');
-  assert.match(container.textContent, /Claude Login/);
+  assert.equal(nameInputAfterReset.value, 'Claude Code login');
+  assert.match(container.textContent, /Claude Code Login/);
   assert.doesNotMatch(container.textContent, /undefined/);
 });
 

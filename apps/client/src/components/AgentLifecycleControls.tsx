@@ -7,6 +7,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { waitForCommandAck } from './admin/agentManagerModelRefresh';
 import { cliUpdateState } from '../utils/cliVersions';
+import { cliUpdatable } from '../cli/catalog';
 
 /**
  * AgentLifecycleControls — per-managed-agent lifecycle surface for the
@@ -42,10 +43,14 @@ import { cliUpdateState } from '../utils/cliVersions';
  *  what "live" looks like. */
 const HEARTBEAT_STALE_MS = 60_000;
 
-/** Agent.type 에 들어오지만 실제 CLI 가 아닌 값들 — 이 둘에는 올릴 바이너리가
- *  없으므로 Update CLI 버튼을 아예 감춘다('custom' 은 운영자가 직접 정의한
- *  실행 파일, 'manager' 는 페어링으로 발급된 매니저 identity). */
-const NON_UPDATABLE_CLI_TYPES = new Set(['custom', 'manager', '']);
+/** Agent.type 에 들어오지만 올릴 바이너리가 없는 값 — Update CLI 버튼을 감춘다.
+ *  '' 와 'manager'(페어링으로 발급된 매니저 identity)는 CLI 가 아니고, 그 외는
+ *  카탈로그의 `updatable` 이 정한다('custom' 은 운영자가 직접 정의한 실행 파일이라
+ *  false). */
+function updatableCliOf(cli: string | null | undefined): string | null {
+  if (!cli || cli === 'manager') return null;
+  return cliUpdatable(cli) ? cli : null;
+}
 
 interface AgentLifecycleControlsProps {
   agentId: string;
@@ -145,7 +150,7 @@ export default function AgentLifecycleControls({
   // 여기서는 경로(args.bin)를 싣지 않는다: 이 화면의 단위는 에이전트이고, 그
   // 에이전트가 쓰는 것은 **지금 해석되는 설치본**이기 때문이다. 같은 CLI 의 다른
   // 설치본을 골라 올리는 것은 Runtime Hosts 화면(InstalledCliVersions)의 일이다.
-  const updatableCli = cli && !NON_UPDATABLE_CLI_TYPES.has(cli) ? cli : null;
+  const updatableCli = updatableCliOf(cli);
   const currentCliVersion = (updatableCli && managerInstance?.cli_versions?.[updatableCli]) || null;
   const latestCliVersion = (updatableCli && managerInstance?.cli_latest_versions?.[updatableCli]) || null;
   // 이미 최신이면 버튼을 잠근다 — 올릴 게 없는데도 계속 눌리면, 운영자는 눌러

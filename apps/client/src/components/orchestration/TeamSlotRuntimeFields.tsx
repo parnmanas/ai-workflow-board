@@ -18,6 +18,7 @@ import RuntimeConfigFields, {
   type RuntimeSelection,
 } from '../admin/RuntimeConfigFields';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
+import { cliCredentialPrefix, cliSupportsBackendProfile } from '../../cli/catalog';
 
 /**
  * The editor for one Orchestration team slot's runtime: Runtime Host, CLI,
@@ -253,9 +254,13 @@ export default function TeamSlotRuntimeFields({
       : []),
   ];
   // Credential providers are prefixed by CLI (`claude_subscription`,
-  // `codex_api_key`, …) — same filter the admin agent dialog uses.
-  const eligibleCredentials = cli ? credentials.filter((c) => c.provider.startsWith(`${cli}_`)) : [];
-  const showBackendProfile = cli === 'claude' && backendProfiles.length > 0;
+  // `codex_api_key`, …) — the prefix is a catalog fact, same filter the admin
+  // agent dialog uses. CLIs without a credential concept get an empty list.
+  const credentialPrefix = cliCredentialPrefix(cli);
+  const eligibleCredentials = credentialPrefix
+    ? credentials.filter((c) => c.provider.startsWith(credentialPrefix))
+    : [];
+  const showBackendProfile = cliSupportsBackendProfile(cli) && backendProfiles.length > 0;
 
   return (
     <>

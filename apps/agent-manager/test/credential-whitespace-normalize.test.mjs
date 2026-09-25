@@ -56,7 +56,7 @@ test('normalizeCredentialFields tolerates a missing fields map', () => {
 test('the AWB fetch path normalizes before the required-field check and returns the clean map', () => {
   const src = read('lib/agent-manager-commands.ts');
   const normalizeAt = src.indexOf('normalizeCredentialFields(fetched.fields)');
-  const requiredAt = src.indexOf('const required = REQUIRED_CREDENTIAL_FIELDS[fetched.provider]');
+  const requiredAt = src.indexOf('const required = requiredCredentialFields(fetched.provider)');
   assert.ok(normalizeAt > 0, 'fetched credential must be normalized');
   assert.ok(normalizeAt < requiredAt, 'normalization must precede the required-field check');
   assert.doesNotMatch(

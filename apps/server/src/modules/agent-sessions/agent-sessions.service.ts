@@ -7,6 +7,7 @@ import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
 import { profileEntityToRuntime } from '../../common/claude-backend-registry';
+import { CLI_CATALOG } from '../../common/cli-catalog';
 import type { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { decrypt } from '../../services/encryption.service';
 import { normalizeCredentialFields } from '../../common/credential-fields';
@@ -90,8 +91,10 @@ export interface AgentSessionCliSettings {
   updated_at: string | null;
 }
 
-/** backend profile 을 받을 수 있는 CLI — Claude backend profile 이므로 claude 뿐이다. */
-const BACKEND_PROFILE_CLIS: ReadonlySet<string> = new Set(['claude']);
+/** backend profile 을 받을 수 있는 CLI — cli-catalog.ts `sessions.backend_profile` (Claude backend profile 이므로 claude 뿐). */
+export const BACKEND_PROFILE_CLIS: ReadonlySet<string> = new Set(
+  CLI_CATALOG.filter((d) => d.sessions.backend_profile).map((d) => d.id),
+);
 
 /** 화면에 보여 줄 backend profile 투영(비밀 없음). */
 export interface AgentSessionBackendRef {
@@ -102,11 +105,13 @@ export interface AgentSessionBackendRef {
   base_url: string;
 }
 
-/** CLI → 호환 credential provider 접두어. agents 화면의 CLI_TO_CREDENTIAL_PREFIX 와 같은 규약. */
-export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = {
-  claude: 'claude_',
-  codex: 'codex_',
-};
+/** CLI → 호환 credential provider 접두어. agents 화면의 CLI_TO_CREDENTIAL_PREFIX 와 같은 규약.
+ *  cli-catalog.ts 에서 파생: 세션을 열 수 있고(`sessions.acp`) credential 개념이 있는 CLI 만. */
+export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = Object.fromEntries(
+  CLI_CATALOG
+    .filter((d) => d.sessions.acp && d.credential)
+    .map((d) => [d.id, d.credential!.prefix]),
+);
 
 export interface ManagerStatePatch {
   status?: string;

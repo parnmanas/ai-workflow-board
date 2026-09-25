@@ -1,4 +1,5 @@
 import type { CliAdapter } from '../../cli-adapters/base.js';
+import { DEFAULT_CLI_ID } from '../../constants.js';
 import type { RuntimePluginRegistry } from './plugin-registry.js';
 import { RuntimeExecutionFacade } from '../application/runtime-execution-facade.js';
 import type { OneshotSpec, SessionSpec } from '../../cli-adapters/base.js';
@@ -17,7 +18,7 @@ export class RuntimeAdapterResolver {
   }
 
   resolve(runtimeId: string | null | undefined): CliAdapter {
-    const id = String(runtimeId || 'claude').trim().toLowerCase();
+    const id = String(runtimeId || DEFAULT_CLI_ID).trim().toLowerCase();
     let adapter = this.#adapters.get(id);
     if (!adapter) {
       adapter = this.registry.createCliAdapter(id);
@@ -27,14 +28,14 @@ export class RuntimeAdapterResolver {
   }
 
   buildOneshot(runtimeId: string | null | undefined, spec: OneshotSpec) {
-    const id = String(runtimeId || 'claude').trim().toLowerCase();
+    const id = String(runtimeId || DEFAULT_CLI_ID).trim().toLowerCase();
     const adapter = this.resolve(id);
     const prepared = this.#facade.prepareOneshot(id, spec, adapter);
     return { ...prepared, adapter };
   }
 
   buildSession(runtimeId: string | null | undefined, mode: 'persistent' | 'resume' | 'control', spec: SessionSpec, sessionId?: string) {
-    const id = String(runtimeId || 'claude').trim().toLowerCase();
+    const id = String(runtimeId || DEFAULT_CLI_ID).trim().toLowerCase();
     const adapter = this.resolve(id);
     const prepared = this.#facade.prepareSession(id, mode, spec, sessionId, adapter);
     return { ...prepared, adapter };

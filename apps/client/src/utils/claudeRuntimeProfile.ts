@@ -1,12 +1,16 @@
 import type { ClaudeBackendProfile } from '../types';
+import { cliSupportsBackendProfile } from '../cli/catalog';
 
 export type RuntimeProfileLoadState = 'idle' | 'loading' | 'ready' | 'error';
+
+// Backend profiles only exist for CLIs whose catalog descriptor says so
+// (`sessions.backend_profile`); every other CLI short-circuits to "no profile".
 
 export function runtimeProfileSelectionReady(
   cli: string,
   loadState: RuntimeProfileLoadState,
 ): boolean {
-  return cli !== 'claude' || loadState === 'ready';
+  return !cliSupportsBackendProfile(cli) || loadState === 'ready';
 }
 
 function validSelection(
@@ -33,7 +37,7 @@ export function runtimeProfileForAgentUpdate(
   profiles: ClaudeBackendProfile[],
   loadState: RuntimeProfileLoadState,
 ): string | null {
-  if (cli !== 'claude') return 'none';
+  if (!cliSupportsBackendProfile(cli)) return 'none';
   return validSelection(selection, profiles, loadState) || null;
 }
 
@@ -43,6 +47,6 @@ export function runtimeProfileForManagedAgentCreate(
   profiles: ClaudeBackendProfile[],
   loadState: RuntimeProfileLoadState,
 ): string | undefined {
-  if (cli !== 'claude') return undefined;
+  if (!cliSupportsBackendProfile(cli)) return undefined;
   return validSelection(selection, profiles, loadState) || undefined;
 }

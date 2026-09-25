@@ -48,6 +48,7 @@ import {
 import { FsBrowser } from './lib/fs-browser.js';
 import { SubagentMonitor } from './lib/subagent-monitor.js';
 import { createAdapter, KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index.js';
+import { cliDispatch, cliModulesWith, findCliModule } from './lib/clis/index.js';
 // ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
 import { gatherAvailableModels } from './lib/available-models.js';
@@ -1018,7 +1019,7 @@ async function runRuntime(
       // spawn_agent / restart_agent anyway.
       const credential = await readAgentCredential(id);
       let extraEnv: Record<string, string> = {};
-      if (cfg.cli !== 'hermes') {
+      if (findCliModule(cfg.cli)?.transport === 'cli') {
       try {
         // Same MCP context as spawn_agent so antigravity's mcp_config.json gets
         // refreshed on rehydrate (operator may have rotated the AWB url
@@ -1036,9 +1037,9 @@ async function runRuntime(
       } catch (err: any) {
         const detail = `rehydrate: cli-home prep failed for agent=${id.slice(0, 8)} cli=${cfg.cli}: ${err?.message ?? err}`;
         log(detail);
-        if (cfg.cli === 'codex') {
-          // Codex loads AWB exclusively from this native config. Do not route
-          // events to an agent that cannot satisfy its required MCP contract.
+        if (cliDispatch(cfg.cli).cliHomePrepFatal) {
+          // 이 CLI 는 AWB MCP 를 오직 네이티브 config 로만 붙인다(codex). 필수 MCP 계약을
+          // 만족하지 못하는 에이전트에 이벤트를 보내지 않는다.
           managedAgents.upsert({ agent_id: id, name: cfg.name, cli: cfg.cli, working_dir: cfg.working_dir });
           managedAgents.markStopped(id, detail);
           skipped++;
@@ -1313,7 +1314,7 @@ async function runRuntime(
     // 대신 checkAuxiliaryCli로 통일해, 4개 CLI 모두 resolveCliBin이 고른 절대경로로
     // 직접 probe하고 그 경로를 함께 로그에 남긴다.
     const cliResolutionChecks = await Promise.all(
-      (['claude', 'codex', 'gh', 'git'] as const).map(
+      [...cliModulesWith('binary').filter((m) => m.binary.bootVersionProbe).map((m) => m.id), 'gh', 'git'].map(
         async (cli) => [cli, await checkAuxiliaryCli(cli)] as const,
       ),
     );

@@ -90,11 +90,15 @@ test('pi → 호스트 pi login / ~/.pi/agent, 항상 fallback(per-agent credent
   assert.match(meaning, /no per-agent credential concept/i);
 });
 
-test('opencode → 호스트 opencode login / auth.json, 항상 fallback(pi 와 같은 credential-free)', () => {
+test('opencode → 호스트 opencode login / auth.json fallback; opencode_auth credential 을 붙이면 그것이 우선', () => {
   const { optionLabel, meaning } = credentialFallbackCopy('opencode');
   assert.match(optionLabel, /opencode login/);
   assert.match(meaning, /auth\.json/);
-  assert.match(meaning, /no per-agent credential concept/i);
+  // opencode 는 이제 per-agent `opencode_auth` credential 을 받는다(OPENCODE_AUTH_CONTENT
+  // 로 주입, 호스트 파일보다 우선) — pi 처럼 "credential 개념 없음"이라 쓰면 틀린다.
+  assert.match(meaning, /opencode_auth/);
+  assert.match(meaning, /OPENCODE_AUTH_CONTENT/);
+  assert.doesNotMatch(meaning, /no per-agent credential concept/i);
 });
 
 // ─── 3. 어댑터 문구는 서로 구별된다(예전엔 4곳이 동일 리터럴을 복제했다) ──────────

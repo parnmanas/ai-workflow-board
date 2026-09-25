@@ -748,3 +748,137 @@ test('review-fix: applyProgress-equivalent — command_id is required on every p
     assert.ok(body.command_id, 'every progress report must carry a non-empty command_id');
   }
 });
+
+// ── opencode — provider 단위 로그인 ────────────────────────────────────────
+//
+// codex/claude 와 다른 점이 셋이다: (1) CLI 자신이 계정이 아니라 그 안의
+// provider 로 로그인하므로 `-p/-m` 을 받아야 하고, (2) 코드가 URL 다음 줄이
+// 아니라 같은 줄에 `Enter code: …` 로 오며, (3) 수확물이 CLI 홈 변수가 아니라
+// 격리 XDG_DATA_HOME 아래의 `opencode/auth.json` 이다.
+//
+// 아래 줄 포맷은 라이브 호스트(opencode 1.18.32, 격리 XDG_*,
+// `opencode auth login -p openai -m "ChatGPT Pro/Plus (headless)"`)에서 캡처한 것.
+const REAL_OPENCODE_PROMPT_LINES = [
+  '┌  Add credential',
+  '│',
+  '●  Go to: https://auth.openai.com/codex/device',
+  '│',
+  '●  Enter code: WZ1E-3RVM7',
+  '│',
+  '◒  Waiting for authorization',
+];
+
+/** argv/env 를 스크래치 파일에 적어 두는 가짜 opencode — 격리 홈은 성공 후
+ *  삭제되므로 그 안에 적으면 검증할 수 없다. */
+function makeFakeOpencode(recordPath, bodyJs) {
+  const printLines = REAL_OPENCODE_PROMPT_LINES.map((l) => `console.log(${JSON.stringify(l)});`).join('\n');
+  return makeFakeCodex(`
+    const fs = require('fs');
+    const path = require('path');
+    fs.writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({
+      argv: process.argv.slice(2),
+      xdgData: process.env.XDG_DATA_HOME || '',
+      xdgConfig: process.env.XDG_CONFIG_HOME || '',
+      home: process.env.HOME || '',
+    }));
+    ${printLines}
+    ${bodyJs}
+  `);
+}
+
+function fakeOpencodeSuccess(recordPath) {
+  return makeFakeOpencode(recordPath, `
+    setTimeout(() => {
+      const dir = path.join(process.env.XDG_DATA_HOME, 'opencode');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ openai: { type: 'oauth', refresh: 'SECRET-OPENCODE-REFRESH' } }));
+      process.exit(0);
+    }, 30);
+  `);
+}
+
+test('opencode success: -p/-m reach the CLI, url and code are reported separately, auth.json is harvested from the isolated XDG_DATA_HOME', async () => {
+  const recordPath = join(scratchDir, `opencode-argv-${randomUUID()}.json`);
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { opencodeBin: fakeOpencodeSuccess(recordPath) },
+  );
+  const sessionId = randomUUID();
+  await manager.start({
+    sessionId,
+    commandId: 'cmd-o1',
+    cli: 'opencode',
+    cliProvider: 'openai',
+    cliMethod: 'ChatGPT Pro/Plus (headless)',
+  });
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'succeeded'));
+  const bodies = progressBodies(sessionId);
+
+  // provider/method 는 그대로 argv 로 간다 — 라벨은 opencode 가 문자 그대로
+  // 대조하므로 따옴표째 넘기거나 다시 조립하면 CLI 가 거부한다.
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.deepEqual(record.argv, ['auth', 'login', '-p', 'openai', '-m', 'ChatGPT Pro/Plus (headless)']);
+
+  // 운영자 홈은 건드리지 않는다: 네 XDG 축이 전부 격리 홈 아래여야 한다
+  // (HOME 만 바꾸면 Windows 의 os.homedir() 가 운영자 상태를 그대로 읽는다).
+  const homeDir = join(CLI_LOGINS_DIR, sessionId);
+  assert.equal(record.xdgData, join(homeDir, 'data'));
+  assert.equal(record.xdgConfig, join(homeDir, 'config'));
+  assert.equal(record.home, homeDir);
+  assert.ok(!record.xdgData.startsWith(homedir()), 'the isolated home must not sit under the operator home');
+
+  // URL 과 코드는 각각 보고된다 — URL 을 찾는 즉시 한 번(코드를 기다리지 않는다),
+  // 코드까지 찾으면 다시 한 번.
+  const urlOnly = bodies.find((b) => b.status === 'awaiting_user' && b.verification_url && !b.user_code);
+  assert.ok(urlOnly, 'the url must be reported as soon as it is seen, without waiting for the code');
+  assert.equal(urlOnly.verification_url, 'https://auth.openai.com/codex/device');
+  const withCode = bodies.find((b) => b.status === 'awaiting_user' && b.user_code);
+  assert.ok(withCode, 'expected a second awaiting_user report carrying the code');
+  assert.equal(withCode.user_code, 'WZ1E-3RVM7');
+  assert.equal(withCode.verification_url, 'https://auth.openai.com/codex/device');
+
+  const succeeded = bodies.find((b) => b.status === 'succeeded');
+  assert.deepEqual(
+    JSON.parse(succeeded.credential_fields.auth_json),
+    { openai: { type: 'oauth', refresh: 'SECRET-OPENCODE-REFRESH' } },
+  );
+  assert.equal(succeeded.credential_fields.config_toml, undefined, 'opencode carries one field only');
+
+  await waitUntil(() => !existsSync(homeDir));
+  assert.equal(manager.isBusy(), false);
+});
+
+test('opencode: exit 0 without an auth.json is reported as failed, not succeeded', async () => {
+  const recordPath = join(scratchDir, `opencode-argv-${randomUUID()}.json`);
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { opencodeBin: makeFakeOpencode(recordPath, 'setTimeout(() => process.exit(0), 20);') },
+  );
+  const sessionId = randomUUID();
+  await manager.start({ sessionId, commandId: 'cmd-o2', cli: 'opencode', cliProvider: 'openai', cliMethod: 'M' });
+
+  await waitUntil(() => progressBodies(sessionId).some((b) => b.status === 'failed'));
+  const failed = progressBodies(sessionId).find((b) => b.status === 'failed');
+  assert.match(failed.error_detail, /auth\.json was not found/);
+  await waitUntil(() => !existsSync(join(CLI_LOGINS_DIR, sessionId)));
+});
+
+// provider/method 가 비면 opencode 는 선택 UI 를 띄우려다 파이프 뒤에서 아무것도
+// 출력하지 않고 멎는다(실측) — 10분 타임아웃까지 "starting" 에 갇히느니 즉시 거부한다.
+test('opencode: start without cli_provider/cli_method is rejected before anything is spawned', async () => {
+  const recordPath = join(scratchDir, `opencode-argv-${randomUUID()}.json`);
+  const manager = new CliLoginManager(
+    { url: 'https://awb.example', apiKey: 'k' },
+    { opencodeBin: fakeOpencodeSuccess(recordPath) },
+  );
+  const sessionId = randomUUID();
+  await assert.rejects(
+    () => manager.start({ sessionId, commandId: 'cmd-o3', cli: 'opencode', cliProvider: 'openai' }),
+    /cli_provider and cli_method/,
+  );
+  assert.equal(existsSync(recordPath), false, 'nothing may be spawned when the pair is incomplete');
+  assert.equal(manager.isBusy(), false, 'a rejected start must not leave the manager busy');
+  assert.equal(existsSync(join(CLI_LOGINS_DIR, sessionId)), false,
+    'a rejected start must not leave an isolated home behind — #finish never runs for it');
+});

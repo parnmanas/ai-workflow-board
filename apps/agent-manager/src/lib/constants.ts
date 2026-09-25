@@ -115,5 +115,8 @@ export const STOP_GRACE_MS = 2_000;
  *  참고), 그래서 이 값을 과하게 늘려 shutdown 을 느리게 만들 필요는 없다. */
 export const STOP_FORCE_KILL_SETTLE_MS = 5_000;
 
-export const KNOWN_CLI_TYPES = ['claude', 'deepseek', 'codex', 'antigravity', 'pi', 'opencode'] as const;
-export type CliType = (typeof KNOWN_CLI_TYPES)[number];
+/** 설정·페이로드에 CLI 가 비어 있을 때의 기본값. 이 빌드가 아는 CLI 목록은 더 이상
+ *  여기 없다 — `clis/index.ts` 의 `KNOWN_CLI_IDS`(레지스트리)가 단일 원천이다. */
+export const DEFAULT_CLI_ID = 'claude';
+/** @deprecated CLI 이름은 레지스트리가 검증한다 — 문자열로 취급하라. */
+export type CliType = string;

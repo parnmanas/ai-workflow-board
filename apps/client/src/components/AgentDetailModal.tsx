@@ -17,6 +17,7 @@ import AgentMoveToWorkspaceSection from './AgentMoveToWorkspaceSection';
 import AgentLifecycleControls from './AgentLifecycleControls';
 import AgentLaunchSpecSection from './AgentLaunchSpecSection';
 import ManagedAgentDialog from './admin/ManagedAgentDialog';
+import { DEFAULT_CLI_ID } from '../cli/catalog';
 import { useParams } from 'react-router-dom';
 
 /**
@@ -1497,7 +1498,7 @@ export default function AgentDetailModal({ agentId, onClose, onDeleted }: AgentD
           onClose={() => setManagedDialogOpen(false)}
           managerAgentId={detail.manager_agent_id || ''}
           managerInstanceId={detail.live_instance?.instance_id}
-          defaultCli={detail.type || 'claude'}
+          defaultCli={detail.type || DEFAULT_CLI_ID}
           mode="edit"
           agent={detail as unknown as Agent}
           onSubmitted={() => {

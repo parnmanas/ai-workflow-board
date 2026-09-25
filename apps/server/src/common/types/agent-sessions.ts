@@ -12,6 +12,8 @@
  * 문자열 집합을 본다. 값 추가/변경은 서버·agent-manager 를 같은 PR 로.
  */
 
+import { CLI_CATALOG } from '../cli-catalog';
+
 export const AGENT_SESSION_STATUSES = [
   'idle',                  // 매니저에 살아 있는 프로세스 없음 — 다음 prompt 가 연다(기록은 CLI 홈에 있음)
   'starting',              // ACP 프로세스를 여는 중
@@ -74,9 +76,11 @@ export const AGENT_SESSION_REQUEST_OPS = [
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 
-/** 세션을 열 수 있는 CLI. deepseek 는 Claude CLI 홈을 공유하므로 claude 로 흡수된다.
- *  opencode 는 어댑터 사이드카 없이 자기 자신이 ACP 서버다(`opencode acp`). */
-export const ACP_SESSION_CLIS: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode', 'hermes']);
+/** 세션을 열 수 있는 CLI — cli-catalog.ts 의 `sessions.acp` 에서 파생. deepseek 는 Claude CLI
+ *  홈을 공유하므로 claude 로 흡수된다. opencode 는 어댑터 사이드카 없이 자기 자신이 ACP 서버다(`opencode acp`). */
+export const ACP_SESSION_CLIS: ReadonlySet<string> = new Set(
+  CLI_CATALOG.filter((d) => d.sessions.acp).map((d) => d.id),
+);
 
 export interface AgentSessionModeOption {
   id: string;

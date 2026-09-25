@@ -29,6 +29,7 @@ import { priorityIndex } from './priority';
 import { appendBoardLanguageInstruction, resolveHarnessConfig, HarnessConfig } from '../../common/harness-config';
 import { resolveClonePolicy, ResolvedClonePolicy } from '../../common/clone-policy';
 import { resolveEffortPreset, ResolvedEffortPreset } from '../../common/effort-presets';
+import { cliDescriptor } from '../../common/cli-catalog';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from '../../common/environment-config';
 import { resolveBoardUsePr, resolveBoardWorktreeMode, resolveWorktreeRelPath, renderUsePrTemplate, WorktreeMode } from '../../common/worktree-config';
 import { appendBoardLessons, MAX_INJECTED_LESSONS } from '../../common/board-lessons';
@@ -3102,7 +3103,7 @@ candidate's branch or move the ticket.
     // Claude backend profiles must be invisible to every other CLI. In
     // particular, a board default must not alter Codex/Antigravity spawn
     // model/cwd or make their dispatch depend on a Claude credential.
-    if (agent?.type === 'claude') {
+    if (agent && cliDescriptor(agent.type)?.sessions.backend_profile) {
       runtimeProfile = await resolveClaudeBackendProfileForDispatch(
         this.dataSource,
         [

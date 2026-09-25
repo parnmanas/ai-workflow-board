@@ -52,16 +52,22 @@ test('Agent creation resolves healthy runtimes from live Runtime Host instances'
   assert.doesNotMatch(source, /managerInstanceByManagerAgentId/);
 });
 
-test('Hermes is explicit and collaboration controls are Hermes-only', () => {
-  const source = [
+test('Hermes is explicit in the CLI catalog and collaboration controls are gated by its descriptor, not a literal', () => {
+  const catalog = read('cli/catalog.ts');
+  const components = [
     'components/AgentsPage.tsx',
     'components/admin/ManagedAgentDialog.tsx',
     'components/admin/RuntimeConfigFields.tsx',
   ].map(read).join('\n');
 
-  assert.match(source, /value:\s*['"]hermes['"]/);
-  assert.match(source, /(?:cli|runtime)\s*===\s*['"]hermes['"]/);
-  assert.match(source, /delegated/);
-  assert.match(source, /swarm/);
-  assert.match(source, /max_children/);
+  // The catalog is the only place hermes and its collaboration modes are named…
+  assert.match(catalog, /id:\s*['"]hermes['"]/);
+  assert.match(catalog, /collaboration:\s*\[\s*'single',\s*'delegated',\s*'swarm'\s*\]/);
+  assert.match(catalog, /runtime_config:\s*\{\s*profiles:\s*true,\s*child_limits:\s*true\s*\}/);
+  // …and the components gate on descriptor facts instead of the id.
+  assert.doesNotMatch(components, /(?:cli|runtime)\s*===\s*['"]hermes['"]/);
+  assert.match(components, /cliRuntimeConfig\(/);
+  assert.match(components, /cliCollaboration\(/);
+  assert.match(components, /child_limits/);
+  assert.match(components, /max_children/);
 });

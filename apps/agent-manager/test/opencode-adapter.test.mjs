@@ -8,8 +8,8 @@ import { OpencodeCliAdapter, OPENCODE_SESSION_ID_RE } from '../dist/lib/cli-adap
 import {
   ADAPTER_CAPABILITIES,
   describeSpawnArgv,
-  selectEffortSlice,
 } from '../dist/lib/cli-adapters/base.js';
+import { selectEffortSlice } from '../dist/lib/clis/effort.js';
 import { resolveEffectivePermissionPolicy } from '../dist/lib/permission-policy.js';
 
 const tempDirs = [];
@@ -467,4 +467,80 @@ test('listModels degrades to [] — never throws — when the binary cannot be r
   a.resolveBin = () => failing;
   assert.deepEqual(await a.listModels(), [],
     'a non-zero exit is not a model list — partial stdout from a failed probe must not be trusted');
+});
+
+// ── opencode_auth credential ──────────────────────────────────────────────
+//
+// 기본은 여전히 credential-free(운영자 auth.json 심볼릭 링크)다. credential 을
+// 묶으면 그 자리를 `OPENCODE_AUTH_CONTENT` env 가 대신한다 — opencode 가 그 env
+// 를 파일보다 **우선**해서 읽고 파일은 건드리지 않는다(opencode 1.18.32 실측).
+// 파일을 쓰지 않는 덕분에 운영자 홈이 전혀 관여하지 않고, 데이터 디렉터리도
+// 제자리에 남아 그 에이전트의 세션이 Sessions 화면에 그대로 보인다.
+test('prepareCliHome with an opencode_auth credential passes the auth through OPENCODE_AUTH_CONTENT and never writes it to disk', async () => {
+  const fakeOperatorHome = await freshDir('awb-opencode-operator-');
+  const operatorDataDir = join(fakeOperatorHome, '.local', 'share', 'opencode');
+  await fsp.mkdir(operatorDataDir, { recursive: true });
+  const operatorAuth = join(operatorDataDir, 'auth.json');
+  await fsp.writeFile(operatorAuth, JSON.stringify({ openai: { type: 'api', key: 'OPERATOR-KEY' } }));
+
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeOperatorHome;
+  process.env.USERPROFILE = fakeOperatorHome;
+  try {
+    const home = await freshDir();
+    const adapter = new OpencodeCliAdapter();
+    const authJson = JSON.stringify({ anthropic: { type: 'oauth', refresh: 'AGENT-REFRESH' } });
+    const { extraEnv } = await adapter.prepareCliHome(
+      home,
+      { credential_id: 'cred-1', provider: 'opencode_auth', fields: { auth_json: authJson } },
+      { url: 'https://awb.example', apiKey: 'k' },
+    );
+    assert.equal(extraEnv.OPENCODE_AUTH_CONTENT, authJson);
+    assert.equal(extraEnv.XDG_CONFIG_HOME, join(home, '.config'));
+    assert.equal(extraEnv.XDG_DATA_HOME, undefined,
+      'the data dir must stay put — pinning it would hide the agent sessions from the Sessions screen');
+
+    // 에이전트 홈에는 auth 파일이 생기지 않는다(링크도, 사본도).
+    const agentAuth = join(home, '.local', 'share', 'opencode', 'auth.json');
+    await assert.rejects(() => fsp.lstat(agentAuth), 'a bound credential must not leave an auth file in the agent home');
+
+    // 그리고 운영자의 로그인은 글자 하나 바뀌지 않는다.
+    assert.deepEqual(JSON.parse(await fsp.readFile(operatorAuth, 'utf8')), { openai: { type: 'api', key: 'OPERATOR-KEY' } });
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+  }
+});
+
+test('prepareCliHome without a credential still inherits the operator auth.json by symlink (unchanged default)', async () => {
+  const fakeOperatorHome = await freshDir('awb-opencode-operator-');
+  const operatorDataDir = join(fakeOperatorHome, '.local', 'share', 'opencode');
+  await fsp.mkdir(operatorDataDir, { recursive: true });
+  await fsp.writeFile(join(operatorDataDir, 'auth.json'), JSON.stringify({ openai: { type: 'api', key: 'OPERATOR-KEY' } }));
+
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeOperatorHome;
+  process.env.USERPROFILE = fakeOperatorHome;
+  try {
+    const home = await freshDir();
+    const adapter = new OpencodeCliAdapter();
+    const { extraEnv } = await adapter.prepareCliHome(home, null, { url: 'https://awb.example', apiKey: 'k' });
+    assert.equal(extraEnv.OPENCODE_AUTH_CONTENT, undefined);
+    const agentAuth = join(home, '.local', 'share', 'opencode', 'auth.json');
+    assert.deepEqual(JSON.parse(await fsp.readFile(agentAuth, 'utf8')), { openai: { type: 'api', key: 'OPERATOR-KEY' } });
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+  }
+});
+
+// credential 이 있는 에이전트에서만 벗겨 낸다(subagent-manager 가 그렇게 게이트한다).
+// GITHUB_TOKEN 은 일부러 빠져 있다 — opencode 의 copilot 인증은 auth 파일에 있고,
+// 그 env 는 에이전트의 gh/git 도구가 쓰는 값이다.
+test('authEnvKeys strips operator provider keys that would compete with a bound credential, but not GITHUB_TOKEN', () => {
+  const keys = new OpencodeCliAdapter().authEnvKeys();
+  assert.deepEqual(keys.slice().sort(), ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'OPENAI_API_KEY']);
+  assert.ok(!keys.includes('GITHUB_TOKEN'));
 });

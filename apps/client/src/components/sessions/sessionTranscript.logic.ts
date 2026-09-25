@@ -14,6 +14,7 @@
  *     아닐 때만 남긴다(취소/거절/오류를 사용자가 볼 수 있게)
  */
 import type { AgentSessionAuth, AgentSessionCommand, AgentSessionEventRecord, AgentSessionStatus } from '../../types';
+import { cliLabel } from '../../cli/catalog';
 
 export interface PermissionOptionView {
   option_id: string;
@@ -537,19 +538,9 @@ export function canConnect(status: AgentSessionStatus | string | null | undefine
   return status === 'idle' || status === 'closed' || status === 'error';
 }
 
+/** Display label for a CLI id — the catalog label, the raw id for ids the
+ *  catalog doesn't know, 'CLI' when empty. Kept under this name because the
+ *  sessions surface (and its tests) import it everywhere. */
 export function runtimeLabel(runtime: string): string {
-  switch (runtime) {
-    case 'claude':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex';
-    case 'hermes':
-      return 'Hermes';
-    case 'deepseek':
-      return 'DeepSeek (Claude CLI)';
-    case 'opencode':
-      return 'OpenCode';
-    default:
-      return runtime || 'CLI';
-  }
+  return runtime ? cliLabel(runtime) : 'CLI';
 }

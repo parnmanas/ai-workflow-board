@@ -7,19 +7,18 @@ import {
 } from './runtime-registry.js';
 import type { RuntimeCapabilities } from './runtime-types.js';
 import { probeRuntimeCommand, type RuntimeProbeResult } from './probe-command.js';
-import {
-  listHermesProfiles as defaultListHermesProfiles,
-  resolveHermesAcpCommand,
-} from './hermes/hermes-command.js';
+import { findCliModule } from '../clis/index.js';
+import { findOnPath } from '../find-on-path.js';
 
 export type { RuntimeProbeResult } from './probe-command.js';
 export { probeRuntimeCommand } from './probe-command.js';
 
 export interface RuntimeHealth extends RuntimeProbeResult {
   capabilities: RuntimeCapabilities;
-  /** Hermes 전용: Runtime Host가 지금 열거할 수 있는 프로파일 이름 목록.
-   *  다른 런타임에서는 undefined; `[]`는 "설치는 됐지만 named profile 없음"
-   *  (또는 열거 실패)을 뜻하며 `healthy`를 의심할 근거가 되지 않는다. */
+  /** 이름 붙은 프로파일을 가진 런타임(hermes)만: Runtime Host가 지금 열거할 수 있는
+   *  프로파일 이름 목록. `listProfiles` 를 선언하지 않은 런타임에서는 undefined;
+   *  `[]`는 "설치는 됐지만 named profile 없음"(또는 열거 실패)을 뜻하며 `healthy`를
+   *  의심할 근거가 되지 않는다. */
   profiles?: string[];
 }
 
@@ -33,18 +32,33 @@ export interface RuntimeProbeCommand {
 export interface RuntimeDiscoveryOptions {
   resolveCommand?: (runtimeId: string) => RuntimeProbeCommand | Promise<RuntimeProbeCommand>;
   probe?: (command: string, args: string[]) => Promise<RuntimeProbeResult>;
+  /** 프로파일 열거 seam(테스트). 런타임 id 를 받는다; 생략하면 모듈의 `listProfiles`. */
+  listProfiles?: (runtimeId: string) => Promise<string[]>;
+  /** @deprecated `listProfiles` 로 대체 — hermes 에만 적용되는 옛 seam. */
   listHermesProfiles?: () => Promise<string[]>;
 }
 
 export async function resolveRuntimeProbeCommand(runtimeId: string): Promise<RuntimeProbeCommand> {
-  if (runtimeId === 'hermes') {
-    const { command, argsPrefix } = await resolveHermesAcpCommand();
-    return { command, args: [...argsPrefix, '--help'] };
+  const module = findCliModule(runtimeId);
+  // CLI 어댑터가 없는 런타임(ACP 소유자)은 세션 슬라이스의 ACP 명령으로 프로브한다.
+  if (module && module.transport !== 'cli') {
+    if (!module.sessions) throw new Error(`runtime ${runtimeId} declares no probe command`);
+    const { command, args } = await module.sessions.resolveAcpCommand(findOnPath);
+    return { command, args: [...args, '--help'] };
   }
   return {
     command: createRuntimeCliAdapter(runtimeId).resolveBin(),
     args: ['--version'],
   };
+}
+
+/** 모듈이 프로파일을 선언했으면 그 열거기, 아니면 null. */
+function profileListerFor(runtimeId: string, options: RuntimeDiscoveryOptions): (() => Promise<string[]>) | null {
+  const module = findCliModule(runtimeId);
+  if (!module?.listProfiles) return null;
+  if (options.listProfiles) return () => options.listProfiles!(runtimeId);
+  if (options.listHermesProfiles && runtimeId === 'hermes') return options.listHermesProfiles;
+  return () => module.listProfiles!();
 }
 
 /**
@@ -57,7 +71,6 @@ export async function discoverRuntimeCapabilities(
 ): Promise<RuntimeCapabilityReport> {
   const resolveCommand = options.resolveCommand ?? resolveRuntimeProbeCommand;
   const probe = options.probe ?? probeRuntimeCommand;
-  const listHermesProfiles = options.listHermesProfiles ?? defaultListHermesProfiles;
   const rows = await Promise.all(
     KNOWN_RUNTIME_IDS.map(async (runtimeId) => {
       const capabilities = getRuntimeDescriptor(runtimeId).capabilities;
@@ -66,9 +79,8 @@ export async function discoverRuntimeCapabilities(
         const result = await probe(command, args);
         // 프로파일 열거는 best-effort이자 부가적이다: 여기서의 실패가
         // `healthy`(주 프로브만을 반영)를 절대 뒤집으면 안 된다.
-        const profiles = runtimeId === 'hermes' && result.installed
-          ? await listHermesProfiles().catch(() => [])
-          : undefined;
+        const lister = profileListerFor(runtimeId, options);
+        const profiles = lister && result.installed ? await lister().catch(() => []) : undefined;
         return [
           runtimeId,
           { ...result, capabilities, ...(profiles ? { profiles } : {}) },
@@ -82,7 +94,7 @@ export async function discoverRuntimeCapabilities(
             version: null,
             reason: 'probe_unavailable',
             capabilities,
-            ...(runtimeId === 'hermes' ? { profiles: [] } : {}),
+            ...(profileListerFor(runtimeId, options) ? { profiles: [] } : {}),
           },
         ] as const;
       }

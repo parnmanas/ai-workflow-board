@@ -18,6 +18,7 @@ import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayName, resolveAgentDisplayMap } from '../../utils/agent-name';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
+import { cliDescriptor } from '../../common/cli-catalog';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
@@ -1237,7 +1238,7 @@ export class RoomMessagingService {
     agent: Agent,
     workspaceId: string,
   ): Promise<CliRuntimeProfile | null> {
-    if (agent.type !== 'claude') return null;
+    if (!cliDescriptor(agent.type)?.sessions.backend_profile) return null;
     try {
       return await this._resolveChatRuntimeProfileCore(agent);
     } catch (err) {

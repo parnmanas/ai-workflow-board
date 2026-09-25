@@ -1,3 +1,4 @@
+import type { CliDescriptor } from './cli/catalog';
 import type {
   PromptTemplate,
   Resource,
@@ -1596,6 +1597,10 @@ export const api = {
     return request<{ success: true; id: string }>(`/credentials/${id}${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
   },
 
+  // LLM CLI 카탈로그 — 클라이언트의 per-CLI 표(라벨/credential/로그인/capability)는
+  // 전부 여기서 온다(`src/cli/catalog.ts` 가 static mirror 와 스토어를 가진다).
+  getCliCatalog: () => request<{ clis: CliDescriptor[] }>('/cli-catalog'),
+
   // 티켓 b2e79108 — CLI 자동 로그인(device-auth). 터미널·파일 업로드 없이
   // Codex 로그인 세션을 시작하고 진행 상태를 폴링/SSE로 추적한다.
   listCliLoginInstances: (workspaceId?: string) => {
@@ -1608,6 +1613,9 @@ export const api = {
     workspace_id?: string;
     scope?: 'global' | 'workspace';
     cli: string;
+    /** opencode 전용 — `opencode auth login -p <cli_provider> -m <cli_method>`. */
+    cli_provider?: string;
+    cli_method?: string;
     credential_name: string;
     instance_id: string;
   }) => request<CliLoginSession>('/credentials/cli-login/start', { method: 'POST', body: JSON.stringify(data) }),
@@ -1771,7 +1779,7 @@ export const api = {
 
   // Create an agent identity that the manager will spawn. Differs from the
   // generic POST /agents in two ways: (1) cli is validated against the
-  // claude/codex/antigravity/pi/custom whitelist, (2) manager_agent_id is sanity-
+  // CLI_TYPES whitelist (common/types/cli-types.ts), (2) manager_agent_id is sanity-
   // checked (existence + type='manager'); the manager itself can live in a
   // different workspace from the new agent — managers are paired globally
   // by an admin and supervise children across workspaces.

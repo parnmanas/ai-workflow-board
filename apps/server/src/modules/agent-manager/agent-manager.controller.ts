@@ -44,6 +44,7 @@ import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 import { ALLOWED_CLI_TYPES } from '../../common/types/cli-types';
+import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
 import {
   AgentRuntimeConfigError,
   validateAgentRuntimeConfig,
@@ -787,7 +788,7 @@ export class AgentManagerController {
       mode,
       hostname,
       plugin_version: typeof body?.plugin_version === 'string' && body.plugin_version ? body.plugin_version : 'unknown',
-      cli: typeof body?.cli === 'string' && body.cli ? body.cli : 'claude',
+      cli: typeof body?.cli === 'string' && body.cli ? body.cli : DEFAULT_CLI_ID,
       cli_adapters,
       runtime_capabilities,
       manager_capabilities,

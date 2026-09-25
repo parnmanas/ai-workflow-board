@@ -21,9 +21,12 @@ import {
   SIGTERM_GRACE_MS,
   STOP_GRACE_MS,
   STOP_FORCE_KILL_SETTLE_MS,
+  DEFAULT_CLI_ID,
 } from './constants.js';
 import { log } from './logging.js';
 import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
+import { cliDispatch } from './clis/index.js';
+import { selectEffortSlice } from './clis/effort.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
@@ -36,7 +39,6 @@ import {
   describeSpawnArgv,
   partitionHarness,
   resolveModelChain,
-  selectEffortSlice,
 } from './cli-adapters/base.js';
 import { recordActualLaunch } from './launch-spec-recorder.js';
 import {
@@ -552,7 +554,7 @@ export class SubagentManager implements SubagentManagerContract {
 
   /** Default-claude adapter for the legacy single-agent code paths. */
   get adapter(): CliAdapter {
-    return this.#adapterFor('claude');
+    return this.#adapterFor(DEFAULT_CLI_ID);
   }
 
   async #sweepOrphanCfgs(): Promise<void> {
@@ -740,7 +742,7 @@ export class SubagentManager implements SubagentManagerContract {
     // Server-side resolution is Claude-only, but retain this guard for
     // compatibility with older servers and hand-built dispatch events.
     const claudeRuntimeProfile =
-      adapter.cliType === 'claude' ? spec.runtimeProfile : null;
+      cliDispatch(adapter.cliType).runtimeProfile ? spec.runtimeProfile : null;
     // Ticket ee26302d: see base-session-manager.ts's identical comment —
     // `{}` (full) unless this profile's context_window is small.
     const toolProfileHeader = resolveToolProfileHeader(claudeRuntimeProfile);
@@ -1868,7 +1870,7 @@ export class SubagentManager implements SubagentManagerContract {
           // tool-call sentinel) to stderr. Other adapters already expose
           // their structured tool events on stdout, so keep this extra scan
           // pi-specific instead of treating arbitrary diagnostics as events.
-          if (record.cli_type === 'pi') this._scanForCommentTool(record, line);
+          if (cliDispatch(record.cli_type).scanStderrForTools) this._scanForCommentTool(record, line);
         }
         log(`${tagFor(record)}[err] ${line}`);
       });

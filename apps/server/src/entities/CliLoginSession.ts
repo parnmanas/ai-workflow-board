@@ -35,10 +35,21 @@ export class CliLoginSession {
   @Column({ type: 'boolean', default: false })
   is_global: boolean;
 
-  // 'codex' | 'claude' 자동화됨(ticket b2e79108, 06b2b990). 문자열 컬럼이라
-  // 스키마 변경 없이 다른 CLI도 나중에 추가 가능.
+  // 'codex' | 'claude' | 'opencode' 자동화됨(ticket b2e79108, 06b2b990). 문자열
+  // 컬럼이라 스키마 변경 없이 다른 CLI도 나중에 추가 가능.
   @Column({ type: 'varchar' })
   cli: string;
+
+  // opencode 전용. codex/claude 는 CLI 자신이 곧 계정이지만 opencode 는
+  // **provider 단위**로 로그인한다(`opencode auth login -p <provider> -m <method>`)
+  // — 같은 장비에 openai 와 github-copilot 로그인이 동시에 있을 수 있다. 그래서
+  // "무엇으로 로그인했는가" 를 세션에 남겨 두어야 UI 가 진행 상황을 설명할 수 있고,
+  // 매니저가 커맨드에서 이 두 값을 그대로 `-p`/`-m` 에 싣는다. 다른 CLI 는 빈 문자열.
+  @Column({ type: 'varchar', default: '' })
+  cli_provider: string;
+
+  @Column({ type: 'varchar', default: '' })
+  cli_method: string;
 
   // 성공 시 생성할 Credential.name.
   @Column({ type: 'varchar' })

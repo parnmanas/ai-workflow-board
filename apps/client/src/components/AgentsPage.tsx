@@ -10,6 +10,13 @@ import AgentManagerPage from './admin/AgentManagerPage';
 import { tokens } from '../tokens';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
 import {
+  cliCredentialPrefix,
+  cliRuntimeConfig,
+  cliSupportsBackendProfile,
+  cliSupportsCredential,
+  useCliCatalog,
+} from '../cli/catalog';
+import {
   reconcileRuntimeProfileSelection,
   runtimeProfileForManagedAgentCreate,
   type RuntimeProfileLoadState,
@@ -30,20 +37,10 @@ import type {
   ManagedAgentCreateBody,
 } from '../types';
 
-/** Map agent.type → credential provider prefix used to filter the credential
- *  picker. Keep this aligned with the server adapter credential mapping.
- *  CLIs whose adapter ships in agent-manager (claude / codex / antigravity) show
- *  only credentials with a matching provider prefix; `custom` skips it. `pi`
- *  and `opencode` have no provider prefix at all — neither has a credential
- *  concept AWB manages (see cli-adapters/pi.ts, cli-adapters/opencode.ts) —
- *  so both are deliberately absent from this map, which is what keeps the
- *  credential picker below from rendering for them. */
-const CLI_TO_CREDENTIAL_PREFIX: Record<string, string> = {
-  claude: 'claude_',
-  codex: 'codex_',
-  antigravity: 'antigravity_',
-  deepseek: 'deepseek_',
-};
+// Which CLIs take a per-agent credential (and which provider prefix filters
+// the picker) is a catalog fact — `cliCredentialPrefix()`. CLIs without a
+// credential concept (pi, hermes, custom) return null, which is what keeps the
+// credential picker below from rendering for them.
 
 interface ManagerOption {
   id: string;
@@ -270,11 +267,12 @@ export default function AgentsPage() {
     return () => { alive = false; };
   }, [showManagedModal, wsId]);
 
+  const cliCatalogList = useCliCatalog();
+  const managedCredentialPrefix = cliCredentialPrefix(managedForm.runtime.runtime);
   const eligibleCredentials = useMemo(() => {
-    const prefix = CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime];
-    if (!prefix) return [];
-    return credentials.filter((c) => c.provider.startsWith(prefix));
-  }, [credentials, managedForm.runtime.runtime]);
+    if (!managedCredentialPrefix) return [];
+    return credentials.filter((c) => c.provider.startsWith(managedCredentialPrefix));
+  }, [credentials, managedCredentialPrefix]);
 
   const selectedRuntimeIds = useMemo(() => {
     if (!managedForm.manager_agent_id) return [];
@@ -301,15 +299,19 @@ export default function AgentsPage() {
     );
   }, [managedForm.manager_agent_id, managerInstances]);
 
-  // undefined([]가 아님)는 선택된 Host가 아직 hermes 프로파일을 리포트하지
+  // 선택된 런타임의 named profile 목록(카탈로그가 `runtime_config.profiles` 를 켠
+  // 런타임만). undefined([]가 아님)는 선택된 Host가 아직 프로파일을 리포트하지
   // 않았다는 뜻 — 그 경우 RuntimeConfigFields는 자유 입력으로 폴백한다.
-  const selectedHermesProfiles = useMemo(() => {
-    if (!managedForm.manager_agent_id) return undefined;
+  const selectedNamedProfiles = useMemo(() => {
+    const runtime = managedForm.runtime.runtime;
+    if (!managedForm.manager_agent_id || !cliRuntimeConfig(runtime).profiles) return undefined;
     const host = managerInstances.find(
       (instance) => instance.agent_id === managedForm.manager_agent_id,
     );
-    return host?.runtime_capabilities?.hermes?.profiles;
-  }, [managedForm.manager_agent_id, managerInstances]);
+    return host?.runtime_capabilities?.[runtime]?.profiles;
+    // `cliCatalogList` is a dep so the memo re-derives once the fetched
+    // catalog replaces the static mirror (`cliRuntimeConfig` reads the store).
+  }, [managedForm.manager_agent_id, managedForm.runtime.runtime, managerInstances, cliCatalogList]);
 
   // working_dir is optional for `custom` (the manager doesn't know how to
   // launch a custom CLI without operator-supplied scripts anyway), required
@@ -359,18 +361,17 @@ export default function AgentsPage() {
     setCreatingManaged(true);
     try {
       // Drop credential_id when the CLI doesn't support per-agent
-      // credentials (only CLIs with a provider prefix in the map above —
-      // claude / deepseek / codex / antigravity — do; pi / opencode /
-      // custom / hermes don't); preserves the
-      // server's null contract for `custom` so it doesn't mis-set an FK.
-      const supportsCredential = !!CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime];
+      // credentials (a catalog fact — only CLIs with a credential prefix
+      // do); preserves the server's null contract for `custom` so it
+      // doesn't mis-set an FK.
+      const supportsCredential = cliSupportsCredential(managedForm.runtime.runtime);
       const credential_id = supportsCredential && managedForm.credential_id
         ? managedForm.credential_id
         : undefined;
-      // Only 'claude' agents have a backend profile concept — mirrors
-      // ManagedAgentDialog's create-mode resolution (sentinel 'none' opts
-      // out of board/workspace inheritance; '' / other CLIs omit the field
-      // so the server falls back to inherit).
+      // Only CLIs with `sessions.backend_profile` have a backend profile
+      // concept — mirrors ManagedAgentDialog's create-mode resolution
+      // (sentinel 'none' opts out of board/workspace inheritance; '' / other
+      // CLIs omit the field so the server falls back to inherit).
       const cli_runtime_profile = runtimeProfileForManagedAgentCreate(
         managedForm.runtime.runtime,
         managedForm.runtime_profile,
@@ -517,8 +518,8 @@ export default function AgentsPage() {
           <RuntimeConfigFields
             value={managedForm.runtime}
             availableRuntimeIds={selectedRuntimeIds}
-            hermesProfiles={selectedHermesProfiles}
-              permissionTiers={selectedPermissionTiers}
+            namedProfiles={selectedNamedProfiles}
+            permissionTiers={selectedPermissionTiers}
             disabled={!managedForm.manager_agent_id}
             onChange={(runtime) => setManagedForm((form) => ({ ...form, runtime, credential_id: '' }))}
           />
@@ -569,7 +570,7 @@ export default function AgentsPage() {
               }}
             />
           )}
-          {CLI_TO_CREDENTIAL_PREFIX[managedForm.runtime.runtime] && (
+          {managedCredentialPrefix && (
             <div>
               <Select
                 label="CLI credential"
@@ -585,7 +586,7 @@ export default function AgentsPage() {
               </div>
             </div>
           )}
-          {managedForm.runtime.runtime === 'claude' && (
+          {cliSupportsBackendProfile(managedForm.runtime.runtime) && (
             <div>
               <Select
                 label="Claude backend profile"

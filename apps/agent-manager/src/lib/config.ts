@@ -3,11 +3,12 @@ import {
   AGENT_PATH,
   CONFIG_PATH,
   DELEGATION_DEFAULTS,
-  KNOWN_CLI_TYPES,
+  DEFAULT_CLI_ID,
   REQUEST_TIMEOUT_MS,
   type CliType,
 } from './constants.js';
 import { log } from './logging.js';
+import { isKnownCli, KNOWN_CLI_IDS } from './clis/index.js';
 import type { AwbConfig } from './rest.js';
 
 export interface AgentInfo {
@@ -23,11 +24,11 @@ export function loadConfig(path: string = CONFIG_PATH): AwbConfig | null {
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     raw.delegation = { ...DELEGATION_DEFAULTS, ...(raw.delegation || {}) };
-    const cli = String(raw.cli || 'claude').toLowerCase().trim();
-    raw.cli = cli || 'claude';
-    if (!(KNOWN_CLI_TYPES as readonly string[]).includes(raw.cli)) {
+    const cli = String(raw.cli || DEFAULT_CLI_ID).toLowerCase().trim();
+    raw.cli = cli || DEFAULT_CLI_ID;
+    if (!isKnownCli(raw.cli)) {
       log(
-        `config.cli="${raw.cli}" is not a known CLI; valid: ${KNOWN_CLI_TYPES.join(', ')}. Adapter will fall back at creation.`,
+        `config.cli="${raw.cli}" is not a known CLI; valid: ${KNOWN_CLI_IDS.join(', ')}. Adapter will fall back at creation.`,
       );
     }
     return raw as AwbConfig;
@@ -144,7 +145,7 @@ export async function resolveAgentId(
 }
 
 export function getCliType(config: AwbConfig | null | undefined): CliType {
-  const raw = String(config?.cli ?? 'claude').toLowerCase().trim();
-  if ((KNOWN_CLI_TYPES as readonly string[]).includes(raw)) return raw as CliType;
-  return 'claude';
+  const raw = String(config?.cli ?? DEFAULT_CLI_ID).toLowerCase().trim();
+  if (isKnownCli(raw)) return raw;
+  return DEFAULT_CLI_ID;
 }

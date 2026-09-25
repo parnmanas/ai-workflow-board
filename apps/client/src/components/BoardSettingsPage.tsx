@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import {
   Board, BoardWithCards, PromptTemplate, BoardMovePreview, MoveBlocker, MoveRemedy,
-  EffortPreset, EffortPresetsConfig, EffortLevel, BUILTIN_EFFORT_PRESETS, Resource,
+  EffortPreset, EffortPresetsConfig, EffortLevel, EffortCliOptions, BUILTIN_EFFORT_PRESETS, Resource,
   BoardLesson,
   Workspace, ClaudeBackendProfile, BuiltinPromptDefault,
 } from '../types';
@@ -19,6 +19,7 @@ import EnvironmentConfigEditor from './EnvironmentConfigEditor';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError } from './QaPhasesEditor';
 import { QaPhase } from '../types';
 import { formatAgentDisplayName } from '../utils/agentName';
+import { effortEditorClis, useCliCatalog } from '../cli/catalog';
 import { tokens } from '../tokens';
 import { Button, Input, HeaderAction } from './common';
 
@@ -1341,8 +1342,9 @@ function SelfImprovementSetting({ board, onSave }: SelfImprovementSettingProps) 
 // ─── Effort presets ─────────────────────────────────────────────
 // Abstract per-board effort presets → per-CLI option mapping. The ticket
 // carries only the abstract preset id; the server resolves it into per-CLI
-// options at dispatch. Claude gets effort + ultracode + model; codex /
-// antigravity / pi / opencode get model-only. Starts from the board's stored presets, else
+// options at dispatch. Which CLIs get a block, and which keys (effort /
+// ultracode / model) each honours, comes from the CLI catalog
+// (`effortEditorClis`). Starts from the board's stored presets, else
 // BUILTIN_EFFORT_PRESETS. Save writes the whole config (or null to clear the
 // override and fall back to the builtins on the server).
 const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'max'];
@@ -1363,15 +1365,22 @@ function parseEffortPresets(raw: Board['effort_presets']): EffortPresetsConfig {
   }
   const presets: EffortPreset[] = cfg.presets
     .filter((p: any) => p && typeof p.id === 'string')
-    .map((p: any) => ({
-      id: String(p.id),
-      label: typeof p.label === 'string' && p.label ? p.label : String(p.id),
-      ...(p.claude ? { claude: { ...p.claude } } : {}),
-      ...(p.codex ? { codex: { ...p.codex } } : {}),
-      ...(p.antigravity ? { antigravity: { ...p.antigravity } } : {}),
-      ...(p.pi ? { pi: { ...p.pi } } : {}),
-      ...(p.opencode ? { opencode: { ...p.opencode } } : {}),
-    }));
+    .map((p: any) => {
+      const preset: EffortPreset = {
+        id: String(p.id),
+        label: typeof p.label === 'string' && p.label ? p.label : String(p.id),
+      };
+      // Every object-valued key is a per-CLI slice. Copy them all — including
+      // slices for CLIs this client build doesn't know — so a load → edit →
+      // save round-trip never silently drops another CLI's options.
+      for (const [key, value] of Object.entries(p)) {
+        if (key === 'id' || key === 'label') continue;
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          preset[key] = { ...(value as EffortCliOptions) };
+        }
+      }
+      return preset;
+    });
   if (presets.length === 0) return cloneEffortConfig(BUILTIN_EFFORT_PRESETS);
   const def = typeof cfg.default === 'string' && presets.some((p) => p.id === cfg.default)
     ? cfg.default
@@ -1388,7 +1397,15 @@ interface EffortPresetsSettingProps {
   onSave(config: EffortPresetsConfig | null): Promise<void>;
 }
 
+/** A preset's slice for one CLI (empty object when absent / malformed). */
+export function effortSlice(preset: EffortPreset, cli: string): EffortCliOptions {
+  const slice = preset[cli];
+  return slice && typeof slice === 'object' ? slice : {};
+}
+
 function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
+  const catalog = useCliCatalog();
+  const effortClis = effortEditorClis(catalog);
   const initial = parseEffortPresets(board.effort_presets);
   const [config, setConfig] = useState<EffortPresetsConfig>(initial);
   const [busy, setBusy] = useState(false);
@@ -1407,11 +1424,11 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
     });
   };
 
-  // Patch a CLI sub-object (claude/codex/antigravity/pi/opencode), pruning empty objects
-  // so the saved config stays clean (mirror the server WRITE-side normalization).
+  // Patch one CLI's slice (any catalog CLI id), pruning empty objects so the
+  // saved config stays clean (mirror the server WRITE-side normalization).
   const updateCli = (
     idx: number,
-    cli: 'claude' | 'codex' | 'antigravity' | 'pi' | 'opencode',
+    cli: string,
     patch: Record<string, any>,
   ) => {
     setConfig((prev) => {
@@ -1480,10 +1497,10 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
         Effort presets
       </h3>
       <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, marginBottom: 12 }}>
-        Abstract effort options a ticket can carry. Each preset maps to per-CLI options at dispatch:
-        Claude gets <code>--effort</code>, the <code>ultracode</code> orchestration keyword, and an
-        optional model; Codex, Antigravity, and PI get model-only (other keys are gracefully skipped).
-        Tickets reference a preset by name; clearing falls back to the built-in presets.
+        Abstract effort options a ticket can carry. Each preset maps to per-CLI options at dispatch;
+        which options a CLI honours (<code>--effort</code>, the <code>ultracode</code> orchestration
+        keyword, a model) comes from the CLI catalog, and keys a CLI does not support are gracefully
+        skipped. Tickets reference a preset by name; clearing falls back to the built-in presets.
       </div>
 
       {/* Default preset picker */}
@@ -1539,80 +1556,57 @@ function EffortPresetsSetting({ board, onSave }: EffortPresetsSettingProps) {
               </Button>
             </div>
 
-            {/* Claude options */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
-              <div>
-                <label style={fieldLabel}>Claude effort</label>
-                <select
-                  value={p.claude?.effort || ''}
-                  onChange={(e) => updateCli(idx, 'claude', { effort: e.target.value })}
-                  style={inputStyle}
-                >
-                  <option value="">(none)</option>
-                  {EFFORT_LEVELS.map((lvl) => (
-                    <option key={lvl} value={lvl}>{lvl}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={fieldLabel}>Claude model</label>
-                <input
-                  value={p.claude?.model || ''}
-                  placeholder="(CLI default)"
-                  onChange={(e) => updateCli(idx, 'claude', { model: e.target.value })}
-                  style={inputStyle}
-                />
-              </div>
-              <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 6 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textStrong, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!p.claude?.ultracode}
-                    onChange={(e) => updateCli(idx, 'claude', { ultracode: e.target.checked })}
-                  />
-                  ultracode
-                </label>
-              </div>
-            </div>
-
-            {/* Codex / Antigravity / PI / OpenCode model-only */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
-              <div>
-                <label style={fieldLabel}>Codex model</label>
-                <input
-                  value={p.codex?.model || ''}
-                  placeholder="(CLI default)"
-                  onChange={(e) => updateCli(idx, 'codex', { model: e.target.value })}
-                  style={inputStyle}
-                />
-              </div>
-              <div>
-                <label style={fieldLabel}>Antigravity model</label>
-                <input
-                  value={p.antigravity?.model || ''}
-                  placeholder="(CLI default)"
-                  onChange={(e) => updateCli(idx, 'antigravity', { model: e.target.value })}
-                  style={inputStyle}
-                />
-              </div>
-              <div>
-                <label style={fieldLabel}>PI model</label>
-                <input
-                  value={p.pi?.model || ''}
-                  placeholder="(CLI default)"
-                  onChange={(e) => updateCli(idx, 'pi', { model: e.target.value })}
-                  style={inputStyle}
-                />
-              </div>
-              <div>
-                <label style={fieldLabel}>OpenCode model</label>
-                <input
-                  value={p.opencode?.model || ''}
-                  placeholder="(provider/model)"
-                  onChange={(e) => updateCli(idx, 'opencode', { model: e.target.value })}
-                  style={inputStyle}
-                />
-              </div>
+            {/* One block per CLI with its own effort slice (catalog-driven);
+                each block renders only the keys that CLI honours. */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 }}>
+              {effortClis.map((cli) => {
+                const slice = effortSlice(p, cli.id);
+                return (
+                  <div
+                    key={cli.id}
+                    data-testid={`effort-cli-${cli.id}`}
+                    style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm }}
+                  >
+                    <div style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.textStrong }}>{cli.label}</div>
+                    {cli.keys.includes('effort') && (
+                      <div>
+                        <label style={fieldLabel}>Effort</label>
+                        <select
+                          value={slice.effort || ''}
+                          onChange={(e) => updateCli(idx, cli.id, { effort: e.target.value })}
+                          style={inputStyle}
+                        >
+                          <option value="">(none)</option>
+                          {EFFORT_LEVELS.map((lvl) => (
+                            <option key={lvl} value={lvl}>{lvl}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    {cli.keys.includes('model') && (
+                      <div>
+                        <label style={fieldLabel}>Model</label>
+                        <input
+                          value={slice.model || ''}
+                          placeholder="(CLI default)"
+                          onChange={(e) => updateCli(idx, cli.id, { model: e.target.value })}
+                          style={inputStyle}
+                        />
+                      </div>
+                    )}
+                    {cli.keys.includes('ultracode') && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textStrong, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={!!slice.ultracode}
+                          onChange={(e) => updateCli(idx, cli.id, { ultracode: e.target.checked })}
+                        />
+                        ultracode
+                      </label>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         ))}

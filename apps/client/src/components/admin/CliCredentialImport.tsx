@@ -4,31 +4,34 @@ import type { CatalogScope } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal } from '../common';
+import { cliLabel, cliLoginInfo, loginCapableClis, useCliCatalog } from '../../cli/catalog';
+import { defaultLoginCli } from '../../cli/presentation';
 
-type CliProvider = 'codex' | 'claude';
-
-const CLI_DETAILS: Record<CliProvider, {
+/** What the importer needs to know about one CLI — all read from the catalog
+ *  login descriptor (`cliLoginInfo`): the command that produces the file, where
+ *  the CLI writes it, which credential provider/field stores it, and an
+ *  optional companion file (codex's config.toml). */
+interface ImportDetails {
   label: string;
   command: string;
   file: string;
-  provider: 'codex_subscription' | 'claude_subscription';
-  field: 'auth_json' | 'credentials_json';
-}> = {
-  codex: {
-    label: 'Codex CLI',
-    command: 'codex login',
-    file: '~/.codex/auth.json',
-    provider: 'codex_subscription',
-    field: 'auth_json',
-  },
-  claude: {
-    label: 'Claude CLI',
-    command: 'claude auth login',
-    file: '~/.claude/.credentials.json',
-    provider: 'claude_subscription',
-    field: 'credentials_json',
-  },
-};
+  provider: string;
+  field: string;
+  extraFile: string | null;
+}
+
+export function importDetailsFor(cli: string): ImportDetails | null {
+  const login = cliLoginInfo(cli);
+  if (!login) return null;
+  return {
+    label: `${cliLabel(cli)} CLI`,
+    command: login.command,
+    file: login.file_path ?? '',
+    provider: login.harvest_provider,
+    field: login.harvest_field,
+    extraFile: login.extra_file_field,
+  };
+}
 
 function validateJsonFile(contents: string): string | null {
   if (!contents.trim()) return 'Select the credential file created by the CLI login.';
@@ -53,24 +56,26 @@ export default function CliCredentialImport({
   onCreated?: () => void | Promise<void>;
 }) {
   const { showToast } = useToast();
+  const catalog = useCliCatalog();
+  const loginClis = loginCapableClis(catalog);
   const credentialInput = useRef<HTMLInputElement | null>(null);
   const configInput = useRef<HTMLInputElement | null>(null);
   const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState<CliProvider>('codex');
+  const [provider, setProvider] = useState<string>(() => defaultLoginCli());
   const [name, setName] = useState('');
   const [credentialJson, setCredentialJson] = useState('');
-  const [configToml, setConfigToml] = useState('');
+  const [extraFileContents, setExtraFileContents] = useState('');
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const details = CLI_DETAILS[provider];
+  const details = importDetailsFor(provider) ?? importDetailsFor(defaultLoginCli());
 
-  const reset = (nextProvider: CliProvider = provider) => {
+  const reset = (nextProvider: string = provider) => {
     setProvider(nextProvider);
     setName('');
     setCredentialJson('');
-    setConfigToml('');
+    setExtraFileContents('');
     setFileName('');
     setError('');
   };
@@ -78,27 +83,32 @@ export default function CliCredentialImport({
   const close = () => {
     if (saving) return;
     setOpen(false);
-    reset('codex');
+    reset(defaultLoginCli());
   };
 
-  const readFile = async (file: File, kind: 'credential' | 'config') => {
+  const readFile = async (file: File, kind: 'credential' | 'extra') => {
     const contents = await file.text();
     if (kind === 'credential') {
       setCredentialJson(contents);
       setFileName(file.name);
       setError('');
-      if (!name.trim()) setName(`${CLI_DETAILS[provider].label} login`);
+      if (!name.trim() && details) setName(`${details.label} login`);
     } else {
-      setConfigToml(contents);
+      setExtraFileContents(contents);
     }
   };
 
   const copyCommand = async () => {
+    if (!details) return;
     await navigator.clipboard.writeText(details.command);
     showToast('Login command copied.', 'success');
   };
 
   const createCredential = async () => {
+    if (!details) {
+      setError('No CLI in the catalog supports file import.');
+      return;
+    }
     const jsonError = validateJsonFile(credentialJson);
     if (!name.trim()) {
       setError('Credential name is required.');
@@ -123,12 +133,12 @@ export default function CliCredentialImport({
         provider: details.provider,
         credentials: {
           [details.field]: credentialJson.trim(),
-          ...(provider === 'codex' && configToml.trim() ? { config_toml: configToml } : {}),
+          ...(details.extraFile && extraFileContents.trim() ? { [details.extraFile]: extraFileContents } : {}),
         },
       });
       showToast(`${details.label} credential created.`, 'success');
       setOpen(false);
-      reset('codex');
+      reset(defaultLoginCli());
       await onCreated?.();
     } catch (err: any) {
       setError(err?.message || 'Failed to create credential.');
@@ -136,6 +146,8 @@ export default function CliCredentialImport({
       setSaving(false);
     }
   };
+
+  const extraFileName = details?.extraFile ? details.extraFile.replace(/_/g, '.') : '';
 
   return (
     <>
@@ -151,7 +163,7 @@ export default function CliCredentialImport({
         footer={(
           <>
             <Button variant="secondary" onClick={close} disabled={saving}>Cancel</Button>
-            <Button variant="primary" onClick={createCredential} disabled={saving} loading={saving}>
+            <Button variant="primary" onClick={createCredential} disabled={saving || !details} loading={saving}>
               Create Credential
             </Button>
           </>
@@ -164,76 +176,80 @@ export default function CliCredentialImport({
           </p>
 
           <div style={{ display: 'flex', gap: 8 }} role="group" aria-label="CLI provider">
-            {(['codex', 'claude'] as const).map((item) => (
+            {loginClis.map((d) => (
               <Button
-                key={item}
-                variant={provider === item ? 'primary' : 'secondary'}
-                onClick={() => reset(item)}
+                key={d.id}
+                variant={provider === d.id ? 'primary' : 'secondary'}
+                onClick={() => reset(d.id)}
               >
-                {CLI_DETAILS[item].label}
+                {importDetailsFor(d.id)?.label ?? d.label}
               </Button>
             ))}
           </div>
 
-          <div style={{ padding: 14, borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface }}>
-            <div style={{ color: tokens.colors.textStrong, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>1. Run the login command</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <code style={{ flex: 1, padding: '9px 10px', borderRadius: tokens.radii.sm, background: tokens.colors.surfaceCard, color: tokens.colors.textPrimary }}>
-                {details.command}
-              </code>
-              <Button variant="secondary" size="sm" onClick={copyCommand}>Copy</Button>
-            </div>
-            <div style={{ marginTop: 8, color: tokens.colors.textMuted, fontSize: 12 }}>
-              Complete the browser sign-in opened by the CLI. Your login remains local until you choose the file below.
-            </div>
-          </div>
+          {details && (
+            <>
+              <div style={{ padding: 14, borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface }}>
+                <div style={{ color: tokens.colors.textStrong, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>1. Run the login command</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <code style={{ flex: 1, padding: '9px 10px', borderRadius: tokens.radii.sm, background: tokens.colors.surfaceCard, color: tokens.colors.textPrimary }}>
+                    {details.command}
+                  </code>
+                  <Button variant="secondary" size="sm" onClick={copyCommand}>Copy</Button>
+                </div>
+                <div style={{ marginTop: 8, color: tokens.colors.textMuted, fontSize: 12 }}>
+                  Complete the browser sign-in opened by the CLI. Your login remains local until you choose the file below.
+                </div>
+              </div>
 
-          <div style={{ padding: 14, borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface }}>
-            <div style={{ color: tokens.colors.textStrong, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>2. Select the generated credential file</div>
-            <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginBottom: 10 }}>
-              File location: <code>{details.file}</code>. Hidden folders can be shown with Ctrl/Cmd + Shift + . in most file pickers.
-            </div>
-            <input
-              ref={credentialInput}
-              type="file"
-              accept="application/json,.json"
-              style={{ display: 'none' }}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void readFile(file, 'credential');
-                event.target.value = '';
-              }}
-            />
-            <Button variant="secondary" onClick={() => credentialInput.current?.click()}>
-              {fileName ? `Selected: ${fileName}` : `Choose ${details.file.split('/').pop()}`}
-            </Button>
-            {provider === 'codex' && (
-              <>
+              <div style={{ padding: 14, borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface }}>
+                <div style={{ color: tokens.colors.textStrong, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>2. Select the generated credential file</div>
+                <div style={{ color: tokens.colors.textMuted, fontSize: 12, marginBottom: 10 }}>
+                  File location: <code>{details.file}</code>. Hidden folders can be shown with Ctrl/Cmd + Shift + . in most file pickers.
+                </div>
                 <input
-                  ref={configInput}
+                  ref={credentialInput}
                   type="file"
-                  accept=".toml,text/plain"
+                  accept="application/json,.json"
                   style={{ display: 'none' }}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
-                    if (file) void readFile(file, 'config');
+                    if (file) void readFile(file, 'credential');
                     event.target.value = '';
                   }}
                 />
-                <Button variant="secondary" onClick={() => configInput.current?.click()} style={{ marginLeft: 8 }}>
-                  {configToml ? 'config.toml selected' : 'Add config.toml (optional)'}
+                <Button variant="secondary" onClick={() => credentialInput.current?.click()}>
+                  {fileName ? `Selected: ${fileName}` : `Choose ${details.file.split('/').pop()}`}
                 </Button>
-              </>
-            )}
-          </div>
+                {details.extraFile && (
+                  <>
+                    <input
+                      ref={configInput}
+                      type="file"
+                      accept=".toml,.json,text/plain"
+                      style={{ display: 'none' }}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void readFile(file, 'extra');
+                        event.target.value = '';
+                      }}
+                    />
+                    <Button variant="secondary" onClick={() => configInput.current?.click()} style={{ marginLeft: 8 }}>
+                      {extraFileContents ? `${extraFileName} selected` : `Add ${extraFileName} (optional)`}
+                    </Button>
+                  </>
+                )}
+              </div>
 
-          <Input
-            label="Credential Name"
-            value={name}
-            onChange={(event) => { setName(event.target.value); setError(''); }}
-            placeholder={`e.g. ${details.label} · work account`}
-            error={error || undefined}
-          />
+              <Input
+                label="Credential Name"
+                value={name}
+                onChange={(event) => { setName(event.target.value); setError(''); }}
+                placeholder={`e.g. ${details.label} · work account`}
+                error={error || undefined}
+              />
+            </>
+          )}
           <div style={{ color: tokens.colors.textMuted, fontSize: 12 }}>
             Importing copies the current login snapshot. If the CLI rotates or expires it, log in again and import a new credential before switching agents to it.
           </div>

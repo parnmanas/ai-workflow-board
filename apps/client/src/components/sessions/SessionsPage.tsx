@@ -21,6 +21,7 @@ import NewSessionModal from './NewSessionModal';
 import SessionComposer from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
+import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -109,11 +110,13 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
   wsId: string; hosts: AgentSessionHost[]; loading: boolean; error: string | null; onReload: () => void; onNew: () => void;
 }) {
   const navigate = useNavigate();
+  const catalog = useCliCatalog();
+  const sessionCliNames = acpSessionClis(catalog).map((d) => d.label).join(', ');
   return (
     <>
       <PageHeader
         title="Sessions"
-        description="Drive a CLI on one of your Runtime Hosts — Claude Code, Codex, Hermes — including the sessions already on that machine."
+        description={`Drive a CLI on one of your Runtime Hosts — ${sessionCliNames} — including the sessions already on that machine.`}
         actions={<Button variant="primary" size="sm" onClick={onNew} disabled={hosts.length === 0}>New session</Button>}
       />
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>

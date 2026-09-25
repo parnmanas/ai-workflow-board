@@ -24,6 +24,7 @@
  */
 
 import { CLI_TYPES } from './types/cli-types';
+import { cliDescriptor, type CliCollaboration } from './cli-catalog';
 import {
   AgentRuntimeConfig,
   AgentRuntimeConfigError,
@@ -219,26 +220,24 @@ export function mergeTeamAgentSpec(
     if (raw[key] !== undefined) merged[key] = raw[key];
   }
   // A CLI change can invalidate the old runtime_config: `strategy` is per-CLI
-  // (only hermes supports delegated/swarm), so carrying `swarm` onto claude
-  // would be rejected for a combination the operator never chose. Fall back to
-  // the one strategy every CLI supports while KEEPING the permission tier —
-  // that is a deliberate safety choice about what the agent may do, and
-  // silently resetting it to the default on an unrelated CLI edit would loosen
-  // or tighten it behind the operator's back.
+  // (cli-catalog.ts `collaboration` — today only hermes supports
+  // delegated/swarm), so carrying `swarm` onto claude would be rejected for a
+  // combination the operator never chose. Fall back to the one strategy every
+  // CLI supports while KEEPING the permission tier — that is a deliberate
+  // safety choice about what the agent may do, and silently resetting it to
+  // the default on an unrelated CLI edit would loosen or tighten it behind the
+  // operator's back. Likewise the profile / child-limit knobs only survive
+  // when the new CLI declares them (`runtime_config.profiles` / `.child_limits`).
   if (raw.cli !== undefined && str(raw.cli).toLowerCase() !== current.cli && raw.runtime_config === undefined) {
-    merged.runtime_config = {
-      ...current.runtime_config,
-      strategy: 'single',
-      // hermes-only knobs mean nothing on another CLI.
-      profile: undefined,
-      max_children: undefined,
-      max_iterations: undefined,
-    };
-    for (const key of ['profile', 'max_children', 'max_iterations'] as const) {
-      if ((merged.runtime_config as Record<string, unknown>)[key] === undefined) {
-        delete (merged.runtime_config as Record<string, unknown>)[key];
-      }
+    const next = cliDescriptor(str(raw.cli));
+    const rc: Record<string, unknown> = { ...current.runtime_config };
+    if (!next || !next.collaboration.includes(rc.strategy as CliCollaboration)) rc.strategy = 'single';
+    if (!next?.runtime_config.profiles) delete rc.profile;
+    if (!next?.runtime_config.child_limits) {
+      delete rc.max_children;
+      delete rc.max_iterations;
     }
+    merged.runtime_config = rc;
   }
   return normalizeTeamAgentSpec(merged, label);
 }

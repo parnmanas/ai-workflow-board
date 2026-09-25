@@ -42,7 +42,9 @@ import {
 } from './permission-policy.js';
 import type { PendingRetryEntry, RetryScheduler } from './dispatch-preflight.js';
 import { SessionLimitDeferStore } from './session-limit-defer.js';
-import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel } from './cli-adapters/base.js';
+import type { HarnessSpec, RuntimeProfileSpec, ResolvedEffortPreset, EffortLevel, EffortSlice } from './cli-adapters/base.js';
+import { cliDispatch, isAcpRuntime } from './clis/index.js';
+import { effortKeysForSlice, effortSliceKeys } from './clis/effort.js';
 import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 import type {
   RuntimeDispatchResult,
@@ -70,7 +72,7 @@ import { FolderMutex } from './run-execution-lock.js';
 import type { RunLockHandle } from './run-execution-lock.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { mentionTriggerId } from './trigger-id.js';
-import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES } from './constants.js';
+import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES, DEFAULT_CLI_ID } from './constants.js';
 import { parseClonePolicy, type CloneWirePolicy } from './repo-credential.js';
 import { createHash } from 'node:crypto';
 import {
@@ -283,24 +285,21 @@ export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
   if (typeof obj.id !== 'string' || !obj.id.trim()) return null;
   const out: ResolvedEffortPreset = { id: obj.id.trim() };
   if (typeof obj.label === 'string' && obj.label.trim()) out.label = obj.label;
-  if (obj.claude && typeof obj.claude === 'object' && !Array.isArray(obj.claude)) {
-    const c: { model?: string; effort?: EffortLevel; ultracode?: boolean } = {};
-    if (typeof obj.claude.model === 'string' && obj.claude.model.trim()) c.model = obj.claude.model.trim();
-    if (typeof obj.claude.effort === 'string') {
-      const level = obj.claude.effort.trim().toLowerCase();
+  // 어느 슬라이스 키가 있고 각 키가 무엇을 담을 수 있는지는 CLI 모듈이 선언한다
+  // (`clis/<id>/index.ts` → effort). 낯선 키·낯선 필드는 조용히 버린다.
+  for (const key of effortSliceKeys()) {
+    const slice = obj[key];
+    if (!slice || typeof slice !== 'object' || Array.isArray(slice)) continue;
+    const allowed = effortKeysForSlice(key);
+    const c: EffortSlice = {};
+    if (allowed.has('model') && typeof slice.model === 'string' && slice.model.trim()) c.model = slice.model.trim();
+    if (allowed.has('effort') && typeof slice.effort === 'string') {
+      const level = slice.effort.trim().toLowerCase();
       const mapped = (LEGACY_EFFORT_ALIASES[level] ?? level) as EffortLevel;
       if (EFFORT_LEVELS.has(mapped)) c.effort = mapped;
     }
-    if (typeof obj.claude.ultracode === 'boolean') c.ultracode = obj.claude.ultracode;
-    if (Object.keys(c).length > 0) out.claude = c;
-  }
-  for (const key of ['codex', 'antigravity', 'pi'] as const) {
-    const slice = obj[key];
-    if (slice && typeof slice === 'object' && !Array.isArray(slice)) {
-      if (typeof slice.model === 'string' && slice.model.trim()) {
-        out[key] = { model: slice.model.trim() };
-      }
-    }
+    if (allowed.has('ultracode') && typeof slice.ultracode === 'boolean') c.ultracode = slice.ultracode;
+    if (Object.keys(c).length > 0) out[key] = c;
   }
   return out;
 }
@@ -1657,7 +1656,7 @@ export class EventDispatcher {
       api_key: ctx.api_key,
       cwd: ctx.working_dir,
       mcp_config_path: ctx.mcp_config_path,
-      cli: ctx.cli || 'claude',
+      cli: ctx.cli || DEFAULT_CLI_ID,
       cli_home_dir: ctx.cli_home_dir,
       extra_env: ctx.extra_env,
       credential_provider: ctx.credential_provider ?? null,
@@ -2703,7 +2702,7 @@ export class EventDispatcher {
     // this capability gap is visible and cannot degrade into the generic
     // "subagent exited without a comment" fallback. Chat dispatch is handled by
     // separate entry points and remains supported through stdout harvesting.
-    if (agentContext?.cli === 'pi' && ev.ticket_id) {
+    if (cliDispatch(agentContext?.cli).ticketDispatch === 'blocked' && ev.ticket_id) {
       if (this.#dispatchBlockers.shouldComment(ev.ticket_id, PI_TICKET_DISPATCH_BLOCK_REASON)) {
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
@@ -2944,7 +2943,7 @@ export class EventDispatcher {
     // 'nack'도 아님). Hermes 는 자체 readiness 개념(RuntimeSupervisor/ACP
     // 세션의 runtime_config.permission_mode)을 따로 갖고 있으며, 아래 Hermes
     // 분기에서 별도로 처리된다.
-    if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && agentContext?.cli !== 'hermes') {
+    if (ev.ticket_id && agentContext?.cwd && agentContext?.cli_home_dir && !isAcpRuntime(agentContext?.cli)) {
       const adapter = createRuntimeCliAdapter(agentContext.cli);
       // ticket 5851e435: trust 게이트도 spawn argv 와 **같은** effective
       // policy 를 본다. 예전엔 harness `permission_mode` 하나만 보고 판단해서,
@@ -3245,7 +3244,7 @@ export class EventDispatcher {
     // Hermes는 RuntimeSupervisor가 이 dispatch에 AWB 하나를 직접 주입한다.
     // CLI 경로는 실제 spawn에 넘길 관리형 mcp-config를 읽어 진단 계약이
     // 설정 파일과 어긋나지 않게 한다. 읽을 수 없으면 추정하지 않고 빈 목록이다.
-    const activeMcpServers = agentContext?.cli === 'hermes'
+    const activeMcpServers = isAcpRuntime(agentContext?.cli)
       ? ['awb']
       : await readMcpConfigServerNames(agentContext?.mcp_config_path || '');
 
@@ -3321,7 +3320,7 @@ export class EventDispatcher {
 
     // Hermes is an ACP runtime owned by RuntimeSupervisor. Once selected it
     // never crosses into the CLI session/subagent fallback paths.
-    if (agentContext?.cli === 'hermes') {
+    if (agentContext && isAcpRuntime(agentContext.cli)) {
       try {
         const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'hermes');
         if (ticket) {
@@ -3777,7 +3776,7 @@ export class EventDispatcher {
       }
     }
 
-    if (runContext?.cli === 'hermes') {
+    if (runContext && isAcpRuntime(runContext.cli)) {
       const rolePrompt = payload.role_prompt || '';
       const taskText =
         this.#prompts?.composeChatPrompt(
@@ -4035,7 +4034,7 @@ export class EventDispatcher {
       );
     }
 
-    if (agentContext?.cli === 'hermes') {
+    if (agentContext && isAcpRuntime(agentContext.cli)) {
       try {
         const ticket = ticketId ? await fetchTicketContext(this.#config, ticketId) : null;
         const rolePrompt = ev.role_prompt || '';
@@ -4790,7 +4789,7 @@ export class EventDispatcher {
       // chat-room 턴엔 harness 필드가 없다) 이것과 짝지을 만한 차단-후-중단
       // 체크 자체가 없다 — 시딩이 이 경로의 수정 전부다. best-effort:
       // 시딩 실패로 run 자체를 중단시키지 않는다.
-      if (runContext?.cwd && runContext?.cli_home_dir && runContext?.cli !== 'hermes') {
+      if (runContext?.cwd && runContext?.cli_home_dir && !isAcpRuntime(runContext?.cli)) {
         await createRuntimeCliAdapter(runContext.cli)
           .ensureWorkspaceTrust(runContext.cli_home_dir, runContext.cwd)
           .catch((err: any) => {
@@ -4842,7 +4841,7 @@ export class EventDispatcher {
     // map 항목 > 인스턴스 오버라이드 > null.
     const runtimeProfile = resolveRoomBroadcastRuntimeProfile(p, roomResponderId, this.#runtimeProfileOverride);
 
-    if (runContext?.cli === 'hermes') {
+    if (runContext && isAcpRuntime(runContext.cli)) {
       try {
         const history = await fetchChatRoomHistory(this.#config, p.room_id);
         const prepared = await prepareChatAttachments(

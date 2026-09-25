@@ -9,7 +9,7 @@ import {
   type HermesRuntimeOptions,
 } from './hermes/hermes-runtime.js';
 import type { HermesSessionRecord } from './hermes/hermes-session-store.js';
-import { getRuntimeDescriptor, validateRuntimeConfig } from './runtime-registry.js';
+import { getRuntimeDescriptor, validateRuntimeConfig, runtimePluginRegistry } from './runtime-registry.js';
 import type {
   AgentRuntimeConfig,
   RuntimeErrorCode,
@@ -130,7 +130,7 @@ export class RuntimeSupervisor {
     let config: AgentRuntimeConfig;
     try {
       const descriptor = getRuntimeDescriptor(runtimeId);
-      if (descriptor.id !== 'hermes') {
+      if (runtimePluginRegistry.manifest(descriptor.id).transport !== 'acp') {
         throw new RuntimeDispatchError(
           'runtime_not_supported',
           descriptor.id,

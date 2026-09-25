@@ -13,6 +13,7 @@ import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { catalogLoginCapable } from '../../common/cli-catalog';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -20,25 +21,40 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
-// cli → 생성할 Credential.provider. codex(b2e79108)에 이어 claude(ticket
-// 06b2b990)도 자동화됨 — claude auth login이 TTY 없이도 동작함을 라이브
-// 호스트에서 확인해 codex와 동일한 crossSpawn 경로로 구현했다(PTY 불필요).
-const CLI_PROVIDER: Record<string, string> = {
-  codex: 'codex_subscription',
-  claude: 'claude_subscription',
-};
+// 아래 세 표는 전부 cli-catalog.ts 의 `login` 블록에서 파생된다 — 자동 로그인을
+// 새 CLI 에 붙이려면 그 descriptor 에 `login` 을 채우면 된다. codex(b2e79108)에
+// 이어 claude(ticket 06b2b990)도 자동화됨 — claude auth login 이 TTY 없이도
+// 동작함을 라이브 호스트에서 확인해 codex 와 동일한 crossSpawn 경로로 구현했다.
+// (export 는 테스트가 파생 결과를 예전 리터럴과 대조하기 위한 것.)
+const LOGIN_CLIS = catalogLoginCapable();
 
-// provider별 필수 필드 — credentials.controller.ts의 PROVIDER_FIELDS 및
-// agent-manager-commands.ts의 REQUIRED_CREDENTIAL_FIELDS와 동일해야 한다.
-const REQUIRED_FIELD: Record<string, string> = {
-  codex_subscription: 'auth_json',
-  claude_subscription: 'credentials_json',
-};
+/** cli → 생성할 Credential.provider. */
+export const CLI_PROVIDER: Record<string, string> = Object.fromEntries(
+  LOGIN_CLIS.map((d) => [d.id, d.login!.harvest_provider]),
+);
+
+/**
+ * CLI 자신의 계정이 아니라 **그 CLI 안의 provider** 로 로그인하는 CLI
+ * (`-p <provider> -m <method>` 를 반드시 받아야 한다). 빠뜨리면 CLI 가 TTY
+ * 선택 UI 를 띄우려다 파이프 뒤에서 조용히 멎어 10분 타임아웃까지 "starting"
+ * 으로 남는다(실측), 그래서 fail-fast 한다.
+ */
+export const PROVIDER_SCOPED_CLIS: ReadonlySet<string> = new Set(
+  LOGIN_CLIS.filter((d) => d.login!.provider_scoped).map((d) => d.id),
+);
+
+/** provider 별 필수 필드 — 카탈로그에서 파생. agent-manager 는 `clis/<id>/index.ts` 의 credentials 슬라이스에서 같은 값을 읽는다(contract 테스트가 일치를 강제). */
+export const REQUIRED_FIELD: Record<string, string> = Object.fromEntries(
+  LOGIN_CLIS.map((d) => [d.login!.harvest_provider, d.login!.harvest_field]),
+);
 
 export interface StartCliLoginSessionArgs {
   workspaceId: string;
   isGlobal: boolean;
   cli: string;
+  /** opencode 전용 — `opencode auth login -p <cliProvider> -m <cliMethod>`. */
+  cliProvider?: string;
+  cliMethod?: string;
   credentialName: string;
   instanceId: string;
   triggeredById: string;
@@ -76,10 +92,15 @@ export class CliLoginSessionService {
   async startSession(args: StartCliLoginSessionArgs): Promise<CliLoginSession> {
     const provider = CLI_PROVIDER[args.cli];
     if (!provider) {
-      throw makeError(400, `Unsupported cli "${args.cli}" — only codex/claude are automated so far`);
+      throw makeError(400, `Unsupported cli "${args.cli}" — only ${Object.keys(CLI_PROVIDER).join('/')} are automated so far`);
     }
     if (!args.credentialName?.trim()) {
       throw makeError(400, 'credential_name is required');
+    }
+    const cliProvider = (args.cliProvider || '').trim();
+    const cliMethod = (args.cliMethod || '').trim();
+    if (PROVIDER_SCOPED_CLIS.has(args.cli) && (!cliProvider || !cliMethod)) {
+      throw makeError(400, `${args.cli} login needs both cli_provider and cli_method (e.g. openai / "ChatGPT Pro/Plus (headless)")`);
     }
     const inst = this.instanceRegistry
       .list()
@@ -103,6 +124,8 @@ export class CliLoginSessionService {
         workspace_id: args.workspaceId,
         is_global: args.isGlobal,
         cli: args.cli,
+        cli_provider: cliProvider,
+        cli_method: cliMethod,
         credential_name: args.credentialName.trim(),
         status: 'starting',
         instance_id: inst.instance_id,
@@ -115,7 +138,9 @@ export class CliLoginSessionService {
     const { command_id } = await this.commandService.issue(
       inst,
       'cli_login_start',
-      { session_id: session.id, cli: args.cli },
+      // cli_provider/cli_method 는 opencode 에서만 의미가 있지만 항상 실어 보낸다 —
+      // 매니저가 CLI 별로 해석하고, 구버전 매니저는 모르는 키를 무시한다.
+      { session_id: session.id, cli: args.cli, cli_provider: cliProvider, cli_method: cliMethod },
       args.triggeredById,
     );
     session.command_id = command_id;
@@ -200,12 +225,17 @@ export class CliLoginSessionService {
       session.status = 'awaiting_user';
       const url = args.verificationUrl?.trim();
       const code = args.userCode?.trim();
-      if (url && code) {
-        // 진짜 파싱 성공 — raw fallback은 더 이상 필요 없으니 비운다.
+      // url 과 code 는 **따로** 온다. codex 는 둘을 한 번에 보내지만 claude 는
+      // code 자체가 없어 url 만 보내고(승인은 링크를 여는 것이 전부), opencode 는
+      // url 줄과 code 줄이 차례로 나와 두 번에 걸쳐 온다. 예전엔 `url && code` 일
+      // 때만 저장해서 — claude 로그인은 링크를 끝내 화면에 못 띄웠다. 온 것만 각각
+      // 반영하고, 진짜 url 이 잡히면 raw fallback 은 역할이 끝났으므로 비운다.
+      if (url) {
         session.verification_url = url;
-        session.user_code = code;
         session.raw_output_fallback = null;
-      } else if (args.rawOutputFallback?.trim()) {
+      }
+      if (code) session.user_code = code;
+      if (!url && !code && args.rawOutputFallback?.trim()) {
         // 리뷰 지적(round 1): 티켓이 명시한 파싱 실패 폴백. url/code를 아직
         // 못 찾았을 때만 raw 출력을 보여준다 — 이미 진짜 url/code가 있으면
         // 그걸 덮어쓰지 않는다.
@@ -235,7 +265,9 @@ export class CliLoginSessionService {
           workspace_id: session.is_global ? null : session.workspace_id,
           board_id: null,
           name: session.credential_name,
-          description: `Automatically created via CLI device-auth login (${session.cli}).`,
+          description: session.cli_provider
+            ? `Automatically created via CLI device-auth login (${session.cli} / ${session.cli_provider}).`
+            : `Automatically created via CLI device-auth login (${session.cli}).`,
           provider,
           encrypted_data: encrypted,
         }),

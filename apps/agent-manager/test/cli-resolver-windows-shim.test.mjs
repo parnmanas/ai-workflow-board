@@ -20,6 +20,8 @@ import {
   assertCliExecutable,
   _resetResolverCache,
 } from '../dist/lib/cli-resolver.js';
+// 바이너리 후보 표는 CLI 모듈이 선언하고 builtin 목록 로드 시 리졸버에 등록된다.
+import '../dist/lib/clis/builtin.js';
 
 const NPM = 'C:\\Users\\user\\AppData\\Roaming\\npm';
 

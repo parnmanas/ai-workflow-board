@@ -13,6 +13,8 @@ import { PERMISSIONS, hasPermission } from '../../common/types/permissions';
 import { encrypt, decrypt, decryptStrict } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { normalizeCredentialFields } from '../../common/credential-fields';
+import { PROVIDER_FIELDS, REVEALABLE_OAUTH_FIELDS } from '../../common/credential-providers';
+import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
 import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
@@ -22,37 +24,21 @@ import { ActivityService } from '../../services/activity.service';
 import { CliLoginSessionService } from './cli-login-session.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 
-const PROVIDER_FIELDS: Record<string, { label: string; fields: string[] }> = {
-  github: { label: 'GitHub', fields: ['token'] },
-  gitlab: { label: 'GitLab', fields: ['token'] },
-  openai: { label: 'OpenAI', fields: ['api_key'] },
-  custom: { label: 'Custom', fields: ['token'] },
-  // Per-agent CLI credentials. Two kinds per CLI: subscription (raw OAuth
-  // credential file content the CLI's `login` command produced — pasted in
-  // by the operator and replayed verbatim into the per-agent cli-home) and
-  // api_key (a billing-token string the manager exports as ANTHROPIC_API_KEY
-  // / OPENAI_API_KEY / GEMINI_API_KEY when spawning).
-  claude_subscription: { label: 'Claude (Subscription)', fields: ['credentials_json'] },
-  claude_api_key: { label: 'Claude (API Key)', fields: ['api_key'] },
-  // `claude setup-token` output (sk-ant-oat..., 1-year long-lived OAuth token
-  // that does NOT rotate). Injected as CLAUDE_CODE_OAUTH_TOKEN — unlike the
-  // rotating claude_subscription .credentials.json, a single shared token can
-  // be registered once and fetched by every agent-manager without the daily
-  // re-login that per-machine refresh rotation causes.
-  claude_oauth_token: { label: 'Claude (OAuth Token)', fields: ['oauth_token'] },
-  // DeepSeek runs through the Claude Code binary against DeepSeek's
-  // Anthropic-compatible endpoint. api_key is the DeepSeek bearer token
-  // (exported as ANTHROPIC_AUTH_TOKEN); model/base_url are optional overrides.
-  deepseek_api_key: { label: 'DeepSeek (API Key)', fields: ['api_key', 'model', 'base_url'] },
-  codex_subscription: { label: 'Codex (Subscription)', fields: ['auth_json', 'config_toml'] },
-  codex_api_key: { label: 'Codex (API Key)', fields: ['api_key'] },
-  antigravity_subscription: { label: 'Antigravity (Subscription)', fields: ['oauth_creds_json'] },
-  antigravity_api_key: { label: 'Antigravity (API Key)', fields: ['api_key'] },
-};
+// PROVIDER_FIELDS / REVEALABLE_OAUTH_FIELDS 는 common/credential-providers.ts 에서
+// 온다 — CLI provider 는 cli-catalog.ts 에서 파생되고, 비-CLI provider(github 등)만
+// 그 파일이 손으로 든다. 여기에 provider 를 직접 적지 말 것.
 
-const REVEALABLE_OAUTH_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  claude_oauth_token: ['oauth_token'],
-};
+/** 자동 로그인 대상 CLI 마다 장비의 설치/건강 상태를 읽는다 — 레거시 평면 키의 원천이기도 하다. */
+function cliInstallState(
+  capabilities: Record<string, { installed?: boolean; healthy?: boolean } | undefined> | undefined,
+): Record<string, { installed: boolean; healthy: boolean }> {
+  const out: Record<string, { installed: boolean; healthy: boolean }> = {};
+  for (const d of catalogLoginCapable()) {
+    const cap = capabilities?.[d.id];
+    out[d.id] = { installed: !!cap?.installed, healthy: !!cap?.healthy };
+  }
+  return out;
+}
 
 function maskCredentialData(decryptedJson: string): Record<string, string> {
   try {
@@ -80,6 +66,8 @@ function serializeCliLoginSession(s: CliLoginSession) {
     workspace_id: s.workspace_id,
     is_global: s.is_global,
     cli: s.cli,
+    cli_provider: s.cli_provider,
+    cli_method: s.cli_method,
     credential_name: s.credential_name,
     status: s.status,
     verification_url: s.verification_url,
@@ -201,15 +189,23 @@ export class CredentialsController {
       visible = all;
     }
     return res.json(
-      visible.map((i) => ({
-        instance_id: i.instance_id,
-        hostname: i.hostname,
-        workspace_id: i.workspace_id,
-        codex_installed: !!i.runtime_capabilities?.codex?.installed,
-        codex_healthy: !!i.runtime_capabilities?.codex?.healthy,
-        claude_installed: !!i.runtime_capabilities?.claude?.installed,
-        claude_healthy: !!i.runtime_capabilities?.claude?.healthy,
-      })),
+      visible.map((i) => {
+        const clis = cliInstallState(i.runtime_capabilities as any);
+        return {
+          instance_id: i.instance_id,
+          hostname: i.hostname,
+          workspace_id: i.workspace_id,
+          // 자동 로그인을 지원하는 모든 CLI — 카탈로그에 login 이 붙으면 자동으로 늘어난다.
+          clis,
+          // 레거시 평면 키 — 클라이언트(CliAutoLogin.tsx)가 `clis` 로 옮겨 갈 때까지 유지.
+          codex_installed: clis.codex?.installed ?? false,
+          codex_healthy: clis.codex?.healthy ?? false,
+          claude_installed: clis.claude?.installed ?? false,
+          claude_healthy: clis.claude?.healthy ?? false,
+          opencode_installed: clis.opencode?.installed ?? false,
+          opencode_healthy: clis.opencode?.healthy ?? false,
+        };
+      }),
     );
   }
 
@@ -230,6 +226,9 @@ export class CredentialsController {
         workspaceId,
         isGlobal,
         cli: String(body?.cli || '').trim().toLowerCase(),
+        // opencode 전용 — 어느 provider 로, 어느 로그인 방식으로 붙을지(`-p`/`-m`).
+        cliProvider: String(body?.cli_provider || '').trim(),
+        cliMethod: String(body?.cli_method || '').trim(),
         credentialName: String(body?.credential_name || '').trim(),
         instanceId,
         triggeredById: actor?.id || '',

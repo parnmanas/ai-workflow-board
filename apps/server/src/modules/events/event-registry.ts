@@ -43,6 +43,7 @@ import {
   AgentSessionEventPayload,
 } from '../../common/types/stream-events';
 import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
+import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
 import { EventDefinition, SubscriberIdentity } from './types';
 
 // ── Helpers used by multiple filter functions ─────────────────────────────
@@ -1072,7 +1073,7 @@ export const EVENT_TYPES: EventDefinition[] = [
           mode: 'manager',
           hostname: String(inst.hostname || 'unknown'),
           plugin_version: String(inst.plugin_version || 'unknown'),
-          cli: String(inst.cli || 'claude'),
+          cli: String(inst.cli || DEFAULT_CLI_ID),
           cli_adapters: Array.isArray(inst.cli_adapters) ? inst.cli_adapters.map(String) : [],
           runtime_capabilities:
             inst.runtime_capabilities

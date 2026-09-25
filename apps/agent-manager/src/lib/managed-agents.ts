@@ -18,6 +18,7 @@
 // designed to absorb it without changing callers.
 
 import { log } from './logging.js';
+import { DEFAULT_CLI_ID } from './constants.js';
 
 export type ManagedAgentStatus = 'idle' | 'spawning' | 'running' | 'stopped' | 'error';
 
@@ -55,7 +56,7 @@ export class ManagedAgentRegistry {
     const fresh: ManagedAgentRecord = {
       agent_id: rec.agent_id,
       name: rec.name || rec.agent_id.slice(0, 8),
-      cli: rec.cli || 'claude',
+      cli: rec.cli || DEFAULT_CLI_ID,
       working_dir: rec.working_dir || '',
       status: 'idle',
       pid: null,

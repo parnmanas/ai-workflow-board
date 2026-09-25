@@ -17,7 +17,7 @@
 
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { HEARTBEAT_INTERVAL_MS, REQUEST_TIMEOUT_MS } from './constants.js';
+import { HEARTBEAT_INTERVAL_MS, REQUEST_TIMEOUT_MS, DEFAULT_CLI_ID } from './constants.js';
 import { log } from './logging.js';
 import type { AwbConfig } from './rest.js';
 import type { UpdateChecker } from './self-update.js';
@@ -543,7 +543,7 @@ export class InstanceHeartbeat {
         mode: meta?.mode === 'manager' ? 'manager' : 'manager',
         hostname: hostname() || 'unknown',
         plugin_version: String(meta?.version || 'unknown'),
-        cli: String(meta?.cli || 'claude'),
+        cli: String(meta?.cli || DEFAULT_CLI_ID),
         cli_adapters: cliAdapters,
         ...(runtimeCapabilities ? { runtime_capabilities: runtimeCapabilities } : {}),
         ...(managerCapabilities.length ? { manager_capabilities: managerCapabilities } : {}),

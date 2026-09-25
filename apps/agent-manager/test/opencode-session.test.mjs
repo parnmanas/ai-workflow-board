@@ -134,3 +134,117 @@ test('opencode 어댑터가 모델을 열거한다 (미설치 환경에서는 �
     assert.equal(new Set(models).size, models.length, '중복이 없어야 한다');
   }
 });
+
+// ─── 기록(readHistory) ────────────────────────────────────────────────────
+//
+// opencode 는 기록도 파일이 아니라 DB 에 있다: `message`(역할) + `part`(내용).
+// 예전엔 claude/codex 파일 경로만 있어서, 목록에는 뜨는 세션을 열면 트랜스크립트가
+// 통째로 비어 있었다.
+
+/** `opencode db` 응답을 SQL 로 갈라 주는 스텁. */
+function historyStore({ session, count, rows }) {
+  return new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-${Math.random().toString(16).slice(2)}.json`),
+    opencodeQuery: async (sql) => {
+      if (/FROM session/.test(sql)) return JSON.stringify(session ?? []);
+      if (/count\(\*\)/.test(sql)) return JSON.stringify([{ n: count ?? 0 }]);
+      return JSON.stringify(rows ?? []);
+    },
+  });
+}
+
+const partRow = (messageId, role, data, over = {}) => ({
+  part_id: `prt_${Math.random().toString(16).slice(2)}`,
+  message_id: messageId,
+  part_time: 1758500000000,
+  part_data: JSON.stringify(data),
+  message_data: JSON.stringify({ role }),
+  ...over,
+});
+
+test('opencode 기록을 트랜스크립트 이벤트로 매핑한다 (user_prompt / text / reasoning / tool)', async () => {
+  const store = historyStore({
+    session: [{ id: 'ses_abc123', directory: '/home/parn/repo', title: 'Greeting exchange', time_created: 1758500000000, time_updated: 1758500600000 }],
+    count: 6,
+    rows: [
+      partRow('msg_1', 'user', { type: 'text', text: 'run the suite' }),
+      partRow('msg_2', 'assistant', { type: 'step-start' }),
+      partRow('msg_2', 'assistant', { type: 'reasoning', text: 'thinking about it' }),
+      partRow('msg_2', 'assistant', {
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call_9',
+        state: { status: 'completed', input: { command: 'npm test' }, output: '42 passing' },
+      }),
+      partRow('msg_2', 'assistant', { type: 'text', text: 'All green.' }),
+      partRow('msg_2', 'assistant', { type: 'step-finish' }),
+    ],
+  });
+
+  const history = await store.readHistory('opencode', 'ses_abc123');
+
+  assert.equal(history.session.cli, 'opencode');
+  assert.equal(history.session.cwd, '/home/parn/repo');
+  assert.equal(history.session.title, 'Greeting exchange');
+  assert.equal(history.truncated, false);
+
+  assert.deepEqual(history.events.map((e) => e.type), [
+    'user_prompt', 'reasoning', 'tool_call', 'tool_update', 'text',
+  ], 'step-start / step-finish 는 그릴 것이 없으므로 버린다');
+  assert.equal(history.events[0].payload.text, 'run the suite');
+  assert.equal(history.events[0].turn_id, 'msg_1');
+  // 같은 assistant 메시지의 행들은 한 턴으로 묶인다 — UI 가 turn_id 로 병합한다.
+  assert.deepEqual([...new Set(history.events.slice(1).map((e) => e.turn_id))], ['msg_2']);
+  assert.equal(history.events[2].payload.tool_call_id, 'call_9');
+  assert.equal(history.events[2].payload.title, 'bash');
+  assert.deepEqual(history.events[2].payload.input, { command: 'npm test' });
+  assert.equal(history.events[3].payload.status, 'completed');
+  assert.equal(history.events[3].payload.output, '42 passing');
+  assert.equal(history.events[4].payload.text, 'All green.');
+  // id/seq 는 part 의 절대 위치 기준 — 다시 읽어도 같은 이벤트가 같은 id 를 갖는다.
+  assert.deepEqual(history.events.map((e) => e.id), ['ses_abc123:1', 'ses_abc123:2', 'ses_abc123:3', 'ses_abc123:4', 'ses_abc123:5']);
+});
+
+test('opencode 기록: 창을 넘긴 세션은 앞부분 생략 안내를 달고 seq 는 절대 위치를 유지한다', async () => {
+  const store = new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-${Math.random().toString(16).slice(2)}.json`),
+    historyEventLimit: 2,
+    opencodeQuery: async (sql) => {
+      if (/FROM session/.test(sql)) return JSON.stringify([{ id: 'ses_long', directory: '/x', title: 'Long', time_created: 1, time_updated: 2 }]);
+      if (/count\(\*\)/.test(sql)) return JSON.stringify([{ n: 10 }]);
+      // 상한과 offset 이 질의에 실려야 한다 — 전부 읽어 와서 자르는 것이 아니다.
+      assert.match(sql, /LIMIT 2 OFFSET 8/);
+      return JSON.stringify([
+        partRow('msg_9', 'assistant', { type: 'text', text: 'second to last' }),
+        partRow('msg_9', 'assistant', { type: 'text', text: 'last' }),
+      ]);
+    },
+  });
+
+  const history = await store.readHistory('opencode', 'ses_long');
+  assert.equal(history.truncated, true);
+  assert.equal(history.events[0].type, 'system');
+  assert.match(history.events[0].payload.text, /Earlier history omitted \(8 events\)/);
+  assert.deepEqual(history.events.slice(1).map((e) => e.seq), [9, 10]);
+});
+
+test('opencode 기록: 질의가 실패해도 빈 기록으로 접는다 (세션 화면은 열려야 한다)', async () => {
+  const exploding = new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-${Math.random().toString(16).slice(2)}.json`),
+    opencodeQuery: async () => { throw new Error('spawn opencode ENOENT'); },
+  });
+  const history = await exploding.readHistory('opencode', 'ses_abc123');
+  assert.equal(history.session, null);
+  assert.deepEqual(history.events, []);
+});
+
+test('opencode 기록: 세션 id 형식이 아니면 SQL 을 아예 던지지 않는다', async () => {
+  let called = false;
+  const store = new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-${Math.random().toString(16).slice(2)}.json`),
+    opencodeQuery: async () => { called = true; return '[]'; },
+  });
+  const history = await store.readHistory('opencode', "ses_abc' OR 1=1 --");
+  assert.equal(called, false, 'id 는 SQL 에 문자열로 박히므로 형식 검사가 1차 방어선이다');
+  assert.deepEqual(history.events, []);
+});

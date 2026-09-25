@@ -1,3 +1,5 @@
+import { CLI_CATALOG } from './cli-catalog';
+
 export type ExecutionStrategy = 'single' | 'delegated' | 'swarm';
 export type RuntimePermissionMode = 'strict' | 'approve' | 'trusted';
 
@@ -24,19 +26,14 @@ export class AgentRuntimeConfigError extends Error {
   }
 }
 
-const EXECUTABLE_RUNTIMES = new Set([
-  'claude',
-  'deepseek',
-  'codex',
-  'antigravity',
-  'pi',
-  'opencode',
-  'hermes',
-]);
+// 둘 다 cli-catalog.ts 에서 파생 — 손으로 CLI 를 추가하지 말 것.
+const EXECUTABLE_RUNTIMES: ReadonlySet<string> = new Set(
+  CLI_CATALOG.filter((d) => d.executable).map((d) => d.id),
+);
 
-const COLLABORATION = new Map<string, ReadonlySet<ExecutionStrategy>>([
-  ['hermes', new Set<ExecutionStrategy>(['single', 'delegated', 'swarm'])],
-]);
+const COLLABORATION = new Map<string, ReadonlySet<ExecutionStrategy>>(
+  CLI_CATALOG.map((d) => [d.id, new Set<ExecutionStrategy>(d.collaboration)]),
+);
 
 function invalid(message: string): never {
   throw new AgentRuntimeConfigError('runtime_config_invalid', message);

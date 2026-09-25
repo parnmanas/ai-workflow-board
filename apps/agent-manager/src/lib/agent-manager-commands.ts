@@ -33,6 +33,7 @@
 // so the server log surfaces the outcome to the operator.
 
 import { log } from './logging.js';
+import { DEFAULT_CLI_ID } from './constants.js';
 import { normalizeCredentialFields } from './credential-fields.js';
 import {
   postCommandAck,
@@ -68,6 +69,7 @@ import {
   maskKey,
 } from './managed-agent-store.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
+import { cliDispatch, credentialProviderKind, findCliModule, requiredCredentialFields } from './clis/index.js';
 import { runSelfUpdate, restartManager } from './self-update.js';
 import type { CliLoginManager } from './cli-login.js';
 
@@ -114,17 +116,6 @@ type CommandKind =
 // `.credentials.json` / `auth.json` / `oauth_creds.json` into cli-home,
 // which silently breaks CLI auth). Optional secondary fields like codex's
 // `config_toml` are intentionally excluded — they're not auth-bearing.
-const REQUIRED_CREDENTIAL_FIELDS: Record<string, string[]> = {
-  claude_subscription: ['credentials_json'],
-  claude_api_key: ['api_key'],
-  claude_oauth_token: ['oauth_token'],
-  deepseek_api_key: ['api_key'],
-  codex_subscription: ['auth_json'],
-  codex_api_key: ['api_key'],
-  antigravity_subscription: ['oauth_creds_json'],
-  antigravity_api_key: ['api_key'],
-};
-
 const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'spawn_agent',
   'stop_agent',
@@ -509,7 +500,7 @@ export class AgentManagerCommandHandler {
     // the admin configured. Falls back to in-payload args when present.
     const remote = await fetchAgentRecord(this.#config, agentId);
     const name = remote?.name ?? payload.args?.name ?? agentId.slice(0, 8);
-    const cli = remote?.type ?? payload.args?.cli ?? 'claude';
+    const cli = remote?.type ?? payload.args?.cli ?? DEFAULT_CLI_ID;
     const workingDir = remote?.working_dir || payload.args?.working_dir || '';
     // Per-agent default model. Prefer the canonical AWB record (remote.model);
     // fall back to the spawn payload's args.model. Empty string = unset → the
@@ -597,7 +588,8 @@ export class AgentManagerCommandHandler {
     // spawn — the CLI's own auth error is more actionable than a
     // missing-file abort here.
     let extraEnv: Record<string, string> = {};
-    if (cli !== 'hermes') {
+    // ACP 런타임(hermes)은 cli-home 을 스스로 관리한다 — CLI 어댑터가 있는 모듈만 준비한다.
+    if (findCliModule(cli)?.transport === 'cli') {
     try {
       // Pass AWB URL + per-agent apiKey so adapters that consume MCP
       // servers via a static config file (antigravity → mcp_config.json) can
@@ -616,7 +608,7 @@ export class AgentManagerCommandHandler {
     } catch (err: any) {
       const detail = `spawn_agent: cli-home prep failed for agent=${agentId.slice(0, 8)} cli=${cli}: ${err?.message ?? err}`;
       log(detail);
-      if (cli === 'codex') {
+      if (cliDispatch(cli).cliHomePrepFatal) {
         this.#deps.registry.markStopped(agentId, detail);
         throw new Error(detail);
       }
@@ -739,7 +731,7 @@ export class AgentManagerCommandHandler {
       );
     }
 
-    const required = REQUIRED_CREDENTIAL_FIELDS[fetched.provider];
+    const required = requiredCredentialFields(fetched.provider);
     if (required) {
       const present = required.filter((k) => {
         const v = fields[k];
@@ -963,7 +955,7 @@ export class AgentManagerCommandHandler {
       this.#deps.registry.upsert({
         agent_id: agentId,
         name: remote?.name ?? agentId.slice(0, 8),
-        cli: remote?.type ?? 'claude',
+        cli: remote?.type ?? DEFAULT_CLI_ID,
         working_dir: workingDir,
       });
     } else {
@@ -1028,8 +1020,13 @@ export class AgentManagerCommandHandler {
     if (!this.#deps.cliLoginManager) {
       throw new Error('cli_login_start: no cli-login manager wired on this deployment');
     }
-    await this.#deps.cliLoginManager.start({ sessionId, commandId: payload.command_id, cli });
-    return `cli_login_start ok: session=${sessionId.slice(0, 8)} cli=${cli} process spawned, awaiting user`;
+    // opencode 만 쓰는 축 — 그 CLI 안의 어느 provider 로, 어느 방식으로 로그인할지.
+    // codex/claude 에는 이 개념이 없어 서버가 빈 문자열을 보낸다.
+    const cliProvider = String(payload.args?.cli_provider || '').trim();
+    const cliMethod = String(payload.args?.cli_method || '').trim();
+    await this.#deps.cliLoginManager.start({ sessionId, commandId: payload.command_id, cli, cliProvider, cliMethod });
+    const scope = cliProvider ? ` provider=${cliProvider}` : '';
+    return `cli_login_start ok: session=${sessionId.slice(0, 8)} cli=${cli}${scope} process spawned, awaiting user`;
   }
 
   /**
@@ -1193,7 +1190,7 @@ export class AgentManagerCommandHandler {
           `(spawn_agent first so the manager owns its cli-home)`,
       );
     }
-    if (ctx.cli !== 'claude') {
+    if (!cliDispatch(ctx.cli).pluginUpdates) {
       return `update_plugins: agent=${agentId.slice(0, 8)} cli=${ctx.cli} (not applicable — claude only)`;
     }
     const result = await runPluginUpdate(ctx.cli_home_dir);
@@ -1222,18 +1219,7 @@ function credentialKind(
   credential: ManagedAgentCredential | null,
 ): 'subscription' | 'api_key' | 'operator_home' {
   if (!credential) return 'operator_home';
-  if (credential.provider.endsWith('_subscription')) return 'subscription';
-  if (credential.provider.endsWith('_api_key')) return 'api_key';
-  // claude_oauth_token is env-only (CLAUDE_CODE_OAUTH_TOKEN), writes no
-  // .credentials.json, and the long-lived setup-token has no per-spawn expiry
-  // file to monitor — so it's the same 'api_key' heartbeat kind (no rotation
-  // tracking) rather than the 'subscription' default below, which would chase
-  // a .credentials.json that never exists.
-  if (credential.provider.endsWith('_oauth_token')) return 'api_key';
-  // Unknown shape — assume subscription so the heartbeat still tries to
-  // read .credentials.json. Worse case the adapter returns null and the
-  // UI shows "no credential metadata" rather than mis-labeling api_key.
-  return 'subscription';
+  return credentialProviderKind(credential.provider);
 }
 
 
