@@ -34,6 +34,12 @@ export interface GitHubWorkflow {
 // status runs (queried by CiHealthMonitorService) ever carry a non-null one.
 export interface GitHubWorkflowRun {
   id: string;
+  /** 이 run 을 만든 workflow 의 id. 목록 조회가 요청한 workflow 밖의 run 을 섞어 돌려주는
+   *  경우를 호출자가 구조적으로 걸러낼 수 있게 노출한다 (ticket 0ef405f9 — 한 푸시가
+   *  여러 workflow 를 동시에 띄우면 "다른 workflow 의 성공" 을 이 workflow 의 성공으로
+   *  읽을 여지가 생긴다). 원본 응답에 없으면 빈 문자열 — 이물질이라는 증거가 아니라
+   *  판별 불가라는 뜻이다. */
+  workflow_id: string;
   status: string;
   conclusion: string | null;
   /** 트리거 이벤트('push'/'schedule'/'workflow_dispatch' 등). */
@@ -50,6 +56,33 @@ export interface GitHubWorkflowRun {
 }
 
 // Pure helpers — no DB, no config. Kept as standalone exports.
+
+/**
+ * 완료 run 목록을 최신순으로 정렬한다 — 1순위 `created_at` 내림차순, 같은 시각이면
+ * run id 내림차순(GitHub 의 run id 는 생성 순서대로 증가한다).
+ *
+ * 왜 응답 순서를 그대로 쓰지 않나 (ticket 0ef405f9): GitHub 의 목록 엔드포인트는 문서상
+ * 정렬 순서를 보장하지 않는다. 한 번의 푸시가 여러 workflow 를 동시에 띄우면 `created_at`
+ * 이 초 단위까지 완전히 같은 run 이 생기고, 그런 동률에서는 응답이 주는 순서가 곧 "가장
+ * 최신 run" 이 되어 버린다. "최신 run 이 성공인가" 로 CI 건강을 판정하는 소비자에게 이
+ * 가정은 그대로 오판이 된다 — 순서는 응답이 아니라 데이터에서 다시 만들어야 한다.
+ *
+ * `created_at` 을 못 읽는 run 은 가장 오래된 쪽으로 밀어낸다. 시점을 모르는 run 이 "가장
+ * 최신" 자리를 차지하는 것이 이 함수가 막으려는 바로 그 실패 모드이기 때문이다.
+ */
+export function sortWorkflowRunsNewestFirst(runs: GitHubWorkflowRun[]): GitHubWorkflowRun[] {
+  const createdMs = (r: GitHubWorkflowRun): number => {
+    const ms = new Date(r?.created_at || '').getTime();
+    return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+  };
+  // 숫자가 아닌 id(테스트 픽스처 등)는 동률 처리 — Array.prototype.sort 가 stable 이므로
+  // 그 경우 입력 순서가 그대로 유지된다.
+  const idNum = (r: GitHubWorkflowRun): number => {
+    const n = Number(r?.id);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return [...(runs || [])].sort((a, b) => (createdMs(b) - createdMs(a)) || (idNum(b) - idNum(a)));
+}
 
 /**
  * owner/repo are caller-supplied (the `fetch_github_info` MCP tool takes them as
@@ -560,10 +593,12 @@ export class GitHubConnectorService {
   }
 
   /**
-   * Most recent COMPLETED runs of one workflow on one branch, newest first
-   * (GitHub's default order) — `evaluateRedStreak` only ever needs a short
-   * recent window, not full history. Same degrade/propagate contract as
-   * `listWorkflows`.
+   * Most recent COMPLETED runs of one workflow on one branch, newest first —
+   * `evaluateRedStreak` only ever needs a short recent window, not full
+   * history. Same degrade/propagate contract as `listWorkflows`.
+   *
+   * 최신순은 GitHub 응답 순서를 그대로 믿지 않고 `sortWorkflowRunsNewestFirst` 로 다시
+   * 만들며, 요청한 workflow 밖의 run 은 걸러낸다 (ticket 0ef405f9 — 아래 필터 주석 참고).
    */
   async listWorkflowRuns(
     owner: string, repo: string, workflowId: string, branch: string,
@@ -578,8 +613,9 @@ export class GitHubConnectorService {
         fetchImpl,
       );
       const runs: any[] = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
-      return runs.map((r) => ({
+      const mapped: GitHubWorkflowRun[] = runs.map((r) => ({
         id: String(r.id),
+        workflow_id: r.workflow_id == null ? '' : String(r.workflow_id),
         status: r.status || '',
         conclusion: r.conclusion ?? null,
         event: r.event || '',
@@ -588,6 +624,13 @@ export class GitHubConnectorService {
         updated_at: r.updated_at || '',
         head_sha: r.head_sha || '',
       }));
+      // 요청한 workflow 밖의 run 은 버린다. 엔드포인트가 이미 workflow 로 고정돼 있으므로
+      // 정상 응답에서는 한 건도 걸리지 않지만, 한 번이라도 섞이는 순간 소비자는 다른
+      // workflow 의 성공을 이 workflow 의 성공으로 읽는다 (ticket 0ef405f9 — 매 푸시마다
+      // CI(failure) 와 Publish(success) 가 같은 초에 생기는 저장소에서 그 오탐이 실제로
+      // 관측됐다). `workflow_id` 가 아예 없는 run 은 이물질이라는 증거가 없으므로 남긴다.
+      const ownWorkflowOnly = mapped.filter((r) => !r.workflow_id || r.workflow_id === workflowId);
+      return sortWorkflowRunsNewestFirst(ownWorkflowOnly);
     } catch (e) {
       if (isGitHubDegradableError(e)) return [];
       throw e;
@@ -615,6 +658,7 @@ export class GitHubConnectorService {
       );
       return {
         id: String(data.id),
+        workflow_id: data.workflow_id == null ? '' : String(data.workflow_id),
         status: data.status || '',
         conclusion: data.conclusion ?? null,
         event: data.event || '',

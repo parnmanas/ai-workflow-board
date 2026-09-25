@@ -39,6 +39,15 @@
  * success로 찍히고, wire 경로에서 event 필드가 유실되면 그 판별 자체가 불가능해지기
  * 때문이다(ticket 654465c8, 리뷰 지적).
  *
+ * 복구는 **단조적**이다 (ticket 0ef405f9): "최신 완료 run이 success" 는 필요조건일 뿐이고,
+ * 그 success run이 이 행이 red 근거로 기록해 둔 실패 run(`last_run_id`/`last_run_at`)보다
+ * 엄격히 최신일 때만 복구로 인정한다. 복구는 durable 상태(행 삭제 + 추적 티켓 연결 해제)를
+ * 파괴하는 전이인데 판단 근거는 목록 API의 단발 응답 하나뿐이라, 그 응답이 한 번만
+ * 어긋나도(다른 workflow의 run 혼입 · 최신 run 누락 · 같은 초 생성 run의 순서 뒤집힘) 곧장
+ * 가짜 복구가 된다 — 실제로 성공 run이 0건인 main에 복구 알림이 두 차례 발송됐다. 하한선을
+ * 통과하지 못한 green은 알림도 상태 변경도 없이 'CI' warn 로그 + `stale_green_rejected`
+ * 카운터로만 관측된다. 같은 run의 재실행 flip(run id 동일)은 진짜 복구이므로 통과시킨다.
+ *
  * Ticket idempotency: the auto-created ticket carries
  * `operational_dedupe_key = "ci_red:{board_id}:{repo}:{branch}:{workflow_id}"`
  * under Ticket's pre-existing `uq_tickets_operational_dedupe_open` unique
@@ -63,7 +72,7 @@ import { mergeEnvironmentConfig } from '../../common/environment-config';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
-import { GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl } from '../../services/github-connector.service';
+import { GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl, sortWorkflowRunsNewestFirst } from '../../services/github-connector.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { maxTicketPosition } from '../mcp/shared/ticket-helpers';
@@ -132,18 +141,66 @@ export interface RedStreakResult {
   firstFailedRun: GitHubWorkflowRun | null;
   /** Newest signal run overall (null when there is no completed-run signal yet). */
   lastRun: GitHubWorkflowRun | null;
+  /** 최신 signal run 이 success 였지만 기존 red 근거보다 최신이 아니라 복구로 인정하지
+   *  않은 run. null 이 아니면 이번 응답이 앞뒤가 맞지 않았다는 뜻이며, 호출자는 기존
+   *  상태를 그대로 두고 관측 가능하게 로그를 남겨야 한다 (ticket 0ef405f9). */
+  staleGreenRun: GitHubWorkflowRun | null;
+}
+
+/**
+ * 복구 판정의 하한선 — 직전 평가가 red 의 근거로 기록해 둔 실패 run.
+ * `CiRedAlert` 행의 `last_run_id` / `last_run_at` 을 그대로 넘긴다.
+ */
+export interface RedStreakEvidence {
+  lastFailedRunId: string;
+  /** 그 run 의 `created_at` (ISO). 빈 문자열이면 하한선이 없다는 뜻이고 게이트는 적용되지 않는다. */
+  lastFailedAt: string;
+}
+
+/**
+ * 복구 단조성 게이트 — CI 상태를 green 으로 되돌리려면 그 근거가 red 를 만든 근거보다
+ * **엄격히 최신**이어야 한다 (ticket 0ef405f9).
+ *
+ * 왜 필요한가: 복구 판정은 filtered 목록 API 의 단발 응답 하나만 보고 durable 상태
+ * (`CiRedAlert` 행 + 추적 티켓 연결)를 지운다. 그 응답이 한 번만 어긋나면 — 다른
+ * workflow 의 run 이 섞이든, 최신 run 이 빠지든, 같은 초에 생성된 run 의 순서가 뒤집히든
+ * — 그 한 번이 그대로 "복구" 가 되고, 감시 상태까지 함께 사라진다. 실제로 성공 run 이
+ * 하나도 없는 main 에 복구 알림이 두 차례 발송됐다. 근거가 기존 실패보다 최신이 아니면
+ * 그것은 복구가 아니라 앞뒤가 맞지 않는 읽기이므로 red 를 유지한다.
+ *
+ * 같은 `created_at` 도 복구가 아니다 — 한 푸시가 동시에 띄운 형제 run 은 그 실패를
+ * *뒤이어* 고친 run 이 아니라 나란히 돈 run 이기 때문이다. 그래서 비교는 `>` 이지 `>=` 가
+ * 아니다.
+ *
+ * 예외 하나: **같은 run 이 재실행되어 green 으로 뒤집힌 경우**(`run_attempt` 증가)는 진짜
+ * 복구다. run id 가 같고 `created_at` 도 그대로이므로 시각 비교만으로는 영원히 거부돼
+ * 행이 갇힌다 — id 일치를 먼저 확인해 통과시킨다.
+ */
+function isRecoveryNewerThanEvidence(green: GitHubWorkflowRun, evidence?: RedStreakEvidence | null): boolean {
+  const floorIso = evidence?.lastFailedAt || '';
+  if (!floorIso) return true; // 하한선 자체가 없음 — 비교 대상이 없으므로 게이트하지 않는다
+  if (evidence?.lastFailedRunId && green.id === evidence.lastFailedRunId) return true; // 같은 run 의 재실행 flip
+  const floorMs = new Date(floorIso).getTime();
+  if (!Number.isFinite(floorMs)) return true; // 하한선을 못 읽으면 게이트 근거가 없다
+  const greenMs = new Date(green.created_at || '').getTime();
+  if (!Number.isFinite(greenMs)) return false; // 시점을 못 읽는 run 으로는 복구를 주장할 수 없다
+  return greenMs > floorMs;
 }
 
 /**
  * Pure red-streak decision — no DB, no HTTP — so the threshold logic is
  * deterministically unit-testable against fixture run lists. `runs` is
- * expected newest-first (GitHub's default order / `listWorkflowRuns`'s
- * contract), already narrowed to one workflow + branch.
+ * already narrowed to one workflow + branch; 최신순은 응답 순서를 믿지 않고
+ * `sortWorkflowRunsNewestFirst` 로 (created_at, run id) 에서 다시 만든다.
+ *
+ * `evidence` 를 넘기면 복구 판정에 단조성 게이트가 걸린다 — `isRecoveryNewerThanEvidence`
+ * 참고. 넘기지 않으면(하한선 없음) 기존 동작 그대로다.
  */
 export function evaluateRedStreak(
   runs: GitHubWorkflowRun[],
   now: Date,
   config: { minConsecutiveRuns: number; minAgeMs: number },
+  evidence?: RedStreakEvidence | null,
 ): RedStreakResult {
   // schedule(cron) 트리거 run은 워크플로 대부분의 잡이 `if: ... != 'schedule'`로 skip되지만
   // run-level conclusion은 그대로 success로 찍힌다 — signal에서 통째로 제외해 잡 5/6 skip인
@@ -151,13 +208,21 @@ export function evaluateRedStreak(
   // 문자열(누락)인 run도 같은 이유로 제외한다(fail-closed) — schedule 여부를 확인할 수 없는
   // run을 신호로 받아들이면, wire 경로에서 event 필드가 유실되는 순간 이 수정 자체가
   // 조용히 무력화된다(리뷰 지적).
-  const signal = (runs || []).filter((r) => SIGNAL_CONCLUSIONS.has(r.conclusion || '') && !!r.event && r.event !== 'schedule');
+  // 응답이 준 순서는 쓰지 않는다 — "가장 최신 run" 은 데이터(created_at, run id)에서
+  // 다시 만든다 (ticket 0ef405f9).
+  const ordered = sortWorkflowRunsNewestFirst(runs || []);
+  const signal = ordered.filter((r) => SIGNAL_CONCLUSIONS.has(r.conclusion || '') && !!r.event && r.event !== 'schedule');
   if (signal.length === 0) {
-    return { isRed: false, isGreen: false, streak: 0, firstFailedRun: null, lastRun: null };
+    return { isRed: false, isGreen: false, streak: 0, firstFailedRun: null, lastRun: null, staleGreenRun: null };
   }
   const lastRun = signal[0];
   if (lastRun.conclusion === 'success') {
-    return { isRed: false, isGreen: true, streak: 0, firstFailedRun: null, lastRun };
+    if (!isRecoveryNewerThanEvidence(lastRun, evidence)) {
+      // 복구로도 red 로도 넘기지 않는다 — 기존 상태를 그대로 유지시키고, 호출자가
+      // 이 앞뒤 안 맞는 읽기를 관측할 수 있게 run 만 실어 보낸다.
+      return { isRed: false, isGreen: false, streak: 0, firstFailedRun: null, lastRun, staleGreenRun: lastRun };
+    }
+    return { isRed: false, isGreen: true, streak: 0, firstFailedRun: null, lastRun, staleGreenRun: null };
   }
   let streak = 0;
   let firstFailedRun = lastRun;
@@ -169,7 +234,7 @@ export function evaluateRedStreak(
   const firstFailedAtMs = new Date(firstFailedRun.updated_at).getTime();
   const ageMs = Number.isFinite(firstFailedAtMs) ? now.getTime() - firstFailedAtMs : 0;
   const isRed = streak >= config.minConsecutiveRuns || (streak >= 1 && ageMs >= config.minAgeMs);
-  return { isRed, isGreen: false, streak, firstFailedRun, lastRun };
+  return { isRed, isGreen: false, streak, firstFailedRun, lastRun, staleGreenRun: null };
 }
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -212,6 +277,10 @@ interface CiSweepStats {
    *  board/repo/workflow context; a nonzero count here means the sweep did
    *  NOT get a full picture this pass, even though it didn't throw. */
   fetch_failures: number;
+  /** 최신 run 이 success 로 보였지만 기존 red 근거보다 최신이 아니라 복구로 인정하지 않은
+   *  횟수 (ticket 0ef405f9). 0 이 아니면 GitHub 응답이 그 sweep 에서 앞뒤가 맞지 않았다는
+   *  뜻이다 — 알림은 나가지 않지만 'CI' 카테고리 warn 로그로 남는다. */
+  stale_green_rejected: number;
 }
 
 @Injectable()
@@ -276,6 +345,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       tickets_created: 0, delivery_failures: 0, recovered: 0,
       skipped_disabled: !this.config.enabled,
       fetch_failures: 0,
+      stale_green_rejected: 0,
     };
     if (!this.config.enabled) return stats;
 
@@ -349,11 +419,10 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
           });
           continue;
         }
-        const evalResult = evaluateRedStreak(runs, now, {
-          minConsecutiveRuns: this.config.minRuns,
-          minAgeMs: this.config.minAgeMs,
-        });
-        await this._applyEvaluation(board, target, workflow, evalResult, now, stats);
+        // 평가는 `_applyEvaluation` 안에서 한다 — 복구 단조성 게이트의 하한선이 기존
+        // `CiRedAlert` 행에 있으므로, 행을 먼저 읽은 뒤에야 올바른 평가가 가능하다
+        // (ticket 0ef405f9).
+        await this._applyEvaluation(board, target, workflow, runs, now, stats);
       }
     }
     return stats;
@@ -403,7 +472,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     board: Board,
     target: MonitorTarget,
     workflow: GitHubWorkflow,
-    evalResult: RedStreakResult,
+    runs: GitHubWorkflowRun[],
     now: Date,
     stats: CiSweepStats,
   ): Promise<void> {
@@ -411,6 +480,30 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     const existing = await alertRepo.findOne({
       where: { board_id: board.id, repo_full_name: target.repoFullName, branch: target.branch, workflow_id: workflow.id },
     });
+
+    const evalResult = evaluateRedStreak(
+      runs,
+      now,
+      { minConsecutiveRuns: this.config.minRuns, minAgeMs: this.config.minAgeMs },
+      existing ? { lastFailedRunId: existing.last_run_id || '', lastFailedAt: existing.last_run_at || '' } : null,
+    );
+
+    if (evalResult.staleGreenRun) {
+      // 응답의 최신 run 이 success 로 보였지만 기존 red 근거보다 최신이 아니다. 알림도
+      // 보내지 않고 행도 건드리지 않는다 — 다만 조용히 넘기면 이 모니터가 잡으라고
+      // 존재하는 바로 그 "아무도 모르는" 실패가 되므로 반드시 남긴다 (ticket 0ef405f9).
+      stats.stale_green_rejected += 1;
+      this.logService.warn('CI', 'CI 복구 신호를 거부했다 — 기존 red 근거보다 최신이 아니다 (상태 유지)', {
+        board_id: board.id, repo: target.repoFullName, branch: target.branch,
+        workflow_id: workflow.id, workflow_name: workflow.name,
+        green_run_id: evalResult.staleGreenRun.id,
+        green_run_created_at: evalResult.staleGreenRun.created_at,
+        green_run_url: evalResult.staleGreenRun.html_url,
+        recorded_last_run_id: existing?.last_run_id || '',
+        recorded_last_run_at: existing?.last_run_at || '',
+      });
+      return;
+    }
 
     if (evalResult.isGreen) {
       if (existing) await this._handleRecovery(board, target, workflow, existing, stats);
@@ -436,6 +529,9 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     row.streak = evalResult.streak;
     row.first_failed_run_id = evalResult.firstFailedRun?.id || '';
     row.last_run_id = evalResult.lastRun?.id || '';
+    // 이 시점의 `lastRun` 은 red 를 성립시킨 가장 최신 실패 run 이다 — 그 생성 시각이
+    // 다음 sweep 의 복구 단조성 하한선이 된다 (ticket 0ef405f9).
+    row.last_run_at = evalResult.lastRun?.created_at || '';
     await alertRepo.save(row);
     if (isNewRow) stats.alerts_created += 1; else stats.alerts_updated += 1;
 
