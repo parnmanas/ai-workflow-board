@@ -7,16 +7,31 @@
  * 실제로 도는지 검사한다.
  *
  * 왜 필요한가(2026-08-20 의존성 감사에서 발견): 이전까지 `ci.yml` 의 push 트리거는
- * `main` 뿐이었다. 그런데 실제로 NAS 에 배포되는 브랜치는 `production.private` 이고,
- * 이 브랜치는 main 을 머지한 뒤 **직접 push** 로 갱신된다 — PR 을 거치지 않으므로
- * `pull_request` 트리거도 걸리지 않는다. 결과적으로 그 push 에 반응하는 워크플로는
+ * `main` 뿐이었다. 그런데 당시 실제로 배포되는 브랜치는 `production.private` 이었고,
+ * 그 브랜치는 main 을 머지한 뒤 **직접 push** 로 갱신됐다 — PR 을 거치지 않으므로
+ * `pull_request` 트리거도 걸리지 않았다. 결과적으로 그 push 에 반응하는 워크플로는
  * deploy.yml(배포) 하나뿐이었고, **배포 브랜치에서는 의존성 감사가 단 한 번도 돌지
  * 않았다.** production 전용 커밋이 lockfile 이나 워크플로를 건드리면 감사 없이 그대로
  * 나가는 구조였다.
  *
- * 이 가드는 그 구멍이 되돌아오는 걸 막는다: deploy.yml 이 배포 트리거로 삼는 브랜치를
- * 읽어서, 그 브랜치가 전부 ci.yml 의 push 트리거에도 있는지 확인한다. 배포 대상이
- * 새로 늘어나면(예: staging 브랜치 추가) 감사 커버리지가 자동으로 따라오도록 강제된다.
+ * 이 가드는 그 구멍이 되돌아오는 걸 막는다: 배포 대상 브랜치를 읽어서, 그 브랜치가
+ * 전부 ci.yml 의 push 트리거에도 있는지 확인한다. 배포 대상이 새로 늘어나면(예:
+ * staging 브랜치 추가) 감사 커버리지가 자동으로 따라오도록 강제된다.
+ *
+ * ## 2026-09 배포 형상 변경 (ticket 128d62cd)
+ *
+ * `production.private` 은 더 이상 없다 — origin 에서 삭제됐고 deploy.yml 기반 배포도
+ * 함께 사라졌다. 지금은 호스트의 배포 워크트리가 `git checkout --detach origin/main` 으로
+ * **main tip 을 그대로** 체크아웃해 빌드·구동한다. 즉 배포 대상 브랜치는 `main` 이다.
+ *
+ * 이 목록이 사라진 브랜치를 가리키는 동안 audit-deploy-branch-deps.mjs 가 그걸 fetch
+ * 하려다 fail-closed 로 죽어 schedule run 이 13일간 red 였다. 목록은 **실제 배포
+ * 대상**을 가리켜야 한다 — 그게 두 가드가 함께 따라오게 하는 유일한 방법이다.
+ *
+ * 위 구멍의 위협 모델("배포 브랜치가 main 에 없는 커밋을 실어 감사 없이 나간다")은 지금
+ * 형상에선 **구조적으로 도달 불가능**하다: 배포 트리는 origin/main 의 detached 체크아웃이라
+ * main 과 다른 내용을 가질 수 없다. 그래도 가드를 지우지 않는 이유는, 별도 배포 브랜치가
+ * 다시 생겼을 때 커버리지 공백이 조용히 재발하는 걸 막기 위해서다.
  *
  * 주의 — 무거운 테스트 잡까지 배포 브랜치에서 돌릴 필요는 없다. 같은 커밋이 이미
  * main 에서 전체 매트릭스를 통과했고, deploy.yml 이 동일 push 에 병렬로 돌아 CI 가
@@ -82,13 +97,16 @@ export function pushBranches(yaml) {
   return out;
 }
 
-// deploy.yml 은 production.private 브랜치에만 있다(main 에는 없음). 없으면 검사할
-// 배포 대상이 없다는 뜻이므로, main 기준의 알려진 배포 브랜치를 대신 확인한다.
-export const KNOWN_DEPLOY_BRANCHES = ['production.private'];
+// deploy.yml 이 어느 체크아웃에도 없을 때 쓰는 배포 대상 목록. 2026-09 형상에서 배포
+// 트리는 origin/main 을 detached 로 체크아웃하므로 대상은 main 하나다(위 헤더 참조).
+// 배포 브랜치가 다시 생기면 **여기에 추가**해야 두 가드가 함께 따라온다.
+export const KNOWN_DEPLOY_BRANCHES = ['main'];
 
 /**
  * 이 저장소가 실제로 배포하는 브랜치 목록. deploy.yml 이 있으면 그 push 트리거를
- * 신뢰하고, 없으면(=main 체크아웃) 알려진 목록으로 떨어진다.
+ * 신뢰하고, 없으면 위 상수로 떨어진다. 2026-09 현재 deploy.yml 은 어느 브랜치에도
+ * 없으므로 사실상 항상 상수 경로다 — deploy.yml 분기는 배포 방식이 워크플로로 되돌아갈
+ * 때를 위해 남겨 둔다.
  *
  * scripts/audit-deploy-branch-deps.mjs 도 같은 목록을 써야 한다 — "배포되는 곳은
  * 전부 감사한다" 는 불변식의 출처가 하나여야 두 가드가 갈라지지 않는다.
