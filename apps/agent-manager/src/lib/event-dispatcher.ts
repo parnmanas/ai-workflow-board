@@ -542,6 +542,12 @@ export interface SubagentSpawnArgs {
    *  (codex, antigravity) post their collected result to this room via REST
    *  instead of as a ticket comment. */
   roomId?: string;
+  /** ticket e6d32e9d marker forwarded from the `chat_room_message` SSE: this
+   *  room is an Action / QA / orchestration-step run room where a reply tool
+   *  call (report_orchestration_step / send_chat_room_message) is mandatory.
+   *  Read by the exit handler's no-reply fallback; plain chat rooms leave it
+   *  unset so an agent that legitimately chose silence stays silent. */
+  isActionRoom?: boolean;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
   /** Resolved board/workspace harness from the trigger event (e9c7a896).
@@ -5038,6 +5044,7 @@ export class EventDispatcher {
           ticketId: '',
           agentId: agentContext?.agent_id || '',
           roomId: p.room_id || '',
+          isActionRoom: !!p.is_action_room,
           agentContext: runContext,
           runtimeProfile,
           // ticket e9d0e8bc: release the run lock when this oneshot exits.

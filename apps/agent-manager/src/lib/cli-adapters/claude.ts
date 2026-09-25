@@ -383,6 +383,19 @@ export class ClaudeCliAdapter extends CliAdapter {
     return JSON.stringify(obj);
   }
 
+  /** stream-json `assistant` events: join the text blocks of one message. */
+  extractAssistantText(raw: any): string | null {
+    if (!raw || typeof raw !== 'object' || raw.type !== 'assistant') return null;
+    const content = raw.message?.content;
+    if (!Array.isArray(content)) return null;
+    const text = content
+      .filter((b: any) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((b: any) => b.text.trim())
+      .filter(Boolean)
+      .join('\n');
+    return text || null;
+  }
+
   parseStdoutLine(line: string): ParseResult {
     let obj: any = null;
     try {

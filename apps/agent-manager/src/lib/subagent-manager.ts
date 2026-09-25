@@ -101,6 +101,9 @@ const TAIL_RING_MAX_LINES = 100;
 /** Max bytes of `tail.join('\n')` posted in the silent-exit system
  *  comment. 4KB keeps the comment readable in the board UI. */
 const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
+/** Cap on `record.lastAssistantText` — the same ceiling #postOneshotChatAnswer
+ *  truncates a chat post to, so nothing past it could be delivered anyway. */
+const LAST_ASSISTANT_TEXT_MAX_CHARS = 60_000;
 /** Max per-pid detail lines embedded in a one-shot run's orphan-sweep summary
  *  (ticket 55d3063f). Mirrors ChatSessionManager's ORPHAN_SUMMARY_MAX_DETAIL —
  *  the full pid list is always included; this only caps the cmd detail. */
@@ -322,6 +325,12 @@ interface SubagentRecord {
    *  completed on a room-dispatched one-shot. Optional so caller-built records
    *  (tests, older spec shapes) default to "no reply observed". */
   chatReplySent?: boolean;
+  /** Spawn-time copy of SubagentSpawnArgs.isActionRoom (chat one-shots only). */
+  isActionRoom?: boolean;
+  /** Last model prose seen on stdout (adapter.extractAssistantText), room
+   *  one-shots only. Posted by the exit handler when an action-room child
+   *  exits 0 without a reply tool call. Capped to keep memory bounded. */
+  lastAssistantText?: string;
   tap: SubagentTapHandle | null;
   /** Running token/cost total accumulated across every `result` /
    *  `turn.completed` stdout line observed for this run (ticket 6dd3f968).
@@ -1064,6 +1073,7 @@ export class SubagentManager implements SubagentManagerContract {
         agent_id: spec.agentId || null,
         role: spec.role || null,
         room_id: spec.roomId || null,
+        isActionRoom: spec.kind === 'chat' && !!spec.isActionRoom,
         started_at: Date.now(),
         expected_completion_at:
           Date.now() + (spec.ttlMinutes ?? this.#config.delegation.ttlMinutes ?? 15) * 60_000,
@@ -1352,23 +1362,35 @@ export class SubagentManager implements SubagentManagerContract {
     // child that DID call send_chat_room_message / report_orchestration_step
     // and then crashed is a post-hoc crash — the deliverable is already in the
     // room — so `chatReplySent` suppresses the warning (commentSent parity).
-    if (
-      !record.captureOutput &&
-      record.room_id &&
-      !record.ticket_id &&
-      code !== 0 &&
-      !record.chatReplySent
-    ) {
-      const tail = this.#collectTail(record);
-      const exitLabel = code === null ? 'unknown' : String(code);
-      const header = `⚠️ Agent가 응답하지 못했습니다 (cli=${record.cli_type}, exit code ${exitLabel}).`;
-      const body = tail
-        ? `${header}\n\nLast CLI output:\n\`\`\`\n${tail}\n\`\`\``
-        : `${header} CLI 출력이 없습니다 — 프로세스가 시작 직후 종료됐을 수 있습니다.`;
-      try {
-        await this.#postOneshotChatAnswer(record, body);
-      } catch (err: any) {
-        log(`Subagent room failure notice failed pid=${pid} room=${record.room_id}: ${err?.message ?? err}`);
+    if (!record.captureOutput && record.room_id && !record.ticket_id && !record.chatReplySent) {
+      let body: string | null = null;
+      if (code !== 0) {
+        const tail = this.#collectTail(record);
+        const exitLabel = code === null ? 'unknown' : String(code);
+        const header = `⚠️ Agent가 응답하지 못했습니다 (cli=${record.cli_type}, exit code ${exitLabel}).`;
+        body = tail
+          ? `${header}\n\nLast CLI output:\n\`\`\`\n${tail}\n\`\`\``
+          : `${header} CLI 출력이 없습니다 — 프로세스가 시작 직후 종료됐을 수 있습니다.`;
+      } else if (record.isActionRoom && record.lastAssistantText) {
+        // Clean exit, action room, but the reply tool was never called: the
+        // model finished the work and printed its report as prose instead
+        // (typically because it did not find the tool under the name it was
+        // told). Post that prose so the room — and the orchestrator reading
+        // it — sees the outcome now rather than after the lease reaper. The
+        // server-side step record is NOT updated by this (only the tool can
+        // do that), so the header says so. Plain chat rooms are excluded: an
+        // agent that decided a message needed no reply must stay silent.
+        body =
+          `⚠️ Agent가 AWB 보고 툴(report_orchestration_step / send_chat_room_message)을 호출하지 않고 ` +
+          `종료했습니다 (cli=${record.cli_type}, exit code 0). step/run 상태는 서버에 기록되지 않았으니 ` +
+          `orchestrator 가 확인해야 합니다. CLI 의 최종 답변을 대신 올립니다:\n\n${record.lastAssistantText}`;
+      }
+      if (body) {
+        try {
+          await this.#postOneshotChatAnswer(record, body);
+        } catch (err: any) {
+          log(`Subagent room failure notice failed pid=${pid} room=${record.room_id}: ${err?.message ?? err}`);
+        }
       }
     }
 
@@ -1795,6 +1817,7 @@ export class SubagentManager implements SubagentManagerContract {
           }
           this.#bufferTail(record, line);
           this._scanForCommentTool(record, line);
+          this._captureAssistantText(record, line);
           this.#maybeEmitChatProgress(record, line);
           this.#captureUsageLine(record, line);
         }
@@ -1918,6 +1941,28 @@ export class SubagentManager implements SubagentManagerContract {
         if (block?.type === 'tool_use') mark(block.name);
       }
     }
+  }
+
+  /** Room one-shots only: remember the model's latest prose so the exit
+   *  handler can post it when no reply tool was ever called. Public
+   *  (`_`-prefixed) for the test runner. Never throws. */
+  _captureAssistantText(record: SubagentRecord, line: string): void {
+    if (!record.room_id) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) return;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    let text: string | null = null;
+    try {
+      text = this.#adapterFor(record.cli_type).extractAssistantText(parsed);
+    } catch {
+      return;
+    }
+    if (text) record.lastAssistantText = text.slice(0, LAST_ASSISTANT_TEXT_MAX_CHARS);
   }
 
   async #postOneshotAnswer(record: SubagentRecord, answer: string): Promise<void> {

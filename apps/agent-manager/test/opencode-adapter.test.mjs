@@ -251,7 +251,13 @@ test('prepareCliHome writes per-agent opencode.json with awb/host MCP and no bak
     url: 'https://awb.example',
     apiKey: 'per-agent-key-never-baked',
   });
-  assert.deepEqual(extraEnv, {});
+  // Windows regression (EmberDelve, 2026-09-25): opencode resolves its config
+  // dir via xdg-basedir — $XDG_CONFIG_HOME, else os.homedir()/.config — and on
+  // Windows os.homedir() is USERPROFILE, which the manager's HOME redirect never
+  // touches. Without this env the per-agent file below is written and never
+  // read: the child loads the operator's config, has no `awb` server, and every
+  // step ends without a report. Pin it explicitly, on every platform.
+  assert.deepEqual(extraEnv, { XDG_CONFIG_HOME: join(home, '.config') });
   const raw = await fsp.readFile(join(home, '.config', 'opencode', 'opencode.json'), 'utf8');
   const config = JSON.parse(raw);
   assert.equal(config.mcp.awb.type, 'remote');
@@ -271,6 +277,82 @@ test('prepareCliHome without an AWB endpoint still provisions the home (operator
   await adapter.prepareCliHome(home, null, null);
   const raw = await fsp.readFile(join(home, '.config', 'opencode', 'opencode.json'), 'utf8');
   JSON.parse(raw); // must be valid JSON even with nothing to inject
+});
+
+test('prepareCliHome merges the operator opencode.jsonc (comments, trailing commas, // inside URLs)', async () => {
+  // Operators who set opencode up interactively have ONLY `opencode.jsonc` —
+  // that is what the CLI writes — and both fleet hosts carry their ComfyUI MCP
+  // server there. Reading just `.json` dropped it from every agent's config.
+  const fakeOperatorHome = await freshDir('awb-opencode-operator-');
+  const operatorConfigDir = join(fakeOperatorHome, '.config', 'opencode');
+  await fsp.mkdir(operatorConfigDir, { recursive: true });
+  await fsp.writeFile(
+    join(operatorConfigDir, 'opencode.jsonc'),
+    [
+      '{',
+      '  "$schema": "https://opencode.ai/config.json", // schema for editors',
+      '  /* operator servers */',
+      '  "mcp": {',
+      '    "comfyui-txiv": { "type": "local", "command": ["npx", "-y", "comfyui-mcp"], "environment": { "COMFYUI_URL": "https://txiv-comfyui.example" }, },',
+      '  },',
+      '}',
+    ].join('\n'),
+  );
+  await fsp.writeFile(
+    join(operatorConfigDir, 'opencode.json'),
+    JSON.stringify({ mcp: { legacy: { type: 'local', command: ['legacy-mcp'] } }, theme: 'dark' }),
+  );
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeOperatorHome;
+  process.env.USERPROFILE = fakeOperatorHome;
+  try {
+    const home = await freshDir();
+    const adapter = new OpencodeCliAdapter();
+    await adapter.prepareCliHome(home, null, { url: 'https://awb.example', apiKey: 'k' });
+    const config = JSON.parse(await fsp.readFile(join(home, '.config', 'opencode', 'opencode.json'), 'utf8'));
+    assert.equal(config.$schema, 'https://opencode.ai/config.json');
+    assert.equal(config.theme, 'dark', '.json keys survive the .jsonc merge');
+    assert.deepEqual(Object.keys(config.mcp).sort(), ['awb', 'comfyui-txiv', 'host', 'legacy']);
+    assert.equal(config.mcp['comfyui-txiv'].environment.COMFYUI_URL, 'https://txiv-comfyui.example',
+      'a // inside a string must not be treated as a comment');
+    assert.equal(config.mcp.awb.url, 'https://awb.example/mcp');
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+  }
+});
+
+test('the run message opens with the awb_<tool> naming note, ahead of the role prompt', () => {
+  // The Windows member concluded "report tool이 이 세션에 노출되지 않아" because the
+  // work order said mcp__awb__report_orchestration_step and opencode lists it
+  // as awb_report_orchestration_step. The note must precede any instruction
+  // that uses the other spelling.
+  const adapter = new OpencodeCliAdapter();
+  const d = adapter.buildOneshotSpawn({
+    rolePrompt: 'ROLE PROMPT — call mcp__awb__report_orchestration_step when done.',
+    taskText: 'TASK',
+    permission: policy('trusted'),
+    model: null,
+    cwd: null,
+    harness: { system_prompt_append: 'POLICY' },
+  });
+  let written = '';
+  d.writePrompt({ stdin: { write: (s) => { written += s; }, end: () => {} } });
+  const note = written.indexOf('awb_report_orchestration_step');
+  const policyAt = written.indexOf('AWB managed policy');
+  const role = written.indexOf('ROLE PROMPT');
+  assert.ok(note >= 0, 'naming note present');
+  assert.ok(note < policyAt && policyAt < role, 'note first, then managed policy, then the role prompt');
+  assert.match(written, /mcp__awb__<tool>.*awb_<tool>/s);
+});
+
+test('extractAssistantText returns opencode text parts only', () => {
+  const adapter = new OpencodeCliAdapter();
+  assert.equal(adapter.extractAssistantText({ type: 'text', part: { text: '  최종 보고  ' } }), '최종 보고');
+  assert.equal(adapter.extractAssistantText({ type: 'text', part: { text: '' } }), null);
+  assert.equal(adapter.extractAssistantText({ type: 'tool_use', part: { tool: 'bash' } }), null);
+  assert.equal(adapter.extractAssistantText('nope'), null);
 });
 
 test('buildSessionSpawn gates --session on ses_-shaped ids', () => {

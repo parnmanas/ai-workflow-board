@@ -87,6 +87,59 @@ export const OPENCODE_SESSION_ID_RE = /^ses_[A-Za-z0-9]+$/;
  *  slow response means a wedged binary, not a large result. */
 const SESSION_LIST_TIMEOUT_MS = 10_000;
 
+/** Strip `//` and `/* *\/` comments plus trailing commas — the JSONC subset
+ *  opencode itself accepts for `opencode.jsonc`. String contents are preserved
+ *  (a `//` inside a URL such as the MCP `url` field must survive). */
+function parseJsonc(text: string): unknown {
+  let out = '';
+  let i = 0;
+  let inString = false;
+  while (i < text.length) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (inString) {
+      out += ch;
+      if (ch === '\\' && i + 1 < text.length) {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
+}
+
+/** Shallow merge with one level of object merge (`mcp`, `provider`, ...) so an
+ *  operator `.jsonc` adding a server never wipes servers from the `.json`. */
+function mergeConfig(base: Record<string, any>, extra: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = { ...base };
+  for (const [key, value] of Object.entries(extra)) {
+    out[key] = isRecord(value) && isRecord(out[key]) ? { ...out[key], ...value } : value;
+  }
+  return out;
+}
+
 function isRecord(v: unknown): v is Record<string, any> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
 }
@@ -114,6 +167,24 @@ function opencodePermissionArgs(
   return effective.tier === 'trusted' ? ['--auto'] : [];
 }
 
+/**
+ * opencode exposes MCP tools as `<server>_<tool>` (`awb_report_orchestration_step`),
+ * while every AWB work order / role prompt names them the Claude way
+ * (`mcp__awb__report_orchestration_step`). Most models bridge that on their
+ * own; the ones that don't conclude "the report tool is not available", finish
+ * the work, print the report as prose and exit 0 — which AWB reads as silence
+ * until the step lease expires (EmberDelve incident, 2026-09-25: the Windows
+ * member did exactly this and wrote "report tool이 이 세션에 노출되지 않아 본문으로
+ * 보고"). Folded in at the top of every run message so it is the first thing
+ * the model reads, before any instruction that uses the other spelling.
+ */
+const OPENCODE_TOOL_NAMING_NOTE = [
+  'Tool naming in this environment: AWB MCP tools are exposed to you as `awb_<tool>` — for example',
+  '`awb_report_orchestration_step`, `awb_report_orchestration_progress`, `awb_send_chat_room_message`,',
+  '`awb_add_comment`. Wherever the instructions below say `mcp__awb__<tool>`, call `awb_<tool>`; it is',
+  'the same tool. If no `awb_*` tools are listed at all, say so explicitly in your final message.',
+].join(' ');
+
 /** Role prompt + harness system_prompt_append, folded into the run message
  *  (opencode has no --append-system-prompt flag — same fold as codex). */
 function composePrompt(
@@ -121,7 +192,7 @@ function composePrompt(
   taskText: string,
   harness?: HarnessSpec | null,
 ): string {
-  const parts: string[] = [];
+  const parts: string[] = [OPENCODE_TOOL_NAMING_NOTE];
   if (harness?.system_prompt_append?.trim()) {
     parts.push(
       `AWB managed policy:\n${harness.system_prompt_append.trim()}\nEnd AWB managed policy.`,
@@ -456,6 +527,15 @@ export class OpencodeCliAdapter extends CliAdapter {
     return raw || null;
   }
 
+  /** `text` events carry the model's prose; the last one before `step_finish`
+   *  reason=stop is the final answer. Read by the subagent manager's
+   *  no-reply-tool fallback for action rooms (see `_handleOneshotExit`). */
+  extractAssistantText(raw: any): string | null {
+    if (!isRecord(raw) || raw.type !== 'text') return null;
+    const text = str(raw.part?.text).trim();
+    return text || null;
+  }
+
   /**
    * Map a single `run --format json` event onto a normalized progress signal
    * (the one-shot twin of Claude's persistent tool_use progress, ticket
@@ -594,13 +674,21 @@ export class OpencodeCliAdapter extends CliAdapter {
     // reasoning): the per-agent apiKey rides AWB_API_KEY env (injected on
     // every spawn by subagent/base-session managers), referenced here via
     // opencode's `{env:VAR}` header interpolation so no secret is baked.
+    //
+    // opencode reads BOTH `opencode.json` and `opencode.jsonc` from the config
+    // dir and merges them; operators who ran `opencode` interactively usually
+    // have only the `.jsonc` (that is what the CLI writes). Reading just the
+    // `.json` silently dropped every operator MCP server (the ComfyUI server
+    // an art team member depends on, for one) from the per-agent file.
     let config: Record<string, any> = {};
-    try {
-      const text = await fsp.readFile(operatorConfigPath, 'utf8');
-      const parsed = text.trim() ? (JSON.parse(text) as unknown) : {};
-      if (isRecord(parsed)) config = { ...parsed };
-    } catch (err: any) {
-      if (err?.code !== 'ENOENT') throw err;
+    for (const candidate of [operatorConfigPath, `${operatorConfigPath}c`]) {
+      try {
+        const text = await fsp.readFile(candidate, 'utf8');
+        const parsed = text.trim() ? (parseJsonc(text) as unknown) : {};
+        if (isRecord(parsed)) config = mergeConfig(config, parsed);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
     }
     if (mcp?.url) {
       const mcpUrl = `${mcp.url.replace(/\/$/, '')}/mcp`;
@@ -626,7 +714,21 @@ export class OpencodeCliAdapter extends CliAdapter {
     await fsp.writeFile(join(opencodeConfigDir, 'opencode.json'), JSON.stringify(config, null, 2), {
       mode: 0o600,
     });
-    return { extraEnv: {} };
+    // The per-agent file only counts if opencode actually reads it. opencode
+    // resolves its config dir through xdg-basedir: `$XDG_CONFIG_HOME`, else
+    // `os.homedir()/.config`. On POSIX the manager's HOME redirect
+    // (configDirEnv) covers that; on Windows `os.homedir()` is USERPROFILE and
+    // ignores HOME entirely, so a Windows Runtime Host kept loading the
+    // OPERATOR's `~/.config/opencode/*` — no `awb` server, no `awb_*` tools,
+    // every step "finished" without a report (EmberDelve, 2026-09-25;
+    // verified on the host: HOME-only → 1 operator server, XDG_CONFIG_HOME →
+    // awb + host connected). Pin the config dir explicitly on every platform;
+    // it also shields the child from an operator-level XDG_CONFIG_HOME in the
+    // manager's own environment. Data (auth.json / sessions / logs) is left on
+    // its default resolution on purpose: on Windows that is the operator's live
+    // `opencode auth login` state, which is exactly what a credential-free
+    // adapter wants to inherit.
+    return { extraEnv: { XDG_CONFIG_HOME: join(cliHomeDir, '.config') } };
   }
 
   async #linkIfPresent(src: string, dst: string): Promise<void> {

@@ -639,6 +639,20 @@ export abstract class CliAdapter {
   }
 
   /**
+   * The model's own prose from a single already-parsed one-shot stdout event —
+   * opencode `text` parts, claude `assistant` text blocks. The subagent manager
+   * keeps the LAST non-empty value per room one-shot and, when an action-room
+   * child (orchestration step / QA / Action run) exits 0 without ever calling a
+   * reply tool, posts it to the room in place of the report that never came —
+   * the model's "final report as prose" is then at least visible instead of
+   * waiting ~100 minutes for the lease reaper. Pure, best-effort, never throws;
+   * default null (no prose surface).
+   */
+  extractAssistantText(_raw: any): string | null {
+    return null;
+  }
+
+  /**
    * Extract token/cost usage from a single already-parsed CLI stdout event —
    * the object `parseStdoutLine` put on `ParseResult.raw`, or a freshly
    * `JSON.parse`d line. Called on EVERY stdout line (both oneshot and

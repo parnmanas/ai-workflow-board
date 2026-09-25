@@ -202,13 +202,64 @@ test('② the scanner still marks ticket comment tools independently (claude ass
   assert.equal(rec.chatReplySent, true, 'the scan keeps running after commentSent until both flags are set');
 });
 
-test('③ exit 0 without an observed reply tool → no notice', async () => {
+test('③ exit 0 in a plain chat room without a reply tool → stays silent (agent may have chosen not to reply)', async () => {
   const mgr = new SubagentManager(makeConfig());
-  const rec = makeRoomRecord();
+  const rec = makeRoomRecord({ lastAssistantText: 'No reply needed for this message.' });
 
   await mgr._handleOneshotExit(rec, 0);
 
   assert.equal(chatPosts.length, 0);
+});
+
+test('③ exit 0 in an ACTION room without a reply tool → the model\'s final prose is posted with a "not recorded" header', async () => {
+  // EmberDelve audit-commit3: opencode ran 33 minutes, exit 0, and printed
+  // "최종 보고 (report tool이 이 세션에 노출되지 않아 본문으로 보고 …)" — the step
+  // stayed `dispatched` for the lease reaper. That prose must reach the room.
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeRoomRecord({ isActionRoom: true });
+  mgr._captureAssistantText(rec, JSON.stringify({ type: 'text', part: { text: 'QA 통과 — 최종 push 시도' } }));
+  mgr._captureAssistantText(rec, JSON.stringify({ type: 'tool_use', part: { tool: 'bash', state: { status: 'completed' } } }));
+  mgr._captureAssistantText(rec, JSON.stringify({ type: 'text', part: { text: '최종 보고: step done, lease abc' } }));
+  assert.equal(rec.lastAssistantText, '최종 보고: step done, lease abc', 'the LAST prose wins; tool events do not clear it');
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(chatPosts.length, 1);
+  assert.equal(chatPosts[0].body.agent_id, 'agent-coder-muse');
+  assert.match(chatPosts[0].body.content, /보고 툴.*호출하지 않고/);
+  assert.match(chatPosts[0].body.content, /서버에 기록되지 않았으니/);
+  assert.match(chatPosts[0].body.content, /최종 보고: step done, lease abc/);
+});
+
+test('③ exit 0 in an ACTION room with a reply tool observed → nothing extra (the report went through)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeRoomRecord({ isActionRoom: true });
+  mgr._captureAssistantText(rec, JSON.stringify({ type: 'text', part: { text: 'done' } }));
+  mgr._scanForCommentTool(rec, opencodeToolUseLine('awb_report_orchestration_step'));
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(chatPosts.length, 0);
+});
+
+test('③ exit 0 in an ACTION room with no prose at all → stays silent (nothing to post)', async () => {
+  const mgr = new SubagentManager(makeConfig());
+  const rec = makeRoomRecord({ isActionRoom: true });
+
+  await mgr._handleOneshotExit(rec, 0);
+
+  assert.equal(chatPosts.length, 0);
+});
+
+test('_captureAssistantText ignores ticket-only records and never throws on junk', () => {
+  const mgr = new SubagentManager(makeConfig());
+  const ticketRec = makeRoomRecord({ room_id: null, ticket_id: 'ticket-1' });
+  mgr._captureAssistantText(ticketRec, JSON.stringify({ type: 'text', part: { text: 'hi' } }));
+  assert.equal(ticketRec.lastAssistantText, undefined);
+  const rec = makeRoomRecord();
+  mgr._captureAssistantText(rec, '{not json');
+  mgr._captureAssistantText(rec, 'plain line');
+  assert.equal(rec.lastAssistantText, undefined);
 });
 
 test('④ ticket one-shot (ticket_id set) exit 1 → no room post; the ticket silent-exit path owns it', async () => {
