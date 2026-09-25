@@ -132,7 +132,7 @@ test('a host that has never run this CLI explains why there are no defaults yet'
     const view = mount(panel({}));
     await flush();
     assert.equal(Boolean(document.querySelector('select[data-default-config-id]')), false);
-    assert.match(document.querySelector('[data-cli-settings]').textContent, /appear here once a Codex session has run on rolf/);
+    assert.match(document.querySelector('[data-cli-settings]').textContent, /appear here once rolf reports what Codex offers/);
     view.unmount();
   } finally {
     dom.cleanup();

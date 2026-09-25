@@ -72,6 +72,23 @@ credential 안내문처럼 **표현만** 다루는 값은 `src/cli/presentation.
 에는 중립 기본값을 준다 — 서버가 새 CLI 를 내려보내면 클라이언트 수정 없이도 picker,
 credential 폼, 로그인 화면, effort 편집기가 그 CLI 를 그린다.
 
+## 모델 목록 — 화면마다 다르게 읽지 않는다
+
+호스트 × CLI 의 모델 목록은 매니저의 CLI 모듈(어댑터 `listModels()`)이 열거하고, 하트비트의
+`available_models` / `available_models_at`(마지막 재열거 시각)로 서버에 온다. 매니저는 부팅 시,
+`refresh_available_models` 커맨드 시, 그리고 `AVAILABLE_MODELS_REFRESH_MS`(15분)마다 다시 센다.
+
+서버는 `HostModelsService`(`modules/agent-manager/host-models.service.ts`) 하나로 읽기·갱신을
+제공한다 — `GET /api/agent-manager/hosts/:managerAgentId/models`, `POST …/models/refresh`(서버가
+커맨드 ack 를 기다린 뒤 새 목록을 돌려준다). 오케스트레이션 로스터의 refresh 도 이 서비스를
+거치고, 세션 CLI 설정은 ACP 가 보고한 목록에 호스트가 그 뒤 알게 된 모델을 덧붙인다.
+
+클라이언트는 `src/cli/hostModels.ts` 의 `useHostModels(managerAgentId, cli)` 하나를 쓴다 —
+Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모달, Runtime Hosts 화면 전부.
+훅은 열릴 때 목록이 비었거나(host×cli 당 한 번) 재열거 시각이 10분보다 오래됐으면 조용히
+갱신하고, 각 화면의 "Refresh" 버튼은 같은 `refresh()` 를 부른다. 모델을 보여주는 새 화면을
+만들 때 `available_models` 를 직접 읽거나 `refresh_available_models` 를 직접 보내지 말 것.
+
 ## 새 CLI 추가
 
 절차는 [runbooks/cli-module-wiring.md](runbooks/cli-module-wiring.md).

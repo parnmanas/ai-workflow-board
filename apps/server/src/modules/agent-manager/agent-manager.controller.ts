@@ -534,6 +534,10 @@ export class AgentManagerController {
       }
       if (Object.keys(out).length) available_models = out;
     }
+    const available_models_at =
+      typeof body?.available_models_at === 'string' && !Number.isNaN(Date.parse(body.available_models_at))
+        ? new Date(body.available_models_at).toISOString()
+        : undefined;
 
     // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). available_models 와 같은
     // 관대한 검증 — 문자열 아닌 값은 버린다. `update_cli` 가 CLI 를 올린 직후 매니저가
@@ -804,6 +808,7 @@ export class AgentManagerController {
       active_worktrees,
       active_run_workspaces,
       available_models,
+      available_models_at,
       cli_versions,
       cli_installs,
       cli_latest_versions,

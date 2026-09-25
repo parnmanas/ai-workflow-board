@@ -188,6 +188,9 @@ export interface InstanceRecord {
   // model ids), gathered via each adapter's listModels() at boot. Powers the
   // per-agent model selector in the admin UI. Older managers leave undefined.
   available_models?: Record<string, string[]>;
+  // 위 목록을 매니저가 마지막으로 재열거한 시각(ISO). 클라이언트가 오래된 목록을 자동
+  // 갱신하는 근거. 구버전 매니저는 보내지 않는다(= 항상 오래된 것으로 취급).
+  available_models_at?: string;
   // 이 장비에 설치된 CLI 들의 버전(cliType → `--version` 결과). `update_cli` 버튼이
   // 무엇을 올리는지/올렸는지 UI 가 보여주는 근거. 버전을 못 읽은 CLI 는 키가 없고,
   // 구버전 매니저는 필드 자체를 보내지 않는다(= 버전 텔레메트리 없음).

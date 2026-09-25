@@ -26,7 +26,8 @@ import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentNam
 import DirectoryPicker from './DirectoryPicker';
 import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
-import { reloadInstance, summarizeModelCounts, waitForCommandAck } from './agentManagerModelRefresh';
+import { refreshHostModels, summarizeHostModels } from '../../cli/hostModels';
+import { reloadInstance, waitForCommandAck } from './agentManagerModelRefresh';
 import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersions';
 
 /**
@@ -673,33 +674,11 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     if (refreshModelsPending) return;
     setRefreshModelsPending(true);
     try {
-      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
-        command: 'refresh_available_models',
-      });
-      const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
-      const ack = await waitForCommandAck(resp.command_id);
-      if (ack.state === 'error') {
-        showToast(`모델 목록 갱신 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
-        return;
-      }
-      if (ack.state !== 'ok') {
-        showToast(
-          `refresh_available_models 전송됨${idTail} — 매니저 응답을 아직 받지 못했습니다` +
-            `${ack.state === 'unknown' ? ' (서버가 이 command_id 를 더 이상 알지 못합니다)' : ''}` +
-            `. 매니저가 처리하면 다음 ` +
-            `하트비트에 반영됩니다.`,
-          'info',
-        );
-        return;
-      }
-      // 성공 ack 이후에만 레지스트리를 다시 읽는다.
-      const fresh = await reloadInstance(inst.instance_id);
-      const registrySummary = summarizeModelCounts(fresh?.available_models);
-      showToast(
-        `모델 목록 갱신 완료${idTail} — ${ack.detail || '매니저가 결과를 보고하지 않았습니다'}` +
-          (registrySummary ? ` (레지스트리 반영: ${registrySummary})` : ''),
-        'success',
-      );
+      // 모든 모델 화면과 같은 경로 — 서버가 재열거 커맨드의 ack 를 기다린 뒤 새 목록을 준다.
+      const fresh = await refreshHostModels(inst.agent_id);
+      if (!fresh) throw new Error('갱신 결과를 받지 못했습니다');
+      const summary = summarizeHostModels(fresh);
+      showToast(`모델 목록 갱신 완료${summary ? ` — ${summary}` : ''}`, 'success');
     } catch (err: any) {
       showToast(`refresh_available_models failed: ${err?.message || err}`, 'error');
     } finally {

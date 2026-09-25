@@ -85,6 +85,9 @@ export interface InstanceMeta {
   // 배선되면 정적 값보다 우선하고, 다른 provider 들과 같은 best-effort 계약을
   // 따른다(throw 하면 정적 스냅샷으로 접고 하트비트는 계속 돈다).
   availableModelsProvider?: (() => Record<string, string[]> | null) | null;
+  // 위 목록을 마지막으로 재열거한 시각(ISO). 서버/클라이언트가 "오래된 목록" 을 판정해
+  // 자동 갱신하는 근거. 없으면 필드를 싣지 않는다(구버전과 같은 모양).
+  availableModelsAtProvider?: (() => string | null) | null;
   // 이 장비에 설치된 CLI 들의 `--version` (cliType → 버전 문자열). `update_cli` 가
   // CLI 를 올린 뒤 같은 값을 다시 읽어 교체하므로, 모델 목록과 같은 이유로 정적
   // 값이 아니라 provider 다. 버전을 못 읽은 CLI 는 키가 없다(= 미설치/probe 실패).
@@ -366,6 +369,7 @@ export class InstanceHeartbeat {
         ? meta.availableModels
         : null;
     const availableModelsProvider = meta?.availableModelsProvider ?? null;
+    const availableModelsAtProvider = meta?.availableModelsAtProvider ?? null;
     const cliVersionsProvider = meta?.cliVersionsProvider ?? null;
     const cliLatestVersionsProvider = meta?.cliLatestVersionsProvider ?? null;
     const cliInstallsProvider = meta?.cliInstallsProvider ?? null;
@@ -504,6 +508,12 @@ export class InstanceHeartbeat {
           models = availableModels;
         }
       }
+      let modelsAt: string | null = null;
+      try {
+        modelsAt = availableModelsAtProvider?.() ?? null;
+      } catch {
+        modelsAt = null;
+      }
       // CLI 버전도 모델 목록과 같은 best-effort provider 계약을 따른다 — throw 하면
       // 이 tick 만 필드를 빼고 하트비트는 계속 돈다.
       let cliVersions: Record<string, string> | null = null;
@@ -554,6 +564,7 @@ export class InstanceHeartbeat {
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
         ...(models && Object.keys(models).length ? { available_models: models } : {}),
+        ...(modelsAt ? { available_models_at: modelsAt } : {}),
         ...(cliVersions && Object.keys(cliVersions).length ? { cli_versions: cliVersions } : {}),
         ...(cliLatestVersions && Object.keys(cliLatestVersions).length
           ? { cli_latest_versions: cliLatestVersions }

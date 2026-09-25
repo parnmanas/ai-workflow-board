@@ -330,3 +330,12 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 `AGENT_SESSION_REQUEST_OPS` 는 서버·agent-manager 공동 contract 다. agent-manager 는
 별도 패키지라 그 타입을 import 할 수 없어 유니온 사본을 두므로, op 추가는 **양쪽을 같은
 PR 로** 고친다(`agent-session-runner.ts` 의 `AgentSessionRequest`).
+
+## 모델 선택지의 출처
+
+CLI 설정 패널과 새 세션 모달의 `model` 선택지는 두 출처를 합친다: (1) 그 host×CLI 로 세션을 열었을
+때 ACP 가 보고해 캐시한 configOptions(표시 이름·현재값), (2) 호스트 하트비트의 `available_models`
+(캐시에 없는 id 를 덧붙인다 — 서버 `withModelFallback`, 클라이언트 `withHostModelOption`). 갱신은
+모든 모델 화면과 같은 `useHostModels()` 훅 / `POST /api/agent-manager/hosts/:id/models/refresh`
+경로다. 세션을 다시 열어야만 목록이 바뀌던 동작은 없어졌다. 자세한 규칙은 `docs/cli-modules.md`
+→ "모델 목록".

@@ -649,9 +649,19 @@ export class AgentSessionsService implements OnModuleDestroy {
     managerId: string,
     cli: string,
   ): AgentSessionConfigOption[] {
-    if (options.some((o) => o.category === 'model')) return options;
     const models = this.heartbeatModels(managerId, cli);
     if (!models.length) return options;
+    const idx = options.findIndex((o) => o.category === 'model');
+    if (idx !== -1) {
+      // ACP 가 보고한 목록은 그대로 두고(표시 이름·현재값), 호스트가 **그 뒤에** 알게 된
+      // 모델만 덧붙인다 — provider 를 새로 로그인한 뒤 세션을 다시 열지 않아도 dropdown 이
+      // 따라온다. 이전에는 캐시가 있으면 하트비트를 아예 보지 않아 옛 목록에 머물렀다.
+      const existing = options[idx];
+      const known = new Set(existing.options.map((o) => o.value));
+      const extra = models.filter((m) => !known.has(m)).map((value) => ({ value, name: value }));
+      if (!extra.length) return options;
+      return options.map((o, i) => (i === idx ? { ...o, options: [...o.options, ...extra] } : o));
+    }
     return [
       ...options,
       {

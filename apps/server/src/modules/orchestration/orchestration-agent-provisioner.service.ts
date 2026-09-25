@@ -46,7 +46,6 @@ import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
-import { CommandLedgerService } from '../agent-manager/command-ledger.service';
 import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instance-registry.service';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import { CLI_RUNTIME_NONE } from '../../common/cli-runtime-profiles';
@@ -56,6 +55,7 @@ import {
   workingDirLeaf,
 } from '../../common/orchestration-member-spec';
 import { orchestrationError } from './orchestration-errors';
+import { HostModelsError, HostModelsService } from '../agent-manager/host-models.service';
 
 export { ORCHESTRATION_AGENT_ORIGIN };
 
@@ -63,8 +63,6 @@ const ISSUED_BY = 'system:orchestration-roster';
 
 // The host's re-enumeration is a per-adapter parallel scan with a few seconds of
 // worst case, plus the ack POST round trip. Same window the client helper uses.
-const MODEL_REFRESH_ACK_INTERVAL_MS = 800;
-const MODEL_REFRESH_ACK_ATTEMPTS = 15;
 
 export interface ProvisionSlotInput {
   spec: TeamAgentSpec;
@@ -122,7 +120,7 @@ export class OrchestrationAgentProvisionerService {
     @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
     private readonly registry: InstanceRegistryService,
     private readonly commands: AgentManagerCommandService,
-    private readonly commandLedger: CommandLedgerService,
+    private readonly hostModels: HostModelsService,
     private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
@@ -557,40 +555,17 @@ export class OrchestrationAgentProvisionerService {
    * arrives on the next heartbeat; the caller just gets the current list back.
    */
   async refreshHostModels(managerAgentId: string, workspaceId: string): Promise<RuntimeHostView | null> {
-    const id = (managerAgentId || '').trim();
-    if (!id) throw orchestrationError(400, 'manager_agent_id is required');
-    const manager = await this.agentRepo.findOne({ where: { id } });
-    if (!manager || manager.type !== 'manager') {
-      throw orchestrationError(404, 'Runtime Host not found');
+    // 재열거 + ack 대기는 HostModelsService 가 한다 — Agent 다이얼로그 · 세션 설정과
+    // 같은 경로. 여기서는 그 결과에 이 로스터 화면 고유의 병합(agent 행에 핀된 모델)만 얹는다.
+    let id: string;
+    try {
+      id = (await this.hostModels.refresh(managerAgentId, ISSUED_BY)).manager_agent_id;
+    } catch (err) {
+      if (err instanceof HostModelsError) throw orchestrationError(err.status, err.message);
+      throw err;
     }
-    const inst = this.commands.resolveLiveManagerInstance(id);
-    if (!inst) {
-      throw orchestrationError(
-        409,
-        `Runtime Host "${manager.name}" is offline — it can only re-list its models while connected.`,
-      );
-    }
-
-    const { command_id } = await this.commands.issue(inst, 'refresh_available_models', {}, ISSUED_BY);
-    await this.awaitCommandAck(command_id);
-
     const hosts = await this.listRuntimeHosts(workspaceId);
     return hosts.find((h) => h.manager_agent_id === id) ?? null;
-  }
-
-  /**
-   * Poll the ledger until this command reaches a terminal ack, or the window
-   * closes. Mirrors the client helper's contract deliberately: `pending` is
-   * never treated as done, because the host's re-enumeration is a parallel
-   * best-effort scan that takes seconds and an unrelated 30s heartbeat landing
-   * first would otherwise look like completion.
-   */
-  private async awaitCommandAck(commandId: string): Promise<void> {
-    for (let attempt = 0; attempt < MODEL_REFRESH_ACK_ATTEMPTS; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, MODEL_REFRESH_ACK_INTERVAL_MS));
-      if (this.commandLedger.getOutcome(commandId)) return;
-      if (!this.commandLedger.get(commandId)) return; // expired without an ack
-    }
   }
 
   /** `(manager, working_dir)` pairs named by existing team slots. */

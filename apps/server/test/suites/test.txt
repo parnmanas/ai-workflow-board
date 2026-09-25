@@ -57,6 +57,7 @@ test/ci-wait-resume-presence.test.mjs
 test/ci-wait-resume.test.mjs
 test/claim-verification-same-second-move.test.mjs
 test/cli-catalog-endpoint.test.mjs
+test/host-models.test.mjs
 test/cli-catalog.test.mjs
 test/clone-policy.test.mjs
 test/column-role-policy-glob.test.mjs

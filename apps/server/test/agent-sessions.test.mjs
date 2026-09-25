@@ -862,6 +862,57 @@ test('세션 CLI 설정: 세션을 연 적 없는 호스트×CLI 도 하트비�
   assert.equal(unknown.known_config_options.some((o) => o.category === 'model'), false);
 });
 
+// 세션이 한 번 열려 ACP 가 보고한 목록이 캐시된 뒤에도, 호스트가 **그 뒤에** 알게 된 모델
+// (provider 를 새로 로그인한 경우 등)은 세션을 다시 열지 않아도 dropdown 에 따라와야 한다.
+// 예전에는 캐시가 있으면 하트비트를 아예 보지 않아 옛 목록에 머물렀다.
+test('세션 CLI 설정: ACP 캐시가 있어도 하트비트가 더 아는 모델은 덧붙인다 (표시 이름·현재값은 유지)', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'model-union');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
+  const token = app.get(AuthService).createSession(owner.id);
+  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'opencode' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+
+  // ACP 가 보고한 선택지가 캐시돼 있다(세션을 한 번 연 상태).
+  await ds.getRepository('AgentSessionCliSetting').save({
+    workspace_id: ws.id, manager_id: managerId, cli: 'opencode', credential_id: null,
+    default_config: '{}', backend_profile_id: null, updated_by: owner.id,
+    known_config_options: JSON.stringify([{
+      config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'opencode/big-pickle',
+      options: [{ value: 'opencode/big-pickle', name: 'Big Pickle' }],
+    }]),
+  });
+  // 그 뒤 호스트가 provider 를 하나 더 로그인해 모델이 늘었다.
+  await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST',
+    headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: 'inst-union', agent_id: managerId, mode: 'manager', hostname: 'ralf',
+      plugin_version: 'test', cli: 'mixed', cli_adapters: ['opencode'], acp_session_clis: ['opencode'],
+      pid: 1, started_at: new Date().toISOString(),
+      available_models: { opencode: ['opencode/big-pickle', 'opencode-go/glm-5.3'] },
+      available_models_at: '2026-09-26T00:00:00.000Z',
+    }),
+  });
+
+  const resp = await call(`${base}/api/agent-sessions/hosts/${managerId}/opencode/settings`, { headers });
+  assert.equal(resp.status, 200, resp.text);
+  const modelOption = resp.body.known_config_options.find((o) => o.category === 'model');
+  assert.equal(modelOption.current_value, 'opencode/big-pickle', 'ACP 가 준 현재값은 유지');
+  assert.deepEqual(modelOption.options, [
+    { value: 'opencode/big-pickle', name: 'Big Pickle' },
+    { value: 'opencode-go/glm-5.3', name: 'opencode-go/glm-5.3' },
+  ], 'ACP 표시 이름은 그대로, 호스트만 아는 id 는 덧붙는다');
+});
+
 // ─── 서버 재시작: 세션을 읽는 것이 driver 를 되찾는다 ────────────────────────────────
 //
 // driver 는 메모리에만 있다. 서버가 재시작하면(배포 push 한 번이면 일어난다) 사라지고, 매니저가

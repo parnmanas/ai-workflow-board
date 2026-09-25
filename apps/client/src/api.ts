@@ -1,4 +1,5 @@
 import type { CliDescriptor } from './cli/catalog';
+import type { HostModelsView } from './cli/hostModels';
 import type {
   PromptTemplate,
   Resource,
@@ -1679,6 +1680,12 @@ export const api = {
 
   // ─── Admin Agent Manager (Phase 3) ─────────────────────
   // Live Runtime Hosts heartbeating against the server.
+  /** Runtime Host 별 CLI 모델 목록(하트비트 스냅샷). 모든 모델 화면의 단일 출처 — `src/cli/hostModels.ts` 참고. */
+  getHostModels: (managerAgentId: string) =>
+    request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models`),
+  /** 호스트에 재열거를 시키고 ack 까지 기다린 뒤 갱신된 목록을 받는다(서버가 기다린다 — 폴링 없음). */
+  refreshHostModels: (managerAgentId: string) =>
+    request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models/refresh`, { method: 'POST' }),
   listAgentManagerInstances: (workspaceId?: string) => {
     const qs = new URLSearchParams();
     if (workspaceId) qs.set('workspace_id', workspaceId);

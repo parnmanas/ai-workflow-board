@@ -161,3 +161,33 @@ test('runtime discovery degrades to an empty profile list without touching healt
   assert.equal(report.hermes.healthy, true);
   assert.deepEqual(report.hermes.profiles, []);
 });
+
+test('instance heartbeat carries available_models_at from its provider so clients can judge staleness', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let resolvePayload;
+  const payloadPromise = new Promise((resolve) => { resolvePayload = resolve; });
+  globalThis.fetch = async (_url, init) => {
+    resolvePayload(JSON.parse(init.body));
+    return new Response(null, { status: 204 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const heartbeat = new InstanceHeartbeat(
+    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    'manager-1',
+    {
+      mode: 'manager',
+      version: 'test',
+      cli: 'mixed',
+      cliAdapters: ['opencode'],
+      availableModelsProvider: () => ({ opencode: ['opencode-go/glm-5.3'] }),
+      availableModelsAtProvider: () => '2026-09-26T00:00:00.000Z',
+    },
+  );
+  t.after(() => heartbeat.stop());
+  heartbeat.start();
+
+  const payload = await payloadPromise;
+  assert.deepEqual(payload.available_models, { opencode: ['opencode-go/glm-5.3'] });
+  assert.equal(payload.available_models_at, '2026-09-26T00:00:00.000Z');
+});

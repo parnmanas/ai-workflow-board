@@ -51,7 +51,7 @@ import { createAdapter, KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index
 import { cliDispatch, cliModulesWith, findCliModule } from './lib/clis/index.js';
 // ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
-import { gatherAvailableModels } from './lib/available-models.js';
+import { AVAILABLE_MODELS_REFRESH_MS, gatherAvailableModels } from './lib/available-models.js';
 import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
 import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
 import { runWithSudo } from './lib/sudo-runner.js';
@@ -695,6 +695,7 @@ async function runRuntime(
   // tick 읽어 가므로(instance-heartbeat.ts `availableModelsProvider`), 교체
   // 즉시 다음 전송분부터 새 목록이 실린다.
   let availableModels: Record<string, string[]> = {};
+  let availableModelsAt: string | null = null;
 
   // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). 부팅 시 CLI 해석 probe 와
   // 같은 측정으로 채우고, `update_cli` 가 CLI 를 올린 뒤 그 CLI 만 다시 읽어 교체한다.
@@ -832,6 +833,7 @@ async function runRuntime(
     // 커맨드를 실패시키지 않고 결과에만 표시한다.
     refreshAvailableModels: async () => {
       availableModels = await gatherAvailableModels();
+      availableModelsAt = new Date().toISOString();
       const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
       return { models: availableModels, heartbeatPosted };
     },
@@ -886,6 +888,7 @@ async function runRuntime(
       if (outcome.ok) {
         try {
           availableModels = await gatherAvailableModels();
+          availableModelsAt = new Date().toISOString();
         } catch (err: any) {
           log(`update_cli: model re-enumeration failed after ${cli} update: ${err?.message ?? err}`);
         }
@@ -1156,6 +1159,7 @@ async function runRuntime(
 
   let uploadTimer: NodeJS.Timeout | null = null;
   let cliLatestTimer: NodeJS.Timeout | null = null;
+  let modelsRefreshTimer: NodeJS.Timeout | null = null;
 
   // Outbox backstop — a POST can fail transiently while the SSE stream itself
   // stays up (single dropped request, brief LB hiccup), in which case no
@@ -1341,6 +1345,7 @@ async function runRuntime(
     // 설치된 CLI 별 모델 목록을 부팅 시 한 번 채운다. 이후 갱신은
     // `refresh_available_models` 커맨드가 같은 열거를 다시 돌려 통째로 교체한다.
     availableModels = await gatherAvailableModels();
+    availableModelsAt = new Date().toISOString();
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
@@ -1366,6 +1371,7 @@ async function runRuntime(
       // 캡처해 버려서, `refresh_available_models` 로 교체한 목록이 매니저를
       // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
       availableModelsProvider: () => availableModels,
+      availableModelsAtProvider: () => availableModelsAt,
       cliVersionsProvider: () => cliVersions,
       cliLatestVersionsProvider: () => cliLatestVersions,
       cliInstallsProvider: () => cliInstalls,
@@ -1549,6 +1555,16 @@ async function runRuntime(
       void refreshCliInstalls().then(() => refreshCliLatestVersions());
     }, CLI_LATEST_REFRESH_MS);
     cliLatestTimer.unref?.();
+    // 모델 목록도 주기적으로 다시 센다 — 호스트에서 provider 를 로그인하거나 CLI 가 모델을
+    // 추가하면 누가 새로고침을 누르지 않아도 한 주기 안에 모든 화면이 따라온다. 화면은
+    // `available_models_at` 을 보고 이보다 오래된 목록이면 스스로 재열거를 시킨다.
+    modelsRefreshTimer = setInterval(() => {
+      void gatherAvailableModels().then((models) => {
+        availableModels = models;
+        availableModelsAt = new Date().toISOString();
+      });
+    }, AVAILABLE_MODELS_REFRESH_MS);
+    modelsRefreshTimer.unref?.();
     const fireUpload = (): void => {
       uploadIfNewErrors(config, agentId, version).catch(() => {});
     };
@@ -1570,6 +1586,7 @@ async function runRuntime(
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
     if (cliLatestTimer) clearInterval(cliLatestTimer);
+    if (modelsRefreshTimer) clearInterval(modelsRefreshTimer);
     updateChecker.stop();
     if (uploadTimer) {
       clearInterval(uploadTimer);
