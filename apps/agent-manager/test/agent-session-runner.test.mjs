@@ -883,3 +883,33 @@ test('credential (opencode_api_key): the nested session-store link is created wi
   assert.equal(cap.XDG_CONFIG_HOME, join(sessionHomesDir, 'opencode', 'cred-oc', '.config'));
   await runner.handle(request('close', { session_id: opened.result.session_id }));
 });
+
+// ─── 조용한 턴 경고 ───────────────────────────────────────────────────────────
+//
+// CLI 가 업스트림 오류를 조용히 재시도하면 ACP 응답도 stderr 도 이벤트도 없이 멎는다
+// (실측: opencode 1.18.32 + 무료 모델 `opencode/big-pickle` → 429 를 말없이 재시도).
+// 프롬프트 타임아웃은 기본 6시간이라 화면은 그동안 "Working" 하나만 띄운 채 멈춰 있었다.
+// 턴을 죽이지는 않되, 아무 말도 없었다는 사실만은 알려야 한다.
+test('a turn that emits nothing gets a silence warning in the transcript, and a talking turn does not', async (t) => {
+  const quiet = await harness(t, { promptTimeoutMs: 4000, silenceWarnMs: 150 }, { FAKE_ACP_SILENT_PROMPT: '1' });
+  await quiet.runner.handle(request('open', { request_id: 'rpc-silent', session_id: null, cwd: quiet.cwd }));
+  const sid = quiet.server.rpc('rpc-silent').result.session_id;
+  await quiet.runner.handle(request('prompt', { session_id: sid, turn_id: 'turn-silent', text: 'hello?' }));
+  const warn = quiet.server.events(sid).find((e) => e.type === 'system' && e.payload?.code === 'turn_silent');
+  assert.ok(warn, `expected a silence warning; got ${quiet.server.events(sid).map((e) => e.type).join(',')}`);
+  assert.match(warn.payload.text, /sent nothing/);
+  assert.equal(warn.turn_id, 'turn-silent');
+  await quiet.runner.handle(request('close', { session_id: sid }));
+
+  // 말을 하는 턴은 경고하지 않는다 — 감시는 첫 이벤트에서 꺼진다.
+  const talking = await harness(t, { promptTimeoutMs: 20_000, silenceWarnMs: 150 });
+  await talking.runner.handle(request('open', { request_id: 'rpc-talk', session_id: null, cwd: talking.cwd }));
+  const tid = talking.server.rpc('rpc-talk').result.session_id;
+  await talking.runner.handle(request('prompt', { session_id: tid, turn_id: 'turn-talk', text: 'hello' }));
+  assert.equal(
+    talking.server.events(tid).some((e) => e.payload?.code === 'turn_silent'),
+    false,
+    'a turn that streamed text must not be flagged as silent',
+  );
+  await talking.runner.handle(request('close', { session_id: tid }));
+});

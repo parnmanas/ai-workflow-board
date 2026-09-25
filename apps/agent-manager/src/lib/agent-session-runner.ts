@@ -102,6 +102,8 @@ export interface AgentSessionRunnerOptions {
   permissionTimeoutMs?: number;
   requestTimeoutMs?: number;
   promptTimeoutMs?: number;
+  /** 턴이 아무 이벤트도 못 내보낸 채 이만큼 지나면 트랜스크립트에 한 줄 알린다. */
+  silenceWarnMs?: number;
   flushIntervalMs?: number;
   /** 테스트용 명령 해석 override. */
   commandResolver?: (cli: string) => Promise<ResolvedAcpCommand>;
@@ -206,6 +208,8 @@ interface LiveSession {
   textBuffer: string;
   reasoningBuffer: string;
   flushTimer: NodeJS.Timeout | null;
+  /** 턴이 조용한 동안 도는 감시 타이머 — 이벤트가 하나라도 나오면 꺼진다. */
+  silenceTimer: NodeJS.Timeout | null;
   idleTimer: NodeJS.Timeout | null;
   postChain: Promise<void>;
   seq: number;
@@ -227,6 +231,16 @@ const DEFAULT_IDLE_MINUTES = 30;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;
+/**
+ * 턴이 **아무것도** 내보내지 않은 채 이만큼 지나면 화면에 한 줄 알린다.
+ *
+ * 건강한 긴 턴은 조용하지 않다 — 생각이든 도구 호출이든 계속 흘린다. 반대로 CLI 가
+ * 업스트림 오류(무료 한도 429 등)를 **조용히 재시도**하면 ACP 응답도, stderr 도, 이벤트도
+ * 없이 프롬프트 타임아웃(기본 6시간)까지 멎는다(실측: opencode 1.18.32 + `opencode/big-pickle`
+ * 무료 모델 — "Working" 인 채로 영원히). 그때 사용자에게 보이는 것이 아무것도 없으면
+ * 세션이 고장 난 것과 구분되지 않으므로, 턴은 그대로 두고 사실만 알린다(Stop 은 사용자 몫).
+ */
+const SILENT_TURN_WARN_MS = 90_000;
 const DEFAULT_FLUSH_INTERVAL_MS = 150;
 const MAX_TOOL_TEXT_CHARS = 16_000;
 /**
@@ -387,7 +401,7 @@ export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env)
 
 export class AgentSessionRunner {
   readonly #config: AwbConfig;
-  readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir'>>
+  readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir' | 'silenceWarnMs'>>
     & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher' | 'maxLineBytes'>;
   readonly #store: AgentSessionStore;
   readonly #live = new Map<string, LiveSession>();
@@ -404,6 +418,7 @@ export class AgentSessionRunner {
       permissionTimeoutMs: options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
       requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       promptTimeoutMs: options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS,
+      silenceWarnMs: options.silenceWarnMs ?? SILENT_TURN_WARN_MS,
       flushIntervalMs: options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
       commandResolver: options.commandResolver,
       baseEnv: options.baseEnv,
@@ -712,6 +727,7 @@ export class AgentSessionRunner {
         textBuffer: '',
         reasoningBuffer: '',
         flushTimer: null,
+        silenceTimer: null,
         idleTimer: null,
         postChain: Promise.resolve(),
         seq: 0,
@@ -1148,6 +1164,7 @@ export class AgentSessionRunner {
       await this.#store.touchAwbSession(live.cli, live.sessionId, { title: live.title }).catch(() => undefined);
     }
     this.#enqueue(live, [{ type: 'turn', payload: { phase: 'started' }, turn_id: turnId }], { status: 'busy', title: live.title, reason: 'turn_started' });
+    this.#armSilenceWatch(live, turnId);
     try {
       const response = await live.client.prompt(
         { sessionId: live.sessionId, prompt: [{ type: 'text', text }] },
@@ -1179,9 +1196,46 @@ export class AgentSessionRunner {
         { type: 'turn', payload: { phase: 'finished', stop_reason: 'error' }, turn_id: turnId },
       ], { status: live.exited ? 'idle' : 'error', last_error: message, reason: 'turn_failed' });
     } finally {
+      this.#clearSilenceWatch(live);
       live.turn = null;
       this.#touch(live);
       await live.postChain;
+    }
+  }
+
+  /**
+   * 조용한 턴 감시. 턴이 시작될 때 걸고, 이벤트가 하나라도 나오면(#onEvent) 끈다 —
+   * 즉 경고는 "이 턴은 처음부터 끝까지 아무 말이 없었다" 일 때만 한 번 나간다.
+   * 턴을 죽이지는 않는다: 느린 것과 멎은 것을 여기서 구분할 수 없고, 멀쩡한 턴을
+   * 끊는 쪽이 더 나쁘다. 사용자가 Stop 을 누를 수 있게 사실만 알린다.
+   */
+  #armSilenceWatch(live: LiveSession, turnId: string): void {
+    this.#clearSilenceWatch(live);
+    const waitMs = this.#options.silenceWarnMs;
+    if (waitMs <= 0) return;
+    live.silenceTimer = setTimeout(() => {
+      live.silenceTimer = null;
+      if (live.turn?.turnId !== turnId) return;
+      const seconds = Math.round(waitMs / 1000);
+      this.#enqueue(live, [{
+        type: 'system',
+        payload: {
+          text: `${live.cli} has sent nothing for ${seconds}s — no output, no tool call, no error. `
+            + 'It is most likely retrying an upstream failure in silence (a rate limit or an unusable model '
+            + 'does this), so the turn can hang until the prompt timeout. Stop it and try another model if '
+            + 'nothing follows.',
+          code: 'turn_silent',
+        },
+        turn_id: turnId,
+      }]);
+    }, waitMs);
+    live.silenceTimer.unref?.();
+  }
+
+  #clearSilenceWatch(live: LiveSession): void {
+    if (live.silenceTimer) {
+      clearTimeout(live.silenceTimer);
+      live.silenceTimer = null;
     }
   }
 
@@ -1189,6 +1243,8 @@ export class AgentSessionRunner {
 
   #onEvent(live: LiveSession, event: RuntimeEvent): void {
     if (live.loading) return; // session/load 재생분 — history 가 이미 UI 에 있다
+    // 무엇이든 하나 왔으면 이 턴은 조용하지 않다.
+    this.#clearSilenceWatch(live);
     const turnId = live.turn?.turnId;
     switch (event.type) {
       case 'message_delta':
