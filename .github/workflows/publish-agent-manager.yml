@@ -19,8 +19,9 @@
 #   - push to `main` 이되 **agent-manager 산출물/publish 기계**를 건드린 push 로만
 #     한정(paths 필터). version diff 가 아니라 '소스 변경'이 트리거다. 계산된 버전은
 #     **main 에 되커밋하지 않고** 태그/tarball 에만 담으므로 봇 push→재트리거 루프가
-#     구조적으로 없다. (production.private 미러도 이 워크플로가 건드리지 않는다 —
-#     그건 웹앱 전용 별도 배포 경로다.)
+#     구조적으로 없다. (웹앱 배포도 이 워크플로가 건드리지 않는다 — 그건 배포 호스트가
+#     origin/main 을 detached 로 체크아웃하는 별도 경로다. 2026-09 이전엔
+#     production.private 미러가 그 자리였다.)
 #   - workflow_dispatch — 수동 재시도(부분 실패 복구/재실행). 멱등.
 #   수동 릴리스 태그 트리거(`awb-agent-manager-v*`)는 제거했다 — 버전의 단일
 #   출처는 '레지스트리 + patch' 하나뿐이다(봇이 미는 마커 태그는 recursion guard +

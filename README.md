@@ -128,7 +128,16 @@ This starts both the client and server:
 
 ## Production Deployment
 
-> **Note on branches.** `main` holds the source code; deploy automation lives only on `production.private`. That branch equals `main` plus one extra commit adding `.github/workflows/deploy.yml` (trigger: `push` to `production.private`). To ship a release, rebase `production.private` onto the new `main` and push — `scripts/deploy-sync.sh` (or `scripts/deploy-sync.ps1` on Windows) does the whole dance in one command. Don't merge `main` into `production.private`; use rebase to avoid 3-way-merging the "deploy.yml doesn't exist on main" delta into a file deletion.
+> **Note on branches.** `main` is the only branch that ships. The deploy host keeps its own
+> worktree — deliberately separate from any dev checkout — and updates it with
+> `git checkout --detach origin/main` before reinstalling, rebuilding and restarting the
+> server. Shipping a release therefore means nothing more than landing the commit on `main`.
+>
+> There is no release branch. The old `production.private` branch, the
+> `.github/workflows/deploy.yml` it carried, and the `scripts/deploy-sync.*` helpers that
+> rebased it onto `main` were all retired in 2026-09. `ci.yml` still keeps a
+> `production.private` push trigger on purpose: if a separate deploy branch is ever
+> revived, it must not be able to ship without the dependency audit running on it.
 
 ### Docker Compose (Recommended)
 
