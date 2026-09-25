@@ -129,6 +129,17 @@ const TICKET_COMMENT_TOOL_SUFFIXES = [
   'move_ticket',
 ];
 
+/** MCP tools whose successful call proves a CHAT / orchestration-step one-shot
+ *  delivered its result to the room it was dispatched from — the room twin of
+ *  TICKET_COMMENT_TOOL_SUFFIXES. Read by the NATIVE_MCP room failure notice in
+ *  `_handleOneshotExit`: a child that called one of these and then died non-zero
+ *  is a post-hoc crash, not an unanswered room. Suffix-matched like the ticket
+ *  list so an MCP prefix rename (awb_* / mcp__awb__*) keeps working. */
+const CHAT_REPLY_TOOL_SUFFIXES = [
+  'send_chat_room_message',
+  'report_orchestration_step',
+];
+
 /** Minimal identity shape the dedup scan reads off both live SubagentRecords
  *  and in-flight ReservationRecords. */
 interface SpawnIdentityRecord {
@@ -307,6 +318,10 @@ interface SubagentRecord {
    *  paths — once `#postOneshotAnswer` succeeded. Skipping the silent-exit
    *  fallback when this is true keeps clean cycles quiet. */
   commentSent: boolean;
+  /** Room twin of `commentSent`: true once a CHAT_REPLY_TOOL_SUFFIXES tool_use
+   *  completed on a room-dispatched one-shot. Optional so caller-built records
+   *  (tests, older spec shapes) default to "no reply observed". */
+  chatReplySent?: boolean;
   tap: SubagentTapHandle | null;
   /** Running token/cost total accumulated across every `result` /
    *  `turn.completed` stdout line observed for this run (ticket 6dd3f968).
@@ -1325,6 +1340,38 @@ export class SubagentManager implements SubagentManagerContract {
       }
     }
 
+    // NATIVE_MCP room one-shot (opencode / claude / codex-native / pi chat and
+    // every orchestration-step dispatch) that died non-zero WITHOUT ever
+    // calling a reply tool. The `captureOutput` block above never runs for
+    // these adapters — they deliver their own answer over MCP — so before this
+    // branch a CLI that died on the spot (Windows cmd.exe 8191-char argv
+    // limit, missing binary, auth refusal, ...) left the room and the mission
+    // step completely silent: the only signal was the orchestration lease
+    // reaper ~100 minutes later. Ticket one-shots keep their own
+    // system-attributed silent-exit comment below; this is the room twin. A
+    // child that DID call send_chat_room_message / report_orchestration_step
+    // and then crashed is a post-hoc crash — the deliverable is already in the
+    // room — so `chatReplySent` suppresses the warning (commentSent parity).
+    if (
+      !record.captureOutput &&
+      record.room_id &&
+      !record.ticket_id &&
+      code !== 0 &&
+      !record.chatReplySent
+    ) {
+      const tail = this.#collectTail(record);
+      const exitLabel = code === null ? 'unknown' : String(code);
+      const header = `⚠️ Agent가 응답하지 못했습니다 (cli=${record.cli_type}, exit code ${exitLabel}).`;
+      const body = tail
+        ? `${header}\n\nLast CLI output:\n\`\`\`\n${tail}\n\`\`\``
+        : `${header} CLI 출력이 없습니다 — 프로세스가 시작 직후 종료됐을 수 있습니다.`;
+      try {
+        await this.#postOneshotChatAnswer(record, body);
+      } catch (err: any) {
+        log(`Subagent room failure notice failed pid=${pid} room=${record.room_id}: ${err?.message ?? err}`);
+      }
+    }
+
     // 폴백 모델 체인 (ticket 61f4dd18). 주 모델이 폴백-적격 실패(usage cap /
     // model unavailable)로 죽었고, 이번 시도가 산출물(commentSent)을 전혀 남기지
     // 못했으며, 체인에 남은 모델이 있으면 다음 모델로 재-spawn 한다. 서킷브레이커/
@@ -1545,8 +1592,8 @@ export class SubagentManager implements SubagentManagerContract {
     // warning would be a false positive. Suppress it (log only).
     //
     // Chat-only spawns (room_id but no ticket_id) are already covered by the
-    // room_id branch above and by ChatSessionManager's fallback, so we skip
-    // them here. This system-attributed comment is what the server trigger-loop
+    // room_id branches above (captured-output answer/fallback for non-NATIVE_MCP,
+    // the NATIVE_MCP room failure notice otherwise), so we skip them here. This system-attributed comment is what the server trigger-loop
     // guard drops, so it never re-fires the loop.
     if (record.ticket_id && record.commentSent && code !== 0) {
       log(
@@ -1814,7 +1861,7 @@ export class SubagentManager implements SubagentManagerContract {
    *  ticket comments. Kept as a test seam because a missed event causes a
    *  misleading system fallback comment after otherwise successful work. */
   _scanForCommentTool(record: SubagentRecord, line: string): void {
-    if (record.commentSent) return;
+    if (record.commentSent && record.chatReplySent) return;
     const trimmed = line.trim();
     if (!trimmed.startsWith('{')) return;
     let parsed: any;
@@ -1825,12 +1872,18 @@ export class SubagentManager implements SubagentManagerContract {
     }
     const isCommentTool = (name: unknown): boolean =>
       typeof name === 'string' && TICKET_COMMENT_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix));
+    const isChatReplyTool = (name: unknown): boolean =>
+      typeof name === 'string' && CHAT_REPLY_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix));
+    // One successful AWB tool call may prove either delivery kind; mark both
+    // independently so a ticket one-shot and a room one-shot read the same scan.
+    const mark = (name: unknown): void => {
+      if (isCommentTool(name)) record.commentSent = true;
+      if (isChatReplyTool(name)) record.chatReplySent = true;
+    };
 
     if (parsed?.type === 'item.completed' && parsed?.item?.type === 'mcp_tool_call') {
       const item = parsed.item;
-      if (item.server === 'awb' && item.error == null && isCommentTool(item.tool ?? item.name)) {
-        record.commentSent = true;
-      }
+      if (item.server === 'awb' && item.error == null) mark(item.tool ?? item.name);
       return;
     }
 
@@ -1839,9 +1892,7 @@ export class SubagentManager implements SubagentManagerContract {
     // this sentinel after each successful AWB tool call; pi routes extension
     // console output to stderr, which #wireStdioCapture scans for pi only.
     if (parsed?.type === 'awb_mcp_bridge_tool_call') {
-      if (parsed.server === 'awb' && parsed.error == null && isCommentTool(parsed.tool)) {
-        record.commentSent = true;
-      }
+      if (parsed.server === 'awb' && parsed.error == null) mark(parsed.tool);
       return;
     }
 
@@ -1856,9 +1907,7 @@ export class SubagentManager implements SubagentManagerContract {
       const completed = state?.status === 'completed';
       const failed = state?.error != null || state?.isError === true
         || state?.status === 'failed' || state?.status === 'error';
-      if (completed && !failed && isCommentTool(part?.tool)) {
-        record.commentSent = true;
-      }
+      if (completed && !failed) mark(part?.tool);
       return;
     }
 
@@ -1866,10 +1915,7 @@ export class SubagentManager implements SubagentManagerContract {
       const content = parsed?.message?.content;
       if (!Array.isArray(content)) return;
       for (const block of content) {
-        if (block?.type === 'tool_use' && isCommentTool(block.name)) {
-          record.commentSent = true;
-          return;
-        }
+        if (block?.type === 'tool_use') mark(block.name);
       }
     }
   }

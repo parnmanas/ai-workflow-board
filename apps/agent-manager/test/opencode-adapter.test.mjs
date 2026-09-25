@@ -60,12 +60,17 @@ test('harnessKeys covers model, permission_mode and system_prompt_append (codex 
   assert.ok(keys.includes('system_prompt_append'));
 });
 
-test('buildOneshotSpawn emits run --format json with message last', () => {
-  const args = oneshot(new OpencodeCliAdapter(), {
+test('buildOneshotSpawn emits run --format json, and the prompt goes over STDIN — never argv', () => {
+  const adapter = new OpencodeCliAdapter();
+  const d = adapter.buildOneshotSpawn({
+    rolePrompt: 'You are a careful engineer.',
+    taskText: 'task: do the thing',
     permission: policy('trusted'),
     model: 'anthropic/claude-sonnet-4-5',
     cwd: '/tmp/work',
+    harness: null,
   });
+  const args = d.args;
   assert.equal(args[0], 'run');
   assert.deepEqual(args.slice(1, 3), ['--format', 'json']);
   assert.ok(args.includes('--model'));
@@ -73,19 +78,64 @@ test('buildOneshotSpawn emits run --format json with message last', () => {
   assert.ok(args.includes('--dir'));
   assert.equal(args[args.indexOf('--dir') + 1], '/tmp/work');
   assert.ok(args.includes('--auto'));
-  // message (role + task) is the trailing positional.
-  assert.ok(String(args[args.length - 1]).includes('task'));
+
+  // Windows regression (live incident): the `[message..]` positional carried
+  // the whole work order (~8 KB). The npm `.cmd` shim runs through
+  // `cmd.exe /d /s /c`, whose command line is capped at 8191 chars, so any
+  // real work order made cmd.exe refuse to start the child — exit 1 in 0 s,
+  // no stdout — and the step silently waited for the lease reaper. The
+  // prompt must therefore never be an argv element; it rides stdin instead.
+  assert.ok(!args.some((a) => /task: do the thing|careful engineer/.test(String(a))),
+    'the prompt must not appear anywhere in argv');
+  assert.equal(d.stdio[0], 'pipe', 'stdin must be a pipe so writePrompt can feed the prompt');
+  assert.equal(typeof d.writePrompt, 'function', 'the descriptor must supply writePrompt (codex precedent)');
+
+  let written = '';
+  let ended = false;
+  d.writePrompt({ stdin: { write: (s) => { written += s; }, end: () => { ended = true; } } });
+  assert.match(written, /careful engineer/);
+  assert.match(written, /task: do the thing/);
+  assert.ok(ended, 'stdin must be closed after the prompt, or opencode waits forever for more input');
+});
+
+test('buildOneshotSpawn keeps every argv element short of the Windows cmd.exe limit regardless of prompt size', () => {
+  const huge = 'x'.repeat(20_000);
+  const d = new OpencodeCliAdapter().buildOneshotSpawn({
+    rolePrompt: huge,
+    taskText: huge,
+    permission: policy('trusted'),
+    model: 'opencode/muse-spark-1.3-contributor-free',
+    cwd: 'E:\\Repository\\txiv\\emberdelve',
+    harness: { system_prompt_append: huge },
+  });
+  const total = d.args.reduce((n, a) => n + String(a).length + 1, 0);
+  assert.ok(total < 2000,
+    `argv must stay tiny (got ${total} chars) — cmd.exe caps the whole command line at 8191 and the prompt alone exceeded it`);
+  let written = '';
+  d.writePrompt({ stdin: { write: (s) => { written += s; }, end: () => {} } });
+  assert.ok(written.length >= 60_000, 'the full prompt still reaches the CLI, via stdin');
 });
 
 test('buildOneshotSpawn omits --auto for approve/strict and folds harness policy text', () => {
   const adapter = new OpencodeCliAdapter();
   assert.equal(oneshot(adapter, { permission: policy('approve') }).includes('--auto'), false);
   assert.equal(oneshot(adapter, { permission: policy('strict') }).includes('--auto'), false);
-  const folded = oneshot(adapter, {
+  // The harness policy is folded into the PROMPT, which now rides stdin
+  // (never argv — see the Windows cmd.exe limit test above), so read it back
+  // through writePrompt rather than from the last argv element.
+  const d = adapter.buildOneshotSpawn({
+    rolePrompt: 'role',
+    taskText: 'task',
+    mcpConfigPath: null,
+    model: null,
+    cwd: null,
     permission: policy('trusted'),
     harness: { system_prompt_append: 'be terse' },
   });
-  assert.ok(String(folded[folded.length - 1]).includes('be terse'));
+  let written = '';
+  d.writePrompt({ stdin: { write: (s) => { written += s; }, end: () => {} } });
+  assert.match(written, /AWB managed policy:\nbe terse\nEnd AWB managed policy\./);
+  assert.ok(!d.args.some((a) => String(a).includes('be terse')), 'policy text must not leak into argv');
 });
 
 test('selectEffortSlice maps opencode to model-only', () => {

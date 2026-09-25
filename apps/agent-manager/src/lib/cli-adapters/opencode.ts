@@ -266,10 +266,25 @@ export class OpencodeCliAdapter extends CliAdapter {
     harness,
     permission,
   }: OneshotSpec): SpawnDescriptor {
-    // `opencode run [message..]`: the prompt is a positional message; flags
-    // first, message last (claude/codex argv order precedent). `--format
-    // json` is what makes stdout machine-readable JSONL — without it the
-    // output is human-formatted prose the manager cannot parse.
+    // The prompt goes over STDIN, never as the `[message..]` positional.
+    //
+    // `opencode run` reads the message from stdin when no positional is
+    // given (verified on a Linux binary and on a Windows npm `.cmd` shim
+    // through cross-spawn — both answer the piped prompt and still emit
+    // `--format json` events). Putting it in argv is what broke Windows: the
+    // shim runs through `cmd.exe /d /s /c "..."`, whose whole command line is
+    // capped at 8191 characters, and a real Orchestration work order is ~8 KB.
+    // Above the cap cmd.exe refuses to start the child at all — exit 1 in 0 s,
+    // nothing on stdout — so the manager had nothing to post and the step
+    // just sat there until the lease reaper failed it 95 minutes later. On
+    // Linux (real binary, ARG_MAX in the megabytes) the same argv worked,
+    // which is why the same team's member on rolf finished its steps while
+    // the one on ralf never did. stdin has no such limit on either platform.
+    // Same pattern as codex (`codex exec` + writePrompt) and antigravity.
+    //
+    // `--format json` is what makes stdout machine-readable JSONL — without
+    // it the output is human-formatted prose the manager cannot parse.
+    const prompt = composePrompt(rolePrompt, taskText, harness);
     return {
       args: [
         'run',
@@ -282,10 +297,17 @@ export class OpencodeCliAdapter extends CliAdapter {
         // (codex `--cd` reasoning — same divergence hazard).
         ...(cwd ? ['--dir', cwd] : []),
         ...opencodePermissionArgs(permission, harness),
-        composePrompt(rolePrompt, taskText, harness),
       ],
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: false,
+      writePrompt: (child) => {
+        try {
+          child.stdin?.write(prompt);
+          child.stdin?.end();
+        } catch {
+          /* spawn already failed; the manager's exit handler logs it */
+        }
+      },
     };
   }
 
