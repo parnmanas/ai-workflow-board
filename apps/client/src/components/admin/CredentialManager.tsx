@@ -63,6 +63,7 @@ const FIELD_LABELS: Record<string, FieldDef> = {
   'deepseek_api_key:api_key': { label: 'DeepSeek API Key', placeholder: 'sk-... (from platform.deepseek.com)' },
   'codex_api_key:api_key': { label: 'OPENAI_API_KEY', placeholder: 'sk-...' },
   'antigravity_api_key:api_key': { label: 'GEMINI_API_KEY', placeholder: 'AI...' },
+  'opencode_api_key:api_key': { label: 'OPENCODE_API_KEY', placeholder: 'OpenCode Go key — create one at https://opencode.ai/auth (the CLI calls this provider "OpenCode Zen")' },
   oauth_token: {
     label: 'CLAUDE_CODE_OAUTH_TOKEN',
     placeholder: 'Run `claude setup-token` on one machine and paste the output (sk-ant-oat...). Valid ~1 year, does NOT rotate, shared by every agent — no per-machine daily re-login.',

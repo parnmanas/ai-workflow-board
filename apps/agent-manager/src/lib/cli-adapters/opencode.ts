@@ -42,6 +42,14 @@
 // was — a credentialled agent's opencode sessions still land in the same store
 // the Sessions screen lists.
 //
+// The third kind, `opencode_api_key`, is opencode's own paid plan (OpenCode Go;
+// the CLI calls the provider "OpenCode Zen"): one API key minted at
+// https://opencode.ai/auth, consumed straight from `OPENCODE_API_KEY` — the
+// same shape as codex_api_key → OPENAI_API_KEY. With it set, `opencode models`
+// lists the paid `opencode/*` models (verified on 1.18.32). It only unlocks the
+// `opencode/` provider; other providers still come from auth.json / their own
+// env keys, so an agent can pair it with the operator's file-based logins.
+//
 // Per-dispatch MCP attribution (X-AWB-Subagent-Ticket-Id/Role, ticket
 // 702d0ebe for codex) is DELIBERATELY absent: opencode has no `-c`-style
 // per-spawn config override, and rewriting the per-agent file per dispatch
@@ -657,7 +665,7 @@ export class OpencodeCliAdapter extends CliAdapter {
     // the credential's OPENCODE_AUTH_CONTENT for the same provider. Deliberately
     // NOT including GITHUB_TOKEN: opencode's github-copilot auth lives in the
     // auth file, while the env var is what an agent's `gh`/git tooling uses.
-    return ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'];
+    return ['OPENCODE_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'];
   }
 
   configDirEnv(): string {
@@ -688,13 +696,19 @@ export class OpencodeCliAdapter extends CliAdapter {
     // banner), else inherited from the operator.
     const agentDataDir = join(cliHomeDir, '.local', 'share', 'opencode');
     await fsp.mkdir(agentDataDir, { recursive: true, mode: 0o700 });
-    const boundAuthJson = credential?.provider?.startsWith('opencode_')
+    const boundAuthJson = credential?.provider === 'opencode_auth'
       ? (credential.fields?.auth_json ?? '').trim()
+      : '';
+    const boundApiKey = credential?.provider === 'opencode_api_key'
+      ? (credential.fields?.api_key ?? '').trim()
       : '';
     if (!boundAuthJson) {
       // Inherit provider auth (any `opencode auth login` provider, including
       // env-key setups whose keys live outside this file — the symlink only
-      // carries what the file carries, same best-effort posture as pi).
+      // carries what the file carries, same best-effort posture as pi). This
+      // also holds for the API-key kind: the key unlocks only the `opencode/`
+      // provider, so the agent keeps whatever other providers the operator
+      // logged into.
       await this.#linkIfPresent(operatorAuthPath, join(agentDataDir, 'auth.json'));
     }
 
@@ -762,6 +776,7 @@ export class OpencodeCliAdapter extends CliAdapter {
       extraEnv: {
         XDG_CONFIG_HOME: join(cliHomeDir, '.config'),
         ...(boundAuthJson ? { OPENCODE_AUTH_CONTENT: boundAuthJson } : {}),
+        ...(boundApiKey ? { OPENCODE_API_KEY: boundApiKey } : {}),
       },
     };
   }

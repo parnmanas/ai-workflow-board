@@ -541,6 +541,41 @@ test('prepareCliHome without a credential still inherits the operator auth.json 
 // 그 env 는 에이전트의 gh/git 도구가 쓰는 값이다.
 test('authEnvKeys strips operator provider keys that would compete with a bound credential, but not GITHUB_TOKEN', () => {
   const keys = new OpencodeCliAdapter().authEnvKeys();
-  assert.deepEqual(keys.slice().sort(), ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'OPENAI_API_KEY']);
+  assert.deepEqual(keys.slice().sort(), ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'OPENAI_API_KEY', 'OPENCODE_API_KEY']);
   assert.ok(!keys.includes('GITHUB_TOKEN'));
+});
+
+// ── opencode_api_key credential (OpenCode Go) ─────────────────────────────
+//
+// opencode 자신의 유료 플랜 키. `OPENCODE_API_KEY` 한 줄이면 되고(`opencode auth list`
+// 가 "Environment · OpenCode Zen OPENCODE_API_KEY" 로 인식, 1.18.32 실측), 그 키는
+// `opencode/` provider 만 여니 운영자의 다른 provider 로그인(auth.json 링크)은 그대로 둔다.
+test('prepareCliHome with an opencode_api_key credential injects OPENCODE_API_KEY and keeps the operator auth.json link for other providers', async () => {
+  const fakeOperatorHome = await freshDir('awb-opencode-operator-');
+  const operatorDataDir = join(fakeOperatorHome, '.local', 'share', 'opencode');
+  await fsp.mkdir(operatorDataDir, { recursive: true });
+  await fsp.writeFile(join(operatorDataDir, 'auth.json'), JSON.stringify({ github: { type: 'oauth', refresh: 'OPERATOR-COPILOT' } }));
+
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeOperatorHome;
+  process.env.USERPROFILE = fakeOperatorHome;
+  try {
+    const home = await freshDir();
+    const adapter = new OpencodeCliAdapter();
+    const { extraEnv } = await adapter.prepareCliHome(
+      home,
+      { credential_id: 'cred-go', provider: 'opencode_api_key', fields: { api_key: ' sk-go-AGENT-KEY \n' } },
+      { url: 'https://awb.example', apiKey: 'k' },
+    );
+    assert.equal(extraEnv.OPENCODE_API_KEY, 'sk-go-AGENT-KEY', 'whitespace a paste smuggled in must not reach the header');
+    assert.equal(extraEnv.OPENCODE_AUTH_CONTENT, undefined, 'an API key is not an auth.json');
+    assert.equal(extraEnv.XDG_CONFIG_HOME, join(home, '.config'));
+    // 다른 provider 는 여전히 운영자 것을 물려받는다 — 키가 여는 건 `opencode/` 하나뿐.
+    const agentAuth = join(home, '.local', 'share', 'opencode', 'auth.json');
+    assert.deepEqual(JSON.parse(await fsp.readFile(agentAuth, 'utf8')), { github: { type: 'oauth', refresh: 'OPERATOR-COPILOT' } });
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+  }
 });

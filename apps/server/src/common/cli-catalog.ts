@@ -314,6 +314,16 @@ const CATALOG = [
           multiline: ['auth_json'],
           revealable: [],
         },
+        {
+          // opencode 자신의 유료 플랜(OpenCode Go — CLI 는 "OpenCode Zen" 이라 부른다).
+          // 웹(https://opencode.ai/auth)에서 만든 키 한 줄, 매니저가 `OPENCODE_API_KEY` 로 주입.
+          id: 'opencode_api_key',
+          label: 'Opencode Go (API Key)',
+          fields: ['api_key'],
+          required: ['api_key'],
+          multiline: [],
+          revealable: [],
+        },
       ],
     },
     login: {

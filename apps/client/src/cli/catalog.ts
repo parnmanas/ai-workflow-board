@@ -187,6 +187,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
       prefix: 'opencode_',
       providers: [
         { id: 'opencode_auth', label: 'Opencode (Provider Auth)', fields: ['auth_json'], required: ['auth_json'], multiline: ['auth_json'], revealable: [] },
+        { id: 'opencode_api_key', label: 'Opencode Go (API Key)', fields: ['api_key'], required: ['api_key'], multiline: [], revealable: [] },
       ],
     },
     login: {

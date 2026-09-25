@@ -133,7 +133,7 @@ test('flattened credential providers keep the old dropdown order and field facts
     'deepseek_api_key',
     'codex_subscription', 'codex_api_key',
     'antigravity_subscription', 'antigravity_api_key',
-    'opencode_auth',
+    'opencode_auth', 'opencode_api_key',
   ]);
   for (const p of providers) {
     assert.ok(p.id.startsWith(cliCredentialPrefix(p.cli)), `${p.id} carries its CLI prefix`);

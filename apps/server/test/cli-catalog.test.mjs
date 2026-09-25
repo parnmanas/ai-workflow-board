@@ -70,6 +70,7 @@ const OLD_PROVIDER_FIELDS = {
   codex_subscription: { label: 'Codex (Subscription)', fields: ['auth_json', 'config_toml'] },
   codex_api_key: { label: 'Codex (API Key)', fields: ['api_key'] },
   opencode_auth: { label: 'Opencode (Provider Auth)', fields: ['auth_json'] },
+  opencode_api_key: { label: 'Opencode Go (API Key)', fields: ['api_key'] },
   antigravity_subscription: { label: 'Antigravity (Subscription)', fields: ['oauth_creds_json'] },
   antigravity_api_key: { label: 'Antigravity (API Key)', fields: ['api_key'] },
 };

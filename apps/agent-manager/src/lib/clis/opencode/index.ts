@@ -2,8 +2,12 @@
 //
 // opencode 는 codex/claude 와 달리 **CLI 자신이 계정이 아니다** — 그 안의 provider
 // (openai / github-copilot / anthropic …)마다 따로 로그인하고, 결과는 provider 가
-// 무엇이든 auth.json 한 파일에 쌓인다. 그래서 credential kind 도 `opencode_auth`
-// 하나다.
+// 무엇이든 auth.json 한 파일에 쌓인다. 그래서 파일형 credential 은 `opencode_auth`
+// 하나다. 예외가 opencode 자신의 유료 플랜(OpenCode Go — CLI 는 "OpenCode Zen" 이라
+// 부른다)이다: 그건 웹(https://opencode.ai/auth)에서 만든 API 키 한 줄이고, opencode 가
+// `OPENCODE_API_KEY` env 로 곧장 읽는다(`opencode auth list` 가 "Environment · OpenCode
+// Zen OPENCODE_API_KEY" 로 보여 준다, 1.18.32 실측) — codex_api_key → OPENAI_API_KEY 와
+// 같은 모양의 `opencode_api_key` 로 둔다.
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +60,7 @@ export const opencodeModule = defineCliModule({
     prefix: 'opencode_',
     providers: [
       { id: 'opencode_auth', label: 'Opencode (Provider Auth)', fields: ['auth_json'], required: ['auth_json'] },
+      { id: 'opencode_api_key', label: 'Opencode Go (API Key)', fields: ['api_key'], required: ['api_key'] },
     ],
   },
 

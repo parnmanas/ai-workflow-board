@@ -67,6 +67,7 @@ test('예전 손표들이 모듈 선언에서 같은 값으로 파생된다', ()
     antigravity_subscription: ['oauth_creds_json'],
     antigravity_api_key: ['api_key'],
     opencode_auth: ['auth_json'],
+    opencode_api_key: ['api_key'],
   });
   assert.deepEqual(requiredCredentialFields('codex_subscription'), ['auth_json']);
   assert.equal(requiredCredentialFields('github'), null, '모르는 provider 는 검사하지 않는다(이전 동작)');

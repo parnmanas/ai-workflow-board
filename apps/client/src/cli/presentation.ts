@@ -48,6 +48,7 @@ const CLI_PROVIDER_ICONS: Record<string, string> = {
   antigravity_subscription: 'AS',
   antigravity_api_key: 'AK',
   opencode_auth: 'OA',
+  opencode_api_key: 'OG',
 };
 
 export function cliPresentation(cliId: string | null | undefined): CliPresentation {
@@ -95,7 +96,8 @@ export function defaultLoginCli(): string {
 //   - pi          → host ~/.pi/agent/{auth.json,settings.json} (`pi /login`) symlink/copy;
 //                   AWB has no per-agent credential concept for it at all (ticket d72282ad)
 //   - opencode    → a bound `opencode_auth` credential is injected as
-//                   `OPENCODE_AUTH_CONTENT` (wins over the file); when unbound the host
+//                   `OPENCODE_AUTH_CONTENT` (wins over the file); a bound `opencode_api_key`
+//                   (OpenCode Go plan) as `OPENCODE_API_KEY`; when unbound the host
 //                   ~/.local/share/opencode/auth.json (`opencode auth login`) is symlinked
 // Change the adapter → change the prose here too. Consumed through
 // `utils/credentialFallback.ts`, which stays the public API.
@@ -141,7 +143,7 @@ export const CREDENTIAL_FALLBACK_COPY: Record<string, CredentialFallbackCopy> = 
   opencode: {
     optionLabel: 'None — use the host opencode login (opencode auth login)',
     meaning:
-      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager points this agent at the host opencode login — the auth at ~/.local/share/opencode/auth.json (a.k.a. "operator HOME") on the manager host, set up via `opencode auth login` — on every spawn. Pick an opencode_auth credential instead to give this agent its own account (it is injected as OPENCODE_AUTH_CONTENT and takes precedence over that file, which stays untouched). Authentication still requires the host login to actually exist when nothing is picked; if it is absent opencode surfaces its own login error and turns fail.',
+      'Leaving this empty is a valid fallback configuration, not a per-agent credential gap: the manager points this agent at the host opencode login — the auth at ~/.local/share/opencode/auth.json (a.k.a. "operator HOME") on the manager host, set up via `opencode auth login` — on every spawn. Pick an opencode_auth credential instead to give this agent its own account (it is injected as OPENCODE_AUTH_CONTENT and takes precedence over that file, which stays untouched), or an opencode_api_key (OpenCode Go plan key, injected as OPENCODE_API_KEY). Authentication still requires the host login to actually exist when nothing is picked; if it is absent opencode surfaces its own login error and turns fail.',
   },
 };
 
