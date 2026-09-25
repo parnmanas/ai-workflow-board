@@ -18,6 +18,7 @@ import ConfirmRequestPanel from './ConfirmRequestPanel';
 import MissionConversationPanel from './MissionConversationPanel';
 import MissionStepRail from './MissionStepRail';
 import StepSessionPanel from './StepSessionPanel';
+import MissionEvidencePane from './MissionEvidencePane';
 import { MissionFormModal } from './OrchestrationPage';
 import { missionStyle, progressPercent } from './status';
 
@@ -49,7 +50,7 @@ export default function MissionDetailPage() {
    * 작업 세션, 없으면 미션 대화가 된다 — 탭을 하나 더 만들지 않고 선택 상태가 내용을
    * 가르는 구조다("step 을 고르면 그 세션, 선택을 풀면 메인 세션").
    */
-  const [tab, setTab] = useState<'session' | 'graph' | 'brief'>('session');
+  const [tab, setTab] = useState<'session' | 'graph' | 'evidence' | 'brief'>('session');
   const [busy, setBusy] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
@@ -137,6 +138,8 @@ export default function MissionDetailPage() {
   }
 
   const selectedStep = mission.steps.find((s) => s.id === selectedStepId) || null;
+  const evidenceTotal =
+    mission.steps.reduce((n, s) => n + (s.evidence_count ?? 0), 0) + (mission.mission_evidence_count ?? 0);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -252,6 +255,9 @@ export default function MissionDetailPage() {
             <Tab active={tab === 'graph'} onClick={() => setTab('graph')}>
               Plan graph
             </Tab>
+            <Tab active={tab === 'evidence'} onClick={() => setTab('evidence')}>
+              Evidence{evidenceTotal > 0 ? ` (${evidenceTotal})` : ''}
+            </Tab>
             <Tab active={tab === 'brief'} onClick={() => setTab('brief')}>
               Brief
             </Tab>
@@ -349,6 +355,21 @@ export default function MissionDetailPage() {
                     />
                   </>
                 )}
+              </div>
+            ) : tab === 'evidence' ? (
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                <MissionEvidencePane
+                  missionId={mission.id}
+                  wsId={wsId}
+                  steps={mission.steps}
+                  // 미션 상세가 갱신될 때마다(SSE/폴링) 갤러리도 다시 읽는다 — 새 증거는
+                  // 곧 updated_at 이나 증거 수의 변화로 드러난다.
+                  refreshKey={`${mission.updated_at}:${evidenceTotal}`}
+                  onSelectStep={(id) => {
+                    setSelectedStepId(id);
+                    setTab('session');
+                  }}
+                />
               </div>
             ) : (
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>

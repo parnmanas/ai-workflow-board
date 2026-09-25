@@ -13,6 +13,10 @@ export function isImageMime(mime: string | undefined | null): boolean {
   return !!mime && /^image\//i.test(mime);
 }
 
+export function isVideoMime(mime: string | undefined | null): boolean {
+  return !!mime && /^video\//i.test(mime);
+}
+
 // Minimal filename-extension → MIME map for the legacy / empty-mime fallback.
 // Older Resource attachment rows were persisted with an empty or generic
 // (application/octet-stream) file_mimetype. When that mime is fed to the inline

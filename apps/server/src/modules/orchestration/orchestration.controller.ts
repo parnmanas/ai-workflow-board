@@ -438,6 +438,42 @@ export class OrchestrationController {
     }
   }
 
+  /**
+   * step 방 첨부 하나(바이트 포함). 미션 화면의 썸네일·플레이어·다운로드가 읽는다.
+   * 채팅 경로는 참여자 게이트라 step 방에서는 사람이 못 읽는다(세션과 같은 이유).
+   */
+  @Get('steps/:stepId/attachments/:attachmentId')
+  async getStepAttachment(
+    @Param('stepId') stepId: string,
+    @Param('attachmentId') attachmentId: string,
+    @Query('workspace_id') workspaceId: string,
+    @Res() res: Response,
+  ) {
+    try {
+      return res.json(await this.missions.getStepAttachment(stepId, workspaceId, attachmentId));
+    } catch (e: any) {
+      return fail(res, e, 'Attachment not found');
+    }
+  }
+
+  /** 미션의 검증 증거 갤러리 — 모든 step 방과 미션 방의 이미지·동영상, 최신순. */
+  @Get('missions/:id/evidence')
+  async listMissionEvidence(
+    @Param('id') id: string,
+    @Query('workspace_id') workspaceId: string,
+    @Query('limit') limit: string,
+    @Res() res: Response,
+  ) {
+    try {
+      const parsed = parseInt(limit, 10);
+      return res.json(
+        await this.missions.listMissionEvidence(id, workspaceId, Number.isFinite(parsed) ? parsed : undefined),
+      );
+    } catch (e: any) {
+      return fail(res, e, 'Failed to read the mission evidence');
+    }
+  }
+
   @Post('steps/:stepId/confirm')
   async confirmStep(
     @Param('stepId') stepId: string,

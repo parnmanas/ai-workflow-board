@@ -348,6 +348,11 @@ export function renderStepPrompt(args: {
   } | null;
   /** 이 step 으로 이어지는 confirm node 들의 사용자 판정(티켓 5dbe4aa2). */
   confirmFeedback?: ConfirmFeedbackContext[];
+  /**
+   * 이 work order 가 배달되는 step 방. 증거(스크린샷·녹화) 안내가 방 id 를 그대로 적어
+   * 주기 위한 값이다 — "이 방" 이라고만 쓰면 모델이 다른 방 id 를 집는 일이 있다.
+   */
+  roomId?: string | null;
 }): string {
   const { mission, step, teamName, orchestratorName, dependencies } = args;
   const lines: string[] = [];
@@ -496,6 +501,31 @@ export function renderStepPrompt(args: {
       ),
     );
   }
+
+  // 증거는 보고보다 앞에 둔다 — 보고 절차를 다 읽고 나서 "아, 스크린샷도" 가 되면 이미
+  // 턴을 끝낸 뒤다. 검증을 눈으로 볼 수 있게 남기는 것이 "verified" 한 문장보다 낫고,
+  // 미션 화면은 이 방의 이미지·동영상을 그대로 이 step 의 검증 증거로 보여준다.
+  lines.push('## Evidence (screenshots / recordings)');
+  lines.push(
+    [
+      `Verification you can *see* is worth more than a sentence saying "verified". When a screenshot or a`,
+      `short screen recording shows the result — a page rendering, a test run, build output, a game scene —`,
+      `post it into **this step's chat room**${args.roomId ? ` (room_id: \`${args.roomId}\`)` : ''}. The mission`,
+      `board shows every image and video from this room as this step's verification evidence, and that is`,
+      `where the operator reviews it.`,
+      ``,
+      `1. \`mcp__awb__add_chat_message_attachment\` with \`room_id\`, \`file_name\`, base64 \`file_data\` and`,
+      `   \`file_mimetype\` (\`image/png\`, \`image/webp\`, \`video/webm\`, \`video/mp4\`). One call per file;`,
+      `   the response carries an \`attachment_id\`.`,
+      `2. \`mcp__awb__send_chat_room_message\` with \`room_id\`, a one-line caption saying what the picture`,
+      `   proves, and \`attachment_ids: [...]\`.`,
+      ``,
+      `Limits: 10 MB per file. Prefer PNG/WebP for screenshots and a short, downscaled WebM/MP4 (a few`,
+      `seconds) for recordings — trim before uploading rather than skipping the evidence. Say what you`,
+      `attached in your report \`summary\`. Never paste base64 into the summary or into the room text.`,
+    ].join('\n'),
+  );
+  lines.push('');
 
   lines.push('## Reporting (required)');
   lines.push(

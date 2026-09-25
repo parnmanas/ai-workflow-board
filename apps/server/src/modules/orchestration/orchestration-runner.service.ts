@@ -2370,6 +2370,7 @@ export class OrchestrationRunnerService {
       orchestratorName,
       dependencies,
       confirmFeedback: this.confirmFeedbackFor(mission, step, allSteps),
+      roomId: room.id,
       isRetry: step.attempt > 1 || !!opts?.recovery,
       workspaceFolder: runProvision?.workspace_folder,
       sharedFolder: folderScope === 'shared' && slotSpec

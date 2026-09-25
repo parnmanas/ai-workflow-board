@@ -103,7 +103,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2546,6 +2546,16 @@ export const api = {
     if (opts?.beforeId) params.set('before_id', opts.beforeId);
     return request<OrchestrationStepSession>(`/orchestration/steps/${stepId}/session?${params.toString()}`);
   },
+  /** step 방 첨부 하나(바이트 포함). 썸네일·플레이어·다운로드가 Blob 으로 바꿔 쓴다. */
+  getOrchestrationStepAttachment: (stepId: string, workspaceId: string, attachmentId: string) =>
+    request<OrchestrationStepAttachment & { file_data: string }>(
+      `/orchestration/steps/${stepId}/attachments/${attachmentId}?workspace_id=${encodeURIComponent(workspaceId)}`,
+    ),
+  /** 미션의 검증 증거 갤러리 — 모든 step 방과 미션 방의 이미지·동영상, 최신순. */
+  listOrchestrationMissionEvidence: (missionId: string, workspaceId: string, limit = 200) =>
+    request<{ mission_id: string; items: OrchestrationEvidenceItem[] }>(
+      `/orchestration/missions/${missionId}/evidence?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`,
+    ),
   getOrchestrationMission: (id: string, workspaceId: string) =>
     request<OrchestrationMissionDetail>(
       `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,

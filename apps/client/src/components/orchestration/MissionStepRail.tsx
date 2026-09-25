@@ -165,6 +165,15 @@ function StepRailRow({
         {step.status === 'awaiting_user' && (
           <span style={{ fontSize: 9, color: tokens.colors.warningLight, fontWeight: 700 }}>답변 필요</span>
         )}
+        {(step.evidence_count ?? 0) > 0 && (
+          <span
+            data-testid="rail-evidence-badge"
+            title={`검증 증거 ${step.evidence_count}개 (스크린샷·녹화)`}
+            style={{ marginLeft: 'auto', fontSize: 9.5, color: tokens.colors.textMuted }}
+          >
+            📎 {step.evidence_count}
+          </span>
+        )}
       </div>
 
       <div

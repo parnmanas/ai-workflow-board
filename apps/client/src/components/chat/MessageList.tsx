@@ -4,7 +4,7 @@ import { tokens } from '../../tokens';
 import type { ChatAttachment, ChatRoomMessageItem } from '../../types';
 import { formatClockTime, daySeparatorLabel, sameDay } from './utils/time';
 import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from './utils/markdown';
-import { base64ToBlob, formatBytes, isImageMime, triggerBlobDownload } from './utils/attachments';
+import { base64ToBlob, formatBytes, isImageMime, isVideoMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';
 import AgentRefCard from './AgentRefCard';
@@ -257,7 +257,12 @@ export default function MessageList({ messages, participantCount, participants =
     // New uniform attachment surface — split for image-inline vs file-button.
     const attachments: ChatAttachment[] = Array.isArray(msg.attachments) ? msg.attachments : [];
     const imageAttachments = attachments.filter((a) => isImageMime(a.mime_type || a.file_mimetype));
-    const fileAttachments = attachments.filter((a) => !isImageMime(a.mime_type || a.file_mimetype));
+    // 동영상은 그 자리에서 재생한다. 파일 카드(다운로드만)로 두면 검증 녹화를 보려고
+    // 파일을 내려받아 다른 앱을 열어야 한다 — 미션 대화에 올린 증거가 대개 이것이다.
+    const videoAttachments = attachments.filter((a) => isVideoMime(a.mime_type || a.file_mimetype));
+    const fileAttachments = attachments.filter(
+      (a) => !isImageMime(a.mime_type || a.file_mimetype) && !isVideoMime(a.mime_type || a.file_mimetype),
+    );
 
     const isMe = msg.sender_type === 'user' && msg.sender_id === currentUserId;
 
@@ -441,6 +446,35 @@ export default function MessageList({ messages, participantCount, participants =
                       ) : (
                         <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>…</span>
                       )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* Video attachments — inline player, fetched on demand like images. */}
+            {videoAttachments.length > 0 && (
+              <div style={{ display: 'flex', gap: tokens.spacing.sm, marginTop: tokens.spacing.sm, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
+                {videoAttachments.map((att) => {
+                  const id = att.id || att.attachment_id || '';
+                  const url = previewUrls[id];
+                  if (!url) ensureImagePreview(att);
+                  return url ? (
+                    <video
+                      key={id}
+                      data-testid="chat-video-attachment"
+                      src={url}
+                      controls
+                      preload="metadata"
+                      title={att.filename}
+                      style={{ maxWidth: 360, maxHeight: 240, borderRadius: tokens.radii.sm, background: '#000' }}
+                    />
+                  ) : (
+                    <div
+                      key={id}
+                      title={att.filename}
+                      style={{ width: 160, height: 90, borderRadius: tokens.radii.sm, background: tokens.colors.border, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    >
+                      <span style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary }}>▶ …</span>
                     </div>
                   );
                 })}

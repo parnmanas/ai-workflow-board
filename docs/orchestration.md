@@ -322,6 +322,36 @@ Mm` 을 나란히 그려 운영자가 그 결말을 미리 볼 수 있게 한다
 (지시·CLI 하트비트·에이전트 보고 전사, 최신순 + `before_id` 복합 커서)이며, 채팅 API 의
 참여자 게이트를 우회하지 않고 orchestration 권한으로 게이트한다.
 
+### 검증 증거 — 스크린샷·녹화 (Evidence 탭)
+
+"verified" 한 문장보다 결과를 **눈으로 볼 수 있는** 그림이 낫다. 미션 화면의 Evidence 탭은
+모든 step 방과 미션 방에 올라온 **이미지·동영상**을 step 별로 모아 보여주고(썸네일 → 원본/
+인라인 재생), step 세션은 각 메시지 아래에 첨부를 그대로 그린다.
+
+**새 저장소를 만들지 않았다.** 담당 agent 가 자기 step 방에 파일을 올리는 경로가 이미 있다 —
+`add_chat_message_attachment`(방 참여자만, 10MB, mime sniffing) → `send_chat_room_message`
+(`attachment_ids`) — 그리고 사람은 미션 대화에 첨부할 수 있다. **그 두 방의 미디어가 곧
+증거**다. 별도 "증거" 엔티티를 두면 agent 가 두 번 올리거나 하나를 빼먹는 경로가 생기고,
+채팅에서 이미 보이는 것을 다른 이름으로 또 저장하게 된다. work order 는 `## Evidence` 절에서
+이 절차와 **그 step 방의 id** 를 그대로 적어 준다("이 방"이라고만 쓰면 모델이 다른 방 id 를
+집는 일이 있다). 동영상은 sniffer 가 모르는 형식이라 호출자의 mime 을 믿는다 — 10MB 한도
+안에서 짧고 다운스케일한 WebM/MP4 를 올리라고 안내한다.
+
+읽기 경로가 따로 필요한 이유는 세션 전사와 같다: 채팅의 `chat-rooms/:room/attachments/:id` 는
+참여자 게이트이고 step 방에는 사람이 없다. 그래서
+- `GET /api/orchestration/steps/:id/attachments/:attId` — 바이트. **첨부가 그 step 의 방에
+  속하는지**를 앵커로 잡는다(다른 step 의 id 로는 404, 워크스페이스 경계는 step 조회가 강제).
+- `GET /api/orchestration/missions/:id/evidence` — 갤러리 목록(메타만, 최신순, 상한 있음).
+  `(room_id, created_at)` 인덱스를 타는 한 쿼리다. 미션 방 항목(`step_id: null`)의 바이트는
+  채팅 경로로 읽는다 — 사람이 그 방의 참여자다.
+- 미션 상세의 step 마다 `evidence_count`, 미션에 `mission_evidence_count` — GROUP BY 한 쿼리.
+  레일 배지(📎 n)와 Evidence 탭 카운트가 여기서 나온다.
+
+세션 전사와 갤러리 목록은 **메타만** 싣는다. 10MB 짜리 동영상 여러 개가 base64 로 실리면
+패널을 여는 것만으로 수십 MB 를 내려받는다. 썸네일이 화면에 놓일 때 바이트를 받아 Blob URL 로
+바꾸고 언마운트 때 revoke 한다(채팅 MessageList 와 같은 규칙). 채팅 MessageList 도 이제
+동영상을 인라인 플레이어로 그린다 — 미션 대화에 사람이 올린 녹화가 대개 그것이다.
+
 > 매니저 쪽 짝: 하트비트는 spawn 당 30줄에서 끊겼는데, 그러면 90분짜리 step 의 카드가 초반
 > 30줄에 얼어붙어 이 기능의 의미가 사라진다. action room(orchestration step / QA / Action
 > run)에서는 cap 을 끊는 대신 간격을 늘린다(cap 이후 30초에 한 줄) — `shouldEmitProgressHeartbeat`.

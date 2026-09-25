@@ -2986,6 +2986,41 @@ export interface OrchestrationStepSessionItem {
   sender_id: string;
   sender_name: string;
   text: string;
+  /** 메시지에 묶인 파일 메타. 바이트는 `getOrchestrationStepAttachment` 로 따로 받는다. */
+  attachments?: OrchestrationStepAttachment[];
+}
+
+/** step 방 첨부 메타. `is_media` 면 화면이 썸네일/플레이어로 그린다. */
+export interface OrchestrationStepAttachment {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  is_media: boolean;
+  uploaded_by_type: string;
+  uploaded_by_id: string;
+  uploaded_by: string;
+  created_at: string;
+}
+
+/**
+ * 미션 검증 증거 한 장 — step 방·미션 방의 이미지·동영상. `step_id` 가 null 이면 미션 방
+ * (사람이나 orchestrator 가 올린 것)이고, 그 바이트는 채팅 경로로 읽는다(사람이 참여자다).
+ */
+export interface OrchestrationEvidenceItem {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  uploaded_by_type: string;
+  uploaded_by_id: string;
+  uploaded_by: string;
+  created_at: string;
+  room_id: string;
+  message_id: string;
+  step_id: string | null;
+  step_key: string;
+  step_title: string;
 }
 
 export interface OrchestrationStepSession {
@@ -3035,6 +3070,8 @@ export interface OrchestrationStep {
   confirm_decision: OrchestrationConfirmDecision | null;
   /** 진행 중 step 의 최신 활동. 구 서버 응답에는 없으므로 옵셔널. */
   activity?: OrchestrationStepActivity | null;
+  /** 이 step 방에 올라온 이미지·동영상 수. 구 서버 응답에는 없으므로 옵셔널. */
+  evidence_count?: number;
 }
 
 // ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────
@@ -3118,6 +3155,8 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   confirm_policy: OrchestrationConfirmPolicy;
   /** 미션 대화의 사용자 chat 옵션 — 서버가 항상 정규화해 보낸다(티켓 9cfd8161). */
   user_chat_mode: OrchestrationUserChatMode;
+  /** 미션 방에 올라온 이미지·동영상 수. 구 서버 응답에는 없으므로 옵셔널. */
+  mission_evidence_count?: number;
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */

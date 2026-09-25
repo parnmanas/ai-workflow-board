@@ -11,7 +11,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository, In, Not } from 'typeorm';
+import { Brackets, DataSource, EntityManager, Repository, In, Not } from 'typeorm';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
@@ -20,6 +20,7 @@ import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember'
 import { Agent } from '../../entities/Agent';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
+import { TicketAttachment } from '../../entities/TicketAttachment';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
@@ -162,6 +163,70 @@ export interface StepSessionItem {
   sender_id: string;
   sender_name: string;
   text: string;
+  /** 이 메시지에 묶인 파일들(메타만 — 바이트는 `steps/:id/attachments/:attId` 로). */
+  attachments: StepAttachmentMeta[];
+}
+
+/**
+ * step 방에 올라온 파일 하나의 메타. 바이트는 싣지 않는다 — 전사 한 페이지에 10MB 짜리
+ * 동영상 여러 개가 base64 로 실리면 세션 패널을 여는 것만으로 수십 MB 를 내려받는다.
+ * `is_media` 가 true 면 화면이 인라인(썸네일/플레이어)으로 그린다.
+ */
+export interface StepAttachmentMeta {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  is_media: boolean;
+  uploaded_by_type: string;
+  uploaded_by_id: string;
+  uploaded_by: string;
+  created_at: Date;
+}
+
+/**
+ * 미션 증거 갤러리의 한 항목 — step 방과 미션 방에 올라온 **이미지·동영상**만.
+ *
+ * "검증 증거" 를 따로 저장하지 않는 이유: 담당 agent 가 자기 step 방에 스크린샷/녹화를
+ * 올리는 경로(`add_chat_message_attachment` → `send_chat_room_message`)가 이미 있고,
+ * 사람은 미션 대화에 첨부할 수 있다. 그 두 방의 미디어가 곧 증거다. 별도 엔티티를 만들면
+ * agent 가 두 번 올리거나 하나를 빼먹는 경로가 생긴다.
+ */
+export interface MissionEvidenceItem {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  uploaded_by_type: string;
+  uploaded_by_id: string;
+  uploaded_by: string;
+  created_at: Date;
+  room_id: string;
+  message_id: string;
+  /** null = 미션 방(사람 또는 orchestrator 가 올린 것). */
+  step_id: string | null;
+  step_key: string;
+  step_title: string;
+}
+
+/** 화면에 인라인으로 그릴 수 있는 종류 — 증거 갤러리와 카운트가 같은 판정을 쓴다. */
+export function isEvidenceMime(mime: string | null | undefined): boolean {
+  return /^(image|video)\//i.test(String(mime ?? ''));
+}
+
+/** 첨부 행 → 메타(바이트 제외). 세션 전사와 다운로드 응답이 같은 모양을 쓴다. */
+function projectStepAttachment(row: TicketAttachment): StepAttachmentMeta {
+  return {
+    id: row.id,
+    file_name: row.file_name,
+    mime_type: row.file_mimetype,
+    size_bytes: row.file_size,
+    is_media: isEvidenceMime(row.file_mimetype),
+    uploaded_by_type: row.uploaded_by_type,
+    uploaded_by_id: row.uploaded_by_id,
+    uploaded_by: row.uploaded_by,
+    created_at: row.created_at,
+  };
 }
 
 /** 저장된 채팅 행 하나를 세션 항목 종류로 분류한다. */
@@ -219,6 +284,8 @@ export interface MissionStepView {
    * 없다"는 뜻이고, 그것 자체가 읽어야 할 신호다.
    */
   activity: StepActivity | null;
+  /** 이 step 방에 올라온 이미지·동영상 수 — 레일/카드의 증거 배지. */
+  evidence_count: number;
 }
 
 export interface MissionDetail extends MissionListItem {
@@ -255,6 +322,8 @@ export interface MissionDetail extends MissionListItem {
   confirm_policy: ConfirmPolicy;
   /** 미션 대화의 사용자 chat 옵션 — 항상 정규화된 값이다(티켓 9cfd8161). */
   user_chat_mode: UserChatMode;
+  /** 미션 방(step 이 아닌)에 올라온 이미지·동영상 수. step 별 수는 각 step 에. */
+  mission_evidence_count: number;
   steps: MissionStepView[];
   events: Array<{
     id: string;
@@ -788,6 +857,10 @@ export class OrchestrationMissionService {
     // events 는 여기서 아직 DESC(최신 우선)다 — 아래 응답 조립에서 reverse() 되므로
     // 활동 스캔은 반드시 그 전에 끝내야 한다.
     const activityByStepId = await this.loadLiveStepActivity(steps, events);
+    const evidenceByRoom = await this.loadEvidenceCounts([
+      ...steps.map((s) => s.room_id),
+      mission.room_id,
+    ]);
 
     return {
       id: mission.id,
@@ -879,8 +952,10 @@ export class OrchestrationMissionService {
           last_heartbeat_at: s.last_heartbeat_at ?? null,
           confirm_decision: s.confirm_decision ?? null,
           activity: activityByStepId.get(s.id) ?? null,
+          evidence_count: s.room_id ? evidenceByRoom.get(s.room_id) ?? 0 : 0,
         };
       }),
+      mission_evidence_count: mission.room_id ? evidenceByRoom.get(mission.room_id) ?? 0 : 0,
       // Oldest-first for rendering; the DESC + take above is only there so the
       // limit keeps the RECENT tail rather than the first N events of a long run.
       events: events.reverse().map((e) => ({
@@ -1036,6 +1111,25 @@ export class OrchestrationMissionService {
     const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
     const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
 
+    // 페이지에 실린 메시지들의 첨부 메타(바이트 제외). 채팅 히스토리와 같은 조인이지만
+    // 참여자 게이트 없이 — 이 경로 자체가 orchestration 권한으로 게이트된다.
+    const attachmentsByMessage = new Map<string, StepAttachmentMeta[]>();
+    if (page.length) {
+      const rows = await this.dataSource.getRepository(TicketAttachment).find({
+        where: { owner_type: 'chat_message', owner_id: In(page.map((r) => r.id)) },
+        select: [
+          'id', 'owner_id', 'file_name', 'file_mimetype', 'file_size',
+          'uploaded_by_type', 'uploaded_by_id', 'uploaded_by', 'created_at',
+        ],
+        order: { created_at: 'ASC', id: 'ASC' },
+      });
+      for (const a of rows) {
+        const list = attachmentsByMessage.get(a.owner_id) ?? [];
+        list.push(projectStepAttachment(a));
+        attachmentsByMessage.set(a.owner_id, list);
+      }
+    }
+
     const items: StepSessionItem[] = page.map((r) => ({
       id: r.id,
       at: r.created_at,
@@ -1044,6 +1138,7 @@ export class OrchestrationMissionService {
       sender_id: r.sender_id,
       sender_name: r.sender_type === 'agent' ? displayById.get(r.sender_id) ?? '' : '',
       text: r.type === 'progress' ? plainProgressText(r.content) : String(r.content ?? ''),
+      attachments: attachmentsByMessage.get(r.id) ?? [],
     }));
 
     return {
@@ -1052,6 +1147,130 @@ export class OrchestrationMissionService {
       has_more,
       next_before_id: has_more && page.length ? page[page.length - 1].id : null,
     };
+  }
+
+  /**
+   * step 방 첨부 하나의 바이트 — 미션 화면의 썸네일/플레이어/다운로드가 읽는다.
+   *
+   * 채팅의 `chat-rooms/:room/attachments/:id` 는 참여자 게이트라 step 방에서는 어느
+   * 운영자도 못 읽는다(세션 전사와 같은 이유). 여기서는 **첨부가 그 step 의 방에 속하는지**
+   * 를 앵커로 잡는다 — step 을 통해 워크스페이스 경계가 강제되고, 다른 방의 첨부 id 를
+   * 들이밀어도 방이 다르면 404 다. 미션 방의 첨부는 채팅 경로로 읽는다(사람이 참여자다).
+   */
+  async getStepAttachment(
+    stepId: string,
+    workspaceId: string,
+    attachmentId: string,
+  ): Promise<StepAttachmentMeta & { file_data: string }> {
+    const step = await this.requireStep(stepId, workspaceId);
+    if (!step.room_id) throw orchestrationError(404, 'attachment not found');
+    const row = await this.dataSource.getRepository(TicketAttachment).findOne({
+      where: { id: attachmentId, room_id: step.room_id },
+    });
+    if (!row || (row.owner_type !== 'chat_message' && row.owner_type !== 'chat_room')) {
+      throw orchestrationError(404, 'attachment not found');
+    }
+    return { ...projectStepAttachment(row), file_data: row.file_data };
+  }
+
+  /**
+   * 미션의 검증 증거 — 모든 step 방과 미션 방의 이미지·동영상, 최신순.
+   *
+   * 한 쿼리다: room_id 가 미션의 방 집합에 속하고 mime 이 image/* 또는 video/* 인 첨부.
+   * `(room_id, created_at)` 인덱스를 타므로 방 수에 비례해 싸다. 상한(`limit`)을 두는 이유는
+   * 갤러리 한 화면에 수백 장이 필요한 경우가 없고, 필요하면 step 세션에서 그 step 만 깊게
+   * 보면 되기 때문이다.
+   */
+  async listMissionEvidence(
+    missionId: string,
+    workspaceId: string,
+    limit = 200,
+  ): Promise<{ mission_id: string; items: MissionEvidenceItem[] }> {
+    const mission = await this.requireMission(missionId, workspaceId);
+    const steps = await this.listSteps(mission.id);
+    const stepByRoom = new Map<string, OrchestrationStep>();
+    for (const s of steps) if (s.room_id) stepByRoom.set(s.room_id, s);
+    const roomIds = [...stepByRoom.keys(), ...(mission.room_id ? [mission.room_id] : [])];
+    if (roomIds.length === 0) return { mission_id: mission.id, items: [] };
+
+    const rows = await this.dataSource
+      .getRepository(TicketAttachment)
+      .createQueryBuilder('a')
+      .select([
+        'a.id', 'a.room_id', 'a.owner_type', 'a.owner_id', 'a.file_name', 'a.file_mimetype', 'a.file_size',
+        'a.uploaded_by_type', 'a.uploaded_by_id', 'a.uploaded_by', 'a.created_at',
+      ])
+      .where('a.room_id IN (:...roomIds)', { roomIds })
+      .andWhere("a.owner_type = 'chat_message'")
+      .andWhere(
+        new Brackets((qb) => {
+          qb.where("a.file_mimetype LIKE 'image/%'").orWhere("a.file_mimetype LIKE 'video/%'");
+        }),
+      )
+      .orderBy('a.created_at', 'DESC')
+      .addOrderBy('a.id', 'DESC')
+      .limit(Math.min(Math.max(limit, 1), 500))
+      .getMany();
+
+    // 올린 agent 의 표시 이름은 `<Manager>/<Agent>` 규약을 따른다 — 저장된 `uploaded_by` 는
+    // 업로드 시점의 bare name 이라 그대로 그리면 같은 leaf 이름이 매니저마다 겹친다.
+    const agentIds = Array.from(
+      new Set(rows.filter((r) => r.uploaded_by_type === 'agent' && r.uploaded_by_id).map((r) => r.uploaded_by_id)),
+    );
+    const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+
+    const items: MissionEvidenceItem[] = rows.map((r) => {
+      const step = stepByRoom.get(r.room_id ?? '') ?? null;
+      return {
+        id: r.id,
+        file_name: r.file_name,
+        mime_type: r.file_mimetype,
+        size_bytes: r.file_size,
+        uploaded_by_type: r.uploaded_by_type,
+        uploaded_by_id: r.uploaded_by_id,
+        uploaded_by:
+          r.uploaded_by_type === 'agent' ? displayById.get(r.uploaded_by_id) ?? r.uploaded_by : r.uploaded_by,
+        created_at: r.created_at,
+        room_id: r.room_id ?? '',
+        message_id: r.owner_id,
+        step_id: step?.id ?? null,
+        step_key: step?.step_key ?? '',
+        step_title: step?.title ?? '',
+      };
+    });
+    return { mission_id: mission.id, items };
+  }
+
+  /**
+   * 방별 이미지·동영상 첨부 수 — 한 GROUP BY 쿼리. 레일/카드의 배지와 Evidence 탭 카운트가
+   * 여기서 나온다. 미션 상세는 30초마다 다시 그려지므로 방마다 세는 대신 한 번에 센다.
+   */
+  private async loadEvidenceCounts(roomIds: Array<string | null | undefined>): Promise<Map<string, number>> {
+    const ids = Array.from(new Set(roomIds.filter((r): r is string => !!r)));
+    const out = new Map<string, number>();
+    if (ids.length === 0) return out;
+    try {
+      const rows: Array<{ room_id: string; n: string | number }> = await this.dataSource
+        .getRepository(TicketAttachment)
+        .createQueryBuilder('a')
+        .select('a.room_id', 'room_id')
+        .addSelect('COUNT(*)', 'n')
+        .where('a.room_id IN (:...ids)', { ids })
+        .andWhere("a.owner_type = 'chat_message'")
+        .andWhere(
+          new Brackets((qb) => {
+            qb.where("a.file_mimetype LIKE 'image/%'").orWhere("a.file_mimetype LIKE 'video/%'");
+          }),
+        )
+        .groupBy('a.room_id')
+        .getRawMany();
+      for (const r of rows) out.set(String(r.room_id), Number(r.n) || 0);
+    } catch (err: any) {
+      // 장식용 카운트가 미션 화면을 깨뜨리면 안 된다 — 활동 신호와 같은 best-effort 규칙.
+      this.logService.warn('Orchestration', `evidence count lookup failed: ${err?.message ?? err}`);
+    }
+    return out;
   }
 
   /**

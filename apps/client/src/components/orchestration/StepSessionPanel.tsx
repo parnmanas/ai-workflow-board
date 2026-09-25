@@ -3,10 +3,19 @@ import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type {
   OrchestrationStep,
+  OrchestrationStepAttachment,
   OrchestrationStepSessionItem,
   OrchestrationTimelineEvent,
 } from '../../types';
 import { renderMarkdown } from '../chat/utils/markdown';
+import { base64ToBlob, formatBytes, triggerBlobDownload } from '../chat/utils/attachments';
+import {
+  EvidenceLightbox,
+  EvidenceThumb,
+  isEvidenceMedia,
+  useEvidenceUrls,
+  type EvidenceMediaMeta,
+} from './EvidenceMedia';
 import { relativeTime } from '../../utils/time';
 import { eventColor, stepStyle } from './status';
 import {
@@ -91,8 +100,17 @@ export default function StepSessionPanel({
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState<string | null>(null);
   const [showOrder, setShowOrder] = useState(false);
+  const [lightbox, setLightbox] = useState<{ meta: EvidenceMediaMeta; url: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottom = useRef(true);
+
+  // 첨부 바이트는 step 첨부 경로로 읽는다 — 채팅 경로는 참여자 게이트라 step 방에서는
+  // 사람이 못 읽는다. 세션 전사와 같은 게이트(orchestration 권한)를 탄다.
+  const loadAttachment = useCallback(
+    async (meta: EvidenceMediaMeta) => api.getOrchestrationStepAttachment(step.id, wsId, meta.id),
+    [step.id, wsId],
+  );
+  const media = useEvidenceUrls(loadAttachment);
 
   const style = stepStyle(step.status);
   const inFlight = style.live;
@@ -386,7 +404,14 @@ export default function StepSessionPanel({
               row.kind === 'event' ? (
                 <EventRow key={`e-${row.event.id}`} event={row.event} />
               ) : (
-                <ItemRow key={`i-${row.item.id}`} item={row.item} />
+                <ItemRow
+                  key={`i-${row.item.id}`}
+                  item={row.item}
+                  mediaUrls={media.urls}
+                  onEnsureMedia={media.ensure}
+                  onOpenMedia={(meta, url) => setLightbox({ meta, url })}
+                  onDownload={loadAttachment}
+                />
               ),
             )}
           </div>
@@ -407,12 +432,27 @@ export default function StepSessionPanel({
         읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지
         않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.
       </div>
+
+      {lightbox && <EvidenceLightbox meta={lightbox.meta} url={lightbox.url} onClose={() => setLightbox(null)} />}
     </div>
   );
 }
 
-function ItemRow({ item }: { item: OrchestrationStepSessionItem }) {
+function ItemRow({
+  item,
+  mediaUrls,
+  onEnsureMedia,
+  onOpenMedia,
+  onDownload,
+}: {
+  item: OrchestrationStepSessionItem;
+  mediaUrls: Record<string, string>;
+  onEnsureMedia: (meta: EvidenceMediaMeta) => void;
+  onOpenMedia: (meta: EvidenceMediaMeta, url: string) => void;
+  onDownload: (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
+}) {
   const [open, setOpen] = useState(false);
+  const attachments = item.attachments ?? [];
 
   if (item.kind === 'progress') {
     return (
@@ -483,18 +523,103 @@ function ItemRow({ item }: { item: OrchestrationStepSessionItem }) {
         </span>
         <span style={{ color: tokens.colors.textMuted, fontSize: 10 }}>{timeOf(item.at)}</span>
       </div>
-      <div
-        style={{
-          marginTop: 2,
-          fontSize: 12.5,
-          lineHeight: 1.7,
-          color: tokens.colors.textSecondary,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-        }}
-      >
-        {renderMarkdown(item.text)}
-      </div>
+      {item.text && (
+        <div
+          style={{
+            marginTop: 2,
+            fontSize: 12.5,
+            lineHeight: 1.7,
+            color: tokens.colors.textSecondary,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {renderMarkdown(item.text)}
+        </div>
+      )}
+      {attachments.length > 0 && (
+        <AttachmentStrip
+          attachments={attachments}
+          mediaUrls={mediaUrls}
+          onEnsureMedia={onEnsureMedia}
+          onOpenMedia={onOpenMedia}
+          onDownload={onDownload}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 메시지 아래의 첨부 줄. 이미지·동영상은 썸네일(클릭 → 라이트박스), 그 밖의 파일은
+ * 이름·크기·다운로드 버튼. 검증 증거가 대개 여기로 들어온다 — work order 가 담당자에게
+ * 스크린샷/녹화를 이 방에 올리라고 지시한다.
+ */
+function AttachmentStrip({
+  attachments,
+  mediaUrls,
+  onEnsureMedia,
+  onOpenMedia,
+  onDownload,
+}: {
+  attachments: OrchestrationStepAttachment[];
+  mediaUrls: Record<string, string>;
+  onEnsureMedia: (meta: EvidenceMediaMeta) => void;
+  onOpenMedia: (meta: EvidenceMediaMeta, url: string) => void;
+  onDownload: (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
+}) {
+  const media = attachments.filter((a) => isEvidenceMedia(a));
+  const files = attachments.filter((a) => !isEvidenceMedia(a));
+  return (
+    <div data-testid="step-session-attachments" style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {media.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {media.map((a) => (
+            <EvidenceThumb key={a.id} meta={a} url={mediaUrls[a.id]} onEnsure={onEnsureMedia} onOpen={onOpenMedia} />
+          ))}
+        </div>
+      )}
+      {files.map((a) => (
+        <div
+          key={a.id}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 11.5,
+            padding: '5px 8px',
+            borderRadius: 6,
+            border: `1px solid ${tokens.colors.border}`,
+            maxWidth: 360,
+          }}
+        >
+          <span aria-hidden="true">📄</span>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {a.file_name}
+          </span>
+          <span style={{ color: tokens.colors.textMuted, fontSize: 10 }}>{formatBytes(a.size_bytes)}</span>
+          <button
+            type="button"
+            onClick={async () => {
+              const full = await onDownload(a);
+              if (!full?.file_data) return;
+              triggerBlobDownload(base64ToBlob(full.file_data, full.mime_type || a.mime_type), a.file_name);
+            }}
+            style={{
+              border: `1px solid ${tokens.colors.border}`,
+              background: 'transparent',
+              color: tokens.colors.textSecondary,
+              borderRadius: 5,
+              fontSize: 10.5,
+              padding: '2px 8px',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >
+            Download
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
