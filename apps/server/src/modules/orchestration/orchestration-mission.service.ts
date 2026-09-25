@@ -142,6 +142,41 @@ export function plainProgressText(content: string): string {
   return out.length > ACTIVITY_TEXT_MAX ? `${out.slice(0, ACTIVITY_TEXT_MAX - 1)}\u2026` : out;
 }
 
+/**
+ * step 작업 세션의 한 줄. `kind` 가 렌더링을 가른다:
+ *
+ *   - `system`   — AWB 가 그 방에 넣은 지시/요청(work order, lease 재연결 요청).
+ *                  본문이 마크다운 heading 으로 시작하므로 UI 가 접어서 제목만 보인다.
+ *   - `agent`    — 담당 agent 가 방에 남긴 메시지(보고·질문).
+ *   - `progress` — 매니저가 중계한 CLI 툴 하트비트. 이미 평문으로 변환돼 있다.
+ *   - `user`     — 사람이 남긴 줄. 정상 경로에는 없다(step 방에는 쓰기 입구가 없다).
+ *                  과거 데이터/수동 개입으로 존재할 수 있어 버리지 않고 표시한다.
+ */
+export type StepSessionItemKind = 'system' | 'agent' | 'progress' | 'user';
+
+export interface StepSessionItem {
+  id: string;
+  at: Date;
+  kind: StepSessionItemKind;
+  sender_type: string;
+  sender_id: string;
+  sender_name: string;
+  text: string;
+}
+
+/** 저장된 채팅 행 하나를 세션 항목 종류로 분류한다. */
+function classifyStepSessionRow(row: {
+  type: string;
+  sender_type: string;
+  sender_id: string;
+}): StepSessionItemKind {
+  if (row.type === 'progress') return 'progress';
+  if (row.sender_type === 'agent') return 'agent';
+  // 디스패치와 리퍼 안내는 의사 user `system` 으로 들어온다(방을 만든 주체가 AWB 다).
+  if (row.sender_type === 'user' && row.sender_id === 'system') return 'system';
+  return 'user';
+}
+
 export interface MissionStepView {
   id: string;
   step_key: string;
@@ -930,37 +965,93 @@ export class OrchestrationMissionService {
   }
 
   /**
-   * 한 step 의 활동 기록 — 상세 모달이 열릴 때만 읽는다(카드는 최신 한 줄로 충분하다).
+   * 한 step 의 **작업 세션** — 그 step 전용 방의 대화 기록.
    *
-   * step 방의 `progress` 행을 최신순으로 돌려준다. 방은 하나의 step 전용이고 매니저의
-   * 하트비트는 세션당 상한이 걸려 있으므로 행 수는 수십 건 규모다. `message` 타입은
-   * 섞지 않는다 — 에이전트의 최종 답변은 step 결과와 타임라인에 이미 있고, 여기 섞으면
-   * "진행 중 신호"와 "결과 보고"가 한 목록에서 구분되지 않는다.
+   * 미션 화면은 step 을 선택하면 오른쪽 패널에 이 기록을 그린다(선택을 풀면 미션
+   * 대화로 돌아간다). 그래서 이 경로는 "이 step 이 무엇을 받아서 무엇을 했고 무엇을
+   * 보고했는가" 전체이며, 카드의 최신 한 줄(`step.activity`)과는 깊이가 다르다.
    *
-   * 워크스페이스 경계는 step 조회에서 강제된다(`requireStep`). 방 참여자 여부는 보지
-   * 않는다 — step 방은 사람을 참여자로 넣지 않는 설계이므로(티켓 995a9519) 참여자
-   * 게이트를 그대로 적용하면 **아무 운영자도** 자기 미션의 진행 상황을 못 읽는다. 대신
-   * 이 경로는 미션을 읽을 수 있는 권한(MANAGE_ACTIONS)으로만 들어온다.
+   * 왜 채팅 API 를 쓰지 않는가: step 방은 **사람을 참여자로 넣지 않는 설계**다(티켓
+   * 995a9519 — 미션 하나가 수십 개를 만들고 사람이 낄 대화가 아니다). 그래서
+   * `chat-rooms/:id/messages` 의 참여자 게이트를 그대로 적용하면 자기 미션의 작업
+   * 내용을 **어느 운영자도** 못 읽는다. 읽기 입구를 orchestration 쪽에 두고 미션
+   * 권한으로 게이트하는 것이 올바른 위치이고, 쓰기 입구는 만들지 않는다 — 사람이
+   * step 방에 말을 걸면 그 지시는 orchestrator 의 계획 밖에서 흐른다.
+   *
+   * 정렬·커서는 채팅 히스토리와 **같은 관행**을 따른다: 최신순 DESC + `before_id`
+   * 복합 커서(created_at, id). 같은 밀리초에 몰린 하트비트 버스트에서 페이지 경계가
+   * 유실되지 않으려면 id 타이브레이커가 반드시 함께 가야 한다.
    */
-  async listStepActivity(
+  async getStepSession(
     stepId: string,
     workspaceId: string,
-    limit = 30,
-  ): Promise<{ step_id: string; step_key: string; items: StepActivity[] }> {
+    opts?: { limit?: number; beforeId?: string },
+  ): Promise<{
+    step_id: string;
+    step_key: string;
+    room_id: string | null;
+    items: StepSessionItem[];
+    has_more: boolean;
+    next_before_id: string | null;
+  }> {
     const step = await this.requireStep(stepId, workspaceId);
-    const take = Math.min(Math.max(limit, 1), 200);
-    let items: StepActivity[] = [];
-    if (step.room_id) {
-      const rows = await this.dataSource.getRepository(ChatRoomMessage).find({
-        where: { room_id: step.room_id, type: 'progress' },
-        order: { created_at: 'DESC' },
-        take,
-      });
-      items = rows
-        .map((r) => ({ at: r.created_at, source: 'cli' as const, text: plainProgressText(r.content) }))
-        .filter((r) => !!r.text);
+    const take = Math.min(Math.max(opts?.limit ?? 60, 1), 200);
+    const empty = {
+      step_id: step.id,
+      step_key: step.step_key,
+      room_id: step.room_id ?? null,
+      items: [] as StepSessionItem[],
+      has_more: false,
+      next_before_id: null,
+    };
+    if (!step.room_id) return empty;
+
+    const repo = this.dataSource.getRepository(ChatRoomMessage);
+    const qb = repo
+      .createQueryBuilder('m')
+      .where('m.room_id = :roomId', { roomId: step.room_id })
+      .orderBy('m.created_at', 'DESC')
+      .addOrderBy('m.id', 'DESC')
+      // 한 건 더 읽어 "더 있음"을 판정한다 — 두 번째 count 쿼리를 아낀다.
+      .limit(take + 1);
+    if (opts?.beforeId) {
+      const cursor = await repo.findOne({ where: { id: opts.beforeId } });
+      if (cursor) {
+        qb.andWhere('(m.created_at < :cursorAt OR (m.created_at = :cursorAt AND m.id < :cursorId))', {
+          cursorAt: cursor.created_at,
+          cursorId: cursor.id,
+        });
+      }
     }
-    return { step_id: step.id, step_key: step.step_key, items };
+    const rows = await qb.getMany();
+    const has_more = rows.length > take;
+    const page = has_more ? rows.slice(0, take) : rows;
+
+    // 발신 agent 이름만 해석한다. step 방에 사람이 말하는 경로는 없으므로(위 참고)
+    // user 발신은 `sender_type` 만 실어 보내고 이름 조회를 하지 않는다 — 있지도 않은
+    // 경로를 위해 매 요청마다 User 조회를 붙이지 않는다.
+    const agentIds = Array.from(
+      new Set(page.filter((r) => r.sender_type === 'agent' && r.sender_id).map((r) => r.sender_id)),
+    );
+    const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
+    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+
+    const items: StepSessionItem[] = page.map((r) => ({
+      id: r.id,
+      at: r.created_at,
+      kind: classifyStepSessionRow(r),
+      sender_type: r.sender_type,
+      sender_id: r.sender_id,
+      sender_name: r.sender_type === 'agent' ? displayById.get(r.sender_id) ?? '' : '',
+      text: r.type === 'progress' ? plainProgressText(r.content) : String(r.content ?? ''),
+    }));
+
+    return {
+      ...empty,
+      items,
+      has_more,
+      next_before_id: has_more && page.length ? page[page.length - 1].id : null,
+    };
   }
 
   /**

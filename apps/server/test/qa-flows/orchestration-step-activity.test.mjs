@@ -15,7 +15,8 @@
 //   4. 신호가 하나도 없으면 `null` 이다 — UI 의 "디스패치 후 무신호" 경고가 실제 값에
 //      근거한다.
 //   5. 목록 페이로드(`live_steps`)는 무엇이 돌고 있고 마지막 신호가 언제인지 싣는다.
-//   6. REST `steps/:id/activity` 는 최신순 기록을 돌려주고 워크스페이스 경계를 지킨다.
+//   6. REST `steps/:id/session` 은 그 방의 전사(지시·하트비트·보고)를 최신순 + 커서로
+//      돌려주고, 워크스페이스 경계와 인증을 지킨다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -85,7 +86,7 @@ async function roomOf(ds, stepId) {
 
 const byKey = (detail) => Object.fromEntries(detail.steps.map((s) => [s.step_key, s]));
 
-test('진행 중 step 의 활동 신호가 미션 페이로드와 REST 기록에 실린다', async (t) => {
+test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세션 전사를 REST 로 읽는다', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => {
     void app.close().catch(() => {});
@@ -231,30 +232,59 @@ test('진행 중 step 의 활동 신호가 미션 페이로드와 REST 기록에
     '끝난 step 은 live_steps 에서도 빠진다',
   );
 
-  logStep('REST 기록은 끝난 step 에 대해서도 최신순으로 읽힌다 (무엇을 하다 멈췄나)');
+  logStep('REST 세션 기록은 끝난 step 에 대해서도 읽힌다 (무엇을 하다 멈췄나)');
   const res = await fetch(
-    `${base}/api/orchestration/steps/${steps.build.id}/activity?workspace_id=${ws.id}&limit=10`,
+    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}&limit=50`,
     { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id } },
   );
   assert.equal(res.status, 200);
   const log = await res.json();
   assert.equal(log.step_key, 'build');
-  assert.equal(log.items.length, 2, 'progress 행만 센다 — work order 는 제외');
-  assert.match(log.items[0].text, /명령 완료/, '최신순');
-  assert.match(log.items[1].text, /첫 번째 명령/);
+  assert.ok(log.room_id, '어느 방을 읽었는지 함께 돌려준다');
+
+  // 세션은 방의 전부다 — 지시(work order), CLI 하트비트, 그리고 있으면 agent 메시지.
+  const kinds = log.items.map((i) => i.kind);
+  assert.ok(kinds.includes('system'), 'AWB 가 넣은 지시가 세션에 포함된다');
+  assert.equal(kinds.filter((k) => k === 'progress').length, 2, 'CLI 하트비트 두 줄');
+  assert.equal(log.items[0].id, log.items[0].id, 'id 가 실려 커서로 쓸 수 있다');
+
+  const progress = log.items.filter((i) => i.kind === 'progress');
+  assert.match(progress[0].text, /명령 완료/, '최신순');
+  assert.match(progress[1].text, /첫 번째 명령/);
   assert.ok(
-    log.items.every((i) => i.source === 'cli' && !i.text.startsWith('_')),
-    '전부 평문 CLI 신호다',
+    progress.every((i) => !i.text.startsWith('_') && !i.text.includes('\\_')),
+    '하트비트는 평문으로 변환돼 나온다',
+  );
+  const workOrder = log.items.find((i) => i.kind === 'system');
+  assert.match(workOrder.text, /Assigned task/, '지시 본문은 그대로 — UI 가 제목만 접어서 보여준다');
+
+  logStep('커서로 과거를 이어 붙일 수 있다');
+  const firstPage = await fetch(
+    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}&limit=2`,
+    { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id } },
+  ).then((r) => r.json());
+  assert.equal(firstPage.items.length, 2);
+  assert.equal(firstPage.has_more, true, '더 있으면 그렇다고 말한다');
+  assert.ok(firstPage.next_before_id, '다음 페이지 커서를 준다');
+  const secondPage = await fetch(
+    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}&limit=2&before_id=${firstPage.next_before_id}`,
+    { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id } },
+  ).then((r) => r.json());
+  assert.ok(secondPage.items.length > 0, '커서 뒤로 이어진다');
+  const firstIds = new Set(firstPage.items.map((i) => i.id));
+  assert.ok(
+    secondPage.items.every((i) => !firstIds.has(i.id)),
+    '페이지가 겹치지 않는다 — (created_at, id) 복합 커서가 같은 밀리초에서도 경계를 지킨다',
   );
 
   logStep('워크스페이스 경계를 지킨다');
   const wrong = await fetch(
-    `${base}/api/orchestration/steps/${steps.build.id}/activity?workspace_id=${other.id}`,
+    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${other.id}`,
     { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': other.id } },
   );
   assert.equal(wrong.status, 404, '다른 워크스페이스에서는 step 자체가 보이지 않는다');
 
-  const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/activity?workspace_id=${ws.id}`);
+  const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}`);
   assert.ok(anon.status === 401 || anon.status === 403, `인증 없이는 읽을 수 없다 (got ${anon.status})`);
 });
 

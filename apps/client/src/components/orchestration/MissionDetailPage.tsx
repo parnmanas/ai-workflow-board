@@ -3,10 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api';
 import type {
   OrchestrationMissionDetail,
-  OrchestrationStep,
-  OrchestrationStepActivity,
   OrchestrationTeam,
-  OrchestrationTimelineEvent,
   OrchestrationUpdateEvent,
   OrchestrationUserChatMode,
 } from '../../types';
@@ -19,8 +16,10 @@ import { relativeTime } from '../../utils/time';
 import PlanGraph from './PlanGraph';
 import ConfirmRequestPanel from './ConfirmRequestPanel';
 import MissionConversationPanel from './MissionConversationPanel';
+import MissionStepRail from './MissionStepRail';
+import StepSessionPanel from './StepSessionPanel';
 import { MissionFormModal } from './OrchestrationPage';
-import { eventColor, missionStyle, progressPercent, stepStyle } from './status';
+import { missionStyle, progressPercent } from './status';
 
 /**
  * Mission detail — the "watch the team work" view.
@@ -45,6 +44,12 @@ export default function MissionDetailPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  /**
+   * 오른쪽 패널이 무엇을 그리는가. `session` 이 기본이고, 선택된 step 이 있으면 그 step 의
+   * 작업 세션, 없으면 미션 대화가 된다 — 탭을 하나 더 만들지 않고 선택 상태가 내용을
+   * 가르는 구조다("step 을 고르면 그 세션, 선택을 풀면 메인 세션").
+   */
+  const [tab, setTab] = useState<'session' | 'graph' | 'brief'>('session');
   const [busy, setBusy] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
@@ -131,7 +136,6 @@ export default function MissionDetailPage() {
     );
   }
 
-  const style = missionStyle(mission.status);
   const selectedStep = mission.steps.find((s) => s.id === selectedStepId) || null;
 
   return (
@@ -163,12 +167,7 @@ export default function MissionDetailPage() {
             )}
             {(mission.status === 'planning' || mission.status === 'running') && (
               <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={busy}
-                  onClick={() => setShowNudge(true)}
-                >
+                <Button variant="secondary" size="sm" loading={busy} onClick={() => setShowNudge(true)}>
                   Nudge orchestrator
                 </Button>
                 <Button
@@ -200,172 +199,66 @@ export default function MissionDetailPage() {
         }
       />
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-        <StatusBanner mission={mission} />
-
-        {/* 미션 전체가 여기서 멈춰 있으므로 화면 맨 위에 둔다 — 계획 그래프 아래로
-            내려가면 "왜 아무것도 진행되지 않는가"를 찾는 데 스크롤이 필요해진다. */}
+      {/*
+        머리에 남는 것은 **한 줄짜리 상태**뿐이다. 브리핑·완료조건·계획 요약처럼 길고
+        거의 변하지 않는 텍스트는 Brief 탭으로 내렸다 — 그것들이 화면 위쪽을 차지하고
+        있으면 정작 지금 움직이는 것(진행 중인 step)을 보려고 매번 스크롤해야 한다.
+      */}
+      <div style={{ padding: '10px 16px 0', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <StatusStrip mission={mission} />
+        {/* 미션 전체가 여기서 멈춰 있으므로 접지 않는다 — 사람이 답해야 진행된다. */}
         <ConfirmRequestPanel steps={mission.steps} wsId={wsId} onDecided={() => load({ silent: true })} />
+      </div>
 
-        <Section title="Objective">
-          <Prose text={mission.objective} />
-          {mission.context && (
-            <>
-              <SubHeading>Context</SubHeading>
-              <Prose text={mission.context} muted />
-            </>
-          )}
-          {mission.method && (
-            <>
-              <SubHeading>Method</SubHeading>
-              <Prose text={mission.method} muted />
-            </>
-          )}
-          {mission.acceptance_criteria && (
-            <>
-              <SubHeading>Acceptance criteria</SubHeading>
-              <Prose text={mission.acceptance_criteria} muted />
-            </>
-          )}
-          <SubHeading>Step workspace</SubHeading>
-          <div style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
-            {mission.resolved_workspace_folder}
-          </div>
-          {/* Qualify the path: it is the root for ISOLATED slots only. A member
-              whose slot uses the shared folder scope runs in its own working
-              folder instead, so stating this unconditionally would send someone
-              looking for that member's files in a directory that never exists. */}
-          <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-            Relative to each member&apos;s working folder, for members whose roster slot uses the
-            <strong> isolated</strong> folder scope — each step gets its own subfolder here. Members set to
-            <strong> shared</strong> run in their working folder directly; the Teams screen shows which is which.
-          </div>
-        </Section>
-
-        {mission.completion_criteria.length > 0 && (
-          <Section
-            title="Completion criteria"
-            right={
-              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                {mission.completion_criteria.filter((c) => c.met).length}/{mission.completion_criteria.length} met
-              </span>
-            }
-          >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {mission.completion_criteria.map((c) => (
-                <div key={c.key} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12.5 }}>
-                  <span style={{ color: c.met ? tokens.colors.successLight : tokens.colors.textMuted }}>{c.met ? '☑' : '☐'}</span>
-                  <div>
-                    <span style={{ color: tokens.colors.textPrimary }}>{c.description}</span>{' '}
-                    <span style={{ fontFamily: 'monospace', fontSize: 10, color: tokens.colors.textMuted }}>{c.key}</span>
-                    {c.note && <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{c.note}</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Section>
-        )}
-
-        {mission.plan_summary && (
-          <Section title={`Orchestrator's plan (v${mission.plan_version})`}>
-            <Prose text={mission.plan_summary} />
-          </Section>
-        )}
-
-        <Section
-          title="Plan"
-          right={
-            mission.steps.length > 0 ? (
-              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                {mission.counts.done}/{mission.counts.total} done · up to {mission.max_parallel_steps} in parallel
-                {mission.graph_spec
-                  ? ` · graph: ${mission.graph_spec.nodes.length} nodes, ${mission.graph_spec.edges.length} edges` +
-                    (mission.graph_spec.edges.some((e) => e.kind === 'loop_back')
-                      ? `, ${mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length} loop`
-                      : '') +
-                    ` · budget ${mission.total_visits}/${mission.graph_spec.max_total_visits} runs`
-                  : ''}
-              </span>
-            ) : undefined
+      {/*
+        본문은 2단이다. 왼쪽은 "무엇을 볼지"(미션 대화 + step 목록), 오른쪽은 고른 것의
+        내용. 한 화면에 전부 쌓아 두던 이전 구조는 스크롤 위치가 곧 맥락이라, 대화를
+        읽다가 step 상태를 보려면 화면을 잃어버렸다.
+      */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', marginTop: 10, borderTop: `1px solid ${tokens.colors.border}` }}>
+        <MissionStepRail
+          steps={mission.steps}
+          graph={mission.graph_spec}
+          stepTimeoutMinutes={mission.step_timeout_minutes}
+          selectedId={selectedStepId}
+          onSelect={(id) => {
+            setSelectedStepId(id);
+            setTab('session');
+          }}
+          counts={mission.counts}
+          planVersion={mission.plan_version}
+          emptyHint={
+            mission.status === 'draft'
+              ? 'Not started yet — the orchestrator has not been briefed.'
+              : mission.status === 'planning'
+                ? 'The orchestrator is working out the plan. Steps appear the moment it submits one.'
+                : 'No steps in this mission.'
           }
-        >
-          {mission.steps.length === 0 ? (
-            <div style={{ fontSize: 12, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
-              {mission.status === 'draft'
-                ? 'Not started yet — the orchestrator has not been briefed.'
-                : mission.status === 'planning'
-                  ? 'The orchestrator has the brief and is working out the plan. Steps appear here the moment it submits one.'
-                  : 'No steps in this mission.'}
-            </div>
-          ) : (
-            <PlanGraph
-              steps={mission.steps}
-              graph={mission.graph_spec}
-              stepTimeoutMinutes={mission.step_timeout_minutes}
-              selectedId={selectedStepId}
-              onSelect={(s) => setSelectedStepId(s.id)}
-            />
-          )}
-        </Section>
+        />
 
-        {mission.result_summary && (
-          <Section title={mission.status === 'completed' ? 'Result' : 'Final report'}>
-            <Prose text={mission.result_summary} />
-          </Section>
-        )}
-
-        {mission.post_actions.length > 0 && (
-          <Section title="Post-completion actions">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {[...mission.post_actions]
-                .sort((a, b) => a.order - b.order)
-                .map((pa, i) => {
-                  const style = postActionStyle(pa.status);
-                  return (
-                    <div key={`${pa.action_id}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                      <span
-                        style={{
-                          padding: '1px 7px',
-                          borderRadius: 999,
-                          fontSize: 10,
-                          fontWeight: 700,
-                          textTransform: 'uppercase',
-                          color: style.color,
-                          background: style.background,
-                        }}
-                      >
-                        {pa.status}
-                      </span>
-                      <span style={{ fontFamily: 'monospace', color: tokens.colors.textSecondary }}>{pa.action_id}</span>
-                      <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>({pa.condition})</span>
-                      {pa.error && <span style={{ color: tokens.colors.dangerLight, fontSize: 11 }}>{pa.error}</span>}
-                    </div>
-                  );
-                })}
-            </div>
-          </Section>
-        )}
-
-        {/*
-          진행 중인 orchestrator 와 직접 주고받는 자리. Timeline 이 "무슨 일이
-          있었나"를 보여준다면 여기는 "지금 방향을 바꾸거나 물어보는" 곳이다.
-          실행 이벤트를 대화와 시간순으로 엮되 서로 다른 렌더러로 그려, 내 지시
-          직후에 무엇이 디스패치됐는지가 한 흐름에서 읽힌다.
-        */}
-        <Section
-          title="Conversation"
-          right={
-            /*
-              chat 옵션을 대화 바로 위에 둔다(티켓 9cfd8161). 미션 폼 모달의 Edit 버튼은
-              draft 에서만 뜨므로, 실행 중인 미션의 옵션을 바꿀 자리가 여기 말고는 없다 —
-              "옵션을 바꾸면 실행 중인 미션 방에도 즉시 반영된다"가 요구사항이다.
-
-              종료된 미션에서는 셀렉트를 감춘다: 종료 미션의 대화는 모드와 무관하게 읽기
-              전용이므로(서버 게이트가 그렇게 판정한다), 여기서 바꿔도 아무 일이 일어나지
-              않는 죽은 컨트롤이 된다. 서버도 종료 미션의 편집을 409 로 거부한다.
-            */
-            isLive ? (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: '6px 10px',
+              borderBottom: `1px solid ${tokens.colors.border}`,
+            }}
+          >
+            <Tab active={tab === 'session'} onClick={() => setTab('session')}>
+              {selectedStep ? 'Step session' : 'Mission conversation'}
+            </Tab>
+            <Tab active={tab === 'graph'} onClick={() => setTab('graph')}>
+              Plan graph
+            </Tab>
+            <Tab active={tab === 'brief'} onClick={() => setTab('brief')}>
+              Brief
+            </Tab>
+            {tab === 'session' && !selectedStep && isLive && (
+              <label
+                style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted }}
+              >
                 User chat
                 <select
                   value={mission.user_chat_mode}
@@ -397,35 +290,74 @@ export default function MissionDetailPage() {
                   <option value="off">Off (read-only)</option>
                 </select>
               </label>
-            ) : (
-              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>종료됨 · 기록 보존</span>
-            )
-          }
-        >
-          <div style={{ height: 420, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-            {/*
-              `key` 로 미션이 바뀌면 패널을 통째로 remount 한다 — 패널 내부에도 미션 경계
-              초기화가 있지만(리뷰 라운드3 P0), 호출부에서 한 번 더 못박아 두면 이후 이
-              패널을 다른 곳에서 재사용할 때도 미션 기록이 섞이지 않는다.
-            */}
-            <MissionConversationPanel
-              key={mission.id}
-              missionId={mission.id}
-              workspaceId={wsId}
-              roomId={mission.room_id}
-              events={mission.events}
-              live={isLive}
-              userChatMode={mission.user_chat_mode}
-            />
+            )}
           </div>
-        </Section>
 
-        <Section title="Timeline" right={<span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{mission.events.length} events</span>}>
-          <Timeline events={mission.events} onSelectStep={(stepId) => setSelectedStepId(stepId)} />
-        </Section>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            {tab === 'session' ? (
+              selectedStep ? (
+                /*
+                  `key` 로 step 이 바뀌면 패널을 통째로 remount 한다 — 전사·스크롤 위치·
+                  페이징 커서가 이전 step 의 것으로 남지 않게 하는 가장 확실한 경계다.
+                */
+                <StepSessionPanel
+                  key={selectedStep.id}
+                  step={selectedStep}
+                  wsId={wsId}
+                  events={mission.events}
+                  stepTimeoutMinutes={mission.step_timeout_minutes}
+                  onClose={() => setSelectedStepId(null)}
+                />
+              ) : (
+                <MissionConversationPanel
+                  key={mission.id}
+                  missionId={mission.id}
+                  workspaceId={wsId}
+                  roomId={mission.room_id}
+                  events={mission.events}
+                  live={isLive}
+                  userChatMode={mission.user_chat_mode}
+                />
+              )
+            ) : tab === 'graph' ? (
+              <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
+                {mission.steps.length === 0 ? (
+                  <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No steps to draw yet.</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 10 }}>
+                      {mission.counts.done}/{mission.counts.total} done · up to {mission.max_parallel_steps} in parallel
+                      {mission.graph_spec
+                        ? ` · graph: ${mission.graph_spec.nodes.length} nodes, ${mission.graph_spec.edges.length} edges` +
+                          (mission.graph_spec.edges.some((e) => e.kind === 'loop_back')
+                            ? `, ${mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length} loop`
+                            : '') +
+                          ` · budget ${mission.total_visits}/${mission.graph_spec.max_total_visits} runs`
+                        : ''}
+                    </div>
+                    <PlanGraph
+                      steps={mission.steps}
+                      graph={mission.graph_spec}
+                      stepTimeoutMinutes={mission.step_timeout_minutes}
+                      selectedId={selectedStepId}
+                      // 그래프에서 카드를 고르면 곧바로 그 step 의 세션으로 넘어간다 —
+                      // 위상을 보다가 "얘는 뭘 하고 있지"로 이어지는 흐름이 자연스럽다.
+                      onSelect={(s) => {
+                        setSelectedStepId(s.id);
+                        setTab('session');
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>
+                <BriefPane mission={mission} />
+              </div>
+            )}
+          </div>
+        </div>
       </div>
-
-      <StepDetailModal step={selectedStep} wsId={wsId} onClose={() => setSelectedStepId(null)} />
 
       <MissionFormModal
         isOpen={showEdit}
@@ -465,15 +397,30 @@ export default function MissionDetailPage() {
   );
 }
 
-/**
- * Operator → orchestrator channel.
- *
- * This is deliberately the ONLY way a human injects direction into a running
- * mission: it posts into the orchestrator's room and wakes it, so whatever the
- * operator says goes through the same agent that owns the plan. The alternative
- * — letting the UI edit steps directly — would desync the orchestrator's model
- * of the mission from the database with no channel to reconcile them.
- */
+/** 오른쪽 패널의 탭 하나. */
+function Tab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      style={{
+        border: 'none',
+        borderBottom: `2px solid ${active ? tokens.colors.accent : 'transparent'}`,
+        background: 'transparent',
+        color: active ? tokens.colors.textPrimary : tokens.colors.textMuted,
+        fontSize: 12,
+        fontWeight: active ? 700 : 500,
+        padding: '5px 10px',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function NudgeModal({
   isOpen,
   missionId,
@@ -553,25 +500,24 @@ function NudgeModal({
   );
 }
 
-function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
+/**
+ * 한 줄짜리 상태 띠 — "살아 있나 / 어디까지 왔나 / 지금 멈춰 있나".
+ *
+ * 이전의 큰 배너에서 카드 형태와 여백을 덜어냈다. 이 줄의 역할은 눈에 걸리는 것이지
+ * 자리를 차지하는 것이 아니고, 아래 2단 본문이 화면의 주인이어야 한다. 실패 사유와
+ * planning 안내는 남긴다 — 둘 다 "왜 아무 일도 일어나지 않는가"의 답이라 접으면 안 된다.
+ */
+function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
   const style = missionStyle(mission.status);
   const pct = progressPercent(mission.counts);
   return (
-    <div
-      style={{
-        padding: '14px 16px',
-        borderRadius: 10,
-        border: `1px solid ${tokens.colors.border}`,
-        borderLeft: `3px solid ${style.color}`,
-        background: tokens.colors.surfaceCard,
-      }}
-    >
+    <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span
           style={{
-            padding: '3px 10px',
+            padding: '2px 9px',
             borderRadius: 999,
-            fontSize: 11,
+            fontSize: 10.5,
             fontWeight: 700,
             letterSpacing: '0.04em',
             textTransform: 'uppercase',
@@ -584,17 +530,35 @@ function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
         {style.live && (
           <span
             aria-hidden="true"
-            style={{ width: 7, height: 7, borderRadius: '50%', background: style.color, animation: 'awb-orch-pulse 1.4s ease-in-out infinite' }}
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: style.color,
+              animation: 'awb-orch-pulse 1.4s ease-in-out infinite',
+            }}
           />
         )}
-        <span style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
+        <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
           {mission.counts.total > 0
             ? `${mission.counts.done} done · ${mission.counts.inFlight} working · ${mission.counts.pending} waiting` +
               `${mission.counts.awaitingUser ? ` · ${mission.counts.awaitingUser} needs your decision` : ''}` +
               `${mission.counts.failed ? ` · ${mission.counts.failed} failed` : ''}`
             : 'No steps yet'}
         </span>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: tokens.colors.textMuted }}>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 90,
+            height: 4,
+            borderRadius: 999,
+            background: `${tokens.colors.border}80`,
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ width: `${pct}%`, height: '100%', background: style.color, transition: 'width 300ms ease' }} />
+        </div>
+        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
           {mission.finished_at
             ? `finished ${relativeTime(mission.finished_at)}`
             : mission.started_at
@@ -603,17 +567,13 @@ function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
         </span>
       </div>
 
-      <div style={{ marginTop: 10, height: 5, borderRadius: 999, background: `${tokens.colors.border}80`, overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: style.color, transition: 'width 300ms ease' }} />
-      </div>
-
       {mission.failure_reason && (
-        <div style={{ marginTop: 10, fontSize: 12, color: tokens.colors.dangerLight, lineHeight: 1.5 }}>
+        <div style={{ marginTop: 7, fontSize: 11.5, color: tokens.colors.dangerLight, lineHeight: 1.5 }}>
           {mission.failure_reason}
         </div>
       )}
       {mission.status === 'planning' && (
-        <div style={{ marginTop: 10, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
+        <div style={{ marginTop: 7, fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5 }}>
           The orchestrator has been briefed in its mission room and is deciding how to break the work up. If nothing
           appears for a while, check that the orchestrator agent is online — the server re-briefs it automatically
           before giving up.
@@ -623,7 +583,6 @@ function StatusBanner({ mission }: { mission: OrchestrationMissionDetail }) {
   );
 }
 
-/** post_action 한 행의 "디스패치 결과" 색상 — 그 ActionRun의 최종 결과는 아니다(여기선 추적하지 않음, 서버쪽 MissionPostAction 문서 참고). */
 function postActionStyle(status: string): { color: string; background: string } {
   if (status === 'dispatched') return { color: tokens.colors.successLight, background: `${tokens.colors.success}22` };
   if (status === 'dispatch_failed') return { color: tokens.colors.dangerLight, background: `${tokens.colors.danger}22` };
@@ -668,275 +627,120 @@ function Prose({ text, muted }: { text: string; muted?: boolean }) {
   );
 }
 
-function Timeline({
-  events,
-  onSelectStep,
-}: {
-  events: OrchestrationTimelineEvent[];
-  onSelectStep: (stepId: string) => void;
-}) {
-  if (events.length === 0) {
-    return <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Nothing has happened yet.</div>;
-  }
-  // Newest first: on a live mission the thing that just happened is what the
-  // operator came to see, and a long-running mission's timeline is far taller
-  // than the viewport.
-  const ordered = [...events].reverse();
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column' }}>
-      {ordered.map((event) => (
-        <div key={event.id} style={{ display: 'flex', gap: 10, padding: '6px 0' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, paddingTop: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: eventColor(event.type) }} />
-            <span style={{ flex: 1, width: 1, background: tokens.colors.border, marginTop: 3 }} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, color: tokens.colors.textPrimary, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-              {event.message}
-            </div>
-            <div style={{ marginTop: 2, fontSize: 10, color: tokens.colors.textMuted, display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={{ fontFamily: 'monospace' }}>{event.type}</span>
-              {event.actor_name && <span>{event.actor_name}</span>}
-              <span>{relativeTime(event.created_at)}</span>
-              {event.step_id && (
-                <button
-                  type="button"
-                  onClick={() => onSelectStep(event.step_id!)}
-                  style={{
-                    border: 'none',
-                    background: 'transparent',
-                    color: tokens.colors.accentSubtle,
-                    cursor: 'pointer',
-                    fontSize: 10,
-                    fontFamily: 'inherit',
-                    padding: 0,
-                  }}
-                >
-                  {event.step_key ? `open ${event.step_key}` : 'open step'}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function StepDetailModal({
-  step,
-  wsId,
-  onClose,
-}: {
-  step: OrchestrationStep | null;
-  wsId: string;
-  onClose: () => void;
-}) {
-  if (!step) return null;
-  const style = stepStyle(step.status);
-  return (
-    <Modal
-      isOpen={!!step}
-      onClose={onClose}
-      title={step.title}
-      maxWidth={720}
-      footer={
-        <Button variant="secondary" onClick={onClose}>
-          Close
-        </Button>
-      }
-    >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <span
-            style={{
-              padding: '2px 9px',
-              borderRadius: 999,
-              fontSize: 10,
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              color: style.color,
-              background: style.background,
-            }}
-          >
-            {style.label}
-          </span>
-          <span style={{ fontSize: 11, fontFamily: 'monospace', color: tokens.colors.textMuted }}>{step.step_key}</span>
-          <span style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
-            {step.assignee_name || 'unassigned'}
-          </span>
-          <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-            attempt {step.attempt}/{step.max_attempts}
-          </span>
-          {step.retry_policy === 'manual' && (
-            <span
-              data-testid="step-retry-policy-manual"
-              style={{ fontSize: 10, color: tokens.colors.warningLight, fontWeight: 700, textTransform: 'uppercase' }}
-            >
-              manual recovery only
-            </span>
-          )}
-        </div>
-
-        {/*
-          복구 사유는 needs_recovery 의 존재 이유다 — 상태만 보여주고 왜 자동으로
-          재실행하지 않는지 숨기면 운영자는 그냥 멈춘 step 과 구분할 수 없다.
-        */}
-        {step.recovery_reason && (
-          <div
-            data-testid="step-recovery-reason"
-            style={{
-              padding: '10px 12px',
-              borderRadius: 6,
-              border: `1px solid ${tokens.colors.dangerLight}55`,
-              background: `${tokens.colors.dangerBg}30`,
-              fontSize: 12,
-              color: tokens.colors.textSecondary,
-              lineHeight: 1.6,
-            }}
-          >
-            <div style={{ fontWeight: 700, color: tokens.colors.dangerLight, marginBottom: 4 }}>
-              자동 복구 불가 — 사람의 확인이 필요합니다
-            </div>
-            {step.recovery_reason}
-          </div>
-        )}
-
-        {step.workspace_folder && (
-          <div style={{ fontSize: 11, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
-            {step.workspace_folder}
-          </div>
-        )}
-
-        {step.depends_on.length > 0 && (
-          <div style={{ fontSize: 11, color: tokens.colors.textSecondary }}>
-            Depends on: {step.depends_on.join(', ')}
-          </div>
-        )}
-
-        {/*
-          이 step 이 **실제로** 무엇을 했는지. 지시문(Work order)보다 위에 둔다 — 모달을
-          여는 이유의 대부분이 "왜 안 끝나지 / 무엇을 하다 멈췄지" 이고, 그 답은 지시문이
-          아니라 이 목록에 있다.
-        */}
-        <StepActivityLog stepId={step.id} wsId={wsId} />
-
-        <div>
-          <SubHeading>Work order</SubHeading>
-          <Prose text={step.instructions || '(no instructions recorded)'} />
-        </div>
-
-        {step.acceptance_criteria && (
-          <div>
-            <SubHeading>Done when</SubHeading>
-            <Prose text={step.acceptance_criteria} muted />
-          </div>
-        )}
-
-        {step.result_summary && (
-          <div>
-            <SubHeading>Reported result</SubHeading>
-            <Prose text={step.result_summary} />
-          </div>
-        )}
-
-        {step.artifacts.length > 0 && (
-          <div>
-            <SubHeading>Artifacts</SubHeading>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {step.artifacts.map((a, i) => (
-                <div key={`${a.ref}-${i}`} style={{ fontSize: 12, color: tokens.colors.textSecondary }}>
-                  <span style={{ color: tokens.colors.textMuted, fontFamily: 'monospace', fontSize: 10 }}>{a.kind}</span>{' '}
-                  {/^https?:\/\//.test(a.ref) ? (
-                    <a href={a.ref} target="_blank" rel="noreferrer" style={{ color: tokens.colors.accentLight }}>
-                      {a.label || a.ref}
-                    </a>
-                  ) : (
-                    <span>{a.label ? `${a.label} — ${a.ref}` : a.ref}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
-          {step.dispatched_at && <>Dispatched {relativeTime(step.dispatched_at)}. </>}
-          {step.finished_at && <>Finished {relativeTime(step.finished_at)}. </>}
-          Plan version {step.plan_version}.
-        </div>
-      </div>
-    </Modal>
-  );
-}
 
 /**
- * step 방의 CLI 하트비트 기록 — 모달이 열릴 때 한 번 가져온다.
+ * 미션의 고정 문서 — 목표·맥락·완료 조건·계획 요약·결과·후속 액션.
  *
- * 카드에는 최신 한 줄만 싣는다(미션 페이로드에 이미 들어 있다). 전체 목록을 그 페이로드에
- * 같이 실으면 30초 폴링마다 모든 step 의 기록을 다시 내려받는 셈이 되므로, 깊게 보는
- * 것은 이렇게 열었을 때만 요청한다.
- *
- * 실패는 조용히 접는다 — 이 블록은 진단 보조이고, 없다고 모달의 나머지(지시문·결과·
- * 아티팩트)를 못 읽게 만들 이유가 없다.
+ * 전부 **거의 변하지 않는 텍스트**라서 탭으로 내렸다. 예전에는 이것들이 화면 위쪽
+ * 절반을 차지하고 있어서, 지금 움직이는 것을 보려면 매번 지나쳐 스크롤해야 했다.
+ * 필요할 때 한 번 읽는 자료는 한 번에 찾을 수 있는 자리에 모아 두는 편이 낫다.
  */
-function StepActivityLog({ stepId, wsId }: { stepId: string; wsId: string }) {
-  const [items, setItems] = useState<OrchestrationStepActivity[] | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    setItems(null);
-    setFailed(false);
-    api
-      .getOrchestrationStepActivity(stepId, wsId, 40)
-      .then((res) => {
-        if (alive) setItems(res.items);
-      })
-      .catch(() => {
-        if (alive) setFailed(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [stepId, wsId]);
-
-  if (failed) return null;
-
+function BriefPane({ mission }: { mission: OrchestrationMissionDetail }) {
   return (
-    <div data-testid="step-activity-log">
-      <SubHeading>
-        What the CLI actually did{items ? ` (${items.length})` : ''}
-      </SubHeading>
-      {items === null ? (
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading activity…</div>
-      ) : items.length === 0 ? (
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
-          기록된 CLI 활동이 없습니다. 아직 시작하지 않았거나, 원격 CLI 가 도구를 한 번도
-          실행하지 못한 채 끝났다는 뜻입니다 — 후자라면 Runtime Host 의 매니저 로그를 보세요.
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820 }}>
+      <Section title="Objective">
+        <Prose text={mission.objective} />
+        {mission.context && (
+          <>
+            <SubHeading>Context</SubHeading>
+            <Prose text={mission.context} muted />
+          </>
+        )}
+        {mission.method && (
+          <>
+            <SubHeading>Method</SubHeading>
+            <Prose text={mission.method} muted />
+          </>
+        )}
+        {mission.acceptance_criteria && (
+          <>
+            <SubHeading>Acceptance criteria</SubHeading>
+            <Prose text={mission.acceptance_criteria} muted />
+          </>
+        )}
+        <SubHeading>Step workspace</SubHeading>
+        <div style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
+          {mission.resolved_workspace_folder}
         </div>
-      ) : (
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 3,
-            maxHeight: 220,
-            overflowY: 'auto',
-            padding: '6px 8px',
-            borderRadius: 6,
-            background: `${tokens.colors.border}35`,
-          }}
+        {/* Qualify the path: it is the root for ISOLATED slots only. A member whose slot
+            uses the shared folder scope runs in its own working folder instead, so stating
+            this unconditionally would send someone looking for files in a directory that
+            never exists. */}
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+          Relative to each member&apos;s working folder, for members whose roster slot uses the
+          <strong> isolated</strong> folder scope — each step gets its own subfolder here. Members set to
+          <strong> shared</strong> run in their working folder directly; the Teams screen shows which is which.
+        </div>
+      </Section>
+
+      {mission.completion_criteria.length > 0 && (
+        <Section
+          title="Completion criteria"
+          right={
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+              {mission.completion_criteria.filter((c) => c.met).length}/{mission.completion_criteria.length} met
+            </span>
+          }
         >
-          {items.map((item, i) => (
-            <div key={`${item.at}-${i}`} style={{ display: 'flex', gap: 8, fontSize: 11, lineHeight: 1.5 }}>
-              <span style={{ color: tokens.colors.textMuted, fontFamily: 'monospace', flexShrink: 0 }}>
-                {new Date(item.at).toLocaleTimeString()}
-              </span>
-              <span style={{ color: tokens.colors.textSecondary, wordBreak: 'break-word' }}>{item.text}</span>
-            </div>
-          ))}
-        </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {mission.completion_criteria.map((c) => (
+              <div key={c.key} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12.5 }}>
+                <span style={{ color: c.met ? tokens.colors.successLight : tokens.colors.textMuted }}>
+                  {c.met ? '☑' : '☐'}
+                </span>
+                <div>
+                  <span style={{ color: tokens.colors.textPrimary }}>{c.description}</span>{' '}
+                  <span style={{ fontFamily: 'monospace', fontSize: 10, color: tokens.colors.textMuted }}>{c.key}</span>
+                  {c.note && <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{c.note}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {mission.plan_summary && (
+        <Section title={`Orchestrator's plan (v${mission.plan_version})`}>
+          <Prose text={mission.plan_summary} />
+        </Section>
+      )}
+
+      {mission.result_summary && (
+        <Section title={mission.status === 'completed' ? 'Result' : 'Final report'}>
+          <Prose text={mission.result_summary} />
+        </Section>
+      )}
+
+      {mission.post_actions.length > 0 && (
+        <Section title="Post-completion actions">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {[...mission.post_actions]
+              .sort((a, b) => a.order - b.order)
+              .map((pa, i) => {
+                const style = postActionStyle(pa.status);
+                return (
+                  <div key={`${pa.action_id}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                    <span
+                      style={{
+                        padding: '1px 7px',
+                        borderRadius: 999,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        color: style.color,
+                        background: style.background,
+                      }}
+                    >
+                      {pa.status}
+                    </span>
+                    <span style={{ fontFamily: 'monospace', color: tokens.colors.textSecondary }}>{pa.action_id}</span>
+                    <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>({pa.condition})</span>
+                    {pa.error && <span style={{ color: tokens.colors.dangerLight, fontSize: 11 }}>{pa.error}</span>}
+                  </div>
+                );
+              })}
+          </div>
+        </Section>
       )}
     </div>
   );

@@ -2949,6 +2949,33 @@ export interface OrchestrationStepActivity {
   text: string;
 }
 
+/**
+ * step 작업 세션의 한 줄. `kind` 가 렌더링을 가른다 — `system` 은 AWB 가 넣은
+ * 지시(work order·재연결 요청)라 접어서 제목만 보이고, `progress` 는 CLI 툴
+ * 하트비트라 한 줄 muted 로, `agent` 는 담당자의 보고라 본문으로 그린다.
+ */
+export type OrchestrationStepSessionKind = 'system' | 'agent' | 'progress' | 'user';
+
+export interface OrchestrationStepSessionItem {
+  id: string;
+  at: string;
+  kind: OrchestrationStepSessionKind;
+  sender_type: string;
+  sender_id: string;
+  sender_name: string;
+  text: string;
+}
+
+export interface OrchestrationStepSession {
+  step_id: string;
+  step_key: string;
+  room_id: string | null;
+  /** 최신순(DESC). 화면은 역순으로 그린다. */
+  items: OrchestrationStepSessionItem[];
+  has_more: boolean;
+  next_before_id: string | null;
+}
+
 export interface OrchestrationStep {
   id: string;
   step_key: string;

@@ -412,26 +412,29 @@ export class OrchestrationController {
    * stale 해진 경우를 409 로 걸러낸다.
    */
   /**
-   * 한 step 이 실제로 무슨 작업을 했는지의 기록 — 상세 모달이 열릴 때만 읽는다.
+   * 한 step 의 작업 세션 기록 — 미션 화면에서 그 step 을 선택했을 때 오른쪽 패널이 읽는다.
    *
    * 카드에 실리는 최신 한 줄(`step.activity`)은 미션 상세 페이로드에 이미 들어 있다.
-   * 이 경로는 그 한 줄로 부족할 때(무엇을 하다 멈췄는지 봐야 할 때) 쓰는 on-demand
-   * 확대이고, 그래서 카드 목록의 30초 폴링 비용을 늘리지 않는다.
+   * 이 경로는 선택한 **하나**의 step 만 깊게 읽으므로, 카드 목록의 폴링 비용과 무관하다.
    */
-  @Get('steps/:stepId/activity')
-  async listStepActivity(
+  @Get('steps/:stepId/session')
+  async getStepSession(
     @Param('stepId') stepId: string,
     @Query('workspace_id') workspaceId: string,
     @Query('limit') limit: string,
+    @Query('before_id') beforeId: string,
     @Res() res: Response,
   ) {
     try {
       const parsed = parseInt(limit, 10);
       return res.json(
-        await this.missions.listStepActivity(stepId, workspaceId, Number.isFinite(parsed) ? parsed : 30),
+        await this.missions.getStepSession(stepId, workspaceId, {
+          limit: Number.isFinite(parsed) ? parsed : undefined,
+          beforeId: beforeId || undefined,
+        }),
       );
     } catch (e: any) {
-      return fail(res, e, 'Failed to read the step activity');
+      return fail(res, e, 'Failed to read the step session');
     }
   }
 

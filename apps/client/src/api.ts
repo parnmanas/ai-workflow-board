@@ -102,7 +102,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepActivity, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2524,13 +2524,20 @@ export const api = {
     return request<OrchestrationMissionListItem[]>(`/orchestration/missions?${params.toString()}`);
   },
   /**
-   * 한 step 의 활동 기록(최신순). 카드에 실리는 최신 한 줄은 미션 상세 응답의
-   * `step.activity` 에 이미 있으므로, 이 경로는 상세 모달을 열었을 때만 부른다.
+   * 한 step 의 작업 세션 기록(최신순 + `before_id` 커서). 미션 화면에서 그 step 을
+   * 선택했을 때만 부른다 — 카드에 실리는 최신 한 줄은 미션 상세 응답의 `step.activity`
+   * 에 이미 있다.
    */
-  getOrchestrationStepActivity: (stepId: string, workspaceId: string, limit = 30) =>
-    request<{ step_id: string; step_key: string; items: OrchestrationStepActivity[] }>(
-      `/orchestration/steps/${stepId}/activity?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`,
-    ),
+  getOrchestrationStepSession: (
+    stepId: string,
+    workspaceId: string,
+    opts?: { limit?: number; beforeId?: string },
+  ) => {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.beforeId) params.set('before_id', opts.beforeId);
+    return request<OrchestrationStepSession>(`/orchestration/steps/${stepId}/session?${params.toString()}`);
+  },
   getOrchestrationMission: (id: string, workspaceId: string) =>
     request<OrchestrationMissionDetail>(
       `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,
