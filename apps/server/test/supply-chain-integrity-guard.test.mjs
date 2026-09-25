@@ -290,11 +290,44 @@ test('the CI workflow keeps its GITHUB_TOKEN read-only', () => {
       'if a job genuinely needs write, scope it to that job rather than the whole workflow',
   );
 
-  // 쓰기 권한이 필요해지는 유일한 이유는 secrets 사용인데, 이 워크플로는 쓰지 않는다.
-  assert.ok(
-    !/secrets\./.test(yaml),
-    'ci.yml now references a secret — re-evaluate this read-only guard, since a workflow that ' +
-      'handles secrets on `pull_request` is exposed to PR-authored code',
+  // secrets 사용 — 2026-09-20 에 재평가했다.
+  //
+  // 예전 계약은 "ci.yml 은 secrets 를 일절 참조하지 않는다" 였다. 그 계약이 지키려던
+  // 진짜 성질은 "PR 이 작성한 코드가 도는 턴에 secret 이 환경에 깔리지 않는다" 이지
+  // 문자열 `secrets.` 의 부재가 아니다. 배포 브랜치가 삭제된 뒤 **마지막으로 배포된
+  // sha** 를 deploy 워크플로 실행 이력에서 읽어야 했고(그래야 지금 돌고 있는 트리의
+  // 취약점을 자동으로 셀 수 있다), 그 조회에는 GITHUB_TOKEN 이 필요하다.
+  //
+  // 그래서 부재 대신 **성질 자체**를 단언한다. 이게 더 엄격하다 — 예전 검사는
+  // `${{ github.token }}` 로 쓰면 그냥 빠져나갔다(같은 토큰인데 문자열만 다르다).
+  const secretRefs = [...yaml.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].map((m) => m[1]);
+
+  // (a) 커스텀 secret 은 여전히 금지. GITHUB_TOKEN 은 이 워크플로에서 read 스코프로
+  //     고정돼 있지만, 배포 키·레지스트리 토큰 같은 건 탈취 시 피해가 차원이 다르다.
+  assert.deepEqual(
+    [...new Set(secretRefs)].filter((n) => n !== 'GITHUB_TOKEN'),
+    [],
+    'ci.yml references a non-GITHUB_TOKEN secret; this workflow runs `npm ci` (third-party install ' +
+      'scripts) and PR-authored test code, so a high-value secret here is one compromised dependency ' +
+      'away from exfiltration — put it in a workflow that does not execute untrusted code',
+  );
+
+  // (b) secret 을 환경에 까는 스텝은 반드시 schedule 전용이어야 한다.
+  //     `pull_request` 에서 checkout 되는 건 PR 의 머지 ref 다 — 즉 이 잡이 돌리는
+  //     scripts/*.mjs 자체가 PR 이 고칠 수 있는 코드다. schedule 게이트가 있으면 그
+  //     스텝은 PR 이벤트에서 아예 실행되지 않으므로 토큰이 환경에 존재하지 않는다.
+  //     (`github.token` 컨텍스트로 우회하는 것도 같이 막는다.)
+  const steps = yaml.split(/^ {6}- /m).slice(1);
+  const leaky = steps
+    .filter((b) => /secrets\.|github\.token/.test(b))
+    .filter((b) => !/event_name\s*==\s*'schedule'/.test(b))
+    .map((b) => (/name:\s*(.+)/.exec(b)?.[1] ?? '(unnamed)').trim());
+
+  assert.deepEqual(
+    leaky,
+    [],
+    `these ci.yml steps put a token in the environment without a \`github.event_name == 'schedule'\` ` +
+      `guard, so it is materialised on pull_request runs alongside PR-authored code: ${leaky.join(', ')}`,
   );
 });
 

@@ -153,11 +153,39 @@ jobs:
   dependency-audit:
     name: dependency audit
     runs-on: ubuntu-latest
+    # 워크플로 기본값(contents: read)에 `actions: read` 하나만 더한다.
+    # 배포 브랜치가 삭제되면 감사할 브랜치가 없지만 **배포된 트리는 계속 돌고 있다** —
+    # 그 트리는 커밋 sha 로만 식별되고, sha 는 deploy 워크플로의 **실행 이력**에 있다.
+    # 그 이력을 읽는 데 actions:read 가 필요하다(없으면 403 → 폴백이 조용히 null).
+    # 잡 단위 `permissions:` 는 워크플로 선언을 대체하므로 contents: read 를 다시 적는다.
+    # 이 잡은 `npm ci` 를 하지 않아 서드파티 install script 가 돌지 않으므로 —
+    # 다른 잡들과 달리 — 이 토큰과 신뢰할 수 없는 코드가 같은 프로세스 트리에 있지 않다.
+    # 쓰기 스코프는 여전히 전부 none.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      # ── 모든 가드 스텝은 `if: !cancelled()` 로 서로 독립이다 ──
+      #
+      # 순서를 고쳐도 결합이 남아 있었다. GitHub Actions 는 앞 스텝이 실패하면 뒤 스텝을
+      # 기본적으로 skip 하므로, **가드 하나의 실패가 뒤따르는 가드 전부를 침묵**시킨다.
+      # 2026-09-10 이후 실측: 배포 브랜치가 삭제돼 스텝 10(`배포 브랜치 lockfile 재감사`)이
+      # 매일 죽었고, 그 뒤의 스텝 11(`발행 트리 재감사`)이 9일 넘게 한 번도 돌지 않았다
+      # (run 34830287705 / 35078672216 / 35205211091 / 35327285746 전부 step10=failure,
+      # step11=skipped). 스텝 11 은 `npm i -g awb-agent-manager` 가 깔 트리를 보는
+      # **유일한** 시간축 검사이고 그 경로는 lockfile 을 읽지 않는다 — 즉 lockfile 감사가
+      # 초록이어도 그 축은 전혀 감사되지 않은 채였다.
+      #
+      # 그래서 각 가드가 앞 가드의 결과와 무관하게 자기 판정을 내도록 한다. 실패는 그대로
+      # 잡 실패로 올라가므로 게이트는 약해지지 않고, 한 번에 **모든** 실패가 보인다.
+      # `always()` 가 아니라 `!cancelled()` 인 이유: 취소된 워크플로까지 계속 돌리지 않는다.
+      # 새 가드 스텝을 추가할 때도 이 조건을 붙일 것 —
+      # lockfile-advisory-audit-guard.test.mjs 가 강제한다.
+
       # ── 오프라인 가드 먼저 ──
       #
       # 스텝 순서는 미학이 아니라 가드다(ticket 1019e57d). 예전엔 네트워크에 의존하는
@@ -171,12 +199,16 @@ jobs:
       # 새 오프라인 가드를 추가할 때도 반드시 이 블록 안에 넣을 것 —
       # lockfile-advisory-audit-guard.test.mjs 가 이 순서를 강제한다.
       - name: install-script 허용목록 가드
+        if: ${{ !cancelled() }}
         run: node scripts/audit-install-scripts.mjs
       - name: 액션 SHA 고정 가드
+        if: ${{ !cancelled() }}
         run: node scripts/audit-action-pins.mjs
       - name: 배포 브랜치 감사 커버리지 가드
+        if: ${{ !cancelled() }}
         run: node scripts/audit-ci-branch-coverage.mjs
       - name: 정기 감사 커버리지 가드
+        if: ${{ !cancelled() }}
         run: node scripts/audit-cron-coverage.mjs
       # 발행 범위 상한 가드 (2026-08-22 감사). 오프라인·수 밀리초라 항상 돈다.
       # 위 모든 검사는 lockfile 축인데, agent-manager 는 호스트에 `npm i -g` 로
@@ -184,6 +216,7 @@ jobs:
       # 레지스트리에서 새로 해석한다. 범위를 넓히는 변경(`^1.7.0` → `*`)은 그
       # 구멍의 폭을 직접 키우므로 cron 을 기다리지 않고 PR 에서 막는다.
       - name: 발행 패키지 선언 범위 가드
+        if: ${{ !cancelled() }}
         run: node scripts/audit-published-deps.mjs --offline
 
       # ── 여기부터 네트워크 의존 ──
@@ -208,12 +241,18 @@ jobs:
       # secret" 단언이 지키는 선이 바로 이것이라 넘지 않는다. 비인증 한도(시간당 60회)에
       # 걸리면 통과가 아니라 fail-closed 로 죽는다.
       - name: 취약점 감사 (advisory 조회, moderate 이상 실패)
+        if: ${{ !cancelled() }}
         run: node scripts/audit-lockfile-advisories.mjs --audit-level=moderate
       # schedule 전용 — cron 은 기본 브랜치(main)에서만 돌므로, 이 스텝이 없으면
       # 배포 브랜치는 "다음 push" 까지 새 advisory 를 한 번도 평가받지 못한다.
       # push/PR 에서는 그 브랜치 자신의 dependency-audit 이 이미 돌므로 불필요.
       - name: 배포 브랜치 lockfile 재감사 (schedule 전용)
-        if: github.event_name == 'schedule'
+        if: ${{ !cancelled() && github.event_name == 'schedule' }}
+        env:
+          # 브랜치가 삭제됐을 때 마지막 배포 sha 를 deploy 워크플로 이력에서 찾기 위해서만
+          # 쓴다(위 permissions 주석 참조). 토큰이 없으면 폴백은 null 로 떨어지고,
+          # 판정은 그대로 FAIL 이라 게이트가 약해지지는 않는다.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/audit-deploy-branch-deps.mjs
       # schedule 전용 — 레지스트리를 실제로 때려 "지금 `npm i -g awb-agent-manager`
       # 가 깔 트리"(live)와 "다음 publish 가 넘길 트리"(next)를 해석해 audit 한다.
@@ -222,7 +261,7 @@ jobs:
       # 늘어나는 advisory + 우리 커밋과 무관하게 움직이는 `^` 해석 결과)이므로
       # 하루 한 번이면 충분하다. 값싼 상한 검사는 위에서 항상 돈다.
       - name: 발행 트리 재감사 (schedule 전용)
-        if: github.event_name == 'schedule'
+        if: ${{ !cancelled() && github.event_name == 'schedule' }}
         run: node scripts/audit-published-deps.mjs
 
   # Fast static guard — runs everywhere, no DB. Catches the bare-join regression

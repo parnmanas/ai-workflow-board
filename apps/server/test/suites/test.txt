@@ -75,6 +75,7 @@ test/cron-coverage-guard.test.mjs
 test/cross-workspace-holder-name.test.mjs
 test/default-role-assignments-config.test.mjs
 test/deferral-terminal-guard.test.mjs
+test/deploy-branch-audit-guard.test.mjs
 test/dispatch-intent-decision.test.mjs
 test/dispatch-intent-idempotency.test.mjs
 test/dispatch-intent-pre-index-repair.test.mjs

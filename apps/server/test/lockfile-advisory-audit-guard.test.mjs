@@ -563,8 +563,13 @@ export function jobRunSteps(yml, jobName) {
   const block = next < 0 ? rest : rest.slice(0, next);
 
   const steps = [];
-  const re = /^ {6}- name: (.+)$\n(?:^ {8}(?!run:).*$\n)*^ {8}run: (.+)$/gm;
-  for (const m of block.matchAll(re)) steps.push({ name: m[1].trim(), run: m[2].trim() });
+  // `name` 과 `run` 사이의 줄(=`if:` 등)을 통째로 잡아 둔다 — 실행 조건까지 봐야
+  // "앞 스텝이 죽으면 이 스텝이 skip 되는가" 를 판정할 수 있다.
+  const re = /^ {6}- name: (.+)$\n((?:^ {8}(?!run:).*$\n)*)^ {8}run: (.+)$/gm;
+  for (const m of block.matchAll(re)) {
+    const cond = /^ {8}if: (.+)$/m.exec(m[2] ?? '');
+    steps.push({ name: m[1].trim(), if: cond ? cond[1].trim() : null, run: m[3].trim() });
+  }
   return steps;
 }
 
@@ -655,6 +660,65 @@ test('모르는 명령은 오프라인으로 가정하지 않는다 (분류가 f
     true,
   );
   assert.equal(isOfflineStep({ name: 'x', run: 'node scripts/audit-cron-coverage.mjs' }), true);
+});
+
+/**
+ * 앞 스텝이 실패해도 이 스텝이 자기 판정을 내는가. GitHub Actions 의 기본 동작은
+ * "앞 스텝 실패 → 뒤 스텝 skip" 이라, 조건이 없으면 가드끼리 서로를 침묵시킨다.
+ * `always()` 는 취소된 워크플로까지 돌리므로 `!cancelled()` 만 인정한다.
+ */
+const runsIndependently = (step) => step.if != null && /!\s*cancelled\(\)/.test(step.if);
+
+test('dependency-audit 의 모든 가드 스텝은 앞 스텝 실패와 무관하게 실행된다', () => {
+  // 순서를 고쳐도 남아 있던 결합(ticket 1019e57d 의 후속). 실측: 배포 브랜치 삭제로
+  // 스텝 10 이 매일 죽자 그 뒤의 `발행 트리 재감사` 가 9일 넘게 skipped 였다 —
+  // `npm i -g` 경로(= lockfile 을 읽지 않는 축)의 유일한 시간축 검사가 침묵한 것이다.
+  const steps = jobRunSteps(readCi(), AUDIT_JOB);
+  assert.ok(steps.length >= 7, `run 스텝을 ${steps.length}개만 읽었다 — 검사가 공허해진다`);
+  assert.deepEqual(
+    steps.filter((s) => !runsIndependently(s)).map((s) => s.name),
+    [],
+    '이 스텝들은 앞 가드가 실패하면 skipped 된다 — `if: ${{ !cancelled() }}` 를 붙일 것',
+  );
+});
+
+test('현재 ci.yml 에서 if 조건을 실제로 읽어낸다 (파서 공허성 차단)', () => {
+  // `if:` 를 못 읽으면 위 검사는 "전부 조건 없음" 이 아니라 조용히 반대로 깨진다.
+  const steps = jobRunSteps(readCi(), AUDIT_JOB);
+  const scheduled = steps.filter((s) => s.if && s.if.includes('schedule'));
+  assert.ok(
+    scheduled.length >= 2,
+    `schedule 전용 스텝의 if 를 못 읽었다: ${JSON.stringify(steps.map((s) => s.if))}`,
+  );
+  // schedule 전용 스텝도 독립 실행 조건을 함께 갖고 있어야 한다.
+  assert.deepEqual(scheduled.filter((s) => !runsIndependently(s)).map((s) => s.name), []);
+});
+
+test('조건 없는 스텝을 넣으면 독립성 가드가 FAIL 한다 (가드의 공허성 차단)', () => {
+  const coupled = `
+  ${AUDIT_JOB}:
+    name: dependency audit
+    steps:
+      - name: 배포 브랜치 lockfile 재감사 (schedule 전용)
+        if: github.event_name == 'schedule'
+        run: node scripts/audit-deploy-branch-deps.mjs
+      - name: 발행 트리 재감사 (schedule 전용)
+        if: github.event_name == 'schedule'
+        run: node scripts/audit-published-deps.mjs
+
+  other-job:
+`;
+  const steps = jobRunSteps(coupled, AUDIT_JOB);
+  assert.equal(steps.length, 2, '픽스처 파싱이 안 됐다');
+  assert.deepEqual(
+    steps.filter((s) => !runsIndependently(s)).map((s) => s.name),
+    ['배포 브랜치 lockfile 재감사 (schedule 전용)', '발행 트리 재감사 (schedule 전용)'],
+    '결합된 스텝을 넣었는데 가드가 아무것도 못 잡는다 — 검사가 공허하다',
+  );
+  // `always()` 는 취소까지 돌리므로 인정하지 않는다.
+  assert.equal(runsIndependently({ name: 'x', if: 'always()' }), false);
+  assert.equal(runsIndependently({ name: 'x', if: '${{ !cancelled() }}' }), true);
+  assert.equal(runsIndependently({ name: 'x', if: null }), false);
 });
 
 test('ci.yml 은 취약점 게이트로 audit-lockfile-advisories.mjs 를 돌린다', () => {
