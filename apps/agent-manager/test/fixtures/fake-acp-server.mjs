@@ -82,6 +82,11 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
     CODEX_HOME: process.env.CODEX_HOME ?? null,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
+    // opencode credential 적용 검증용 — 키는 env 로 주입되고 설정 홈은 XDG 로 고정된다.
+    OPENCODE_API_KEY: process.env.OPENCODE_API_KEY ?? null,
+    OPENCODE_AUTH_CONTENT: process.env.OPENCODE_AUTH_CONTENT ?? null,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? null,
+    HOME: process.env.HOME ?? null,
     AWB_API_KEY: process.env.AWB_API_KEY ?? null,
     ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? null,
     ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? null,

@@ -842,3 +842,44 @@ test('no backend profile leaves the endpoint alone, and a broken one fails the o
   assert.equal(bad.ok, false);
   assert.match(bad.error, /backend profile "broken" is unusable/i, 'the operator is told which profile and why');
 });
+
+// ─── opencode: 중첩 storeSubdir 의 기록 링크 ────────────────────────────────────
+//
+// opencode 의 기록 디렉터리는 `.local/share/opencode` 처럼 **중첩** 경로다(claude
+// `projects` / codex `sessions` 는 한 단계). 부모 `.local/share` 를 만들지 않고 symlink
+// 를 걸어 ENOENT 로 죽었고 — credential 을 묶은 호스트에서는 opencode 세션의 open/new
+// 가 **전부** 실패했다(rolf 실측: "open rpc failed: ENOENT … symlink").
+test('credential (opencode_api_key): the nested session-store link is created with its parents, and OPENCODE_API_KEY reaches the process', async (t) => {
+  const captureFile = join(tmpdir(), `awb-oc-capture-${process.pid}-${Date.now()}.json`);
+  const h = await harness(t);
+  // harness 는 root 를 만든 뒤에야 알려 주므로 운영자 HOME 과 세션 홈을 그 아래로 잡은 러너를 하나 더 띄운다.
+  const operatorHome = join(h.root, 'home');
+  const sessionHomesDir = join(h.root, 'session-homes');
+  const runner = new AgentSessionRunner(
+    { url: 'http://127.0.0.1:0', apiKey: 'manager-key' },
+    {
+      getManagerId: () => MANAGER,
+      store: new AgentSessionStore({ claudeHome: join(h.root, 'claude'), codexHome: join(h.root, 'codex'), indexPath: join(h.root, 'index2.json') }),
+      sessionHomesDir,
+      commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
+      baseEnv: { ...process.env, HOME: operatorHome, FAKE_ACP_CAPTURE_FILE: captureFile, OPENCODE_API_KEY: 'operator-shell-key' },
+      credentialFetcher: async (id) => ({ credential_id: id, provider: 'opencode_api_key', fields: { api_key: 'sk-go-test' } }),
+      flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
+    },
+  );
+  h.holdsRoot(runner);
+  t.after(() => rm(captureFile, { force: true }));
+
+  await runner.handle(request('open', { request_id: 'rpc-oc-cred', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-oc', cli: 'opencode' }));
+  const opened = h.server.rpc('rpc-oc-cred');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+
+  const linkPath = join(sessionHomesDir, 'opencode', 'cred-oc', '.local', 'share', 'opencode');
+  assert.ok((await lstat(linkPath)).isSymbolicLink(), 'the nested store dir is a link, and its parents were created first');
+  assert.equal(await readlink(linkPath), join(operatorHome, '.local', 'share', 'opencode'));
+
+  const cap = JSON.parse(await readFile(captureFile, 'utf8'));
+  assert.equal(cap.OPENCODE_API_KEY, 'sk-go-test', `the credential key wins over the operator shell key (got ${JSON.stringify(cap.OPENCODE_API_KEY)}; keys=${Object.keys(cap).filter((k) => /OPENCODE|XDG|HOME/.test(k)).join(',')})`);
+  assert.equal(cap.XDG_CONFIG_HOME, join(sessionHomesDir, 'opencode', 'cred-oc', '.config'));
+  await runner.handle(request('close', { session_id: opened.result.session_id }));
+});

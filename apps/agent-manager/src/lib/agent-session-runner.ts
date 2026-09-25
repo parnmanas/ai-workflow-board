@@ -13,7 +13,7 @@
 
 import { access, constants as fsConstants, lstat, mkdir, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
 import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
@@ -1070,6 +1070,10 @@ export class AgentSessionRunner {
       log(`[agent-session ${cli}] session store link was broken (${linkPath} → ${target}); recreating`);
       await rm(linkPath, { recursive: true, force: true });
     }
+    // storeSubdir 는 한 단계(claude `projects`, codex `sessions`)일 수도, 중첩(opencode
+    // `.local/share/opencode`)일 수도 있다. 부모가 없으면 symlink 가 ENOENT 로 죽고 — 그
+    // credential 로 여는 **모든** opencode 세션의 open/new 가 실패했다(rolf 실측).
+    await mkdir(dirname(linkPath), { recursive: true });
     await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
   }
 
