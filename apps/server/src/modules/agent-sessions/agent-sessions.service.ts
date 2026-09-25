@@ -810,8 +810,15 @@ export class AgentSessionsService implements OnModuleDestroy {
       cwd: summary?.cwd || (typeof reportedLive?.cwd === 'string' ? reportedLive.cwd : ''),
       title: summary?.title || (typeof reportedLive?.title === 'string' ? reportedLive.title : ''),
       status: reportedStatus ?? 'idle',
-      driver_user_id: null,
+      driver_user_id: userId,
     });
+    // 세션을 읽는 것 자체가 driver 를 (다시) 잡는다. driver 는 메모리에만 있으므로 서버가
+    // 재시작하면 사라지는데, 그동안 매니저가 계속 보내오는 이벤트는 driver 가 없다는
+    // 이유로 조용히 버려진다(서버는 세션을 저장하지 않는다). 진행 중이던 세션은 busy 라
+    // prompt 가 409 고 Connect 버튼도 안 나와서 — 쓰기 동작으로만 driver 를 잡던 예전
+    // 규칙 아래서는 되찾을 길이 아예 없었다. 그래서 화면은 끝난 작업을 "Working" 인 채로
+    // 붙들고 그 뒤 대화가 하나도 흐르지 않았다.
+    state.driver_user_id = userId;
     if (reportedLive) {
       // 살아 있는 프로세스의 모드·config option·slash command 는 매니저만 안다(서버 재시작 뒤 특히).
       this.applyPatch(state, {

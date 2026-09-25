@@ -41,8 +41,8 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 - **서버 `modules/agent-sessions`** — 상태 없는 중계자. `InstanceRegistryService`(하트비트)에서 살아 있는
   Runtime Host 와 그 장비의 세션 CLI(`acp_session_clis`)를 읽고, list/history/open 은 `agent_session_request{request_id}`
   → `POST /api/agent/sessions/rpc/:id` 로 왕복한다(fs-browser 와 같은 패턴, 타임아웃 list 20s / history 40s / open 120s).
-  라이브 상태(status/mode/driver)만 메모리에 두고, 매니저가 중계한 이벤트를 driver(마지막으로 open/prompt 한 사용자)에게
-  SSE 로 흘린다. 다른 매니저 키는 남의 RPC 를 풀거나 이벤트를 중계할 수 없다.
+  라이브 상태(status/mode/driver)만 메모리에 두고, 매니저가 중계한 이벤트를 driver(마지막으로 그 세션을 **연**
+  사용자 — history 로 읽은 것도 포함, open/prompt 같은 쓰기뿐 아니라)에게 SSE 로 흘린다. 다른 매니저 키는 남의 RPC 를 풀거나 이벤트를 중계할 수 없다.
 - **매니저 `agent-session-store.ts`** — CLI 홈 리더. Claude: `projects/*/*.jsonl` (`agent-*.jsonl` 서브에이전트 파일과
   프롬프트 없는 빈 세션 제외, `custom-title` 우선, sidechain 행 제외). Codex: `sessions/**/rollout-*.jsonl`
   (`session_meta` → id/cwd, developer/environment_context 메시지는 제목에서 제외). 기록은 같은 파일을 트랜스크립트
@@ -179,6 +179,12 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
   안에 화면이 실제와 같아진다. 비어 있어도 `[]` 를 보내는 이유가 이것이다(구버전 매니저는 필드가 없어 아무것도 바꾸지 않는다).
 - 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
   턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
+- **driver 도 메모리에만 있다 — 그래서 세션을 읽는 것 자체가 driver 를 (다시) 잡는다.** 서버가 재시작하면 driver 가
+  사라지고, 그 뒤 매니저가 보내오는 이벤트는 받을 사람이 없다는 이유로 조용히 버려진다(서버는 세션을 저장하지 않는다).
+  진행 중이던 세션은 busy 라 prompt 가 409 이고 Connect 버튼도 나오지 않아, driver 를 쓰기 동작으로만 잡던 예전
+  규칙 아래서는 되찾을 길이 아예 없었다 — 화면은 이미 끝난 작업을 "Working" 인 채로 붙들고 그 뒤 대화가 하나도
+  흐르지 않았다. 화면 쪽도 짝을 이룬다: SSE 가 끊겼다 붙으면 세션 화면이 스스로 다시 읽어(`isConnected` 전이) 끊긴
+  동안의 기록을 매니저에서 메꾸고 driver 를 되찾는다.
 - 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
 
 ### 긴 세션 (기록 창과 라이브 창)

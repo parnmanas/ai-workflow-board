@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
-import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
+import { useBoardStream, useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { AGENT_SESSIONS_CHANGED_EVENT, useAgentSessionsNav } from '../../hooks/useAgentSessionsNav';
@@ -418,6 +418,19 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     if (!matches(data) || !data.event) return;
     setEvents((prev) => appendLiveEvent(prev, data.event));
   }, [matches]));
+
+  // SSE 가 끊겼다 붙으면(대개 서버 재시작) 그 사이의 라이브 이벤트는 받지 못했다 — 서버는
+  // 세션을 저장하지 않으므로 그만큼이 화면에서 통째로 빈다. 다시 읽어 매니저의 기록·상태로
+  // 메꾼다. 이 재조회가 서버 메모리의 driver 도 이 사용자로 되돌려 이후 라이브가 이어진다.
+  const { isConnected } = useBoardStream();
+  // 마운트 시점은 "이미 붙어 있던" 것으로 친다 — 첫 렌더의 false→true 는 끊김이 아니라
+  // 스트림이 처음 열리는 것이고, 거기에 반응하면 페이지를 열 때마다 기록을 두 번 읽는다.
+  const wasConnectedRef = useRef(true);
+  useEffect(() => {
+    const reconnected = isConnected && !wasConnectedRef.current;
+    wasConnectedRef.current = isConnected;
+    if (reconnected) void load();
+  }, [isConnected, load]);
 
   const blocks = useMemo(() => buildTranscript(events), [events]);
   const pending = useMemo(() => pendingInteraction(blocks), [blocks]);

@@ -861,3 +861,93 @@ test('세션 CLI 설정: 세션을 연 적 없는 호스트×CLI 도 하트비�
   const unknown = await settings('codex');
   assert.equal(unknown.known_config_options.some((o) => o.category === 'model'), false);
 });
+
+// ─── 서버 재시작: 세션을 읽는 것이 driver 를 되찾는다 ────────────────────────────────
+//
+// driver 는 메모리에만 있다. 서버가 재시작하면(배포 push 한 번이면 일어난다) 사라지고, 매니저가
+// 계속 보내오는 이벤트는 "받을 사람이 없다" 는 이유로 조용히 버려진다 — 서버는 세션을 저장하지
+// 않으므로 그 대화는 화면에서 통째로 빈다. 진행 중이던 세션은 busy 라 prompt 가 409 고 Connect 도
+// 안 나와서, driver 를 쓰기 동작으로만 잡던 예전 규칙에서는 되찾을 길이 아예 없었다(실측: 끝난
+// 작업이 "Working" 인 채로 남고 그 뒤 대화가 하나도 안 보였다). 이제 history 로 읽기만 해도 잡는다.
+test('server restart: reading the session re-claims the driver so the live stream resumes', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-redriver');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-redriver', role: 'admin' });
+  const ownerToken = app.get(AuthService).createSession(owner.id);
+  const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-redriver', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerKey = runtimeHostKeyForAgent(agent.id);
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
+  assert.ok((await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-redriver', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4243, started_at: new Date().toISOString(),
+    }),
+  })).status < 300, 'manager registered');
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  const answered = new Set();
+  const answerNext = async (op, body) => {
+    await waitFor(() => requests.some((r) => r.op === op && !answered.has(r.request_id)), `${op} rpc`);
+    const req = requests.find((r) => r.op === op && !answered.has(r.request_id));
+    answered.add(req.request_id);
+    const res = await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...body }) });
+    assert.equal(res.status, 200, res.text);
+    return req;
+  };
+  const stream = await openSseStream(port, ownerToken, {});
+  t.after(() => stream.close());
+
+  // 이 앱은 "막 재시작한 서버" 다 — 이 세션에 대해 아무 기억이 없는데 매니저는 턴 도중이다.
+  const sid = 'sess-redriver';
+  const sessionsUrl = `${base}/api/agent-sessions/hosts/${managerId}/claude/sessions`;
+  const relay = async (events, state) => {
+    const res = await call(`${base}/api/agent/sessions/${managerId}/claude/${sid}/events`, {
+      method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, events, ...(state ? { state } : {}) }),
+    });
+    assert.equal(res.status, 200, res.text);
+    return res.body;
+  };
+  const textRow = (seq, text) => ({ id: `${sid}:live:${seq}`, seq, turn_id: 't9', type: 'text', payload: { text }, created_at: new Date().toISOString() });
+
+  const orphan = await relay([textRow(1, 'still working')]);
+  assert.equal(orphan.relayed, 1, 'the manager can relay into a session the restarted server has never seen');
+
+  // 1. 아직 아무도 driver 가 아니다 — 이 프레임은 갈 곳이 없다.
+  assert.equal((await stream.drainOfType('agent_session_event', 300)).length, 0, 'no driver yet, so nothing is delivered');
+
+  // 2. 사용자가 세션 화면에 (다시) 들어온다 = history 읽기. 매니저가 여전히 busy 라고 답한다.
+  const detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
+  await answerNext('history', {
+    ok: true,
+    result: {
+      session: { session_id: sid, cwd: '/home/parn/repo', title: 'Long turn', updated_at: '2026-09-25T02:20:00.000Z', source: 'cli' },
+      events: [textRow(1, 'still working')],
+      truncated: false,
+      live: { session_id: sid, cwd: '/home/parn/repo', title: 'Long turn', status: 'busy', resume_supported: true },
+    },
+  });
+  const detail = await detailCall;
+  assert.equal(detail.status, 200, detail.text);
+  assert.equal(detail.body.live.status, 'busy');
+  assert.equal(detail.body.live.driver_user_id, owner.id, '세션을 읽은 사용자가 driver 가 된다');
+
+  // 3. 이후 매니저가 중계하는 이벤트·상태가 그 사용자에게 흐른다 — 턴이 끝나면 화면도 따라 끝난다.
+  await relay([textRow(2, 'done at last')]);
+  await stream.waitFor('agent_session_event', (d) => d?.session_id === sid && d.event?.payload?.text === 'done at last', 4000);
+  await relay([{ id: `${sid}:live:3`, seq: 3, turn_id: 't9', type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, created_at: new Date().toISOString() }], { status: 'ready', reason: 'turn_finished' });
+  await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'ready', 4000);
+
+  stream.close();
+});
