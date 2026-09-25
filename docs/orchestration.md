@@ -263,6 +263,43 @@ heartbeat 는 `last_heartbeat_at` 을 **매 progress 호출마다** 갱신하고
 `started_at` 이 기준이었는데 그 값은 최초 progress 호출에서 한 번만 찍혀서, "heartbeat
 가 inactivity timeout 을 리셋한다"는 문서상 계약이 두 번째 호출부터 거짓이었다.
 
+### 카드가 보여주는 "지금 실제로 하는 일" (step activity)
+
+`status` 만으로는 **일하고 있는 step** 과 **떠서 즉시 죽은 step** 이 구분되지 않는다.
+2026-09-25 EmberDelve 에서 Windows 의 opencode 멤버는 디스패치마다 0초 만에 죽었는데도
+화면은 100분 동안 다른 정상 step 과 똑같이 `dispatched` 였다 — 그 차이를 말해 주는 값이
+페이로드에 아예 없었다. 그래서 미션 상세 응답의 step 마다 `activity` 한 줄이 실린다.
+
+출처는 둘이고 **최신 것이 이긴다**:
+
+- `cli` — 매니저가 step 방에 중계하는 CLI 툴 하트비트(`chat_room_messages.type='progress'`).
+  에이전트가 한 번도 보고하지 않아도 찍히므로, "CLI 가 아예 못 떴는지"는 이것으로만 안다.
+- `agent` — 에이전트 자신의 `report_orchestration_progress` 요약(`step_progress` /
+  `step_checkpoint` 이벤트). 드물지만 사람이 읽기에 가장 정확하다.
+
+비용 규칙:
+
+- **진행 중(in-flight) step 만** 방을 조회한다. 동시 실행은 `max_parallel_steps` 로 묶여
+  있고 `chat_room_messages` 에 `(room_id, type, created_at)` 인덱스가 있어 각 조회는 단일
+  행 역방향 탐색이다. 종료된 step 의 활동은 `GET /api/orchestration/steps/:id/activity` 로
+  **모달을 열 때만** 읽는다 — 카드 목록은 30초마다 다시 그려지므로 여기에 기록 전체를
+  실으면 그 비용이 step 수에 비례해 늘어난다.
+- agent 쪽 신호는 이미 로드된 이벤트 창에서 스캔해 추가 쿼리를 쓰지 않는다.
+- 전 구간 best-effort 다. 이 값은 읽기 전용 장식이므로 채팅 테이블 쪽 문제가 미션 화면을
+  깨뜨려서는 안 된다.
+
+UI 가 **두 시계를 따로** 보여주는 이유: 리퍼의 기준선은 CLI 활동이 아니라 에이전트 자신의
+heartbeat(`last_heartbeat_at ?? started_at ?? dispatched_at`)다. 그래서 CLI 활동이 방금
+찍힌 step 도 무신호 시계는 허용치를 향해 계속 흐를 수 있고, 그 어긋남이 EmberDelve 에서
+열심히 일한 step 이 100분 뒤 lease 만료로 실패한 이유였다. 카드는 활동 줄과 `quiet Nm /
+Mm` 을 나란히 그려 운영자가 그 결말을 미리 볼 수 있게 한다. 침묵을 죽음으로 단정하지는
+않는다 — 경고는 **디스패치 후 활동이 한 번도 없었던** 경우에만 띄운다.
+
+> 매니저 쪽 짝: 하트비트는 spawn 당 30줄에서 끊겼는데, 그러면 90분짜리 step 의 카드가 초반
+> 30줄에 얼어붙어 이 기능의 의미가 사라진다. action room(orchestration step / QA / Action
+> run)에서는 cap 을 끊는 대신 간격을 늘린다(cap 이후 30초에 한 줄) — `shouldEmitProgressHeartbeat`.
+> 사람이 대화하는 일반 채팅방은 도배 방지가 우선이라 기존 hard cap 을 유지한다.
+
 ### lease 만료 reconciliation — 유예 · 재연결 · 자동 재개
 
 리퍼는 만료를 보자마자 step 을 죽이지 않는다. `reconcileStaleLease()` 하나가 두 단계로 처리한다:

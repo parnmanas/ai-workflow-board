@@ -113,6 +113,38 @@ const ORPHAN_SUMMARY_MAX_DETAIL = 5;
  *  coalesce + cap their progress identically. */
 const CHAT_PROGRESS_MIN_INTERVAL_MS = 1500;
 const CHAT_PROGRESS_MAX_PER_SESSION = 30;
+/** Heartbeat interval AFTER the per-spawn cap, for action rooms only (see
+ *  `shouldEmitProgressHeartbeat`). Two per minute is enough to prove liveness on
+ *  a card while bounding a long step's row growth to ~120/hour. */
+const CHAT_PROGRESS_SLOW_INTERVAL_MS = 30_000;
+
+/**
+ * Should this NON-error progress heartbeat be posted? Pure so the rule can be
+ * asserted directly instead of through 30 real seconds of wall clock.
+ *
+ * Ordinary chat rooms keep the original contract: rate-limit, then a hard cap —
+ * a person is reading that room and a runaway agent must not flood it.
+ *
+ * **Action rooms must never go silent.** An orchestration-step / QA / Action-run
+ * room has exactly one reader, an operator asking "is this still alive", and the
+ * AWB mission view renders the newest line of this stream as the step card's
+ * activity. Stopping at the cap froze a 90-minute step's card on its first 30
+ * tool calls, which made a hard-working step indistinguishable from one that
+ * died in its first seconds — the very distinction the card exists to show. So
+ * past the cap we stretch the interval instead of cutting the stream: one line
+ * per 30s keeps liveness forever while bounding growth (~120 rows/hour).
+ */
+export function shouldEmitProgressHeartbeat(input: {
+  count: number;
+  lastEmitMs: number;
+  now: number;
+  isActionRoom: boolean;
+}): boolean {
+  const overCap = input.count >= CHAT_PROGRESS_MAX_PER_SESSION;
+  if (overCap && !input.isActionRoom) return false;
+  const minIntervalMs = overCap ? CHAT_PROGRESS_SLOW_INTERVAL_MS : CHAT_PROGRESS_MIN_INTERVAL_MS;
+  return input.now - input.lastEmitMs >= minIntervalMs;
+}
 const CHAT_PROGRESS_DETAIL_MAX = 80;
 const CHAT_PROGRESS_LABEL_MAX = 40;
 /** MCP tool name suffixes that count as the subagent leaving a real
@@ -1818,7 +1850,7 @@ export class SubagentManager implements SubagentManagerContract {
           this.#bufferTail(record, line);
           this._scanForCommentTool(record, line);
           this._captureAssistantText(record, line);
-          this.#maybeEmitChatProgress(record, line);
+          this._maybeEmitChatProgress(record, line);
           this.#captureUsageLine(record, line);
         }
         log(`${tagFor(record)} ${line}`);
@@ -2066,7 +2098,11 @@ export class SubagentManager implements SubagentManagerContract {
   }
 
   /**
-   * ticket c47194d9 — surface a CHAT one-shot's in-flight work as
+   * Public (`_`-prefixed) for the test runner — same seam convention as
+ * `_scanForCommentTool` / `_captureAssistantText`; not part of the manager
+ * contract.
+ *
+ * ticket c47194d9 — surface a CHAT one-shot's in-flight work as
    * `type='progress'` chat heartbeats so a Codex chat shows what it's doing in
    * the chat window, like Claude's persistent session already does. Only chat
    * spawns (room_id set) qualify — ticket work reports through comments, not the
@@ -2074,7 +2110,7 @@ export class SubagentManager implements SubagentManagerContract {
    * given stdout line means: Codex maps its `item.*` / `turn.failed` events;
    * claude/antigravity default to null here (claude chat takes the persistent
    * ChatSessionManager route). Best-effort — a bad line never breaks capture. */
-  #maybeEmitChatProgress(record: SubagentRecord, line: string): void {
+  _maybeEmitChatProgress(record: SubagentRecord, line: string): void {
     if (!record.room_id) return;
     const trimmed = line.trim();
     if (!trimmed.startsWith('{')) return;
@@ -2117,10 +2153,15 @@ export class SubagentManager implements SubagentManagerContract {
       // error 라인이 방을 도배하지 않도록 pid 당 terminal error 슬롯을 하나만
       // 예약(dedupe)한다 — 첫 실패만 방출하고 이후 error 는 무시.
       if (meta.errorEmitted) return;
-    } else {
-      // 일반 heartbeat: item.* 버스트가 방을 도배하지 않도록 rate-limit + hard-cap.
-      if (meta.count >= CHAT_PROGRESS_MAX_PER_SESSION) return;
-      if (now - meta.lastEmitMs < CHAT_PROGRESS_MIN_INTERVAL_MS) return;
+    } else if (
+      !shouldEmitProgressHeartbeat({
+        count: meta.count,
+        lastEmitMs: meta.lastEmitMs,
+        now,
+        isActionRoom: !!record.isActionRoom,
+      })
+    ) {
+      return;
     }
     const message = this.#formatChatProgressLine(ev);
     if (!message) return;

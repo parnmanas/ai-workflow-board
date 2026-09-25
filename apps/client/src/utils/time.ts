@@ -16,3 +16,17 @@ export function relativeTime(iso: string): string {
   const yr = Math.floor(mo / 12);
   return `${yr}y ago`;
 }
+
+/**
+ * 짧은 경과 시간 — `12s` / `8m` / `1h 22m`. `relativeTime` 과 달리 "언제"가 아니라
+ * **얼마나 오래**를 말한다(실행 시간, 무신호 구간처럼 구간 자체가 정보인 자리).
+ * 음수/NaN 은 `0s` 로 접어 시계가 거꾸로 가는 표시를 만들지 않는다.
+ */
+export function shortDuration(ms: number): string {
+  const total = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  if (total < 60) return `${total}s`;
+  const min = Math.floor(total / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
+}

@@ -2920,6 +2920,33 @@ export interface OrchestrationMissionListItem {
   finished_at: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * 지금 진행 중인 step 들 — 목록 카드가 "몇 개 남았나"를 넘어 **무엇이** 돌고 있고
+   * 마지막 신호가 언제인지까지 말할 수 있게 한다. 구 서버 응답에는 없으므로 옵셔널.
+   */
+  live_steps?: OrchestrationMissionLiveStep[];
+}
+
+/** 목록 카드용 진행 중 step 한 줄. `last_signal_at` 은 heartbeat → 시작 → 디스패치 순 첫 값. */
+export interface OrchestrationMissionLiveStep {
+  id: string;
+  step_key: string;
+  title: string;
+  status: OrchestrationStepStatus;
+  last_signal_at: string | null;
+}
+
+/**
+ * step 이 지금 실제로 무엇을 하고 있는지의 한 줄.
+ *
+ * `cli` 는 매니저가 step 방에 중계한 CLI 툴 하트비트(몇 초 단위, 에이전트가 한 번도
+ * 보고하지 않아도 찍힌다), `agent` 는 에이전트 자신의 진행 보고다. 진행 중인 step 에만
+ * 채워지고, 진행 중인데도 null 이면 "디스패치 후 아무 신호 없음"이라는 신호다.
+ */
+export interface OrchestrationStepActivity {
+  at: string;
+  source: 'cli' | 'agent';
+  text: string;
 }
 
 export interface OrchestrationStep {
@@ -2957,6 +2984,8 @@ export interface OrchestrationStep {
   last_heartbeat_at: string | null;
   /** confirm 노드의 사용자 판정. null = 아직 판정 전/해당 없음. */
   confirm_decision: OrchestrationConfirmDecision | null;
+  /** 진행 중 step 의 최신 활동. 구 서버 응답에는 없으므로 옵셔널. */
+  activity?: OrchestrationStepActivity | null;
 }
 
 // ── 실행 그래프(티켓 1ca9e49b) ───────────────────────────────────────────────

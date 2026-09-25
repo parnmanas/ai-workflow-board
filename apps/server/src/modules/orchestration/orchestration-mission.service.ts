@@ -19,6 +19,7 @@ import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { Agent } from '../../entities/Agent';
 import { ChatRoom } from '../../entities/ChatRoom';
+import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
@@ -84,6 +85,61 @@ export interface MissionListItem {
   finished_at: Date | null;
   created_at: Date;
   updated_at: Date;
+  /**
+   * 지금 진행 중인 step 들의 요약 — 목록 카드가 "몇 개가 돌고 있나"를 넘어 **무엇이**
+   * 돌고 있고 **마지막 신호가 언제인지**까지 말할 수 있게 한다. 여기에는 CLI 활동
+   * 텍스트가 없다(목록에서 미션마다 방을 훑지 않는다 — 그건 상세 화면의 몫이다);
+   * step 행에 이미 있는 값만 쓰므로 추가 쿼리가 없다.
+   */
+  live_steps: MissionLiveStep[];
+}
+
+/** 목록 카드용 진행 중 step 한 줄. `last_signal_at` 은 heartbeat → 시작 → 디스패치 순의 첫 값. */
+export interface MissionLiveStep {
+  id: string;
+  step_key: string;
+  title: string;
+  status: string;
+  last_signal_at: Date | null;
+}
+
+/**
+ * "지금 실제로 무슨 작업을 하고 있나" — 카드 한 줄짜리 활동 신호.
+ *
+ * step 의 `status` 만으로는 **일하고 있는 것**과 **떠서 즉시 죽은 것**을 구분할 수
+ * 없다. 2026-09-25 EmberDelve 사건에서 Windows 의 opencode 멤버는 디스패치마다 0초
+ * 만에 죽었는데도 카드는 100분 동안 `dispatched` 로 보였고, 화면에는 그 차이가 아예
+ * 존재하지 않았다. 운영자가 리퍼를 기다리지 않고 알아차릴 수 있어야 한다.
+ *
+ * 출처는 둘이고 **최신 것이 이긴다**:
+ *   - `cli`   — 매니저가 step 방에 중계하는 CLI 툴 하트비트(`chat_room_messages.type
+ *               = 'progress'`). 몇 초 단위로 "무슨 명령/파일/툴을 건드렸는지"가 남는
+ *               가장 촘촘한 신호이고, 에이전트가 한 번도 보고하지 않아도 찍힌다.
+ *   - `agent` — 에이전트 자신의 `report_orchestration_progress` 요약(step_progress /
+ *               step_checkpoint 이벤트). 드물지만 사람이 읽기에 가장 정확하다.
+ */
+export interface StepActivity {
+  at: Date;
+  source: 'cli' | 'agent';
+  text: string;
+}
+
+/** 카드/목록에 실을 활동 텍스트 상한. 한 줄로 읽히는 길이를 넘으면 잘라 낸다. */
+const ACTIVITY_TEXT_MAX = 240;
+
+/**
+ * 매니저가 만든 진행 하트비트를 평문으로 되돌린다.
+ *
+ * 형식 계약은 `SubagentManager#formatChatProgressLine` 에 있다: 줄 전체를 `_..._` 로
+ * 감싸고, 안쪽의 `` ` `` · `_` · `*` 는 백슬래시로 이스케이프해 이탤릭 wrapper 가
+ * 깨지지 않게 한다. 카드에는 마크다운을 렌더하지 않으므로 그 두 겹을 벗긴다 — 벗기지
+ * 않으면 운영자가 `$env:GIT\_TERMINAL\_PROMPT` 같은 문자열을 읽게 된다.
+ */
+export function plainProgressText(content: string): string {
+  let out = String(content ?? '').replace(/\s+/g, ' ').trim();
+  if (out.length >= 2 && out.startsWith('_') && out.endsWith('_')) out = out.slice(1, -1).trim();
+  out = out.replace(/\\([`_*])/g, '$1');
+  return out.length > ACTIVITY_TEXT_MAX ? `${out.slice(0, ACTIVITY_TEXT_MAX - 1)}\u2026` : out;
 }
 
 export interface MissionStepView {
@@ -121,6 +177,13 @@ export interface MissionStepView {
   last_heartbeat_at: Date | null;
   /** confirm node 에 사람이 내린 판정(티켓 5dbe4aa2). null = 아직 판정 전/해당 없음. */
   confirm_decision: ConfirmDecision | null;
+  /**
+   * 최신 활동 한 줄. **진행 중인(in-flight) step 만** 채운다 — 종료된 step 은
+   * `result_summary` 가 이미 결과를 말하고, 카드를 그릴 때마다 모든 step 의 방을 훑으면
+   * 30초 폴링이 그만큼 비싸진다. 진행 중인데도 null 이면 "디스패치된 뒤 아무 신호도
+   * 없다"는 뜻이고, 그것 자체가 읽어야 할 신호다.
+   */
+  activity: StepActivity | null;
 }
 
 export interface MissionDetail extends MissionListItem {
@@ -618,9 +681,21 @@ export class OrchestrationMissionService {
   private async projectMissionList(missions: OrchestrationMission[]): Promise<MissionListItem[]> {
     if (missions.length === 0) return [];
 
+    // `select` 를 넓히는 대가는 컬럼 몇 개이고, 얻는 것은 목록 카드의 "무엇이 돌고
+    // 있나" 한 줄이다 — 추가 쿼리는 없다. 방(progress 메시지)은 여기서 보지 않는다.
     const steps = await this.stepRepo.find({
       where: { mission_id: In(missions.map((m) => m.id)) },
-      select: ['id', 'mission_id', 'status'],
+      select: [
+        'id',
+        'mission_id',
+        'status',
+        'step_key',
+        'title',
+        'position',
+        'dispatched_at',
+        'started_at',
+        'last_heartbeat_at',
+      ],
     });
     const teams = await this.teamRepo.find({ where: { id: In(missions.map((m) => m.team_id)) } });
     const teamById = new Map(teams.map((t) => [t.id, t]));
@@ -644,6 +719,16 @@ export class OrchestrationMissionService {
       finished_at: m.finished_at,
       created_at: m.created_at,
       updated_at: m.updated_at,
+      live_steps: steps
+        .filter((s) => s.mission_id === m.id && isInFlight(s.status))
+        .sort((a, b) => a.position - b.position)
+        .map((s) => ({
+          id: s.id,
+          step_key: s.step_key,
+          title: s.title,
+          status: s.status,
+          last_signal_at: s.last_heartbeat_at ?? s.started_at ?? s.dispatched_at ?? null,
+        })),
     }));
   }
 
@@ -665,6 +750,9 @@ export class OrchestrationMissionService {
       take: Math.min(Math.max(eventLimit, 1), 1000),
     });
     const stepKeyById = new Map(steps.map((s) => [s.id, s.step_key]));
+    // events 는 여기서 아직 DESC(최신 우선)다 — 아래 응답 조립에서 reverse() 되므로
+    // 활동 스캔은 반드시 그 전에 끝내야 한다.
+    const activityByStepId = await this.loadLiveStepActivity(steps, events);
 
     return {
       id: mission.id,
@@ -679,6 +767,19 @@ export class OrchestrationMissionService {
         : '',
       plan_version: mission.plan_version,
       counts: countSteps(steps),
+      // 상세 화면은 step 카드마다 `activity` 를 따로 갖지만, 이 요약은 `MissionDetail`
+      // 이 `MissionListItem` 을 확장하는 계약을 지키는 값이다 — 목록에서 상세로 들어온
+      // 화면이 같은 필드를 읽어도 비어 있지 않아야 한다.
+      live_steps: steps
+        .filter((s) => isInFlight(s.status))
+        .sort((a, b) => a.position - b.position)
+        .map((s) => ({
+          id: s.id,
+          step_key: s.step_key,
+          title: s.title,
+          status: s.status,
+          last_signal_at: s.last_heartbeat_at ?? s.started_at ?? s.dispatched_at ?? null,
+        })),
       started_at: mission.started_at,
       finished_at: mission.finished_at,
       created_at: mission.created_at,
@@ -742,6 +843,7 @@ export class OrchestrationMissionService {
           recovery_reason: s.recovery_reason || '',
           last_heartbeat_at: s.last_heartbeat_at ?? null,
           confirm_decision: s.confirm_decision ?? null,
+          activity: activityByStepId.get(s.id) ?? null,
         };
       }),
       // Oldest-first for rendering; the DESC + take above is only there so the
@@ -762,6 +864,103 @@ export class OrchestrationMissionService {
         write_seq: e.write_seq ?? 0,
       })),
     };
+  }
+
+  /**
+   * 진행 중인 step 들의 최신 활동 한 줄씩.
+   *
+   * **in-flight 만 본다.** 종료된 step 의 "무엇을 하고 있었나"는 상세 모달의
+   * `listStepActivity` 가 요청받을 때만 읽는다 — 카드 목록은 30초마다 새로 그려지므로
+   * 여기서 모든 step 의 방을 훑으면 폴링 비용이 step 수에 비례해 늘어난다. 동시 실행은
+   * `max_parallel_steps`(기본 3, 상한 MAX_PARALLEL_CEILING) 로 묶여 있으므로 방 조회
+   * 수도 그만큼이고, `chat_room_messages` 에는 (room_id, type, created_at) 인덱스가
+   * 있어 각 조회가 단일 행 역방향 탐색이다.
+   *
+   * agent 쪽 신호는 **이미 로드된 이벤트 창**에서 스캔해 쿼리를 쓰지 않는다. 창 밖으로
+   * 밀려난 진행 보고는 정의상 오래된 것이고, 그 경우에도 CLI 신호와
+   * `last_heartbeat_at` 이 카드에 남는다.
+   *
+   * 전 구간이 best-effort 다 — 이 값은 읽기 전용 장식이므로, 채팅 테이블 쪽 문제가
+   * 미션 화면 전체를 깨뜨리면 안 된다.
+   *
+   * @param events `created_at` DESC 로 정렬된 이벤트 창(최신 우선).
+   */
+  private async loadLiveStepActivity(
+    steps: OrchestrationStep[],
+    events: OrchestrationEvent[],
+  ): Promise<Map<string, StepActivity>> {
+    const out = new Map<string, StepActivity>();
+    const live = steps.filter((s) => isInFlight(s.status));
+    if (live.length === 0) return out;
+
+    const liveIds = new Set(live.map((s) => s.id));
+    const noteByStepId = new Map<string, OrchestrationEvent>();
+    for (const e of events) {
+      if (!e.step_id || !liveIds.has(e.step_id) || noteByStepId.has(e.step_id)) continue;
+      if (e.type !== 'step_progress' && e.type !== 'step_checkpoint') continue;
+      noteByStepId.set(e.step_id, e);
+    }
+
+    const messageRepo = this.dataSource.getRepository(ChatRoomMessage);
+    for (const step of live) {
+      let best: StepActivity | null = null;
+      const note = noteByStepId.get(step.id);
+      if (note?.message) {
+        best = { at: note.created_at, source: 'agent', text: plainProgressText(note.message) };
+      }
+      if (step.room_id) {
+        try {
+          const latest = await messageRepo.findOne({
+            where: { room_id: step.room_id, type: 'progress' },
+            order: { created_at: 'DESC' },
+          });
+          if (latest && (!best || latest.created_at > best.at)) {
+            best = { at: latest.created_at, source: 'cli', text: plainProgressText(latest.content) };
+          }
+        } catch (err: any) {
+          this.logService.warn(
+            'Orchestration',
+            `step activity lookup failed step=${step.id.slice(0, 8)}: ${err?.message ?? err}`,
+          );
+        }
+      }
+      if (best?.text) out.set(step.id, best);
+    }
+    return out;
+  }
+
+  /**
+   * 한 step 의 활동 기록 — 상세 모달이 열릴 때만 읽는다(카드는 최신 한 줄로 충분하다).
+   *
+   * step 방의 `progress` 행을 최신순으로 돌려준다. 방은 하나의 step 전용이고 매니저의
+   * 하트비트는 세션당 상한이 걸려 있으므로 행 수는 수십 건 규모다. `message` 타입은
+   * 섞지 않는다 — 에이전트의 최종 답변은 step 결과와 타임라인에 이미 있고, 여기 섞으면
+   * "진행 중 신호"와 "결과 보고"가 한 목록에서 구분되지 않는다.
+   *
+   * 워크스페이스 경계는 step 조회에서 강제된다(`requireStep`). 방 참여자 여부는 보지
+   * 않는다 — step 방은 사람을 참여자로 넣지 않는 설계이므로(티켓 995a9519) 참여자
+   * 게이트를 그대로 적용하면 **아무 운영자도** 자기 미션의 진행 상황을 못 읽는다. 대신
+   * 이 경로는 미션을 읽을 수 있는 권한(MANAGE_ACTIONS)으로만 들어온다.
+   */
+  async listStepActivity(
+    stepId: string,
+    workspaceId: string,
+    limit = 30,
+  ): Promise<{ step_id: string; step_key: string; items: StepActivity[] }> {
+    const step = await this.requireStep(stepId, workspaceId);
+    const take = Math.min(Math.max(limit, 1), 200);
+    let items: StepActivity[] = [];
+    if (step.room_id) {
+      const rows = await this.dataSource.getRepository(ChatRoomMessage).find({
+        where: { room_id: step.room_id, type: 'progress' },
+        order: { created_at: 'DESC' },
+        take,
+      });
+      items = rows
+        .map((r) => ({ at: r.created_at, source: 'cli' as const, text: plainProgressText(r.content) }))
+        .filter((r) => !!r.text);
+    }
+    return { step_id: step.id, step_key: step.step_key, items };
   }
 
   /**

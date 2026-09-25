@@ -102,7 +102,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
+  OrchestrationStepStatus, OrchestrationStepActivity, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2523,6 +2523,14 @@ export const api = {
     if (opts?.limit) params.set('limit', String(opts.limit));
     return request<OrchestrationMissionListItem[]>(`/orchestration/missions?${params.toString()}`);
   },
+  /**
+   * 한 step 의 활동 기록(최신순). 카드에 실리는 최신 한 줄은 미션 상세 응답의
+   * `step.activity` 에 이미 있으므로, 이 경로는 상세 모달을 열었을 때만 부른다.
+   */
+  getOrchestrationStepActivity: (stepId: string, workspaceId: string, limit = 30) =>
+    request<{ step_id: string; step_key: string; items: OrchestrationStepActivity[] }>(
+      `/orchestration/steps/${stepId}/activity?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`,
+    ),
   getOrchestrationMission: (id: string, workspaceId: string) =>
     request<OrchestrationMissionDetail>(
       `/orchestration/missions/${id}?workspace_id=${encodeURIComponent(workspaceId)}`,

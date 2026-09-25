@@ -2,7 +2,7 @@ import React from 'react';
 import type { OrchestrationGraphSpec, OrchestrationGraphEdge, OrchestrationStep } from '../../types';
 import { tokens } from '../../tokens';
 import { stepStyle } from './status';
-import { relativeTime } from '../../utils/time';
+import { relativeTime, shortDuration } from '../../utils/time';
 
 /**
  * The plan, drawn as dependency waves.
@@ -73,11 +73,14 @@ export default function PlanGraph({
   selectedId,
   onSelect,
   graph = null,
+  stepTimeoutMinutes = 0,
 }: {
   steps: OrchestrationStep[];
   selectedId: string | null;
   onSelect: (step: OrchestrationStep) => void;
   graph?: OrchestrationGraphSpec | null;
+  /** 미션의 step 무신호 허용 시간(분). 0 = 모름 → 카드에 리퍼 시계를 그리지 않는다. */
+  stepTimeoutMinutes?: number;
 }) {
   const depths = computeDepths(steps, graph);
   const maxDepth = steps.reduce((max, s) => Math.max(max, depths.get(s.step_key) ?? 0), 0);
@@ -112,6 +115,7 @@ export default function PlanGraph({
               key={step.id}
               step={step}
               graph={graph}
+              stepTimeoutMinutes={stepTimeoutMinutes}
               selected={step.id === selectedId}
               onClick={() => onSelect(step)}
             />
@@ -125,11 +129,13 @@ export default function PlanGraph({
 function StepCard({
   step,
   graph,
+  stepTimeoutMinutes,
   selected,
   onClick,
 }: {
   step: OrchestrationStep;
   graph: OrchestrationGraphSpec | null;
+  stepTimeoutMinutes: number;
   selected: boolean;
   onClick: () => void;
 }) {
@@ -253,6 +259,8 @@ function StepCard({
         </div>
       )}
 
+      {style.live && <LiveActivity step={step} stepTimeoutMinutes={stepTimeoutMinutes} />}
+
       {step.verdict && (
         <div style={{ marginTop: 6, fontSize: 10, color: tokens.colors.textSecondary }}>
           verdict:{' '}
@@ -300,6 +308,134 @@ function StepCard({
       )}
     </button>
   );
+}
+
+/** 디스패치 직후 CLI 가 뜨기까지의 유예 — 이 안의 침묵은 정상이다. */
+const SPAWN_GRACE_MS = 90_000;
+
+/**
+ * 진행 중인 카드에만 붙는 "지금 실제로 무엇을 하고 있나" 블록.
+ *
+ * 서로 다른 **두 개의 시계**를 나란히 보여준다. 하나로 합치면 안 된다:
+ *
+ *   - **활동(activity)** — CLI 가 마지막으로 무엇을 건드렸는지. 매니저가 step 방에
+ *     중계하는 툴 하트비트라 에이전트가 한 번도 보고하지 않아도 찍히고, 그래서 "떠서
+ *     즉시 죽었는지"를 이것으로만 구분할 수 있다.
+ *   - **무신호 시계(quiet)** — AWB 가 개입을 판단하는 기준은 CLI 활동이 아니라
+ *     **에이전트 자신의 진행 보고**(`last_heartbeat_at`, 없으면 시작/디스패치 시각)다.
+ *     따라서 활동이 방금 찍혔는데도 이 시계는 허용 시간을 향해 계속 흐를 수 있다 —
+ *     그 어긋남이 2026-09-25 EmberDelve 에서 열심히 일한 step 이 100분 뒤 lease 만료로
+ *     실패한 이유였고, 화면에 두 값이 같이 있어야 운영자가 그걸 예측할 수 있다.
+ *
+ * **침묵을 죽음으로 단정하지 않는다.** 매니저는 하트비트를 spawn 당 상한/간격으로
+ * 조이므로 긴 작업은 자연히 드물어진다. 경고는 `디스패치 후 활동이 한 번도 없고`
+ * 유예 시간도 지난 경우에만 띄운다 — 그건 CLI 가 아예 뜨지 못했다는 뜻이다.
+ */
+function LiveActivity({
+  step,
+  stepTimeoutMinutes,
+}: {
+  step: OrchestrationStep;
+  stepTimeoutMinutes: number;
+}) {
+  const now = Date.now();
+  const startedMs = msOf(step.started_at) ?? msOf(step.dispatched_at);
+  const runningFor = startedMs === null ? null : now - startedMs;
+  const activity = step.activity ?? null;
+
+  // 리퍼의 기준선과 **같은 순서**로 고른다(서버: last_heartbeat_at ?? started_at ??
+  // dispatched_at). 여기서 CLI 활동 시각을 섞으면 화면이 실제보다 안전해 보인다.
+  const quietSince = msOf(step.last_heartbeat_at) ?? startedMs;
+  const quietFor = quietSince === null ? null : now - quietSince;
+  const quietMinutes = quietFor === null ? 0 : Math.floor(quietFor / 60_000);
+  const showQuiet = stepTimeoutMinutes > 0 && quietMinutes >= 1;
+
+  const stalled = !activity && runningFor !== null && runningFor > SPAWN_GRACE_MS;
+
+  return (
+    <div
+      data-testid="step-activity"
+      style={{
+        marginTop: 7,
+        padding: '5px 6px',
+        borderRadius: 6,
+        background: stalled ? `${tokens.colors.warningBg}40` : `${tokens.colors.border}45`,
+        borderLeft: `2px solid ${stalled ? tokens.colors.warningLight : tokens.colors.infoLight}`,
+      }}
+    >
+      {activity ? (
+        <>
+          <div
+            style={{
+              fontSize: 10.5,
+              lineHeight: 1.35,
+              color: tokens.colors.textSecondary,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+            }}
+            title={activity.text}
+          >
+            <span
+              style={{ color: tokens.colors.textMuted, fontWeight: 700, marginRight: 4 }}
+              title={
+                activity.source === 'cli'
+                  ? 'CLI 가 실제로 실행한 도구 — 에이전트의 보고와 무관하게 찍힌다'
+                  : '에이전트가 직접 남긴 진행 보고'
+              }
+            >
+              {activity.source === 'cli' ? 'CLI' : 'REPORT'}
+            </span>
+            {activity.text}
+          </div>
+          <div style={{ marginTop: 2, fontSize: 9.5, color: tokens.colors.textMuted }}>
+            {relativeTime(activity.at)}
+            {runningFor !== null && ` · running ${shortDuration(runningFor)}`}
+          </div>
+        </>
+      ) : (
+        <div
+          style={{
+            fontSize: 10,
+            color: stalled ? tokens.colors.warningLight : tokens.colors.textMuted,
+            lineHeight: 1.35,
+          }}
+          title={
+            stalled
+              ? '디스패치된 뒤 CLI 활동이 한 번도 없습니다 — 원격 CLI 가 뜨지 못했을 수 있습니다(Runtime Host 의 매니저 로그를 확인하세요).'
+              : 'CLI 가 첫 도구를 실행하면 여기에 표시됩니다'
+          }
+        >
+          {stalled ? '⚠ no CLI activity since dispatch' : 'waiting for the CLI to start…'}
+          {runningFor !== null && ` · ${shortDuration(runningFor)}`}
+        </div>
+      )}
+      {showQuiet && (
+        <div
+          style={{
+            marginTop: 2,
+            fontSize: 9.5,
+            color: quietMinutes >= stepTimeoutMinutes ? tokens.colors.dangerLight : tokens.colors.textMuted,
+          }}
+          title={
+            `AWB 는 에이전트의 진행 보고가 ${stepTimeoutMinutes}분간 없으면 재접속을 요청하고, ` +
+            '유예 안에 답이 없으면 이 시도를 실패로 처리합니다. CLI 활동은 이 시계를 되돌리지 않습니다 — ' +
+            'report_orchestration_progress 호출만 되돌립니다.'
+          }
+        >
+          quiet {quietMinutes}m / {stepTimeoutMinutes}m to reconnect check
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** ISO 문자열 → epoch ms. 빈 값/파싱 실패는 null(시계를 만들지 않는다). */
+function msOf(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime();
+  return Number.isNaN(ms) ? null : ms;
 }
 
 /**

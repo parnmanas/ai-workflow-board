@@ -4,6 +4,7 @@ import { api } from '../../api';
 import type {
   OrchestrationMissionDetail,
   OrchestrationStep,
+  OrchestrationStepActivity,
   OrchestrationTeam,
   OrchestrationTimelineEvent,
   OrchestrationUpdateEvent,
@@ -300,6 +301,7 @@ export default function MissionDetailPage() {
             <PlanGraph
               steps={mission.steps}
               graph={mission.graph_spec}
+              stepTimeoutMinutes={mission.step_timeout_minutes}
               selectedId={selectedStepId}
               onSelect={(s) => setSelectedStepId(s.id)}
             />
@@ -423,7 +425,7 @@ export default function MissionDetailPage() {
         </Section>
       </div>
 
-      <StepDetailModal step={selectedStep} onClose={() => setSelectedStepId(null)} />
+      <StepDetailModal step={selectedStep} wsId={wsId} onClose={() => setSelectedStepId(null)} />
 
       <MissionFormModal
         isOpen={showEdit}
@@ -721,7 +723,15 @@ function Timeline({
   );
 }
 
-function StepDetailModal({ step, onClose }: { step: OrchestrationStep | null; onClose: () => void }) {
+function StepDetailModal({
+  step,
+  wsId,
+  onClose,
+}: {
+  step: OrchestrationStep | null;
+  wsId: string;
+  onClose: () => void;
+}) {
   if (!step) return null;
   const style = stepStyle(step.status);
   return (
@@ -804,6 +814,13 @@ function StepDetailModal({ step, onClose }: { step: OrchestrationStep | null; on
           </div>
         )}
 
+        {/*
+          이 step 이 **실제로** 무엇을 했는지. 지시문(Work order)보다 위에 둔다 — 모달을
+          여는 이유의 대부분이 "왜 안 끝나지 / 무엇을 하다 멈췄지" 이고, 그 답은 지시문이
+          아니라 이 목록에 있다.
+        */}
+        <StepActivityLog stepId={step.id} wsId={wsId} />
+
         <div>
           <SubHeading>Work order</SubHeading>
           <Prose text={step.instructions || '(no instructions recorded)'} />
@@ -850,5 +867,77 @@ function StepDetailModal({ step, onClose }: { step: OrchestrationStep | null; on
         </div>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * step 방의 CLI 하트비트 기록 — 모달이 열릴 때 한 번 가져온다.
+ *
+ * 카드에는 최신 한 줄만 싣는다(미션 페이로드에 이미 들어 있다). 전체 목록을 그 페이로드에
+ * 같이 실으면 30초 폴링마다 모든 step 의 기록을 다시 내려받는 셈이 되므로, 깊게 보는
+ * 것은 이렇게 열었을 때만 요청한다.
+ *
+ * 실패는 조용히 접는다 — 이 블록은 진단 보조이고, 없다고 모달의 나머지(지시문·결과·
+ * 아티팩트)를 못 읽게 만들 이유가 없다.
+ */
+function StepActivityLog({ stepId, wsId }: { stepId: string; wsId: string }) {
+  const [items, setItems] = useState<OrchestrationStepActivity[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setItems(null);
+    setFailed(false);
+    api
+      .getOrchestrationStepActivity(stepId, wsId, 40)
+      .then((res) => {
+        if (alive) setItems(res.items);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [stepId, wsId]);
+
+  if (failed) return null;
+
+  return (
+    <div data-testid="step-activity-log">
+      <SubHeading>
+        What the CLI actually did{items ? ` (${items.length})` : ''}
+      </SubHeading>
+      {items === null ? (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading activity…</div>
+      ) : items.length === 0 ? (
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.6 }}>
+          기록된 CLI 활동이 없습니다. 아직 시작하지 않았거나, 원격 CLI 가 도구를 한 번도
+          실행하지 못한 채 끝났다는 뜻입니다 — 후자라면 Runtime Host 의 매니저 로그를 보세요.
+        </div>
+      ) : (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 3,
+            maxHeight: 220,
+            overflowY: 'auto',
+            padding: '6px 8px',
+            borderRadius: 6,
+            background: `${tokens.colors.border}35`,
+          }}
+        >
+          {items.map((item, i) => (
+            <div key={`${item.at}-${i}`} style={{ display: 'flex', gap: 8, fontSize: 11, lineHeight: 1.5 }}>
+              <span style={{ color: tokens.colors.textMuted, fontFamily: 'monospace', flexShrink: 0 }}>
+                {new Date(item.at).toLocaleTimeString()}
+              </span>
+              <span style={{ color: tokens.colors.textSecondary, wordBreak: 'break-word' }}>{item.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

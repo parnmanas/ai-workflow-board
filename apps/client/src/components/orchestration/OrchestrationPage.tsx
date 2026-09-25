@@ -16,7 +16,7 @@ import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, EmptyState, Input, Modal, Select } from '../common';
-import { relativeTime } from '../../utils/time';
+import { relativeTime, shortDuration } from '../../utils/time';
 import { missionStyle, progressPercent } from './status';
 import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
 import { RepoRefPicker, buildRepoRefPayload } from '../admin/WorkspaceFolderOptions';
@@ -102,6 +102,9 @@ export default function OrchestrationPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {/* 진행 중 step 점의 맥박. MissionDetailPage 와 같은 이름/정의를 쓴다 — 여기에
+          없으면 목록 카드의 점만 조용히 정적으로 굳는다(애니메이션은 실패해도 조용하다). */}
+      <style>{`@keyframes awb-orch-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }`}</style>
       <PageHeader
         title="Orchestrations"
         description="Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back."
@@ -166,7 +169,11 @@ export default function OrchestrationPage() {
   );
 }
 
-function MissionRow({
+/**
+ * 목록의 미션 카드 한 줄. `export` 인 이유는 테스트가 라우터/컨텍스트 전체를 세우지
+ * 않고 카드 렌더 계약(진행 중 step 줄 포함)을 직접 단언하기 때문이다.
+ */
+export function MissionRow({
   mission,
   onOpen,
 }: {
@@ -175,6 +182,8 @@ function MissionRow({
 }) {
   const style = missionStyle(mission.status);
   const pct = progressPercent(mission.counts);
+  // 구 서버 응답(필드 없음)에서는 조용히 빈 목록 — 카드가 깨지지 않는다.
+  const liveSteps = mission.live_steps ?? [];
 
   return (
     <button
@@ -251,6 +260,52 @@ function MissionRow({
       >
         <div style={{ width: `${pct}%`, background: style.color, transition: 'width 300ms ease' }} />
       </div>
+
+      {/*
+        "몇 개가 돌고 있다"만으로는 목록에서 이 미션이 살아 있는지 알 수 없다 — 카운트는
+        step 이 죽어서 lease 만 남아 있어도 똑같이 N working 으로 보인다(2026-09-25
+        EmberDelve). 무엇이 돌고 있고 마지막 신호가 언제인지까지 여기서 읽히게 한다.
+        CLI 활동 텍스트는 싣지 않는다 — 목록에서 미션마다 step 방을 훑는 비용을 지지
+        않기로 했고, 그 깊이는 상세 화면의 몫이다.
+      */}
+      {liveSteps.length > 0 && (
+        <div
+          data-testid="mission-live-steps"
+          style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2 }}
+        >
+          {liveSteps.map((s) => {
+            const quietFor = s.last_signal_at ? Date.now() - new Date(s.last_signal_at).getTime() : null;
+            return (
+              <div
+                key={s.id}
+                style={{ display: 'flex', gap: 8, fontSize: 11, color: tokens.colors.textSecondary, minWidth: 0 }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 5,
+                    height: 5,
+                    marginTop: 5,
+                    flexShrink: 0,
+                    borderRadius: '50%',
+                    background: tokens.colors.infoLight,
+                    animation: 'awb-orch-pulse 1.4s ease-in-out infinite',
+                  }}
+                />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>
+                {quietFor !== null && (
+                  <span
+                    style={{ marginLeft: 'auto', flexShrink: 0, color: tokens.colors.textMuted }}
+                    title="이 step 의 마지막 생존 신호 이후 경과 시간 (에이전트의 진행 보고 기준)"
+                  >
+                    quiet {shortDuration(quietFor)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </button>
   );
 }
