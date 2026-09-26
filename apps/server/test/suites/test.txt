@@ -57,7 +57,6 @@ test/ci-wait-resume-presence.test.mjs
 test/ci-wait-resume.test.mjs
 test/claim-verification-same-second-move.test.mjs
 test/cli-catalog-endpoint.test.mjs
-test/host-models.test.mjs
 test/cli-catalog.test.mjs
 test/clone-policy.test.mjs
 test/column-role-policy-glob.test.mjs
@@ -71,8 +70,8 @@ test/consensus-meta-self-exclusion-grep.test.mjs
 test/consensus-state.test.mjs
 test/credential-mask.test.mjs
 test/credential-whitespace-normalize.test.mjs
-test/credentials-scope.test.mjs
 test/credentials-scope-switch.test.mjs
+test/credentials-scope.test.mjs
 test/cron-coverage-guard.test.mjs
 test/cross-workspace-holder-name.test.mjs
 test/default-role-assignments-config.test.mjs
@@ -97,6 +96,7 @@ test/github-sync-credential.test.mjs
 test/hard-budget-config.test.mjs
 test/hard-budget-dispatch-gate.test.mjs
 test/hard-budget-guard.test.mjs
+test/host-models.test.mjs
 test/inflight-strand-output-liveness.test.mjs
 test/instance-registry-list-for-agent.test.mjs
 test/legacy-column-workspace-detail.test.mjs
