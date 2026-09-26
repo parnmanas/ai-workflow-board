@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
   isGitAuthFailure,
+  isGitRefLockRace,
   decidePushReadiness,
   decideCliTrustReadiness,
   decideCliAuthReadiness,
@@ -90,6 +91,51 @@ test('isGitAuthFailure: transient/connectivity errors are NOT auth blockers (fai
     null,
   ]) {
     assert.equal(isGitAuthFailure(s), false, `should NOT classify as auth failure: ${String(s)}`);
+  }
+});
+
+// ── isGitRefLockRace (티켓 0835f582) ────────────────────────────────────────
+//
+// 같은 저장소로 동시 dispatch 가 걸리면 공유 base 의 `refs/remotes/origin/<b>`
+// 갱신에서 compare-and-swap 경합이 난다. 진 쪽만 실패하고 ref 는 이미 목표값에
+// 있으므로 무해하다 — 그 판정이 여기 있다. 문자열 판정이라 플랫폼과 무관하게
+// 돌아야 하고(worktree-manager 의 end-to-end 재시도 테스트는 bash shim 때문에
+// POSIX 전용이다), 그래서 실측 stderr 를 그대로 핀으로 박는다.
+
+test('isGitRefLockRace: 티켓 0835f582 의 실측 stderr 는 ref CAS 경합이다', () => {
+  // dispatch 가 실제로 막혔을 때 git 이 찍은 문면 그대로.
+  const stderr = [
+    "error: cannot lock ref 'refs/remotes/origin/main': is at bd8bc4dd4cc3efceee5ed5b5153ad7dcf8cbf486 but expected fc9fccc524affba0e7b3bd359a83d77bf01e2609",
+    ' ! fc9fccc5..bd8bc4dd  main       -> origin/main  (unable to update local ref)',
+  ].join('\n');
+  assert.equal(isGitRefLockRace(stderr), true);
+  // 경합은 auth 블로커가 아니다 — 둘은 서로 배타적으로 분류돼야 한다.
+  assert.equal(isGitAuthFailure(stderr), false);
+});
+
+test('isGitRefLockRace: `cannot lock ref` 만으로는 경합이 아니다 (ref 가 움직였다는 증거가 없다)', () => {
+  for (const s of [
+    // 남겨졌거나 살아 있는 `.lock` 에 막힌 경우 — ref 는 갱신되지 않았다.
+    "error: cannot lock ref 'refs/remotes/origin/main': Unable to create '/repo/.git/refs/remotes/origin/main.lock': File exists.",
+    // 반대쪽 절반만 있는 경우.
+    'error: update_ref failed: but expected something else',
+    'fatal: unable to access ...: Could not resolve host: github.com',
+    '',
+    undefined,
+    null,
+  ]) {
+    assert.equal(isGitRefLockRace(s), false, `경합으로 분류하면 안 된다: ${String(s)}`);
+  }
+});
+
+test('isGitRefLockRace: auth 실패 문면은 경합으로 분류되지 않는다', () => {
+  for (const s of [
+    "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    'fatal: Authentication failed for https://github.com/x/y.git',
+    'remote: Repository not found.',
+  ]) {
+    assert.equal(isGitRefLockRace(s), false, `경합으로 분류하면 안 된다: ${s}`);
+    assert.equal(isGitAuthFailure(s), true, `auth 블로커로 분류돼야 한다: ${s}`);
   }
 });
 
