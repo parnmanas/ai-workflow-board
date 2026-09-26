@@ -3181,7 +3181,12 @@ export interface OrchestrationRuntimeHost {
   last_seen_at: string | null;
   /** CLIs installed on this host. */
   clis: string[];
-  /** cliType → model ids this host reported. */
+  /**
+   * cliType → model ids. **화면에서 이 필드를 읽지 말 것** — 모델 dropdown 은
+   * `useHostModels()`(src/cli/hostModels.ts)만 본다. 서버는 이제 그 훅과 **같은**
+   * 단일 출처(HostModelsService)로 이 값을 채우지만, 여기서 직접 읽는 코드가 생기면
+   * 화면마다 갱신 시점이 갈려 또 목록이 달라진다(팀 슬롯이 정확히 그랬다).
+   */
   available_models: Record<string, string[]>;
   cli_versions: Record<string, string>;
   /** Working folders already used on this host — the "share a folder" picker. */

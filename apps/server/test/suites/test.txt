@@ -98,6 +98,7 @@ test/github-sync-credential.test.mjs
 test/hard-budget-config.test.mjs
 test/hard-budget-dispatch-gate.test.mjs
 test/hard-budget-guard.test.mjs
+test/host-models-single-source.test.mjs
 test/host-models.test.mjs
 test/inflight-strand-output-liveness.test.mjs
 test/instance-registry-list-for-agent.test.mjs

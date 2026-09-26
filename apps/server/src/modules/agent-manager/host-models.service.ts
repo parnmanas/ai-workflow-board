@@ -48,6 +48,14 @@ export class HostModelsError extends Error {
 const REFRESH_ACK_INTERVAL_MS = 800;
 const REFRESH_ACK_ATTEMPTS = 15;
 
+/**
+ * 살아 있는 세션이 알려 준 모델 id 를 얼마나 오래 인정하는가. 하트비트가 이미 그
+ * 모델을 실어 오면 이 관측은 없어도 되지만, 열거가 실패하는 CLI(또는 provider 를
+ * 방금 로그인한 직후)에서는 이것만이 목록의 유일한 출처가 된다. 너무 길면 지운
+ * provider 의 모델이 남고, 너무 짧으면 세션을 닫자마자 목록이 줄어든다.
+ */
+const OBSERVED_MODELS_TTL_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class HostModelsService {
   constructor(
@@ -56,6 +64,63 @@ export class HostModelsService {
     private readonly commands: AgentManagerCommandService,
     private readonly commandLedger: CommandLedgerService,
   ) {}
+
+  /**
+   * 라이브 ACP 세션이 보고한 모델 id — host×cli 별 관측. Agent Session 화면이
+   * `noteObservedModels()` 로 넣는다.
+   *
+   * 왜 필요한가: 세션이 열리면 ACP 어댑터가 그 CLI 가 **실제로** 받아들이는 목록을
+   * 보고한다. 예전에는 그 사실이 세션 화면에만 남아 Agent 다이얼로그·팀 슬롯은 더
+   * 가난한 목록을 보여줬다 — "session/chat 다르고 mission 다르다"의 절반이 이것이다.
+   * 이제 관측은 이 단일 출처로 흘러들어 모든 화면이 같은 목록을 본다.
+   */
+  #observed = new Map<string, { models: string[]; at: number }>();
+
+  private observedKey(managerAgentId: string, cli: string): string {
+    return `${managerAgentId}::${cli}`;
+  }
+
+  /** 라이브 세션이 보고한 목록을 기록한다(같은 host×cli 의 이전 관측을 대체). */
+  noteObservedModels(managerAgentId: string, cli: string, models: readonly string[]): void {
+    const clean = Array.from(new Set(models.filter((m) => typeof m === 'string' && !!m.trim()).map((m) => m.trim())));
+    const key = this.observedKey(managerAgentId, cli);
+    if (!clean.length) {
+      this.#observed.delete(key);
+      return;
+    }
+    this.#observed.set(key, { models: clean, at: Date.now() });
+  }
+
+  private observedModels(managerAgentId: string, cli: string): string[] {
+    const entry = this.#observed.get(this.observedKey(managerAgentId, cli));
+    if (!entry) return [];
+    if (Date.now() - entry.at > OBSERVED_MODELS_TTL_MS) {
+      this.#observed.delete(this.observedKey(managerAgentId, cli));
+      return [];
+    }
+    return entry.models;
+  }
+
+  /**
+   * 하트비트 + 라이브 관측을 합친 최종 목록. **순서는 하트비트 먼저** — 호스트가
+   * 열거한 순서에 의미가 있고(설치된 CLI 의 기본값이 앞), 알파벳으로 다시 정렬하면
+   * 같은 사실이 화면마다 다른 순서로 보인다.
+   */
+  private mergeModels(managerAgentId: string, cli: string, heartbeat: readonly string[]): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const m of heartbeat) {
+      if (typeof m !== 'string' || !m || seen.has(m)) continue;
+      seen.add(m);
+      out.push(m);
+    }
+    for (const m of this.observedModels(managerAgentId, cli)) {
+      if (seen.has(m)) continue;
+      seen.add(m);
+      out.push(m);
+    }
+    return out;
+  }
 
   private liveRecord(managerAgentId: string): InstanceRecord | null {
     let best: InstanceRecord | null = null;
@@ -80,10 +145,32 @@ export class HostModelsService {
     return this.viewOf(manager, this.liveRecord(manager.id));
   }
 
-  /** 하트비트가 보고한 한 CLI 의 목록. 없으면 빈 배열. */
+  /**
+   * 이 host×cli 의 모델 목록 — **모델을 보여주는 모든 화면이 이 값을 본다**
+   * (Agent 다이얼로그·팀 슬롯·세션 설정·새 세션·Runtime Hosts·오케스트레이션 로스터).
+   * 하트비트 열거 + 라이브 세션 관측의 합집합이고, 없으면 빈 배열.
+   *
+   * 자기만의 합집합을 따로 만들지 말 것 — 그렇게 갈라진 목록이 화면마다 달랐다.
+   */
   modelsFor(managerAgentId: string, cli: string): string[] {
     const models = this.liveRecord(managerAgentId)?.available_models?.[cli];
-    return Array.isArray(models) ? models.filter((m) => typeof m === 'string' && !!m) : [];
+    return this.mergeModels(managerAgentId, cli, Array.isArray(models) ? models : []);
+  }
+
+  /** 이 호스트가 아는 모든 CLI 의 목록(로스터·카탈로그용). */
+  modelsByCli(managerAgentId: string): Record<string, string[]> {
+    const heartbeat = this.liveRecord(managerAgentId)?.available_models ?? {};
+    const clis = new Set<string>(Object.keys(heartbeat));
+    for (const key of this.#observed.keys()) {
+      const [id, cli] = key.split('::');
+      if (id === managerAgentId && cli) clis.add(cli);
+    }
+    const out: Record<string, string[]> = {};
+    for (const cli of clis) {
+      const list = this.modelsFor(managerAgentId, cli);
+      if (list.length) out[cli] = list;
+    }
+    return out;
   }
 
   /**
@@ -114,12 +201,7 @@ export class HostModelsService {
   }
 
   private viewOf(manager: Agent, rec: InstanceRecord | null): HostModelsView {
-    const models: Record<string, string[]> = {};
-    for (const [cli, list] of Object.entries(rec?.available_models ?? {})) {
-      if (!Array.isArray(list)) continue;
-      const clean = list.filter((m) => typeof m === 'string' && !!m);
-      if (clean.length) models[cli] = clean;
-    }
+    const models = this.modelsByCli(manager.id);
     return {
       manager_agent_id: manager.id,
       manager_name: manager.name,

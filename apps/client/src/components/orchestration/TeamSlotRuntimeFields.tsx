@@ -190,13 +190,13 @@ export default function TeamSlotRuntimeFields({
 
   // 모델 목록은 모든 화면이 공유하는 스토어에서 온다(src/cli/hostModels.ts): 오래된/빈
   // 목록은 훅이 조용히 재열거하고, 아래 Refresh 버튼은 같은 refresh() 를 부른다.
-  // `host.available_models` 는 로스터 카탈로그의 스냅샷일 뿐이라 첫 렌더 seed 로만 쓴다.
+  //
+  // `host.available_models` 로 **떨어지지 않는다**. 예전엔 훅이 빈 목록일 때 그 스냅샷을
+  // 썼는데, 서버가 그 필드를 다르게(하트비트 + agent 행에 핀된 모델, 알파벳 재정렬)
+  // 계산해서 같은 호스트의 목록이 팀 슬롯과 세션/Agent 다이얼로그에서 달라 보였다.
+  // 목록은 한 곳에서만 온다 — 비어 있으면 아래 자유 입력이 답이다.
   const hostModels = useHostModels(host?.manager_agent_id ?? null, cli);
-  const modelOptions = hostModels.models.length
-    ? hostModels.models
-    : host && cli
-      ? host.available_models[cli] ?? []
-      : [];
+  const modelOptions = hostModels.models;
   const refreshingModels = hostModels.refreshing;
   const [modelProbeNote, setModelProbeNote] = useState<string | null>(null);
 

@@ -14,6 +14,7 @@ import { normalizeCredentialFields } from '../../common/credential-fields';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { InstanceRecord, InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { HostModelsService } from '../agent-manager/host-models.service';
 import {
   ACP_SESSION_CLIS,
   AGENT_SESSION_COMMANDS_MAX,
@@ -309,6 +310,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     @InjectRepository(Credential) private readonly credentials: Repository<Credential>,
     @InjectRepository(ClaudeBackendProfile) private readonly backendProfiles: Repository<ClaudeBackendProfile>,
     private readonly registry: InstanceRegistryService,
+    private readonly hostModels: HostModelsService,
     private readonly logService: LogService,
   ) {
     activityEvents.on('agent_instance_update', this.onInstanceUpdate);
@@ -555,7 +557,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다:
       //   1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP configOptions (가장 정확 — 표시 이름·현재값 포함)
       //   2) 지금 살아 있는 세션이 아는 선택지 (서버 재시작 직후)
-      //   3) 하트비트의 `available_models` 로 합성한 model 옵션 (세션을 한 번도 연 적 없는 조합)
+      //   3) 단일 출처(HostModelsService)의 모델 목록으로 합성한 model 옵션 (세션을 한 번도 연 적 없는 조합)
       // 3번이 없던 동안에는 "처음 쓰는 호스트×CLI 면 모델을 못 고른다" 가 됐고, 사용자 눈에는
       // 되는 조합과 안 되는 조합이 뒤섞인 것처럼 보였다.
       known_config_options: this.withModelFallback(cached.length ? cached : this.liveConfigOptions(managerId, cli), managerId, cli),
@@ -635,7 +637,7 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   /** 지금 살아 있는 이 호스트×CLI 세션 중 가장 최근 것이 아는 설정 선택지. */
   /**
-   * 선택지 목록에 model 옵션이 없으면 하트비트의 `available_models[cli]` 로 하나 합성해 덧붙인다.
+   * 선택지 목록에 model 옵션이 없으면 단일 출처(HostModelsService)의 목록으로 하나 합성해 덧붙인다.
    *
    * ACP 가 주는 값과 어댑터 `listModels()` 가 주는 값은 **같은 id 형식**이다(rolf 실측:
    * claude `opus/sonnet/haiku`, codex `gpt-6-astra…`, opencode `opencode/big-pickle`). 그래서
@@ -676,15 +678,14 @@ export class AgentSessionsService implements OnModuleDestroy {
     ];
   }
 
-  /** 이 매니저의 최신 하트비트가 보고한 CLI별 모델 목록. 보고가 없으면 빈 배열. */
+  /**
+   * 이 host×cli 의 모델 목록. 하트비트를 직접 읽지 않고 단일 출처(HostModelsService)에
+   * 물어본다 — 그래야 이 화면과 Agent 다이얼로그·팀 슬롯이 **같은 목록**을 본다.
+   * 반대 방향(이 세션이 ACP 로 알게 된 목록)은 `noteObservedModels` 로 그 출처에
+   * 흘려보낸다.
+   */
   private heartbeatModels(managerId: string, cli: string): string[] {
-    let best: InstanceRecord | null = null;
-    for (const rec of this.managerRecords()) {
-      if (rec.agent_id !== managerId) continue;
-      if (!best || rec.last_seen_at > best.last_seen_at) best = rec;
-    }
-    const models = best?.available_models?.[cli];
-    return Array.isArray(models) ? models.filter((m) => typeof m === 'string' && !!m) : [];
+    return this.hostModels.modelsFor(managerId, cli);
   }
 
   private liveConfigOptions(managerId: string, cli: string): AgentSessionConfigOption[] {
@@ -1362,6 +1363,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     if (patch.config_options !== undefined) {
       state.config_options = normalizeConfigOptions(patch.config_options);
+      // 살아 있는 어댑터가 보고한 모델 목록은 이 화면만의 지식이 아니다 — 모델을
+      // 보여주는 모든 화면의 단일 출처로 올려보낸다(티켓: mission/session/chat 의
+      // 목록이 서로 달랐다). 하트비트 열거가 실패하는 CLI 에서는 이것이 유일한 출처다.
+      const reportedModels = state.config_options
+        .filter((o) => o.category === 'model')
+        .flatMap((o) => o.options.map((opt) => opt.value));
+      if (reportedModels.length) this.hostModels.noteObservedModels(state.manager_id, state.cli, reportedModels);
       // 선택지는 어댑터가 살아 있어야 알 수 있다 — 새 세션 모달이 세션 없이도 고를 수 있게 남긴다(best-effort).
       void this.rememberKnownOptions(state.manager_id, state.cli, state.config_options)
         .catch((err) => this.logService.debug('AgentSession', `known config options cache failed: ${err?.message ?? err}`));

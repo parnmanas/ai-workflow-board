@@ -466,26 +466,16 @@ export class OrchestrationAgentProvisionerService {
     const managerIds = managers.map((m) => m.id);
     const hosted = await this.agentRepo.find({
       where: { manager_agent_id: In(managerIds) },
-      select: { id: true, manager_agent_id: true, type: true, working_dir: true, model: true } as any,
+      select: { id: true, manager_agent_id: true, type: true, working_dir: true } as any,
     });
     const folders = new Map<string, Set<string>>();
     const clisFromRows = new Map<string, Set<string>>();
-    const modelsFromRows = new Map<string, Map<string, Set<string>>>();
     for (const a of hosted) {
       const host = a.manager_agent_id!;
       if (a.working_dir && a.working_dir.trim()) {
         addTo(folders, host, a.working_dir.trim());
       }
-      if (a.type && a.type !== 'manager') {
-        addTo(clisFromRows, host, a.type);
-        if (a.model && a.model.trim()) {
-          const perHost = modelsFromRows.get(host) ?? new Map<string, Set<string>>();
-          const set = perHost.get(a.type) ?? new Set<string>();
-          set.add(a.model.trim());
-          perHost.set(a.type, set);
-          modelsFromRows.set(host, perHost);
-        }
-      }
+      if (a.type && a.type !== 'manager') addTo(clisFromRows, host, a.type);
     }
 
     // Folders named by team slots but not (yet) by any agent row — e.g. a slot
@@ -496,23 +486,6 @@ export class OrchestrationAgentProvisionerService {
 
     return managers.map((m) => {
       const rec = live.get(m.id) ?? null;
-      const heartbeatModels = rec?.available_models ?? {};
-      const rowModels = modelsFromRows.get(m.id) ?? new Map<string, Set<string>>();
-      const models: Record<string, string[]> = {};
-      const cliKeys = new Set<string>([
-        ...Object.keys(heartbeatModels),
-        ...rowModels.keys(),
-      ]);
-      for (const cli of cliKeys) {
-        // Heartbeat first (what the installed CLI actually enumerates), then
-        // any model an existing agent on this host is already pinned to — the
-        // latter keeps a working value selectable even when enumeration failed.
-        const merged = new Set<string>(
-          (Array.isArray(heartbeatModels[cli]) ? heartbeatModels[cli] : []).filter((v) => typeof v === 'string' && v),
-        );
-        for (const v of rowModels.get(cli) ?? []) merged.add(v);
-        if (merged.size) models[cli] = Array.from(merged).sort();
-      }
       const clis = new Set<string>([
         ...(rec?.cli_adapters ?? []),
         ...(clisFromRows.get(m.id) ?? []),
@@ -525,7 +498,13 @@ export class OrchestrationAgentProvisionerService {
         instance_id: rec?.instance_id ?? null,
         last_seen_at: rec?.last_seen_at ?? null,
         clis: Array.from(clis).sort(),
-        available_models: models,
+        // 모델 목록은 **단일 출처**에서 그대로 가져온다(HostModelsService). 예전에는
+        // 여기서 하트비트 + 기존 agent 행에 핀된 모델을 합쳐 알파벳순으로 다시 정렬했다 —
+        // 그래서 같은 호스트의 opencode 목록이 팀 슬롯(mission)과 세션/Agent 다이얼로그
+        // 에서 내용도 순서도 달랐다. 열거가 실패한 호스트에서 저장된 값이 사라지는 문제는
+        // 화면이 이미 다루고 있다(슬롯 편집기가 저장된 model 을 목록에 덧붙이고 자유
+        // 입력도 받는다) — 그것 때문에 목록 자체를 갈라놓을 이유는 없다.
+        available_models: this.hostModels.modelsByCli(m.id),
         cli_versions: rec?.cli_versions ?? {},
         working_dirs: Array.from(folders.get(m.id) ?? []).sort(),
       };
