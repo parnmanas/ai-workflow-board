@@ -3,6 +3,7 @@ import 'reflect-metadata';
 import { join } from 'path';
 import compression from 'compression';
 import helmet from 'helmet';
+import { CSP_DIRECTIVES } from './common/security-headers';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
@@ -61,10 +62,7 @@ async function bootstrap() {
     if (req.path.startsWith('/api-docs')) return next();
     return helmet.contentSecurityPolicy({
       useDefaults: true,
-      directives: {
-        objectSrc: ["'none'"],
-        frameAncestors: ["'none'"],
-      },
+      directives: CSP_DIRECTIVES,
     })(req, res, next);
   });
 

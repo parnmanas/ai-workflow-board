@@ -226,6 +226,7 @@ test/run-budget-dispatch-gate.test.mjs
 test/run-budget-guard.test.mjs
 test/run-workspace-resolver-credential.test.mjs
 test/runtime-ca-bundle.test.mjs
+test/security-headers.test.mjs
 test/security-profile-scope.test.mjs
 test/security-run-reaper-behavior.test.mjs
 test/security-schedule-behavior.test.mjs
