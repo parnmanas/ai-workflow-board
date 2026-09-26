@@ -28,6 +28,7 @@ test/allocation-staleness-clock.test.mjs
 test/api-keys-leak.test.mjs
 test/archive-exclusion-guard.test.mjs
 test/assignee-role-flat-sync.test.mjs
+test/attachment-truncation-guard.test.mjs
 test/backlog-promotion-sort-prefix.test.mjs
 test/base-repo-binding.test.mjs
 test/board-language-dispatch-guard.test.mjs

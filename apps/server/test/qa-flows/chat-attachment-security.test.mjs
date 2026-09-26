@@ -36,11 +36,13 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_CHAT_ATTACH_SEC_PORT || '0';
 
-// Real PNG signature + a couple of IHDR bytes — sniffer matches "image/png".
-const FAKE_PNG = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
-]).toString('base64');
+// 1x1 PNG 전체 — 헤더뿐인 스텁이 아니라 **완결된 파일**이다. 예전 픽스처는 14바이트
+// "PNG 헤더 + IHDR 앞부분" 이었고, 업로드가 완결성까지 검사하게 된 뒤(2026-09-26,
+// attachment-truncation-guard) 그건 정의상 잘린 PNG 라서 거부된다. 이 테스트들이 시험하려는
+// 것은 소유권 전이·다운로드·권한이지 "불완전한 파일도 받아 주는가" 가 아니므로, 진짜 파일로
+// 바꾸는 것이 의도에 맞다.
+const FAKE_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 // Real PDF header — sniffer matches "application/pdf". Same bytes but
 // labeled as image/png is the P2 mismatch case.
 const FAKE_PDF = Buffer.from('%PDF-1.4\n%example\n').toString('base64');
@@ -210,8 +212,14 @@ test('chat-attachment security regressions: atomic claim + mime sniffing', async
   // Real JPEG bytes labeled with the non-canonical "image/jpg" spelling
   // (some browsers + legacy SDKs still emit this). The sniffer detects
   // image/jpeg; the alias table must reconcile so the upload is accepted.
+  //
+  // 헤더만이 아니라 **EOI(FFD9)까지** 넣는다: 업로드가 완결성도 검사하므로(2026-09-26)
+  // 헤더 10바이트짜리 스텁은 잘린 JPEG 으로 거부된다. 이 테스트가 시험하는 것은 mime
+  // 별칭 정규화이고, 그러려면 파일이 일단 온전해야 한다.
   const FAKE_JPEG = Buffer.from([
-    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46,
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00,
+    ...new Array(32).fill(0x41),
+    0xff, 0xd9,
   ]).toString('base64');
   const jpgRes = await fetch(`http://localhost:${port}/api/chat-rooms/${room.id}/attachments`, {
     method: 'POST',

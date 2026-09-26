@@ -34,11 +34,13 @@ process.env.PORT = process.env.QA_CHAT_ATTACH_PORT || '0';
 
 // 8 bytes of "hello!\n" base64 — minimal valid payload.
 const TINY_TXT = Buffer.from('hello!\n').toString('base64');
-// 14-byte fake PNG header + IHDR — enough for mime sniffing to recognize image/png.
-const FAKE_PNG = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
-]).toString('base64');
+// 1x1 PNG 전체 — 헤더뿐인 스텁이 아니라 **완결된 파일**이다. 예전 픽스처는 14바이트
+// "PNG 헤더 + IHDR 앞부분" 이었고, 업로드가 완결성까지 검사하게 된 뒤(2026-09-26,
+// attachment-truncation-guard) 그건 정의상 잘린 PNG 라서 거부된다. 이 테스트들이 시험하려는
+// 것은 소유권 전이·다운로드·권한이지 "불완전한 파일도 받아 주는가" 가 아니므로, 진짜 파일로
+// 바꾸는 것이 의도에 맞다.
+const FAKE_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 async function createDmRoom(app, getDataSourceToken, { wsId, userA, userB }) {
   const ds = app.get(getDataSourceToken());

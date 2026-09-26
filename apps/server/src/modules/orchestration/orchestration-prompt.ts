@@ -528,6 +528,13 @@ export function renderStepPrompt(args: {
       `Limits: 10 MB per file. Prefer PNG/WebP for screenshots and a short, downscaled WebM/MP4 (a few`,
       `seconds) for recordings — trim before uploading rather than skipping the evidence. Say what you`,
       `attached in your report \`summary\`. Never paste base64 into the summary or into the room text.`,
+      ``,
+      `**Make sure the file is finished before you read it.** A screenshot or recording that is still being`,
+      `written produces a file whose bytes stop mid-image: the upload looks fine and the operator later sees`,
+      `a broken thumbnail. Wait for the capturing process to exit, then confirm the file actually opens`,
+      `(e.g. \`python3 -c "from PIL import Image; Image.open('shot.png').load()"\`, or \`ffprobe\` for video)`,
+      `before you base64 it. The server rejects a truncated image outright, so a failed upload means read it`,
+      `again — do not report the step as verified with evidence you never managed to attach.`,
     ].join('\n'),
   );
   lines.push('');

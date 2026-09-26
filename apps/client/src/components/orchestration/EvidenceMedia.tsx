@@ -107,6 +107,18 @@ export function EvidenceThumb({
   useEffect(() => {
     onEnsure(meta);
   }, [meta, onEnsure]);
+  /**
+   * 바이트는 받았는데 **브라우저가 디코드하지 못하는** 경우. 2026-09-26 에 실제로 일어났다:
+   * 에이전트가 아직 쓰이는 중인 캡처 파일을 읽어 올려서 JPEG 가 중간에 끊긴 채 저장됐다.
+   * 그때 화면은 영원히 "…" 자리표시자였고, 운영자에게는 "AWB 가 이미지를 못 보여준다"로
+   * 보였다 — 실제로는 파일이 깨진 것이다. 둘은 서로 **다른 문제**이므로 화면이 구분해서
+   * 말해야 한다. 업로드 시점 검사가 지금은 이런 파일을 막지만, 이미 저장된 것들과
+   * 검사하지 않는 형식(동영상 컨테이너)이 남아 있다.
+   */
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    setBroken(false);
+  }, [url]);
   const video = isVideoMime(meta.mime_type);
   return (
     <button
@@ -132,16 +144,42 @@ export function EvidenceThumb({
         flexShrink: 0,
       }}
     >
-      {url ? (
+      {broken ? (
+        <span
+          data-testid="evidence-thumb-broken"
+          style={{
+            fontSize: 10,
+            lineHeight: 1.35,
+            padding: 6,
+            textAlign: 'center',
+            color: tokens.colors.warningLight,
+          }}
+        >
+          ⚠ 깨진 파일
+          <br />
+          <span style={{ color: tokens.colors.textMuted }}>열 수 없습니다</span>
+        </span>
+      ) : url ? (
         video ? (
-          <video src={url} muted preload="metadata" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          <video
+            src={url}
+            muted
+            preload="metadata"
+            onError={() => setBroken(true)}
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
         ) : (
-          <img src={url} alt={meta.file_name} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+          <img
+            src={url}
+            alt={meta.file_name}
+            onError={() => setBroken(true)}
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+          />
         )
       ) : (
         <span style={{ fontSize: 11, color: tokens.colors.textSecondary }}>…</span>
       )}
-      {video && (
+      {video && !broken && (
         <span
           aria-hidden="true"
           style={{
@@ -174,6 +212,7 @@ export function EvidenceLightbox({
   caption?: string;
   onClose: () => void;
 }) {
+  const [broken, setBroken] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -201,11 +240,33 @@ export function EvidenceLightbox({
         gap: 10,
       }}
     >
-      {video ? (
+      {broken ? (
+        <div
+          data-testid="evidence-lightbox-broken"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            maxWidth: 520,
+            padding: 20,
+            borderRadius: 8,
+            background: tokens.colors.surfaceCard,
+            color: tokens.colors.textSecondary,
+            fontSize: 12.5,
+            lineHeight: 1.7,
+          }}
+        >
+          <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
+            ⚠ 이 파일은 열 수 없습니다
+          </div>
+          바이트는 서버에 저장돼 있지만 디코드되지 않습니다 — 올리는 쪽에서 아직 저장이 끝나지
+          않은 파일을 읽어 중간에 끊긴 경우입니다. 담당 agent 에게 다시 올려 달라고 하세요.
+          아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.
+        </div>
+      ) : video ? (
         <video
           src={url}
           controls
           autoPlay
+          onError={() => setBroken(true)}
           style={{ maxWidth: '92vw', maxHeight: '82vh', borderRadius: 6, background: '#000' }}
           onClick={(e) => e.stopPropagation()}
         />
@@ -213,6 +274,7 @@ export function EvidenceLightbox({
         <img
           src={url}
           alt={meta.file_name}
+          onError={() => setBroken(true)}
           style={{ maxWidth: '92vw', maxHeight: '82vh', borderRadius: 6 }}
           onClick={(e) => e.stopPropagation()}
         />
