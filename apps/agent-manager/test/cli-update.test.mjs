@@ -261,6 +261,174 @@ test('경로를 지정하면 그 경로만 본다 — 재해석으로 대상이 
   assert.equal(invalidated, 0, '지정된 경로가 곧 대상이므로 재해석하지 않는다');
 });
 
+// ─── `options.bin` 미지정 경로 — 대상은 `resolveBin` 이 정한다 ───────────────
+//
+// 운영자가 설치본을 특정하지 않고 "claude 올려" 라고만 하면 `args.bin` 없이 여기
+// 까지 온다(`agent-manager-commands.ts` 의 `args.bin` 은 optional → `main.ts` 의
+// updateCli 가 `bin: null` 로 부른다). 그때 **대상을 정하는 것이 resolveBin** 이고,
+// 그래서 이 분기는 주입 없이 검증할 수 없다 — 주입을 흘리면 "이 러너에 claude 가
+// 깔려 있는가" 가 결과를 가른다(board lesson: CLI resolver 테스트는 호스트 설치에
+// 의존하지 말 것).
+//
+// 아래 경로는 **어느 호스트에도 없는 픽스처**다. 그래서 단언이 성립한다는 것 자체가
+// "해석이 주입을 탔다" 의 증거다: 구현이 주입을 흘려 어댑터로 직행하면 resolvedPath
+// 는 러너의 실제 설치 경로(또는 해석 실패)가 되어 이 상수와 결코 같을 수 없다.
+const FIXTURE_NPM_CLAUDE = '/awb-fixture/npm-global/bin/claude';
+const FIXTURE_NATIVE_CLAUDE = '/awb-fixture/dot-local/bin/claude';
+
+test('bin 을 안 주면 주입된 resolveBin 이 대상을 정한다 — 호스트 설치와 무관하다', async () => {
+  const askedFor = [];
+  const detected = [];
+  const runs = [];
+  const probed = [];
+  const invalidated = [];
+  const result = await runCliUpdate(
+    'claude',
+    {
+      hostLabel: 'fixture-host',
+      resolveBin: (cli) => {
+        askedFor.push(cli);
+        return FIXTURE_NPM_CLAUDE;
+      },
+      listCandidates: noOtherInstalls,
+      detectMethod: (bin) => {
+        detected.push(bin);
+        return npmMethod('/awb-fixture/npm-global', '@anthropic-ai/claude-code');
+      },
+      run: async (cmd, args) => {
+        runs.push([cmd, ...args]);
+        return { ok: true, output: '' };
+      },
+      probeVersion: async (bin) => {
+        probed.push(bin);
+        return probed.length === 1 ? '2.1.273 (Claude Code)' : '2.1.281 (Claude Code)';
+      },
+      invalidateResolved: (cli) => invalidated.push(cli),
+    },
+    { latest: '2.1.281' },
+  );
+
+  assert.deepEqual(askedFor, ['claude', 'claude'], 'resolveBin 에는 CLI 이름이 그대로 전달된다 (업데이트 전 해석 + 후 재해석)');
+  assert.deepEqual(detected, [FIXTURE_NPM_CLAUDE], '설치 방법은 해석된 경로로 판정한다');
+  assert.deepEqual(runs, [
+    ['npm', '--prefix', '/awb-fixture/npm-global', 'install', '-g', '@anthropic-ai/claude-code@latest'],
+  ], '해석된 경로의 prefix 를 박아 그 설치본만 올린다');
+  assert.deepEqual(invalidated, ['claude'], '재해석 전에 resolve 캐시를 버린다');
+  assert.deepEqual(
+    probed,
+    [FIXTURE_NPM_CLAUDE, FIXTURE_NPM_CLAUDE],
+    'before/after 모두 해석된 경로에서 읽는다',
+  );
+  assert.equal(result.resolvedPath, FIXTURE_NPM_CLAUDE);
+  assert.equal(result.before, '2.1.273 (Claude Code)');
+  assert.equal(result.after, '2.1.281 (Claude Code)');
+  assert.equal(result.ok, true);
+});
+
+test('업데이터가 설치 위치를 옮기면 재해석도 주입된 resolveBin 을 탄다 (npm → native installer)', async () => {
+  // claude 가 실제로 하는 일이다. 재해석이 주입을 흘리면 업데이트 후 버전을
+  // **옮겨지기 전** 경로에서 읽게 되고, 방금 올린 것이 "안 움직였다" 로 보고된다.
+  const keys = [];
+  let resolves = 0;
+  const result = await runCliUpdate(
+    'claude',
+    {
+      resolveBin: () => (++resolves === 1 ? FIXTURE_NPM_CLAUDE : FIXTURE_NATIVE_CLAUDE),
+      listCandidates: (key) => {
+        keys.push(key);
+        return [FIXTURE_NPM_CLAUDE];
+      },
+      detectMethod: unknownMethod,
+      run: async () => ({ ok: true, output: 'migrated to the native installer' }),
+      probeVersion: async (bin) =>
+        bin === FIXTURE_NATIVE_CLAUDE ? '2.1.281 (Claude Code)' : '2.1.273 (Claude Code)',
+      invalidateResolved: () => {},
+    },
+    { latest: '2.1.281' },
+  );
+
+  assert.equal(resolves, 2, '업데이트 전 해석 + 업데이트 후 재해석');
+  assert.equal(result.resolvedPath, FIXTURE_NATIVE_CLAUDE, '옮겨진 새 경로가 대상이다');
+  assert.equal(result.before, '2.1.273 (Claude Code)');
+  assert.equal(result.after, '2.1.281 (Claude Code)', '새 경로에서 읽어야 올라간 것이 보인다');
+  assert.equal(result.ok, true);
+  assert.deepEqual(keys, ['claude'], '다른 설치본 열거 키도 재해석된 경로에서 뽑는다');
+  assert.deepEqual(
+    result.otherInstalls,
+    [{ path: FIXTURE_NPM_CLAUDE, version: '2.1.273 (Claude Code)' }],
+    '옮겨지기 전 경로는 이제 "다른 설치본" 으로 보인다 — 실패가 아니라 정보다',
+  );
+});
+
+test('재해석이 실패하면 업데이트 전 경로로 계속 읽는다 — 업데이터가 설치를 망가뜨렸을 수 있다', async () => {
+  let resolves = 0;
+  const result = await runCliUpdate(
+    'claude',
+    {
+      resolveBin: () => {
+        if (++resolves === 2) throw new Error('claude is no longer on PATH');
+        return FIXTURE_NPM_CLAUDE;
+      },
+      listCandidates: noOtherInstalls,
+      detectMethod: unknownMethod,
+      run: async () => ({ ok: true, output: '' }),
+      probeVersion: async () => '2.1.273 (Claude Code)',
+      invalidateResolved: () => {},
+    },
+    { latest: '2.1.281' },
+  );
+
+  assert.equal(resolves, 2);
+  assert.equal(result.resolvedPath, FIXTURE_NPM_CLAUDE, '재해석 실패가 결과를 날려먹지 않는다');
+  assert.equal(result.ok, false, '최신이 더 위에 있는데 안 움직였으면 실패다');
+  assert.match(result.detail, /latest available is 2\.1\.281/);
+});
+
+test('해석 자체가 실패하면 throw 대신 사유를 담아 돌아온다 — 그 CLI 가 안 깔린 호스트', async () => {
+  let ran = 0;
+  const result = await runCliUpdate('claude', {
+    resolveBin: () => {
+      throw new Error('claude not found on PATH');
+    },
+    listCandidates: noOtherInstalls,
+    detectMethod: () => npmMethod('/awb-fixture/npm-global', '@anthropic-ai/claude-code'),
+    run: async () => {
+      ran++;
+      return { ok: true, output: '' };
+    },
+    probeVersion: async () => '2.1.273 (Claude Code)',
+  });
+
+  assert.equal(ran, 0, '대상을 모르는 채로는 아무것도 돌리지 않는다');
+  assert.equal(result.supported, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.resolvedPath, null);
+  assert.match(result.detail, /cannot resolve claude: claude not found on PATH/);
+});
+
+test('bin 을 지정하면 resolveBin 은 한 번도 불리지 않는다', async () => {
+  // 지정된 경로가 곧 대상이다. 여기서 해석을 타면 운영자가 고른 설치본이 아니라
+  // 지금 PATH 위에 있는 설치본을 올리게 된다 — ragnar 회귀와 같은 모양이다.
+  let resolves = 0;
+  const result = await runCliUpdate(
+    'claude',
+    {
+      resolveBin: () => {
+        resolves++;
+        return FIXTURE_NATIVE_CLAUDE;
+      },
+      listCandidates: noOtherInstalls,
+      detectMethod: () => npmMethod('/awb-fixture/npm-global', '@anthropic-ai/claude-code'),
+      run: async () => ({ ok: true, output: '' }),
+      probeVersion: async () => '2.1.281 (Claude Code)',
+    },
+    { bin: FIXTURE_NPM_CLAUDE, latest: '2.1.281' },
+  );
+
+  assert.equal(resolves, 0);
+  assert.equal(result.resolvedPath, FIXTURE_NPM_CLAUDE);
+});
+
 test('자체 업데이터도 없고 방법도 못 알아보면 조용히 성공한 척하지 않는다', async () => {
   let ran = 0;
   const result = await runCliUpdate(
