@@ -2734,6 +2734,15 @@ export const api = {
       loop_reentered: string[];
       orchestrator_woken: boolean;
     }>(`/orchestration/steps/${stepId}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
+  /**
+   * 종료된 미션을 다시 연다(운영자 입구). orchestrator 는 같은 전이를
+   * `reopen_orchestration_mission` MCP 툴로 스스로 부르므로, 대화만으로도 이어서 진행된다.
+   */
+  reopenOrchestrationMission: (id: string, workspaceId: string, reason?: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/reopen`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, reason }),
+    }),
   nudgeOrchestrationMission: (id: string, workspaceId: string, note?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
       method: 'POST',

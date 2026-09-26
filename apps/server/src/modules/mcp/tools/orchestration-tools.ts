@@ -10,6 +10,7 @@
  *     update_orchestration_step      — retry / reassign / amend / skip a step
  *     add_orchestration_note         — leave a reasoning note on the timeline
  *     complete_orchestration_mission — the ONLY clean way a mission ends
+ *     reopen_orchestration_mission    — bring a finished mission back (operator asked for more in the room)
  *
  *   MEMBER (the agent a step is assigned to)
  *     get_orchestration_step          — re-read the work order + dependency results
@@ -578,6 +579,36 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         return ok({ mission_id: mission.id, status: mission.status, finished_at: mission.finished_at });
       } catch (e: any) {
         return toolError(e, 'failed to complete mission');
+      }
+    },
+  );
+
+  server.tool(
+    'reopen_orchestration_mission',
+    'Bring a FINISHED mission (completed / failed / cancelled) back to life so you can continue it. ' +
+    'Call this when an operator returns to the mission conversation and asks for a change or for more work — ' +
+    'it is cheaper and clearer than starting a new mission, because the plan, every step result, the ' +
+    'timeline and this conversation all stay intact. Only the mission status is restored: no step is ' +
+    'rewound, so decide yourself what to retry (update_orchestration_step) or add (submit_orchestration_plan). ' +
+    'The mission becomes `running` and complete_orchestration_mission is still the only way it ends again. ' +
+    'Refused if the mission is not finished, or if you are not its orchestrator. Do NOT reopen just to ' +
+    'answer a question about what happened — reopen when you are actually going to do work.',
+    {
+      mission_id: z.string(),
+      reason: z
+        .string()
+        .optional()
+        .describe('One line on what the operator asked for. Recorded on the timeline and shown to you on wake-up.'),
+    },
+    async ({ mission_id, reason }, extra) => {
+      const svc = runner();
+      if (!svc) return err(NO_RUNTIME);
+      try {
+        const agentId = callerAgentId(extra);
+        const mission = await svc.reopenMission(mission_id, undefined, { type: 'agent', id: agentId, name: '' }, { reason });
+        return ok({ mission_id: mission.id, status: mission.status });
+      } catch (e: any) {
+        return toolError(e, 'failed to reopen mission');
       }
     },
   );

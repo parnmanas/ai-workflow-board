@@ -664,6 +664,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_orchestration_mission: 'orchestration',
   get_orchestration_step: 'orchestration',
   list_my_orchestration_steps: 'orchestration',
+  reopen_orchestration_mission: 'orchestration',
   list_orchestration_graph_templates: 'orchestration',
   list_orchestration_missions: 'orchestration',
   list_orchestration_teams: 'orchestration',

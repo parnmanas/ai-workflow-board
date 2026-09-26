@@ -446,11 +446,13 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
     '의사 user system 은 users 행이 없다 — 게이트가 엔진 wake 를 막으면 미션이 통째로 정지한다',
   );
 
-  // ── 4b. 종료된 미션에는 새로 참여할 수 없다 ─────────────────────────────────
+  // ── 4b. 종료된 미션에도 참여하고 말할 수 있다 ───────────────────────────────
   //
-  // 리뷰 라운드1 지적 3: 화면은 live=false 면 참여 버튼을 숨기는데 서버가 허용하면
-  // REST 를 직접 부르는 경로로 규칙이 샌다. 두 쪽을 같은 규칙으로 맞춘다.
-  step('종료된 미션의 join 은 거부된다 — 화면이 버튼을 숨기는 것과 같은 규칙');
+  // 계약이 바뀐 자리다. 예전에는 join 과 발화 모두 거부였고 그때는 맞았다 — 미션을
+  // 되살릴 방법이 없어 말을 걸어도 orchestrator 가 할 수 있는 일이 없었다. 지금은
+  // `reopenMission` 이 있고 끝난 미션의 대화가 "이어서 해 달라" 의 유일한 입구이므로,
+  // 참여와 발화를 막으면 그 기능 자체가 없어진다. 화면도 입력창을 열어 둔다.
+  step('종료된 미션에도 참여하고 발화할 수 있다 — 되살리기의 입구다');
   const closed = await missions.createMission({
     workspace_id: ws.id,
     team_id: team.id,
@@ -466,12 +468,32 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   });
   await runner.cancelMission(closed.id, ws.id, { type: 'user', id: owner.id, name: owner.name }, 'no longer needed');
   const closedJoin = await join(closed.id, peerToken);
-  assert.equal(closedJoin.status, 409, '종료된 미션에는 참여시키지 않는다');
-  assert.match((await closedJoin.json()).error, /cancelled/, '왜 거부됐는지 사유가 전달된다');
+  assert.equal(closedJoin.status, 201, '종료된 미션에도 참여할 수 있다');
   assert.equal(
     (await activeParticipants(ds, closedStarted.room_id)).includes(`user:${peer.id}`),
-    false,
-    '거부된 join 은 참여자를 남기지 않는다',
+    true,
+    '참여가 실제로 기록된다 — 이후 발화가 참여자 게이트에 걸리지 않는다',
+  );
+  const closedSay = await say(closedStarted.room_id, peerToken, '이거 한 군데만 더 고쳐 줄 수 있어?');
+  assert.equal(closedSay.status, 201, '끝난 미션에서도 운영자는 orchestrator 에게 말할 수 있다');
+
+  step('말을 거는 것만으로 미션 상태가 바뀌지는 않는다 — 되살리기는 명시적 전이다');
+  assert.equal(
+    (await missions.getMissionDetail(closed.id, ws.id)).status,
+    'cancelled',
+    '질문 한 줄에 끝난 미션이 자동으로 running 이 되면 상태가 거짓이 된다',
+  );
+
+  step('되살리면 running 으로 돌아오고 계획·기록은 그대로 남는다');
+  await runner.reopenMission(closed.id, ws.id, { type: 'user', id: owner.id, name: owner.name }, {
+    reason: '한 군데만 더 고쳐 달라',
+  });
+  const reopened = await missions.getMissionDetail(closed.id, ws.id);
+  assert.equal(reopened.status, 'running');
+  assert.equal(reopened.finished_at, null, '더 이상 끝난 미션이 아니다');
+  assert.ok(
+    reopened.events.some((e) => e.type === 'mission_reopened'),
+    '되살리기는 타임라인에 남는다 — 상태만 조용히 뒤집으면 사후에 설명할 근거가 없다',
   );
 
   // ── 4c. active membership 의 단일성 ─────────────────────────────────────────

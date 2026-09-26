@@ -653,13 +653,18 @@ export class RoomMembershipService {
     // 정확히 알려준다(요구사항 C: 실제 사유를 드러낼 것).
     const resolved = policy !== undefined ? policy : await this.resolveMissionChatPolicy(room);
     if (resolved) {
-      // 종료된 미션은 읽기 전용이다. `joinMissionConversation` 이 이미 같은 규칙으로
-      // 종료 미션 참여를 409 로 거부하고 화면도 입력창을 감추는데, 발화 경로만 이
-      // 규칙을 몰라 REST 를 직접 부르면 새 지시가 들어갔다. 세 표면이 같은 말을
-      // 하도록 여기서 닫는다. 기록 열람은 관전 경로로 그대로 열려 있다.
-      if (resolved.terminal) {
-        throw makeError(403, 'This mission has finished — its conversation is read-only');
-      }
+      // 종료된 미션도 **대화는 열려 있다.** 예전에는 여기서 403 이었다: 끝난 미션에는
+      // 말을 걸어도 아무 일이 일어나지 않는다는 판단이었고, 그때는 사실이었다 — 미션을
+      // 되살릴 방법이 아예 없었으므로 orchestrator 가 할 수 있는 일이 없었다.
+      //
+      // 지금은 `reopenMission` 이 있다. 그래서 끝난 미션의 대화는 두 가지로 쓰인다:
+      // 지난 결과를 묻는 질문(미션은 그대로 종료 상태로 남는다)과, 이어서 해 달라는
+      // 요청(orchestrator 가 `reopen_orchestration_mission` 으로 되살리고 계획을 잇는다).
+      // 둘 다 사람이 이 방에서 말하는 것으로 시작하므로, 발화를 막으면 기능 자체가 없다.
+      // 되살릴지 말지는 orchestrator 의 판단으로 남긴다 — 질문 하나에 끝난 미션이 자동으로
+      // running 으로 바뀌면 상태가 거짓이 된다.
+      //
+      // `off` 는 그대로 막는다. 그건 미션의 수명과 무관한 **운영자 자신의 선택**이다.
       if (resolved.mode === 'off') {
         throw makeError(403, 'User chat is turned off for this mission');
       }

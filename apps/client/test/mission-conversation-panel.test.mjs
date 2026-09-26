@@ -13,8 +13,8 @@
 //   • 시스템 nudge 와 사람 발화가 한 스트림에서 구분돼 보인다(티켓 f6a0de0e)
 //   • 관전 상태에서 참여 버튼을 누르면 실제로 참여되어 입력창이 열린다(티켓 f6a0de0e)
 //   • 참여가 거부되면 사유가 보이고 입력창은 열리지 않는다
-//   • 종료된 미션에는 참여 버튼을 걸지 않는다
-//   • 종료된 미션은 입력창이 없고 기록 보존 안내가 나온다
+//   • 종료된 미션에도 참여 버튼이 걸린다(참여가 실제로 발화를 푼다)
+//   • 종료된 미션도 입력창이 열려 있고, 안내 + 되살리기 버튼이 함께 나온다
 //   • 미션이 시작 전(room 없음)이면 안내만 나오고 조회를 시도하지 않는다
 //   • 긴 로그는 창 크기로 bounded 되고, 위로 스크롤하면 커서로 과거를 이어 붙인다
 //   • 과거 페이지를 여러 장 넘겨도 가장 오래된 페이지가 실제로 렌더링된다(창이 뒤로 밀린다)
@@ -385,7 +385,7 @@ test('참여가 거부되면 사유가 보이고 입력창은 열리지 않는�
   );
 });
 
-test('종료된 미션의 관전 상태에는 참여 버튼을 걸지 않는다', async () => {
+test('종료된 미션의 관전 상태에는 참여 버튼이 걸린다 — 참여하면 실제로 말할 수 있다', async () => {
   await withPanel(
     {
       props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: false, events: [] },
@@ -395,38 +395,50 @@ test('종료된 미션의 관전 상태에는 참여 버튼을 걸지 않는다'
       },
     },
     async ({ view }) => {
-      // 티켓 9cfd8161 이후 종료가 참여 여부보다 **앞선 사유**다. 서버도 이제 종료 미션의
-      // 발화를 참여자에게까지 거부하므로(requireMissionRoomSpeaker), 관전자에게 "참여자가
-      // 아님"을 먼저 말하면 참여해도 풀리지 않는 문제를 참여 문제처럼 설명하게 된다.
+      // 계약 변경: 종료는 더 이상 발화 차단 사유가 아니다(서버 requireMissionRoomSpeaker 도
+      // terminal 을 보지 않는다). 그래서 관전자에게 남은 사유는 "참여자가 아님" 하나이고,
+      // 그것은 참여로 실제로 풀리므로 버튼을 거는 것이 맞다.
       assert.ok(
-        view.container.querySelector('[data-testid="mission-conversation-closed-notice"]'),
-        '종료된 미션에서는 종료가 사유여야 한다',
+        view.container.querySelector('[data-testid="mission-conversation-observer-notice"]'),
+        '남은 사유는 참여자 아님이다',
       );
-      assert.equal(
-        Boolean(view.container.querySelector('[data-testid="mission-conversation-join"]')),
-        false,
-        '참여에 성공해도 보낼 orchestrator 세션이 없다 — 아무 일도 못 하는 버튼을 주면 안 된다',
+      assert.ok(
+        view.container.querySelector('[data-testid="mission-conversation-join"]'),
+        '참여가 문제를 실제로 풀므로 버튼을 준다',
       );
     },
   );
 });
 
-test('종료된 미션은 입력창 없이 기록 보존 안내를 보여준다', async () => {
+test('종료된 미션은 입력창을 열어 두고, 되살리는 길을 함께 안내한다', async () => {
+  const reopened = [];
   await withPanel(
     {
-      props: { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: false, events: [] },
+      props: {
+        missionId: 'mission-1',
+        workspaceId: 'ws-1',
+        roomId: ROOM,
+        live: false,
+        events: [],
+        onReopen: () => {
+          reopened.push(true);
+        },
+      },
       getChatRoomMessages: async () => [msg('m1', '완료 전 마지막 지시')],
     },
     async ({ view }) => {
       assert.ok(
         view.container.querySelector('[data-testid="mission-conversation-closed-notice"]'),
-        '종료된 미션에는 보낼 orchestrator 세션이 없으므로 안내가 나와야 한다',
+        '끝난 미션이라는 사실은 계속 알려야 한다 — 다만 막지는 않는다',
       );
-      assert.equal(
-        Boolean(view.container.querySelector('textarea')),
-        false,
-        '종료된 미션에서 입력창이 살아 있으면 사용자가 허공에 지시를 보낸다',
+      assert.ok(
+        view.container.querySelector('textarea'),
+        '입력창이 있어야 한다: 끝난 미션의 대화가 "이어서 해 달라" 의 유일한 입구다',
       );
+      const reopenBtn = view.container.querySelector('[data-testid="mission-conversation-reopen"]');
+      assert.ok(reopenBtn, 'agent 와 협상하지 않고 바로 되살리는 길도 있어야 한다');
+      reopenBtn.click();
+      assert.equal(reopened.length, 1, '버튼이 실제로 되살리기를 호출한다');
       assert.ok(
         textOf(view.container).includes('완료 전 마지막 지시'),
         '재시작·종료 후에도 기록은 그대로 보존돼 보여야 한다',

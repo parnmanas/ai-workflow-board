@@ -577,7 +577,21 @@ export class OrchestrationMissionService {
   ): Promise<OrchestrationMission> {
     const mission = await this.requireMission(missionId, workspaceId);
     if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
-      throw orchestrationError(409, `mission is ${mission.status} and can no longer be edited`);
+      // 예외 하나: `user_chat_mode` 만 담긴 패치는 종료된 미션에도 허용한다. 끝난 미션의
+      // 대화는 이어서 진행하는 입구로 살아 있으므로(되살리기), 그 방에서 누가 말할 수
+      // 있는지는 미션이 끝난 뒤에도 운영자가 정할 수 있어야 한다 — 화면이 그 셀렉트를
+      // 보여주면서 저장만 409 로 튕기면 고장난 컨트롤이 된다. 나머지 필드는 그대로 잠긴다.
+      const keys = Object.keys(patch).filter(
+        (k) => (patch as Record<string, unknown>)[k] !== undefined,
+      );
+      const onlyChatOption = keys.length > 0 && keys.every((k) => k === 'user_chat_mode');
+      if (!onlyChatOption) {
+        throw orchestrationError(
+          409,
+          `mission is ${mission.status} and can no longer be edited (the chat option is the one exception; ` +
+            `reopen the mission if you need to change anything else)`,
+        );
+      }
     }
     // 브리핑(title/objective/context/criteria/method/workspace/post-actions)은
     // orchestrator가 브리핑되기 전, draft 상태일 때만 편집 가능하다. 미션

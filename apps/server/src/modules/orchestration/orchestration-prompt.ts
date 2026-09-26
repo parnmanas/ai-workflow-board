@@ -198,6 +198,11 @@ export function renderMissionPrompt(args: {
       `6. When the acceptance criteria are met, call \`mcp__awb__complete_orchestration_mission\` with a`,
       `   \`summary\` of what was delivered. If the mission cannot be delivered, call it with`,
       `   \`status: "failed"\` and explain why. **The mission never ends on its own — only this call ends it.**`,
+      `7. Ending it is not final. If an operator comes back into this room afterwards and asks for a change or`,
+      `   for more work, call \`mcp__awb__reopen_orchestration_mission\` (mission_id + a one-line reason) and`,
+      `   the mission goes live again with its plan, results and timeline intact — then continue from there`,
+      `   instead of starting a new mission. If they only ask a question about what happened, just answer:`,
+      `   reopening is for work you are actually going to do.`,
     ].join('\n'),
   );
   lines.push('');
@@ -614,7 +619,7 @@ export function renderLeaseRecoveryNudge(args: {
  */
 export function renderWakePrompt(args: {
   mission: OrchestrationMission;
-  reason: 'step_failed' | 'step_blocked' | 'all_steps_terminal' | 'stalled' | 'manual';
+  reason: 'step_failed' | 'step_blocked' | 'all_steps_terminal' | 'stalled' | 'manual' | 'reopened';
   detail: string;
   counts: { total: number; done: number; failed: number; inFlight: number; pending: number };
 }): string {
@@ -625,6 +630,10 @@ export function renderWakePrompt(args: {
     all_steps_terminal: 'Every step has reached a terminal state.',
     stalled: 'The mission has nothing left to dispatch but is not finished.',
     manual: 'An operator asked you to reassess this mission.',
+    // 되살아난 미션(ticket: 종료 미션 대화 재개). 이미 한 번 끝났다는 사실을 첫 줄에
+    // 못박아 둔다 — 그걸 모르면 orchestrator 가 직전 라운드의 결론을 없던 일로 취급하고
+    // 처음부터 다시 계획한다.
+    reopened: 'An operator REOPENED this finished mission — it is live again.',
   }[reason];
 
   const lines = [
@@ -643,6 +652,15 @@ export function renderWakePrompt(args: {
     `- add / restructure work → \`mcp__awb__submit_orchestration_plan\` (it merges into the existing plan)`,
     `- finish → \`mcp__awb__complete_orchestration_mission\``,
     '',
+    ...(reason === 'reopened'
+      ? [
+          `Everything from the previous round is still on the record: the plan, every step result, the`,
+          `timeline, this conversation. Do not start over — read the state, then do the smallest thing the`,
+          `operator actually asked for (retry one step, add one step, or just answer them). When that is`,
+          `done, call \`complete_orchestration_mission\` again — it is still the only way this mission ends.`,
+          '',
+        ]
+      : []),
     `Do not simply acknowledge this message — the mission only advances through a tool call.`,
   ];
   return lines.join('\n');

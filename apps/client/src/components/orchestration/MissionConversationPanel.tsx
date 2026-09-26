@@ -114,6 +114,8 @@ interface MissionConversationPanelProps {
    */
   userChatMode?: OrchestrationUserChatMode;
   currentUserId?: string;
+  /** 종료된 미션을 되살리는 버튼의 동작. 없으면 안내만 뜬다. */
+  onReopen?: () => void | Promise<void>;
 }
 
 export default function MissionConversationPanel({
@@ -122,6 +124,7 @@ export default function MissionConversationPanel({
   roomId,
   events,
   live,
+  onReopen,
   userChatMode = 'open',
   currentUserId,
 }: MissionConversationPanelProps) {
@@ -438,13 +441,9 @@ export default function MissionConversationPanel({
    * 화면이 대는 이유와 서버가 실제로 막는 이유가 갈린다.
    */
   const speakBlock: { reason: string; testId: string; canJoin: boolean } | null = (() => {
-    if (!live) {
-      return {
-        reason: '종료된 미션이라 새 지시를 보낼 수 없습니다. 기록은 그대로 보존됩니다.',
-        testId: 'mission-conversation-closed-notice',
-        canJoin: false,
-      };
-    }
+    // 종료(terminal) 는 더 이상 발화를 막지 않는다 — 끝난 미션의 대화가 곧 "이어서 해 줘"
+    // 의 입구다(서버 `requireMissionRoomSpeaker` 도 같은 이유로 terminal 을 안 본다).
+    // 대신 아래 `terminalNotice` 가 상태를 알리고 되살리기 버튼을 건다.
     if (userChatMode === 'off') {
       return {
         reason:
@@ -479,6 +478,16 @@ export default function MissionConversationPanel({
     }
     return null;
   })();
+
+  /**
+   * 종료된 미션에서 입력창 위에 붙는 안내. **막지 않는다** — 알리고, 되살리는 길을 준다.
+   *
+   * 두 가지가 다 유효하기 때문이다: 지난 결과를 묻기만 하면 미션은 종료 상태로 남아야
+   * 하고(orchestrator 가 답만 한다), 이어서 해 달라고 하면 orchestrator 가 스스로
+   * `reopen_orchestration_mission` 을 부른다. 사람이 그 협상을 건너뛰고 싶을 때를 위해
+   * 버튼도 같이 둔다.
+   */
+  const terminalNotice = !live && roomId;
 
   if (!roomId) {
     return (
@@ -596,6 +605,45 @@ export default function MissionConversationPanel({
         </div>
       ) : (
         <div style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+          {terminalNotice && (
+            <div
+              data-testid="mission-conversation-closed-notice"
+              style={{
+                padding: '7px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                flexWrap: 'wrap',
+                borderBottom: `1px solid ${tokens.colors.border}`,
+                background: `${tokens.colors.border}30`,
+              }}
+            >
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5, flex: 1, minWidth: 180 }}>
+                이 미션은 종료됐습니다. 지난 결과를 물어보면 orchestrator 가 답하고, 이어서 진행해
+                달라고 하면 미션을 다시 열고 계속합니다.
+              </span>
+              {onReopen && (
+                <button
+                  type="button"
+                  onClick={() => void onReopen()}
+                  data-testid="mission-conversation-reopen"
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: 11,
+                    borderRadius: 4,
+                    border: `1px solid ${tokens.colors.border}`,
+                    background: tokens.colors.surfaceHover,
+                    color: tokens.colors.textPrimary,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  지금 다시 열기
+                </button>
+              )}
+            </div>
+          )}
           <ChatMessageInput roomId={roomId} onSent={handleSent} isMobile={false} />
         </div>
       )}
