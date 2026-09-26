@@ -102,6 +102,13 @@ export class MergeLease {
    *   1. 미해소 CI 대기(`pending_ci_wait` + 아직 outcome 없는 `ci_wait_context`)
    *      — 서버 자신이 그 run 을 폴링 중이라는 가장 강한 증거.
    *   2. 홀더의 도구 호출(획득/갱신/재검증 기록).
+   *
+   * 그 갱신은 `MergeLeaseService.reapStaleHolders` 안에 있다 — 회수 판정과 **같은
+   * 자리**여야 한다. 처음 출시될 때 이 문단이 약속한 1번(CI 대기) 갱신이 배선되지
+   * 않은 채 `noteProgress()` 가 호출자 0개로 남아 있었고, 그래서 idle 상한이
+   * "grant 이후 총 작업 예산" 으로 퇴화해 홀더 5명 중 1명이 작업 중에 lease 를
+   * 빼앗겼다(ticket baaac7e9). 이 값을 미는 코드를 옮기거나 지울 때는 그 회귀를
+   * 먼저 떠올릴 것.
    */
   @Column({ type: Date })
   last_progress_at: Date;
