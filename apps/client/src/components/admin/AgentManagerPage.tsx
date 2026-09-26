@@ -978,7 +978,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
           )}
         </dl>
 
-        <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+        {/* 호스트 단위 동작. `flexWrap` 이 필요한 이유: manager 인스턴스에서는 이 줄이
+            최대 7개까지 늘어나는데, 감싸지 않으면 창이 좁을 때 버튼들이 눌려 라벨이
+            잘리고 마지막 것이 컨테이너 밖으로 밀려 나간다. */}
+        <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {/* 워크스페이스 스냅샷에 그 agent 행이 있는지로 게이팅하지 않는다
               (ticket 20fff298). Details 는 `/ws/:wsId/agents/:agentId` 라우트로
               가고 그 화면이 id 로 단건 조회하므로, 스냅샷 행은 애초에 필요가

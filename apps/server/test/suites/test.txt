@@ -12,6 +12,7 @@ test/active-tasks-ui-liveness-parity.test.mjs
 test/activity-actor-uuid-guard.test.mjs
 test/agent-chain-depth.test.mjs
 test/agent-comment-pingpong.test.mjs
+test/agent-dashboard-fleet-fields.test.mjs
 test/agent-error-logs-hermes.test.mjs
 test/agent-fullname-display.test.mjs
 test/agent-fullname-orchestration-typing.test.mjs

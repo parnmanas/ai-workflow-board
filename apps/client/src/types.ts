@@ -1725,6 +1725,16 @@ export interface DashboardAgent {
   // REST /dashboard and /:id responses additionally merge kind:'qa' entries.
   // Absent (old server) → clients fall back to current_task.
   active_tasks?: AgentCurrentTask[];
+  // ── 목록을 카테고리로 묶는 데 쓰는 정체성 사실 (server dashboard projection).
+  // 구버전 서버는 보내지 않으므로 전부 optional — 없으면 그 축으로 그룹이 안 잡힐
+  // 뿐이고 목록 자체는 그대로 그려진다.
+  /** CLI id (`claude` / `codex` / …). 카탈로그가 라벨을 안다. */
+  type?: string;
+  description?: string;
+  working_dir?: string;
+  model?: string | null;
+  /** `''` 또는 `'orchestration'` — 팀이 발급한 정체성 표시. */
+  origin?: string;
 }
 
 export interface AgentDetail extends DashboardAgent {
