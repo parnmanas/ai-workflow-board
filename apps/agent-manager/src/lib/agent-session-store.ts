@@ -26,6 +26,7 @@ import {
   SESSION_ID_RE,
 } from './agent-session-history.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver } from './clis/cli-module.js';
+import type { SessionUsage } from './session-usage.js';
 import { cliSessions } from './clis/index.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 
@@ -188,6 +189,22 @@ export class AgentSessionStore {
     const bound = this.#driverFor(cli);
     if (!bound?.driver.findSessionFile) return null;
     return bound.driver.findSessionFile(bound.ctx, sessionId);
+  }
+
+  /**
+   * 이 세션에서 마지막으로 기록된 토큰 사용량. 라이브 턴이 끝났는데 ACP 어댑터가
+   * usage 를 주지 않은 경우의 메꿈용이다 — CLI 자신의 기록이 권위 있는 출처다.
+   * 드라이버가 없거나(hermes) 못 읽으면 `null`.
+   */
+  async readLatestUsage(cli: string, sessionId: string): Promise<SessionUsage | null> {
+    if (!SESSION_ID_RE.test(sessionId)) return null;
+    const bound = this.#driverFor(cli);
+    if (!bound?.driver.readLatestUsage) return null;
+    try {
+      return await bound.driver.readLatestUsage(bound.ctx, sessionId);
+    } catch {
+      return null;
+    }
   }
 
   // ─── 기록 ───────────────────────────────────────────────────────────────

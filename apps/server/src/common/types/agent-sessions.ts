@@ -45,7 +45,12 @@ export const AGENT_SESSION_EVENT_TYPES = [
   'elicitation_request',  // { elicitation_id, mode: 'form'|'url', message, schema? (ACP ElicitationSchema), url?, tool_call_id? } — 에이전트의 질문/폼
   'elicitation_decision', // { elicitation_id, action: 'accept'|'decline'|'cancel', content?, decided_by: 'user'|'agent'|'system' }
   'plan',                 // { entries: [{ content, priority, status }] } — 같은 turn 의 최신 plan 이 이전 것을 대체한다
-  'usage',                // { input_tokens, output_tokens, total_tokens, … }
+  // { input_tokens, output_tokens, cached_read_tokens, cache_write_tokens,
+  //   total_tokens, reasoning_tokens, context_tokens?, context_window?, cost_usd? }
+  // `input_tokens` 는 **캐시를 제외한** 신규 입력이라는 것이 계약이다 — CLI 마다 뜻이
+  // 달라(claude 제외 / codex 포함) 매니저가 정규화해서 보낸다. 자세한 근거는
+  // agent-manager `src/lib/session-usage.ts`. 화면은 합계와 캐시를 함께 보여 준다.
+  'usage',
   'turn',                 // { phase: 'started'|'finished', stop_reason? }
   'error',                // { message, code? }
   'system',               // { text }

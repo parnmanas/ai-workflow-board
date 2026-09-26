@@ -251,10 +251,51 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 - 새 세션 모달은 **열릴 때만** 기본 호스트/CLI/cwd 를 채운다. `hosts` 는 매니저 하트비트마다 새 배열로 내려오므로 그것을
   초기화 트리거로 쓰면 사용자가 고르던 호스트·cwd·제목이 30초 간격으로 되돌아간다(`new-session-modal-host-refresh.test.mjs`).
 
+## 토큰 사용량 (`usage` 이벤트)
+
+전사의 턴마다 붙는 작은 회색 줄이다. **출처가 두 개**이고, 둘 다 CLI 별 매핑을 거친 뒤
+하나의 계약으로 정규화된다(`apps/agent-manager/src/lib/session-usage.ts`).
+
+계약: **`input_tokens` 는 캐시 히트를 제외한 신규 입력이다.** 네이티브 값이 캐시를
+포함하는 CLI 는 자기 매핑에서 빼고 넘긴다. `reasoning_tokens` 는 `output_tokens` 의
+내역이라 합에 더하지 않는다. `total_tokens` 가 없으면 `input + output + cache_read +
+cache_write` 로 계산한다.
+
+| CLI | 네이티브 `input` | 매핑 위치 | 기록의 출처 |
+| --- | --- | --- | --- |
+| claude | 캐시 **제외**(보통 1~5) | `clis/claude/sessions.ts` `claudeUsageFromMessage` | `projects/**/<id>.jsonl` 의 `message.usage` |
+| codex | 캐시 **포함**(`cached_input_tokens` 가 내역) | `clis/codex/sessions.ts` `codexUsageFromInfo` | rollout 의 `token_count` / `token_usage_record` |
+| opencode | 캐시 제외 | `clis/opencode/sessions.ts` `opencodeUsageFromPart` | `part` 의 `step-finish`(`tokens`/`cost`) |
+| hermes | — | 없음 | 기록 저장소 자체가 없다 — ACP 어댑터가 보고하면 그것만 쓴다 |
+
+출처 두 개:
+
+1. **라이브** — ACP 어댑터가 주는 값(prompt 응답의 `usage`, 또는 `session/update`
+   `usage_update`). 어댑터가 **주지 않는 경우가 있다**(`claude-agent-acp` 가 그렇다).
+   그래서 턴이 끝날 때 usage 가 하나도 안 왔으면 매니저가 CLI 자신의 기록 꼬리에서
+   마지막 usage 를 읽어 메꾼다(`CliSessionStoreDriver.readLatestUsage`).
+2. **기록(history)** — 세션을 다시 열었을 때. 각 CLI 의 파서가 턴 경계에서 한 줄씩
+   낸다(한 턴의 여러 API 호출은 합쳐서 한 줄).
+
+화면(`SessionTranscript`)은 합계를 먼저 쓰고 괄호로 내역을 붙인다 —
+`36.1k tokens · (in 2 · out 346 · cache 35.8k) · ctx 15.6k/258k · $0.012`. **모르는 값은
+찍지 않는다**: 예전 화면이 `total 0` 을 찍어 claude 가 "토큰을 안 쓴 것"처럼 보였고,
+`in 2` 만 보여 실제로 쓴 3.6만 토큰이 화면에서 사라져 있었다(운영 보고 2026-09-26).
+
+주의: 보드/채팅 subagent 실행의 사용량 집계(`subagents` 테이블 → 관리자 워크플로
+헬스)는 **다른 경로**다(`lib/cli-adapters/*.extractUsage`). 그쪽은 아직 이 정규화를
+쓰지 않아 codex 의 `input_tokens` 가 캐시를 포함한 채 저장된다 — 필드를 각각 따로
+보여 주므로 화면상 오류는 없지만, 두 경로를 합산하려면 먼저 통일해야 한다.
+
+회귀: `apps/agent-manager/test/session-usage.test.mjs`(실측 레코드 모양으로 매핑·기록·
+메꿈), `apps/client/test/agent-session-transcript.test.mjs`(표시 규칙).
+
 ## agent-manager contract 변경 규칙
 
 `agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`
 는 서버와 agent-manager 가 같은 contract 를 본다 — 변경은 **같은 PR**. 버전은 손으로 올리지 않는다.
+`usage` 이벤트 payload 의 키도 같은 계약이다(서버 `common/types/agent-sessions.ts` 의 주석 ↔ 매니저
+`session-usage.ts` 의 `usageEventPayload`) — 키를 늘리면 화면(`sessionTranscript.logic.ts`)까지 한 PR 로 묶는다.
 
 ## 운영 메모
 

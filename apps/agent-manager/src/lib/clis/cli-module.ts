@@ -18,6 +18,7 @@
 // 그리고 소비자 파일을 import 하면 순환이 생기므로, 여기서 쓰는 보조 타입은
 // 전부 구조적(structural)으로 정의한다.
 
+import type { SessionUsage } from '../session-usage.js';
 import type { RuntimePluginManifest } from '../runtime/composition/plugin-manifest.js';
 
 // ─── binary ────────────────────────────────────────────────────────────────
@@ -178,6 +179,15 @@ export interface CliSessionStoreDriver {
   ): Promise<CliSessionHistoryRead | null>;
   /** 기록 파일 경로(파일 기반 CLI 만). */
   findSessionFile?(ctx: CliSessionStoreContext, sessionId: string): Promise<string | null>;
+  /**
+   * 이 세션에서 **가장 최근에 기록된** 토큰 사용량. 라이브 턴이 끝났는데 ACP 어댑터가
+   * usage 를 주지 않았을 때의 메꿈용이다 — CLI 자신의 기록 파일이 언제나 권위 있는
+   * 출처이고, 어댑터가 무엇을 보고하든 그건 변하지 않는다.
+   *
+   * 없으면 그 CLI 는 라이브 usage 를 어댑터에만 의존한다(hermes — 기록 저장소 자체가 없다).
+   * 절대 throw 하지 않는다 — 못 읽으면 `null`.
+   */
+  readLatestUsage?(ctx: CliSessionStoreContext, sessionId: string): Promise<SessionUsage | null>;
 }
 
 export interface CliSessionSpec {

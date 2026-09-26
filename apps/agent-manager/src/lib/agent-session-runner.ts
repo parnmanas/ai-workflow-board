@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
 import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
+import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
 import { findOnPath } from './find-on-path.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
@@ -204,7 +205,8 @@ interface LiveSession {
   availableCommands: CommandPatch[];
   currentMode: string | null;
   availableModes: Array<{ id: string; name: string; description?: string }>;
-  turn: { turnId: string; startedAt: number } | null;
+  /** `sawUsage` — 이 턴에 어댑터가 사용량을 보고했는가(안 했으면 기록에서 메꾼다). */
+  turn: { turnId: string; startedAt: number; sawUsage?: boolean } | null;
   textBuffer: string;
   reasoningBuffer: string;
   flushTimer: NodeJS.Timeout | null;
@@ -1157,7 +1159,7 @@ export class AgentSessionRunner {
       this.#enqueue(live, [{ type: 'error', payload: { message: 'A turn is already in progress.', code: 'turn_in_progress' }, turn_id: turnId }]);
       return;
     }
-    live.turn = { turnId, startedAt: Date.now() };
+    live.turn = { turnId, startedAt: Date.now(), sawUsage: false };
     this.#clearIdle(live);
     if (!live.title) {
       live.title = text.trim().replace(/\s+/g, ' ').slice(0, 80);
@@ -1172,18 +1174,25 @@ export class AgentSessionRunner {
       );
       this.#flushBuffers(live, turnId);
       const events: AgentSessionEventInput[] = [];
-      if (response?.usage) {
-        events.push({
-          type: 'usage',
-          payload: {
-            input_tokens: response.usage.inputTokens ?? 0,
-            output_tokens: response.usage.outputTokens ?? 0,
-            total_tokens: response.usage.totalTokens ?? 0,
-            cached_read_tokens: response.usage.cachedReadTokens,
-            thought_tokens: response.usage.thoughtTokens,
-          },
-          turn_id: turnId,
-        });
+      const responseUsage = normalizeSessionUsage({
+        inputTokens: response?.usage?.inputTokens,
+        outputTokens: response?.usage?.outputTokens,
+        cachedReadTokens: response?.usage?.cachedReadTokens,
+        cacheWriteTokens: (response?.usage as any)?.cacheWriteTokens,
+        reasoningTokens: response?.usage?.thoughtTokens,
+        totalTokens: response?.usage?.totalTokens,
+      });
+      if (responseUsage) {
+        live.turn = live.turn ? { ...live.turn, sawUsage: true } : live.turn;
+        events.push({ type: 'usage', payload: usageEventPayload(responseUsage), turn_id: turnId });
+      }
+      // ACP 어댑터가 사용량을 아예 보고하지 않는 CLI 가 있다(claude-agent-acp). 그때는
+      // CLI 자신의 기록에서 읽어 메꾼다 — 그 파일에는 항상 usage 가 남아 있다.
+      const fallbackUsage = live.turn?.sawUsage || responseUsage
+        ? null
+        : await this.#store.readLatestUsage(live.cli, live.sessionId).catch(() => null);
+      if (fallbackUsage) {
+        events.push({ type: 'usage', payload: usageEventPayload(fallbackUsage), turn_id: turnId });
       }
       events.push({ type: 'turn', payload: { phase: 'finished', stop_reason: response?.stopReason || 'end_turn' }, turn_id: turnId });
       this.#enqueue(live, events, { status: 'ready', last_error: null, reason: 'turn_finished' });
@@ -1297,13 +1306,22 @@ export class AgentSessionRunner {
         this.#flushBuffers(live, turnId);
         this.#enqueue(live, [{ type: 'tool_update', payload: { tool_call_id: event.childRunId, status: event.status, output: boundedValue(event.output) }, turn_id: turnId }]);
         return;
-      case 'usage':
-        this.#enqueue(live, [{
-          type: 'usage',
-          payload: { input_tokens: event.inputTokens, output_tokens: event.outputTokens, total_tokens: event.totalTokens, cached_read_tokens: event.cachedReadTokens, thought_tokens: event.thoughtTokens },
-          turn_id: turnId,
-        }]);
+      case 'usage': {
+        // 어댑터가 준 값도 공용 계약으로 접는다 — CLI 별로 뜻이 다른 숫자가 그대로
+        // 화면에 나가면 "어떤 CLI 는 잘 나오고 어떤 건 이상하다"가 된다.
+        const usage = normalizeSessionUsage({
+          inputTokens: event.inputTokens,
+          outputTokens: event.outputTokens,
+          cachedReadTokens: event.cachedReadTokens,
+          cacheWriteTokens: (event as any).cacheWriteTokens,
+          reasoningTokens: event.thoughtTokens,
+          totalTokens: event.totalTokens,
+        });
+        if (!usage) return;
+        if (live.turn) live.turn.sawUsage = true;
+        this.#enqueue(live, [{ type: 'usage', payload: usageEventPayload(usage), turn_id: turnId }]);
         return;
+      }
       case 'diagnostic': {
         const data = (event.data ?? {}) as Record<string, unknown>;
         const kind = String(data.sessionUpdate ?? data.session_update ?? '');

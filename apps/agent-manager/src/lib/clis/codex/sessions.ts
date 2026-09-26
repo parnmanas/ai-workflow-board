@@ -16,12 +16,62 @@ import {
   readJsonlRecords,
   SESSION_ID_RE,
   statJsonlFiles,
+  TAIL_BYTES,
   textOfBlocks,
   TOOL_TEXT_MAX,
   truncate,
   walkJsonl,
 } from '../../agent-session-history.js';
+import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+
+/**
+ * codex `token_count` / `token_usage_record` payload → 공용 계약.
+ *
+ * codex 의 `input_tokens` 는 캐시 히트를 **포함한** 값이고 `cached_input_tokens` 가
+ * 그 내역이다(실측: input 15358 / cached 12160 / output 207 / total 15565 =
+ * 15358 + 207). 공용 계약의 `input_tokens` 는 캐시 제외이므로 여기서 빼서 넘긴다 —
+ * 빼지 않으면 캐시가 두 번 세어져 claude 와 같은 뜻이 되지 않는다.
+ *
+ * `last_token_usage` 가 그 턴의 값, `total_token_usage` 는 세션 누적이다. 전사는
+ * 턴 단위로 보여 주므로 last 를 쓰고, 누적은 컨텍스트 점유로 따로 싣는다.
+ */
+export function codexUsageFromInfo(info: Record<string, any> | null): SessionUsage | null {
+  if (!info) return null;
+  const last = isRecord(info.last_token_usage) ? info.last_token_usage : null;
+  const total = isRecord(info.total_token_usage) ? info.total_token_usage : null;
+  const turn = last ?? total;
+  if (!turn) return null;
+  const cached = typeof turn.cached_input_tokens === 'number' ? turn.cached_input_tokens : 0;
+  const input = typeof turn.input_tokens === 'number' ? turn.input_tokens : 0;
+  return normalizeSessionUsage({
+    inputTokens: Math.max(0, input - cached),
+    outputTokens: turn.output_tokens,
+    cachedReadTokens: cached,
+    cacheWriteTokens: turn.cache_write_input_tokens,
+    reasoningTokens: turn.reasoning_output_tokens,
+    totalTokens: turn.total_tokens,
+    // 세션 누적 total 이 곧 현재 컨텍스트 점유에 가장 가까운 값이다.
+    contextTokens: total?.total_tokens,
+    contextWindow: info.model_context_window,
+  });
+}
+
+/** 한 레코드에서 usage 를 뽑는다(event_msg `token_count` / `token_usage_record` 둘 다). */
+function codexUsageFromRecord(rec: Record<string, any>): SessionUsage | null {
+  const payload = isRecord(rec.payload) ? rec.payload : null;
+  if (!payload) return null;
+  if (rec.type === 'event_msg' && payload.type === 'token_count') {
+    return codexUsageFromInfo(isRecord(payload.info) ? payload.info : null);
+  }
+  if (rec.type === 'token_usage_record') {
+    return codexUsageFromInfo({
+      last_token_usage: payload.turn_token_usage ?? payload.usage,
+      total_token_usage: payload.total_token_usage ?? payload.thread_token_usage,
+    });
+  }
+  return null;
+}
 
 export function codexToolKind(name: string): string {
   if (/shell|exec|command|bash/i.test(name)) return 'execute';
@@ -70,6 +120,24 @@ async function findSessionFile(ctx: CliSessionStoreContext, sessionId: string): 
 export const codexSessionStore: CliSessionStoreDriver = {
   findSessionFile,
 
+  /** 파일 꼬리에서 마지막 token_count 를 읽는다(ACP 어댑터가 usage 를 안 줄 때의 메꿈). */
+  async readLatestUsage(ctx, sessionId) {
+    const path = await findSessionFile(ctx, sessionId);
+    if (!path) return null;
+    try {
+      const st = await stat(path);
+      const len = Math.min(st.size, TAIL_BYTES);
+      const records = parseLines(await readChunk(path, st.size - len, len), st.size > len, false);
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        const usage = codexUsageFromRecord(records[i] ?? {});
+        if (usage) return usage;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  },
+
   async listSessions(ctx) {
     const paths: string[] = [];
     await walkJsonl(join(ctx.home, 'sessions'), 4, paths);
@@ -106,6 +174,14 @@ export const codexSessionStore: CliSessionStoreDriver = {
     // payload 크기는 담는 시점에 정리한다 — 이유는 claude 스캐너의 같은 자리 주석 참조.
     const push = (type: string, payload: Record<string, unknown>, ts: string | undefined) => {
       events.push({ id: '', seq: 0, turn_id: turnId, type, payload: boundHistoryPayload(payload), created_at: ts || createdAt || new Date().toISOString() });
+    };
+    let pendingUsage: SessionUsage | null = null;
+    let pendingUsageAt: string | undefined;
+    const flushUsage = () => {
+      if (!pendingUsage) return;
+      push('usage', usageEventPayload(pendingUsage), pendingUsageAt);
+      pendingUsage = null;
+      pendingUsageAt = undefined;
     };
     for await (const rec of readJsonlRecords(path)) {
       const payload = isRecord(rec.payload) ? rec.payload : {};
@@ -181,11 +257,21 @@ export const codexSessionStore: CliSessionStoreDriver = {
         }
         continue;
       }
-      if (rec.type === 'event_msg') {
-        if (payload.type === 'task_complete') push('turn', { phase: 'finished', stop_reason: 'end_turn' }, ts);
-        else if (payload.type === 'turn_aborted') push('turn', { phase: 'finished', stop_reason: 'cancelled' }, ts);
+      if (rec.type === 'event_msg' || rec.type === 'token_usage_record') {
+        // codex 는 API 호출마다 token_count 를 남긴다 — 턴의 마지막 것이 그 턴의 값이라
+        // 턴 종료 때 한 번만 낸다(호출마다 내면 전사가 숫자로 뒤덮인다).
+        const usage = codexUsageFromRecord(rec);
+        if (usage) { pendingUsage = usage; pendingUsageAt = ts; }
+        if (payload.type === 'task_complete') {
+          flushUsage();
+          push('turn', { phase: 'finished', stop_reason: 'end_turn' }, ts);
+        } else if (payload.type === 'turn_aborted') {
+          flushUsage();
+          push('turn', { phase: 'finished', stop_reason: 'cancelled' }, ts);
+        }
       }
     }
+    flushUsage();
     return {
       events: events.items(),
       total: events.total,
