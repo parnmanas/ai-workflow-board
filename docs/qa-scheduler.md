@@ -60,10 +60,11 @@ cron 은 내재 시간대가 없으므로 UTC 고정으로 `next_run_at` 을 결
 
 ## ⚠️ 배포 타이밍 (ticket 467dbc7a 와 같은 함정)
 
-QA 는 **돌고 있는 서버** 를 검증한다. fix 머지(main) ≠ prod 배포
-(`production.private` auto-deploy). fix 머지 직후 발화하는 스케줄은 **배포 전 옛 코드**
-를 검증할 수 있다. rerun-on-fix 의 delay gate 와 달리 고정-cadence 스케줄에는 deferral
-의 기준이 될 머지 edge 가 없다 — 완화책은 운영적이다:
+QA 는 **돌고 있는 서버** 를 검증한다. **fix 머지(main) ≠ 배포**: 배포되는 브랜치는 main
+하나지만, 배포 호스트가 자기 워크트리를 `origin/main` 으로 detached 체크아웃하고 의존성
+재설치·재빌드·서버 재기동까지 마쳐야 그 커밋이 서빙된다. fix 머지 직후 발화하는 스케줄은
+**배포 전 옛 코드** 를 검증할 수 있다. rerun-on-fix 의 delay gate 와 달리 고정-cadence
+스케줄에는 deferral 의 기준이 될 머지 edge 가 없다 — 완화책은 운영적이다:
 
 > cadence 를 main→prod 배포 지연보다 **넉넉히** 잡거나(고정 wall-clock 시각 cron, 혹은
 > 멀티 분 interval), 발화가 배포 이후에 떨어지게 한다.

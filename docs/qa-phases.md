@@ -164,12 +164,14 @@ The end-to-end behavior is locked down by deterministic tests that drive the
 
 Both are wired into `npm test` (`apps/server`).
 
-### Live-MCP E2E playbook (run after deploy)
+### Live-MCP E2E playbook (run against a deployed instance)
 
-The phase stack is on `origin/main`; the live server auto-deploys from
-`production.private`, which lags. Once a `main → production.private` deploy lands
-(confirm the live MCP surface exposes `set_qa_phase`, `start_qa_run.initial_phase`,
-and `update_board.qa_phases`), this is the on-a-real-board replay:
+`main` is the only branch that ships, but landing on it is not the same as serving it:
+the deploy host re-checks-out `origin/main` into its own worktree (detached), reinstalls
+dependencies, rebuilds and restarts the server before that commit is live. So confirm the
+instance you are replaying against actually exposes `set_qa_phase`,
+`start_qa_run.initial_phase` and `update_board.qa_phases` on its live MCP surface (all
+three have been deployed since 2026-09). Then this is the on-a-real-board replay:
 
 1. `update_board { board_id, qa_phases: { phases: [{id:"import",timeout_sec:30},{id:"build",timeout_sec:120},{id:"run",timeout_sec:600}] } }`
    — short `import` so a reap is observable without a long wait.

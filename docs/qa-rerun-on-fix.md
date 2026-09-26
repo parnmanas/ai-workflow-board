@@ -81,10 +81,12 @@ disables reruns entirely (equivalent to leaving `rerun_on_fix` off).
 ## ⚠️ Deployment timing — the one real caveat
 
 QA scenarios validate the **running** AWB server (the awb-mcp / browser drivers
-hit the live host). The AWB server **auto-deploys from `production.private` only
-*after* `main` merges** (the agent-manager is a separate, lagging local piece —
-unrelated here). A fix ticket reaching **Done** means *merged to main*, **not
-necessarily deployed**.
+hit the live host). `main` is the only branch that ships, but **landing on it is not the
+same as serving it**: the deploy host re-checks-out `origin/main` into its own worktree
+(detached), reinstalls dependencies, rebuilds and restarts the server before that commit
+goes live — and that deploy is kicked by the pushing side, not by a daemon on a timer
+(the agent-manager is a separate, lagging local piece — unrelated here). A fix ticket
+reaching **Done** means *merged to main*, **not necessarily deployed**.
 
 Therefore an **immediate** rerun (`rerun_delay_seconds = 0`) can re-validate the
 **pre-fix** code and "fail again" even though the fix is correct — burning a
