@@ -4306,3 +4306,274 @@ green, 따라서 스텝 11(`발행 트리 재감사`)이 **16일 만에** 실제
 - **다음 회차 확인 항목** — (a) 머지 이후 첫 cron 에서 스텝 10 green / 스텝 11 실제 실행 확인
   (9절의 예측). (b) 루트 두 blob 동일성. (c) 원격 브랜치 수(현재 12)와 ref 전체의 루트 lockfile
   blob. (d) `production.private` 문자열은 이제 **안전망**이다 — 드리프트로 오인하지 말 것(1절).
+
+## 재검증 로그 — 2026-09-27 (`main` @ `a1855811`)
+
+17회차. **조용한 회차가 아니다 — 루트 lockfile blob 이 움직였고, 그 움직임이 이 감사 자신의
+게이트에 있던 커버리지 구멍을 드러냈다.**
+
+1. **실질 드리프트.** 루트 blob 규칙(8회차)이 "변했다" 를 가리켰다 — `package-lock.json`
+   `e464f1db` → `896fce76`(`package.json` 은 `3a357fd3` 그대로). 최근 회차들이 계속 같은 값을
+   보고해 온 뒤의 변화이고, 헛경보가 아니라 실제 의존성 3종 추가였다(1절).
+2. **발견·수정 — 발행 축 감사가 `optionalDependencies` 를 통째로 보지 못했다.**
+   `scripts/audit-published-deps.mjs` 의 `declaredRanges()` 가 `dependencies` 만 읽어서,
+   전날 랜딩한 `@lydell/node-pty` 가 **범위 상한 검사·`next` 축 advisory 감사 양쪽에서 빠져
+   있었다**. lockfile 을 읽지 않는 유일한 경로(`npm i -g`)를 담당하는 게이트에 생긴 구멍이다.
+   고치고 tripwire 로 못박았다(2절). **이번 회차의 코드 변경은 이것뿐이다.**
+3. `main` 은 여전히 moderate/low **양쪽 0건** (547 패키지 / 588 버전). 새 3종 포함 판정이다(3절).
+4. **16회차 이월 항목 (a) 종결 — 단, 그 초록은 부분적으로 눈먼 초록이었다.** 머지 이후 첫
+   cron 에서 스텝 10·11 이 실제로 **실행되고 success** 했다(16일간의 침묵 해소). 그런데 그
+   스텝 11 의 success 가 바로 2절의 구멍을 타고 나온 false green 이다(6절).
+
+### 1. 추가된 의존성 3종 — 전부 정상 패키지
+
+16회차 이후 `main` 에 **39개 커밋**이 랜딩했다(`gh api compare/7c1678a1...main` → `ahead_by: 39`).
+의존성을 바꾼 것은 그중 **`47cb2e63`**(2026-09-26T04:02:50Z, `기능(terminals): Runtime Host 의
+셸을 AWB 화면에서 직접 연다`) 하나다 — `apps/server/src/modules/terminals/`, `docs/terminals.md`
+가 같이 들어왔다. 워크스페이스 매니페스트 3개 중 의존성이 바뀐 것은 둘이고, `apps/server` 는
+테스트 등록 스크립트 줄만 바뀌었다(8회차가 말한 그 패턴 그대로).
+
+> **방법 주의 — shallow 워크트리에서 `git rev-list --count` 를 믿지 말 것.** 이 워크트리에서
+> `git rev-list --count 7c1678a1..origin/main` 은 **1** 을 돌려준다. 실제로는 39다. 이 값을
+> 그대로 적었다가 "단일 squash 커밋" 이라는 틀린 서술을 거의 남길 뻔했고, 그 틀린 전제가
+> 2절의 cron 판정까지 뒤집었다(아래). 커밋 범위는 서버측 `gh api .../compare/A...B` 로 볼 것 —
+> blob 비교를 쓰라는 8회차 지침과 같은 이유(shallow graft)다.
+
+| 패키지 | 범위 | 해소 | 블록 / 워크스페이스 | 판정 근거 |
+| --- | --- | --- | --- | --- |
+| `@lydell/node-pty` | `^1.2.0-beta.15` | 1.2.0-beta.15 | `optionalDependencies` / agent-manager | maintainer `lydell`, repo `github.com/lydell/node-pty`, MIT, deprecate 안 됨. 레지스트리 `latest` dist-tag 자체가 이 beta 다 |
+| `@xterm/xterm` | `^6.0.0` | 6.0.0 | `dependencies` / client | xterm.js 공식 org, maintainer `tyriar`, **6.0.0 이 현재 stable `latest`** |
+| `@xterm/addon-fit` | `^0.11.0` | 0.11.0 | `dependencies` / client | 위와 동일 org·maintainer, 0.11.0 이 stable `latest` |
+
+`@lydell/node-pty` 는 플랫폼별 prebuilt 바이너리 6개(`darwin/linux/win32 × arm64/x64`)를 다시
+optional 로 달고 있어 lockfile 노드가 9개 늘었다 — advisory 감사의 패키지 수 증가분(538→547,
+버전 579→588)과 정확히 일치한다. **install script 는 없다** — `audit-install-scripts` 가 여전히
+3개(전부 허용목록 내)를 보고하고, 발행 트리 양쪽 축도 `install script 0개`다. 네이티브 모듈이
+추가됐는데도 `self-update` 의 `npm i -g --ignore-scripts` 결합이 깨지지 않았다는 뜻이다
+(그 결합은 `published-deps-audit-guard` 가 강제한다).
+
+### 2. 수정 — `optionalDependencies` 가 발행 축 감사 밖에 있었다
+
+**무엇이 문제였나.** 이 저장소의 모든 의존성 게이트는 `package-lock.json` 을 본다. 예외가
+하나 있고 그게 `audit-published-deps.mjs` 다 — agent-manager 는 호스트에 `npm i -g
+awb-agent-manager` 로 깔리고 그 경로는 lockfile 을 읽지 않는다. 그 게이트의 입력이 이거였다:
+
+```js
+export function declaredRanges(manifest) {
+  return { ...(manifest?.dependencies ?? {}) };   // ← optionalDependencies 누락
+}
+```
+
+주석은 *"devDependencies 는 발행 tarball 의 소비자에게 설치되지 않으므로 제외한다"* 라고 포함
+기준을 **"소비자에게 설치되는가"** 로 정확히 적어 뒀는데, 구현이 그 기준을 따르지 않았다.
+`optionalDependencies` 는 "없어도 되는" 이 아니라 **"해석에 실패해도 설치를 중단하지 않는"**
+이다 — 해석에 성공하면 소비자 호스트에 그대로 깔리고 실행된다(`--omit=optional` 을 준 소비자만
+예외). `dependencies` 와 같은 위험을 갖는 코드다.
+
+**실제 영향.** `a1855811` 이 랜딩한 시점부터 `@lydell/node-pty` 는 발행 축에서 이렇게 보였다:
+
+| 검사 | 구멍 이전 | 구멍 상태 | 수정 후 |
+| --- | --- | --- | --- |
+| 범위 상한 검사(층 1, 매 push) | 4개 검사 | **4개** — 새 패키지 미포함 | **5개** |
+| `next` 축 advisory 감사(cron) | 92 패키지 | **미포함** (92) | **99 패키지** |
+| `live` 축 advisory 감사(cron) | — | 영향 없음 (npm 이 발행 tarball 의 optional 을 스스로 해석) | 100 패키지 |
+
+증가분 **+7** 은 `@lydell/node-pty` 1개와 플랫폼별 prebuilt 바이너리 6개로 정확히 떨어진다
+(루트 lockfile 이 늘어난 9개 중 `@xterm/*` 2개는 client 전용이라 발행 트리에 없다). 수정 전후
+모두 실제로 돌려 얻은 수치다.
+
+`live` 축은 원래 안전했다 — 합성 매니페스트가 `{ "awb-agent-manager": "latest" }` 라 npm 이
+optional 까지 알아서 따라간다. 구멍은 **`next` 축**, 즉 "다음 publish 가 호스트에 넘길 트리" 를
+보는 전방 축에만 있었다. 하필 그 축이 존재하는 이유가 lockfile 이 못 보는 것을 보는 것이다.
+
+**이 구멍은 이미 한 번 false green 을 냈다.** 정기 감사 run `36232538912` 는
+2026-09-26T09:21:43Z 에 sha `0d0712c5` 로 돌았고, 그 sha 의 발행 매니페스트에는
+`optionalDependencies` 가 **이미 있었다**(터미널 기능이 04:02Z 에 랜딩했으므로 — 1절):
+
+```
+$ gh api ".../contents/apps/agent-manager/package.json?ref=0d0712c5"
+  optionalDependencies: {'@lydell/node-pty': '^1.2.0-beta.15'}
+```
+
+그런데 그 run 의 스텝 11(`발행 트리 재감사`)은 **success** 다(6절). 즉 그 초록은
+`@lydell/node-pty` 를 **한 번도 보지 않은 채** 나온 초록이다 — `next` 축이 92 패키지만 보고
+판정했다. 게이트가 "있지만 아무것도 막지 않는 상태" 였고, 그게 이 가드 파일 헤더가 2026-08-22
+에 적어 둔 바로 그 실패 양상이다(*"범위 판정 층이 느슨해지면 조용히 전부 통과한다"*).
+
+같은 날 14:24:31Z 에 `awb-agent-manager@1.6.244` 가 **실제로 발행됐고**, 그 발행본의 매니페스트에도
+`optionalDependencies` 가 들어 있다. 즉 구멍은 이론이 아니라 이미 라이브 발행 축에 적용된 상태였다.
+다행히 실질 노출은 없다 — 3절의 lockfile 감사와 오늘 수정 후의 `next` 축 재감사 양쪽 모두 이
+패키지를 포함해 **0건**이다. 취약 버전이 깔린 적은 없고, **감사가 그것을 모르고 있었다는 것**이
+문제였다.
+
+**어떻게 고쳤나.** 커버리지 결정을 코드에 명시하고, 분류되지 않은 블록이 조용히 지나가지
+못하게 했다:
+
+- `AUDITED_DEPENDENCY_BLOCKS` = `dependencies`, `optionalDependencies` — 층 1 과 `next` 축 양쪽의 입력.
+- `UNAUDITED_DEPENDENCY_BLOCKS` = `devDependencies`(사유 명기). 여기까지 넓히면 tooling 의
+  관습적으로 넓은 범위 때문에 게이트가 상시 red 가 되고, 그러면 누군가 게이트를 끈다.
+- `unclassifiedDependencyBlocks()` + `main()` 의 fail-closed 검사 — 발행 매니페스트에 어느 쪽에도
+  분류되지 않은 `*Dependencies` 블록이 생기면 **exit 1**. 실측:
+
+```
+$ node scripts/audit-published-deps.mjs --offline     # peerDependencies 를 임시로 넣고
+exit=1
+FAIL apps/agent-manager/package.json 에 분류되지 않은 의존성 블록이 있다: peerDependencies.
+     소비자 호스트에 깔리는 블록이면 AUDITED_DEPENDENCY_BLOCKS 에, 아니면 사유와 함께
+     UNAUDITED_DEPENDENCY_BLOCKS 에 추가하라 (scripts/audit-published-deps.mjs).
+```
+
+`peerDependencies` 를 미리 어느 쪽에도 넣지 않은 것은 의도다 — npm 7+ 는 peer 를 소비자에게
+자동 설치하므로 "무시해도 되는 블록"이 아니지만, peer 범위는 관습적으로 넓어 상한 검사에 그대로
+태우면 거짓 실패가 난다. 실제로 생기는 날 사람이 판단하게 남기고, 그때까지 **조용히 지나가지만
+않게** 만들었다. 오늘의 실패 양상이 정확히 "새 블록이 조용히 커버리지 밖에 놓였다" 였다.
+
+`next` 축 합성 매니페스트는 블록 구분을 **보존**한다(`declaredBlocks()`). optional 을 hard
+dependency 로 올려 합성하면 소비자에겐 무해한 해석 실패가 감사 실패로 바뀌어 축이 어긋난다 —
+플랫폼 전용 optional 바이너리 6개가 정확히 그 경우다.
+
+### 3. `main` — 0건, overrides 8개 전부 하한 이상
+
+루트 `package.json` blob 은 `3a357fd3` 으로 **그대로**고 lockfile 만 움직였다(1절). 즉 직접
+선언이 아니라 워크스페이스 매니페스트 경유 추가 — npm workspaces 가 per-workspace 의존성을
+루트 lockfile 의 `packages["apps/*"]` 노드에 담기 때문에 나타나는 정상 형태다.
+
+- `audit-lockfile-advisories --audit-level=moderate` → **0건** (547 패키지 / 588 버전, 출처 npm)
+- `--audit-level=low` → **0건** (동일 규모)
+
+선언이 아니라 lockfile 이 **실제로 해소한** 버전으로 본다(11회차 방식):
+
+| 패키지 | 해소된 버전 | 안전 하한 | 판정 |
+| --- | --- | --- | --- |
+| `multer` | 2.3.0 | 2.3.0 | OK |
+| `hono` | 4.13.7 | 4.13.5 | OK |
+| `@hono/node-server` | 2.1.1 | 2.0.10 | OK |
+| `js-yaml` (cosmiconfig) | 4.3.2 | 4.3.2 | OK |
+| `js-yaml` (@nestjs/swagger) | 5.4.1 | 5.2.3 | OK |
+| `picomatch` (3개 스코프 override → hoist 1노드) | 4.0.7 | 4.0.4 | OK |
+
+`packages[""].overrides` 가 lockfile 에 없는 것은 정상이며 실패 신호가 아니다.
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다.
+
+### 4. 배포된 트리 — `main` 자신, 별도 감사 없음
+
+16회차에서 종결된 형상 그대로다. `audit-deploy-branch-deps` → **exit 0**,
+`ok main — lockfile 이 현재 브랜치와 동일 (같은 감사 결과)`. 이 경로가 약화된 게이트가 아닌
+이유는 같은 회차의 advisory 감사가 방금 그 트리를 판정했다는 것이다(3절).
+
+### 5. 가드 124/124 — 119 에서 5 늘었다
+
+`apps/server` 에서 직접 실행(워크트리 `node_modules` 가 stale symlink 라 `npm test -w server` 는
+`nest build` 에서 죽는다 — 12회차와 동일, 저장소 회귀가 아니다):
+
+| 가드 | 통과 | 비고 |
+| --- | --- | --- |
+| `lockfile-advisory-audit-guard` | 42 | |
+| `supply-chain-integrity-guard` | 16 | 새 노드 9개의 integrity 포함 |
+| `published-deps-audit-guard` | **21** | 16 → **+5** (2절) |
+| `test-registration-completeness` | 20 | |
+| `deploy-branch-audit-guard` | **12** | 16회차 8 → 12 (`main` 랜딩분) |
+| `ci-branch-coverage-guard` | 7 | |
+| `cron-coverage-guard` | 6 | |
+
+16회차 115 → 오늘 124. 증가분은 `deploy-branch-audit-guard` +4(`main` 에서 온 것)와
+`published-deps-audit-guard` +5(이번 회차)다. 새 **테스트 파일**은 추가하지 않았으므로
+`apps/server/test/suites/*.txt` 매니페스트 변경은 없다 — 기존 파일에 단언만 늘렸다.
+
+추가한 5개 단언: optional 블록이 상한 검사에 실제로 태워지는가 / dev 블록이 제외된 채 유지되는가
+(거짓 양성 방지) / `declaredBlocks` 가 블록 구분을 보존하는가 / 미분류 블록을 잡는가 + 의존성이
+아닌 키에 반응하지 않는가 / **실제 발행 매니페스트에 미분류 블록이 없는가**(저장소 현재 상태 단언,
+새 블록이 추가되는 커밋에서 즉시 red).
+
+### 6. 이월 (a) 종결 — cron 스텝 10·11 이 실제로 돌았다
+
+16회차의 예측을 실측으로 확인했다. 머지 이후 첫 정기 실행(run `36232538912`,
+2026-09-26T09:21:43Z)은 3연속 실패를 끊고 **success** 이고, `dependency audit` 잡의 스텝별
+판정에서 schedule 전용 두 스텝이 `skipped` 가 아니라 **success** 다:
+
+```
+10  success  배포 브랜치 lockfile 재감사 (schedule 전용)
+11  success  발행 트리 재감사 (schedule 전용)
+```
+
+`!cancelled()` 수정이 의도대로 동작한다는 뜻이고, 16일간 앞선 실패에 가려 침묵했던
+발행 트리 게이트가 실제로 판정을 내리기 시작했다. **이 항목은 닫는다.**
+
+단 **그 초록을 무결로 읽지 말 것**: 스텝 11 은 돌았지만 그 판정에는 2절의 구멍이 있었고,
+`@lydell/node-pty` 를 보지 않은 채 success 를 냈다. 이월 항목 (a) 가 묻던 것은 "스텝이 실제로
+실행되는가" 이고 그 답은 **예**다. 판정 내용의 정확성은 별개 문제였고, 그건 2절에서 닫았다.
+이 회차의 교훈은 이 둘이 같이 와야 한다는 것이다 — **스텝이 돌았다는 사실이 그 스텝이 옳은
+것을 봤다는 증거는 아니다.**
+
+`main` push CI 최신 run(`36255283213`, `a1855811`)은 **전 잡 green** 이다 — 16회차에서 범위 밖
+red 로 추적하던 `hermes-runtime-dispatch.test.mjs` 도 해소됐다. `dependency audit` 잡도 success.
+
+### 7. 잠든 취약 브랜치 — 브랜치 수 12 → 8, 취약 4개는 그대로
+
+원격 ref 가 12개에서 **8개**로 줄었다(4개 삭제). 전 ref 의 루트 lockfile blob 전수 확인
+(shallow 워크트리라 fetch 없이 `gh api contents` 로 — `--jq .sha` 가 404 본문을 돌려주므로
+40자 hex 인지로 판정한다, 12회차 교훈):
+
+| ref | lockfile blob | 판정 |
+| --- | --- | --- |
+| `main` | `896fce76` | 기준, **0건** |
+| `sec-audit-20260826`, `sec-audit-20260911`, `sec-audit-20260926` | `e464f1db` | **어제 main 의 lockfile** — 16회차가 0/0 으로 판정한 그 blob. 취약 아님 |
+| `codex`, `sec-audit-20260824`, `ticket/2dc3c62f-mission-execution-workspace` | 각각 상이 | 각 13건, 잠들어 있음 |
+| `fix/prod-dependency-audit-gate` | `37538a2e` | 7건, 잠들어 있음 + 운영자 판단 대기 |
+
+취약한 4개는 16회차와 **동일한 4개**다. `main` 이 오늘 움직여서 `sec-audit-*` 3개가 "diverges"
+로 보이지만 이건 드리프트가 아니라 그 브랜치들이 어제 tip 을 들고 있는 것이다 — 다음 회차가
+이걸 새 위험으로 오인하지 말 것. 감사 범위 밖이고 PR 시 `ci.yml` 이 막는다.
+
+### 8. 관찰 — prerelease 를 자동으로 받아들이는 범위 (운영자 판단)
+
+`@lydell/node-pty: ^1.2.0-beta.15` 는 상한이 있어 게이트를 정당하게 통과한다(`<2.0.0`).
+다만 semver 규칙상 이 범위는 **같은 `1.2.0` 튜플의 이후 prerelease 를 자동으로 받아들인다** —
+업스트림이 `1.2.0-beta.16` 을 올리는 순간 `npm i -g awb-agent-manager` 는 그걸 집어온다.
+발행 축은 lockfile 보호가 없는 경로라 검토 없이 호스트에 들어온다는 뜻이다.
+
+이건 "상한 없음"(임의 메이저 유입)과는 다른 종류의, 더 좁은 위험이고, 업스트림이 stable 로
+1.1.0 밖에 갖고 있지 않아(`latest` dist-tag 가 beta 다) 기능 작성자가 의식적으로 고른 값일
+가능성이 높다. 정확히 고정(`1.2.0-beta.15`)하면 이 창이 닫히지만 prebuilt 바이너리 해석에
+영향을 줄 수 있어 **의존성 감사가 단독으로 바꿀 판단이 아니다.** 사실만 남기고 기능 소유자·
+운영자에게 넘긴다. 게이트를 이 사유로 red 로 만들지도 않았다 — 거짓 실패가 될 형태다.
+
+### 이번 회차에 돌린 것
+
+- 가드 7종 **124/124** (`apps/server` 직접 실행, 5절) — 변경 전 119 도 green 이었음을 먼저 확인
+- `audit-lockfile-advisories` — moderate **0건**, low **0건** (547/588)
+- `audit-install-scripts`, `audit-action-pins`, `audit-ci-branch-coverage`,
+  `audit-cron-coverage`, `audit-deploy-branch-deps` → 전부 **exit 0**
+- `audit-published-deps --offline` → 선언 범위 **5개** 전부 상한 있음 (수정 전 4개)
+- `audit-published-deps` (전체, 네트워크) → **live 100 / next 99 패키지, 양쪽 0건 + install script 0개**
+- tripwire fail-closed 실측 (`peerDependencies` 임시 주입 → exit 1, 매니페스트 원복 확인)
+- 추가된 3종의 레지스트리 메타데이터 직접 조회 (maintainer·repo·license·deprecate·dist-tag)
+- overrides 8개 항목의 **해소된** 버전 확인 (3절)
+- 원격 **8개** ref 의 루트 lockfile blob 전수 (7절)
+- `main` push CI 최신 run + **머지 이후 첫 cron run 의 스텝별 판정** (6절)
+- **커밋 범위·시점 검증** — `gh api compare/7c1678a1...main`(39개), 터미널 커밋 `47cb2e63` 의
+  시각, cron sha `0d0712c5` 의 발행 매니페스트, `awb-agent-manager@1.6.244` 발행 시각/매니페스트
+  (1·2절). shallow `rev-list --count` 의 오답(1)을 서버측으로 교정한 것이 이 회차의 판정 하나를
+  뒤집었다
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다.
+**코드 변경: `scripts/audit-published-deps.mjs` + 그 가드 1건**(2절).
+
+### 이월
+
+- **해소됨 — 16회차 이월 (a)**: 머지 이후 첫 cron 에서 스텝 10·11 실제 실행·success 확인(6절).
+  다시 확인하지 말 것.
+- **해소됨 — 범위 밖 red**: `hermes-runtime-dispatch.test.mjs` green. `main` 전 잡 green(6절).
+- **신규 — 운영자/기능 소유자 판단**: `@lydell/node-pty` 의 `^1.2.0-beta.15` 가 이후 prerelease
+  를 자동 수용한다(8절). 감사가 단독으로 바꾸지 않는다.
+- **`fix/prod-dependency-audit-gate` 처리 (기존 운영자 판단)** — 취약(7건)하지만 비활성이고,
+  은퇴한 `deploy.yml` 의 마지막 사본이다. **되살리거나 push 하지 말 것.**
+- **잠든 취약 브랜치 3개** — `codex`, `sec-audit-20260824`, `ticket/2dc3c62f-mission-execution-workspace`
+  각 13건. 감사 범위 밖이고 PR 시 `ci.yml` 이 막는다. 되살려 쓸 일이 생기면 `main` 을 먼저 머지.
+- **운영자 인프라 항목 (11회차)** — cron liveness 는 저장소 안 가드로 닫을 수 없다. 외부
+  heartbeat 모니터가 필요하다. **재검토하지 말 것**.
+- **다음 회차 확인 항목** — (a) 루트 두 blob. 오늘 lockfile 이 `896fce76` 으로 움직였으니 이게
+  새 기준이다. (b) 원격 브랜치 수(현재 **8**)와 ref 전체 lockfile blob. `sec-audit-*` 3개가
+  어제 tip 을 들고 있는 것은 위험이 아니다(7절). (c) **PR #12 머지 여부** — 머지되면 2절의
+  수정이 `main` 에 올라가고, 첫 cron 에서 `next` 축이 99 패키지로 올라간 것을 확인할 수 있다.
+  (d) `production.private` 문자열은 **안전망**이다 — 드리프트로 오인하지 말 것(16회차 1절).
