@@ -87,7 +87,12 @@ export interface CliUpdateDeps {
   /** 이 CLI 가 지정 없이 어느 실행 파일로 해석되는지. 기본은 어댑터의 resolveBin.
    *  테스트가 갈아끼운다 — 이걸 주입할 수 없으면 "그 CLI 가 러너 장비에 깔려
    *  있는가" 에 결과가 좌우된다(board lesson: CLI resolver 테스트는 호스트 설치에
-   *  의존하지 말 것). */
+   *  의존하지 말 것).
+   *
+   *  `runCliUpdate` 에서 해석이 일어나는 **두 지점 모두** 이것을 탄다: `options.bin`
+   *  이 없을 때의 최초 해석과, 업데이터가 설치 위치를 옮겼을 수 있어 하는 업데이트
+   *  후 재해석. 한쪽만 존중하면 주입한 호출자는 대상이 조용히 호스트 설치로
+   *  갈아치워지는 것을 볼 수 없다. */
   resolveBin?: (cli: string) => string;
   /** 업데이터가 설치 위치를 옮겼을 수 있으므로 resolve 캐시를 버린다. */
   invalidateResolved?: (cli: string) => void;
@@ -192,6 +197,14 @@ export function candidateKeyFor(cli: string, resolvedPath: string): string {
   return name || cli;
 }
 
+/** `CliUpdateDeps.resolveBin` 의 기본값 — 지정이 없을 때 이 CLI 가 어느 실행 파일로
+ *  해석되는지. `listCliInstalls` 와 `runCliUpdate` 가 **같은** 기본값을 공유해야 한다:
+ *  한쪽만 주입을 존중하면 호출자는 "어느 함수에는 먹히고 어느 함수에는 안 먹힌다" 를
+ *  외워야 하고, 주입한 쪽은 조용히 호스트 설치에 끌려간다. */
+function defaultResolveBin(cli: string): string {
+  return createAdapter(cli).resolveBin();
+}
+
 /**
  * npm 레지스트리의 "latest" 를 이 설치본의 기준으로 삼아도 되는가.
  *
@@ -239,7 +252,7 @@ export async function listCliInstalls(
   try {
     const adapter = createAdapter(cli);
     pkg = adapter.updatePackage();
-    key = candidateKeyFor(cli, (deps.resolveBin ?? ((c) => createAdapter(c).resolveBin()))(cli));
+    key = candidateKeyFor(cli, (deps.resolveBin ?? defaultResolveBin)(cli));
   } catch {
     // 해석 실패(미설치) — 이름 그대로 열거해 본다. 후보가 없으면 빈 배열이다.
   }
@@ -264,6 +277,7 @@ export async function runCliUpdate(
   const probeVersion = deps.probeVersion ?? defaultProbeVersion;
   const listCandidates = deps.listCandidates ?? listCliBinCandidates;
   const detectMethod = deps.detectMethod ?? detectInstallMethod;
+  const resolveBin = deps.resolveBin ?? defaultResolveBin;
   const invalidateResolved = deps.invalidateResolved ?? invalidateCliBinCache;
   const log = deps.log ?? (() => {});
   const attempts: CliUpdateAttempt[] = [];
@@ -284,15 +298,16 @@ export async function runCliUpdate(
     ...extra,
   });
 
-  let adapter;
   let updater: { args: string[]; label: string } | null = null;
   let pkg: string | null = null;
   let bin: string;
   try {
-    adapter = createAdapter(cli);
+    // 어댑터는 이 CLI 의 **선언**(자체 업데이터 argv, npm 패키지 이름)만 읽는 데 쓴다.
+    // 경로 해석은 resolveBin 이 맡으므로 이 블록 밖에서 어댑터가 필요하지 않다.
+    const adapter = createAdapter(cli);
     updater = adapter.cliUpdate();
     pkg = adapter.updatePackage();
-    bin = options.bin || adapter.resolveBin();
+    bin = options.bin || resolveBin(cli);
   } catch (err: any) {
     return fail(`cannot resolve ${cli}: ${err?.message ?? err}`);
   }
@@ -380,7 +395,7 @@ export async function runCliUpdate(
   if (!options.bin) {
     invalidateResolved(cli);
     try {
-      target = adapter.resolveBin();
+      target = resolveBin(cli);
     } catch {
       /* 업데이터가 설치를 망가뜨렸을 수도 있다 — 이전 경로로 계속 읽어 본다. */
     }
