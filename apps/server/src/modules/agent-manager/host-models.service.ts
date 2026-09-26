@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, type OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Agent } from '../../entities/Agent';
+import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { InstanceRecord, InstanceRegistryService } from './instance-registry.service';
@@ -56,14 +57,81 @@ const REFRESH_ACK_ATTEMPTS = 15;
  */
 const OBSERVED_MODELS_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** 영속된 ACP 보고 목록을 다시 읽는 최소 간격(스냅샷 조회 시). */
+const REPORTED_RELOAD_MS = 60 * 1000;
+
+/**
+ * `known_config_options`(ACP 가 보고한 선택지 JSON)에서 model 후보 id 만 뽑는다.
+ * 파싱 실패·모양 변화는 빈 배열로 접는다 — 목록 하나가 화면을 막지 않는다.
+ */
+export function modelIdsFromConfigOptions(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const option of parsed) {
+      if (!option || typeof option !== 'object' || (option as any).category !== 'model') continue;
+      for (const choice of (option as any).options ?? []) {
+        const value = choice && typeof choice === 'object' ? (choice as any).value : null;
+        if (typeof value !== 'string' || !value || seen.has(value)) continue;
+        seen.add(value);
+        out.push(value);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 @Injectable()
-export class HostModelsService {
+export class HostModelsService implements OnModuleInit {
   constructor(
     @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(AgentSessionCliSetting) private readonly cliSettings: Repository<AgentSessionCliSetting>,
     private readonly registry: InstanceRegistryService,
     private readonly commands: AgentManagerCommandService,
     private readonly commandLedger: CommandLedgerService,
   ) {}
+
+  /**
+   * ACP 어댑터가 보고한 모델 목록은 세션이 열릴 때 `agent_session_cli_settings.
+   * known_config_options` 에 **영속**된다. 부팅 때 그것을 읽어 둔다 — 그러지 않으면
+   * "세션을 이 프로세스에서 한 번 열었는가" 에 따라 목록이 갈린다.
+   *
+   * 이것이 운영자가 본 마지막 차이였다: Ralf 의 opencode 는 ACP 가 108개(`opencode-go/*`)를
+   * 보고해 세션 화면에는 그게 나왔지만, 하트비트 열거(`opencode models`)는 다른 짧은
+   * 목록이었고 팀 슬롯(mission)은 그 짧은 목록만 봤다.
+   */
+  async onModuleInit(): Promise<void> {
+    await this.reloadReportedModels();
+  }
+
+  /** 영속된 ACP 보고 목록을 다시 읽는다(부팅·스냅샷 조회 시). 실패는 조용히 접는다. */
+  async reloadReportedModels(): Promise<void> {
+    try {
+      const rows = await this.cliSettings.find();
+      const byKey = new Map<string, string[]>();
+      for (const row of rows) {
+        const models = modelIdsFromConfigOptions(row.known_config_options);
+        if (!models.length) continue;
+        const key = `${row.manager_id}::${row.cli}`;
+        // 같은 host×cli 행이 워크스페이스마다 있다. 가장 많이 아는 행을 쓴다.
+        const prev = byKey.get(key);
+        if (!prev || models.length > prev.length) byKey.set(key, models);
+      }
+      this.#reported = byKey;
+      this.#reportedAt = Date.now();
+    } catch {
+      /* 목록 조회 실패가 화면을 막지는 않는다 — 하트비트 목록만으로 답한다. */
+    }
+  }
+
+  /** 영속된 ACP 보고 목록(부팅 시 로드). host×cli → 모델 id. */
+  #reported = new Map<string, string[]>();
+  #reportedAt = 0;
 
   /**
    * 라이브 ACP 세션이 보고한 모델 id — host×cli 별 관측. Agent Session 화면이
@@ -102,23 +170,30 @@ export class HostModelsService {
   }
 
   /**
-   * 하트비트 + 라이브 관측을 합친 최종 목록. **순서는 하트비트 먼저** — 호스트가
-   * 열거한 순서에 의미가 있고(설치된 CLI 의 기본값이 앞), 알파벳으로 다시 정렬하면
-   * 같은 사실이 화면마다 다른 순서로 보인다.
+   * 최종 목록 = **ACP 가 보고한 목록 먼저**, 그 뒤에 하트비트가 아는 나머지.
+   *
+   * 순서까지 한 규칙으로 정하는 이유: 세션 화면은 ACP 목록을 앞에 두고 호스트가 나중에
+   * 알게 된 모델만 뒤에 붙인다(`withModelFallback`). 여기서 하트비트를 앞에 두면 같은
+   * 호스트의 같은 CLI 가 화면마다 **다른 순서**로 보인다 — 내용이 같아도 다른 목록처럼
+   * 읽힌다. 그래서 두 규칙을 하나로 맞췄다.
+   *
+   * ACP 보고는 두 갈래를 같은 자격으로 본다: 영속된 것(`known_config_options`, 재시작
+   * 후에도 유효)과 지금 살아 있는 세션의 관측(`noteObservedModels`, 더 최신).
    */
   private mergeModels(managerAgentId: string, cli: string, heartbeat: readonly string[]): string[] {
     const out: string[] = [];
     const seen = new Set<string>();
-    for (const m of heartbeat) {
-      if (typeof m !== 'string' || !m || seen.has(m)) continue;
+    const push = (m: unknown) => {
+      if (typeof m !== 'string' || !m || seen.has(m)) return;
       seen.add(m);
       out.push(m);
-    }
-    for (const m of this.observedModels(managerAgentId, cli)) {
-      if (seen.has(m)) continue;
-      seen.add(m);
-      out.push(m);
-    }
+    };
+    const live = this.observedModels(managerAgentId, cli);
+    const persisted = this.#reported.get(this.observedKey(managerAgentId, cli)) ?? [];
+    // 라이브 관측이 있으면 그것이 더 최신이다 — 앞에 둔다. 영속 목록은 그 뒤를 채운다.
+    for (const m of live) push(m);
+    for (const m of persisted) push(m);
+    for (const m of heartbeat) push(m);
     return out;
   }
 
@@ -142,6 +217,8 @@ export class HostModelsService {
   /** 최신 하트비트 기준 목록. 오프라인이면 빈 목록(마지막 값이 아니라 — 레지스트리 TTL 이 지운다). */
   async snapshot(managerAgentId: string): Promise<HostModelsView> {
     const manager = await this.requireManager(managerAgentId);
+    // 다른 화면이 세션을 열어 새 목록을 영속했을 수 있다 — 조회 때 싸게 다시 읽는다.
+    if (Date.now() - this.#reportedAt > REPORTED_RELOAD_MS) await this.reloadReportedModels();
     return this.viewOf(manager, this.liveRecord(manager.id));
   }
 
@@ -161,7 +238,7 @@ export class HostModelsService {
   modelsByCli(managerAgentId: string): Record<string, string[]> {
     const heartbeat = this.liveRecord(managerAgentId)?.available_models ?? {};
     const clis = new Set<string>(Object.keys(heartbeat));
-    for (const key of this.#observed.keys()) {
+    for (const key of [...this.#observed.keys(), ...this.#reported.keys()]) {
       const [id, cli] = key.split('::');
       if (id === managerAgentId && cli) clis.add(cli);
     }

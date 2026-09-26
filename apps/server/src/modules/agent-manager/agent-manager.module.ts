@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
+import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
@@ -46,7 +47,9 @@ import { SkillsModule } from '../skills/skills.module';
     forwardRef(() => AgentsModule),
     InstanceRegistryModule,
     SkillsModule,
-    TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource, Workspace]),
+    // AgentSessionCliSetting: HostModelsService 가 ACP 가 보고한 모델 목록(영속)을 읽는다 —
+    // 모델 목록의 단일 출처가 재시작 후에도 같은 답을 하게 하는 데 필요하다.
+    TypeOrmModule.forFeature([Agent, AgentSessionCliSetting, ApiKey, Credential, Ticket, Resource, Workspace]),
   ],
   controllers: [AgentManagerController, HostModelsController],
   providers: [

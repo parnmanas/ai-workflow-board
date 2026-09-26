@@ -92,12 +92,20 @@ Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모�
 ### 목록은 어디서 합쳐지는가 (2026-09-27)
 
 "한 경로"는 **서버 안에서도** 지켜야 한다. `HostModelsService.modelsFor()` /
-`modelsByCli()` 가 유일한 답이고, 그 값은 두 출처의 합집합이다:
+`modelsByCli()` 가 유일한 답이고, 그 값은 세 출처의 합집합이다 — **순서까지 이 규칙이 정한다**:
 
-1. 하트비트 `available_models[cli]` — 설치된 CLI 가 열거한 목록. **순서를 바꾸지 않는다.**
-2. 라이브 ACP 세션이 보고한 모델 — 세션이 열리면 어댑터가 그 CLI 가 실제로 받아들이는
-   목록을 준다. `AgentSessionsService` 가 `noteObservedModels()` 로 이 출처에 올려보내므로
-   (TTL 24시간) 열거가 실패하는 CLI 나 방금 로그인한 provider 도 모든 화면에 함께 보인다.
+1. 지금 살아 있는 세션의 ACP 보고 (`noteObservedModels()`, TTL 24시간) — 가장 최신.
+2. 영속된 ACP 보고 — 세션이 열릴 때 `agent_session_cli_settings.known_config_options` 에
+   저장된 목록. 서버 재시작 뒤에도 유효하며, `onModuleInit` + 스냅샷 조회(60초 간격)로 읽는다.
+3. 하트비트 `available_models[cli]` — 설치된 CLI 가 열거한 목록. 위에 없는 것만 뒤에 붙는다.
+
+ACP 보고를 **앞**에 두는 이유: 세션 화면(`withModelFallback`)이 원래 그 순서로 그린다.
+여기서 하트비트를 앞에 두면 내용이 같아도 화면마다 순서가 달라 다른 목록처럼 읽힌다.
+
+2번이 없으면 "이 서버 프로세스에서 세션을 한 번 열었는가"에 따라 목록이 갈린다 — 실측
+(2026-09-27 운영 DB): Ralf 의 opencode 는 ACP 가 108개(`opencode-go/*`)를 보고해 세션
+화면에는 그게 나왔지만, `opencode models` 열거는 짧은 `opencode/*` 목록이라 팀 슬롯
+(mission)은 그것만 봤다. 라이브 관측만 합치는 수정으로는 이 경우가 남는다.
 
 전에는 두 곳이 자기만의 합집합을 만들었다:
 
