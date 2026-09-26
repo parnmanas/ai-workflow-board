@@ -6,8 +6,10 @@ import { useToast } from '../contexts/ToastContext';
 import { api } from '../api';
 import type { AgentSessionUpdateEvent, AgentSessionHost, AgentSessionSummary, ChatRoomListItem } from '../types';
 import { tokens } from '../tokens';
+import type { ActivityView } from '../activity';
 import { MentionInboxBadge } from './common/MentionInboxBadge';
 import { NavBadge } from './common/NavBadge';
+import { ActivityDot } from './common/ActivityIndicator';
 import { NotificationSettingsPanel } from './common/NotificationSettingsPanel';
 import {
   SIDEBAR_ROOMS_BASE_COUNT,
@@ -24,6 +26,8 @@ import {
 } from './workNavigation';
 import { useWorkNavLists } from '../hooks/useWorkNavLists';
 import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
+import { useRoomActivity } from '../hooks/useRoomActivity';
+import { sessionActivity } from '../activity';
 import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
@@ -87,6 +91,8 @@ interface NavItem {
   active?: boolean;
   /** 이름이 길어 말줄임될 때 전체 이름을 보여줄 툴팁. */
   title?: string;
+  /** 이 행이 지금 돌고 있나 — 공용 진행 점(src/activity.ts). */
+  activity?: ActivityView;
 }
 
 function roomDisplayName(room: ChatRoomListItem): string {
@@ -162,6 +168,7 @@ export default function Sidebar({
   // Agent Session(CLI 직접 세션) — Chat 위에 오는 주 작업 표면. 행은 (Runtime Host × CLI)
   // 이고 세션 자체는 그 장비에 있다. 권한이 없는 사용자에겐 섹션을 그리지 않는다.
   const canUseSessions = hasPermission('agent_sessions.use');
+  const canUseTerminals = hasPermission('terminals.use');
   const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);
 
   // 워크스페이스를 바꾸면 펼침 상태를 초기 5개로 되돌린다. 30초 폴링이나
@@ -196,6 +203,16 @@ export default function Sidebar({
           label: 'AI Agents',
           icon: 'A',
         },
+        // Terminal(Runtime Host 셸) — 기본 admin 전용 권한이라 없는 사용자에게는 행 자체를
+        // 그리지 않는다(눌러도 403 인 행을 남겨 두지 않는다).
+        ...(canUseTerminals
+          ? [{
+            key: 'terminals',
+            path: `${workspaceBase}/terminals`,
+            label: 'Terminals',
+            icon: 'T',
+          }]
+          : []),
       ],
     },
     {
@@ -482,6 +499,7 @@ export default function Sidebar({
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {item.label}
         </span>
+        {item.activity && <ActivityDot view={item.activity} size={6} />}
         {!!item.badge && item.badge > 0 && <NavBadge count={item.badge} label={item.badgeLabel} />}
       </button>
     );
@@ -588,6 +606,7 @@ export default function Sidebar({
                     active: child.active,
                     badge: child.badge,
                     badgeLabel: child.badgeLabel,
+                    activity: child.activity,
                   },
                   true,
                 ),
@@ -626,6 +645,9 @@ export default function Sidebar({
       </React.Fragment>
     );
   };
+
+  // 왼쪽 프레임의 채팅 행이 "지금 이 방에서 에이전트가 일하고 있다"를 말한다.
+  const roomActivity = useRoomActivity();
 
   const activeRoomId = rooms.find((room) => location.pathname === `${workspaceBase}/chat/${room.id}`)?.id ?? null;
   const { displayRooms, hiddenRooms } = paginateSidebarRooms(rooms, visibleRoomCount, activeRoomId);
@@ -830,11 +852,10 @@ export default function Sidebar({
                                           {displayed.map((s) => {
                                             const sPath = sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id);
                                             const sActive = location.pathname === sPath;
-                                            const statusColor = s.live_status === 'busy' || s.live_status === 'starting'
-                                              ? tokens.colors.warningLight
-                                              : s.live_status === 'error' ? tokens.colors.dangerLight
-                                              : s.live_status === 'ready' || s.live_status === 'awaiting_permission' ? tokens.colors.successLight
-                                              : null;
+                                            // 세션 목록·세션 헤더와 **같은** 어휘. 예전엔 여기에만
+                                            // 따로 색 표가 있어 같은 'busy' 세션이 사이드바에선
+                                            // 노란 점, 세션 화면에선 파란 pill 로 보였다.
+                                            const activity = sessionActivity(s.live_status);
                                             return (
                                               <button
                                                 key={s.session_id}
@@ -860,9 +881,7 @@ export default function Sidebar({
                                                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                   {sessionDisplayTitle(s)}
                                                 </span>
-                                                {statusColor && (
-                                                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: statusColor }} />
-                                                )}
+                                                <ActivityDot view={activity} size={6} />
                                               </button>
                                             );
                                           })}
@@ -1027,6 +1046,7 @@ export default function Sidebar({
                     >
                       {roomDisplayName(room)}
                     </span>
+                    <ActivityDot view={roomActivity.view(room.id)} size={6} />
                     {unread > 0 && (
                       <NavBadge
                         count={unread}

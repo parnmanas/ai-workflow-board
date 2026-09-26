@@ -417,6 +417,29 @@ export class OrchestrationController {
    * 카드에 실리는 최신 한 줄(`step.activity`)은 미션 상세 페이로드에 이미 들어 있다.
    * 이 경로는 선택한 **하나**의 step 만 깊게 읽으므로, 카드 목록의 폴링 비용과 무관하다.
    */
+  /**
+   * 종료된 미션을 다시 연다. 운영자용 입구 — orchestrator 는 같은 전이를
+   * `reopen_orchestration_mission` MCP 툴로 스스로 부른다(대화만으로 이어서 진행하는 경로).
+   *
+   * 여기가 "사람이 step 을 직접 만지지 않는다" 규칙의 예외가 아닌 이유: 이 호출은 plan 을
+   * 한 줄도 바꾸지 않는다. 미션을 **다시 살아있게** 만들 뿐이고, 무엇을 다시 돌릴지는
+   * 그대로 orchestrator 의 판단이다.
+   */
+  @Post('missions/:id/reopen')
+  async reopenMission(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      await this.runner.reopenMission(id, body?.workspace_id, actorOf(req), { reason: body?.reason });
+      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+    } catch (e: any) {
+      return fail(res, e, 'Failed to reopen the mission');
+    }
+  }
+
   @Get('steps/:stepId/session')
   async getStepSession(
     @Param('stepId') stepId: string,

@@ -216,11 +216,12 @@ export interface QaOnFailureTicketConfig {
   // Counted via a `qa-rerun:<n>` generation label threaded fix-ticket → run →
   // next fix-ticket. Default 3. <= 0 disables reruns (treated like opt-out).
   max_rerun_attempts?: number;
-  // Deployment-timing gate (see docs/qa-rerun-on-fix.md "Deployment timing").
-  // QA scenarios hit the RUNNING AWB server, which auto-deploys from
-  // `production.private` AFTER main merges — so an instant rerun can validate the
-  // pre-fix code. This delays the rerun by N seconds (best-effort, in-process;
-  // not durable across a server restart) so a deploy can land first. Default 0
+  // 배포 타이밍 게이트 (docs/qa-rerun-on-fix.md 의 "Deployment timing" 절 참고).
+  // QA 시나리오는 **돌고 있는** AWB 서버를 친다. 배포 호스트가 `origin/main` 을 detached
+  // 로 다시 체크아웃해 의존성 재설치·재빌드·재기동해야 그 커밋이 서빙되므로, main 머지
+  // 직후의 즉시 재실행은 수정 전 코드를 검증할 수 있다.
+  // This delays the rerun by N seconds (best-effort, in-process; not durable
+  // across a server restart) so a deploy can land first. Default 0
   // (immediate). Set to your typical main→prod deploy lag to make Done≈deployed.
   //
   // ⚠️ Superseded (but retained as fallback) by `deployment_gate` below: a fixed

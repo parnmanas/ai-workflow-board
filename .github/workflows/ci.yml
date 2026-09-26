@@ -321,11 +321,15 @@ jobs:
   # 그대로 돈다(cli-resolver `.cmd` shim, service-install 런처 XML, process-tree
   # parseProcListWin 등 — 각 테스트 주석 "실제 Windows 호스트 없이 테스트 가능"). 실제
   # `.cmd` CreateProcess 경로(spawn-cmd)와 codex 심링크(자기-skip)는 win32 축에서 처음
-  # 진짜 실행된다(위 e299c6b3 codex `.cmd` ENOENT 회귀 — 주입으로 대체 불가). 실 git
-  # 서브프로세스로 POSIX 파일권한(mode & 0o077)·절대경로·credential --file= 경로를
-  # 단언하는 3개 테스트만 win32 에서 명시적 skip(repo-credential·run-provisioner·
-  # worktree-manager 각 1개; 각 `{ skip: process.platform === 'win32' && '…' }` 주석
-  # 참조). git config 격리는 os.devNull 로 이식성 있게 고쳤다(git-mode-update).
+  # 진짜 실행된다(위 e299c6b3 codex `.cmd` ENOENT 회귀 — 주입으로 대체 불가). win32 에서
+  # 빠지는 테스트의 개수·파일명은 여기 적지 않는다 — 적어 두면 테스트가 늘 때마다 조용히
+  # stale 해진다(이 문장이 실제로 그랬다: ticket 679f01bd; AGENTS.md 의
+  # `agent_manager_command` verb 개수와 같은 실패 클래스). 단일 원천은 테스트 자신의
+  # `{ skip: … }` 선언이다 — `git grep -n "skip:" apps/agent-manager/test/` 로 전수
+  # 열람하고, 사유를 값으로 가진 것(`skip: <조건> && '이유'`)은 node --test 출력에도 그대로
+  # 찍힌다. 주의: 본문 안의 `if (process.platform !== 'win32')` 는 skip 이 아니다 — 그
+  # 테스트는 win32 에서도 돌고 POSIX 전용 단언(파일권한 mode & 0o077 등)만 건너뛴다.
+  # git config 격리는 os.devNull 로 이식성 있게 고쳤다(git-mode-update).
   #
   # 참고: `node --test test/`(디렉터리 인자)는 node ≥22 에서 `test` 를 엔트리 모듈로
   # 취급해 MODULE_NOT_FOUND 로 죽는다. 그래서 package.json `test` 스크립트와 동일한

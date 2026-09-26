@@ -72,6 +72,55 @@ credential 안내문처럼 **표현만** 다루는 값은 `src/cli/presentation.
 에는 중립 기본값을 준다 — 서버가 새 CLI 를 내려보내면 클라이언트 수정 없이도 picker,
 credential 폼, 로그인 화면, effort 편집기가 그 CLI 를 그린다.
 
+## 모델 목록 — 화면마다 다르게 읽지 않는다
+
+호스트 × CLI 의 모델 목록은 매니저의 CLI 모듈(어댑터 `listModels()`)이 열거하고, 하트비트의
+`available_models` / `available_models_at`(마지막 재열거 시각)로 서버에 온다. 매니저는 부팅 시,
+`refresh_available_models` 커맨드 시, 그리고 `AVAILABLE_MODELS_REFRESH_MS`(15분)마다 다시 센다.
+
+서버는 `HostModelsService`(`modules/agent-manager/host-models.service.ts`) 하나로 읽기·갱신을
+제공한다 — `GET /api/agent-manager/hosts/:managerAgentId/models`, `POST …/models/refresh`(서버가
+커맨드 ack 를 기다린 뒤 새 목록을 돌려준다). 오케스트레이션 로스터의 refresh 도 이 서비스를
+거치고, 세션 CLI 설정은 ACP 가 보고한 목록에 호스트가 그 뒤 알게 된 모델을 덧붙인다.
+
+클라이언트는 `src/cli/hostModels.ts` 의 `useHostModels(managerAgentId, cli)` 하나를 쓴다 —
+Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모달, Runtime Hosts 화면 전부.
+훅은 열릴 때 목록이 비었거나(host×cli 당 한 번) 재열거 시각이 10분보다 오래됐으면 조용히
+갱신하고, 각 화면의 "Refresh" 버튼은 같은 `refresh()` 를 부른다. 모델을 보여주는 새 화면을
+만들 때 `available_models` 를 직접 읽거나 `refresh_available_models` 를 직접 보내지 말 것.
+
+### 목록은 어디서 합쳐지는가 (2026-09-27)
+
+"한 경로"는 **서버 안에서도** 지켜야 한다. `HostModelsService.modelsFor()` /
+`modelsByCli()` 가 유일한 답이고, 그 값은 세 출처의 합집합이다 — **순서까지 이 규칙이 정한다**:
+
+1. 지금 살아 있는 세션의 ACP 보고 (`noteObservedModels()`, TTL 24시간) — 가장 최신.
+2. 영속된 ACP 보고 — 세션이 열릴 때 `agent_session_cli_settings.known_config_options` 에
+   저장된 목록. 서버 재시작 뒤에도 유효하며, `onModuleInit` + 스냅샷 조회(60초 간격)로 읽는다.
+3. 하트비트 `available_models[cli]` — 설치된 CLI 가 열거한 목록. 위에 없는 것만 뒤에 붙는다.
+
+ACP 보고를 **앞**에 두는 이유: 세션 화면(`withModelFallback`)이 원래 그 순서로 그린다.
+여기서 하트비트를 앞에 두면 내용이 같아도 화면마다 순서가 달라 다른 목록처럼 읽힌다.
+
+2번이 없으면 "이 서버 프로세스에서 세션을 한 번 열었는가"에 따라 목록이 갈린다 — 실측
+(2026-09-27 운영 DB): Ralf 의 opencode 는 ACP 가 108개(`opencode-go/*`)를 보고해 세션
+화면에는 그게 나왔지만, `opencode models` 열거는 짧은 `opencode/*` 목록이라 팀 슬롯
+(mission)은 그것만 봤다. 라이브 관측만 합치는 수정으로는 이 경우가 남는다.
+
+전에는 두 곳이 자기만의 합집합을 만들었다:
+
+- 세션 화면: 하트비트를 직접 읽고 ACP 목록과 합쳤지만, 그 ACP 지식이 화면 밖으로 나가지
+  않아 Agent 다이얼로그·팀 슬롯은 더 가난한 목록을 봤다.
+- 오케스트레이션 로스터: 하트비트 + **기존 agent 행에 핀된 `model`** 을 합쳐 알파벳순으로
+  재정렬했다. 그래서 같은 호스트의 opencode 목록이 mission 과 다른 화면에서 내용도 순서도
+  달랐다(운영 보고). 저장된 값이 목록에 없을 때의 대비는 화면이 이미 한다 — 팀 슬롯이
+  저장된 model 을 "(not listed by this host)" 로 덧붙이고, 목록이 비면 자유 입력으로
+  떨어진다. 그 대비를 **목록 자체를 갈라놓는 것**으로 대신하지 말 것.
+
+회귀: `apps/server/test/host-models-single-source.test.mjs`(스냅샷·로스터·세션 fallback 세
+경로의 결과가 글자 그대로 같은지 + 관측 합류), `apps/client/test/mission-slot-model-list.test.mjs`
+(팀 슬롯 dropdown 이 로스터 스냅샷을 그리지 않는지).
+
 ## 새 CLI 추가
 
 절차는 [runbooks/cli-module-wiring.md](runbooks/cli-module-wiring.md).

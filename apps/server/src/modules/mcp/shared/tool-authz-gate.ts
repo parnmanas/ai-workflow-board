@@ -163,6 +163,10 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   //     않는 이유는 오케스트레이터 에이전트가 계획 중 읽어야 하는 값이라서다 —
   //     'caller'가 이 파일의 최소 하한선(세션리스 거부)을 그대로 적용한다.
   patch_orchestration_graph: 'caller',
+  // reopen_orchestration_mission: 진짜 인가는 runner 의 reopenMission() 이 하는
+  // requireOrchestrator() 다(complete/cancel 과 정확히 같은 경로). 게이트는 caller
+  // 스코프 하한선만 본다 — full 스코프 키라도 남의 미션은 되살릴 수 없다.
+  reopen_orchestration_mission: 'caller',
   list_orchestration_graph_templates: 'caller',
 
   // ticket 6ff827cb: new tool, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors

@@ -530,10 +530,11 @@ export interface BuildScenarioOptions {
  * QA→fix→QA closed loop (ticket 467dbc7a): `rerun_on_fix` is ON so a seeded
  * scenario's fix ticket reaching Done deterministically re-runs the scenario,
  * capped at `max_rerun_attempts` reruns before it halts for human review.
- * `rerun_delay_seconds` is a deploy-lag buffer — ⚠️ the seed scenarios hit the
- * RUNNING server, which auto-deploys main→production.private only AFTER the fix
- * merges, so an immediate (0s) rerun can validate the pre-fix code. This is a
- * real, repeated failure mode: e.g. the board-pause scenario filed a fix ticket
+ * `rerun_delay_seconds` 는 배포 지연 완충값이다 — ⚠️ 시드 시나리오는 **돌고 있는**
+ * 서버를 치고, 그 서버는 배포 호스트가 `origin/main` 을 detached 로 다시 체크아웃해
+ * 의존성 재설치·재빌드·재기동한 결과다. 수정을 main 에 머지해도 그 과정이 끝나기
+ * 전에는 옛 코드가 서빙되므로, 즉시(0초) 재실행은 수정 전 코드를 검증할 수 있다.
+ * This is a real, repeated failure mode: e.g. the board-pause scenario filed a fix ticket
  * whose rerun fired the instant the fix merged but seconds before the deploy
  * propagated, re-failing against the pre-fix build (a false negative). We default
  * to a non-zero buffer so the common case (deploy lands within a few minutes)

@@ -70,14 +70,13 @@ export type UpdateScheduleInput = Partial<Omit<CreateScheduleInput, 'workspaceId
  *     QaRunService.resumeWedgedBatch) — so this tick resumes it instead of
  *     skipping forever (ticket a51ec6d9 review round 2).
  *
- * Deployment timing (same footgun as #467dbc7a): a scheduled run hits the
- * RUNNING server, which auto-deploys from production.private only AFTER main
- * merges. A schedule firing right after a fix-merge can validate pre-deploy
- * code. The honest mitigation here is operational — set the cadence coarser than
- * your main→prod deploy lag (cron at a fixed wall-clock hour, or a multi-minute
- * interval), so a scheduled run lands after the deploy. (Unlike the rerun-on-fix
- * delay gate, a fixed-cadence schedule has no merge edge to defer from.) Noted on
- * the editor + docs/qa-scheduler.md.
+ * 배포 타이밍 (#467dbc7a 와 같은 함정): 스케줄 실행은 **돌고 있는** 서버를 친다. 배포
+ * 호스트가 `origin/main` 을 detached 로 다시 체크아웃하고 의존성 재설치·재빌드·서버
+ * 재기동까지 마쳐야 그 커밋이 서빙되므로, 머지 직후 발화하는 스케줄은 배포 전 코드를
+ * 검증할 수 있다. 여기서 정직한 완화책은 운영적이다 — cadence 를 main→배포 지연보다
+ * 넉넉히 잡아(고정 wall-clock 시각 cron, 혹은 멀티 분 interval) 발화가 배포 이후에
+ * 떨어지게 하라. (rerun-on-fix 의 delay gate 와 달리 고정-cadence 스케줄에는 deferral
+ * 의 기준이 될 머지 edge 가 없다.) 에디터와 docs/qa-scheduler.md 에도 적어 뒀다.
  */
 @Injectable()
 export class QaScheduleService implements OnModuleInit, OnModuleDestroy {

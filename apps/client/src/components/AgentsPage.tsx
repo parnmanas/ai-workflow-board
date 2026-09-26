@@ -5,8 +5,10 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
+import PageTabs from './PageTabs';
 import DirectoryPicker from './admin/DirectoryPicker';
 import AgentManagerPage from './admin/AgentManagerPage';
+import AgentFleetPanel from './agents/AgentFleetPanel';
 import { tokens } from '../tokens';
 import { credentialFallbackCopy } from '../utils/credentialFallback';
 import {
@@ -71,12 +73,26 @@ const EMPTY_MANAGED_FORM: {
 };
 
 /**
- * AgentsPage — card grid + modal layout matching BoardsIndexPage pattern.
+ * AgentsPage — 두 표면을 탭으로 가른다.
  *
- * Card grid shows all workspace agents. Clicking a card opens AgentDetailModal
- * (right-panel slide-in). Real-time status via BoardStreamContext agent_status
- * envelopes (D-42/D-50). workspace sourced from URL params (wsId).
+ *   Agents        워크스페이스의 Agent 를 카테고리(Runtime Host · 상태 · CLI)로 묶어
+ *                 보여주는 카드 그리드. 모두가 본다.
+ *   Runtime Hosts 장비와 그 위의 프로세스를 다루는 관리 콘솔. admin 전용.
+ *
+ * 예전에는 이 둘이 한 화면에 섞여 있었다 — 관리자에게는 제목만 "AI Agents" 인
+ * 호스트 콘솔이 뜨고 Agent 는 인스턴스 상세 안의 카드에 묻혔으며, 비관리자에게는
+ * 그룹도 필터도 없는 평면 목록 하나만 보였다. 같은 화면이 사람마다 전혀 다른 것을
+ * 보여 주고, 어느 쪽도 "지금 무엇이 고장났나" 를 답하지 못했다.
+ *
+ * 탭 선택은 URL 해시에 남는다: 레거시 `/admin/agent-manager` 리다이렉트가 보내는
+ * `agents#agent-manager-runtime` 이 Runtime Hosts 탭으로 바로 떨어져야 하기 때문이다.
+ *
+ * 실시간 상태는 예전과 같이 BoardStreamContext 의 agent_status 봉투로 들어온다.
  */
+
+type AgentsTab = 'fleet' | 'runtime';
+
+const RUNTIME_TAB_HASH = '#agent-manager-runtime';
 
 interface StatusUpdate {
   agent_id: string;
@@ -158,6 +174,12 @@ export default function AgentsPage() {
   // the operator clicks a directory instead of typing an absolute path that
   // is meaningful only on that specific manager host.
   const [pickerOpen, setPickerOpen] = useState(false);
+  // 탭 선택은 해시에서 읽어 해시로 되쓴다 — 레거시 `agents#agent-manager-runtime`
+  // 리다이렉트가 Runtime Hosts 탭으로 바로 떨어지고, 그 탭을 연 채 새로고침해도
+  // 같은 탭이 다시 열린다.
+  const [tab, setTab] = useState<AgentsTab>(() =>
+    typeof window !== 'undefined' && window.location.hash === RUNTIME_TAB_HASH ? 'runtime' : 'fleet',
+  );
 
   const pendingStatusRef = useRef<StatusUpdate[]>([]);
   const agentsReadyRef = useRef(false);
@@ -195,6 +217,31 @@ export default function AgentsPage() {
   useEffect(() => {
     loadSnapshot();
   }, [loadSnapshot]);
+
+  // Runtime Hosts 는 admin 전용이다. 권한이 없는 사람이 해시로 그 탭을 열고 들어오면
+  // 빈 콘솔이 아니라 Agents 로 되돌린다.
+  useEffect(() => {
+    if (tab === 'runtime' && !canAccessAgentManager) setTab('fleet');
+  }, [tab, canAccessAgentManager]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const want = tab === 'runtime' ? RUNTIME_TAB_HASH : '';
+    if (window.location.hash === want) return;
+    // replaceState — 탭 전환은 뒤로 가기 이력에 쌓일 일이 아니다.
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${want}`);
+  }, [tab]);
+
+  // 카드의 spawn/중지/재시작 버튼은 그 Agent 를 감독하는 호스트의 라이브 인스턴스가
+  // 있어야 명령을 보낼 수 있다. admin 에게만, 그리고 목록 화면에서만 읽는다.
+  useEffect(() => {
+    if (!canAccessAgentManager) return;
+    let alive = true;
+    api.listAgentManagerInstances()
+      .then((rows) => { if (alive) setManagerInstances(rows); })
+      .catch(() => { /* 카드는 인스턴스 없이도 그려진다 — 버튼만 비활성이다. */ });
+    return () => { alive = false; };
+  }, [canAccessAgentManager]);
 
   // ─── Live envelopes via BoardStreamContext ────────────────────
   useBoardStreamEvent('agent_status', (envelope: any) => {
@@ -429,7 +476,11 @@ export default function AgentsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       <PageHeader
         title="AI Agents"
-        description="Manage workspace agents and the runtime managers that execute them"
+        description={
+          tab === 'runtime'
+            ? '이 서버에 붙은 Runtime Host 와 그 위에서 도는 프로세스'
+            : '워크스페이스의 Agent — Runtime Host · 상태 · CLI 로 묶어 본다'
+        }
         actions={
           user?.role === 'admin' ? (
             <div style={{ display: 'flex', gap: 8 }}>
@@ -441,18 +492,58 @@ export default function AgentsPage() {
         }
       />
 
+      <PageTabs
+        activeId={tab}
+        tabs={[
+          { id: 'fleet', label: `Agents${agents ? ` (${agents.length})` : ''}`, onClick: () => setTab('fleet') },
+          // admin 이 아니면 탭 자체를 내보내지 않는다 — 눌러도 아무것도 못 보는
+          // 비활성 탭을 남겨 두는 것보다 없는 편이 정직하다.
+          ...(canAccessAgentManager
+            ? [{ id: 'runtime' as const, label: 'Runtime Hosts', onClick: () => setTab('runtime') }]
+            : []),
+        ]}
+      />
+
+      {/* 목록 탭은 세로로 스크롤한다(카드 그리드가 길어진다). Runtime Hosts 탭은
+          자체 master/detail 이 각자 스크롤하므로 바깥은 잠근다. */}
       <div
         id="agent-manager-runtime"
-        style={{ flex: 1, minHeight: 0, padding: 24, overflow: 'hidden' }}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          padding: 24,
+          overflowY: tab === 'fleet' ? 'auto' : 'hidden',
+          overflowX: 'hidden',
+        }}
       >
-        <AgentManagerPage
-          workspaceAgents={agents || []}
-          agentsLoading={loading}
-          agentsError={snapshotError}
-          canManageRuntime={canAccessAgentManager}
-          onRetryAgents={loadSnapshot}
-          onOpenAgent={openDetail}
-        />
+        {tab === 'fleet' ? (
+          <AgentFleetPanel
+            agents={agents || []}
+            loading={loading}
+            error={snapshotError}
+            onRetry={loadSnapshot}
+            onOpenAgent={openDetail}
+            managerInstances={managerInstances}
+            isAdmin={canAccessAgentManager}
+            onLifecycleDispatched={loadSnapshot}
+            emptyAction={
+              user?.role === 'admin' ? (
+                <Button variant="primary" size="sm" onClick={() => setShowManagedModal(true)}>
+                  + New Agent
+                </Button>
+              ) : undefined
+            }
+          />
+        ) : (
+          <AgentManagerPage
+            workspaceAgents={agents || []}
+            agentsLoading={loading}
+            agentsError={snapshotError}
+            canManageRuntime={canAccessAgentManager}
+            onRetryAgents={loadSnapshot}
+            onOpenAgent={openDetail}
+          />
+        )}
       </div>
 
       {/* Agent detail surface moved to a real route in v0.32.x —

@@ -64,6 +64,19 @@ const { MergeLeaseSweepService } = await import(
 const { releaseMergeLeaseForMove } = await import(
   'file://' + path.join(DIST, 'modules', 'mcp', 'shared', 'merge-lease-move.js')
 );
+const { isLeaseAliveVerdict } = await import(
+  'file://' + path.join(DIST, 'modules', 'tickets', 'merge-lease.js')
+);
+// 회귀 테스트가 CI 대기를 **실제 공개 경로**로 등록·해소하기 위한 서비스 둘.
+// `await_ci_run` MCP 도구는 `CiWaitService.registerWait` 의 얇은 래퍼이고
+// (`modules/mcp/tools/ci-wait-tools.ts`), 해소·재개는 `CiWaitResumeService`
+// 의 공개 `sweep()` 이 전부 수행한다.
+const { CiWaitService } = await import(
+  'file://' + path.join(DIST, 'modules', 'tickets', 'ci-wait.service.js')
+);
+const { CiWaitResumeService } = await import(
+  'file://' + path.join(DIST, 'modules', 'agents', 'ci-wait-resume.service.js')
+);
 const { DataSource, IsNull } = await import('typeorm');
 
 const MIN = 60_000;
@@ -93,6 +106,48 @@ const sweep = new MergeLeaseSweepService(ds, logStub, svc, triggerStub);
 
 const leaseRepo = ds.getRepository(MergeLease);
 const ticketRepo = ds.getRepository(Ticket);
+
+const ciWaitService = new CiWaitService(ds, activityStub);
+
+/**
+ * 실제 `CiWaitResumeService` 를 만든다 — GitHub 읽기만 스텁이다.
+ *
+ * `private readonly github` 는 컴파일되면 평범한 인스턴스 속성이라(TS private
+ * 은 컴파일 타임 전용) 생성 후 치환할 수 있다. `ci-wait-resume.test.mjs` 가
+ * 쓰는 것과 **같은** 치환이고, 그 파일에 근거가 적혀 있다.
+ *
+ * 디스패치 스텁은 실제 `trigger-loop.service.ts` 의 게이트를 그대로 재현한다:
+ * `pending_ci_wait` 이 아직 true 인 동안의 emit 은 실제로는 조용히 무시되므로,
+ * 여기서 던져서 순서 회귀가 조용히 지나가지 않게 한다.
+ */
+function makeCiWaitResumer(getRun, dispatchCalls) {
+  const gatedTrigger = {
+    async dispatchCurrentColumn(ticketId, source, by) {
+      const live = await ticketRepo.findOne({ where: { id: ticketId } });
+      const pendingStillTrue = !!live?.pending_ci_wait;
+      dispatchCalls.push({ ticketId, source, by, pendingStillTrue });
+      if (pendingStillTrue) {
+        throw new Error(
+          `dispatchCurrentColumn(${ticketId}) 가 pending_ci_wait=true 인 동안 호출됐다 — `
+          + '실제 trigger-loop 게이트는 이 호출을 조용히 무시한다',
+        );
+      }
+      return { emitted: 1 };
+    },
+  };
+  const resumer = new CiWaitResumeService(ds, logStub, ciWaitService, gatedTrigger);
+  resumer.github = { async getWorkflowRun() { return getRun(); } };
+  return resumer;
+}
+
+/** 등록만 필요한 테스트용 — 아직 끝나지 않은 run 하나. */
+function inProgressRun(runId, headSha) {
+  return {
+    id: runId, workflow_id: '77', status: 'in_progress', conclusion: null,
+    event: 'workflow_dispatch', html_url: `https://github.com/o/r/actions/runs/${runId}`,
+    head_sha: headSha, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+  };
+}
 
 after(async () => {
   await ds.destroy();
@@ -169,7 +224,13 @@ async function clearLeases() {
   await leaseRepo.clear();
   await ticketRepo.update({ pending_merge_lease: true }, { pending_merge_lease: false, merge_lease_context: '' });
   // 에피소드 예산은 티켓 위에 영속하므로 테스트 간 격리가 필요하다.
-  await ds.query('UPDATE tickets SET merge_landing_attempts = 0, merge_lease_degraded = 0');
+  // CI 대기도 같이 내린다: `CiWaitResumeService.sweep()` 은 `pending_ci_wait`
+  // 인 티켓을 **전부** 후보로 잡으므로, 앞선 테스트가 남긴 대기가 다음 테스트의
+  // 스윕 통계·해소 대상에 섞여 든다.
+  await ds.query(
+    "UPDATE tickets SET merge_landing_attempts = 0, merge_lease_degraded = 0,"
+    + " pending_ci_wait = 0, ci_wait_context = ''",
+  );
   dispatched.length = 0;
 }
 
@@ -604,7 +665,7 @@ test('무진행 홀더는 회수되고, 그 자리를 대기자가 이어받는�
   );
 });
 
-test('★ 미해소 CI 대기를 가진 홀더는 idle 상한을 훨씬 넘겨도 회수되지 않는다', async () => {
+test('★ 미해소 CI 대기를 가진 홀더는 회수되지 않고, 스윕이 그 동안 liveness 시계를 민다', async () => {
   await clearLeases();
   const holder = await makeMergingTicket('slow-ci');
   const res = await svc.acquire(holder.id);
@@ -615,27 +676,126 @@ test('★ 미해소 CI 대기를 가진 홀더는 idle 상한을 훨씬 넘겨�
     last_progress_at: new Date(Date.now() - 60 * MIN),
     acquired_at: new Date(Date.now() - 61 * MIN),
   });
-  await ticketRepo.update({ id: holder.id }, {
-    pending_ci_wait: true,
-    ci_wait_context: JSON.stringify({ owner: 'o', repo: 'r', run_id: '123' }), // outcome 없음 = 미해소
-  });
+  // 대기는 실제 공개 등록 경로로 만든다 — 손으로 조립한 컨텍스트는
+  // `registerWait` 가 실제로 쓰는 모양(registered_at 등)과 어긋날 수 있고,
+  // 그러면 이 테스트가 지키는 것이 프로덕션 상태가 아니게 된다.
+  await ciWaitService.registerWait(
+    holder.id,
+    { owner: 'o', repo: 'r', run_id: '36242052303', head_sha: 'a'.repeat(40) },
+    { actorName: 'holder-session' },
+  );
 
   await sweep.sweep();
   const still = await leaseRepo.findOne({ where: { id: res.lease_id } });
   assert.equal(still.released_at, null, 'CI 가 도는 중인 홀더의 lease 를 뺏었다 — 두 홀더 동시 랜딩 위험');
   assert.equal(still.state, 'held');
 
-  // 반대 방향: CI 가 해소되면(outcome 기록) 더 이상 진행 증거가 아니다.
-  await ticketRepo.update({ id: holder.id }, {
-    ci_wait_context: JSON.stringify({
-      owner: 'o', repo: 'r', run_id: '123',
-      outcome: { kind: 'resolved', message: 'ok', resolved_at: new Date().toISOString() },
-    }),
-  });
+  // ★ 회수를 참는 것만으로는 부족하다 (ticket baaac7e9) — 시계도 밀어야 한다.
+  //   밀지 않으면 무진행 경과가 CI 가 도는 동안 그대로 누적돼, `pending_ci_wait`
+  //   이 내려가는 순간 이미 상한을 넘겨 있고 ff push 를 하러 재개된 살아 있는
+  //   홀더가 그 자리에서 회수된다. 그 프로덕션 타임라인은 바로 다음 테스트가
+  //   상태 전이로 재현한다.
+  assert.equal(still.progress_note, 'ci_wait_active', '스윕이 CI 대기를 진행 증거로 기록하지 않았다');
+  const idleMin = (Date.now() - new Date(still.last_progress_at).getTime()) / MIN;
+  assert.ok(
+    idleMin < 5,
+    `CI 대기 중인데 liveness 시계가 밀리지 않았다 — 무진행 ${Math.round(idleMin)}분 (idle 상한 20분)`,
+  );
+});
+
+test('★ 회귀: CI 가 idle 상한보다 오래 돌아도 해소 직후의 홀더를 회수하지 않는다 (ticket baaac7e9)', async () => {
+  // 프로덕션 실측 재현 (2026-09-26, lease d4bbb064 / f7575093). 홀더는 grant
+  // 직후 재획득으로 진행을 한 번 기록한 뒤 `await_ci_run` 으로 턴을 끝냈고, CI
+  // 매트릭스가 idle 상한보다 오래 돌았다. 그 동안 `last_progress_at` 이 멈춰
+  // 있었기 때문에 CI 가 해소되는 순간 무진행 경과가 이미 상한을 넘겨, ff push
+  // 를 하러 재개된 홀더의 lease 가 그 자리에서 회수됐다. 회수는 즉시 다음
+  // 대기자를 승격시키고 그 홀더도 같은 방식으로 회수돼, 연속 3홀더·42분간
+  // 랜딩 0건이 됐다 — 그 사이 박탈·타임아웃된 티켓들이 fail-open 으로 랜딩해
+  // base 를 계속 밀었고, 이 기구가 막으려던 CI 재검증 루프가 그대로 재현됐다.
+  //
+  // 즉 회수를 참는 것만으로는 부족하다. CI 대기는 **진행 증거**이므로 그 동안
+  // liveness 시계도 함께 밀려야 한다. 밀지 않으면 idle 상한이 "grant 이후 총
+  // 작업 예산" 으로 퇴화하고, 그건 `merge-lease.ts` 헤더가 위험하다고 못 박은
+  // 바로 그 설계다.
+  await clearLeases();
+  const holder = await makeMergingTicket('ci-longer-than-idle');
+  const waiter = await makeMergingTicket('waiter-behind-long-ci');
+
+  assert.equal((await svc.acquire(holder.id)).outcome, 'granted');
+  const queued = await svc.acquire(waiter.id);
+  assert.equal(queued.outcome, 'queued');
+
+  // 재개된 홀더 세션의 재획득 — 실제 경로가 남기는 마지막 진행 기록이다.
+  const re = await svc.acquire(holder.id);
+  assert.equal(re.outcome, 'granted');
+  const leaseId = re.lease_id;
+
+  // ── 홀더가 실제 `await_ci_run` 경로로 대기를 등록하고 턴을 끝낸다 ──────
+  //    (그 MCP 도구는 이 서비스 호출의 얇은 래퍼다 — ci-wait-tools.ts)
+  const RUN_ID = '36242052303';
+  const HEAD_SHA = 'ab'.repeat(20);
+  let run = inProgressRun(RUN_ID, HEAD_SHA);
+  const ciDispatched = [];
+  const ciResume = makeCiWaitResumer(() => run, ciDispatched);
+  await ciWaitService.registerWait(
+    holder.id,
+    { owner: 'o', repo: 'r', run_id: RUN_ID, head_sha: HEAD_SHA },
+    { actorName: 'holder-session' },
+  );
+
+  // idle 상한(기본 20분)보다 긴 CI 를 **두 스윕을 실제로 번갈아 돌려** 재현한다.
+  // 한 라운드는 "15분 경과 + CI 스윕 1 tick + lease 스윕 1 tick" 이라 두 라운드면
+  // 누적 30분이다. 경과를 현재 값 기준으로 미는 것이 핵심이다 — lease 스윕이
+  // 시계를 밀어 주지 않으면 누적되고, 밀어 주면 매 라운드 초기화된다.
+  for (const round of [1, 2]) {
+    const before = await leaseRepo.findOne({ where: { id: leaseId } });
+    await backdate(leaseId, {
+      last_progress_at: new Date(new Date(before.last_progress_at).getTime() - 15 * MIN),
+    });
+    // 실제 resumer 도 같이 돈다. run 이 아직 `in_progress` 라 아무것도 해소하지
+    // 않아야 한다 — 여기서 조용히 해소돼 버리면 아래 단계가 무의미해진다.
+    const ciStats = await ciResume.sweep();
+    assert.equal(ciStats.scanned, 1, `CI 대기 ${round}라운드에서 홀더가 스윕 후보가 아니었다`);
+    assert.equal(ciStats.resolved, 0, `아직 in_progress 인 run 이 ${round}라운드에서 해소됐다`);
+
+    await sweep.sweep();
+    const alive = await leaseRepo.findOne({ where: { id: leaseId } });
+    assert.equal(alive.released_at, null, `CI 대기 ${round}라운드에서 홀더가 회수됐다`);
+    assert.equal(await heldCount(), 1, '홀더가 바뀌었다 — 상호배제 위반');
+  }
+
+  // ── run 이 success 로 완료 → 실제 resumer 가 해소·재개까지 수행한다 ─────
+  //    outcome 기록 → claimDelivery(플래그 해제 + 코멘트, 한 트랜잭션) →
+  //    재개 디스패치. 어느 단계도 테스트가 손으로 대신하지 않는다.
+  run = { ...run, status: 'completed', conclusion: 'success', updated_at: new Date().toISOString() };
+  const resolvedStats = await ciResume.sweep();
+  assert.equal(resolvedStats.resolved, 1, '실제 CiWaitResumeService 가 완료된 run 을 해소하지 못했다');
+
+  const resumedTicket = await ticketRepo.findOne({ where: { id: holder.id } });
+  assert.equal(resumedTicket.pending_ci_wait, false, 'resumer 가 CI 대기 플래그를 내리지 않았다');
+  assert.ok(
+    ciDispatched.some((d) => d.ticketId === holder.id && d.source === 'ci_wait_resolved'),
+    '홀더 재개 디스패치가 없었다 — 이 지점부터 홀더는 ff push 를 하러 돌아온다',
+  );
+
+  // ── 그 직후의 lease 스윕. 수동 승격 없이, 홀더가 lease 를 유지해야 한다 ──
   await sweep.sweep();
-  const reaped = await leaseRepo.findOne({ where: { id: res.lease_id } });
-  assert.ok(reaped.released_at, 'CI 가 해소된 뒤에도 무진행 홀더가 회수되지 않았다');
-  assert.equal(reaped.release_reason, 'reap_idle');
+  const afterCi = await leaseRepo.findOne({ where: { id: leaseId } });
+  assert.equal(
+    afterCi.released_at, null,
+    'CI 해소 직후 살아 있는 홀더의 lease 를 뺏었다 — 홀더는 그 사실을 모른 채 push 로 진입하고, 뒤이어 승격된 대기자와 동시에 랜딩한다',
+  );
+  const stillWaiting = await leaseRepo.findOne({ where: { id: queued.lease_id } });
+  assert.equal(stillWaiting.state, 'waiting', '홀더가 아직 랜딩 전인데 대기자가 승격됐다');
+
+  // 상한 자체는 죽지 않았다: CI 가 해소된 뒤 진짜로 무진행이면 회수된다.
+  await backdate(leaseId, { last_progress_at: new Date(Date.now() - 60 * MIN) });
+  await sweep.sweep();
+  const reaped = await leaseRepo.findOne({ where: { id: leaseId } });
+  assert.equal(
+    reaped.release_reason, 'reap_idle',
+    'CI 해소 뒤 진짜 무진행인 홀더가 회수되지 않았다 — idle 상한이 죽었다',
+  );
 });
 
 test('★ pend 된 홀더의 lease 는 스윕이 회수하고 대기자가 이어받는다', async () => {
@@ -723,7 +883,7 @@ test('★ 판정과 해제 사이에 진행이 기록되면 리퍼가 회수를 
   let interposed = 0;
   svc.judgeHolder = async (lease, config, now) => {
     const verdict = await realJudge(lease, config, now);
-    if (verdict !== 'alive' && interposed === 0) {
+    if (!isLeaseAliveVerdict(verdict) && interposed === 0) {
       interposed++;
       // 홀더가 살아나 진행을 기록했다.
       await leaseRepo.update({ id: lease.id }, { last_progress_at: new Date(), progress_note: 'revived' });
@@ -805,7 +965,7 @@ test('★ 회수 판정 뒤 같은 티켓이 새로 대기하면 옛 리퍼가 �
   let interposed = 0;
   svc.judgeHolder = async (lease, config, now) => {
     const verdict = await realJudge(lease, config, now);
-    if (verdict !== 'alive' && interposed === 0) {
+    if (!isLeaseAliveVerdict(verdict) && interposed === 0) {
       interposed++;
       await ticketRepo.update({ id: lease.ticket_id }, {
         pending_merge_lease: true,
@@ -845,7 +1005,7 @@ test('★ 컨텍스트가 비었거나 손상됐으면 옛 리퍼가 파킹을 �
     let interposed = 0;
     svc.judgeHolder = async (lease, config, now) => {
       const verdict = await realJudge(lease, config, now);
-      if (verdict !== 'alive' && interposed === 0) {
+      if (!isLeaseAliveVerdict(verdict) && interposed === 0) {
         interposed++;
         await ticketRepo.update({ id: lease.ticket_id }, {
           pending_merge_lease: true,

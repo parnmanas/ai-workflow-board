@@ -44,6 +44,7 @@ import { OrchestrationModule } from './modules/orchestration/orchestration.modul
 import { OntologyModule } from './modules/ontology/ontology.module';
 import { MigrationModule } from './modules/migration/migration.module';
 import { AgentSessionsModule } from './modules/agent-sessions/agent-sessions.module';
+import { TerminalsModule } from './modules/terminals/terminals.module';
 import { CliCatalogModule } from './modules/cli-catalog/cli-catalog.module';
 
 @Module({
@@ -101,6 +102,7 @@ import { CliCatalogModule } from './modules/cli-catalog/cli-catalog.module';
     EventsModule,
     ChatRoomsModule,
     AgentSessionsModule,
+    TerminalsModule,
     CliCatalogModule,
     ResourcesModule,
     ActionsModule,

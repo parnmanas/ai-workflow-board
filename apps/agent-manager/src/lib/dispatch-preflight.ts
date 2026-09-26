@@ -64,6 +64,29 @@ export function isGitAuthFailure(stderr: string | undefined | null): boolean {
   return GIT_AUTH_FAILURE_SIGNATURES.some((sig) => s.includes(sig));
 }
 
+/** git stderr 조각들(소문자). 둘이 **함께** 있을 때만 "다른 프로세스가 같은
+ *  remote-tracking ref 갱신을 이미 성공시켰고 우리 쪽은 compare-and-swap 만
+ *  졌다" 를 뜻한다. git 은 한 줄에 양쪽을 같이 찍는다 (티켓 0835f582 실측):
+ *
+ *    error: cannot lock ref 'refs/remotes/origin/main': is at <새 값> but expected <옛 값>
+ *
+ *  둘을 모두 요구하는 이유: `cannot lock ref` 하나만으로는 살아 있거나 남겨진
+ *  `<ref>.lock` 파일에 막힌 경우("Unable to create '...lock': File exists")까지
+ *  걸린다 — 그때는 ref 가 움직이지 않았으므로 무해한 경합이라고 단정할 근거가
+ *  없다. `but expected` 가 함께 있으면 git 이 "ref 는 이미 남이 쓴 값에 있다" 고
+ *  말해 준 것이라, 잃어버린 갱신도 손상도 없음이 오류 문면으로 증명된다. */
+const GIT_REF_LOCK_RACE_SIGNATURES = ['cannot lock ref', 'but expected'] as const;
+
+/** True when a failed git fetch lost a compare-and-swap on a remote-tracking ref
+ *  to a concurrent process. 자기치유형 실패라서 호출부가 한 번 재시도해도 되는
+ *  유일한 경우 — `isGitAuthFailure` 가 잡는 "운영자가 고쳐야 하는 블로커" 와
+ *  구분하기 위해 판정을 그 옆에 나란히 둔다. */
+export function isGitRefLockRace(stderr: string | undefined | null): boolean {
+  if (!stderr) return false;
+  const s = stderr.toLowerCase();
+  return GIT_REF_LOCK_RACE_SIGNATURES.every((sig) => s.includes(sig));
+}
+
 /** Result of the live `git ls-remote` probe. `ran:false` means the probe was
  *  skipped (e.g. the remote isn't https) — the decision then never blocks. */
 export interface PushReadinessProbe {

@@ -15,12 +15,21 @@ import { Entity, PrimaryColumn, Column, CreateDateColumn, UpdateDateColumn } fro
  *                              already bounced once for it — Merging's own
  *                              rebase becomes the final re-verification point
  *                              instead of a second Review round-trip.
+ *   - 'already_merged':        feature tip 이 이미 base tip 의 조상이다 — 이
+ *                              브랜치가 가진 것은 전부 base 안에 있으므로 base
+ *                              대비 diff 가 비어 있고, base 가 그 뒤 무엇을
+ *                              바꿨든 rebase 로 더 최신이 될 여지가 없다.
+ *                              (커밋이 하나도 없는 브랜치도 같은 사실의
+ *                              퇴화 사례로 여기에 들어온다.) 티켓 6a9f9de9
+ *                              전에는 이 상태가 repo-global 규칙에 걸려
+ *                              'overlapping_drift' 로 오분류됐다.
  */
 export type DriftClassification =
   | 'fresh'
   | 'non_overlapping_drift'
   | 'overlapping_drift'
-  | 'overlapping_drift_budget_exhausted';
+  | 'overlapping_drift_budget_exhausted'
+  | 'already_merged';
 
 /**
  * ReviewDriftState — one row per ticket, alive for the duration of a single

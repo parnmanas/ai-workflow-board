@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { ChatRoomMessageItem, OrchestrationTimelineEvent, OrchestrationUserChatMode } from '../../types';
+import { useConversationScroll } from '../../hooks/useConversationScroll';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useAuth } from '../../contexts/AuthContext';
 import MessageList from '../chat/MessageList';
@@ -42,11 +43,8 @@ const MANAGE_ACTIONS = 'admin.actions';
 /** 한 번에 불러오는 메시지 수. 스크롤을 위로 올리면 같은 크기로 이어 붙인다. */
 const PAGE_SIZE = 50;
 
-/** 이 거리 안쪽까지 올라가면 과거 메시지를 더 부른다. */
-const LOAD_OLDER_THRESHOLD = 120;
-
-/** 이 거리 안쪽이면 "맨 아래를 보고 있다"고 보고 새 메시지에 자동 추종한다. */
-const NEAR_BOTTOM_THRESHOLD = 80;
+// 스크롤 규칙(첫 진입 바닥 고정 · 근접 추종 · 과거 prepend 보정 · 비동기 높이 재고정)은
+// 네 대화창이 공유하는 useConversationScroll 이 갖는다. 임계값도 그 훅의 것을 쓴다.
 
 /**
  * 한 번에 DOM 에 유지하는 실행 이벤트 수의 상한(bounded window).
@@ -114,6 +112,8 @@ interface MissionConversationPanelProps {
    */
   userChatMode?: OrchestrationUserChatMode;
   currentUserId?: string;
+  /** 종료된 미션을 되살리는 버튼의 동작. 없으면 안내만 뜬다. */
+  onReopen?: () => void | Promise<void>;
 }
 
 export default function MissionConversationPanel({
@@ -122,6 +122,7 @@ export default function MissionConversationPanel({
   roomId,
   events,
   live,
+  onReopen,
   userChatMode = 'open',
   currentUserId,
 }: MissionConversationPanelProps) {
@@ -170,8 +171,8 @@ export default function MissionConversationPanel({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingOlderRef = useRef(false);
-  /** 과거 로드 직전의 스크롤 높이 — 로드 후 위치를 보정해 화면이 튀지 않게 한다. */
-  const pendingAnchorRef = useRef<number | null>(null);
+  /** 이미지·마크다운이 나중에 높이를 키울 때 바닥을 유지하기 위한 내용 래퍼. */
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   // ── 미션 경계 (리뷰 라운드3 P0) ─────────────────────────────────────────────
   //
@@ -208,7 +209,6 @@ export default function MissionConversationPanel({
     setLoadingOlder(false);
     loadingOlderRef.current = false;
     loadingEventsRef.current = false;
-    pendingAnchorRef.current = null;
   }
 
   const load = useCallback(async () => {
@@ -272,7 +272,6 @@ export default function MissionConversationPanel({
     const issuedFor = `${missionId}|${roomId}`;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
-    pendingAnchorRef.current = scrollRef.current?.scrollHeight ?? null;
     try {
       const older = await api.getChatRoomMessages(roomId, PAGE_SIZE, messages[0].id, observer);
       if (activeMissionKeyRef.current !== issuedFor) return;
@@ -290,15 +289,6 @@ export default function MissionConversationPanel({
       loadingOlderRef.current = false;
     }
   }, [roomId, hasMore, messages, observer]);
-
-  // 과거 메시지를 앞에 붙인 만큼 스크롤을 내려 보던 위치를 유지한다.
-  useEffect(() => {
-    const anchor = pendingAnchorRef.current;
-    const el = scrollRef.current;
-    if (anchor == null || !el) return;
-    pendingAnchorRef.current = null;
-    el.scrollTop += el.scrollHeight - anchor;
-  }, [messages]);
 
   // detail 이 실어준 첫 페이지의 가장 오래된 이벤트가 커서의 출발점이다.
   useEffect(() => {
@@ -347,28 +337,35 @@ export default function MissionConversationPanel({
     }
   }, [missionId, workspaceId, hasMoreEvents, eventCursor]);
 
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (el.scrollTop < LOAD_OLDER_THRESHOLD) {
-      void loadOlder();
-      void loadOlderEvents();
-      return;
-    }
-    // 맨 아래로 돌아오면 창을 다시 최신 끝에 붙인다 — 그래야 실시간 이벤트가 보인다.
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distance <= NEAR_BOTTOM_THRESHOLD) setEventWindowEdge('latest');
+  const loadOlderBoth = useCallback(() => {
+    void loadOlder();
+    void loadOlderEvents();
   }, [loadOlder, loadOlderEvents]);
 
-  // 새 메시지 자동 추종 — 사용자가 위쪽 이력을 읽는 중이면 끌어내리지 않는다.
+  /**
+   * 첫 진입 바닥 고정 · 근접 추종 · 과거 prepend 보정 · 비동기 높이 재고정을 전부
+   * 공용 훅이 맡는다. 예전엔 여기 "근접했을 때만 따라간다" 규칙만 있고 첫 진입 고정이
+   * 없어서, 미션을 열면 항상 가장 오래된 메시지(맨 위)가 보였다.
+   *
+   * `followPaused`: 과거 이벤트 페이지를 보고 있는 동안은 새 이벤트가 와도 내려가면
+   * 안 된다 — 바닥 근접과는 다른 축의 래치다.
+   */
+  const { atBottom, scrollToBottom } = useConversationScroll({
+    scrollRef,
+    contentRef,
+    resetKey: missionKey,
+    // 양쪽 트랙의 끝 — 과거를 앞에 붙여도 바뀌지 않아야 한다(그건 규칙 1 의 일).
+    tailKey: `${messages[messages.length - 1]?.id ?? ''}|${events[events.length - 1]?.id ?? ''}`,
+    contentKey: `${messages.length}|${olderEvents.length + events.length}`,
+    ready: !loading && (messages.length > 0 || events.length > 0),
+    onLoadOlder: loadOlderBoth,
+    followPaused: eventWindowEdge === 'history',
+  });
+
+  // 바닥으로 돌아오면 이벤트 창을 다시 최신 끝에 붙인다 — 그래야 실시간 이벤트가 보인다.
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    // 과거를 파고 있는 중이면 새 이벤트가 와도 끌어내리지 않는다.
-    if (eventWindowEdge === 'history') return;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distance <= NEAR_BOTTOM_THRESHOLD + 200) el.scrollTop = el.scrollHeight;
-  }, [messages.length, events.length, eventWindowEdge]);
+    if (atBottom) setEventWindowEdge('latest');
+  }, [atBottom]);
 
   useBoardStreamEvent(
     'chat_room_message',
@@ -438,13 +435,9 @@ export default function MissionConversationPanel({
    * 화면이 대는 이유와 서버가 실제로 막는 이유가 갈린다.
    */
   const speakBlock: { reason: string; testId: string; canJoin: boolean } | null = (() => {
-    if (!live) {
-      return {
-        reason: '종료된 미션이라 새 지시를 보낼 수 없습니다. 기록은 그대로 보존됩니다.',
-        testId: 'mission-conversation-closed-notice',
-        canJoin: false,
-      };
-    }
+    // 종료(terminal) 는 더 이상 발화를 막지 않는다 — 끝난 미션의 대화가 곧 "이어서 해 줘"
+    // 의 입구다(서버 `requireMissionRoomSpeaker` 도 같은 이유로 terminal 을 안 본다).
+    // 대신 아래 `terminalNotice` 가 상태를 알리고 되살리기 버튼을 건다.
     if (userChatMode === 'off') {
       return {
         reason:
@@ -480,6 +473,16 @@ export default function MissionConversationPanel({
     return null;
   })();
 
+  /**
+   * 종료된 미션에서 입력창 위에 붙는 안내. **막지 않는다** — 알리고, 되살리는 길을 준다.
+   *
+   * 두 가지가 다 유효하기 때문이다: 지난 결과를 묻기만 하면 미션은 종료 상태로 남아야
+   * 하고(orchestrator 가 답만 한다), 이어서 해 달라고 하면 orchestrator 가 스스로
+   * `reopen_orchestration_mission` 을 부른다. 사람이 그 협상을 건너뛰고 싶을 때를 위해
+   * 버튼도 같이 둔다.
+   */
+  const terminalNotice = !live && roomId;
+
   if (!roomId) {
     return (
       <div style={{ padding: 16, fontSize: 12, color: tokens.colors.textMuted }}>
@@ -508,10 +511,12 @@ export default function MissionConversationPanel({
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div
         ref={scrollRef}
-        onScroll={handleScroll}
         data-testid="mission-conversation-scroll"
         style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '4px 0' }}
       >
+        {/* contentRef 는 스크롤 뷰포트가 아니라 **내용**을 감싼다 — 이미지가 디코딩되며
+            높이가 자라는 것을 ResizeObserver 가 보려면 이 래퍼가 필요하다. */}
+        <div ref={contentRef}>
         {loadingOlder && (
           <div style={{ padding: 8, textAlign: 'center', fontSize: 11, color: tokens.colors.textMuted }}>
             이전 대화 불러오는 중...
@@ -543,7 +548,25 @@ export default function MissionConversationPanel({
             <ExecutionEventRun key={`e-${track.at}-${index}`} events={track.events} />
           ),
         )}
+        </div>
       </div>
+
+      {/* 위에서 이력을 읽는 중임을 알려 주고 한 번에 최신으로 돌려보낸다 — 세션 전사와
+          같은 버튼/같은 문구(네 대화창 공통). */}
+      {!atBottom && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom('auto')}
+          data-testid="mission-conversation-jump-latest"
+          style={{
+            alignSelf: 'center', marginTop: -34, marginBottom: 6, fontSize: 11.5, padding: '4px 10px',
+            borderRadius: 999, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard,
+            color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
+          }}
+        >
+          ↓ 최신으로
+        </button>
+      )}
 
       {speakBlock ? (
         <div
@@ -596,6 +619,45 @@ export default function MissionConversationPanel({
         </div>
       ) : (
         <div style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
+          {terminalNotice && (
+            <div
+              data-testid="mission-conversation-closed-notice"
+              style={{
+                padding: '7px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                flexWrap: 'wrap',
+                borderBottom: `1px solid ${tokens.colors.border}`,
+                background: `${tokens.colors.border}30`,
+              }}
+            >
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted, lineHeight: 1.5, flex: 1, minWidth: 180 }}>
+                이 미션은 종료됐습니다. 지난 결과를 물어보면 orchestrator 가 답하고, 이어서 진행해
+                달라고 하면 미션을 다시 열고 계속합니다.
+              </span>
+              {onReopen && (
+                <button
+                  type="button"
+                  onClick={() => void onReopen()}
+                  data-testid="mission-conversation-reopen"
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: 11,
+                    borderRadius: 4,
+                    border: `1px solid ${tokens.colors.border}`,
+                    background: tokens.colors.surfaceHover,
+                    color: tokens.colors.textPrimary,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  지금 다시 열기
+                </button>
+              )}
+            </div>
+          )}
           <ChatMessageInput roomId={roomId} onSent={handleSent} isMobile={false} />
         </div>
       )}

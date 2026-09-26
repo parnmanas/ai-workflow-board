@@ -31,9 +31,15 @@ test('AI Agents owns the admin-gated Agent Manager runtime surface', () => {
   assert.match(agentsPageSource, /<AgentManagerPage[\s\S]*workspaceAgents=\{agents \|\| \[\]\}/);
 });
 
-test('AI Agents uses one list/detail surface instead of stacking agent cards above runtime', () => {
+// 한 화면에 목록과 호스트 콘솔을 **쌓지 않는다**는 규칙은 그대로다 — 다만 해결 수단이
+// "목록을 없애고 콘솔만 남긴다" 에서 "탭으로 가른다" 로 바뀌었다(agent-fleet-view
+// 테스트가 그 탭 구조를 고정한다). 여기서는 AgentsPage 가 카드 그리드를 직접 손으로
+// 짜지 않는다는 것만 본다 — 그리드는 AgentFleetPanel 의 일이고, 그래야 Agent artifact
+// 패널과 같은 <AgentCard> 를 계속 공유한다.
+test('AI Agents delegates the card grid instead of hand-rolling one next to the runtime console', () => {
   assert.doesNotMatch(agentsPageSource, /import AgentCard from/);
   assert.doesNotMatch(agentsPageSource, /<AgentCard/);
+  assert.match(agentsPageSource, /import AgentFleetPanel from '\.\/agents\/AgentFleetPanel'/);
   assert.match(agentManagerPageSource, /function AgentStatusSummary/);
   assert.match(agentManagerPageSource, /title="Without a live runtime"/);
   assert.match(agentManagerPageSource, /<AgentStatusSummary agent=\{dashboardAgent\} \/>/);

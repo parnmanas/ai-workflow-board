@@ -10,11 +10,14 @@
 // i.e. drive the REAL QaRunService.setPhase transition and THEN the REAL
 // QaRunReaperService over a shared run, with a controlled clock, to prove that
 // the time already spent in the previous phase does not count against the next
-// phase's timeout. This file is that end-to-end stitch — the same code paths the
-// MCP tools (start_qa_run initial_phase / set_qa_phase) drive on the live server,
-// exercised here deterministically because the feature is on origin/main but not
-// yet deployed to production.private (live-MCP E2E is the post-deploy playbook in
-// docs/qa-phases.md).
+// phase's timeout.
+//
+// 이 파일이 그 end-to-end 이음매다 — MCP 툴(start_qa_run initial_phase / set_qa_phase)
+// 이 라이브 서버에서 구동하는 것과 같은 코드 경로를, 통제된 시계로 결정론적으로 돌린다.
+// 라이브 서버 상대로는 phase 타임아웃을 실시간으로 기다려야 해 재현이 안 되기 때문이다.
+// 실제 보드 위 replay 는 docs/qa-phases.md 의 라이브 MCP playbook 이 맡고, 그쪽은
+// **배포된** 서버를 친다 — 배포 호스트가 `origin/main` 을 detached 로 다시 체크아웃해
+// 재빌드·재기동해야 그 커밋이 서빙되므로 main 머지만으로는 아직 아니다.
 //
 // Verification points (mirrors the ticket):
 //   (1) Each phase's timeout is applied INDEPENDENTLY — import (short) reaps on

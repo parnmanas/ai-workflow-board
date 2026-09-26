@@ -3,6 +3,7 @@ import type { DashboardAgent, AgentManagerInstance, AgentCurrentTask, AgentLifec
 import { tokens } from '../tokens';
 import { Badge } from './common';
 import { formatAgentDisplayName } from '../utils/agentName';
+import { cliLabel } from '../cli/catalog';
 import AgentLifecycleControls from './AgentLifecycleControls';
 
 /**
@@ -65,7 +66,11 @@ function resolveLifecycle(agent: DashboardAgent): AgentLifecycleState {
   return 'offline';
 }
 
-function formatClaimedTime(claimedAt: string | Date): string {
+// 인자가 비어 올 수 있는 것으로 받는다. 서버 계약상 `claimed_at` 은 항상 실리지만,
+// 이 카드는 라이브 SSE 행을 그대로 그리는 표면이라 한 줄이 망가졌을 때 카드 하나가
+// 비는 대신 **화면 전체가 흰 화면이 되는** 실패 모드를 막아 둔다.
+function formatClaimedTime(claimedAt: string | Date | null | undefined): string {
+  if (!claimedAt) return '';
   const d = typeof claimedAt === 'string' ? new Date(claimedAt) : claimedAt;
   if (Number.isNaN(d.getTime())) return '';
   const hh = String(d.getHours()).padStart(2, '0');
@@ -73,7 +78,8 @@ function formatClaimedTime(claimedAt: string | Date): string {
   return `${hh}:${mm}`;
 }
 
-function formatElapsed(claimedAt: string | Date): string {
+function formatElapsed(claimedAt: string | Date | null | undefined): string {
+  if (!claimedAt) return '';
   const d = typeof claimedAt === 'string' ? new Date(claimedAt) : claimedAt;
   if (Number.isNaN(d.getTime())) return '';
   const diffMs = Math.max(0, Date.now() - d.getTime());
@@ -143,6 +149,14 @@ export default function AgentCard({
   // <manager>/<agent> rendering happens on the name line below.
   const glyph = (agent.name && agent.name[0] ? agent.name[0] : '?').toUpperCase();
   const displayName = formatAgentDisplayName(agent);
+  // "무엇으로 도는가" 한 줄 — 카드를 호스트/상태로 묶어 놓고 보면 남는 질문이 이것뿐이다.
+  // 서버가 이 사실들을 안 실어 주는 구버전이면(전부 optional) 줄 자체가 사라진다.
+  const runtimeFacts = [
+    agent.type ? cliLabel(agent.type) : '',
+    agent.model || '',
+    // 폴더는 끝 두 조각만 — 전체 경로는 카드를 한 줄 더 잡아먹고 상세에 이미 있다.
+    agent.working_dir ? agent.working_dir.split('/').filter(Boolean).slice(-2).join('/') : '',
+  ].filter(Boolean);
 
   const handleOpen = () => onOpenDetail(agent.id);
 
@@ -344,6 +358,14 @@ export default function AgentCard({
               </>
             )}
           </div>
+          {runtimeFacts.length > 0 && (
+            <div
+              style={{ ...subMetaStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={[agent.type ? cliLabel(agent.type) : '', agent.model || '', agent.working_dir || ''].filter(Boolean).join(' · ')}
+            >
+              {runtimeFacts.join(' · ')}
+            </div>
+          )}
           {lifecycleDetail && (
             <div style={lifecycleDetailStyle} title={lifecycleDetail}>
               {lifecycleDetail}

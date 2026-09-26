@@ -21,7 +21,29 @@ import {
   TOOL_TEXT_MAX,
   truncate,
 } from '../../agent-session-history.js';
+import { normalizeSessionUsage, addSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+
+/**
+ * claude 기록의 `message.usage` → 공용 계약.
+ *
+ * `input_tokens` 는 캐시를 **제외한** 신규 입력이다(전형적으로 1~5). 그래서 이 값만
+ * 화면에 내면 "2 토큰 썼다"가 되어 실제 컨텍스트(수만 토큰)를 완전히 감춘다 —
+ * 운영자가 보고한 "claude 는 제대로 안 나온다"가 정확히 이것이다. 캐시 읽기/쓰기를
+ * 함께 실어야 합이 맞는다.
+ */
+export function claudeUsageFromMessage(message: Record<string, any> | null): SessionUsage | null {
+  const usage = message && isRecord(message.usage) ? message.usage : null;
+  if (!usage) return null;
+  const details = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : {};
+  return normalizeSessionUsage({
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cachedReadTokens: usage.cache_read_input_tokens,
+    cacheWriteTokens: usage.cache_creation_input_tokens,
+    reasoningTokens: details.thinking_tokens,
+  });
+}
 
 /** Claude 툴 이름 → ACP 툴 kind 근사치. */
 export function claudeToolKind(name: string): string {
@@ -91,6 +113,30 @@ async function findSessionFile(ctx: CliSessionStoreContext, sessionId: string): 
 export const claudeSessionStore: CliSessionStoreDriver = {
   findSessionFile,
 
+  /**
+   * 파일 **꼬리만** 읽어 마지막 assistant 레코드의 usage 를 돌려준다. 라이브 턴이
+   * 끝났는데 ACP 어댑터(`claude-agent-acp`)가 usage 를 보고하지 않았을 때 쓰는
+   * 메꿈용이다 — 어댑터가 무엇을 주든 claude 자신의 기록은 항상 usage 를 남긴다.
+   */
+  async readLatestUsage(ctx, sessionId) {
+    const path = await findSessionFile(ctx, sessionId);
+    if (!path) return null;
+    try {
+      const st = await stat(path);
+      const len = Math.min(st.size, TAIL_BYTES);
+      const records = parseLines(await readChunk(path, st.size - len, len), st.size > len, false);
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        const rec = records[i];
+        if (rec?.type !== 'assistant' || rec.isSidechain) continue;
+        const usage = claudeUsageFromMessage(isRecord(rec.message) ? rec.message : null);
+        if (usage) return usage;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  },
+
   async listSessions(ctx) {
     const projectsDir = join(ctx.home, 'projects');
     let dirs: string[];
@@ -150,6 +196,16 @@ export const claudeSessionStore: CliSessionStoreDriver = {
     const push = (type: string, payload: Record<string, unknown>, createdAtRec: string | undefined) => {
       events.push({ id: '', seq: 0, turn_id: turnId, type, payload: boundHistoryPayload(payload), created_at: createdAtRec || createdAt || new Date().toISOString() });
     };
+    // claude 는 한 턴에 여러 API 호출을 한다(툴 왕복마다 하나). 호출마다 usage 를
+    // 뿌리면 전사가 숫자로 뒤덮이므로 턴 단위로 합쳐 턴이 끝날 때 한 번 낸다.
+    let turnUsage: SessionUsage | null = null;
+    let turnUsageAt: string | undefined;
+    const flushUsage = () => {
+      if (!turnUsage) return;
+      push('usage', usageEventPayload(turnUsage), turnUsageAt);
+      turnUsage = null;
+      turnUsageAt = undefined;
+    };
     for await (const rec of readJsonlRecords(path)) {
       if (!cwd && typeof rec.cwd === 'string') cwd = rec.cwd;
       if (!createdAt && typeof rec.timestamp === 'string') createdAt = rec.timestamp;
@@ -163,6 +219,7 @@ export const claudeSessionStore: CliSessionStoreDriver = {
         const content = message.content;
         if (typeof content === 'string') {
           if (isSyntheticPrompt(content)) continue;
+          flushUsage(); // 이전 턴의 합계를 새 프롬프트 앞에 남긴다
           turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
           if (!firstPrompt) firstPrompt = content;
           push('user_prompt', { text: content }, ts);
@@ -173,6 +230,7 @@ export const claudeSessionStore: CliSessionStoreDriver = {
           if (!isRecord(block)) continue;
           if (block.type === 'text' && typeof block.text === 'string') {
             if (isSyntheticPrompt(block.text)) continue;
+            flushUsage();
             turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
             if (!firstPrompt) firstPrompt = block.text;
             push('user_prompt', { text: block.text }, ts);
@@ -187,6 +245,11 @@ export const claudeSessionStore: CliSessionStoreDriver = {
         continue;
       }
       if (rec.type === 'assistant') {
+        const usage = claudeUsageFromMessage(message);
+        if (usage) {
+          turnUsage = addSessionUsage(turnUsage, usage);
+          turnUsageAt = ts || turnUsageAt;
+        }
         const content = Array.isArray(message.content) ? message.content : [];
         for (const block of content) {
           if (!isRecord(block)) continue;
@@ -206,6 +269,7 @@ export const claudeSessionStore: CliSessionStoreDriver = {
         }
       }
     }
+    flushUsage();
     return {
       events: events.items(),
       total: events.total,

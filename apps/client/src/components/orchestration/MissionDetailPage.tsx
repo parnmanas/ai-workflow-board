@@ -138,12 +138,17 @@ export default function MissionDetailPage() {
   }
 
   const selectedStep = mission.steps.find((s) => s.id === selectedStepId) || null;
+  /**
+   * 종료된 미션 되살리기. 성공하면 상태가 running 으로 돌아오고 orchestrator 가 방에서
+   * 깨어나므로, 화면은 곧 대화가 이어지는 상태가 된다.
+   */
+  const reopen = () =>
+    act(() => api.reopenOrchestrationMission(mission.id, wsId), '미션을 다시 열었습니다 — orchestrator 를 깨웠습니다');
   const evidenceTotal =
     mission.steps.reduce((n, s) => n + (s.evidence_count ?? 0), 0) + (mission.mission_evidence_count ?? 0);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <style>{`@keyframes awb-orch-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }`}</style>
 
       <PageHeader
         title={mission.title}
@@ -196,6 +201,16 @@ export default function MissionDetailPage() {
             {!['completed', 'failed', 'cancelled'].includes(mission.status) && (
               <Button variant="danger" size="sm" onClick={() => setShowCancel(true)}>
                 Cancel
+              </Button>
+            )}
+            {/*
+              종료된 미션을 되살린다. 새 미션을 만드는 것보다 이 버튼이 나은 이유는 계획·step
+              결과·타임라인·대화가 전부 그대로 남기 때문이다 — 이어서 하려는 사람에게 처음부터
+              다시 시작은 제일 비싼 길이다. 무엇을 다시 돌릴지는 그대로 orchestrator 가 정한다.
+            */}
+            {['completed', 'failed', 'cancelled'].includes(mission.status) && (
+              <Button variant="secondary" size="sm" loading={busy} onClick={() => void reopen()}>
+                Reopen
               </Button>
             )}
           </>
@@ -261,7 +276,8 @@ export default function MissionDetailPage() {
             <Tab active={tab === 'brief'} onClick={() => setTab('brief')}>
               Brief
             </Tab>
-            {tab === 'session' && !selectedStep && isLive && (
+            {/* 종료된 미션에서도 대화가 되므로(되살리기 입구) 이 옵션은 방이 있으면 보인다. */}
+            {tab === 'session' && !selectedStep && !!mission.room_id && (
               <label
                 style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted }}
               >
@@ -323,6 +339,7 @@ export default function MissionDetailPage() {
                   events={mission.events}
                   live={isLive}
                   userChatMode={mission.user_chat_mode}
+                  onReopen={reopen}
                 />
               )
             ) : tab === 'graph' ? (
@@ -551,12 +568,12 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
         {style.live && (
           <span
             aria-hidden="true"
+            className="awb-activity-live"
             style={{
               width: 7,
               height: 7,
               borderRadius: '50%',
               background: style.color,
-              animation: 'awb-orch-pulse 1.4s ease-in-out infinite',
             }}
           />
         )}

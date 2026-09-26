@@ -10,6 +10,7 @@
  *     update_orchestration_step      — retry / reassign / amend / skip a step
  *     add_orchestration_note         — leave a reasoning note on the timeline
  *     complete_orchestration_mission — the ONLY clean way a mission ends
+ *     reopen_orchestration_mission    — bring a finished mission back (operator asked for more in the room)
  *
  *   MEMBER (the agent a step is assigned to)
  *     get_orchestration_step          — re-read the work order + dependency results
@@ -453,17 +454,34 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
 
   server.tool(
     'update_orchestration_step',
-    'Change one step of a mission you orchestrate. Use "retry" to run a failed step again (optionally with ' +
-      'new instructions or a different assignee), "reassign" to move it to another member, "amend" to rewrite ' +
-      'its instructions before it starts, "skip" to drop it from the plan (dependents proceed), or "cancel" ' +
-      'to kill it (dependents become blocked). A step that is currently in flight cannot be changed — wait ' +
-      'for its report.',
+    'Change one step of a mission you orchestrate. "retry" runs the step again — it works on a FAILED, ' +
+      'BLOCKED or already DONE step, so re-work goes back through the SAME step instead of a near-duplicate ' +
+      'one (optionally with new instructions or a different assignee). "reassign" moves it to another member, ' +
+      '"amend" rewrites instructions before it starts, "skip" drops it (dependents proceed), "cancel" kills it ' +
+      '(dependents become blocked), "set_retry_budget" only changes how many attempts it may use. A step that ' +
+      'is currently in flight cannot be changed — wait for its report.\n\n' +
+      'PREFER REUSING THE EXISTING STEP over adding a near-copy: one node keeps one history (attempts, ' +
+      'results, evidence, timeline) in one place. Add a NEW step only when the next round is genuinely ' +
+      'different work, has different dependencies, or has to run alongside the original rather than replace it.\n\n' +
+      'When a step has spent its attempts, raise `max_attempts` — send it together with action "retry" and the ' +
+      'step is refilled and re-dispatched in a single call. It can never go below the attempts already spent ' +
+      '(that would retroactively invalidate runs that happened); set it to exactly that number to mean "this ' +
+      'was the last one".',
     {
       step_id: z.string().describe('Step id from get_orchestration_mission'),
-      action: z.enum(['retry', 'reassign', 'amend', 'skip', 'cancel']),
+      action: z.enum(['retry', 'reassign', 'amend', 'skip', 'cancel', 'set_retry_budget']),
       assignee_agent_id: z.string().optional().describe('Required for "reassign"; optional for "retry"'),
       instructions: z.string().optional().describe('Replacement work order for "amend" / "retry"'),
-      acceptance_criteria: z.string().optional(),
+      acceptance_criteria: z.string().optional().describe('Replacement "done when" for "amend" / "retry"'),
+      max_attempts: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          'New retry budget for this step (absolute, not a delta). Use it to refill a step that used all its ' +
+            'attempts — typically attempts_used + 1 or + 2. Required for "set_retry_budget"; allowed with any ' +
+            'other action. Must be >= attempts already used.',
+        ),
       reason: z.string().optional().describe('Why — recorded on the mission timeline'),
     },
     async (args, extra) => {
@@ -578,6 +596,36 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         return ok({ mission_id: mission.id, status: mission.status, finished_at: mission.finished_at });
       } catch (e: any) {
         return toolError(e, 'failed to complete mission');
+      }
+    },
+  );
+
+  server.tool(
+    'reopen_orchestration_mission',
+    'Bring a FINISHED mission (completed / failed / cancelled) back to life so you can continue it. ' +
+    'Call this when an operator returns to the mission conversation and asks for a change or for more work — ' +
+    'it is cheaper and clearer than starting a new mission, because the plan, every step result, the ' +
+    'timeline and this conversation all stay intact. Only the mission status is restored: no step is ' +
+    'rewound, so decide yourself what to retry (update_orchestration_step) or add (submit_orchestration_plan). ' +
+    'The mission becomes `running` and complete_orchestration_mission is still the only way it ends again. ' +
+    'Refused if the mission is not finished, or if you are not its orchestrator. Do NOT reopen just to ' +
+    'answer a question about what happened — reopen when you are actually going to do work.',
+    {
+      mission_id: z.string(),
+      reason: z
+        .string()
+        .optional()
+        .describe('One line on what the operator asked for. Recorded on the timeline and shown to you on wake-up.'),
+    },
+    async ({ mission_id, reason }, extra) => {
+      const svc = runner();
+      if (!svc) return err(NO_RUNTIME);
+      try {
+        const agentId = callerAgentId(extra);
+        const mission = await svc.reopenMission(mission_id, undefined, { type: 'agent', id: agentId, name: '' }, { reason });
+        return ok({ mission_id: mission.id, status: mission.status });
+      } catch (e: any) {
+        return toolError(e, 'failed to reopen mission');
       }
     },
   );

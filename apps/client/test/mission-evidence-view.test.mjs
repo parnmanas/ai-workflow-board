@@ -152,6 +152,65 @@ test('썸네일을 누르면 라이트박스 — 동영상은 <video controls>, 
   assert.equal(Boolean(box2.querySelector('video')), false);
 });
 
+test('바이트는 왔는데 디코드가 안 되면 "깨진 파일"로 말한다 — 영원한 자리표시자가 아니라', async (t) => {
+  // 2026-09-26 실제 사고: 에이전트가 아직 저장이 끝나지 않은 캡처를 읽어 올려 JPEG 이
+  // 중간에 끊겼다. 그때 썸네일은 영원히 "…" 였고 운영자에게는 "AWB 가 이미지를 못
+  // 보여준다"로 보였다 — 파일이 깨진 것과 화면이 고장난 것은 다른 문제이므로 구분해야 한다.
+  const dom = prepDom();
+  stubApi(t, {
+    listOrchestrationMissionEvidence: async () => ({ mission_id: 'm', items: [evidence({ id: 'att-1' })] }),
+    getOrchestrationStepAttachment: async (_s, _w, id) => ({
+      id, file_name: 'broken.jpg', mime_type: 'image/jpeg', size_bytes: 13676, is_media: true, file_data: PNG,
+    }),
+  });
+  const view = mount(
+    React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
+  );
+  await settle();
+  t.after(() => { view.unmount(); dom.cleanup(); });
+
+  const img = view.container.querySelector('[data-testid="evidence-thumb"] img');
+  assert.ok(img, '먼저 이미지로 그려 본다');
+  await act(async () => {
+    img.dispatchEvent(new dom.window.Event('error'));
+  });
+  assert.ok(
+    view.container.querySelector('[data-testid="evidence-thumb-broken"]'),
+    '디코드 실패는 깨진 파일이라고 말해야 한다',
+  );
+  assert.match(view.container.textContent, /깨진 파일/);
+});
+
+test('잘린 파일은 남은 부분을 보여주되 "일부만" 이라고 말한다', async (t) => {
+  // 2026-09-26: 잘린 스크린샷 3장이 화면에서 빈 칸으로 보였다. 브라우저는 사실 남은
+  // 부분을 그리고 있었는데, 썸네일이 `cover` 로 **가운데를 잘라** 미디코드 영역(회색)만
+  // 보여줬기 때문이다(중앙 크롭 회색 85~99%). 그래서 두 가지를 같이 고친다:
+  // 프레임 전체를 보여주고(contain), 일부라는 사실을 배지로 말한다 — 7% 만 남은
+  // 스크린샷을 온전한 증거로 읽으면 안 된다.
+  const dom = prepDom();
+  stubApi(t, {
+    listOrchestrationMissionEvidence: async () => ({ mission_id: 'm', items: [evidence({ id: 'att-1' })] }),
+    getOrchestrationStepAttachment: async (_s, _w, id) => ({
+      id, file_name: 'cut.jpg', mime_type: 'image/jpeg', size_bytes: 13676, is_media: true,
+      file_data: PNG, truncated: true,
+    }),
+  });
+  const view = mount(
+    React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
+  );
+  await settle();
+  t.after(() => { view.unmount(); dom.cleanup(); });
+
+  assert.ok(view.container.querySelector('[data-testid="evidence-thumb-partial"]'), '일부만 도착했다고 말해야 한다');
+  const img = view.container.querySelector('[data-testid="evidence-thumb"] img');
+  assert.ok(img, '남은 부분은 그대로 보여준다 — 숨기지 않는다');
+  assert.match(
+    img.getAttribute('style') || '',
+    /object-fit: contain/,
+    '가운데를 잘라내면(cover) 잘린 이미지의 회색 부분만 보여 빈 칸처럼 읽힌다',
+  );
+});
+
 test('증거가 없으면 어떻게 올리는지 안내한다', async (t) => {
   const dom = prepDom();
   stubApi(t, { listOrchestrationMissionEvidence: async () => ({ mission_id: 'm', items: [] }) });

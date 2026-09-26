@@ -12,6 +12,8 @@ import HandoffEditor from './HandoffEditor';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
+import { ActivityPill } from './common/ActivityIndicator';
+import { ticketActivity } from '../activity';
 import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
 import { formatAgentDisplayName } from '../utils/agentName';
 import { isCommentSummaryInProgress } from '../utils/commentSummary';
@@ -2423,6 +2425,9 @@ export default function TicketPanel({
             );
           })()}
         </div>
+        {/* 진행 상태 — 보드 카드·미션·세션·채팅이 공유하는 어휘(src/activity.ts).
+            오른쪽 프레임 헤더는 점 대신 라벨까지 보여 준다. */}
+        <ActivityPill view={ticketActivity(activeTicket)} />
         <div style={{ display: 'flex', gap: 8, position: 'relative' }}>
           <button
             onClick={() => setTriggerMenuOpen(v => !v)}

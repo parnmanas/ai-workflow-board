@@ -5,6 +5,7 @@ import { useBoardStream, useBoardStreamEvent } from '../../contexts/BoardStreamC
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { AGENT_SESSIONS_CHANGED_EVENT, useAgentSessionsNav } from '../../hooks/useAgentSessionsNav';
+import { useConversationScroll } from '../../hooks/useConversationScroll';
 import { tokens } from '../../tokens';
 import type {
   AgentSessionEventEvent,
@@ -14,7 +15,7 @@ import type {
   AgentSessionSummary,
   AgentSessionUpdateEvent,
 } from '../../types';
-import { Button, EmptyState, ErrorState } from '../common';
+import { ActivityPill, Button, EmptyState, ErrorState } from '../common';
 import PageHeader from '../PageHeader';
 import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
@@ -48,34 +49,16 @@ import {
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
-function toneColor(tone: 'muted' | 'accent' | 'success' | 'warning' | 'danger'): string {
-  switch (tone) {
-    case 'accent': return tokens.colors.accentLight;
-    case 'success': return tokens.colors.successLight;
-    case 'warning': return tokens.colors.warningLight;
-    case 'danger': return tokens.colors.dangerLight;
-    default: return tokens.colors.textMuted;
-  }
-}
-
+/**
+ * 세션 상태 pill — 색·라벨·애니메이션은 공용 진행 어휘(src/activity.ts)에서 온다.
+ * `data-session-status` 는 이 표면의 테스트 훅이라 유지한다.
+ */
 function StatusPill({ status }: { status: string | null | undefined }) {
-  const view = describeSessionStatus(status);
-  const color = toneColor(view.tone);
   return (
-    <span
-      data-session-status={status || 'idle'}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color,
-        border: `1px solid ${color}55`, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap',
-      }}
-    >
-      <span
-        aria-hidden="true"
-        className={status === 'busy' || status === 'starting' ? 'awb-pending-pulse' : undefined}
-        style={{ width: 7, height: 7, borderRadius: '50%', background: color }}
-      />
-      {view.label}
-    </span>
+    <ActivityPill
+      view={describeSessionStatus(status)}
+      dataAttr={{ 'data-session-status': status || 'idle' }}
+    />
   );
 }
 
@@ -387,8 +370,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
-  const [follow, setFollow] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** 첨부 이미지가 나중에 디코딩되며 높이를 키울 때 바닥을 유지하기 위한 내용 래퍼. */
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -475,17 +459,16 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     void connect();
   }, [loading, live, connecting, status, managerId, cli, sessionId, connect]);
 
-  useEffect(() => {
-    if (!follow) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [blocks, follow]);
-
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
-  };
+  // 스크롤 규칙(첫 진입 바닥 고정 · 근접 추종 · 비동기 높이 재고정)은 chat 방·미션
+  // 대화·미션 step 세션과 같은 훅이 맡는다. 전사는 페이지네이션이 없어 onLoadOlder 가 없다.
+  const { atBottom: follow, scrollToBottom } = useConversationScroll({
+    scrollRef,
+    contentRef,
+    resetKey: `${managerId}/${cli}/${sessionId}`,
+    tailKey: blocks.length,
+    contentKey: blocks.length,
+    ready: !loading && blocks.length > 0,
+  });
 
   const busy = status === 'busy' || isWaitingStatus(status) || status === 'starting';
   const title = live?.title || summary?.title || '';
@@ -507,7 +490,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       setEvents((prev) => appendLiveEvent(prev, {
         id: `local:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text }, created_at: new Date().toISOString(),
       }));
-      setFollow(true);
+      // 내가 보낸 프롬프트는 이력을 읽던 중이었어도 따라간다 — 내 발화의 결과를 보려고
+      // 보낸 것이므로. 새 항목 추종(근접할 때만)과는 다른 축이다.
+      scrollToBottom('auto');
     } catch (err: any) {
       showToast(err?.message || 'Failed to send the prompt', 'error');
       throw err;
@@ -766,12 +751,13 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         </div>
       )}
 
-      <div ref={scrollRef} onScroll={onScroll} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
+      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
         {loading && events.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Reading the session from the Runtime Host…</div>
         ) : blocks.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>No transcript yet. Send your first prompt.</div>
         ) : (
+          <div ref={contentRef}>
           <SessionTranscript
             blocks={blocks}
             decidingRequestId={decidingRequestId}
@@ -779,23 +765,20 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
             onAnswerElicitation={(elicitationId, action, content) => void answerElicitation(elicitationId, action, content)}
             permissionsEnabled={isWaitingStatus(status) || status === 'busy'}
           />
+          </div>
         )}
       </div>
 
       {!follow && (
         <button
           type="button"
-          onClick={() => {
-            setFollow(true);
-            const el = scrollRef.current;
-            if (el) el.scrollTop = el.scrollHeight;
-          }}
+          onClick={() => scrollToBottom('auto')}
           style={{
             alignSelf: 'center', marginTop: -36, marginBottom: 8, fontSize: 11.5, padding: '4px 10px', borderRadius: 999,
             border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard, color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
           }}
         >
-          ↓ Jump to latest
+          ↓ 최신으로
         </button>
       )}
 

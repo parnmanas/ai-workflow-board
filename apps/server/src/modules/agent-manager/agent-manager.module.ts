@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Agent } from '../../entities/Agent';
+import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
 import { Ticket } from '../../entities/Ticket';
@@ -19,6 +20,8 @@ import { SudoTicketService } from './sudo-ticket.service';
 import { PrivilegedCommandService } from './privileged-command.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { ManagerDriftMonitorService } from './manager-drift-monitor.service';
+import { HostModelsService } from './host-models.service';
+import { HostModelsController } from './host-models.controller';
 import { SkillsModule } from '../skills/skills.module';
 
 @Module({
@@ -44,15 +47,19 @@ import { SkillsModule } from '../skills/skills.module';
     forwardRef(() => AgentsModule),
     InstanceRegistryModule,
     SkillsModule,
-    TypeOrmModule.forFeature([Agent, ApiKey, Credential, Ticket, Resource, Workspace]),
+    // AgentSessionCliSetting: HostModelsService 가 ACP 가 보고한 모델 목록(영속)을 읽는다 —
+    // 모델 목록의 단일 출처가 재시작 후에도 같은 답을 하게 하는 데 필요하다.
+    TypeOrmModule.forFeature([Agent, AgentSessionCliSetting, ApiKey, Credential, Ticket, Resource, Workspace]),
   ],
-  controllers: [AgentManagerController],
+  controllers: [AgentManagerController, HostModelsController],
   providers: [
     PairingService,
     CommandLedgerService,
     SudoTicketService,
     PrivilegedCommandService,
     AgentManagerCommandService,
+    // Runtime Host 별 모델 목록의 단일 출처(읽기 + 재열거). 모든 모델 화면이 쓴다.
+    HostModelsService,
     // version-drift / stale self-update health monitor (ticket 7485df07). Runs
     // its own sweep timer; consumes InstanceRegistryService (now global via
     // InstanceRegistryModule above). No HTTP surface, so it isn't in
@@ -73,6 +80,7 @@ import { SkillsModule } from '../skills/skills.module';
     // 모델 재열거는 MANAGE_ACTIONS 이라 admin 전용 outcome 엔드포인트를 폴링할 수
     // 없다 — 원장을 직접 읽는 편이 권한 이야기를 하나로 유지한다.
     CommandLedgerService,
+    HostModelsService,
   ],
 })
 export class AgentManagerModule {}

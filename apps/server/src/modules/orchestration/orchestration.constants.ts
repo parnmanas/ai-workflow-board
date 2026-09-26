@@ -463,6 +463,13 @@ export function postActionApplies(condition: PostActionCondition, missionStatus:
 export const STEP_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,47}$/;
 export const MAX_STEPS_CEILING = 200;
 export const MAX_PARALLEL_CEILING = 12;
+/**
+ * step 하나가 가질 수 있는 재시도 예산의 상한(`max_attempts`). orchestrator 가
+ * `update_orchestration_step` 으로 예산을 올릴 수 있게 되면서 필요해졌다 — 상한이 없으면
+ * "한 번 더"를 무한히 반복하며 같은 실패를 계속 태우는 루프를 agent 스스로 만들 수 있다.
+ * loop 노드의 `max_visits` 와 같은 역할이되 축이 다르다(재시도 vs 재진입).
+ */
+export const MAX_STEP_ATTEMPTS_CEILING = 20;
 export const INSTRUCTIONS_MAX = 8000;
 export const SUMMARY_MAX = 8000;
 export const MAX_ARTIFACTS_PER_STEP = 30;

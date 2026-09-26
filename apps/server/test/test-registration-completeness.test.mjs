@@ -37,6 +37,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
+  canonicalSteps,
   listSuiteNames,
   parseSuiteManifest,
   readSuiteSteps,
@@ -181,10 +182,9 @@ test('매니페스트는 중복 없이 사전순이다 — 이게 병합 충돌�
     // 정규 순서 = 테스트 경로 사전순 + 그 뒤에 npm run 위임 사전순. 새 등록이
     // 파일 이름으로 정해진 자리에 들어가야 독립적인 추가 두 개가 서로 다른
     // hunk 가 되고, 끝에 몰아 붙이는 순간 다시 같은 줄에서 충돌한다.
-    const canonical = [
-      ...steps.filter((s) => s.startsWith('test/')).sort(),
-      ...steps.filter((s) => !s.startsWith('test/')).sort(),
-    ];
+    // 순서의 정의는 suite-manifest.mjs 한 곳에 있다 — 여기서 다시 계산하면
+    // test/sort-suites.mjs 가 정규화한 파일을 이 가드가 거부할 수 있다.
+    const canonical = canonicalSteps(steps);
     if (JSON.stringify(steps) !== JSON.stringify(canonical)) {
       const at = steps.findIndex((s, i) => s !== canonical[i]);
       problems.push(
@@ -192,7 +192,16 @@ test('매니페스트는 중복 없이 사전순이다 — 이게 병합 충돌�
       );
     }
   }
-  assert.deepEqual(problems, [], problems.join(' | '));
+  // 어긋난 항목만 알려주고 끝내면 고치는 사람이 손으로 줄을 옮기게 되는데, 그
+  // 판단이 바로 이 가드가 반복해서 잡는 대상이다(셸 `sort` 도 눈도 틀린다).
+  // 조치 명령을 함께 찍어 줄을 옮기는 대신 스크립트를 돌리게 한다.
+  assert.deepEqual(
+    problems,
+    [],
+    problems.length > 0
+      ? `${problems.join(' | ')} — 고치려면 apps/server 에서 \`npm run test:suites:sort\` 를 돌려라`
+      : '',
+  );
 });
 
 test('매니페스트 파서는 주석과 빈 줄을 버린다', () => {

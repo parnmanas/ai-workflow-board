@@ -6,6 +6,7 @@ import { Button, Input, Modal } from '../common';
 import DirectoryPicker from '../admin/DirectoryPicker';
 import { lastCwdStorageKey } from './sessionList.logic';
 import { runtimeLabel } from './sessionTranscript.logic';
+import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 
 /**
  * 새 Agent Session — Runtime Host 와 CLI 를 고르고 작업 폴더를 준다. Chat 의
@@ -123,10 +124,14 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     return () => { cancelled = true; };
   }, [open, managerId, cli]);
 
+  // 모델 목록은 모든 화면이 공유하는 스토어에서 온다(src/cli/hostModels.ts) — 오래된/빈
+  // 목록은 열릴 때 재열거된다. ACP 가 보고한 선택지에 호스트가 그 뒤 알게 된 모델을 덧붙인다.
+  const hostModels = useHostModels(open ? managerId : null, cli);
   // 모달에서 고르는 것은 세션의 성격을 정하는 둘뿐이다(그 밖의 설정은 세션 헤더에서 바꾼다).
   const modalOptions = useMemo(
-    () => knownOptions.filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0),
-    [knownOptions],
+    () => withHostModelOption(knownOptions, hostModels.models)
+      .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0),
+    [knownOptions, hostModels.models],
   );
 
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);
@@ -248,6 +253,16 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
             <label htmlFor={`new-session-config-${option.config_id}`} style={labelStyle}>
               {option.name}
               <span style={{ color: tokens.colors.textMuted }}> — kept for every session on this host</span>
+              {option.category === 'model' && (
+                <button
+                  type="button"
+                  disabled={hostModels.refreshing}
+                  onClick={() => void hostModels.refresh()}
+                  style={{ marginLeft: 8, fontSize: 11, background: 'none', border: 'none', color: tokens.colors.textSecondary, cursor: hostModels.refreshing ? 'wait' : 'pointer', textDecoration: 'underline' }}
+                >
+                  {hostModels.refreshing ? 'refreshing…' : 'refresh'}
+                </button>
+              )}
             </label>
             <select
               id={`new-session-config-${option.config_id}`}

@@ -67,6 +67,8 @@ import {
   POST_ACTION_STALE_IN_FLIGHT_MS,
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
+  MAX_STEP_ATTEMPTS_CEILING,
+  isTerminalMissionStatus,
   allCriteriaMet,
   isAwaitingUser,
   isInFlight,
@@ -124,6 +126,15 @@ export interface ActorRef {
   id: string;
   name: string;
 }
+
+/**
+ * 종료된 미션에서 거부된 orchestrator 툴 호출에 붙는 안내. 거부만 하고 출구를 알려주지
+ * 않으면 agent 는 "끝난 미션이라 아무것도 못 한다" 로 결론내고 대화를 멈춘다 — 운영자가
+ * 대화로 이어서 진행하려는 바로 그 순간이라, 여기서 다음 한 수를 말해 줘야 한다.
+ */
+const REOPEN_MISSION_HINT =
+  ' If the operator asked you to continue this mission, call' +
+  ' `mcp__awb__reopen_orchestration_mission` (mission_id + a short reason) first, then act.';
 
 @Injectable()
 export class OrchestrationRunnerService {
@@ -355,8 +366,129 @@ export class OrchestrationRunnerService {
       });
       // In-flight subagents are NOT killed: the manager owns their lifecycle and
       // there is no cancel channel for a chat-room dispatch. Their late reports
-      // are rejected by reportStep (the mission is terminal), so a cancelled
-      // mission cannot come back to life.
+      // are rejected by reportStep — the mission is terminal, and every open step
+      // was just marked `cancelled` (a terminal step status reportStep refuses).
+      //
+      // 운영자는 나중에 이 미션을 `reopenMission` 으로 되살릴 수 있다. 그때도 위의 좀비
+      // 보고는 여전히 막힌다: step 이 `cancelled` 인 채로 남으므로 terminal-step 가드에
+      // 걸리고, orchestrator 가 명시적으로 retry 하면 **새 lease token** 이 발급돼
+      // 그 순간 옛 토큰이 무효가 된다. 그래서 되살리기가 좀비에게 창을 열어 주지 않는다.
+      return mission;
+    });
+  }
+
+  /**
+   * 종료된 미션을 다시 연다 — 운영자가 **대화로** "이건 좋은데 한 군데만 더" 를 말할 수
+   * 있게 하는 전이.
+   *
+   * 왜 필요한가: 종료 경로는 `complete_orchestration_mission` 과 cancel 뿐이고 그 뒤에는
+   * plan 제출·step 보고·criteria 수정이 전부 409 였다. 그래서 거의 다 맞은 결과를 조금
+   * 고치려면 새 미션을 처음부터 만드는 수밖에 없었다 — 계획도, step 결과도, 타임라인도,
+   * 대화도 전부 버리고 다시 시작해야 했고, 이어서 하려는 사람에게는 그게 제일 비싼 길이다.
+   *
+   * **되살리는 것은 상태뿐이다.** 계획·step 결과·완료 조건·`result_summary`·타임라인은
+   * 그대로 남는다(직전 라운드의 사실이고, 다음 완료가 요약을 덮어쓴다). `finished_at` 과
+   * `failure_reason` 만 지운다 — 더 이상 끝난 것도 실패한 것도 아니기 때문이다. 이미
+   * 끝난 step 을 되돌리지도 않는다: 다시 돌릴 step 은 orchestrator 가 `retry`/`reassign`
+   * 으로 고르거나 새 step 으로 추가하는 것이고, 서버가 대신 추측하지 않는다.
+   *
+   * `post_actions` 도 되돌리지 않는다. 이미 발사된 항목은 `postActionTriggerId` 로 멱등
+   * 스킵되므로 재완료에서 두 번 돌지 않고, 아직 pending 인 항목은 다음 완료에서 조건에
+   * 맞으면 그때 발사된다.
+   *
+   * 진입 경로는 둘이고 **같은 메서드**를 지난다: 운영자의 REST(`missions/:id/reopen`) 와
+   * orchestrator 의 MCP(`reopen_orchestration_mission`). 후자가 있는 이유가 이 기능의
+   * 요청 자체다 — 사람이 미션 대화에서 "이어서 해 줘" 라고 말하면 orchestrator 가 스스로
+   * 되살리고 계획을 잇는다. agent 경로는 그 미션의 orchestrator 본인만 쓸 수 있다.
+   */
+  async reopenMission(
+    missionId: string,
+    workspaceId: string | undefined,
+    actor: ActorRef,
+    opts?: { reason?: string },
+  ): Promise<OrchestrationMission> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = await this.missions.requireMission(missionId, workspaceId);
+      if (actor.type === 'agent') this.requireOrchestrator(mission, actor.id);
+      if (!(TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
+        throw orchestrationError(
+          409,
+          `mission is ${mission.status} — only a finished mission (completed / failed / cancelled) can be reopened`,
+        );
+      }
+
+      const previousStatus = mission.status;
+      const reason = (opts?.reason || '').trim().slice(0, 2000);
+
+      // 시작된 적이 없는 미션(draft 에서 바로 cancel 된 경우)은 되살릴 대화방이 없다.
+      // 억지로 running 으로 만들면 orchestrator 가 브리핑도 방도 없이 돌아야 하므로,
+      // draft 로 돌려놓고 정상 Start 경로를 타게 한다.
+      if (!mission.room_id) {
+        mission.status = 'draft';
+        mission.finished_at = null;
+        mission.failure_reason = '';
+        await this.missionRepo.save(mission);
+        await this.missions.recordEvent(mission, {
+          type: 'mission_reopened',
+          message:
+            `Mission reopened as a draft by ${actor.name || actor.type} (was ${previousStatus}, never started)` +
+            `${reason ? `: ${reason}` : ''}`,
+          actor_type: actor.type,
+          actor_id: actor.id,
+          actor_name: actor.name,
+          data: { previous_status: previousStatus, reason, restarted_as_draft: true },
+        });
+        return mission;
+      }
+
+      const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
+      if (!team) throw orchestrationError(404, 'orchestration team not found');
+      if (team.enabled === 0) throw orchestrationError(409, `team "${team.name}" is disabled`);
+      if (!team.orchestrator_agent_id) {
+        throw orchestrationError(409, `team "${team.name}" has no orchestrator agent to reopen this mission with`);
+      }
+      const orchestrator = await this.agentRepo.findOne({ where: { id: team.orchestrator_agent_id } });
+      if (!orchestrator) throw orchestrationError(409, 'orchestrator agent no longer exists');
+
+      mission.status = 'running';
+      mission.finished_at = null;
+      mission.failure_reason = '';
+      await this.missionRepo.save(mission);
+
+      const steps = await this.missions.listSteps(mission.id);
+      await this.missions.recordEvent(mission, {
+        type: 'mission_reopened',
+        message:
+          `Mission reopened by ${actor.name || actor.type} (was ${previousStatus})${reason ? `: ${reason}` : ''}`,
+        actor_type: actor.type,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        data: { previous_status: previousStatus, reason },
+      });
+
+      // 방에 깨우기 글을 남긴다 — orchestrator 는 이 방의 대화로 깨어나므로, 되살렸다는
+      // 사실과 직전 라운드의 결론이 그 히스토리에 있어야 다음 판단을 할 수 있다.
+      await this.postToRoom(
+        mission.room_id,
+        mission.workspace_id,
+        renderWakePrompt({
+          mission,
+          reason: 'reopened',
+          detail: [
+            `This mission was **${previousStatus}** and an operator has reopened it.`,
+            reason ? `\nWhat they asked for:\n\n${reason}` : '',
+            mission.result_summary
+              ? `\nYour report from the previous round (kept on the record):\n\n${mission.result_summary.slice(0, 1500)}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          counts: countSteps(steps),
+        }),
+      );
+
+      // 자동 pump 는 하지 않는다. 종료 시점에 열린 step 은 모두 terminal 로 닫혔으므로
+      // 디스패치할 것이 없고, 무엇을 다시 돌릴지는 orchestrator 의 판단이다.
       return mission;
     });
   }
@@ -733,7 +865,11 @@ export class OrchestrationRunnerService {
       const mission = await this.missions.requireMission(missionId);
       this.requireOrchestrator(mission, callerAgentId);
       if (mission.status !== 'planning' && mission.status !== 'running') {
-        throw orchestrationError(409, `mission is ${mission.status} — plans are only accepted while planning or running`);
+        throw orchestrationError(
+          409,
+          `mission is ${mission.status} — plans are only accepted while planning or running.` +
+            (isTerminalMissionStatus(mission.status) ? REOPEN_MISSION_HINT : ''),
+        );
       }
       if (mission.plan_version >= mission.max_plan_versions) {
         throw orchestrationError(
@@ -1098,11 +1234,20 @@ export class OrchestrationRunnerService {
     stepId: string,
     callerAgentId: string,
     input: {
-      action: 'retry' | 'reassign' | 'amend' | 'skip' | 'cancel';
+      action: 'retry' | 'reassign' | 'amend' | 'skip' | 'cancel' | 'set_retry_budget';
       assignee_agent_id?: string;
       instructions?: string;
       acceptance_criteria?: string;
       reason?: string;
+      /**
+       * 새 재시도 예산(절대값). `retry` 와 함께 주면 "예산을 채우고 지금 다시 돌려라"가
+       * 한 번의 호출로 끝나고, `set_retry_budget` 으로 단독 조절도 된다.
+       *
+       * **이미 쓴 시도 아래로는 내릴 수 없다.** 그래프 patch 의 `max_visits` 규칙과 같은
+       * 근거다 — 이미 일어난 실행을 소급해서 "예산 초과"로 만들지 않는다. 정확히 쓴
+       * 만큼으로 내리면 "이번이 마지막"이라는 뜻이 된다.
+       */
+      max_attempts?: number;
     },
   ): Promise<{ step: OrchestrationStep; dispatched: string[] }> {
     const step = await this.missions.requireStep(stepId);
@@ -1110,7 +1255,7 @@ export class OrchestrationRunnerService {
       const mission = await this.missions.requireMission(step.mission_id);
       this.requireOrchestrator(mission, callerAgentId);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
-        throw orchestrationError(409, `mission is ${mission.status}`);
+        throw orchestrationError(409, `mission is ${mission.status}.${REOPEN_MISSION_HINT}`);
       }
       // Re-read inside the lock: a concurrent report may have changed it between
       // the lookup above and our turn in the queue.
@@ -1124,7 +1269,62 @@ export class OrchestrationRunnerService {
         }
       }
 
+      /*
+       * 재시도 예산 조절. switch **앞**에 두는 이유는 `retry` 와 한 번에 쓰이기 때문이다 —
+       * "예산을 채우고 지금 다시 돌려라"가 두 번의 호출이면 그 사이에 다른 판단이 끼어들고,
+       * 무엇보다 agent 가 예산 거부를 만난 그 자리에서 이어서 할 수 있어야 한다.
+       *
+       * 이 기능이 생긴 이유: 예산이 바닥나면 거부 메시지가 "새 step 으로 대체하라"고
+       * 안내했고, 그래서 orchestrator 가 audit-commit → audit-commit2 → audit-commit3 처럼
+       * **같은 일을 하는 노드를 복제**했다. 계획이 지저분해지고 이력이 세 조각으로 갈린다.
+       * 같은 노드를 다시 돌리는 편이 나은 경우가 훨씬 많다.
+       */
+      if (input.max_attempts !== undefined) {
+        const requested = Math.trunc(Number(input.max_attempts));
+        if (!Number.isFinite(requested) || requested < 1) {
+          throw orchestrationError(400, 'max_attempts must be a positive integer');
+        }
+        if (requested > MAX_STEP_ATTEMPTS_CEILING) {
+          throw orchestrationError(
+            400,
+            `max_attempts cannot exceed ${MAX_STEP_ATTEMPTS_CEILING} — if a step needs more than that, the work ` +
+              `itself is wrong, not the budget. Amend the instructions, reassign it, or split the step.`,
+          );
+        }
+        // 이미 쓴 시도 아래로는 못 내린다(그래프 patch 의 max_visits 규칙과 같은 근거).
+        if (requested < fresh.attempt) {
+          throw orchestrationError(
+            409,
+            `step "${fresh.step_key}" has already used ${fresh.attempt} attempt(s); max_attempts cannot be set ` +
+              `below that. Setting it to exactly ${fresh.attempt} means "this was the last one".`,
+          );
+        }
+        if (requested !== fresh.max_attempts) {
+          const before = fresh.max_attempts;
+          fresh.max_attempts = requested;
+          await this.stepRepo.save(fresh);
+          await this.missions.recordEvent(mission, {
+            type: 'step_retry_budget_changed',
+            step_id: fresh.id,
+            step_key: fresh.step_key,
+            message:
+              `Retry budget for "${fresh.title}" ${requested > before ? 'raised' : 'lowered'} ` +
+              `${before} → ${requested} (used ${fresh.attempt}) by ${orchestratorName}` +
+              `${input.reason ? `: ${input.reason}` : ''}`,
+            actor_type: 'agent',
+            actor_id: callerAgentId,
+            actor_name: orchestratorName,
+            data: { before, after: requested, attempt: fresh.attempt },
+          });
+        }
+      } else if (input.action === 'set_retry_budget') {
+        throw orchestrationError(400, 'set_retry_budget requires max_attempts');
+      }
+
       switch (input.action) {
+        // 예산만 바꾸고 끝낸다 — 지금 다시 돌릴지는 별도 판단이다(`retry` 와 같이 쓰면 한 번에).
+        case 'set_retry_budget':
+          break;
         case 'skip':
         case 'cancel': {
           if (isInFlight(fresh.status)) {
@@ -1201,11 +1401,22 @@ export class OrchestrationRunnerService {
           if (fresh.attempt >= fresh.max_attempts) {
             throw orchestrationError(
               409,
-              `step "${fresh.step_key}" has used all ${fresh.max_attempts} attempts. Reassign it to a different ` +
-                `agent, replace it with new steps, or fail the mission.`,
+              `step "${fresh.step_key}" has used all ${fresh.max_attempts} attempt(s). To run this same step ` +
+                `again, call update_orchestration_step with \`max_attempts\` raised (e.g. ${Math.min(
+                  fresh.attempt + 2,
+                  MAX_STEP_ATTEMPTS_CEILING,
+                )}) — you can send it together with action "retry" in one call, and amend \`instructions\` or ` +
+                `\`assignee_agent_id\` at the same time. Reuse this step unless the next round is genuinely ` +
+                `different work; cloning it into a near-duplicate step splits its history across nodes.`,
             );
           }
+          // 끝난 노드를 다시 돌리는 것도 정상 경로다(재작업). 직전 상태를 이벤트에 남겨
+          // 타임라인이 "done 이었던 노드를 다시 돌렸다"를 말할 수 있게 한다.
+          const priorStatus = fresh.status;
           if (input.instructions !== undefined) fresh.instructions = String(input.instructions).trim();
+          if (input.acceptance_criteria !== undefined) {
+            fresh.acceptance_criteria = String(input.acceptance_criteria).trim();
+          }
           if (input.assignee_agent_id) fresh.assignee_agent_id = input.assignee_agent_id;
           fresh.status = 'pending';
           fresh.finished_at = null;
@@ -1219,7 +1430,10 @@ export class OrchestrationRunnerService {
             type: 'step_retried',
             step_id: fresh.id,
             step_key: fresh.step_key,
-            message: `Step "${fresh.title}" queued for retry (attempt ${fresh.attempt + 1}/${fresh.max_attempts}) by ${orchestratorName}`,
+            message:
+              `Step "${fresh.title}" queued for retry (attempt ${fresh.attempt + 1}/${fresh.max_attempts}` +
+              `${priorStatus ? `, was ${priorStatus}` : ''}) by ${orchestratorName}` +
+              `${input.reason ? `: ${input.reason}` : ''}`,
             actor_type: 'agent',
             actor_id: callerAgentId,
             actor_name: orchestratorName,
@@ -1411,7 +1625,9 @@ export class OrchestrationRunnerService {
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(
           409,
-          `mission is ${mission.status} — this step's result is no longer being collected`,
+          `mission is ${mission.status} — this step's result is no longer being collected.` +
+            ` An operator can reopen the mission (\`mcp__awb__reopen_orchestration_mission\`), and then the` +
+            ` orchestrator has to re-dispatch this step before a report is accepted.`,
         );
       }
       if (isTerminalStepStatus(step.status)) {
@@ -2680,17 +2896,12 @@ export class OrchestrationRunnerService {
     if (!mission.room_id) {
       throw orchestrationError(409, 'mission has not been started yet — there is no conversation room');
     }
-    // 종료된 미션에는 새로 참여시키지 않는다(리뷰 라운드1 지적 3). 참여에 성공해도 말을
-    // 걸 orchestrator 세션이 없어 아무 일도 일어나지 않으므로, 화면이 버튼을 숨기는 것과
-    // 서버가 거부하는 것이 같은 규칙이어야 한다 — 한쪽만 막으면 REST 를 직접 부르는
-    // 경로로 규칙이 새고, "과거 미션도 대화 가능"의 범위가 화면과 서버에서 갈린다.
-    // 기록 열람은 그대로 열려 있다: observer 경로는 참여자가 아니어도 읽을 수 있다.
-    if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
-      throw orchestrationError(
-        409,
-        `mission is ${mission.status} — its conversation is closed, but the transcript is still readable`,
-      );
-    }
+    // 종료된 미션에도 참여시킨다. 예전에는 409 였다 — 말을 걸어도 되살릴 방법이 없어
+    // orchestrator 가 할 수 있는 일이 없었기 때문이다. `reopenMission` 이 생긴 뒤로는
+    // 끝난 미션의 대화가 "지난 결과를 묻는다" 와 "이어서 해 달라" 두 가지로 실제 의미를
+    // 가지므로, 참여를 막으면 그 입구를 닫는 것이 된다. 발화 게이트
+    // (`requireMissionRoomSpeaker`)도 같은 이유로 terminal 을 더 보지 않는다 — 세 표면이
+    // 같은 규칙을 말한다는 성질은 그대로 유지된다.
 
     const joined = await this.membership.ensureActiveParticipant(mission.room_id, 'user', actor.id);
     if (joined) {

@@ -59,7 +59,7 @@ export default function MissionEvidencePane({
       if (!item) return null;
       if (item.step_id) return api.getOrchestrationStepAttachment(item.step_id, wsId, item.id);
       const full = await api.getChatAttachment(item.room_id, item.id);
-      return full ? { file_data: full.file_data, mime_type: full.mime_type } : null;
+      return full ? { file_data: full.file_data, mime_type: full.mime_type, truncated: full.truncated } : null;
     },
     [byId, wsId],
   );
@@ -136,6 +136,7 @@ export default function MissionEvidencePane({
                 <EvidenceThumb
                   meta={item}
                   url={media.urls[item.id]}
+                  partial={media.partial[item.id]}
                   onEnsure={media.ensure}
                   onOpen={(meta, url) => setLightbox({ meta, url, caption: `${group.title} · ${item.uploaded_by}` })}
                   size={150}
@@ -154,7 +155,13 @@ export default function MissionEvidencePane({
         </div>
       ))}
       {lightbox && (
-        <EvidenceLightbox meta={lightbox.meta} url={lightbox.url} caption={lightbox.caption} onClose={() => setLightbox(null)} />
+        <EvidenceLightbox
+          meta={lightbox.meta}
+          url={lightbox.url}
+          caption={lightbox.caption}
+          partial={media.partial[lightbox.meta.id]}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </div>
   );

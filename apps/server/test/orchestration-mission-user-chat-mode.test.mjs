@@ -262,15 +262,28 @@ describe('미션 chat 옵션이 발화를 지배한다', () => {
     assert.ok(msg?.id, '참여자로 등록되면 발화할 수 있어야 한다');
   });
 
-  it("종료된 미션의 대화는 읽기 전용이다", async () => {
+  // 계약 변경: 종료된 미션의 대화는 **열려 있다**. 예전에는 403 이었고 그때는 맞았다 —
+  // 미션을 되살릴 방법이 없어 말을 걸어도 orchestrator 가 할 수 있는 일이 없었다. 지금은
+  // `reopenMission` 이 있고, 끝난 미션의 대화가 "지난 결과를 묻는다" 와 "이어서 해 달라"
+  // 의 유일한 입구다. 그래서 발화를 막으면 그 기능 자체가 없어진다.
+  it("종료된 미션에도 발화할 수 있다 — 되살리기의 입구이기 때문이다", async () => {
     const { room } = await seedMission({ status: 'completed' }, { open_join: true });
     await addParticipant(room.id, ADMIN);
 
-    await assert.rejects(
-      () => sendAsUser(room.id, ADMIN),
-      (e) => e.status === 403 && /finished/i.test(e.message),
-      'joinMissionConversation 이 이미 종료 미션 참여를 거부하고 화면도 입력창을 감춘다 — 발화 경로만 열려 있으면 REST 로 규칙이 샌다',
+    const msg = await sendAsUser(room.id, ADMIN);
+    assert.ok(msg?.id, '끝난 미션에서도 운영자는 orchestrator 에게 말할 수 있어야 한다');
+  });
+
+  it("종료 + chat off 는 여전히 막힌다 — off 는 미션 수명과 무관한 운영자의 선택이다", async () => {
+    const { room } = await seedMission(
+      { status: 'completed', user_chat_mode: 'off' },
+      { open_join: true },
     );
+    await addParticipant(room.id, ADMIN);
+
+    const err = await sendAsUser(room.id, ADMIN).catch((e) => e);
+    assert.equal(err.status, 403);
+    assert.match(err.message, /chat is turned off/i, '종료를 풀었어도 off 는 그대로 막아야 한다');
   });
 
   it("권한 부족과 참여자 아님은 서로 다른 사유로 구분된다 (요구사항 C)", async () => {
@@ -357,19 +370,23 @@ describe('미션 chat 옵션이 발화를 지배한다', () => {
   // 조합을 비껴간 이유는 off 를 **참여자**로만, participants_only 를 **권한 있는** 사용자로만
   // 시험했기 때문이다 — 두 축을 겹쳐야 순서가 드러난다.
 
-  it("종료 미션에서는 비참여자도 참여 문제가 아니라 종료를 사유로 받는다", async () => {
-    // 모드를 participants_only 로 둔다. `open` 이면 자유 참여 완화가 참여자 검사를 아예
-    // 건너뛰어서 예전 순서로도 "finished" 가 나오고 — 즉 순서를 시험하지 못한다.
-    // 참여자 검사가 실제로 돌 수 있는 모드여야 두 순서가 갈린다.
+  // 종료 축이 사라졌으므로 이 자리의 시험 대상도 바뀐다: 종료된 미션에서 비참여자가
+  // participants_only 에 막히는 이유는 이제 **참여자 아님** 하나뿐이고, 그것은 참여로
+  // 실제로 풀린다. "참여해도 풀리지 않는 차단을 참여 문제로 설명하지 않는다" 는 원래
+  // 불변식은 off/권한 케이스(아래 두 테스트)가 계속 지킨다.
+  it("종료 미션의 participants_only 는 참여로 풀린다 — 종료가 더는 사유가 아니다", async () => {
     const { room } = await seedMission(
       { status: 'completed', user_chat_mode: 'participants_only' },
       { open_join: false },
     );
-    // ADMIN 은 참여자가 아니다. 예전 순서라면 여기서 "not an active participant" 가 났다.
     const err = await sendAsUser(room.id, ADMIN).catch((e) => e);
     assert.equal(err.status, 403);
-    assert.match(err.message, /finished/i, '참여해도 풀리지 않는 차단은 참여 문제로 설명하면 안 된다');
-    assert.doesNotMatch(err.message, /not an active participant/i);
+    assert.match(err.message, /not an active participant/i, '남은 사유는 참여자 아님뿐이다');
+    assert.doesNotMatch(err.message, /finished/i, '종료는 더 이상 발화 차단 사유가 아니다');
+
+    await addParticipant(room.id, ADMIN);
+    const msg = await sendAsUser(room.id, ADMIN);
+    assert.ok(msg?.id, '참여하면 종료된 미션에서도 말할 수 있다');
   });
 
   it("off 에서는 비참여자도 참여 문제가 아니라 chat off 를 사유로 받는다", async () => {

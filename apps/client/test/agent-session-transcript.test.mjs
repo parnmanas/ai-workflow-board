@@ -18,6 +18,8 @@ import {
   pendingPermission,
   sessionDisplayTitle,
   shouldAutoConnect,
+  compactTokens,
+  usageSummaryParts,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
 import {
   cwdBaseName,
@@ -107,7 +109,7 @@ test('status helpers mirror the server prompt rules', () => {
   assert.equal(canPrompt('busy'), false);
   assert.equal(canPrompt('awaiting_permission'), false);
   assert.equal(canPrompt('starting'), false);
-  assert.equal(describeSessionStatus('awaiting_permission').tone, 'warning');
+  assert.equal(describeSessionStatus('awaiting_permission').tone, 'attention');
   assert.equal(describeSessionStatus('idle').live, false);
   assert.equal(describeSessionStatus(undefined).label, 'Unknown');
   assert.equal(sessionDisplayTitle({ title: '', cli: 'claude', session_id: '11111111-2222' }), 'Claude Code · 11111111');
@@ -255,7 +257,7 @@ test('normalizeElicitationSchema handles oneOf titles, multi-select arrays, numb
 
 test('awaiting_input is a waiting status: labelled, blocks prompting, and counts as waiting', () => {
   assert.equal(describeSessionStatus('awaiting_input').label, 'Needs your input');
-  assert.equal(describeSessionStatus('awaiting_input').tone, 'warning');
+  assert.equal(describeSessionStatus('awaiting_input').tone, 'attention');
   assert.equal(canPrompt('awaiting_input'), false);
   assert.equal(isWaitingStatus('awaiting_input'), true);
   assert.equal(isWaitingStatus('awaiting_permission'), true);
@@ -398,4 +400,76 @@ test('splitRecentCwdGroups folds working folders whose newest session is older t
   assert.deepEqual(oldSplit.hidden.map((g) => g.cwd), ['/repo/two']);
 
   assert.deepEqual(splitRecentCwdGroups([], NOW), { visible: [], hidden: [] });
+});
+
+// ─── 토큰 사용량 표시 (운영 보고 2026-09-26: claude 가 제대로 안 나온다) ────────
+//
+// claude 의 `input_tokens` 는 캐시 히트를 제외한 신규 입력이라 보통 한 자릿수다. 예전
+// 화면은 in/out/total 만 찍었고 claude 는 total 을 주지 않아 "tokens in 2 · out 346 ·
+// total 0" 처럼 나왔다 — 실제로 쓴 3.6만 토큰이 화면에서 사라져 있었다.
+
+test('usage 줄은 캐시를 포함한 합계를 보여 준다 — claude 의 "in 2" 가 전부가 아니다', () => {
+  const claude = {
+    inputTokens: 2,
+    outputTokens: 346,
+    cachedReadTokens: 11590,
+    cacheWriteTokens: 24187,
+    totalTokens: 36125,
+    contextTokens: 0,
+    contextWindow: 0,
+    costUsd: 0,
+  };
+  const parts = usageSummaryParts(claude);
+  assert.equal(parts[0], '36.1k tokens', '합계가 먼저 — 실제로 쓴 양이다');
+  assert.ok(parts.some((p) => p.includes('cache 35.8k')), '캐시가 보여야 합이 설명된다');
+  assert.ok(parts.some((p) => p.includes('in 2')), '신규 입력도 그대로 보여 준다');
+});
+
+test('usage 줄은 측정되지 않은 값을 0 으로 찍지 않는다', () => {
+  const nothing = usageSummaryParts({
+    inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, cacheWriteTokens: 0,
+    totalTokens: 0, contextTokens: 0, contextWindow: 0, costUsd: 0,
+  });
+  assert.deepEqual(nothing, [], '아무것도 모르면 아무것도 말하지 않는다 — "0 tokens" 는 거짓이다');
+
+  const codex = usageSummaryParts({
+    inputTokens: 3198, outputTokens: 207, cachedReadTokens: 12160, cacheWriteTokens: 0,
+    totalTokens: 15565, contextTokens: 15565, contextWindow: 258400, costUsd: 0,
+  });
+  assert.ok(codex.some((p) => p === 'ctx 15.6k/258k'), '컨텍스트 점유를 아는 CLI 는 함께 보여 준다');
+  assert.ok(!codex.some((p) => p.includes('$')), '비용을 모르는 CLI 에 $0 을 찍지 않는다');
+
+  const opencode = usageSummaryParts({
+    inputTokens: 1200, outputTokens: 300, cachedReadTokens: 9000, cacheWriteTokens: 400,
+    totalTokens: 10900, contextTokens: 0, contextWindow: 0, costUsd: 0.0123,
+  });
+  assert.ok(opencode.some((p) => p === '$0.012'), '비용을 아는 CLI 는 비용도 보여 준다');
+});
+
+test('buildTranscript 는 usage payload 의 캐시·컨텍스트 조각을 잃지 않는다', () => {
+  const blocks = buildTranscript([
+    ev('usage', {
+      input_tokens: 2, output_tokens: 346, cached_read_tokens: 11590, cache_write_tokens: 24187,
+      total_tokens: 36125, context_tokens: 36125, context_window: 200000, cost_usd: 0.42,
+    }),
+  ]);
+  const usage = blocks.find((b) => b.kind === 'usage');
+  assert.equal(usage.cachedReadTokens, 11590);
+  assert.equal(usage.cacheWriteTokens, 24187);
+  assert.equal(usage.contextWindow, 200000);
+  assert.equal(usage.costUsd, 0.42);
+
+  // 예전 매니저(캐시·total 없이 보내던 버전)와도 섞여 돌아간다 — total 을 조각으로 채운다.
+  const legacy = buildTranscript([ev('usage', { input_tokens: 100, output_tokens: 20 })]);
+  assert.equal(legacy.find((b) => b.kind === 'usage').totalTokens, 120);
+});
+
+test('compactTokens 는 자리수를 읽기 쉽게 줄인다', () => {
+  assert.equal(compactTokens(0), '0');
+  assert.equal(compactTokens(950), '950');
+  assert.equal(compactTokens(1200), '1.2k');
+  assert.equal(compactTokens(35777), '35.8k');
+  assert.equal(compactTokens(258400), '258k');
+  assert.equal(compactTokens(12000), '12k', '소수점 .0 은 붙이지 않는다');
+  assert.equal(compactTokens(1_050_000), '1.05M');
 });

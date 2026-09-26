@@ -101,9 +101,11 @@ footgun 이고, 두 번째 사본은 drift 만 만든다.)
 
 ## ⚠️ 배포 타이밍 (ticket 467dbc7a / #autoticket 과 같은 함정)
 
-보안 점검은 **돌고 있는(배포된) 서버** 의 코드를 친다. fix 머지(main) ≠ prod 배포
-(`production.private` auto-deploy). fix 머지 직후 발화하는 스케줄은 **배포 전 옛 코드**
-를 점검해 "가짜 그린" 을 만들 수 있다. 두 겹의 완화책:
+보안 점검은 **돌고 있는(배포된) 서버** 의 코드를 친다. **fix 머지(main) ≠ 배포**: 배포되는
+브랜치는 main 하나지만, 배포 호스트가 자기 워크트리를 `origin/main` 으로 detached
+체크아웃하고 의존성 재설치·재빌드·서버 재기동까지 마쳐야 그 커밋이 서빙된다. fix 머지
+직후 발화하는 스케줄은 **배포 전 옛 코드** 를 점검해 "가짜 그린" 을 만들 수 있다.
+두 겹의 완화책:
 
 1. **점검 대상 commit 의 명시 기록** — 모든 `SecurityRun` 은 agent 가 실제로 검사한
    worktree HEAD SHA 를 `scanned_commit` 에 기록한다(#foundation cfd74638). 스케줄이

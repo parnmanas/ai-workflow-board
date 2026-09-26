@@ -14,7 +14,10 @@
 // 순서 규약: 테스트 경로는 사전순으로, `npm run` 위임은 그 뒤에 둔다. 사전순이라야
 // 새 항목의 삽입 위치가 파일 이름으로 정해져, 독립적인 추가 두 개가 서로 다른
 // hunk 에 떨어진다 — 끝에 몰아 붙이면 매니페스트로 옮긴 의미가 없어진다.
-// 이 규약은 test/test-registration-completeness.test.mjs 가 강제한다.
+// 이 규약은 test/test-registration-completeness.test.mjs 가 강제하고, 아래
+// canonicalSteps() 가 유일한 정의다. 자리를 손으로 고르지 말고 아무 데나 넣은 뒤
+// apps/server 에서 `npm run test:suites:sort` 를 돌려라 — 가드는 이 저장소의
+// 랜딩 방식상 main 에 들어간 뒤에야 도는데, 그때는 이미 main 이 빨갛다.
 //
 // 매니페스트 이름은 npm 스크립트 이름에서 `:` 를 `-` 로 바꾼 것이다
 // (`test:qa:pg` → `test-qa-pg.txt`). 다른 매핑 규칙은 없다.
@@ -37,13 +40,15 @@ export function suiteNameFromScript(script) {
   return script.replace(/:/g, '-');
 }
 
-export function suiteManifestPath(suite) {
-  return path.join(SUITES_DIR, `${suite}.txt`);
+// dir 인자는 기본값 하나뿐인 저장소 경로를 테스트가 임시 디렉터리로 바꿔 끼우기
+// 위한 것이다 — "무엇이 매니페스트 파일인가" 의 판정은 한 벌로 유지한다.
+export function suiteManifestPath(suite, dir = SUITES_DIR) {
+  return path.join(dir, `${suite}.txt`);
 }
 
-export function listSuiteNames() {
+export function listSuiteNames(dir = SUITES_DIR) {
   return fs
-    .readdirSync(SUITES_DIR)
+    .readdirSync(dir)
     .filter((f) => f.endsWith('.txt'))
     .map((f) => f.slice(0, -'.txt'.length))
     .sort();
@@ -67,6 +72,23 @@ export function suiteFromScriptCommand(command) {
   const at = tokens.indexOf('--suite');
   if (at === -1) return null;
   return tokens[at + 1] ?? null;
+}
+
+// 정규 순서 = 테스트 경로 사전순, 그 뒤에 `npm run` 위임 사전순. 위 "순서 규약"
+// 을 계산으로 옮긴 것이고, 이 함수가 그 규약의 유일한 정의다 — 정렬 가드
+// (test/test-registration-completeness.test.mjs)와 제자리 정렬 스크립트
+// (test/sort-suites.mjs)가 둘 다 여기를 부른다. 두 벌이 되면 스크립트가 정규화한
+// 파일을 가드가 거부하는, 고치는 쪽이 더 헷갈리는 상태가 만들어진다.
+//
+// 비교는 JS 기본 `.sort()`(UTF-16 코드 단위)로 고정한다. 셸 `sort` 는 로케일에
+// 따라 구두점을 무시해 다른 답을 낸다 — 예컨대 `credentials-scope-switch...` 와
+// `credentials-scope...` 의 앞뒤가 뒤집힌다(`-` 0x2D < `.` 0x2E). 눈으로도 셸
+// `sort` 로도 틀리는 자리라, 어느 쪽 순서가 맞는지는 이 함수에게만 물어야 한다.
+export function canonicalSteps(steps) {
+  return [
+    ...steps.filter((s) => s.startsWith('test/')).sort(),
+    ...steps.filter((s) => !s.startsWith('test/')).sort(),
+  ];
 }
 
 export function readSuiteSteps(suite) {

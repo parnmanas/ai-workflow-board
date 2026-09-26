@@ -1017,9 +1017,11 @@ export interface Credential {
   // null = global (instance-level) credential shared across all workspaces.
   workspace_id: string | null;
   board_id: string | null;
-  // 'global' credentials are read-only inside a workspace view (editable only
-  // from the Admin global-credentials page); 'workspace' credentials are owned
-  // by the active workspace.
+  // 'global' credentials are inherited by every workspace; 'workspace' ones are
+  // owned by the active workspace. Unlike the other catalog kinds this is
+  // mutable in place — the Edit dialog lets a holder of
+  // admin.global_credentials move a credential either way, and everyone else
+  // sees globals as read-only.
   scope?: CatalogScope;
   name: string;
   description: string;
@@ -1723,6 +1725,16 @@ export interface DashboardAgent {
   // REST /dashboard and /:id responses additionally merge kind:'qa' entries.
   // Absent (old server) → clients fall back to current_task.
   active_tasks?: AgentCurrentTask[];
+  // ── 목록을 카테고리로 묶는 데 쓰는 정체성 사실 (server dashboard projection).
+  // 구버전 서버는 보내지 않으므로 전부 optional — 없으면 그 축으로 그룹이 안 잡힐
+  // 뿐이고 목록 자체는 그대로 그려진다.
+  /** CLI id (`claude` / `codex` / …). 카탈로그가 라벨을 안다. */
+  type?: string;
+  description?: string;
+  working_dir?: string;
+  model?: string | null;
+  /** `''` 또는 `'orchestration'` — 팀이 발급한 정체성 표시. */
+  origin?: string;
 }
 
 export interface AgentDetail extends DashboardAgent {
@@ -3179,7 +3191,12 @@ export interface OrchestrationRuntimeHost {
   last_seen_at: string | null;
   /** CLIs installed on this host. */
   clis: string[];
-  /** cliType → model ids this host reported. */
+  /**
+   * cliType → model ids. **화면에서 이 필드를 읽지 말 것** — 모델 dropdown 은
+   * `useHostModels()`(src/cli/hostModels.ts)만 본다. 서버는 이제 그 훅과 **같은**
+   * 단일 출처(HostModelsService)로 이 값을 채우지만, 여기서 직접 읽는 코드가 생기면
+   * 화면마다 갱신 시점이 갈려 또 목록이 달라진다(팀 슬롯이 정확히 그랬다).
+   */
   available_models: Record<string, string[]>;
   cli_versions: Record<string, string>;
   /** Working folders already used on this host — the "share a folder" picker. */
@@ -3475,5 +3492,81 @@ export interface AgentSessionEventEvent {
   session_id: string;
   driver_user_id: string;
   event: AgentSessionEventRecord;
+  timestamp: string;
+}
+
+// ─── Terminal (Runtime Host 셸) ────────────────────────────────────────────
+// 서버 contract: apps/server/src/common/types/terminals.ts. 터미널은 매니저의 PTY
+// 프로세스이고 살아 있는 동안만 존재한다 — 기록이 없으므로 목록에 죽은 것은 없다.
+
+export type TerminalStatus = 'starting' | 'live' | 'exited' | 'error';
+
+export interface TerminalShellInfo {
+  id: string;
+  label: string;
+  path: string;
+  default?: boolean;
+}
+
+export interface TerminalHost {
+  manager_id: string;
+  instance_id: string;
+  hostname: string;
+  name: string;
+  /** 'win32' | 'linux' | 'darwin' | '' — 구버전 매니저는 빈 문자열. */
+  platform: string;
+  shells: TerminalShellInfo[];
+  plugin_version: string;
+  last_seen_at: string;
+  live_count: number;
+}
+
+export interface TerminalSummary {
+  manager_id: string;
+  manager_name: string;
+  terminal_id: string;
+  shell: string;
+  shell_label: string;
+  cwd: string;
+  title: string;
+  cols: number;
+  rows: number;
+  pid: number | null;
+  status: TerminalStatus | string;
+  exit_code: number | null;
+  last_error: string | null;
+  driver_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TerminalSnapshot {
+  terminal: TerminalSummary;
+  /** base64 원문 바이트 — 그대로 디코드해 xterm 에 write 한다. */
+  data: string;
+  /** 이 스냅샷에 담긴 마지막 청크의 seq. 이하의 라이브 청크는 버린다. */
+  seq: number;
+  truncated: boolean;
+}
+
+export interface TerminalOutputChunk {
+  seq: number;
+  data: string;
+  created_at: string;
+}
+
+export interface TerminalUpdateEvent {
+  event_type: 'terminal_update';
+  terminal: TerminalSummary;
+  reason: string;
+  timestamp: string;
+}
+
+export interface TerminalOutputEvent {
+  event_type: 'terminal_output';
+  manager_id: string;
+  terminal_id: string;
+  driver_user_id: string;
+  chunk: TerminalOutputChunk;
   timestamp: string;
 }

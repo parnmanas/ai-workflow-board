@@ -578,6 +578,168 @@ test('repo 미연결과 fetch 실패는 서로 다른 provisioning 진단을 반
   }
 });
 
+// ── 동시 dispatch 의 origin ref CAS 경합 (티켓 0835f582) ─────────────────────
+//
+// 한 저장소의 per_ticket worktree 들은 `.awb/base/<resource>/.git` **하나** 를
+// 공유하고, 프로비저닝 fetch 는 어떤 락보다도 앞에서 돌기 때문에 같은 저장소로
+// 동시 dispatch 가 걸리면 `refs/remotes/origin/<branch>` 갱신에서 서로
+// compare-and-swap 경합한다. 진 쪽만 실패하고 ref 는 이미 목표값에 도달해 있어
+// 잃어버린 갱신도 손상도 없는데, 예전에는 그대로 `repository_fetch_failed` 로
+// 종결해 에이전트가 worktree 대신 fallback 프롬프트를 받았다.
+//
+// 이 경합은 진짜 git 으로 결정적으로 재현할 수 없다(경합 자체가 비결정적이다).
+// 그래서 PATH 최상단에 가짜 `git` 을 심어 **앞쪽 N 번의 fetch 만** 해당 stderr 로
+// 실패시키고 나머지 호출은 전부 진짜 git 에 위임한다 — 검증 대상은 git 이 그
+// 메시지를 만들어 내는 과정(버전마다 달라질 수 있다)이 아니라, production 의
+// resolveCwd 가 그 메시지를 보고 재시도하는지와 fetch 를 몇 번 부르는지다.
+// bash 스크립트라 win32 에서는 skip 한다 — 같은 패키지 clone-policy.test.mjs 가
+// 쓰는 방식과 동일하고, 문자열 판정 자체는 플랫폼 무관하게
+// dispatch-preflight.test.mjs 의 isGitRefLockRace 테스트가 단언한다.
+
+const POSIX = process.platform !== 'win32';
+
+/** dispatch 가 실제로 막혔을 때 git 이 찍은 stderr 그대로. */
+const REF_LOCK_RACE_STDERR = [
+  "error: cannot lock ref 'refs/remotes/origin/main': is at bd8bc4dd4cc3efceee5ed5b5153ad7dcf8cbf486 but expected fc9fccc524affba0e7b3bd359a83d77bf01e2609",
+  ' ! fc9fccc5..bd8bc4dd  main       -> origin/main  (unable to update local ref)',
+].join('\n');
+
+const AUTH_FAILURE_STDERR =
+  "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+
+/**
+ * PATH 최상단에 가짜 `git` 을 심는다. 앞쪽 `failFetches` 번의 `fetch` 호출은
+ * `failStderr` 를 내고 exit 1 하며, 그 이후의 fetch 와 fetch 가 아닌 모든 호출은
+ * 진짜 git 에 그대로 위임한다(그래서 프로비저닝의 나머지 단계는 실제로 동작한다).
+ * fetch 호출 횟수는 파일에 누적해 테스트가 직접 센다.
+ */
+async function installFetchFailingGit({ failFetches, failStderr }) {
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const dir = await fsp.mkdtemp(join(tmpdir(), 'awb-wt-fakegit-'));
+  const fetchLog = join(dir, 'fetch.log');
+  const script = `#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  if [ "$a" = "fetch" ]; then
+    printf 'fetch\\n' >> "$AWB_WT_FETCH_LOG"
+    if [ "$(wc -l < "$AWB_WT_FETCH_LOG")" -le "$AWB_WT_FAIL_FETCHES" ]; then
+      printf '%s\\n' "$AWB_WT_FAIL_STDERR" >&2
+      exit 1
+    fi
+    break
+  fi
+done
+exec ${JSON.stringify(realGit)} "$@"
+`;
+  await fsp.writeFile(join(dir, 'git'), script, { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}:${previousPath}`;
+  process.env.AWB_WT_FETCH_LOG = fetchLog;
+  process.env.AWB_WT_FAIL_FETCHES = String(failFetches);
+  process.env.AWB_WT_FAIL_STDERR = failStderr;
+  return {
+    async fetchCount() {
+      const raw = await fsp.readFile(fetchLog, 'utf8').catch(() => '');
+      return raw.split('\n').filter(Boolean).length;
+    },
+    async cleanup() {
+      process.env.PATH = previousPath;
+      delete process.env.AWB_WT_FETCH_LOG;
+      delete process.env.AWB_WT_FAIL_FETCHES;
+      delete process.env.AWB_WT_FAIL_STDERR;
+      await fsp.rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test('프로비저닝 fetch: origin ref CAS 경합은 1회 재시도로 흡수되고 fallback 하지 않는다', { skip: !POSIX }, async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'ref-lock-agent-dir');
+  const bootstrapRepo = { resourceId: 'repo-ref-lock', url: source.remote, branch: 'main' };
+  let fake = null;
+  try {
+    const wm = new WorktreeManager();
+    // base clone 은 정상 경로로 먼저 만든다 — 관찰 대상은 그 다음 dispatch 의 fetch 다.
+    const seeded = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_A, role: 'assignee', bootstrapRepo,
+    });
+    assert.equal(seeded.isWorktree, true);
+
+    // 원격을 한 커밋 전진시킨다 — 재시도 fetch 가 "실패를 삼켰을" 뿐인지,
+    // 진짜로 remote-tracking ref 를 갱신했는지 구분하는 핀이다.
+    git(source.repo, ['push', '-q', 'origin', 'HEAD:main']);
+    const advancedTip = git(source.repo, ['rev-parse', 'HEAD']);
+
+    fake = await installFetchFailingGit({ failFetches: 1, failStderr: REF_LOCK_RACE_STDERR });
+    const provisioned = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_B, role: 'assignee', bootstrapRepo,
+    });
+
+    assert.equal(provisioned.reason, undefined, '경합을 흡수했으니 fallback 사유가 없어야 한다');
+    assert.equal(provisioned.isWorktree, true);
+    assert.equal(await fake.fetchCount(), 2, '1회차 실패 후 정확히 한 번만 재시도해야 한다');
+    // 재시도가 실제 fetch 였음을 원격 tip 으로 증명한다.
+    assert.equal(provisioned.repositoryContext.baseSha, advancedTip);
+  } finally {
+    await fake?.cleanup();
+    await source.cleanup();
+  }
+});
+
+test('프로비저닝 fetch: ref CAS 경합이 2회 연속이면 repository_fetch_failed 로 종결한다', { skip: !POSIX }, async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'ref-lock-twice-agent-dir');
+  const bootstrapRepo = { resourceId: 'repo-ref-lock-twice', url: source.remote, branch: 'main' };
+  let fake = null;
+  try {
+    const wm = new WorktreeManager();
+    const seeded = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_A, role: 'assignee', bootstrapRepo,
+    });
+    assert.equal(seeded.isWorktree, true);
+
+    fake = await installFetchFailingGit({ failFetches: 2, failStderr: REF_LOCK_RACE_STDERR });
+    const failed = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_B, role: 'assignee', bootstrapRepo,
+    });
+
+    assert.equal(failed.reason, 'repository_fetch_failed');
+    assert.match(failed.detail, /cannot lock ref/);
+    assert.equal(await fake.fetchCount(), 2, '재시도는 1회뿐이어야 한다 — 무한 재시도가 아니다');
+  } finally {
+    await fake?.cleanup();
+    await source.cleanup();
+  }
+});
+
+test('프로비저닝 fetch: auth 실패는 재시도 없이 repository_auth_failed 로 종결한다', { skip: !POSIX }, async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'auth-no-retry-agent-dir');
+  const bootstrapRepo = { resourceId: 'repo-auth-no-retry', url: source.remote, branch: 'main' };
+  let fake = null;
+  try {
+    const wm = new WorktreeManager();
+    const seeded = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_A, role: 'assignee', bootstrapRepo,
+    });
+    assert.equal(seeded.isWorktree, true);
+
+    // failFetches:1 이라 재시도가 있었다면 2회차는 성공해 auth 블로커가 가려졌을
+    // 것이다 — 그래서 이 단언은 "재시도 안 함" 을 실제로 구분한다.
+    fake = await installFetchFailingGit({ failFetches: 1, failStderr: AUTH_FAILURE_STDERR });
+    const blocked = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_B, role: 'assignee', bootstrapRepo,
+    });
+
+    assert.equal(blocked.reason, 'repository_auth_failed');
+    assert.equal(blocked.isWorktree, false);
+    assert.equal(await fake.fetchCount(), 1, 'auth 실패는 재시도하지 않는다');
+  } finally {
+    await fake?.cleanup();
+    await source.cleanup();
+  }
+});
+
 test('one non-git container isolates base clones for different repository resources', async () => {
   const first = await makeRepoWithRemote();
   const second = await makeRepoWithRemote();
@@ -914,6 +1076,9 @@ test('cleanupTerminalTicketGit: clean이고 base에 반영된 티켓 worktree와
       baseBranch: 'main',
       repositoryResourceId: 'repo-resource',
     });
+    // 2회차는 지울 것이 아무것도 남지 않은 상태다 — 1회차가 ref 를 실제로 지웠으므로
+    // for-each-ref 열거 자체가 비고, 따라서 `alreadyAbsent*` 도 빈다("열거된 뒤
+    // 사라진 것" 만 그 필드에 들어간다).
     assert.deepEqual(repeated, {
       removedWorktrees: 0,
       removedLocalBranches: [],
@@ -922,6 +1087,8 @@ test('cleanupTerminalTicketGit: clean이고 base에 반영된 티켓 worktree와
       heldReasons: [],
       benignHolds: [],
       benignHeldBranches: [],
+      alreadyAbsentLocalBranches: [],
+      alreadyAbsentRemoteBranches: [],
     });
   } finally {
     await fixture.cleanup();
@@ -1372,13 +1539,158 @@ test('cleanupTerminalTicketGit: 물고 있는 worktree 가 없는 로컬 ref 삭
 
     assert.deepEqual(result.benignHolds, [], JSON.stringify(result));
     assert.deepEqual(result.benignHeldBranches, [], JSON.stringify(result));
+    // ticket 6d580125 로 사유 문구가 더 구체적으로 바뀌었다. 예전에는 일반 메시지
+    // `로컬 브랜치 삭제 실패: <branch>` 였는데, 삭제가 `branch -d` 에서 검증 OID 를
+    // lease 로 건 `update-ref -d` 로 바뀌면서 "왜 거부했는지"(검증 시 OID vs 현재
+    // OID)를 함께 적을 수 있게 됐다. **실제 오류로 보고한다는 이 테스트의 원래
+    // 의도는 그대로다** — 여전히 heldReasons 에 실려 경고가 발행된다.
     assert.ok(
-      result.heldReasons.includes(`로컬 브랜치 삭제 실패: ${fixture.branch}`),
+      result.heldReasons.some(
+        (reason) => reason.startsWith('로컬 브랜치 삭제 실패(검증 이후 ref 전진):') && reason.includes(fixture.branch),
+      ),
       JSON.stringify(result),
     );
+    // "이미 부재" 로 흘러가지 않는다 — ref 는 실제로 존재하고 삭제가 거부된 것이다.
+    assert.deepEqual(result.alreadyAbsentLocalBranches, [], JSON.stringify(result));
     // 보류된 ref 와 그 커밋은 보존된다.
     assert.ok(git(fixture.base, ['branch', '--list', fixture.branch]).endsWith(fixture.branch));
     assert.deepEqual(result.removedLocalBranches, []);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// ── ticket 6d580125: "이미 없는 것" 을 삭제 실패로 오인하지 않는다 ──────────────
+//
+// 이 티켓이 근거로 든 경고는 두 갈래에서 나왔고, 둘 다 **stderr 문구로 부재를
+// 판정**한 데서 비롯됐다. 아래 네 테스트는 각 갈래를 실제 git 저장소 상태로
+// 재현하고, 동시에 "진짜 실패는 여전히 경고로 남는다" 는 반대 방향도 고정한다.
+//
+// 이 테스트들이 문구(`not found` 같은 stderr)를 단언하지 않는 것은 의도적이다 —
+// Git 버전·로캘이 바뀌면 문구가 달라지므로, 단언은 저장소의 관측 가능한 상태와
+// 리포트 필드에만 건다.
+
+// 갈래 1 — **오래된 detached HEAD**. 이 티켓의 직접 원인이다.
+// 정리 코드는 `origin/<base>` 포함으로 삭제 자격을 판정하는데, 예전 구현은 실제
+// 삭제를 `git branch -d` 에 위임했다. `-d` 의 기준은 **HEAD(또는 upstream) 포함**
+// 이고, base 클론의 primary HEAD 는 `#freeBaseBranch` 가 detach 해 둔 시점에
+// 고정돼 시간이 갈수록 뒤처진다(티켓 branch 에는 upstream 도 없다). 그래서
+// `origin/main` 에 완전히 포함된 branch 조차 거부되고, worktree 는 이미 회수돼
+// holder 가 없으므로 분류가 일반 메시지 `로컬 브랜치 삭제 실패` 로 떨어졌다.
+test('cleanupTerminalTicketGit: base 클론 HEAD 가 오래된 커밋에 detach 돼 있어도 base 에 포함된 티켓 ref 를 정리한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    // origin/main 을 티켓 branch 보다 앞으로 전진시켜, base 클론의 HEAD 가
+    // 가리키는 커밋이 "뒤처진" 상태를 만든다.
+    const stale = git(fixture.base, ['rev-parse', 'HEAD']);
+    git(fixture.wt, ['commit', '-q', '--allow-empty', '-m', 'ticket work']);
+    git(fixture.wt, ['push', '-q', 'origin', `HEAD:refs/heads/${fixture.branch}`]);
+    git(fixture.wt, ['push', '-q', 'origin', `HEAD:refs/heads/main`]);
+    git(fixture.base, ['fetch', '-q', 'origin']);
+    git(fixture.base, ['checkout', '-q', '--detach', stale]);
+
+    // 전제 확인: 정리 코드의 기준으로는 삭제 자격이 있는데 `-d` 의 기준으로는 없다.
+    // (이 비대칭이 곧 버그의 원인이므로 픽스처가 실제로 그 상태인지 먼저 고정한다.)
+    execFileSync('git', ['-C', fixture.base, 'merge-base', '--is-ancestor', fixture.branch, 'refs/remotes/origin/main']);
+    assert.throws(
+      () => execFileSync('git', ['-C', fixture.base, 'merge-base', '--is-ancestor', fixture.branch, 'HEAD'], { stdio: 'ignore' }),
+      '픽스처 전제: 티켓 branch 는 HEAD 의 조상이 아니어야 한다',
+    );
+
+    const result = await new WorktreeManager().cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.heldReasons, [], JSON.stringify(result));
+    assert.deepEqual(result.removedLocalBranches, [fixture.branch], JSON.stringify(result));
+    assert.deepEqual(result.remainingBranches, [], JSON.stringify(result));
+    // 제품 불변식: ref 가 실제로 사라졌고, detach 된 HEAD 는 건드리지 않았다.
+    assert.equal(git(fixture.base, ['branch', '--list', fixture.branch]), '');
+    assert.equal(git(fixture.base, ['rev-parse', 'HEAD']), stale);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// 갈래 2 — **원격 ref 가 삭제 push 직전에 사라진다.**
+//
+// 정리는 시작할 때 `fetch --prune` 을 돌리므로, 담당자가 Merging step 5 에서 원격
+// branch 를 지운 뒤 fetch 가 정상 동작하면 stale 한 remote-tracking ref 자체가
+// 남지 않고 원격 삭제는 아예 시도되지 않는다. 즉 그 경로는 upfront prune 이 이미
+// 막는다(이 사실을 모르고 "stale tracking ref 가 남는다" 고 가정하면 도달 불가한
+// 상태를 테스트하게 된다 — 실제로 한 번 그렇게 틀렸다).
+//
+// 실제로 도달하는 경로는 **fetch 이후 push 사이의 경합**이다: 그 창에서 다른 클론이
+// 같은 원격 ref 를 지우면, 우리 lease 는 이미 stale 해서 삭제 push 가
+// `(delete) -> … (stale info)` 로 거부된다. 그건 정리가 이미 끝났다는 뜻이지
+// 실패가 아니다. 예전 판정식(`/remote ref does not exist|unable to delete/`)은
+// 이 문구를 못 잡아 정상 상태를 `원격 브랜치 삭제 실패` 로 보고했고, 그 보류가
+// 로컬 삭제까지 막아 "잔여 브랜치" 까지 함께 붙었다.
+test('cleanupTerminalTicketGit: 삭제 push 직전에 원격 ref 가 사라지면 실패가 아니라 이미-부재로 보고하고 로컬 정리를 계속한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  const otherClone = join(fixture.root, 'other-clone');
+  try {
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        // fetch·검증이 끝나고 삭제 push 직전 — 다른 클론이 먼저 지운다.
+        beforeRemoteDelete: (branch) => {
+          if (branch !== fixture.branch) return;
+          execFileSync('git', ['clone', '-q', fixture.remote, otherClone]);
+          git(otherClone, ['push', '-q', 'origin', `:refs/heads/${branch}`]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    // 경고 없음 + "내가 지웠다" 가 아니라 "이미 없었다" 로 분리 보고.
+    assert.deepEqual(result.heldReasons, [], JSON.stringify(result));
+    assert.deepEqual(result.alreadyAbsentRemoteBranches, [fixture.branch], JSON.stringify(result));
+    assert.deepEqual(result.removedRemoteBranches, [], JSON.stringify(result));
+    // 원격 보류가 로컬 정리를 막지 않는다 — 이게 "잔여 브랜치" 문구의 원인이었다.
+    assert.deepEqual(result.removedLocalBranches, [fixture.branch], JSON.stringify(result));
+    assert.deepEqual(result.remainingBranches, [], JSON.stringify(result));
+    // 제품 불변식: 양쪽 ref 가 실제로 사라졌다.
+    assert.equal(git(fixture.base, ['branch', '--list', fixture.branch]), '');
+    assert.equal(git(fixture.base, ['ls-remote', '--heads', 'origin', fixture.branch]), '');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// 갈래 3 — 열거 이후 로컬 ref 가 사라지는 경합. `localBranches` 는 `for-each-ref`
+// 결과이므로 "이미 부재" 는 이 경로로만 도달한다(다른 sweep·다른 세션이 그 사이
+// 같은 ref 를 지운 경우). 지울 것이 없으면 멱등 성공이며 경고를 쓰지 않는다.
+test('cleanupTerminalTicketGit: 열거 이후 로컬 ref 가 사라지면 삭제 실패가 아니라 이미-부재로 보고한다', async () => {
+  const fixture = await makeManagedTerminalRepo(TICKET_A);
+  try {
+    const result = await new WorktreeManager({
+      terminalCleanupHooks: {
+        beforeLocalDelete: (branch) => {
+          if (branch !== fixture.branch) return;
+          // 다른 주체가 먼저 지운 상황. worktree 는 이미 회수된 뒤이므로
+          // 여기서는 ref 만 사라진다.
+          git(fixture.base, ['update-ref', '-d', `refs/heads/${branch}`]);
+        },
+      },
+    }).cleanupTerminalTicketGit({
+      baseWorkingDir: fixture.workingDir,
+      ticketId: TICKET_A,
+      baseBranch: 'main',
+      repositoryResourceId: 'repo-resource',
+    });
+
+    assert.deepEqual(result.heldReasons, [], JSON.stringify(result));
+    assert.deepEqual(result.alreadyAbsentLocalBranches, [fixture.branch], JSON.stringify(result));
+    // "이번 정리가 지웠다" 고 주장하지 않는다 — 두 사실은 별개 필드다.
+    assert.deepEqual(result.removedLocalBranches, [], JSON.stringify(result));
+    assert.deepEqual(result.remainingBranches, [], JSON.stringify(result));
   } finally {
     await fixture.cleanup();
   }

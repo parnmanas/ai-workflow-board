@@ -31,11 +31,37 @@ import type { ResolvedMergeLease } from '../../common/merge-lease-config';
  *     동안은 살아 있다.
  *   - `lastProgressAtMs` — 그 외 관측된 마지막 진행(획득, 재검증 기록 등).
  *
+ * ★ 회수를 참는 것만으로는 부족하다 (ticket baaac7e9). CI 대기 동안 호출자가
+ * `lastProgressAtMs` 를 함께 밀지 않으면 그 동안 시계가 멈춰 있고, CI 가
+ * 해소되는 순간 무진행 경과가 이미 상한을 넘겨 곧바로 `reap_idle` 로 뒤집힌다 —
+ * ff push 를 하러 재개된 홀더가 그 자리에서 회수된다. 그러면 idle 상한은 이 주석이 금지한
+ * "작업 예산" 으로 정확하게 퇴화한다. 실제로 2026-09-03 이후 `reap_idle` 로
+ * 끝난 lease 11건은 전부 생산적인 첫 검증 사이클 도중(`reverify_count` = 1)에
+ * 박탈된 것이었다. 그래서 살아 있는 이유를 `alive` 와 구분해 `alive_ci_wait`
+ * 로 돌려준다 — 하트비트가 필요한 사실을 이 함수가 이미 알고 있으니, 호출자가
+ * 티켓 상태를 다시 읽지 않고 시계를 밀 수 있다.
+ *
  * `maxHoldMs` 는 위 판정 자체가 고장 나도 lease 가 영원히 걸려 있지 않게 하는
  * **백스톱**이라 CI 증거보다 우선한다. 회수의 최악 결과는 fail-open(= 오늘
  * 동작으로 회귀)이지 데이터 손상이 아니므로 이 우선순위가 안전하다.
  */
-export type LeaseLivenessVerdict = 'alive' | 'reap_not_merging' | 'reap_blocked' | 'reap_max_hold' | 'reap_idle';
+export type LeaseLivenessVerdict =
+  | 'alive'
+  /** 살아 있고, **그 이유가 미해소 CI 대기**다 — 호출자는 liveness 시계를 밀어야 한다. */
+  | 'alive_ci_wait'
+  | 'reap_not_merging'
+  | 'reap_blocked'
+  | 'reap_max_hold'
+  | 'reap_idle';
+
+/**
+ * 살아 있다는 판정인가. `verdict === 'alive'` 로 직접 비교하지 말 것 — alive
+ * 변종이 둘이고, 하나를 빠뜨리면 오분류가 하필 **살아 있는 홀더의 lease 를
+ * 회수하는** 방향으로 기운다. 이 티켓이 고치는 결함이 정확히 그 방향이었다.
+ */
+export function isLeaseAliveVerdict(verdict: LeaseLivenessVerdict): boolean {
+  return verdict === 'alive' || verdict === 'alive_ci_wait';
+}
 
 export interface LeaseLivenessInput {
   /** 홀더 티켓이 아직 merging kind 컬럼에 있는가. */
@@ -79,7 +105,7 @@ export function decideLeaseLiveness(input: LeaseLivenessInput): LeaseLivenessVer
     return 'reap_max_hold';
   }
 
-  if (input.hasActiveCiWait) return 'alive';
+  if (input.hasActiveCiWait) return 'alive_ci_wait';
 
   if (input.nowMs - input.lastProgressAtMs < input.idleTimeoutMs) return 'alive';
 

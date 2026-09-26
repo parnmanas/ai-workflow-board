@@ -422,9 +422,31 @@ export class AgentsController {
           }
         : undefined;
 
+      // Lifecycle + the few identity facts the fleet view groups by. Computed
+      // with the SAME helpers `list()` uses (`_enrichLiveData`), but inline:
+      // the dashboard is a list surface and does not need that helper's
+      // per-workspace subagent rollup, only these two derived fields.
+      const reachable = this.agentStatusService.isReachable(agent.id, !!agent.is_online);
+      const lifecycle_state = this.agentStatusService.lifecycleStateFor(
+        agent.id,
+        reachable,
+        agent.connected_at ?? null,
+      );
+
       return {
         id: agent.id,
         name: agent.name,
+        // The fleet view groups by Runtime Host / CLI / status and searches over
+        // name + folder, so those facts ride along here instead of forcing a
+        // second round trip per agent (the old payload carried none of them and
+        // the screen could only render a flat, ungroupable list).
+        type: agent.type,
+        description: agent.description || '',
+        working_dir: (agent as any).working_dir || '',
+        model: (agent as any).model ?? null,
+        origin: (agent as any).origin || '',
+        lifecycle_state,
+        lifecycle_detail: this.agentStatusService.lifecycleDetailFor(agent.id, lifecycle_state),
         manager_agent_id: (agent as any).manager_agent_id ?? null,
         manager_name: (agent as any).manager_name,
         avatar_url: agent.avatar_url,

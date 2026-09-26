@@ -4,6 +4,8 @@ import { BoardCardTicket } from '../types';
 import { tokens } from '../tokens';
 import { Badge } from './common';
 import { NavBadge } from './common/NavBadge';
+import { ActivityDot } from './common/ActivityIndicator';
+import { ticketActivity } from '../activity';
 import { hasStaleOpenQuestion } from './comment-types';
 
 interface TicketCardProps {
@@ -113,6 +115,10 @@ export default function TicketCard({ ticket, index, onClick, onChildClick, focus
               <Badge variant={priorityVariants[ticket.priority] ?? 'neutral'}>
                 {priorityLabels[ticket.priority]}
               </Badge>
+              {/* 지금 돌고 있는 카드 — 세션 목록·미션 카드와 같은 색·같은 숨쉬기
+                 (src/activity.ts). `live` 일 때만 찍는다: 사람을 기다리는 상태와
+                 차단 상태는 아래 ⏸ USER / ⛓ 뱃지가 이미 더 크게 말하고 있다. */}
+              {ticketActivity(ticket).live && <ActivityDot view={ticketActivity(ticket)} size={6} />}
               {/* Pending-user-action badge (ticket a57517be). High-visibility
                  pulsing label that says "this ticket is waiting on you" so a
                  user scanning the board sees the parked ticket immediately

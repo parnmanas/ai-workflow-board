@@ -259,6 +259,9 @@ rl.on('line', (line) => {
       result(message.id, lastNewSessionParams);
       break;
     case 'session/prompt':
+      // 업스트림 오류를 조용히 재시도하는 CLI 흉내 — 응답도 알림도 stderr 도 없다
+      // (실측: opencode 1.18.32 의 무료 모델 429). 러너의 침묵 감시가 이 상황을 본다.
+      if (process.env.FAKE_ACP_SILENT_PROMPT === '1') break;
       if (JSON.stringify(message.params.prompt).includes('OVERSIZED_TEST')) {
         // 거대한 tool 출력이 알림 한 줄로 오는 상황 — 그 줄 뒤의 스트림이 멀쩡해야 한다.
         process.stdout.write(`${'x'.repeat(8192)}\n`);

@@ -1,5 +1,6 @@
 # test:qa 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
 # 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
+# 자리가 헷갈리면 아무 데나 넣고 apps/server 에서 npm run test:suites:sort 를 돌려라.
 test/qa-flows/action-run-budget-exhaustion.test.mjs
 test/qa-flows/action-run-resume-mcp.test.mjs
 test/qa-flows/actions-run-register-retry.test.mjs
@@ -70,11 +71,13 @@ test/qa-flows/orchestration-events-cursor-rest.test.mjs
 test/qa-flows/orchestration-graph-execution.test.mjs
 test/qa-flows/orchestration-lifecycle.test.mjs
 test/qa-flows/orchestration-mission-conversation.test.mjs
+test/qa-flows/orchestration-mission-reopen.test.mjs
 test/qa-flows/orchestration-recovery.test.mjs
 test/qa-flows/orchestration-restart-recovery.test.mjs
 test/qa-flows/orchestration-slot-provisioning.test.mjs
 test/qa-flows/orchestration-step-activity.test.mjs
 test/qa-flows/orchestration-step-evidence.test.mjs
+test/qa-flows/orchestration-step-retry-budget.test.mjs
 test/qa-flows/orchestration-team-global-scope.test.mjs
 test/qa-flows/pend-action-gate-mcp.test.mjs
 test/qa-flows/promotion-delay-reason.test.mjs

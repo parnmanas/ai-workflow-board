@@ -21,10 +21,10 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * `interval_ms`. `next_run_at` is the precomputed next firing instant the tick
  * compares against; `last_run_at`/`last_batch_id` record the most recent kick.
  *
- * Deploy-timing footgun (the ticket's ⚠️): a scheduled run hits the RUNNING
- * (deployed) server, which auto-deploys from production.private only AFTER main
- * merges — so a schedule firing right after a fix-merge can inspect pre-deploy
- * code and report a false green. Two layers of mitigation: (1) every SecurityRun
+ * 배포 타이밍 함정 (티켓의 ⚠️): 스케줄 실행은 **돌고 있는(배포된)** 서버를 친다. 배포
+ * 호스트가 `origin/main` 을 detached 로 다시 체크아웃해 의존성 재설치·재빌드·재기동해야
+ * 그 커밋이 서빙되므로, 머지 직후 발화하는 스케줄은 배포 전 코드를 점검해 "가짜 그린"
+ * 을 보고할 수 있다. Two layers of mitigation: (1) every SecurityRun
  * records `scanned_commit` (the worktree HEAD the agent actually inspected), so
  * the inspected code is always reconstructable from the run — the schedule never
  * hides WHICH commit it checked; (2) operationally, set the cadence coarser than

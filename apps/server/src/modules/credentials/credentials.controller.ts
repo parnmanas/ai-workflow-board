@@ -16,8 +16,12 @@ import { normalizeCredentialFields } from '../../common/credential-fields';
 import { PROVIDER_FIELDS, REVEALABLE_OAUTH_FIELDS } from '../../common/credential-providers';
 import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
-import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope } from '../../common/catalog-scope';
+import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
+import { Agent } from '../../entities/Agent';
+import { Resource } from '../../entities/Resource';
+import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
+import { OutreachChannel } from '../../entities/OutreachChannel';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { AuthService } from '../../services/auth.service';
 import { ActivityService } from '../../services/activity.service';
@@ -56,6 +60,19 @@ function maskCredentialData(decryptedJson: string): Record<string, string> {
 function isMaskedValue(value: string): boolean {
   return value.includes('••••');
 }
+
+// Everything that pins a credential by bare id (no DB FK — same loose pointer
+// pattern Resource.credential_id documents). Narrowing a global credential to
+// one Workspace would leave any of these that live elsewhere pointing at a
+// credential they can no longer read, so update() refuses the move instead.
+// A NULL workspace_id here means the holder is itself instance-wide (a manager
+// Agent row, a global Resource) and so is just as much outside the destination.
+const CREDENTIAL_DEPENDENTS: Array<{ entity: Function; label: string }> = [
+  { entity: Agent, label: 'agent(s)' },
+  { entity: Resource, label: 'resource(s)' },
+  { entity: AgentSessionCliSetting, label: 'CLI session setting(s)' },
+  { entity: OutreachChannel, label: 'outreach channel(s)' },
+];
 
 // 티켓 b2e79108 — CLI 자동 로그인 세션 응답 shape. 토큰 원문(auth_json 등)은
 // CliLoginSession에 애초에 저장하지 않으므로(Credential.encrypted_data에만
@@ -131,6 +148,20 @@ export class CredentialsController {
     const user = (req as any).currentUser;
     if (!user) return false;
     return hasPermission(user.role, user.permissions || [], PERMISSIONS.MANAGE_GLOBAL_CREDENTIALS);
+  }
+
+  /** Dependent rows that would be orphaned by narrowing `credentialId` down to
+   *  `targetWorkspaceId`, as human-readable "<n> <kind>" fragments. */
+  private async findScopeNarrowingBlockers(credentialId: string, targetWorkspaceId: string): Promise<string[]> {
+    const blockers: string[] = [];
+    for (const { entity, label } of CREDENTIAL_DEPENDENTS) {
+      const rows = await this.dataSource
+        .getRepository(entity as any)
+        .find({ where: { credential_id: credentialId } as any });
+      const outside = rows.filter((r: any) => (r.workspace_id ?? null) !== targetWorkspaceId);
+      if (outside.length > 0) blockers.push(`${outside.length} ${label}`);
+    }
+    return blockers;
   }
 
   @Get()
@@ -394,26 +425,57 @@ export class CredentialsController {
     return res.status(201).json(serializeCred(cred));
   }
 
+  /**
+   * Unlike the other catalog kinds, a Credential CAN be re-scoped in place
+   * (ticket: admin scope switch) — a token pasted into one Workspace is
+   * routinely the same token every Workspace needs, and re-creating it means
+   * re-pasting a secret and re-pointing every binding by hand.
+   *
+   * `workspace_id` in the body keeps its old meaning — the Workspace the
+   * caller is acting from. It doubles as the DESTINATION when a global
+   * credential is narrowed, which is why a Workspace credential can never be
+   * moved straight into a different Workspace: the ownership check below still
+   * requires it to match. Widen to global first, then narrow, and the
+   * dependent check runs on the way back down.
+   */
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { workspace_id } = body;
     const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
-    if (cred.workspace_id === null) {
-      // Global credential — instance-admin only.
-      if (!this.canManageGlobal(req)) {
-        return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
-      }
-    } else {
-      // Workspace credential — body workspace_id must match the owning one.
-      if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
-      if (cred.workspace_id !== workspace_id) return res.status(404).json({ error: 'Credential not found' });
+    if (body.board_id) {
+      return res.status(400).json({ error: 'Board-scoped catalog items are no longer supported; create the item in its Workspace instead' });
     }
-    if (
-      (body.workspace_id !== undefined && (body.workspace_id || null) !== cred.workspace_id)
-      || (body.board_id !== undefined && (body.board_id || null) !== cred.board_id)
-      || (body.scope !== undefined && body.scope !== catalogScopeOf(cred))
-    ) {
-      return res.status(400).json({ error: 'Credential scope cannot be changed; create a new scoped credential instead' });
+    if (body.scope !== undefined && body.scope !== 'global' && body.scope !== 'workspace') {
+      return res.status(400).json({ error: `Unknown scope '${body.scope}'` });
+    }
+    const actingWorkspaceId = String(body.workspace_id || '').trim();
+    const currentScope = catalogScopeOf(cred);
+    // Read before the row is mutated below — the audit entry needs the old side.
+    const previousWorkspaceId = cred.workspace_id;
+    // Omitting `scope` keeps the credential where it is — what every client
+    // that predates the scope switch sends.
+    const targetScope: CatalogScope = (body.scope as CatalogScope | undefined) ?? currentScope;
+
+    if (currentScope === 'workspace') {
+      // Workspace credential — body workspace_id must match the owning one.
+      if (!actingWorkspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+      if (cred.workspace_id !== actingWorkspaceId) return res.status(404).json({ error: 'Credential not found' });
+    }
+    // Editing a global credential, or promoting one into global, is
+    // instance-admin territory either way.
+    if ((currentScope === 'global' || targetScope === 'global') && !this.canManageGlobal(req)) {
+      return res.status(403).json({ error: 'Permission required: admin.global_credentials' });
+    }
+    if (targetScope === 'workspace' && !actingWorkspaceId) {
+      return res.status(400).json({ error: 'workspace_id is required for workspace scope' });
+    }
+    const scopeChanged = targetScope !== currentScope;
+    if (scopeChanged && targetScope === 'workspace') {
+      const blockers = await this.findScopeNarrowingBlockers(cred.id, actingWorkspaceId);
+      if (blockers.length > 0) {
+        return res.status(409).json({
+          error: `Cannot narrow this global credential to one Workspace — ${blockers.join(', ')} outside it still reference it. Re-point or remove them first.`,
+        });
+      }
     }
 
     if (body.name !== undefined) {
@@ -434,7 +496,30 @@ export class CredentialsController {
       cred.encrypted_data = encrypt(JSON.stringify(normalizeCredentialFields(merged)));
     }
 
+    if (scopeChanged) {
+      cred.workspace_id = targetScope === 'global' ? null : actingWorkspaceId;
+      cred.board_id = null;
+    }
+
     const saved = await this.credRepo.save(cred);
+    if (scopeChanged) {
+      // A Workspace secret becoming instance-wide (or the reverse) changes who
+      // can read it, so it leaves the same kind of trail a reveal does.
+      const actor = (req as any).currentUser;
+      await this.activityService.logActivity({
+        entity_type: 'credential',
+        entity_id: saved.id,
+        action: 'credential_scope_changed',
+        field_changed: 'workspace_id',
+        old_value: currentScope === 'global' ? 'global' : `workspace:${previousWorkspaceId ?? ''}`,
+        new_value: targetScope === 'global' ? 'global' : `workspace:${actingWorkspaceId}`,
+        actor_id: actor?.id || '',
+        actor_name: actor?.name || '',
+        ticket_id: '',
+        workspace_id: saved.workspace_id || actingWorkspaceId,
+        trigger_source: 'admin_ui',
+      });
+    }
     return res.json(serializeCred(saved));
   }
 

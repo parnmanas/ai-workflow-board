@@ -44,6 +44,8 @@ import { releaseOpenLeaseRows } from '../mcp/shared/merge-lease-move';
 import {
   decideLeaseLiveness,
   decideReverifyOutcome,
+  isLeaseAliveVerdict,
+  LeaseLivenessVerdict,
   MergeLeaseContext,
   parseMergeLeaseContext,
 } from './merge-lease';
@@ -561,6 +563,12 @@ export class MergeLeaseService {
   /**
    * 홀더의 진행을 기록한다(liveness 갱신). 리퍼가 진행 중인 홀더를 뺏지 않도록
    * 하는 쪽의 입력이다.
+   *
+   * 호출자는 `reapStaleHolders` 다 — 홀더가 미해소 CI 대기 때문에 살아 있다고
+   * 판정될 때마다 시계를 민다. 이 메서드가 호출자 0개로 남아 있던 것이
+   * ticket baaac7e9 의 결함이었으므로, 호출자를 지우려면 그 회귀 테스트
+   * (`merge-lease-serialization.test.mjs` 의 "CI 가 idle 상한보다 오래 돌아도")
+   * 가 무엇을 지키는지 먼저 확인할 것.
    */
   async noteProgress(ticketId: string, note: string): Promise<void> {
     try {
@@ -599,7 +607,27 @@ export class MergeLeaseService {
     let reaped = 0;
     for (const lease of holders) {
       const verdict = await this.judgeHolder(lease, config, now);
-      if (verdict === 'alive') continue;
+      if (isLeaseAliveVerdict(verdict)) {
+        // ★ 하트비트 (ticket baaac7e9). 미해소 CI 대기는 서버 자신이 그 run 을
+        //   폴링 중이라는 진행 증거이므로, 회수를 참는 데서 멈추지 않고 시계도
+        //   함께 민다. 밀지 않으면 CI 가 도는 동안 무진행 시간이 그대로 누적돼
+        //   `pending_ci_wait` 이 내려가는 순간 이미 상한을 넘겨 있고, ff push 를
+        //   하러 재개된 **살아 있는** 홀더가 그 자리에서 회수된다 — idle 상한이
+        //   `merge-lease.ts` 가 금지한 "grant 이후 총 작업 예산" 으로 퇴화한다.
+        //   실측: 2026-09-26 에 연속 3홀더가 이렇게 박탈돼 42분간 랜딩이 0건이
+        //   었고, 그 사이 박탈된 티켓들이 fail-open 으로 랜딩해 base 를 계속
+        //   밀었다(= 이 기구가 막으려던 CI 재검증 루프).
+        //
+        //   `alive`(아직 idle 상한 전)에는 밀지 않는다. 그쪽까지 밀면 상한이
+        //   영원히 도달하지 않아 죽은 홀더를 회수할 수 없다.
+        //
+        //   여기(= `acquire` 와 스윕이 공유하는 규칙)에 두는 이유: 스윕에만
+        //   두면 `MERGE_LEASE_SWEEP_ENABLED=false` 인 배포에서 하트비트가 함께
+        //   죽어, 같은 스코프를 건드리는 `acquire` 의 인라인 회수가 CI 를 막
+        //   끝낸 홀더를 다시 뺏는다.
+        if (verdict === 'alive_ci_wait') await this.noteProgress(lease.ticket_id, 'ci_wait_active');
+        continue;
+      }
       // ★ 리뷰 2R — 조건부 해제. 판정과 해제 사이에 홀더가 진행을 기록하면
       //   (예: `await_ci_run` 등록, 재획득) 이 회수는 **취소돼야** 한다.
       //   무조건 해제하면 판정 직후 살아난 홀더의 lease 를 뺏고, 홀더는 그
@@ -696,7 +724,7 @@ export class MergeLeaseService {
     lease: MergeLease,
     config: ResolvedMergeLease,
     now: Date,
-  ): Promise<'alive' | 'reap_not_merging' | 'reap_blocked' | 'reap_max_hold' | 'reap_idle'> {
+  ): Promise<LeaseLivenessVerdict> {
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: lease.ticket_id } });
     if (!ticket) return 'reap_not_merging';
     const column = ticket.column_id

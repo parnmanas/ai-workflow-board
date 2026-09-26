@@ -109,6 +109,7 @@ function cliProviderFieldDefs(provider: FlattenedCredentialProvider): Record<str
 
 export default function CredentialManager({
   workspaceId,
+  workspaceName,
   globalMode = false,
   catalogMode = false,
   createScope = 'workspace',
@@ -116,6 +117,10 @@ export default function CredentialManager({
   canManageGlobal = false,
 }: {
   workspaceId?: string;
+  /** Names the destination in the Edit dialog's scope picker — moving a global
+   *  credential down lands it in the Workspace currently being viewed, and
+   *  "Current Workspace" is not a good enough label for that. */
+  workspaceName?: string;
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
@@ -150,6 +155,7 @@ export default function CredentialManager({
   const [formDescription, setFormDescription] = useState('');
   const [formProvider, setFormProvider] = useState('github');
   const [formFields, setFormFields] = useState<Record<string, string>>({});
+  const [formScope, setFormScope] = useState<CatalogScope>('workspace');
   const [storedFieldPreviews, setStoredFieldPreviews] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
 
@@ -252,6 +258,7 @@ export default function CredentialManager({
     setFormDescription('');
     setFormProvider('github');
     setFormFields({});
+    setFormScope(effectiveCreateScope);
     setStoredFieldPreviews({});
     setFormErrors({});
     setEditCred(null);
@@ -267,6 +274,7 @@ export default function CredentialManager({
     // the purpose of showing an identifying prefix/suffix.
     setStoredFieldPreviews({ ...cred.credential_fields });
     setFormFields({});
+    setFormScope(cred.scope ?? (cred.workspace_id ? 'workspace' : 'global'));
     setFormErrors({});
     setEditCred(cred);
     setShowForm(true);
@@ -284,8 +292,11 @@ export default function CredentialManager({
     try {
       if (editCred) {
         await api.updateCredential(editCred.id, {
-          scope: editCred.scope,
-          workspace_id: editCred.workspace_id,
+          scope: formScope,
+          // Doubles as the ownership proof for a workspace credential and the
+          // destination when a global one is narrowed — see the server's
+          // update() doc comment.
+          workspace_id: editCred.workspace_id ?? effectiveWsId,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -527,6 +538,34 @@ export default function CredentialManager({
             </div>
           </div>
           <Input label="Description" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Optional note" />
+
+          {/* Scope is fixed at create time by the page-level "Workspace for new
+              item" picker; on an existing credential it is switchable, because
+              the alternative is re-pasting a secret and re-pointing every
+              binding by hand. Non-admins get the control read-only: the Actions
+              column already hides Edit for inherited globals, so for them this
+              row only ever states which Workspace owns the row. */}
+          {editCred && !globalMode && (
+            <div>
+              <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Scope</label>
+              <select
+                value={formScope}
+                disabled={!canManageGlobal}
+                onChange={(e) => setFormScope(e.target.value as CatalogScope)}
+                style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: canManageGlobal ? tokens.colors.textStrong : tokens.colors.textMuted, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
+              >
+                <option value="global">Not set (Global — every Workspace)</option>
+                <option value="workspace">{workspaceName || 'Current Workspace'}</option>
+              </select>
+              <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
+                {!canManageGlobal
+                  ? 'Only an administrator can share a credential across Workspaces.'
+                  : formScope === 'global'
+                  ? 'Readable from every Workspace on this instance.'
+                  : `Readable only from ${workspaceName || 'this Workspace'}. Agents, resources, CLI session settings and outreach channels elsewhere that use it must be re-pointed first.`}
+              </div>
+            </div>
+          )}
 
           {Object.entries(getFieldDefs(formProvider)).map(([fieldKey, fieldDef]) => (
             <div key={fieldKey}>

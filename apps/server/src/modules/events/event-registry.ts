@@ -41,6 +41,9 @@ import {
   AgentSessionRequestPayload,
   AgentSessionUpdatePayload,
   AgentSessionEventPayload,
+  TerminalRequestPayload,
+  TerminalUpdatePayload,
+  TerminalOutputPayload,
 } from '../../common/types/stream-events';
 import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
@@ -1411,6 +1414,84 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'agent_session_event', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── terminal_request ─────────
+  // Terminal(Runtime Host 셸): 서버 → agent-manager. agent_session_request 와 같은
+  // 규약 — scope.agent_id 가 매니저 identity 라 그 매니저 SSE 연결에만 가고 사용자에게는
+  // 절대 가지 않는다. `request_id` 가 있으면 RPC(응답은 REST).
+  {
+    eventType: 'terminal_request',
+    emitterEvent: 'terminal_request',
+    map(event: any) {
+      const payload: TerminalRequestPayload = {
+        manager_id: event.manager_id,
+        workspace_id: event.workspace_id,
+        op: event.op,
+        request_id: event.request_id,
+        terminal_id: event.terminal_id ?? null,
+        shell: event.shell ?? null,
+        cwd: event.cwd,
+        title: event.title,
+        cols: event.cols,
+        rows: event.rows,
+        data: event.data,
+        driver_user_id: event.driver_user_id,
+        issued_at: event.issued_at,
+      };
+      return {
+        payload,
+        scope: { agent_id: event.manager_id },
+        timestamp: event.issued_at,
+      };
+    },
+    filter: (env, identity) => {
+      if (identity.type !== 'agent') return false;
+      return env.scope.agent_id === identity.agentId;
+    },
+  },
+
+  // ───────── terminal_update ─────────
+  // 라이브 터미널의 상태 변경(status/cwd/title/크기/종료). UI 전용 — driver 에게만.
+  {
+    eventType: 'terminal_update',
+    emitterEvent: 'terminal_update',
+    map(event: any) {
+      const payload: TerminalUpdatePayload = {
+        terminal: event.terminal,
+        reason: event.reason || 'updated',
+      };
+      return {
+        payload,
+        scope: { user_id: event.terminal?.driver_user_id || event.driver_user_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'terminal_update', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── terminal_output ─────────
+  // PTY 출력 청크(base64). UI 전용 — driver 에게만. 저장하지 않는다 — 스크롤백은
+  // 매니저가 들고 있고 attach 가 한 번 넘겨준다.
+  {
+    eventType: 'terminal_output',
+    emitterEvent: 'terminal_output',
+    map(event: any) {
+      const payload: TerminalOutputPayload = {
+        manager_id: event.manager_id,
+        terminal_id: event.terminal_id,
+        driver_user_id: event.driver_user_id,
+        chunk: event.chunk,
+      };
+      return {
+        payload,
+        scope: { user_id: event.driver_user_id },
+        timestamp: event.timestamp,
+      };
+    },
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'terminal_output', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
 ];

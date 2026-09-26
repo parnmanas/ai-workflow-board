@@ -1225,6 +1225,8 @@ async function sendAgentSessionRequest(
   url: string,
   payload: string,
   label: string,
+  /** 로그 접두어 — 같은 전송 경로를 쓰는 표면이 둘이라(세션/터미널) 로그에서 구분한다. */
+  surface = 'agent-session',
 ): Promise<AgentSessionRestResult> {
   try {
     const resp = await fetch(url, {
@@ -1235,10 +1237,10 @@ async function sendAgentSessionRequest(
     });
     let body: any = null;
     try { body = await resp.json(); } catch { body = null; }
-    if (!resp.ok) log(`agent-session ${label} ${method} failed: HTTP ${resp.status} ${body?.error ?? ''}`.trim());
+    if (!resp.ok) log(`${surface} ${label} ${method} failed: HTTP ${resp.status} ${body?.error ?? ''}`.trim());
     return { ok: resp.ok, status: resp.status, body };
   } catch (err: any) {
-    log(`agent-session ${label} ${method} error: ${err?.message ?? err}`);
+    log(`${surface} ${label} ${method} error: ${err?.message ?? err}`);
     return { ok: false, status: 0 };
   }
 }
@@ -1430,4 +1432,71 @@ export async function fetchSessionCredential(
     log(`agent-session credential fetch error: ${err?.message ?? err}`);
     throw Object.assign(new Error(`Credential fetch error: ${err?.message ?? err}`), { code: 'credential_fetch_error' });
   }
+}
+
+// ─── Terminal (Runtime Host 셸) ────────────────────────────────────────────
+// 서버 contract: apps/server/src/modules/terminals/terminals-agent.controller.ts.
+// agent-session 표면과 같은 규약 — 매니저 자신의 키로 (1) list/open/attach RPC 응답,
+// (2) PTY 출력 중계, (3) 상태 patch 를 보낸다. 출력은 시간 민감이라 outbox 에 넣지
+// 않는다(유실된 바이트는 되살릴 수 없지만, 스크롤백이 매니저에 남아 attach 가 메꾼다).
+
+export interface TerminalRef {
+  manager_id: string;
+  terminal_id: string;
+}
+
+export interface TerminalOutputChunkInput {
+  seq: number;
+  /** base64 로 실린 원문 바이트. */
+  data: string;
+  created_at?: string;
+}
+
+export interface TerminalStatePatch {
+  status?: string;
+  cwd?: string;
+  title?: string;
+  cols?: number;
+  rows?: number;
+  pid?: number | null;
+  exit_code?: number | null;
+  last_error?: string | null;
+  reason?: string;
+}
+
+function terminalPath(ref: TerminalRef): string {
+  return `${encodeURIComponent(ref.manager_id)}/${encodeURIComponent(ref.terminal_id)}`;
+}
+
+export async function postTerminalRpcResponse(
+  config: AwbConfig,
+  managerId: string,
+  requestId: string,
+  body: { ok: boolean; result?: unknown; error?: string; code?: string },
+): Promise<AgentSessionRestResult> {
+  if (!requestId) return { ok: false, status: 0 };
+  const url = `${trimSlash(config.url)}/api/agent/terminals/rpc/${encodeURIComponent(requestId)}`;
+  return sendAgentSessionRequest(config, 'POST', url, JSON.stringify({ manager_id: managerId, ...body }), `rpc(${requestId.slice(0, 8)})`, 'terminal');
+}
+
+export async function postTerminalOutput(
+  config: AwbConfig,
+  ref: TerminalRef,
+  chunks: TerminalOutputChunkInput[],
+  state?: TerminalStatePatch | null,
+): Promise<AgentSessionRestResult> {
+  if (!ref.terminal_id || (chunks.length === 0 && !state)) return { ok: true, status: 204 };
+  const url = `${trimSlash(config.url)}/api/agent/terminals/${terminalPath(ref)}/output`;
+  const payload = JSON.stringify({ manager_id: ref.manager_id, chunks, state: state ?? undefined });
+  return sendAgentSessionRequest(config, 'POST', url, payload, `output(${ref.terminal_id.slice(0, 8)})`, 'terminal');
+}
+
+export async function patchTerminalState(
+  config: AwbConfig,
+  ref: TerminalRef,
+  state: TerminalStatePatch,
+): Promise<AgentSessionRestResult> {
+  if (!ref.terminal_id) return { ok: false, status: 0 };
+  const url = `${trimSlash(config.url)}/api/agent/terminals/${terminalPath(ref)}`;
+  return sendAgentSessionRequest(config, 'PATCH', url, JSON.stringify({ manager_id: ref.manager_id, ...state }), `state(${ref.terminal_id.slice(0, 8)})`, 'terminal');
 }

@@ -9,6 +9,7 @@
 
 import { log } from './logging.js';
 import type { AgentSessionRunner, AgentSessionRequest } from './agent-session-runner.js';
+import type { TerminalRunner, TerminalRequest } from './terminal-runner.js';
 import { loadAgentInfo } from './config.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
@@ -957,6 +958,8 @@ export interface EventDispatcherDeps {
   // Agent Session(CLI 직접 세션) 러너 — `agent_session_request` SSE 를 처리한다.
   // 선택적이라 러너 없는 하네스/테스트는 그 이벤트를 조용히 버린다.
   agentSessionRunner?: AgentSessionRunner | null;
+  // Terminal(Runtime Host 셸) 러너 — `terminal_request` SSE 를 처리한다. 같은 이유로 선택적이다.
+  terminalRunner?: TerminalRunner | null;
   fsBrowser?: FsBrowser | null;
   prompts?: PromptComposer | null;
   // ST-5b — handler for agent_manager_command SSE events. Optional so the
@@ -1019,6 +1022,7 @@ export class EventDispatcher {
   #runtimeProfileOverride: RuntimeProfileSpec | null | undefined;
   #runtimeSupervisor: RuntimeSupervisor | null;
   #agentSessionRunner: AgentSessionRunner | null;
+  #terminalRunner: TerminalRunner | null;
   // ticket a3047a86: per-ticket de-dup for dispatch-preflight blocker comments
   // (broken worktree / missing push credential). The abort already suppresses
   // the spawn; this keeps the SAME blocker from re-posting a ticket comment on
@@ -1234,6 +1238,7 @@ export class EventDispatcher {
     this.#runtimeProfileOverride = deps.runtimeProfileOverride;
     this.#runtimeSupervisor = deps.runtimeSupervisor ?? null;
     this.#agentSessionRunner = deps.agentSessionRunner ?? null;
+    this.#terminalRunner = deps.terminalRunner ?? null;
     this.#inflightDispatch = deps.inflightDispatchTracker ?? new InflightDispatchTracker();
     this.#dispatchBlockTracker = deps.dispatchBlockTracker ?? new DispatchBlockTracker();
     this.#poolReclaimTrigger = deps.poolReclaimTrigger ?? null;
@@ -2115,6 +2120,7 @@ export class EventDispatcher {
       case 'fs_request':
       case 'agent_manager_command':
       case 'agent_session_request':
+      case 'terminal_request':
         recordEvent(eventType, raw);
         break;
       default:
@@ -2139,6 +2145,8 @@ export class EventDispatcher {
           : undefined;
       case 'agent_session_request':
         return this.handleAgentSessionRequest(raw);
+      case 'terminal_request':
+        return this.handleTerminalRequest(raw);
     }
   }
 
@@ -2161,6 +2169,27 @@ export class EventDispatcher {
     const self = loadAgentInfo()?.agent_id || '';
     if (self && payload.manager_id !== self) return; // 다른 매니저 앞으로 온 요청
     await this.#agentSessionRunner.handle(payload);
+  }
+
+  /**
+   * Terminal(Runtime Host 셸) 제어 요청. agent_session_request 와 같은 envelope-native
+   * 이벤트이고, 터미널도 AWB Agent 가 아니라 **이 장비** 에 속하므로 agent 실행 컨텍스트를
+   * 해석하지 않는다 — 매니저 identity 만 대조한다.
+   */
+  async handleTerminalRequest(raw: string): Promise<void> {
+    if (!this.#terminalRunner) return;
+    let ev: any;
+    try {
+      ev = JSON.parse(raw);
+    } catch (err: any) {
+      log(`Failed to parse terminal_request: ${err?.message ?? err}`);
+      return;
+    }
+    const payload = (ev?.payload ?? ev ?? {}) as TerminalRequest;
+    if (!payload.manager_id || !payload.op) return;
+    const self = loadAgentInfo()?.agent_id || '';
+    if (self && payload.manager_id !== self) return; // 다른 매니저 앞으로 온 요청
+    await this.#terminalRunner.handle(payload);
   }
 
   async handleFsRequest(raw: string): Promise<void> {

@@ -182,7 +182,7 @@ checkout 만 회수한다.
 
 위 3번의 알림 중 **가장 흔한 형태 하나는 이제 아예 발행되지 않는다.** 원격 ref 가
 이미 없고(담당자가 Merging step 5 에서 지웠다) 살아 있는 worktree 가 로컬 ref 를 물고
-있어 `git branch -d` 가 거부되는 상태 — Done 진입과 같은 순간에 리뷰 디스패치가
+있어 지울 수 없는 상태 — Done 진입과 같은 순간에 리뷰 디스패치가
 per-ticket worktree 를 다시 프로비저닝하면 그대로 발생한다 — 는 **정상 보류**다.
 커밋은 base 에 들어가 있고 원격도 정리된 뒤라 잃는 것이 없으며, 그 checkout 이 끝나면
 10분 sweep 이 회수한다. `TerminalTicketCleanupReport.benignHolds` 로 분리되고,
@@ -191,7 +191,7 @@ per-ticket worktree 를 다시 프로비저닝하면 그대로 발생한다 — 
 빠진다.
 
 판정은 stderr 문구가 아니라 저장소 상태로 한다 — Git 버전·로캘에 따라 문구가
-달라지기 때문이다. 세 조건이 **삭제가 실패한 그 시점에** 모두 성립할 때만 정상
+달라지기 때문이다. 세 조건이 **삭제를 시도하는 그 시점에** 모두 성립할 때만 정상
 보류다: `git worktree list` 의 보유자가 있고, 원격 추적 ref 는 없으며, 로컬 ref 가
 여전히 `origin/<base>` 에 포함돼 있다.
 
@@ -205,6 +205,47 @@ per-ticket worktree 를 다시 프로비저닝하면 그대로 발생한다 — 
 같은 티켓에서 정리 실행 자체도 `(ticketId, terminal_entered_at)` 기준 단일 실행으로
 직렬화됐다. 겹치거나 재전달된 `moved` 이벤트는 버려지고, 여러 agent home 의 결과는
 알림 한 건으로 합쳐진다.
+
+### 삭제 기준을 검증 기준과 일치시킨다 (ticket 6d580125)
+
+위 절이 "판정은 저장소 상태로 한다" 고 정했는데도 **실제 삭제 명령 두 개가 여전히
+stderr 문구로 부재를 판정**하고 있었고, 그보다 큰 문제로 **로컬 삭제의 자격 기준이
+검증 기준과 달랐다.**
+
+정리 코드는 `origin/<base>` 포함으로 삭제 자격을 판정한 뒤 실제 삭제를
+`git branch -d` 에 위임했다. 그런데 `-d` 의 기준은 **HEAD(또는 upstream) 포함**이고,
+base 클론의 primary HEAD 는 `#freeBaseBranch` 가 detach 해 둔 시점에 고정돼 시간이
+갈수록 뒤처진다(티켓 branch 에는 upstream 도 없다). 그래서 `origin/<base>` 에 완전히
+포함된 branch 조차 `not fully merged` 로 거부됐고, worktree 는 이미 회수돼 보유자가
+없으므로 분류가 일반 메시지로 떨어져 **정리를 정확히 마친 티켓에**
+`로컬 브랜치 삭제 실패` + `잔여 브랜치` 경고가 붙었다.
+
+그래서 로컬 삭제는 **검증 시점의 OID 를 lease 로 건 `git update-ref -d <ref> <oid>`**
+로 바뀌었다 — 원격 쪽이 이미 `--force-with-lease` 로 쓰는 것과 같은 모양이다. 이렇게
+하면 판정 기준이 검증 기준과 일치하고, 검증 이후 ref 가 전진했으면 git 이 원자적으로
+거부한다(`-D` 로 바꾸는 손쉬운 해법은 바로 그 전진한 커밋을 조용히 잃으므로 쓰지 않는다).
+
+`update-ref` 는 `branch -d` 와 달리 **체크아웃 여부를 보지 않으므로**, 보유자 확인이
+삭제 시도 **앞으로** 옮겨졌다. 이 순서가 아니면 살아 있는 worktree 를 없는 branch 위에
+남기게 된다.
+
+부재는 양쪽 모두 저장소·원격 상태로 판정하고, 결과를 별도 필드로 나눈다:
+
+- `alreadyAbsentLocalBranches` / `alreadyAbsentRemoteBranches` — **이미 없어서 지울
+  것이 없었다.** 멱등 성공이며 `heldReasons` 에 넣지 않으므로 경고가 발행되지 않는다.
+- `removedLocalBranches` / `removedRemoteBranches` — **이번 정리가 지웠다.**
+
+두 사실을 한 필드에 합치면 정리가 실제로 무엇을 했는지 사후에 구분할 수 없고, 반대로
+이미-부재를 오류로 올리면 아무 문제도 없는 상태에 경고가 붙는다.
+
+원격 쪽 부재 판정은 `git ls-remote --heads origin <ref>` 로 **원격에 직접 묻는다.**
+정리는 시작할 때 `fetch --prune` 을 돌리므로 담당자가 이미 지운 원격 branch 는 보통
+열거 단계에서 사라지지만, fetch 와 삭제 push 사이에 다른 클론이 같은 ref 를 지우면
+우리 lease 가 stale 해져 push 가 `(delete) -> … (stale info)` 로 거부된다. 예전
+판정식(`/remote ref does not exist|unable to delete/`)은 그 문구를 못 잡아 이 정상
+상태를 `원격 브랜치 삭제 실패` 로 보고했고, 그 보류가 로컬 삭제까지 막아 "잔여 브랜치"
+까지 함께 붙였다. `ls-remote` 자체가 실패하면(네트워크·인증) 부재를 단정할 수 없으므로
+조용히 성공으로 넘기지 않고 실제 실패로 보고한다(fail-closed).
 
 ### 회수되는 checkout 의 형태 (ticket 7b384c10)
 

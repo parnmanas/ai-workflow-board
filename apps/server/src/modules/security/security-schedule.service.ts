@@ -84,10 +84,10 @@ export interface RunSecurityScheduleNowResult {
  *     `running`, this occurrence is dropped (next_run_at already advanced) and
  *     logged — a slow batch can never pile up overlapping runs.
  *
- * Deploy-timing footgun (the ticket's ⚠️, same as QA scheduler / #467dbc7a): a
- * scheduled run hits the RUNNING server, which auto-deploys from
- * production.private only AFTER main merges. A schedule firing right after a
- * fix-merge can inspect pre-deploy code and report a false green. Two layers:
+ * 배포 타이밍 함정 (티켓의 ⚠️, QA 스케줄러 / #467dbc7a 와 동일): 스케줄 실행은 **돌고
+ * 있는** 서버를 친다. 배포 호스트가 `origin/main` 을 detached 로 다시 체크아웃해 의존성
+ * 재설치·재빌드·재기동해야 그 커밋이 서빙되므로, 머지 직후 발화하는 스케줄은 배포 전
+ * 코드를 점검해 "가짜 그린" 을 보고할 수 있다. Two layers:
  * (1) every SecurityRun records `scanned_commit` (the worktree HEAD the agent
  * actually inspected), so WHICH commit a scheduled run checked is always
  * reconstructable from the run — the schedule never hides the inspected commit;

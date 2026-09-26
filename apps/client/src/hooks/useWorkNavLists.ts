@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
-import type { OrchestrationUpdateEvent } from '../types';
+import type { OrchestrationMissionStatus, OrchestrationUpdateEvent } from '../types';
 import { MISSIONS_CHANGED_EVENT, TEAMS_CHANGED_EVENT } from '../components/workNavigation';
 
 /**
@@ -24,6 +24,12 @@ export interface WorkNavTeam {
 export interface WorkNavMission {
   id: string;
   title: string;
+  /**
+   * 사이드바 행의 진행 점(ActivityDot)이 읽는 값. 목록을 부를 때 받고, 이후
+   * `orchestration_update` 프레임이 제자리에서 갱신한다 — 돌고 있는 미션이 왼쪽
+   * 프레임에서 그렇게 보여야 한다는 것이 이 필드가 있는 이유다.
+   */
+  status: OrchestrationMissionStatus;
 }
 
 export interface WorkNavLists {
@@ -67,7 +73,7 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
     try {
       const list = await api.listOrchestrationMissions(workspaceId, { limit: WORK_NAV_MISSION_LIMIT });
       if (generationRef.current !== generation) return;
-      setMissions(list.map((mission) => ({ id: mission.id, title: mission.title })));
+      setMissions(list.map((mission) => ({ id: mission.id, title: mission.title, status: mission.status })));
     } catch {
       if (generationRef.current !== generation) return;
       setMissions([]);
@@ -120,9 +126,9 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
     }
     setMissions((prev) => {
       const idx = prev.findIndex((mission) => mission.id === data.mission_id);
-      if (idx === -1 || prev[idx].title === data.title) return prev;
+      if (idx === -1 || (prev[idx].title === data.title && prev[idx].status === data.status)) return prev;
       const next = [...prev];
-      next[idx] = { ...next[idx], title: data.title };
+      next[idx] = { ...next[idx], title: data.title, status: data.status };
       return next;
     });
   });

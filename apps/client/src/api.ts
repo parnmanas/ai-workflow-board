@@ -1,4 +1,5 @@
 import type { CliDescriptor } from './cli/catalog';
+import type { HostModelsView } from './cli/hostModels';
 import type {
   PromptTemplate,
   Resource,
@@ -103,7 +104,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -1679,6 +1680,12 @@ export const api = {
 
   // ─── Admin Agent Manager (Phase 3) ─────────────────────
   // Live Runtime Hosts heartbeating against the server.
+  /** Runtime Host 별 CLI 모델 목록(하트비트 스냅샷). 모든 모델 화면의 단일 출처 — `src/cli/hostModels.ts` 참고. */
+  getHostModels: (managerAgentId: string) =>
+    request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models`),
+  /** 호스트에 재열거를 시키고 ack 까지 기다린 뒤 갱신된 목록을 받는다(서버가 기다린다 — 폴링 없음). */
+  refreshHostModels: (managerAgentId: string) =>
+    request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models/refresh`, { method: 'POST' }),
   listAgentManagerInstances: (workspaceId?: string) => {
     const qs = new URLSearchParams();
     if (workspaceId) qs.set('workspace_id', workspaceId);
@@ -2189,6 +2196,43 @@ export const api = {
       { method: 'POST' },
     ),
 
+  // ─── Terminals (Runtime Host 셸) ──────────────────────────────────────
+  // 서버: apps/server/src/modules/terminals. 살아 있는 터미널만 다룬다 — 기록이 없으므로
+  // 목록에 죽은 것은 나오지 않고, 스크롤백은 attach 가 한 번 넘겨준다.
+  listTerminalHosts: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<TerminalHost[]>('/terminals/hosts', init);
+  },
+  listHostTerminals: (managerId: string) =>
+    request<TerminalSummary[]>(`/terminals/hosts/${encodeURIComponent(managerId)}/terminals`),
+  openHostTerminal: (managerId: string, body: { shell?: string | null; cwd?: string; title?: string; cols?: number; rows?: number }) =>
+    request<TerminalSummary>(`/terminals/hosts/${encodeURIComponent(managerId)}/terminals`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** 붙으면서 driver 가 된다 — 이 호출 이후의 출력이 내 SSE 로 온다. */
+  attachHostTerminal: (managerId: string, terminalId: string, size?: { cols: number; rows: number }) =>
+    request<TerminalSnapshot>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}`
+      + (size ? `?cols=${size.cols}&rows=${size.rows}` : ''),
+    ),
+  writeHostTerminal: (managerId: string, terminalId: string, data: string) =>
+    request<{ ok: true }>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}/input`,
+      { method: 'POST', body: JSON.stringify({ data }) },
+    ),
+  resizeHostTerminal: (managerId: string, terminalId: string, cols: number, rows: number) =>
+    request<TerminalSummary>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}/resize`,
+      { method: 'POST', body: JSON.stringify({ cols, rows }) },
+    ),
+  closeHostTerminal: (managerId: string, terminalId: string) =>
+    request<TerminalSummary>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}/close`,
+      { method: 'POST' },
+    ),
+
   listChatRooms: (scope?: 'workspace', workspaceId?: string) => {
     const init: RequestInit = {};
     if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
@@ -2302,7 +2346,7 @@ export const api = {
   // Fetch a single attachment with its base64 payload — used for image preview
   // rendering and file download (decoded into a Blob client-side).
   getChatAttachment: (roomId: string, attachmentId: string) =>
-    request<ChatAttachment & { file_data: string }>(
+    request<ChatAttachment & { file_data: string; truncated?: boolean }>(
       `/chat-rooms/${roomId}/attachments/${attachmentId}`,
     ),
 
@@ -2548,7 +2592,7 @@ export const api = {
   },
   /** step 방 첨부 하나(바이트 포함). 썸네일·플레이어·다운로드가 Blob 으로 바꿔 쓴다. */
   getOrchestrationStepAttachment: (stepId: string, workspaceId: string, attachmentId: string) =>
-    request<OrchestrationStepAttachment & { file_data: string }>(
+    request<OrchestrationStepAttachment & { file_data: string; truncated?: boolean }>(
       `/orchestration/steps/${stepId}/attachments/${attachmentId}?workspace_id=${encodeURIComponent(workspaceId)}`,
     ),
   /** 미션의 검증 증거 갤러리 — 모든 step 방과 미션 방의 이미지·동영상, 최신순. */
@@ -2690,6 +2734,15 @@ export const api = {
       loop_reentered: string[];
       orchestrator_woken: boolean;
     }>(`/orchestration/steps/${stepId}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
+  /**
+   * 종료된 미션을 다시 연다(운영자 입구). orchestrator 는 같은 전이를
+   * `reopen_orchestration_mission` MCP 툴로 스스로 부르므로, 대화만으로도 이어서 진행된다.
+   */
+  reopenOrchestrationMission: (id: string, workspaceId: string, reason?: string) =>
+    request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/reopen`, {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: workspaceId, reason }),
+    }),
   nudgeOrchestrationMission: (id: string, workspaceId: string, note?: string) =>
     request<OrchestrationMissionDetail>(`/orchestration/missions/${id}/nudge`, {
       method: 'POST',

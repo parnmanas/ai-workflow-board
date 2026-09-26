@@ -85,6 +85,9 @@ export interface InstanceMeta {
   // 배선되면 정적 값보다 우선하고, 다른 provider 들과 같은 best-effort 계약을
   // 따른다(throw 하면 정적 스냅샷으로 접고 하트비트는 계속 돈다).
   availableModelsProvider?: (() => Record<string, string[]> | null) | null;
+  // 위 목록을 마지막으로 재열거한 시각(ISO). 서버/클라이언트가 "오래된 목록" 을 판정해
+  // 자동 갱신하는 근거. 없으면 필드를 싣지 않는다(구버전과 같은 모양).
+  availableModelsAtProvider?: (() => string | null) | null;
   // 이 장비에 설치된 CLI 들의 `--version` (cliType → 버전 문자열). `update_cli` 가
   // CLI 를 올린 뒤 같은 값을 다시 읽어 교체하므로, 모델 목록과 같은 이유로 정적
   // 값이 아니라 provider 다. 버전을 못 읽은 CLI 는 키가 없다(= 미설치/probe 실패).
@@ -106,6 +109,14 @@ export interface InstanceMeta {
   // 목록을 보내 서버 메모리의 유령 상태(마지막 패치를 못 받은 busy/awaiting_*)를 되돌리게 한다.
   // 배선되면 비어 있어도 `[]` 를 보낸다 — "살아 있는 세션 없음" 이 정보이기 때문이다.
   agentSessionsProvider?: (() => AgentSessionHeartbeatEntry[]) | null;
+  // Terminal(Runtime Host 셸) — 이 장비의 OS. 화면이 셸 이름을 설명할 때만 쓴다.
+  platform?: string | null;
+  // Terminal — 이 장비에서 띄울 수 있는 셸(TerminalRunner.availableShells). 부팅 시 한 번
+  // 계산한 정적 값이고, **비어 있으면 서버가 이 장비를 터미널 목록에서 뺀다**.
+  terminalShells?: TerminalShellHeartbeatEntry[] | null;
+  // Terminal — 지금 살아 있는 PTY 전체(TerminalRunner.liveStates). agent_sessions 와 같은
+  // 규약으로 매 tick 전체 목록을 보내 서버의 유령 행을 정리하게 한다.
+  terminalsProvider?: (() => TerminalHeartbeatEntry[]) | null;
   // ST-5b — managed-agent presence reporter. Optional so legacy callers
   // that don't track managed agents still construct a valid heartbeat.
   managedAgents?: ManagedAgentSnapshot | null;
@@ -249,6 +260,20 @@ export type RunWorkspaceStatusProvider = () => Promise<RunWorkspaceStatusEntry[]
  *  throw 하면 이번 tick 은 필드를 통째로 생략하고 다음 tick 이 다시 시도한다. */
 export type AgentLaunchSpecProvider = () => AgentLaunchSpecEntry[];
 
+/** 하트비트 `terminal_shells[]` 한 줄 — 서버 `InstanceRecord.terminal_shells` 와 같은 모양. */
+export interface TerminalShellHeartbeatEntry {
+  id: string;
+  label: string;
+  path: string;
+  default?: boolean;
+}
+
+/** 하트비트 `terminals[]` 한 줄 — 서버 `InstanceRecord.terminals` 와 같은 모양. */
+export interface TerminalHeartbeatEntry {
+  terminal_id: string;
+  status: string;
+}
+
 /** 하트비트 `agent_sessions[]` 한 줄 — 서버 `InstanceRecord.agent_sessions` 와 같은 모양. */
 export interface AgentSessionHeartbeatEntry {
   cli: string;
@@ -288,6 +313,12 @@ export interface InstanceHeartbeatPayload {
   agent_credentials?: AgentCredentialEntry[];
   /** Agent Session — 살아 있는 세션 프로세스 전체(비어 있으면 `[]`). 구버전 서버는 무시한다. */
   agent_sessions?: AgentSessionHeartbeatEntry[];
+  /** Terminal — 이 매니저가 도는 OS(`process.platform`). */
+  platform?: string;
+  /** Terminal — 이 장비에서 띄울 수 있는 셸. 없으면 아예 싣지 않는다(= 터미널 미지원). */
+  terminal_shells?: TerminalShellHeartbeatEntry[];
+  /** Terminal — 살아 있는 PTY 전체(비어 있으면 `[]`). */
+  terminals?: TerminalHeartbeatEntry[];
   // 관리 대상 에이전트별 "다음 spawn 시 실효 실행 사양" (ticket 20fff298).
   // agent_credentials 와 같은 presence 계약 — provider 가 배선돼 있고 row 를
   // 반환할 때만 실린다. 이 필드를 모르는 구버전 AWB 서버는 무시하고, 반대로
@@ -366,6 +397,7 @@ export class InstanceHeartbeat {
         ? meta.availableModels
         : null;
     const availableModelsProvider = meta?.availableModelsProvider ?? null;
+    const availableModelsAtProvider = meta?.availableModelsAtProvider ?? null;
     const cliVersionsProvider = meta?.cliVersionsProvider ?? null;
     const cliLatestVersionsProvider = meta?.cliLatestVersionsProvider ?? null;
     const cliInstallsProvider = meta?.cliInstallsProvider ?? null;
@@ -386,6 +418,7 @@ export class InstanceHeartbeat {
     const spawnFailureProvider = meta?.spawnFailureProvider ?? null;
     const agentLaunchSpecProvider = meta?.agentLaunchSpecProvider ?? null;
     const agentSessionsProvider = meta?.agentSessionsProvider ?? null;
+    const terminalsProvider = meta?.terminalsProvider ?? null;
     this.#payloadFactory = async () => {
       // 다른 provider 와 같은 best-effort 계약 — throw 하면 이번 tick 은 필드를 생략한다.
       let agentSessions: AgentSessionHeartbeatEntry[] | null = null;
@@ -396,6 +429,16 @@ export class InstanceHeartbeat {
             .slice(0, 500);
         } catch (err: any) {
           log(`Instance heartbeat: agent-sessions provider failed: ${err?.message ?? err}`);
+        }
+      }
+      let terminals: TerminalHeartbeatEntry[] | null = null;
+      if (terminalsProvider) {
+        try {
+          terminals = terminalsProvider()
+            .filter((e) => e && typeof e.terminal_id === 'string' && typeof e.status === 'string')
+            .slice(0, 200);
+        } catch (err: any) {
+          log(`Instance heartbeat: terminals provider failed: ${err?.message ?? err}`);
         }
       }
       const agentIds = managedSnapshot ? managedSnapshot.liveAgentIds() : [];
@@ -504,6 +547,12 @@ export class InstanceHeartbeat {
           models = availableModels;
         }
       }
+      let modelsAt: string | null = null;
+      try {
+        modelsAt = availableModelsAtProvider?.() ?? null;
+      } catch {
+        modelsAt = null;
+      }
       // CLI 버전도 모델 목록과 같은 best-effort provider 계약을 따른다 — throw 하면
       // 이 tick 만 필드를 빼고 하트비트는 계속 돈다.
       let cliVersions: Record<string, string> | null = null;
@@ -554,6 +603,7 @@ export class InstanceHeartbeat {
         ...(agentIds.length ? { agent_ids: agentIds } : {}),
         ...(workingDirs.length ? { working_dirs: workingDirs } : {}),
         ...(models && Object.keys(models).length ? { available_models: models } : {}),
+        ...(modelsAt ? { available_models_at: modelsAt } : {}),
         ...(cliVersions && Object.keys(cliVersions).length ? { cli_versions: cliVersions } : {}),
         ...(cliLatestVersions && Object.keys(cliLatestVersions).length
           ? { cli_latest_versions: cliLatestVersions }
@@ -561,6 +611,9 @@ export class InstanceHeartbeat {
         ...(cliInstalls && cliInstalls.length ? { cli_installs: cliInstalls } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
         ...(agentSessions ? { agent_sessions: agentSessions } : {}),
+        ...(meta?.platform ? { platform: meta.platform } : {}),
+        ...(meta?.terminalShells?.length ? { terminal_shells: meta.terminalShells } : {}),
+        ...(terminals ? { terminals } : {}),
         ...(agentCredentials.length ? { agent_credentials: agentCredentials } : {}),
         ...(agentLaunchSpecs ? { agent_launch_specs: agentLaunchSpecs } : {}),
         ...(activeWorktrees.length ? { active_worktrees: activeWorktrees } : {}),

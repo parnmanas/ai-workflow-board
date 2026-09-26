@@ -6,6 +6,7 @@ import { tokens } from '../../tokens';
 import type { AgentSessionCliSettings } from '../../types';
 import { Button } from '../common';
 import { runtimeLabel } from './sessionTranscript.logic';
+import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 
 /**
  * CLI 설정 — 이 Runtime Host 의 이 CLI 에 대해 두 가지를 정한다.
@@ -65,8 +66,11 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
     void load();
   }, [load]);
 
+  // 모델 목록은 모든 화면이 공유하는 스토어에서 온다 — 세션을 한 번 열어야만 갱신되던 옛
+  // 동작 대신, 열릴 때 오래된/빈 목록을 훅이 재열거하고 버튼으로도 바로 새로고침한다.
+  const hostModels = useHostModels(managerId, cli);
   // 모달과 같은 규약: approval 모드(category 'mode') 와 모델(category 'model') 만 여기서 정한다.
-  const defaultOptions = (settings?.known_config_options ?? [])
+  const defaultOptions = withHostModelOption(settings?.known_config_options ?? [], hostModels.models)
     .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0);
   const savedDefaults = defaultsOf(settings);
   const dirty = (settings?.credential?.id || '') !== selected
@@ -217,11 +221,27 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
                   </select>
                 </label>
               ))}
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={saving || hostModels.refreshing || !(hostModels.view?.is_online ?? true)}
+                title="Ask the host to re-list the models its CLI accepts"
+                onClick={() => void hostModels.refresh()}
+              >
+                {hostModels.refreshing ? 'Refreshing models…' : 'Refresh models'}
+              </Button>
             </div>
           </div>
         ) : (
-          <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
-            Approval mode and model defaults appear here once a {runtimeLabel(cli)} session has run on {hostName} — that is when the CLI tells AWB which choices it offers.
+          <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span>
+              {hostModels.refreshing
+                ? `Asking ${hostName} to list the models ${runtimeLabel(cli)} accepts…`
+                : `Approval mode and model defaults appear here once ${hostName} reports what ${runtimeLabel(cli)} offers.`}
+            </span>
+            <Button variant="ghost" size="sm" disabled={saving || hostModels.refreshing} onClick={() => void hostModels.refresh()}>
+              Refresh models
+            </Button>
           </div>
         )
       )}

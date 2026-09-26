@@ -29,6 +29,13 @@
  * heuristic upper bound, not a merge simulation. Whether an overlap actually
  * conflicts is left to Merging's existing "integrate, don't bounce" rebase
  * step, which already handles it.
+ *
+ * 티켓 6a9f9de9 가 그 앞에 한 단계를 더 세웠다: path overlap 을 재기 전에
+ * 브랜치가 **이미 base 안에 있는지**(feature tip 이 base tip 의 조상인지)를
+ * 먼저 판정한다. 그런 브랜치의 base 대비 diff 는 빈 배열인데 Q1 의 repo-global
+ * 규칙은 branch 쪽을 보지 않고 발동하므로, 이미 main 에 들어간 브랜치가
+ * `overlapping_drift` → `rebase_required` 로 오분류돼 rebase 로 고칠 수 없는
+ * bounce 를 요구받았다.
  */
 
 import type { DataSource, EntityManager } from 'typeorm';
@@ -82,6 +89,22 @@ function parentDir(p: string): string {
   return idx === -1 ? '' : p.slice(0, idx);
 }
 
+/**
+ * feature tip 이 base tip 의 조상인지 — 즉 이 브랜치가 가진 것이 전부 이미
+ * base 안에 있는지 (티켓 6a9f9de9).
+ *
+ * `git merge-base <base> <feature>` 는 정확히 그 경우에만 feature tip 자신을
+ * 돌려주므로, probe 가 이미 보고하는 두 SHA 의 동일성만으로 판정이 끝난다 —
+ * git 호출을 하나도 더 하지 않고, 기존 probe 계약도 그대로다.
+ *
+ * 빈 문자열 쌍(`'' === ''`)을 "이미 병합"으로 읽으면 미해결 probe 가 조용히
+ * rebase 게이트를 통과시켜 버리므로 — availability-first 와 정반대 방향의
+ * 오류다 — 양쪽 SHA 가 실제로 있을 때만 참을 돌려준다.
+ */
+export function isFeatureContainedInBase(mergeBaseSha: string, featureTipSha: string): boolean {
+  return !!mergeBaseSha && !!featureTipSha && mergeBaseSha === featureTipSha;
+}
+
 /** The subset of `mainDriftPaths` that actually triggers an overlap verdict
  *  under Q1's three rules: ① exact path intersection, ② immediate parent
  *  directory intersection, or ③ a repo-global file. This is the same set a
@@ -105,16 +128,33 @@ function pathsOverlap(branchPaths: string[], mainDriftPaths: string[]): boolean 
  * Pure classifier — Q1's three overlap rules + Q2's reverification budget.
  * No DB / git, so the full truth table is unit-testable without a network.
  *
+ *   - 브랜치가 이미 base 안에 들어 있음           → 'already_merged'
  *   - no main drift at all                        → 'fresh'
  *   - drift, but no path overlap with the branch   → 'non_overlapping_drift'
  *   - drift, overlapping, budget not yet spent     → 'overlapping_drift'
  *   - drift, overlapping, budget already spent     → 'overlapping_drift_budget_exhausted'
+ *
+ * `featureContainedInBase` 는 티켓 6a9f9de9 에서 추가된 네 번째 인자이며
+ * 기본값 false 이므로, 3-인자로 부르는 기존 호출자의 동작은 바이트 단위로
+ * 이전과 같다.
  */
 export function classifyDrift(
   branchPaths: string[],
   mainDriftPaths: string[],
   reverificationCount: number,
+  featureContainedInBase = false,
 ): DriftClassification {
+  // 병합 완료(조상) 판정이 overlap·budget 판정보다 먼저다 (티켓 6a9f9de9).
+  // 브랜치가 이미 base 안에 있으면 base 대비 diff 가 비어 있는데, Q1 규칙 ③
+  // (repo-global 파일)은 branch 쪽 경로를 아예 보지 않고 발동한다 — 그래서
+  // 이미 main 에 들어간 브랜치가 "그 사이 main 이 바꾼 package-lock.json"
+  // 때문에 'overlapping_drift' → rebase_required 로 오분류됐다. rebase 로 더
+  // 최신이 될 수 없는 브랜치이므로 bounce 예산도 태우지 않는다.
+  //
+  // main 이 전혀 움직이지 않은 경우에도 'fresh' 가 아니라 이 판정을 앞세운다 —
+  // 그래야 병합 직후와 몇 분 뒤(= main 이 한 번 더 움직인 뒤)의 verdict 가
+  // 같은 상태를 두 이름으로 흔들지 않는다.
+  if (featureContainedInBase) return 'already_merged';
   if (!mainDriftPaths || mainDriftPaths.length === 0) return 'fresh';
   if (!pathsOverlap(branchPaths || [], mainDriftPaths)) return 'non_overlapping_drift';
   return reverificationCount < MAX_DRIFT_REVERIFICATIONS
@@ -129,7 +169,11 @@ export type DriftRecommendation = 'proceed' | 'rebase_required' | 'proceed_no_ac
  *  episode converges instead of round-tripping forever) but is distinguished
  *  as `proceed_no_action` rather than a clean `proceed`, since it is telling
  *  the reviewer "I would have asked for a rebase, but this episode already
- *  spent its one bounce" rather than "nothing is going on". */
+ *  spent its one bounce" rather than "nothing is going on".
+ *
+ *  `already_merged` 는 `fresh`/`non_overlapping_drift` 와 함께 깨끗한
+ *  `proceed` 다 (티켓 6a9f9de9): 요구할 rebase 자체가 없으므로 "물어봤을 텐데
+ *  예산이 없다"는 뜻의 `proceed_no_action` 이 아니다. */
 export function recommendationFor(classification: DriftClassification): DriftRecommendation {
   if (classification === 'overlapping_drift') return 'rebase_required';
   if (classification === 'overlapping_drift_budget_exhausted') return 'proceed_no_action';
@@ -246,6 +290,10 @@ export const defaultReviewDriftProbe: ReviewDriftProbe = async ({ resource, cred
 
 // ── orchestrator ─────────────────────────────────────────────────────────────
 export interface CheckReviewDriftResult {
+  /** 이 Review 에피소드가 통합해야 할 base drift 가 있는지. `fresh` 는 물론
+   *  `already_merged` 도 false 다 (티켓 6a9f9de9) — 후자는 base 가 실제로
+   *  움직였을 수 있지만 브랜치가 base 안에 들어 있어 그 움직임이 무효화할
+   *  diff 자체가 없다. */
   drifted: boolean;
   classification: DriftClassification | null;
   recommendation: DriftRecommendation;
@@ -335,7 +383,12 @@ export async function checkReviewDrift(
 
   const isEntry = !existing;
   const reverificationCount = existing?.reverification_count ?? 0;
-  const classification = classifyDrift(probed.branchPaths, probed.mainDriftPaths, reverificationCount);
+  // probe 가 이미 돌려준 두 SHA 로 병합 완료(조상) 여부가 결정된다 — 분류
+  // 판단은 그대로 순수 분류기 안에 두고, 여기서는 git 사실만 건네준다.
+  const containedInBase = isFeatureContainedInBase(probed.mergeBaseSha, probed.featureTipSha);
+  const classification = classifyDrift(
+    probed.branchPaths, probed.mainDriftPaths, reverificationCount, containedInBase,
+  );
   const recommendation = recommendationFor(classification);
   const bumpCount = classification === 'overlapping_drift';
   const nextCount = bumpCount ? reverificationCount + 1 : reverificationCount;
@@ -365,7 +418,8 @@ export async function checkReviewDrift(
   }
 
   return {
-    drifted: classification !== 'fresh',
+    // 통합할 것이 없는 두 분류 — 자세한 근거는 CheckReviewDriftResult.drifted.
+    drifted: classification !== 'fresh' && classification !== 'already_merged',
     classification,
     recommendation,
     overlapping_paths: classification === 'overlapping_drift' || classification === 'overlapping_drift_budget_exhausted'

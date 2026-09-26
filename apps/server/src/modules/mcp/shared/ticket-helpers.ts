@@ -418,7 +418,12 @@ export function projectTicketAttachment(
     uploaded_by: row.uploaded_by,
     created_at: row.created_at,
   };
-  if (includeData) out.file_data = row.file_data;
+  if (includeData) {
+    // 읽는 순간에만 스트림을 닫아 준다 — 저장된 행은 그대로 둔다(위 함수 주석 참고).
+    const repaired = repairTruncatedMediaForRead(row.file_mimetype, row.file_data);
+    out.file_data = repaired.file_data;
+    out.truncated = repaired.truncated;
+  }
   return out;
 }
 
@@ -553,9 +558,132 @@ const MIME_ALIASES: Record<string, string> = {
   'application/x-zip-compressed': 'application/zip',
 };
 
+/** status 400 을 실은 Error — 업로드 경로들이 그대로 400/툴 에러로 바꿔 내보낸다. */
+function badRequest(message: string): Error & { status: number } {
+  const err = new Error(message) as Error & { status: number };
+  err.status = 400;
+  return err;
+}
+
 function normalizeMime(mime: string): string {
   const lower = (mime || '').toLowerCase().trim();
   return MIME_ALIASES[lower] || lower;
+}
+
+/**
+ * 이 형식의 파일이 **끝까지 다 왔는가**. 헤더만 맞고 뒤가 잘린 파일을 upload 시점에
+ * 잡아내는 검사다.
+ *
+ * 왜 필요한가(2026-09-26 실측): 미션 evidence 로 올라온 스크린샷 4장 중 3장이 JPEG
+ * 종료 마커(`FFD9`)가 **아예 없는** 잘린 파일이었다. base64 자체는 완전하고 헤더도
+ * 진짜 JPEG 라서 기존 sniffer 를 그대로 통과했고, 몇 시간 뒤 운영자가 "스크린샷이 다
+ * 깨져 보인다"로 발견했다. 원인은 업로더 쪽이다 — 아직 쓰이는 중인 캡처 파일을 읽으면
+ * 정확히 이 모양이 된다. 그래도 **받는 쪽에서 막는 것이 맞다**: 검증 증거가 깨진 채로
+ * 기록되면 그 step 은 증거가 없는 것과 같고, agent 는 실패를 알 방법이 없어 다시
+ * 올리지도 않는다. 업로드가 실패하면 agent 는 그 자리에서 다시 시도할 수 있다.
+ *
+ * 종료 마커를 **마지막 64바이트 안에서** 찾는다. 정확히 끝에 있어야 한다고 요구하면
+ * 일부 인코더가 붙이는 꼬리 패딩을 오탐하고, 파일 전체에서 찾으면 EXIF 안에 박힌
+ * 썸네일(그 자체로 완결된 JPEG)의 마커를 보고 잘린 파일을 통과시킨다.
+ *
+ * 검사하지 않는 형식은 **조용히 통과시킨다**. 동영상 컨테이너(mp4/webm)는 꼬리 한 번으로
+ * 완결성을 판정할 수 없고, 텍스트·로그·PDF·zip 은 "잘렸다"는 개념이 형식마다 다르다.
+ * 여기서 억지 추측을 하면 정상 업로드를 막는다 — 이 검사의 값어치는 **확실할 때만
+ * 거부하는 것**에 있다.
+ */
+/**
+ * 이 바이트가 그 형식으로 **끝까지 왔는가**. 업로드 거부(`assertAttachmentNotTruncated`)와
+ * 읽기 복구(`repairTruncatedMediaForRead`)가 같은 판정을 써야 하므로 여기 한 곳에 둔다 —
+ * 둘이 갈리면 "업로드는 통과했는데 읽을 때 잘렸다고 표시" 같은 모순이 생긴다.
+ *
+ * 반환 `format: null` 은 "이 형식은 값싸게 판정할 수 없다"(동영상 컨테이너·텍스트·PDF·zip)
+ * 이고, 그때 `complete` 는 항상 true 다 — 확실할 때만 판정하는 것이 이 검사의 값어치다.
+ */
+function mediaCompleteness(
+  mime: string,
+  bytes: Buffer,
+): { format: 'JPEG' | 'PNG' | 'GIF' | 'WebP' | null; complete: boolean } {
+  const normalized = normalizeMime(mime);
+  // 종료 마커는 **마지막 64바이트 안에서** 찾는다. 정확히 끝만 보면 일부 인코더의 꼬리
+  // 패딩을 오탐하고, 파일 전체에서 찾으면 EXIF 안에 박힌 완결 썸네일의 마커를 보고 잘린
+  // 파일을 통과시킨다.
+  const tail = bytes.subarray(Math.max(0, bytes.length - 64));
+  const endsWith = (sig: Buffer) => tail.lastIndexOf(sig) >= 0;
+  if (normalized === 'image/jpeg') return { format: 'JPEG', complete: endsWith(Buffer.from([0xff, 0xd9])) };
+  if (normalized === 'image/png') {
+    // IEND chunk + its CRC — PNG 는 이것으로 끝나야 한다.
+    return {
+      format: 'PNG',
+      complete: endsWith(Buffer.from([0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82])),
+    };
+  }
+  if (normalized === 'image/gif') return { format: 'GIF', complete: endsWith(Buffer.from([0x3b])) };
+  if (normalized === 'image/webp') {
+    // RIFF 컨테이너는 길이를 헤더에 적어 둔다 — 꼬리를 볼 필요 없이 정확히 대조된다.
+    if (bytes.length < 12) return { format: 'WebP', complete: false };
+    return { format: 'WebP', complete: bytes.readUInt32LE(4) + 8 <= bytes.length };
+  }
+  return { format: null, complete: true };
+}
+
+export function assertAttachmentNotTruncated(fileName: string, mime: string, base64: string): void {
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(base64, 'base64');
+  } catch {
+    return; // base64 자체가 깨졌으면 이 검사의 소관이 아니다(상위에서 다룬다).
+  }
+  if (bytes.length === 0) {
+    throw badRequest(`Attachment ${fileName}: the file is empty (0 bytes decoded)`);
+  }
+  const { format, complete } = mediaCompleteness(mime, bytes);
+  if (format && !complete) {
+    throw badRequest(
+      `Attachment ${fileName}: the ${format} data is incomplete — ${bytes.length} bytes decoded with no ` +
+        `end-of-file marker. This almost always means the file was read while it was still being written ` +
+        `(a screenshot or recording that had not finished saving). Wait for the writer to close the file, ` +
+        `confirm it opens in an image viewer, then upload it again. Nothing was stored.`,
+    );
+  }
+}
+
+/**
+ * 읽을 때 한 번 손보기 — **남아 있는 부분만이라도 보이게** 한다.
+ *
+ * 업로드 게이트가 생기기 전에 저장된 잘린 파일들이 남아 있다(2026-09-26 실측: 미션
+ * evidence 6장 중 4장). 그 바이트는 쓸모없지 않았다 — 종료 마커만 붙이면 디코더가
+ * 도착한 스캔라인까지 그려 준다(실측: 한 장은 98%, 나머지는 6~18% 복원). 그런데 마커가
+ * 없으면 브라우저는 아무것도 그리지 않아 운영자에게는 빈 칸으로만 보였다.
+ *
+ * **저장된 행은 고치지 않는다.** 실제로 올라온 바이트가 기록이고, 그걸 덮어쓰면 무엇이
+ * 잘못 올라왔는지의 증거가 사라진다. 읽는 순간에만 스트림을 닫아 주고, `truncated` 로
+ * 사실을 함께 알린다 — 화면이 "일부만 남음"이라고 말할 수 있어야 7% 짜리 스크린샷을
+ * 온전한 증거로 착각하지 않는다.
+ *
+ * JPEG 만 복구한다. PNG/GIF 는 청크·CRC 구조라 꼬리를 붙인다고 디코드되지 않고, 잘린
+ * PNG 는 브라우저가 이미 받은 만큼 점진적으로 그린다. 복구하지 못하는 형식도 `truncated`
+ * 는 그대로 알려 준다.
+ */
+export function repairTruncatedMediaForRead(
+  mime: string,
+  base64: string,
+): { file_data: string; truncated: boolean } {
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(base64 || '', 'base64');
+  } catch {
+    return { file_data: base64, truncated: false };
+  }
+  if (bytes.length === 0) return { file_data: base64, truncated: false };
+  const { format, complete } = mediaCompleteness(mime, bytes);
+  if (!format || complete) return { file_data: base64, truncated: false };
+  if (format === 'JPEG') {
+    return {
+      file_data: Buffer.concat([bytes, Buffer.from([0xff, 0xd9])]).toString('base64'),
+      truncated: true,
+    };
+  }
+  return { file_data: base64, truncated: true };
 }
 
 export function validateAttachmentMimetype(
@@ -565,11 +693,23 @@ export function validateAttachmentMimetype(
 ): string {
   const canonical = inferTicketAttachmentMimetype(fileName, claimedMimetype);
   const sniffed = sniffMimetypeFromBase64(base64);
-  if (!sniffed) return canonical;
-  if (normalizeMime(sniffed) === normalizeMime(canonical)) return canonical;
+  // 완결성 검사는 **이 함수 안에서** 한다. 업로드 경로가 둘(MCP 툴 / REST 컨트롤러)인데
+  // 둘 다 이미 이 함수를 반드시 지나므로, 여기 두면 어느 경로도 빠뜨릴 수 없다. 별도
+  // 함수로 내보내고 호출을 각자 추가하게 하면 다음 업로드 경로가 생길 때 조용히 빠진다.
+  if (!sniffed) {
+    assertAttachmentNotTruncated(fileName, canonical, base64);
+    return canonical;
+  }
+  if (normalizeMime(sniffed) === normalizeMime(canonical)) {
+    assertAttachmentNotTruncated(fileName, canonical, base64);
+    return canonical;
+  }
   // Extensionless or unknown-extension upload — canonical is the generic
   // fallback. Use the sniffed type because it's strictly more informative.
-  if (canonical === 'application/octet-stream') return sniffed;
+  if (canonical === 'application/octet-stream') {
+    assertAttachmentNotTruncated(fileName, sniffed, base64);
+    return sniffed;
+  }
   // Definitive mismatch — the caller claimed one type but the bytes are
   // demonstrably another. Reject loudly so the upload never lands on disk
   // with a misleading mime that lets a non-image render in the lightbox.

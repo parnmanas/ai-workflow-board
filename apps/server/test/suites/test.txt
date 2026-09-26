@@ -1,5 +1,6 @@
 # test 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
 # 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
+# 자리가 헷갈리면 아무 데나 넣고 apps/server 에서 npm run test:suites:sort 를 돌려라.
 test/action-fanout.test.mjs
 test/action-prompt-work-folder-token.test.mjs
 test/action-run-reaper-behavior.test.mjs
@@ -11,6 +12,7 @@ test/active-tasks-ui-liveness-parity.test.mjs
 test/activity-actor-uuid-guard.test.mjs
 test/agent-chain-depth.test.mjs
 test/agent-comment-pingpong.test.mjs
+test/agent-dashboard-fleet-fields.test.mjs
 test/agent-error-logs-hermes.test.mjs
 test/agent-fullname-display.test.mjs
 test/agent-fullname-orchestration-typing.test.mjs
@@ -28,6 +30,7 @@ test/allocation-staleness-clock.test.mjs
 test/api-keys-leak.test.mjs
 test/archive-exclusion-guard.test.mjs
 test/assignee-role-flat-sync.test.mjs
+test/attachment-truncation-guard.test.mjs
 test/backlog-promotion-sort-prefix.test.mjs
 test/base-repo-binding.test.mjs
 test/board-language-dispatch-guard.test.mjs
@@ -70,6 +73,7 @@ test/consensus-meta-self-exclusion-grep.test.mjs
 test/consensus-state.test.mjs
 test/credential-mask.test.mjs
 test/credential-whitespace-normalize.test.mjs
+test/credentials-scope-switch.test.mjs
 test/credentials-scope.test.mjs
 test/cron-coverage-guard.test.mjs
 test/cross-workspace-holder-name.test.mjs
@@ -95,6 +99,8 @@ test/github-sync-credential.test.mjs
 test/hard-budget-config.test.mjs
 test/hard-budget-dispatch-gate.test.mjs
 test/hard-budget-guard.test.mjs
+test/host-models-single-source.test.mjs
+test/host-models.test.mjs
 test/inflight-strand-output-liveness.test.mjs
 test/instance-registry-list-for-agent.test.mjs
 test/legacy-column-workspace-detail.test.mjs
@@ -223,6 +229,7 @@ test/run-budget-dispatch-gate.test.mjs
 test/run-budget-guard.test.mjs
 test/run-workspace-resolver-credential.test.mjs
 test/runtime-ca-bundle.test.mjs
+test/security-headers.test.mjs
 test/security-profile-scope.test.mjs
 test/security-run-reaper-behavior.test.mjs
 test/security-schedule-behavior.test.mjs
@@ -238,6 +245,7 @@ test/stuck-detector-presence.test.mjs
 test/stuck-no-progress-decision.test.mjs
 test/stuck-ticket-detector-same-second-lifecycle.test.mjs
 test/subagent-appendlocks-eviction.test.mjs
+test/suite-manifest-sort.test.mjs
 test/supervisor-liveness-redispatch.test.mjs
 test/supervisor-offline-skip-audit.test.mjs
 test/supervisor-output-liveness-decision.test.mjs
@@ -246,6 +254,7 @@ test/supervisor-stale-ttl-guard.test.mjs
 test/supply-chain-integrity-guard.test.mjs
 test/terminal-pend-gate.test.mjs
 test/terminal-reopen-guard.test.mjs
+test/terminals.test.mjs
 test/test-harness-gate.test.mjs
 test/test-registration-completeness.test.mjs
 test/test-registration-merge.test.mjs

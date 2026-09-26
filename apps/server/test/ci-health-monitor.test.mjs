@@ -8,7 +8,7 @@ import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateRedStreak, __test__ } from '../dist/modules/agents/ci-health-monitor.service.js';
-import { GitHubConnectorService } from '../dist/services/github-connector.service.js';
+import { compareRunIds, GitHubConnectorService } from '../dist/services/github-connector.service.js';
 
 const NOW = new Date('2026-08-10T12:00:00.000Z');
 const CONFIG = { minConsecutiveRuns: 3, minAgeMs: 6 * 60 * 60_000 };
@@ -305,6 +305,83 @@ test('단조성 게이트: 기록된 실패와 created_at 이 같은 success 는
   const res = evaluateRedStreak([siblingSuccess], NOW, CONFIG, { lastFailedRunId: '35939082088', lastFailedAt: sameSecond });
   assert.equal(res.isGreen, false, '한 푸시가 나란히 띄운 형제 run 은 그 실패를 고친 run 이 아니다');
   assert.ok(res.staleGreenRun);
+});
+
+// 리뷰 지적 회귀: 복구 하한선이 `created_at` 만 비교하면, 정렬(`sortWorkflowRunsNewestFirst`)
+// 이 "더 최신" 으로 골라 놓은 run 을 복구 판정은 거부하는 모순이 생긴다 — 같은 workflow 에서
+// 실패 run 직후 성공 run 이 같은 초에 생성되는 정상 복구가 영구히 거부돼 alert 행이 갇힌다.
+// 아래 두 테스트는 그 전체 순서 `(created_at, run id)` 의 양쪽 방향을 모두 고정한다.
+
+const TIE_SECOND = '2026-09-24T00:35:14Z';
+function tieRun(id, conclusion, workflowId) {
+  return { id: String(id), workflow_id: workflowId, status: 'completed', conclusion, event: 'push', html_url: '', created_at: TIE_SECOND, updated_at: TIE_SECOND, head_sha: '' };
+}
+
+test('단조성 게이트: 같은 workflow·같은 초에 뒤이어 만들어진 success(더 큰 run id)는 복구로 인정한다 (리뷰 지적 회귀)', () => {
+  // 실패 run 직후 같은 초에 성공 run 이 생긴 정상 복구. 정렬은 이미 이 success 를 최신으로
+  // 고르는데, 하한선이 시각만 보면 거부해 버려 red alert 행이 영원히 남는다.
+  const laterSuccess = tieRun('35939082089', 'success', INCIDENT_WORKFLOW_ID);
+  const res = evaluateRedStreak([laterSuccess], INCIDENT_NOW, CONFIG, {
+    lastFailedRunId: '35939082088',
+    lastFailedAt: TIE_SECOND,
+    workflowId: INCIDENT_WORKFLOW_ID,
+  });
+  assert.equal(res.isGreen, true, '같은 초라도 run id 가 더 큰 쪽은 그 실패 뒤에 만들어진 run 이다 — 진짜 복구다');
+  assert.equal(res.staleGreenRun, null, '정상 복구가 stale_green_rejected 로 집계되면 alert 행이 갇힌다');
+});
+
+test('단조성 게이트: 같은 workflow·같은 초라도 run id 가 더 작은 success 는 복구로 인정하지 않는다', () => {
+  // 위 테스트의 거울상 — 같은 초에서 id 가 더 작으면 그 실패보다 먼저 만들어진 run 이므로
+  // 복구 근거가 될 수 없다. 전체 순서를 쓴다는 것은 양방향 모두 지킨다는 뜻이다.
+  const earlierSuccess = tieRun('35939082087', 'success', INCIDENT_WORKFLOW_ID);
+  const res = evaluateRedStreak([earlierSuccess], INCIDENT_NOW, CONFIG, {
+    lastFailedRunId: '35939082088',
+    lastFailedAt: TIE_SECOND,
+    workflowId: INCIDENT_WORKFLOW_ID,
+  });
+  assert.equal(res.isGreen, false, '기록된 실패보다 먼저 만들어진 run 은 복구가 아니다');
+  assert.equal(res.staleGreenRun.id, '35939082087');
+});
+
+test('단조성 게이트: 같은 초·더 큰 run id 라도 workflow 가 다르면 복구로 인정하지 않는다 (원 오탐 방어 유지)', () => {
+  // 동률 깨기를 workflow 무관하게 적용하면 이 티켓의 원래 오탐이 되돌아온다 — 한 푸시가
+  // 나란히 띄운 다른 workflow 의 성공은 id 가 더 클 수도 있고, 그것은 이 workflow 의
+  // 실패를 고친 run 이 아니다.
+  const foreignLaterSuccess = tieRun('35939082099', 'success', PUBLISH_WORKFLOW_ID);
+  const res = evaluateRedStreak([foreignLaterSuccess], INCIDENT_NOW, CONFIG, {
+    lastFailedRunId: '35939082088',
+    lastFailedAt: TIE_SECOND,
+    workflowId: INCIDENT_WORKFLOW_ID,
+  });
+  assert.equal(res.isGreen, false, '다른 workflow 의 형제 run 은 id 가 더 커도 복구 근거가 아니다');
+  assert.equal(res.staleGreenRun.id, '35939082099');
+});
+
+test('단조성 게이트: 같은 초인데 green run 의 workflow_id 가 비어 있으면(판별 불가) 복구로 인정하지 않는다', () => {
+  // wire 경로에서 workflow_id 가 유실되면 그 run 이 형제인지 후속인지 알 수 없다. 모르는
+  // 것을 복구로 받아들이면 방어선이 조용히 사라지므로 fail-closed 로 둔다.
+  const unknownOrigin = tieRun('35939082099', 'success', '');
+  const res = evaluateRedStreak([unknownOrigin], INCIDENT_NOW, CONFIG, {
+    lastFailedRunId: '35939082088',
+    lastFailedAt: TIE_SECOND,
+    workflowId: INCIDENT_WORKFLOW_ID,
+  });
+  assert.equal(res.isGreen, false);
+  assert.ok(res.staleGreenRun);
+});
+
+test('compareRunIds: 2^53 을 넘는 run id 도 정밀도 손실 없이 비교한다 (Number 변환이면 동률로 무너진다)', () => {
+  // Number('9007199254740993') === Number('9007199254740992') — double 로 접히면 서로 다른
+  // 두 run 이 같은 값이 되어 동률 깨기가 조용히 무력화된다.
+  const lower = '9007199254740992';
+  const higher = '9007199254740993';
+  assert.equal(Number(lower), Number(higher), '전제: 이 두 id 는 double 로는 구분되지 않는다');
+  assert.ok(compareRunIds(higher, lower) > 0, 'BigInt 비교라면 더 큰 id 를 더 나중으로 판정해야 한다');
+  assert.ok(compareRunIds(lower, higher) < 0);
+  assert.equal(compareRunIds(lower, lower), 0);
+  // 10진 정수가 아닌 id 는 비교 불가(0) — 복구 판정에서 `> 0` 이 성립하지 않아 fail-closed.
+  assert.equal(compareRunIds('run-6', 'run-5'), 0);
+  assert.equal(compareRunIds('12', ''), 0);
 });
 
 test('단조성 게이트: 같은 run 이 재실행되어 green 으로 뒤집힌 경우는 복구로 인정한다', () => {

@@ -46,7 +46,6 @@ import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
-import { CommandLedgerService } from '../agent-manager/command-ledger.service';
 import { InstanceRegistryService, InstanceRecord } from '../agent-manager/instance-registry.service';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import { CLI_RUNTIME_NONE } from '../../common/cli-runtime-profiles';
@@ -56,6 +55,7 @@ import {
   workingDirLeaf,
 } from '../../common/orchestration-member-spec';
 import { orchestrationError } from './orchestration-errors';
+import { HostModelsError, HostModelsService } from '../agent-manager/host-models.service';
 
 export { ORCHESTRATION_AGENT_ORIGIN };
 
@@ -63,8 +63,6 @@ const ISSUED_BY = 'system:orchestration-roster';
 
 // The host's re-enumeration is a per-adapter parallel scan with a few seconds of
 // worst case, plus the ack POST round trip. Same window the client helper uses.
-const MODEL_REFRESH_ACK_INTERVAL_MS = 800;
-const MODEL_REFRESH_ACK_ATTEMPTS = 15;
 
 export interface ProvisionSlotInput {
   spec: TeamAgentSpec;
@@ -122,7 +120,7 @@ export class OrchestrationAgentProvisionerService {
     @InjectRepository(OrchestrationStep) private readonly stepRepo: Repository<OrchestrationStep>,
     private readonly registry: InstanceRegistryService,
     private readonly commands: AgentManagerCommandService,
-    private readonly commandLedger: CommandLedgerService,
+    private readonly hostModels: HostModelsService,
     private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
@@ -468,26 +466,16 @@ export class OrchestrationAgentProvisionerService {
     const managerIds = managers.map((m) => m.id);
     const hosted = await this.agentRepo.find({
       where: { manager_agent_id: In(managerIds) },
-      select: { id: true, manager_agent_id: true, type: true, working_dir: true, model: true } as any,
+      select: { id: true, manager_agent_id: true, type: true, working_dir: true } as any,
     });
     const folders = new Map<string, Set<string>>();
     const clisFromRows = new Map<string, Set<string>>();
-    const modelsFromRows = new Map<string, Map<string, Set<string>>>();
     for (const a of hosted) {
       const host = a.manager_agent_id!;
       if (a.working_dir && a.working_dir.trim()) {
         addTo(folders, host, a.working_dir.trim());
       }
-      if (a.type && a.type !== 'manager') {
-        addTo(clisFromRows, host, a.type);
-        if (a.model && a.model.trim()) {
-          const perHost = modelsFromRows.get(host) ?? new Map<string, Set<string>>();
-          const set = perHost.get(a.type) ?? new Set<string>();
-          set.add(a.model.trim());
-          perHost.set(a.type, set);
-          modelsFromRows.set(host, perHost);
-        }
-      }
+      if (a.type && a.type !== 'manager') addTo(clisFromRows, host, a.type);
     }
 
     // Folders named by team slots but not (yet) by any agent row — e.g. a slot
@@ -498,23 +486,6 @@ export class OrchestrationAgentProvisionerService {
 
     return managers.map((m) => {
       const rec = live.get(m.id) ?? null;
-      const heartbeatModels = rec?.available_models ?? {};
-      const rowModels = modelsFromRows.get(m.id) ?? new Map<string, Set<string>>();
-      const models: Record<string, string[]> = {};
-      const cliKeys = new Set<string>([
-        ...Object.keys(heartbeatModels),
-        ...rowModels.keys(),
-      ]);
-      for (const cli of cliKeys) {
-        // Heartbeat first (what the installed CLI actually enumerates), then
-        // any model an existing agent on this host is already pinned to — the
-        // latter keeps a working value selectable even when enumeration failed.
-        const merged = new Set<string>(
-          (Array.isArray(heartbeatModels[cli]) ? heartbeatModels[cli] : []).filter((v) => typeof v === 'string' && v),
-        );
-        for (const v of rowModels.get(cli) ?? []) merged.add(v);
-        if (merged.size) models[cli] = Array.from(merged).sort();
-      }
       const clis = new Set<string>([
         ...(rec?.cli_adapters ?? []),
         ...(clisFromRows.get(m.id) ?? []),
@@ -527,7 +498,13 @@ export class OrchestrationAgentProvisionerService {
         instance_id: rec?.instance_id ?? null,
         last_seen_at: rec?.last_seen_at ?? null,
         clis: Array.from(clis).sort(),
-        available_models: models,
+        // 모델 목록은 **단일 출처**에서 그대로 가져온다(HostModelsService). 예전에는
+        // 여기서 하트비트 + 기존 agent 행에 핀된 모델을 합쳐 알파벳순으로 다시 정렬했다 —
+        // 그래서 같은 호스트의 opencode 목록이 팀 슬롯(mission)과 세션/Agent 다이얼로그
+        // 에서 내용도 순서도 달랐다. 열거가 실패한 호스트에서 저장된 값이 사라지는 문제는
+        // 화면이 이미 다루고 있다(슬롯 편집기가 저장된 model 을 목록에 덧붙이고 자유
+        // 입력도 받는다) — 그것 때문에 목록 자체를 갈라놓을 이유는 없다.
+        available_models: this.hostModels.modelsByCli(m.id),
         cli_versions: rec?.cli_versions ?? {},
         working_dirs: Array.from(folders.get(m.id) ?? []).sort(),
       };
@@ -557,40 +534,17 @@ export class OrchestrationAgentProvisionerService {
    * arrives on the next heartbeat; the caller just gets the current list back.
    */
   async refreshHostModels(managerAgentId: string, workspaceId: string): Promise<RuntimeHostView | null> {
-    const id = (managerAgentId || '').trim();
-    if (!id) throw orchestrationError(400, 'manager_agent_id is required');
-    const manager = await this.agentRepo.findOne({ where: { id } });
-    if (!manager || manager.type !== 'manager') {
-      throw orchestrationError(404, 'Runtime Host not found');
+    // 재열거 + ack 대기는 HostModelsService 가 한다 — Agent 다이얼로그 · 세션 설정과
+    // 같은 경로. 여기서는 그 결과에 이 로스터 화면 고유의 병합(agent 행에 핀된 모델)만 얹는다.
+    let id: string;
+    try {
+      id = (await this.hostModels.refresh(managerAgentId, ISSUED_BY)).manager_agent_id;
+    } catch (err) {
+      if (err instanceof HostModelsError) throw orchestrationError(err.status, err.message);
+      throw err;
     }
-    const inst = this.commands.resolveLiveManagerInstance(id);
-    if (!inst) {
-      throw orchestrationError(
-        409,
-        `Runtime Host "${manager.name}" is offline — it can only re-list its models while connected.`,
-      );
-    }
-
-    const { command_id } = await this.commands.issue(inst, 'refresh_available_models', {}, ISSUED_BY);
-    await this.awaitCommandAck(command_id);
-
     const hosts = await this.listRuntimeHosts(workspaceId);
     return hosts.find((h) => h.manager_agent_id === id) ?? null;
-  }
-
-  /**
-   * Poll the ledger until this command reaches a terminal ack, or the window
-   * closes. Mirrors the client helper's contract deliberately: `pending` is
-   * never treated as done, because the host's re-enumeration is a parallel
-   * best-effort scan that takes seconds and an unrelated 30s heartbeat landing
-   * first would otherwise look like completion.
-   */
-  private async awaitCommandAck(commandId: string): Promise<void> {
-    for (let attempt = 0; attempt < MODEL_REFRESH_ACK_ATTEMPTS; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, MODEL_REFRESH_ACK_INTERVAL_MS));
-      if (this.commandLedger.getOutcome(commandId)) return;
-      if (!this.commandLedger.get(commandId)) return; // expired without an ack
-    }
   }
 
   /** `(manager, working_dir)` pairs named by existing team slots. */

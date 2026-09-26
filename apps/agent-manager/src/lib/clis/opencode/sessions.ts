@@ -16,7 +16,28 @@ import {
   parseJsonObject,
   toEpochMs,
 } from '../../agent-session-history.js';
+import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+
+/**
+ * opencode `step-finish` part → 공용 계약. 모양은 `run --format json` 의 그것과 같다
+ * (cli-adapters/opencode.ts 의 extractUsage 가 같은 키를 읽는다): `tokens.{input,
+ * output, reasoning, cache:{read, write}}` + `cost`. `tokens.input` 은 캐시를
+ * 제외한 값이라 그대로 넘긴다. `reasoning` 은 output 의 내역이다.
+ */
+export function opencodeUsageFromPart(part: Record<string, any> | null): SessionUsage | null {
+  const tokens = part && isRecord(part.tokens) ? part.tokens : null;
+  if (!tokens) return null;
+  const cache = isRecord(tokens.cache) ? tokens.cache : {};
+  return normalizeSessionUsage({
+    inputTokens: tokens.input,
+    outputTokens: tokens.output,
+    cachedReadTokens: cache.read,
+    cacheWriteTokens: cache.write,
+    reasoningTokens: tokens.reasoning,
+    costUsd: part?.cost,
+  });
+}
 
 async function query<T>(ctx: CliSessionStoreContext, sql: string): Promise<T[]> {
   try {
@@ -28,6 +49,20 @@ async function query<T>(ctx: CliSessionStoreContext, sql: string): Promise<T[]> 
 }
 
 export const opencodeSessionStore: CliSessionStoreDriver = {
+  /** 마지막 step-finish 하나만 질의한다(ACP 어댑터가 usage 를 안 줄 때의 메꿈). */
+  async readLatestUsage(ctx, sessionId) {
+    const rows = await query<Record<string, unknown>>(
+      ctx,
+      "SELECT data FROM part WHERE session_id = '" + sessionId + "' AND data LIKE '%step-finish%' "
+      + 'ORDER BY time_created DESC, id DESC LIMIT 1',
+    );
+    for (const row of rows) {
+      const usage = opencodeUsageFromPart(parseJsonObject(row?.data));
+      if (usage) return usage;
+    }
+    return null;
+  },
+
   /** `time_archived` 가 찍힌 세션은 opencode 에서 보관 처리된 것이므로 제외한다. */
   async listSessions(ctx) {
     const rows = await query<Record<string, unknown>>(
@@ -129,8 +164,15 @@ export const opencodeSessionStore: CliSessionStoreDriver = {
           }
           break;
         }
+        case 'step-finish': {
+          // 여기에만 토큰/비용이 있다. 예전엔 이 갈래를 "보일 것이 없다"로 버려서
+          // opencode 세션 전사에 사용량이 한 번도 나오지 않았다.
+          const usage = opencodeUsageFromPart(part);
+          if (usage) push('usage', usageEventPayload(usage));
+          break;
+        }
         default:
-          // step-start / step-finish / file / snapshot … — 트랜스크립트에 보일 것이 없다.
+          // step-start / file / snapshot … — 트랜스크립트에 보일 것이 없다.
           break;
       }
     }

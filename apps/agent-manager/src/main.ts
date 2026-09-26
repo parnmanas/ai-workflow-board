@@ -51,7 +51,7 @@ import { createAdapter, KNOWN_ADAPTER_CLI_TYPES } from './lib/cli-adapters/index
 import { cliDispatch, cliModulesWith, findCliModule } from './lib/clis/index.js';
 // ticket 40110b64 — CLI별 모델 열거. main.ts 는 자기 자신을 즉시 실행하는
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
-import { gatherAvailableModels } from './lib/available-models.js';
+import { AVAILABLE_MODELS_REFRESH_MS, gatherAvailableModels } from './lib/available-models.js';
 import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
 import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
 import { runWithSudo } from './lib/sudo-runner.js';
@@ -83,6 +83,7 @@ import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
 import { AgentSessionRunner, detectAcpSessionClis } from './lib/agent-session-runner.js';
+import { TerminalRunner } from './lib/terminal-runner.js';
 import { loadAgentInfo } from './lib/config.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
@@ -605,6 +606,16 @@ async function runRuntime(
     idleMinutes: Number((config as any)?.agent_sessions?.idle_minutes) || undefined,
     clientVersion: version,
   });
+  // Terminal(Runtime Host 셸) — 이 장비의 PTY 를 소유하고 출력을 서버로 중계한다
+  // (docs/terminals.md). `terminal_request` SSE 만 소비하며, 세션 러너와 독립적이다.
+  const terminalRunner = new TerminalRunner(config, {
+    getManagerId: () => loadAgentInfo()?.agent_id || '',
+    idleHours: Number((config as any)?.terminals?.idle_hours) || undefined,
+  });
+  // 하트비트 `terminal_shells` — 비어 있으면 서버가 이 장비를 터미널 목록에서 뺀다
+  // (PTY 모듈이 없거나 쓸 만한 셸이 없는 장비).
+  const terminalShells = await terminalRunner.availableShells();
+  log(`terminals: shells on this host = ${terminalShells.map((s) => s.id).join(', ') || '(none — terminal support off)'}`);
   // 하트비트 `acp_session_clis` — 이 장비에서 세션을 열 수 있는 CLI(PATH 만 본다).
   const acpSessionClis = await detectAcpSessionClis();
   log(`agent sessions: ACP-capable CLIs on this host = ${acpSessionClis.join(', ') || '(none)'}`);
@@ -695,6 +706,7 @@ async function runRuntime(
   // tick 읽어 가므로(instance-heartbeat.ts `availableModelsProvider`), 교체
   // 즉시 다음 전송분부터 새 목록이 실린다.
   let availableModels: Record<string, string[]> = {};
+  let availableModelsAt: string | null = null;
 
   // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). 부팅 시 CLI 해석 probe 와
   // 같은 측정으로 채우고, `update_cli` 가 CLI 를 올린 뒤 그 CLI 만 다시 읽어 교체한다.
@@ -832,6 +844,7 @@ async function runRuntime(
     // 커맨드를 실패시키지 않고 결과에만 표시한다.
     refreshAvailableModels: async () => {
       availableModels = await gatherAvailableModels();
+      availableModelsAt = new Date().toISOString();
       const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
       return { models: availableModels, heartbeatPosted };
     },
@@ -886,6 +899,7 @@ async function runRuntime(
       if (outcome.ok) {
         try {
           availableModels = await gatherAvailableModels();
+          availableModelsAt = new Date().toISOString();
         } catch (err: any) {
           log(`update_cli: model re-enumeration failed after ${cli} update: ${err?.message ?? err}`);
         }
@@ -1117,6 +1131,7 @@ async function runRuntime(
       runtimeProfileOverride,
       runtimeSupervisor,
       agentSessionRunner,
+      terminalRunner,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
@@ -1156,6 +1171,7 @@ async function runRuntime(
 
   let uploadTimer: NodeJS.Timeout | null = null;
   let cliLatestTimer: NodeJS.Timeout | null = null;
+  let modelsRefreshTimer: NodeJS.Timeout | null = null;
 
   // Outbox backstop — a POST can fail transiently while the SSE stream itself
   // stays up (single dropped request, brief LB hiccup), in which case no
@@ -1341,6 +1357,7 @@ async function runRuntime(
     // 설치된 CLI 별 모델 목록을 부팅 시 한 번 채운다. 이후 갱신은
     // `refresh_available_models` 커맨드가 같은 열거를 다시 돌려 통째로 교체한다.
     availableModels = await gatherAvailableModels();
+    availableModelsAt = new Date().toISOString();
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
@@ -1366,12 +1383,18 @@ async function runRuntime(
       // 캡처해 버려서, `refresh_available_models` 로 교체한 목록이 매니저를
       // 재시작하기 전까지 하트비트에 영원히 실리지 않는다.
       availableModelsProvider: () => availableModels,
+      availableModelsAtProvider: () => availableModelsAt,
       cliVersionsProvider: () => cliVersions,
       cliLatestVersionsProvider: () => cliLatestVersions,
       cliInstallsProvider: () => cliInstalls,
       acpSessionClis,
       // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
       agentSessionsProvider: () => agentSessionRunner.liveStates(),
+      // Terminal — 이 장비의 셸 목록(고정)과 지금 살아 있는 PTY 전체. 서버는 후자로
+      // 유령 행을 30초 안에 정리한다.
+      platform: process.platform,
+      terminalShells,
+      terminalsProvider: () => terminalRunner.liveStates(),
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
@@ -1549,6 +1572,16 @@ async function runRuntime(
       void refreshCliInstalls().then(() => refreshCliLatestVersions());
     }, CLI_LATEST_REFRESH_MS);
     cliLatestTimer.unref?.();
+    // 모델 목록도 주기적으로 다시 센다 — 호스트에서 provider 를 로그인하거나 CLI 가 모델을
+    // 추가하면 누가 새로고침을 누르지 않아도 한 주기 안에 모든 화면이 따라온다. 화면은
+    // `available_models_at` 을 보고 이보다 오래된 목록이면 스스로 재열거를 시킨다.
+    modelsRefreshTimer = setInterval(() => {
+      void gatherAvailableModels().then((models) => {
+        availableModels = models;
+        availableModelsAt = new Date().toISOString();
+      });
+    }, AVAILABLE_MODELS_REFRESH_MS);
+    modelsRefreshTimer.unref?.();
     const fireUpload = (): void => {
       uploadIfNewErrors(config, agentId, version).catch(() => {});
     };
@@ -1570,6 +1603,7 @@ async function runRuntime(
     presenceHeartbeat._real?.stop();
     instanceHeartbeat._real?.stop();
     if (cliLatestTimer) clearInterval(cliLatestTimer);
+    if (modelsRefreshTimer) clearInterval(modelsRefreshTimer);
     updateChecker.stop();
     if (uploadTimer) {
       clearInterval(uploadTimer);
@@ -1617,6 +1651,11 @@ async function runRuntime(
       await agentSessionRunner.stopAll(stopReason);
     } catch (err: any) {
       log(`shutdown (agent sessions): ${err?.message ?? err}`);
+    }
+    try {
+      await terminalRunner.stopAll(stopReason);
+    } catch (err: any) {
+      log(`shutdown (terminals): ${err?.message ?? err}`);
     }
     try {
       await runtimeSupervisor.stopAll();

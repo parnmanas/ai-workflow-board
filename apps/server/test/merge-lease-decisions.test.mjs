@@ -25,6 +25,7 @@ const {
   decideLeaseLiveness,
   decideWaiterOutcome,
   decideReverifyOutcome,
+  isLeaseAliveVerdict,
   parseMergeLeaseContext,
 } = await import('file://' + path.join(DIST, 'modules', 'tickets', 'merge-lease.js'));
 
@@ -90,13 +91,27 @@ test('holder liveness', async (t) => {
   // ★ 이 티켓의 설계 보정 A 그 자체 — 이게 깨지면 리퍼가 진행 중인 홀더를 뺏고
   //   홀더는 그 사실을 모른 채 push 로 진입해, 없애려던 경쟁이 되살아난다.
   await t.test('미해소 CI 대기가 있으면 무진행 시간이 아무리 길어도 살아 있다', () => {
-    assert.equal(
-      decideLeaseLiveness(livenessInput({
-        hasActiveCiWait: true,
-        lastProgressAtMs: NOW - 90 * MIN, // idle 상한의 4배 이상
-      })),
-      'alive',
-    );
+    const verdict = decideLeaseLiveness(livenessInput({
+      hasActiveCiWait: true,
+      lastProgressAtMs: NOW - 90 * MIN, // idle 상한의 4배 이상
+    }));
+    // 살아 있는 이유가 **CI 대기**라는 사실까지 돌려준다 — 호출자가 그 동안
+    // liveness 시계를 밀어야 하고(ticket baaac7e9), 시계를 안 밀면 CI 가
+    // 해소되는 순간 이 판정이 곧바로 reap_idle 로 뒤집혀 살아 있는 홀더가
+    // 회수된다. 이유를 알려주지 않으면 호출자는 티켓 상태를 다시 읽어야 한다.
+    assert.equal(verdict, 'alive_ci_wait');
+    assert.equal(isLeaseAliveVerdict(verdict), true, 'alive 변종이 회수 쪽으로 오분류된다');
+  });
+
+  // ★ alive 변종이 둘로 늘었으므로, 소비자가 `=== 'alive'` 로 비교하면 CI 가
+  //   도는 홀더를 회수 대상으로 오분류한다. 그 오분류 방향이 정확히 두 홀더
+  //   동시 랜딩이므로 공유 술어를 진실표로 고정한다.
+  await t.test('isLeaseAliveVerdict 는 alive 변종만 살아 있다고 본다', () => {
+    assert.equal(isLeaseAliveVerdict('alive'), true);
+    assert.equal(isLeaseAliveVerdict('alive_ci_wait'), true);
+    for (const reap of ['reap_not_merging', 'reap_blocked', 'reap_max_hold', 'reap_idle']) {
+      assert.equal(isLeaseAliveVerdict(reap), false, `${reap} 를 살아 있다고 판정했다`);
+    }
   });
 
   await t.test('CI 대기 중이어도 절대 상한(백스톱)은 이긴다', () => {

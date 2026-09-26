@@ -490,9 +490,23 @@ password stops crossing the network entirely.
 - Stop/restart removes the process owner and on-disk ownership marker.
 - Startup cleanup terminates orphaned processes owned by a dead Runtime Host.
 
+## Terminals (PTY)
+
+`terminal-runner.ts` owns this host's PTY table — one `@lydell/node-pty` process per
+terminal, driven by `terminal_request` SSE and relayed back as base64 output chunks.
+It is independent of every session manager above: a terminal has **no AWB Agent
+identity, no prompt wrapping and no record** — the process is the terminal, and when
+it exits the terminal is gone. `terminal-shells.ts` reports the shells this machine
+can actually launch; an empty list is how a host without PTY support tells the server
+"do not offer terminals here" (the module is an optional dependency, so a failed
+install degrades to that instead of breaking the manager). Details: `docs/terminals.md`.
+
 ## Security boundaries
 
 - API keys and credentials remain scoped to the managed Agent.
+- A terminal runs as the Runtime Host's own user and does **not** receive the
+  manager API key — it is the operator's shell, not an agent's. `terminals.use` is
+  admin-only by default for the same reason.
 - Hermes stdout is reserved for ACP JSON-RPC; diagnostics use stderr.
 - MCP requests include Agent id, AWB run id, client type, and strategy.
 - Skill files are materialized privately after digest verification.

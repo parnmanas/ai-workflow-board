@@ -98,6 +98,11 @@ export interface MergeDecision {
  * classification degrades to the original unconditional block
  * (availability-first: an unresolved classification must never manufacture a
  * bypass, only a resolved safe one can).
+ *
+ * `already_merged` (티켓 6a9f9de9) 도 같은 우회 집합에 든다: 이미 base 에 들어간
+ * 브랜치는 정의상 behind>0 이므로, 그 상태로 stale-base 를 막으면 classifier 가
+ * `proceed` 를 말하는 동안 게이트가 막는 Q3 데드락이 그대로 재현된다 — 게다가 이
+ * 브랜치는 rebase 로 behind 를 줄일 수도 없어 스스로 빠져나올 방법이 없다.
  */
 export function decideMergeGate(
   transition: MergeTransition,
@@ -108,7 +113,8 @@ export function decideMergeGate(
   if (transition === 'review_to_merging') {
     if (gate.require_fresh_base && ba.behind > 0) {
       const driftBypass = driftClassification === 'non_overlapping_drift'
-        || driftClassification === 'overlapping_drift_budget_exhausted';
+        || driftClassification === 'overlapping_drift_budget_exhausted'
+        || driftClassification === 'already_merged';
       if (!driftBypass) {
         return { blocked: true, code: 'merge_gate_stale_base' };
       }

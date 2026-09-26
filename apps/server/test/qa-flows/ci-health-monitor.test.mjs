@@ -334,6 +334,57 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     assert.equal(ticket.column_id, backlog.id, 'recovery must NOT move/close the ticket — that decision is left to whoever holds it');
   });
 
+  // ─── ticket 0ef405f9 리뷰 지적: 정상 복구가 갇히지 않아야 한다 ──────────────────
+  // 복구 하한선이 `created_at` 만 비교하면, 같은 workflow 에서 실패 run 직후 성공 run 이
+  // 같은 초에 생성되는 정상 복구도 거부돼 alert 행이 영구히 남는다. 3번(진짜 복구)은
+  // created_at 이 더 최신인 경우만 다루므로 그 동률을 잡지 못한다. 아래는 같은 초 동률의
+  // 양쪽 방향 — 더 작은 id 는 거부, 더 큰 id 는 복구 — 을 production 경로(sweep())에서
+  // 확인한다. 3번이 행을 지운 뒤라 여기서 red 에피소드를 새로 세운다.
+  await t.test('3b. 같은 workflow·같은 초 동률: run id 가 더 작은 success 는 거부하고, 더 큰 success 는 복구로 처리한다 (ticket 0ef405f9 리뷰 지적)', async () => {
+    const cleared = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.equal(cleared, null, '사전 조건: 3번이 행을 지운 상태에서 시작한다');
+
+    // 실제 run id 모양(10진 정수)을 쓴다 — 동률 깨기는 id 의 대소 비교이므로 'run-5' 같은
+    // 픽스처 id 로는 이 전이를 재현할 수 없다.
+    const tieAt = minutesAgo(10);
+    const numericRed = [
+      { ...run('35939082088', 'failure', tieAt), workflow_id: 555 },
+      { ...run('35939082000', 'failure', minutesAgo(20)), workflow_id: 555 },
+      { ...run('35939081900', 'failure', minutesAgo(30)), workflow_id: 555 },
+    ];
+    fetchState.runs = numericRed;
+    const redStats = await monitor.sweep(new Date(NOW.getTime() + 2000));
+    assert.equal(redStats.alerts_created, 1, '새 red 에피소드가 세워져야 한다');
+
+    const seeded = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.equal(seeded.last_run_id, '35939082088', '하한선 run id 가 최신 실패 run 이어야 한다');
+    assert.equal(seeded.last_run_at, tieAt, '하한선 시각이 그 실패 run 의 생성 시각이어야 한다');
+    const msgsAfterRed = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system').length;
+
+    // (가) 같은 초 · 같은 workflow · 더 작은 run id → 그 실패보다 먼저 만들어진 run 이므로 거부.
+    fetchState.runs = [{ ...run('35939082087', 'success', tieAt), workflow_id: 555 }];
+    const rejectStats = await monitor.sweep(new Date(NOW.getTime() + 3000));
+    assert.equal(rejectStats.recovered, 0, '같은 초라도 id 가 더 작은 success 는 복구가 아니다');
+    assert.equal(rejectStats.stale_green_rejected, 1, '거부는 카운터로 관측돼야 한다');
+    const stillRed = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.ok(stillRed, 'alert 행이 살아 있어야 한다');
+    assert.equal(stillRed.streak, 3, '거부된 평가는 행을 건드리지 않는다');
+
+    // (나) 같은 초 · 같은 workflow · 더 큰 run id → 그 실패 뒤에 만들어진 run 이므로 진짜 복구.
+    //     여기서 복구가 안 되면 red alert 행이 영구히 갇힌다(리뷰가 지적한 회귀).
+    fetchState.runs = [{ ...run('35939082089', 'success', tieAt), workflow_id: 555 }, ...numericRed];
+    const recoverStats = await monitor.sweep(new Date(NOW.getTime() + 4000));
+    assert.equal(recoverStats.recovered, 1, '같은 초에 뒤이어 만들어진 success 는 복구로 처리돼야 한다 — 거부하면 행이 갇힌다');
+    assert.equal(recoverStats.stale_green_rejected, 0, '정상 복구가 거부 카운터로 집계되면 안 된다');
+
+    const recovered = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.equal(recovered, null, '복구 시 alert 행이 삭제돼야 한다');
+
+    const msgsAfterRecovery = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system');
+    assert.equal(msgsAfterRecovery.length, msgsAfterRed + 1, '복구 메시지가 정확히 1건 추가돼야 한다');
+    assert.match(msgsAfterRecovery[msgsAfterRecovery.length - 1].content, /CI 복구|recovered|recovery/i);
+  });
+
   await t.test('4. env GITHUB_TOKEN absent but this board\'s Resource carries its own credential: sweep must still call GitHub and detect the red streak (review blocker #1 — global env-only gate must not blind the sweep to a board credential)', async () => {
     const savedEnvToken = process.env.GITHUB_TOKEN;
     delete process.env.GITHUB_TOKEN;

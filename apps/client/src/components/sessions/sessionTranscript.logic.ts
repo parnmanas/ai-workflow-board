@@ -15,6 +15,60 @@
  */
 import type { AgentSessionAuth, AgentSessionCommand, AgentSessionEventRecord, AgentSessionStatus } from '../../types';
 import { cliLabel } from '../../cli/catalog';
+import { sessionActivity } from '../../activity';
+import type { ActivityView } from '../../activity';
+
+/**
+ * 토큰 수를 짧게 — 12 / 1.2k / 35.8k / 1.05M. 전사의 usage 줄은 한 줄에 여러 값을
+ * 담으므로 원본 숫자는 툴팁(title)이 맡는다.
+ */
+export function compactTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n < 1000) return String(Math.round(n));
+  // 10만 미만은 소수 한 자리까지 — 36.1k 와 35.8k 의 차이가 이 구간에서는 의미 있다.
+  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+/**
+ * usage 줄의 조각들. **측정되지 않은 값은 넣지 않는다** — 0 을 찍으면 "0 토큰 썼다"로
+ * 읽혀 계측 실패와 구분되지 않는다(운영자가 CLI 별 차이를 오해한 지점이다).
+ */
+export function usageSummaryParts(block: {
+  inputTokens: number;
+  outputTokens: number;
+  cachedReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  contextTokens: number;
+  contextWindow: number;
+  costUsd: number;
+}): string[] {
+  const parts: string[] = [];
+  if (block.totalTokens > 0) parts.push(`${compactTokens(block.totalTokens)} tokens`);
+  const detail: string[] = [];
+  if (block.inputTokens > 0) detail.push(`in ${compactTokens(block.inputTokens)}`);
+  if (block.outputTokens > 0) detail.push(`out ${compactTokens(block.outputTokens)}`);
+  const cache = block.cachedReadTokens + block.cacheWriteTokens;
+  if (cache > 0) detail.push(`cache ${compactTokens(cache)}`);
+  if (detail.length > 0) parts.push(`(${detail.join(' · ')})`);
+  if (block.contextTokens > 0) {
+    parts.push(block.contextWindow > 0
+      ? `ctx ${compactTokens(block.contextTokens)}/${compactTokens(block.contextWindow)}`
+      : `ctx ${compactTokens(block.contextTokens)}`);
+  }
+  if (block.costUsd > 0) {
+    // 한 턴 비용은 보통 1센트 미만이라 소수 두 자리로는 전부 "$0.01" 이 된다.
+    const cost = block.costUsd < 0.01
+      ? block.costUsd.toFixed(4)
+      : block.costUsd < 1
+        ? block.costUsd.toFixed(3)
+        : block.costUsd.toFixed(2);
+    parts.push(`$${cost}`);
+  }
+  return parts;
+}
 
 export interface PermissionOptionView {
   option_id: string;
@@ -108,7 +162,26 @@ export type TranscriptBlock =
       decision: ElicitationDecisionView | null;
     }
   | { kind: 'plan'; key: string; seq: number; turnId: string; entries: PlanEntryView[] }
-  | { kind: 'usage'; key: string; seq: number; turnId: string; inputTokens: number; outputTokens: number; totalTokens: number }
+  /**
+   * 한 턴의 토큰 사용량. **캐시를 따로 싣는 이유**: claude 의 `input_tokens` 는 캐시
+   * 히트를 제외한 신규 입력이라 보통 한 자릿수다 — in/out 만 보여 주면 "2 토큰 썼다"가
+   * 되어 실제 컨텍스트(수만 토큰)를 감춘다. 매니저가 CLI 별 차이를 정규화해 보내고
+   * (agent-manager `session-usage.ts`), 화면은 받은 조각을 그대로 보여 준다.
+   */
+  | {
+      kind: 'usage';
+      key: string;
+      seq: number;
+      turnId: string;
+      inputTokens: number;
+      outputTokens: number;
+      cachedReadTokens: number;
+      cacheWriteTokens: number;
+      totalTokens: number;
+      contextTokens: number;
+      contextWindow: number;
+      costUsd: number;
+    }
   | { kind: 'turn'; key: string; seq: number; turnId: string; stopReason: string }
   | { kind: 'error'; key: string; seq: number; turnId: string; message: string; code: string | null }
   | { kind: 'system'; key: string; seq: number; text: string };
@@ -332,7 +405,15 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           turnId,
           inputTokens: num(p.input_tokens),
           outputTokens: num(p.output_tokens),
-          totalTokens: num(p.total_tokens),
+          cachedReadTokens: num(p.cached_read_tokens),
+          cacheWriteTokens: num(p.cache_write_tokens),
+          // 예전 매니저는 total 을 안 실어 보내기도 했다 — 그때는 조각의 합이 답이다.
+          totalTokens:
+            num(p.total_tokens)
+            || num(p.input_tokens) + num(p.output_tokens) + num(p.cached_read_tokens) + num(p.cache_write_tokens),
+          contextTokens: num(p.context_tokens),
+          contextWindow: num(p.context_window),
+          costUsd: typeof p.cost_usd === 'number' && Number.isFinite(p.cost_usd) ? p.cost_usd : 0,
         });
         break;
       case 'turn': {
@@ -450,33 +531,15 @@ export function hasSeqGap(events: AgentSessionEventRecord[]): boolean {
   return false;
 }
 
-export interface StatusView {
-  label: string;
-  tone: 'muted' | 'accent' | 'success' | 'warning' | 'danger';
-  live: boolean;
-}
+/**
+ * 세션 상태 → 공용 진행 어휘(src/activity.ts). 라벨·색·애니메이션 규칙은 네 표면이
+ * 공유하므로 여기서 따로 정의하지 않는다 — 예전에는 이 파일에 tone 표가 따로 있어
+ * 같은 "작업 중"이 세션에선 보라, 미션에선 파랑으로 나왔다.
+ */
+export type StatusView = ActivityView;
 
-export function describeSessionStatus(status: AgentSessionStatus | string | null | undefined): StatusView {
-  switch (status) {
-    case 'idle':
-      return { label: 'Idle', tone: 'muted', live: false };
-    case 'starting':
-      return { label: 'Starting', tone: 'accent', live: true };
-    case 'ready':
-      return { label: 'Ready', tone: 'success', live: true };
-    case 'busy':
-      return { label: 'Working', tone: 'accent', live: true };
-    case 'awaiting_permission':
-      return { label: 'Needs your approval', tone: 'warning', live: true };
-    case 'awaiting_input':
-      return { label: 'Needs your input', tone: 'warning', live: true };
-    case 'closed':
-      return { label: 'Closed', tone: 'muted', live: false };
-    case 'error':
-      return { label: 'Error', tone: 'danger', live: false };
-    default:
-      return { label: String(status || 'Unknown'), tone: 'muted', live: false };
-  }
+export function describeSessionStatus(status: AgentSessionStatus | string | null | undefined): ActivityView {
+  return sessionActivity(status);
 }
 
 export function sessionDisplayTitle(session: { title?: string | null; cli?: string; session_id?: string }): string {

@@ -10,6 +10,10 @@ import { log } from './logging.js';
 
 /** 열거에 필요한 최소 어댑터 계약 — 테스트가 실제 CLI 바이너리 없이 이 함수의
  *  best-effort 동작을 검증할 수 있도록 좁게 잡았다. */
+/** 주기적 재열거 간격. CLI 의 `models` 호출은 가볍지만(수 초, best-effort) 매 하트비트마다
+ *  돌 이유는 없다 — provider 로그인 같은 변화는 분 단위로 따라오면 충분하다. */
+export const AVAILABLE_MODELS_REFRESH_MS = 15 * 60 * 1000;
+
 export interface ModelListingAdapter {
   listModels(): Promise<string[]>;
 }

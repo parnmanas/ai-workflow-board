@@ -36,6 +36,11 @@ export interface LogActivityParams {
     | 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed' | 'archived' | 'unarchived'
     | 'respawn_storm_halted' | 'respawn_twin_detected' | 'respawn_twin_autostop_intent'
     | 'config_changed' | 'credential_revealed' | 'credential_reveal_denied'
+    // 'credential_scope_changed': an operator moved a Credential between
+    // global (instance-wide) and Workspace scope. Who can read the secret
+    // changes with it, so old_value/new_value carry the scope either side
+    // ('global' | 'workspace:<id>') — never the secret itself.
+    | 'credential_scope_changed'
     // 'dispatch_deferred' (ticket bfdd80b7): a dispatch targeted an agent that
     // is not reachable (never-started / offline). Written via logActivity — NOT
     // the raw repo.save the silent drop-gates use — so it rides the live

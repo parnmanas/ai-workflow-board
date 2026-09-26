@@ -104,7 +104,6 @@ export default function OrchestrationPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* 진행 중 step 점의 맥박. MissionDetailPage 와 같은 이름/정의를 쓴다 — 여기에
           없으면 목록 카드의 점만 조용히 정적으로 굳는다(애니메이션은 실패해도 조용하다). */}
-      <style>{`@keyframes awb-orch-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }`}</style>
       <PageHeader
         title="Orchestrations"
         description="Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back."
@@ -282,6 +281,7 @@ export function MissionRow({
               >
                 <span
                   aria-hidden="true"
+                  className="awb-activity-live"
                   style={{
                     width: 5,
                     height: 5,
@@ -289,7 +289,6 @@ export function MissionRow({
                     flexShrink: 0,
                     borderRadius: '50%',
                     background: tokens.colors.infoLight,
-                    animation: 'awb-orch-pulse 1.4s ease-in-out infinite',
                   }}
                 />
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>

@@ -57,6 +57,33 @@ export interface GitHubWorkflowRun {
 
 // Pure helpers — no DB, no config. Kept as standalone exports.
 
+/** 10진 정수로만 이루어진 run id — 그 밖의 형태는 생성 순서를 읽어낼 수 없다. */
+const DECIMAL_RUN_ID_RE = /^\d+$/;
+
+/**
+ * run id 두 개를 생성 순서로 비교한다 — `a` 가 더 나중에 만들어졌으면 양수, 더 먼저면
+ * 음수, **순서를 판정할 수 없으면 0**. GitHub 의 run id 는 생성 순서대로 증가하므로
+ * 같은 `created_at` 안에서의 순서는 이 비교가 유일한 근거다.
+ *
+ * 왜 `Number` 가 아니라 `BigInt` 인가: run id 는 단조 증가하는 정수이고 이미 3.5e10 대다.
+ * double 로 접으면 2^53 을 넘는 순간 서로 다른 두 id 가 **같은 값**이 되어 동률 깨기가
+ * 조용히 사라진다 — 경고도 예외도 없이, 정렬과 복구 판정이 동시에 틀리기 시작한다.
+ *
+ * 10진 정수가 아닌 id(테스트 픽스처의 `run-5` 등, 혹은 응답 유실)는 0 을 돌려 동률로
+ * 둔다. 정렬에서는 `Array.prototype.sort` 가 stable 이라 입력 순서가 그대로 유지되고,
+ * 순서를 근거로 삼는 쪽에서는 `> 0` 이 성립하지 않아 fail-closed 가 된다.
+ */
+export function compareRunIds(a: string, b: string): number {
+  const left = String(a ?? '').trim();
+  const right = String(b ?? '').trim();
+  if (!DECIMAL_RUN_ID_RE.test(left) || !DECIMAL_RUN_ID_RE.test(right)) return 0;
+  const lv = BigInt(left);
+  const rv = BigInt(right);
+  if (lv > rv) return 1;
+  if (lv < rv) return -1;
+  return 0;
+}
+
 /**
  * 완료 run 목록을 최신순으로 정렬한다 — 1순위 `created_at` 내림차순, 같은 시각이면
  * run id 내림차순(GitHub 의 run id 는 생성 순서대로 증가한다).
@@ -75,13 +102,11 @@ export function sortWorkflowRunsNewestFirst(runs: GitHubWorkflowRun[]): GitHubWo
     const ms = new Date(r?.created_at || '').getTime();
     return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
   };
-  // 숫자가 아닌 id(테스트 픽스처 등)는 동률 처리 — Array.prototype.sort 가 stable 이므로
-  // 그 경우 입력 순서가 그대로 유지된다.
-  const idNum = (r: GitHubWorkflowRun): number => {
-    const n = Number(r?.id);
-    return Number.isFinite(n) ? n : 0;
-  };
-  return [...(runs || [])].sort((a, b) => (createdMs(b) - createdMs(a)) || (idNum(b) - idNum(a)));
+  // 동률은 `compareRunIds` 로만 깬다 — 이 전체 순서 `(created_at, run id)` 를 복구 판정도
+  // 그대로 쓰기 때문에, 비교를 여기서만 바꾸면 두 경로가 갈라진다 (ticket 0ef405f9 리뷰).
+  return [...(runs || [])].sort(
+    (a, b) => (createdMs(b) - createdMs(a)) || compareRunIds(b?.id, a?.id),
+  );
 }
 
 /**

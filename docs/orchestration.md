@@ -221,6 +221,37 @@ node/edge 는 거부된다.
 떴을 수 있는가"를 기준으로 보수적으로 센다. 루프가 예산을 미리 깎지 않고 매
 반복 실측을 다시 읽는 이유가 이 구분을 보존하기 위해서다.
 
+### 끝난 노드를 다시 돌린다 — 재시도 예산(`max_attempts`)
+
+step 은 생성 시 `max_attempts: 2` 를 받고, `attempt` 가 거기 닿으면 `retry` 가 409 로
+거부된다. 예산이 **바닥난 뒤에도 그 일을 더 해야 하는** 경우가 실제로는 흔하다(요구가
+바뀌었다 / 실패 원인을 이제 안다 / done 인데 한 군데만 고치면 된다). 그래서
+`update_orchestration_step` 이 `max_attempts` 를 받는다:
+
+| 호출 | 결과 |
+| --- | --- |
+| `action:'retry', max_attempts: 4` | 예산을 올리고 **같은 호출로** 재디스패치. `instructions` / `acceptance_criteria` / `assignee_agent_id` 도 같이 고칠 수 있다 |
+| `action:'set_retry_budget', max_attempts: 4` | 예산만 바꾼다 — 지금 다시 돌리지는 않는다 |
+
+규칙은 그래프 patch 의 `max_visits` 와 같은 근거를 쓴다 — **이미 일어난 실행을 소급
+무효화하지 않는다**:
+
+- 이미 쓴 `attempt` 아래로는 못 내린다. 정확히 쓴 만큼으로 내리는 것은 "이번이
+  마지막"의 표현이라 허용된다.
+- 상한은 `MAX_STEP_ATTEMPTS_CEILING`(20). 그보다 더 필요하면 예산이 아니라 그 일의
+  정의가 잘못된 것이다 — 지시문 수정·재배정·분할이 답이다.
+- 변경은 `step_retry_budget_changed` 로 타임라인에 남는다(`{before, after, attempt}`).
+
+**`retry` 는 `done` 노드에도 쓴다.** 재작업을 새 step 으로 만들면(`audit` → `audit2` →
+`audit3`) 한 작업의 이력(시도·결과·증거·타임라인·의존 배선)이 노드 수만큼 갈리고,
+그래프는 같은 말을 하는 노드로 붐빈다. 노드를 재활용하면 `attempt` 가 이어 올라가고
+`step_retried` 이벤트가 `was done` 처럼 직전 상태를 적어 "끝났던 것을 다시 돌렸다"가
+타임라인에 남는다. 새 step 이 맞는 경우는 **일 자체가 다를 때**뿐이다 — 산출물이 다르고,
+다른 사람이 맡고, 원래 노드의 결과를 입력으로 받는다면 그건 다음 step 이다.
+
+회귀: `test/qa-flows/orchestration-step-retry-budget.test.mjs`.
+
+
 ### verdict 와 중복 실행 통제
 
 evaluator/router node 의 step prompt 에는 그 node 에서 나가는 분기가 기대하는
@@ -346,6 +377,39 @@ Mm` 을 나란히 그려 운영자가 그 결말을 미리 볼 수 있게 한다
   채팅 경로로 읽는다 — 사람이 그 방의 참여자다.
 - 미션 상세의 step 마다 `evidence_count`, 미션에 `mission_evidence_count` — GROUP BY 한 쿼리.
   레일 배지(📎 n)와 Evidence 탭 카운트가 여기서 나온다.
+
+**업로드는 완결성까지 검사한다** (2026-09-26). evidence 로 올라온 스크린샷 4장 중 3장이
+JPEG 종료 마커가 **아예 없는** 잘린 파일이었다 — base64 도 헤더도 진짜라서 mime sniffer 를
+그대로 통과했고, 몇 시간 뒤 운영자가 "스크린샷이 다 깨져 보인다"로 발견했다. 원인은 올리는
+쪽이다(아직 저장이 끝나지 않은 캡처 파일을 읽으면 정확히 이 모양이 된다). 그래도 받는 쪽에서
+막는다: 깨진 증거가 기록되면 그 step 은 증거가 없는 것과 같고, agent 는 실패를 알 방법이 없어
+다시 올리지도 않는다. `assertAttachmentNotTruncated()` 가 jpeg/png/gif 의 종료 마커(마지막
+64바이트 안)와 webp 의 RIFF 길이를 대조해 거부하며, 거부 메시지가 원인과 조치를 말한다.
+**검사는 `validateAttachmentMimetype()` 안에서 한다** — 업로드 경로(MCP 툴·REST 컨트롤러)가
+둘 다 이미 그 함수를 지나므로 어느 경로도 빠뜨릴 수 없다. 동영상 컨테이너·텍스트·PDF·zip 은
+꼬리 한 번으로 완결성을 판정할 수 없어 통과시킨다(확실할 때만 거부하는 것이 이 검사의 값어치다).
+**이미 저장된 잘린 파일은 읽을 때 복구한다**(`repairTruncatedMediaForRead`). 그 바이트는
+쓸모없지 않았다 — JPEG 은 종료 마커만 붙이면 디코더가 도착한 스캔라인까지 그린다(실측:
+한 장은 98%, 나머지는 6~18% 복원). **저장된 행은 고치지 않는다**: 실제로 올라온 바이트가
+기록이고, 덮어쓰면 무엇이 잘못 올라왔는지의 증거가 사라진다. 읽는 순간에만 스트림을 닫고
+`truncated` 로 사실을 함께 알린다. 업로드 거부와 읽기 복구는 `mediaCompleteness()` 한 곳의
+판정을 공유한다 — 갈리면 "업로드는 통과했는데 읽을 때 잘렸다고 표시" 같은 모순이 생긴다.
+
+**가장 먼저 의심할 것은 CSP 다.** 증거가 "다 안 보인다/깨져 보인다" 면 잘린 파일보다
+`Content-Security-Policy` 를 먼저 보라. 첨부는 base64 를 받아 `URL.createObjectURL` 로
+그리는데, helmet 기본값 `img-src 'self' data:` 는 **blob: 을 뺀다** — 그러면 모든 첨부
+이미지·동영상이 차단되고 서버 로그에는 아무 흔적도 남지 않는다(요청은 200, 위반은 브라우저
+콘솔에만). 2026-09-26 에 이걸로 두 번 오진했다. 지시어는
+`apps/server/src/common/security-headers.ts` 한 곳에 있고 `security-headers.test.mjs` 가
+blob: 허용과 "실행 가능한 자원에는 안 준다"를 함께 고정한다.
+
+썸네일은 `contain` 이다. 예전 `cover` 는 정사각 격자에 맞추려고 **가운데를 잘랐고**, 그래서
+넓은 대조표는 아이콘 한두 개만, 잘린 스크린샷은 미디코드 영역인 회색 한가운데만 보였다 —
+운영자 눈에는 빈 칸이었다(실측: 잘린 3장의 중앙 크롭이 회색 85~99%). 증거 썸네일에서
+중요한 것은 격자의 균일함이 아니라 무엇이 찍혔는지다. 일부만 도착한 파일에는 "일부만"
+배지를 붙인다 — 7% 만 남은 스크린샷을 온전한 증거로 읽으면 안 된다. 바이트는 왔는데
+브라우저가 끝내 디코드하지 못하면 "깨진 파일"로 표시한다 — 예전에는 영원히 "…"
+자리표시자여서 "AWB 가 못 보여준다"로 읽혔다.
 
 세션 전사와 갤러리 목록은 **메타만** 싣는다. 10MB 짜리 동영상 여러 개가 base64 로 실리면
 패널을 여는 것만으로 수십 MB 를 내려받는다. 썸네일이 화면에 놓일 때 바이트를 받아 Blob URL 로
@@ -1017,7 +1081,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `get_orchestration_mission` | 현재 계획·결과·타임라인·즉시 디스패치 가능 목록 |
 | `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다. 셋 다 없으면 **확정된 그래프를 보존**하고 새 step 만 고립 node 로 편입한다 — 버리려면 `reset_graph: true` |
 | `patch_orchestration_graph` | 실행 중인 그래프를 **부분** 수정 — 분기 열기/닫기, 의존 재배선, 반복 상한 조정, 폭주 loop 정지. plan 을 건드리지 않아 `plan_version` 을 소모하지 않는다 |
-| `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` |
+| `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` / `set_retry_budget` — `max_attempts` 를 함께 보내면 예산이 바닥난 노드도 **같은 노드로** 다시 돈다 |
 | `add_orchestration_note` | 타임라인에 판단 근거 기록 |
 | `complete_orchestration_mission` | `completed` / `failed` — **미션을 끝내는 유일한 경로** |
 

@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import { renderMarkdown } from '../chat/utils/markdown';
+import { usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
 
 /**
@@ -616,12 +617,26 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             );
           case 'plan':
             return <PlanBlock key={block.key} block={block} />;
-          case 'usage':
+          case 'usage': {
+            const parts = usageSummaryParts(block);
+            // 조각이 하나도 없으면(모두 0) 아무것도 그리지 않는다 — "0 tokens" 는
+            // 계측 실패와 구분되지 않는 거짓 정보다.
+            if (parts.length === 0) return null;
             return (
-              <div key={block.key} data-block="usage" style={{ fontSize: 10.5, color: tokens.colors.textMuted, fontFamily: MONO }}>
-                tokens in {block.inputTokens.toLocaleString()} · out {block.outputTokens.toLocaleString()} · total {block.totalTokens.toLocaleString()}
+              <div
+                key={block.key}
+                data-block="usage"
+                title={
+                  `input ${block.inputTokens.toLocaleString()} · output ${block.outputTokens.toLocaleString()}`
+                  + ` · cache read ${block.cachedReadTokens.toLocaleString()} · cache write ${block.cacheWriteTokens.toLocaleString()}`
+                  + ` · total ${block.totalTokens.toLocaleString()}`
+                }
+                style={{ fontSize: 10.5, color: tokens.colors.textMuted, fontFamily: MONO }}
+              >
+                {parts.join(' · ')}
               </div>
             );
+          }
           case 'turn':
             return (
               <Note key={block.key} tone={block.stopReason === 'error' ? 'danger' : 'warning'}>

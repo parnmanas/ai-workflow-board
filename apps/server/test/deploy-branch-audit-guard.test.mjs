@@ -13,6 +13,12 @@
 //   1) remoteBranchExists 가 '있음/없음/모름' 세 상태를 실제로 구분한다(동작 테스트).
 //   2) 원인을 구분하게 된 뒤에도 판정은 여전히 **양쪽 다 FAIL** 이다(계약 테스트).
 //      여기서 '없음'을 통과로 바꾸면 배포 트리 감사 축이 조용히 사라진다.
+//   4) (2026-09-26 추가) 이 가드는 **자기가 감사하는 저장소를 훼손하지 않는다**.
+//      배포 대상이 main 으로 바뀐 뒤(ticket 128d62cd) 이 스크립트를 개발자의 완전한
+//      클론에서 돌리는 일이 생겼는데, 무조건 `--depth=1` 로 fetch 하면 .git/shallow
+//      가 생기며 로컬 이력이 커밋 하나로 잘린다. 그러면 merge-base·is-ancestor 가
+//      전부 거짓을 돌려줘 "이 브랜치가 main 에 들어갔나" 같은 판정이 조용히 뒤집힌다.
+//
 //   3) (2026-09-20 추가) 브랜치가 없으면 **마지막으로 배포된 sha** 를 찾아 그
 //      트리를 대신 감사한다. 브랜치 상태와 배포 상태는 다른 축이고, 보안 판정에서는
 //      배포 쪽이 이긴다 — 브랜치가 지워져도 마지막 배포 이미지는 계속 돌기 때문이다.
@@ -34,6 +40,7 @@ import {
   remoteBranchExists,
   repoSlugFromRemote,
   lastDeployedSha,
+  fetchDepthArgs,
 } from '../../../scripts/audit-deploy-branch-deps.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -55,6 +62,10 @@ function makeRepoWithOrigin() {
   fs.writeFileSync(path.join(work, 'f.txt'), 'x\n');
   git(['add', '.'], work);
   git(['commit', '-m', 'init'], work);
+  // shallow 여부를 관찰하려면 커밋이 둘 이상이어야 한다 — 커밋 하나짜리 저장소는
+  // 잘려도 잘리지 않아도 `rev-list --count` 가 똑같이 1 이라 테스트가 무의미해진다.
+  fs.writeFileSync(path.join(work, 'f.txt'), 'y\n');
+  git(['commit', '-am', 'second'], work);
   git(['push', 'origin', 'main'], work);
   return { work, cleanup: () => fs.rmSync(tmp, { recursive: true, force: true }) };
 }
@@ -120,6 +131,62 @@ test('브랜치가 없어도 게이트는 여전히 FAIL 이다 (fail-closed 유
 // ---------------------------------------------------------------------------
 // 배포 sha 폴백 (2026-09-20)
 // ---------------------------------------------------------------------------
+
+test('fetchDepthArgs — 완전한 클론에는 depth 를 붙이지 않는다', () => {
+  const { work, cleanup } = makeRepoWithOrigin();
+  try {
+    assert.equal(git(['rev-parse', '--is-shallow-repository'], work).trim(), 'false');
+    assert.deepEqual(fetchDepthArgs(work), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('fetchDepthArgs — 이미 shallow 인 저장소에서는 depth 를 유지한다 (CI 경로)', () => {
+  const { work, cleanup } = makeRepoWithOrigin();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-deploy-branch-guard-shallow-'));
+  try {
+    const shallow = path.join(tmp, 'shallow');
+    git(['clone', '--depth=1', `file://${path.join(work, '.git')}`, shallow], tmp);
+    assert.equal(git(['rev-parse', '--is-shallow-repository'], shallow).trim(), 'true');
+    assert.deepEqual(fetchDepthArgs(shallow), ['--depth=1']);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('배포 브랜치 fetch 가 완전한 클론을 shallow 로 잘라 놓지 않는다', () => {
+  const { work, cleanup } = makeRepoWithOrigin();
+  try {
+    const before = Number(git(['rev-list', '--count', 'HEAD'], work).trim());
+    assert.ok(before >= 2, '픽스처에 커밋이 둘 이상이어야 의미가 있다');
+
+    // main() 이 배포 브랜치마다 도는 바로 그 fetch.
+    git(['fetch', '--no-tags', ...fetchDepthArgs(work), 'origin', 'main'], work);
+
+    assert.equal(
+      git(['rev-parse', '--is-shallow-repository'], work).trim(),
+      'false',
+      '감사 가드가 자기가 감사하는 저장소의 이력을 잘라 놓았다',
+    );
+    assert.equal(Number(git(['rev-list', '--count', 'HEAD'], work).trim()), before);
+  } finally {
+    cleanup();
+  }
+});
+
+test('가드가 fetch 에 depth 를 하드코딩하지 않는다 — 두 호출부 모두 fetchDepthArgs 를 쓴다', () => {
+  const src = fs.readFileSync(SCRIPT, 'utf8');
+  const calls = src.match(/execFileSync\('git', \['fetch'[^\]]*\]/g) ?? [];
+  assert.ok(calls.length >= 2, `fetch 호출부를 찾지 못했다 (${calls.length}건)`);
+  for (const call of calls) {
+    assert.ok(
+      call.includes('fetchDepthArgs()'),
+      `fetch 호출부가 depth 를 하드코딩한다: ${call}`,
+    );
+  }
+});
 
 test('repoSlugFromRemote — ssh/https/.git 형태를 모두 owner/repo 로 푼다', () => {
   const { work, cleanup } = makeRepoWithOrigin();

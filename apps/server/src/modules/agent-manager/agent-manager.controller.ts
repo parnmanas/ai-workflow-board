@@ -511,6 +511,27 @@ export class AgentManagerController {
         .map((e: any) => ({ cli: String(e.cli).slice(0, 32), session_id: String(e.session_id).slice(0, 200), status: String(e.status).slice(0, 32) }))
       : undefined;
 
+    // Terminal(Runtime Host 셸) — 이 장비에서 띄울 수 있는 셸. 비어 있으면 터미널을 못 여는 장비다.
+    const terminal_shells = Array.isArray(body?.terminal_shells)
+      ? body.terminal_shells
+        .filter((e: any) => e && typeof e === 'object' && typeof e.id === 'string' && e.id)
+        .slice(0, 32)
+        .map((e: any) => ({
+          id: String(e.id).slice(0, 64),
+          label: typeof e.label === 'string' && e.label ? String(e.label).slice(0, 100) : String(e.id).slice(0, 64),
+          path: typeof e.path === 'string' ? String(e.path).slice(0, 1024) : '',
+          ...(e.default ? { default: true } : {}),
+        }))
+      : undefined;
+    // Terminal — 지금 살아 있는 PTY 와 상태(전체 목록). 구버전 매니저는 undefined.
+    const terminals = Array.isArray(body?.terminals)
+      ? body.terminals
+        .filter((e: any) => e && typeof e === 'object' && typeof e.terminal_id === 'string' && typeof e.status === 'string')
+        .slice(0, 200)
+        .map((e: any) => ({ terminal_id: String(e.terminal_id).slice(0, 64), status: String(e.status).slice(0, 32) }))
+      : undefined;
+    const platform = typeof body?.platform === 'string' && body.platform ? String(body.platform).slice(0, 32) : undefined;
+
     // Runtime Host supervision metadata.
     const agent_ids = Array.isArray(body?.agent_ids)
       ? body.agent_ids.filter((s: unknown): s is string => typeof s === 'string' && !!s)
@@ -534,6 +555,10 @@ export class AgentManagerController {
       }
       if (Object.keys(out).length) available_models = out;
     }
+    const available_models_at =
+      typeof body?.available_models_at === 'string' && !Number.isNaN(Date.parse(body.available_models_at))
+        ? new Date(body.available_models_at).toISOString()
+        : undefined;
 
     // 이 장비에 설치된 CLI 들의 버전(cliType → `--version`). available_models 와 같은
     // 관대한 검증 — 문자열 아닌 값은 버린다. `update_cli` 가 CLI 를 올린 직후 매니저가
@@ -794,6 +819,9 @@ export class AgentManagerController {
       manager_capabilities,
       acp_session_clis,
       ...(agent_sessions !== undefined ? { agent_sessions } : {}),
+      ...(platform !== undefined ? { platform } : {}),
+      ...(terminal_shells !== undefined ? { terminal_shells } : {}),
+      ...(terminals !== undefined ? { terminals } : {}),
       pid: Number.isFinite(body?.pid) ? Number(body.pid) : 0,
       started_at: typeof body?.started_at === 'string' && body.started_at ? body.started_at : new Date().toISOString(),
       agent_ids,
@@ -804,6 +832,7 @@ export class AgentManagerController {
       active_worktrees,
       active_run_workspaces,
       available_models,
+      available_models_at,
       cli_versions,
       cli_installs,
       cli_latest_versions,
