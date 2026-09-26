@@ -8,7 +8,7 @@ import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateRedStreak, __test__ } from '../dist/modules/agents/ci-health-monitor.service.js';
-import { GitHubConnectorService } from '../dist/services/github-connector.service.js';
+import { compareRunIds, GitHubConnectorService } from '../dist/services/github-connector.service.js';
 
 const NOW = new Date('2026-08-10T12:00:00.000Z');
 const CONFIG = { minConsecutiveRuns: 3, minAgeMs: 6 * 60 * 60_000 };
@@ -305,6 +305,20 @@ test('단조성 게이트: 기록된 실패와 created_at 이 같은 success 는
   const res = evaluateRedStreak([siblingSuccess], NOW, CONFIG, { lastFailedRunId: '35939082088', lastFailedAt: sameSecond });
   assert.equal(res.isGreen, false, '한 푸시가 나란히 띄운 형제 run 은 그 실패를 고친 run 이 아니다');
   assert.ok(res.staleGreenRun);
+});
+
+test('compareRunIds: 2^53 을 넘는 run id 도 정밀도 손실 없이 비교한다 (Number 변환이면 동률로 무너진다)', () => {
+  // Number('9007199254740993') === Number('9007199254740992') — double 로 접히면 서로 다른
+  // 두 run 이 같은 값이 되어 동률 깨기가 조용히 무력화된다.
+  const lower = '9007199254740992';
+  const higher = '9007199254740993';
+  assert.equal(Number(lower), Number(higher), '전제: 이 두 id 는 double 로는 구분되지 않는다');
+  assert.ok(compareRunIds(higher, lower) > 0, 'BigInt 비교라면 더 큰 id 를 더 나중으로 판정해야 한다');
+  assert.ok(compareRunIds(lower, higher) < 0);
+  assert.equal(compareRunIds(lower, lower), 0);
+  // 10진 정수가 아닌 id 는 비교 불가(0) — 복구 판정에서 `> 0` 이 성립하지 않아 fail-closed.
+  assert.equal(compareRunIds('run-6', 'run-5'), 0);
+  assert.equal(compareRunIds('12', ''), 0);
 });
 
 test('단조성 게이트: 같은 run 이 재실행되어 green 으로 뒤집힌 경우는 복구로 인정한다', () => {
