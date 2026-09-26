@@ -15,9 +15,9 @@
  * runs the explicit ordered profile_ids. Cadence: exactly one of `cron` (5-field,
  * UTC) or `interval_ms`.
  *
- * Deploy-timing footgun: a scheduled run hits the RUNNING (deployed) server,
- * which auto-deploys from production.private only after main merges — so a
- * schedule firing right after a fix-merge can inspect pre-deploy code. Every
+ * 배포 타이밍 함정: 스케줄 실행은 **돌고 있는(배포된)** 서버를 친다. 배포 호스트가
+ * `origin/main` 을 detached 로 다시 체크아웃해 의존성 재설치·재빌드·재기동해야 그 커밋이
+ * 서빙되므로, 머지 직후 발화하는 스케줄은 배포 전 코드를 점검할 수 있다. Every
  * SecurityRun records its scanned_commit so the inspected commit is always
  * reconstructable; operationally, keep the cadence coarser than the main→prod
  * deploy lag. See docs/security-scheduler.md.

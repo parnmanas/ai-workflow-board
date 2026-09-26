@@ -92,9 +92,10 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  * new fix ticket stamped `qa-rerun:<gen+1>`, and the cycle continues until the
  * run passes (natural stop — no new ticket) or the cap is hit.
  *
- * Deployment timing: the rerun hits the RUNNING server, which auto-deploys from
- * `production.private` only AFTER main merges. An instant rerun can therefore
- * validate the pre-fix code.
+ * 배포 타이밍: 재실행은 **돌고 있는** 서버를 친다. 배포되는 브랜치는 `main` 하나지만
+ * 머지가 곧 배포는 아니다 — 배포 호스트가 자기 워크트리를 `origin/main` 으로 detached
+ * 체크아웃하고 의존성 재설치·재빌드·서버 재기동까지 마쳐야 그 커밋이 서빙된다. 그래서
+ * 즉시 재실행은 수정 전 코드를 검증할 수 있다.
  *   • Legacy fallback — `on_failure_ticket.rerun_delay_seconds` defers the rerun
  *     by a fixed N seconds (best-effort, in-process) so a deploy can land first.
  *     Re-breaks whenever the real deploy time drifts.
@@ -431,7 +432,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
         `(max_rerun_attempts = ${max}).`,
       ``,
       `자동 재실행을 중단합니다. 근본 원인을 사람이 직접 확인해 주세요:`,
-      `- 수정이 실제로 배포됐는지 (server 는 main→production.private auto-deploy — 배포 지연이면 옛 코드를 검증했을 수 있음)`,
+      `- 수정이 실제로 배포됐는지 (main 머지 후 배포 호스트가 origin/main 을 다시 체크아웃·빌드·재기동해야 반영됨 — 배포 지연이면 옛 코드를 검증했을 수 있음)`,
       `- 시나리오 스텝/기대값 자체가 틀렸는지 (테스트 결함 vs 제품 결함)`,
       ``,
       `_이 티켓을 다시 Done 으로 옮겨도 더는 자동 재실행되지 않습니다 (세대 카운터가 한계에 도달)._`,
