@@ -83,3 +83,33 @@ authorization, and implementation checklist.
 - Verify empty, loading, error, and permission-denied states.
 - Verify keyboard focus, narrow layouts, and long names.
 - Verify the target board belongs to the current workspace server-side.
+
+## Progress indicators (session / chat / board / mission)
+
+"이게 지금 돌고 있나, 내가 뭘 해야 하나, 끝났나?" 는 네 표면에서 같은 질문이고,
+화면도 **같은 색·같은 단어·같은 애니메이션**으로 답해야 한다. 그 어휘의 단일 원천은
+`apps/client/src/activity.ts` 이고, 그리는 것은 `components/common/ActivityIndicator.tsx`
+의 두 프리미티브뿐이다.
+
+| tone | 뜻 | 쓰는 곳 예 |
+| --- | --- | --- |
+| `idle` | 아무 일도 없음 — **점을 찍지 않는다** | 조용한 방, `pending` step, `todo` 티켓 |
+| `queued` | 시작을 기다림 | `ready` step, `starting`/`ready` 세션 |
+| `live` | 지금 돌고 있음 (숨쉬는 점) | `busy` 세션, `running` step/mission, `in_progress` 티켓, 작업 중인 방 |
+| `attention` | **사람이 답해야** 진행됨 (링 펄스) | `awaiting_permission`, `awaiting_user`, `pending_user_action` |
+| `stalled` | 멈춰 있음 | `blocked` step, `paused` mission |
+| `done` / `failed` | 종료 | |
+
+규칙:
+
+- **상태 → tone 번역만** 각 표면이 한다. 색을 그 파일에서 고르지 말 것 — 사이드바 세션
+  행에 자체 색 표가 있어 같은 `busy` 세션이 왼쪽에선 노란 점, 세션 화면에선 보라 pill 로
+  보이던 것이 이 규칙이 생긴 이유다.
+- 애니메이션 두 개는 뜻이 다르다: 숨쉬기(`awb-activity-live`)는 "스스로 진행 중",
+  링(`awb-activity-attention`)은 "사람을 기다림". `attention` 에 숨쉬기를 주면 "곧 알아서
+  될 것"으로 읽혀 정확히 반대 뜻이 된다. 새 `@keyframes` 를 컴포넌트에 인라인으로
+  만들지 말 것(표면마다 다른 속도로 깜빡이던 원인).
+- 좌측 프레임(사이드바 행, 목록 행, 보드 카드)은 **점**(`ActivityDot`), 우측 프레임
+  헤더는 **점 + 라벨**(`ActivityPill`).
+- 회귀: `apps/client/test/activity-vocabulary.test.mjs` — 네 표면의 "작업 중"이 같은 색
+  값인지, `attention` 이 `live` 가 아닌지, 사이드바가 실제로 점을 그리는지까지 단언한다.

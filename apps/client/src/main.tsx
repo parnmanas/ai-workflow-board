@@ -44,6 +44,15 @@ style.textContent = `
   }
   .awb-pending-pulse { animation: awb-pending-pulse 1.8s ease-in-out infinite; }
 
+  /* 진행 표시의 두 애니메이션 — 뜻이 다르므로 섞어 쓰지 말 것 (src/activity.ts).
+       숨쉬기(breathing)  = "스스로 돌고 있다"     → ActivityView.live
+       링(ring, 위 pulse) = "사람이 답해야 진행된다" → tone 'attention'
+     숨쉬기를 attention 에 주면 "곧 알아서 될 것"으로 읽혀 정확히 반대 뜻이 된다.
+     이 두 클래스가 session/chat/board/mission 네 표면의 유일한 진행 애니메이션이다. */
+  @keyframes awb-activity-breathe { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+  .awb-activity-live { animation: awb-activity-breathe 1.4s ease-in-out infinite; }
+  .awb-activity-attention { animation: awb-pending-pulse 1.8s ease-in-out infinite; }
+
   /* AppLayout responsive sidebar (D-12 / UI-SPEC) */
   .awb-shell {
     display: flex;

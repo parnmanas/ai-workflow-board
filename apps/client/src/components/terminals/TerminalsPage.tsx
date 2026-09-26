@@ -6,7 +6,7 @@ import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import type { TerminalHost, TerminalSummary, TerminalUpdateEvent } from '../../types';
-import { Button, EmptyState, ErrorState } from '../common';
+import { ActivityPill, Button, EmptyState, ErrorState } from '../common';
 import PageHeader from '../PageHeader';
 import NewTerminalModal from './NewTerminalModal';
 import TerminalView from './TerminalView';
@@ -24,34 +24,13 @@ import { describeTerminalStatus, isLiveTerminal, terminalDisplayTitle, upsertTer
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
-function toneColor(tone: 'muted' | 'accent' | 'success' | 'warning' | 'danger'): string {
-  switch (tone) {
-    case 'accent': return tokens.colors.accentLight;
-    case 'success': return tokens.colors.successLight;
-    case 'warning': return tokens.colors.warningLight;
-    case 'danger': return tokens.colors.dangerLight;
-    default: return tokens.colors.textMuted;
-  }
-}
-
+/** 터미널 상태 pill — 세션/미션과 같은 진행 어휘(src/activity.ts). */
 function StatusPill({ status }: { status: string | null | undefined }) {
-  const view = describeTerminalStatus(status);
-  const color = toneColor(view.tone);
   return (
-    <span
-      data-terminal-status={status || 'unknown'}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color,
-        border: `1px solid ${color}55`, borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap',
-      }}
-    >
-      <span
-        aria-hidden="true"
-        className={status === 'starting' ? 'awb-pending-pulse' : undefined}
-        style={{ width: 7, height: 7, borderRadius: '50%', background: color }}
-      />
-      {view.label}
-    </span>
+    <ActivityPill
+      view={describeTerminalStatus(status)}
+      dataAttr={{ 'data-terminal-status': status || 'unknown' }}
+    />
   );
 }
 

@@ -149,7 +149,6 @@ export default function MissionDetailPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <style>{`@keyframes awb-orch-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }`}</style>
 
       <PageHeader
         title={mission.title}
@@ -569,12 +568,12 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
         {style.live && (
           <span
             aria-hidden="true"
+            className="awb-activity-live"
             style={{
               width: 7,
               height: 7,
               borderRadius: '50%',
               background: style.color,
-              animation: 'awb-orch-pulse 1.4s ease-in-out infinite',
             }}
           />
         )}

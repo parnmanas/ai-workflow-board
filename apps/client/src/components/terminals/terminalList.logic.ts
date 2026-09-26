@@ -4,6 +4,8 @@
 // 세션과 다르다: `exited` 는 보여 줄 과거가 아니라 곧 사라질 행이다.
 
 import type { TerminalSummary } from '../../types';
+import { terminalActivity } from '../../activity';
+import type { ActivityView } from '../../activity';
 
 export const LIVE_TERMINAL_STATUSES: ReadonlySet<string> = new Set(['starting', 'live']);
 
@@ -11,14 +13,9 @@ export function isLiveTerminal(terminal: Pick<TerminalSummary, 'status'>): boole
   return LIVE_TERMINAL_STATUSES.has(terminal.status);
 }
 
-export function describeTerminalStatus(status: string | null | undefined): { label: string; tone: 'muted' | 'accent' | 'success' | 'warning' | 'danger' } {
-  switch (status) {
-    case 'starting': return { label: 'Starting', tone: 'accent' };
-    case 'live': return { label: 'Live', tone: 'success' };
-    case 'exited': return { label: 'Exited', tone: 'muted' };
-    case 'error': return { label: 'Failed', tone: 'danger' };
-    default: return { label: status ? String(status) : 'Unknown', tone: 'muted' };
-  }
+/** 터미널 상태 → 공용 진행 어휘(src/activity.ts). tone 표를 여기 또 두지 않는다. */
+export function describeTerminalStatus(status: string | null | undefined): ActivityView {
+  return terminalActivity(status);
 }
 
 /** 경로의 마지막 조각 — Windows 경로(`C:\a\b`)도 같이 다룬다. */

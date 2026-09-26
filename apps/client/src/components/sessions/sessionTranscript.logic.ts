@@ -15,6 +15,8 @@
  */
 import type { AgentSessionAuth, AgentSessionCommand, AgentSessionEventRecord, AgentSessionStatus } from '../../types';
 import { cliLabel } from '../../cli/catalog';
+import { sessionActivity } from '../../activity';
+import type { ActivityView } from '../../activity';
 
 export interface PermissionOptionView {
   option_id: string;
@@ -450,33 +452,15 @@ export function hasSeqGap(events: AgentSessionEventRecord[]): boolean {
   return false;
 }
 
-export interface StatusView {
-  label: string;
-  tone: 'muted' | 'accent' | 'success' | 'warning' | 'danger';
-  live: boolean;
-}
+/**
+ * 세션 상태 → 공용 진행 어휘(src/activity.ts). 라벨·색·애니메이션 규칙은 네 표면이
+ * 공유하므로 여기서 따로 정의하지 않는다 — 예전에는 이 파일에 tone 표가 따로 있어
+ * 같은 "작업 중"이 세션에선 보라, 미션에선 파랑으로 나왔다.
+ */
+export type StatusView = ActivityView;
 
-export function describeSessionStatus(status: AgentSessionStatus | string | null | undefined): StatusView {
-  switch (status) {
-    case 'idle':
-      return { label: 'Idle', tone: 'muted', live: false };
-    case 'starting':
-      return { label: 'Starting', tone: 'accent', live: true };
-    case 'ready':
-      return { label: 'Ready', tone: 'success', live: true };
-    case 'busy':
-      return { label: 'Working', tone: 'accent', live: true };
-    case 'awaiting_permission':
-      return { label: 'Needs your approval', tone: 'warning', live: true };
-    case 'awaiting_input':
-      return { label: 'Needs your input', tone: 'warning', live: true };
-    case 'closed':
-      return { label: 'Closed', tone: 'muted', live: false };
-    case 'error':
-      return { label: 'Error', tone: 'danger', live: false };
-    default:
-      return { label: String(status || 'Unknown'), tone: 'muted', live: false };
-  }
+export function describeSessionStatus(status: AgentSessionStatus | string | null | undefined): ActivityView {
+  return sessionActivity(status);
 }
 
 export function sessionDisplayTitle(session: { title?: string | null; cli?: string; session_id?: string }): string {

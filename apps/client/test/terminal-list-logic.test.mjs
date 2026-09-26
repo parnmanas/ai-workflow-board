@@ -59,8 +59,8 @@ test('isLiveTerminal / describeTerminalStatus', () => {
   assert.equal(isLiveTerminal(row({ status: 'starting' })), true);
   assert.equal(isLiveTerminal(row({ status: 'exited' })), false);
   assert.equal(isLiveTerminal(row({ status: 'error' })), false);
-  assert.equal(describeTerminalStatus('live').tone, 'success');
-  assert.equal(describeTerminalStatus('error').tone, 'danger');
+  assert.equal(describeTerminalStatus('live').tone, 'live');
+  assert.equal(describeTerminalStatus('error').tone, 'failed');
   assert.equal(describeTerminalStatus(undefined).label, 'Unknown');
 });
 

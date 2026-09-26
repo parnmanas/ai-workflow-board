@@ -150,12 +150,12 @@ function StepRailRow({
         {style.live && (
           <span
             aria-hidden="true"
+            className="awb-activity-live"
             style={{
               width: 5,
               height: 5,
               borderRadius: '50%',
               background: style.color,
-              animation: 'awb-orch-pulse 1.4s ease-in-out infinite',
             }}
           />
         )}

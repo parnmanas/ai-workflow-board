@@ -107,7 +107,7 @@ test('status helpers mirror the server prompt rules', () => {
   assert.equal(canPrompt('busy'), false);
   assert.equal(canPrompt('awaiting_permission'), false);
   assert.equal(canPrompt('starting'), false);
-  assert.equal(describeSessionStatus('awaiting_permission').tone, 'warning');
+  assert.equal(describeSessionStatus('awaiting_permission').tone, 'attention');
   assert.equal(describeSessionStatus('idle').live, false);
   assert.equal(describeSessionStatus(undefined).label, 'Unknown');
   assert.equal(sessionDisplayTitle({ title: '', cli: 'claude', session_id: '11111111-2222' }), 'Claude Code · 11111111');
@@ -255,7 +255,7 @@ test('normalizeElicitationSchema handles oneOf titles, multi-select arrays, numb
 
 test('awaiting_input is a waiting status: labelled, blocks prompting, and counts as waiting', () => {
   assert.equal(describeSessionStatus('awaiting_input').label, 'Needs your input');
-  assert.equal(describeSessionStatus('awaiting_input').tone, 'warning');
+  assert.equal(describeSessionStatus('awaiting_input').tone, 'attention');
   assert.equal(canPrompt('awaiting_input'), false);
   assert.equal(isWaitingStatus('awaiting_input'), true);
   assert.equal(isWaitingStatus('awaiting_permission'), true);

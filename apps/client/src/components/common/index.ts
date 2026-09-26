@@ -13,3 +13,4 @@ export { EmptyState } from './EmptyState';
 export { ErrorState } from './ErrorState';
 export { ChunkLoadErrorBoundary } from './ChunkLoadErrorBoundary';
 export { PermissionNotice } from './PermissionNotice';
+export { ActivityDot, ActivityPill } from './ActivityIndicator';

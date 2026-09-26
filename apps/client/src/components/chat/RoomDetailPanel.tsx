@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
+import { ActivityPill } from '../common/ActivityIndicator';
+import { roomActivity } from '../../activity';
 import type { AgentCurrentTask, ChatRoomListItem, ChatRoomMessageItem } from '../../types';
 import MessageList from './MessageList';
 import { useMentionViewportReader } from '../../hooks/useMentionViewportReader';
@@ -571,6 +573,14 @@ export default function ChatRoomView({
           description={undefined}
           actions={
             <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
+              {/* 이 방이 지금 돌고 있나 — 사이드바의 방 행과 같은 어휘/색
+                  (src/activity.ts). 아래 "…is typing" 줄은 누가·무엇을 하는지까지
+                  말하지만, 헤더의 이 pill 은 스크롤과 무관하게 항상 보인다. */}
+              {Object.keys(typingAgents).length > 0 && (
+                <ActivityPill
+                  view={roomActivity({ workingNames: Object.values(typingAgents).map((entry) => entry.name) })}
+                />
+              )}
               {isMobile && onBack && (
                 <button
                   onClick={onBack}

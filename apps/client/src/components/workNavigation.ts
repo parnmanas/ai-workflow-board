@@ -1,3 +1,6 @@
+import { missionStyle } from './orchestration/status';
+import type { ActivityView } from '../activity';
+
 // 사이드바 WORK 섹션의 계층 모델 (티켓 03ca8b5b).
 //
 // WORK 는 Teams / Orchestrations / Boards 세 개의 독립 최상위 메뉴를 그 순서대로
@@ -17,6 +20,12 @@ export const MISSIONS_CHANGED_EVENT = 'orchestration-missions-changed';
 export interface WorkNavChild {
   id: string;
   label: string;
+  /**
+   * 이 행이 "지금 돌고 있나"를 말하는 공용 진행 상태(src/activity.ts). 사이드바는
+   * 색·애니메이션을 스스로 고르지 않고 이 값만 그린다 — 미션 카드·세션 목록·티켓
+   * 카드가 같은 어휘를 쓰게 하는 지점이다. 없으면 점을 찍지 않는다.
+   */
+  activity?: ActivityView;
   /** 클릭 시 이동할 전체 경로(쿼리스트링 포함). */
   path: string;
   active: boolean;
@@ -50,7 +59,7 @@ export interface WorkNavInput {
   /** `?team=<id>` 로 선택된 팀(Teams 서브메뉴 active 판정용). */
   selectedTeamId?: string | null;
   teams: Array<{ id: string; name: string }>;
-  missions: Array<{ id: string; title: string }>;
+  missions: Array<{ id: string; title: string; status?: string }>;
   boards: Array<{ id: string; name: string }>;
   /** 보드별 읽지 않은 티켓 코멘트 수. */
   boardUnread?: Record<string, number>;
@@ -58,6 +67,15 @@ export interface WorkNavInput {
   ticketUnreadTotal?: number;
   teamsLoading?: boolean;
   missionsLoading?: boolean;
+}
+
+/**
+ * 미션 상태 → 진행 상태. 미션 화면과 **같은** 표(orchestration/status.ts)를 쓴다 —
+ * 사이드바용 사본을 만들면 같은 미션이 왼쪽에선 회색, 오른쪽에선 파랑이 된다.
+ */
+function missionActivityView(status: string): ActivityView {
+  const style = missionStyle(status);
+  return { label: style.label, tone: style.tone, live: style.live };
 }
 
 /** `path` 자신이거나 그 하위 경로인가. */
@@ -116,6 +134,7 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
         label: mission.title,
         path: `${orchestrationsPath}/missions/${mission.id}`,
         active: pathname === `${orchestrationsPath}/missions/${mission.id}`,
+        activity: mission.status ? missionActivityView(mission.status) : undefined,
       })),
       emptyLabel: 'No missions yet',
       loading: missionsLoading,
