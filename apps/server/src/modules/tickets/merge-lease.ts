@@ -32,9 +32,9 @@ import type { ResolvedMergeLease } from '../../common/merge-lease-config';
  *   - `lastProgressAtMs` — 그 외 관측된 마지막 진행(획득, 재검증 기록 등).
  *
  * ★ 회수를 참는 것만으로는 부족하다 (ticket baaac7e9). CI 대기 동안 호출자가
- * `lastProgressAtMs` 를 함께 밀지 않으면 그 동안 시계가 멈춰 있다가, CI 가
- * 해소되는 순간 무진행 경과가 이미 상한을 넘겨 다시 등장한다 — ff push 를 하러
- * 재개된 홀더가 그 자리에서 회수된다. 그러면 idle 상한은 이 주석이 금지한
+ * `lastProgressAtMs` 를 함께 밀지 않으면 그 동안 시계가 멈춰 있고, CI 가
+ * 해소되는 순간 무진행 경과가 이미 상한을 넘겨 곧바로 `reap_idle` 로 뒤집힌다 —
+ * ff push 를 하러 재개된 홀더가 그 자리에서 회수된다. 그러면 idle 상한은 이 주석이 금지한
  * "작업 예산" 으로 정확하게 퇴화한다. 실제로 2026-09-03 이후 `reap_idle` 로
  * 끝난 lease 11건은 전부 생산적인 첫 검증 사이클 도중(`reverify_count` = 1)에
  * 박탈된 것이었다. 그래서 살아 있는 이유를 `alive` 와 구분해 `alive_ci_wait`
