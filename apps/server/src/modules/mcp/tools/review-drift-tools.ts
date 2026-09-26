@@ -27,7 +27,9 @@ export function registerReviewDriftTools(server: McpServer, ctx: ToolContext): v
     '`gh pr view --json mergeStateStatus` base-freshness check in review_workflow.\n\n' +
     'Returns {drifted, classification, recommendation, overlapping_paths, reverification_count, max_reverifications}. ' +
     'recommendation is one of:\n' +
-    '  - "proceed" — no drift, or main only moved in paths unrelated to this branch. Continue the review.\n' +
+    '  - "proceed" — no drift, main only moved in paths unrelated to this branch, or the branch is already ' +
+    'contained in the default (classification "already_merged": its tip is an ancestor of the default\'s, so no ' +
+    'rebase could make it any more current). Continue the review.\n' +
     '  - "rebase_required" — main moved in a path this branch also touches (or a repo-global file like package.json), ' +
     'and this Review episode has not yet spent its one reverification bounce. Ask the assignee to rebase and bounce ' +
     'to In Progress.\n' +

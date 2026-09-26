@@ -466,3 +466,125 @@ test('require_fresh_base gate: Q3 bypasses on a fresh classification, but not a 
   const rowB = await ticketRepo.findOne({ where: { id: ticketB.id } });
   assert.equal(rowB?.column_id, columns.review.id, 'ticket B STAYS in Review — no bypass on a stale classification');
 });
+
+// ── 티켓 6a9f9de9: 이미 병합된 브랜치의 오분류 ────────────────────────────────
+// feature tip 이 이미 base tip 의 조상이면(= ff/merge 로 main 에 들어간 뒤 main
+// 이 더 움직인 상태) 그 브랜치의 base 대비 diff 는 빈 배열이다. 그런데 Q1 의
+// repo-global 규칙 ③ 은 branch 쪽 경로를 아예 보지 않고 발동하므로, "그 사이
+// main 이 바꾼 package-lock.json" 이 그대로 overlapping_paths 로 보고되어
+// overlapping_drift -> rebase_required 가 나왔다 — rebase 해도 더 최신이 될 수
+// 없는 브랜치에 rebase 를 요구하는 verdict 다.
+//
+// 이 spec 은 중간 분류 문자열에서 멈추지 않고 그 verdict 가 실제로 바꾸는
+// production 결과까지 본다: require_fresh_base 보드에서 behind>0 인 이미-병합
+// 브랜치의 Review -> Merging 이동이 merge_gate_stale_base 로 막히는지 여부.
+// 수정 전에는 분류가 overlapping_drift 라 Q3 우회 집합에 들지 못해 막혔다.
+test('check_review_drift: 이미 main 에 병합된 브랜치는 already_merged / proceed 이고 Merging 이동이 막히지 않는다', async (t) => {
+  step('Boot NestJS app on test port');
+  const { app, port, modules } = await bootApp({ port: 0 });
+  t.after(() => { void app.close().catch(() => {}); });
+  t.after(() => resetStub());
+  t.after(() => resetMergeGateStub());
+  const { getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+
+  step('require_fresh_base 보드 + Merging 컬럼 + repo Resource 를 심는다');
+  const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
+    workspaceName: 'review-drift-already-merged',
+  });
+  const merging = await createColumn(app, getDataSourceToken, board.id, {
+    name: 'Merging', position: 5, workspaceId: ws.id, kind: 'merging', roleRouting: ['assignee'],
+  });
+  await ds.getRepository('Board').update(board.id, {
+    merge_gate_config: JSON.stringify({ enabled: true, require_fresh_base: true }),
+  });
+  const resource = await ds.getRepository('Resource').save(
+    ds.getRepository('Resource').create({
+      workspace_id: ws.id, name: 'repo', type: 'repository',
+      url: 'https://example.com/review-drift-already-merged.git', default_branch: 'main',
+    }),
+  );
+  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker5' });
+  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {
+    workspaceId: ws.id, label: 'worker5',
+  });
+  const ticket = await createTicket(app, getDataSourceToken, {
+    columnId: columns.review.id, workspaceId: ws.id, title: 'Already-merged branch ticket',
+    assigneeId: worker.id, reporterId: worker.id, reviewerId: worker.id,
+  });
+  const ticketRepo = ds.getRepository('Ticket');
+  await ticketRepo.update(ticket.id, { base_repo_resource_id: resource.id, base_branch: 'main' });
+
+  const va = new VirtualAgent({ name: 'worker5', agentId: worker.id, apiKey: workerKey.raw_key, port });
+  await va.start();
+  t.after(() => va.stop());
+
+  step('Stub: feature tip 이 base tip 의 조상 — merge-base == feature tip, branch diff 는 빈 배열');
+  const MERGED_TIP = 'sha-feature-landed-on-main';
+  const BASE_TIP = 'sha-base-tip-after-merge';
+  const mod = await import(DIST_REVIEW_DRIFT);
+  let probeCalled = false;
+  mod.__setReviewDriftProbeForTests(async () => {
+    probeCalled = true;
+    return {
+      baseTipSha: BASE_TIP,
+      // 이미 병합된 브랜치의 git 사실: merge-base(main, feature) == feature tip.
+      mergeBaseSha: MERGED_TIP,
+      featureBranch: 'ticket/dadc825f-production-private-refs',
+      featureTipSha: MERGED_TIP,
+      // 3-dot diff(main...feature) 는 병합된 브랜치에서 빈 배열이다.
+      branchPaths: [],
+      // 병합 이후 main 이 움직인 경로 — repo-global 파일을 일부러 포함시킨다.
+      // 규칙 ③ 이 branch 쪽을 보지 않으므로 이게 오분류의 방아쇠였다.
+      mainDriftPaths: ['package-lock.json', 'apps/client/src/somewhere-else.ts'],
+    };
+  });
+
+  step('check_review_drift -> already_merged / proceed, overlapping_paths 는 비어 있어야 한다');
+  const drift = await va.mcp.callTool('check_review_drift', { ticket_id: ticket.id });
+  assert.ok(probeCalled, 'probe 가 실제로 돌아야 한다');
+  assert.ok(!drift?.isError, `에러 없이 답해야 한다: ${JSON.stringify(drift)}`);
+  assert.equal(
+    drift.classification, 'already_merged',
+    `이미 병합된 브랜치는 already_merged 여야 한다(수정 전엔 overlapping_drift): ${JSON.stringify(drift)}`,
+  );
+  assert.equal(
+    drift.recommendation, 'proceed',
+    `rebase 를 요구하면 안 된다 — rebase 해도 더 최신이 될 수 없는 브랜치다: ${JSON.stringify(drift)}`,
+  );
+  assert.deepEqual(
+    drift.overlapping_paths, [],
+    'main 이 건드린 repo-global 파일을 이 브랜치와 겹친 경로로 보고하면 안 된다',
+  );
+  assert.equal(drift.drifted, false, '브랜치가 base 에 포함돼 있으므로 통합할 drift 가 없다');
+  assert.equal(
+    drift.reverification_count, 0,
+    '이미 병합된 브랜치는 에피소드의 bounce 예산을 태우지 않는다',
+  );
+
+  step('에피소드 상태 행에도 already_merged 가 그대로 남아야 한다 (merge-gate 가 이 행을 읽는다)');
+  const driftRepo = ds.getRepository('ReviewDriftState');
+  const row = await driftRepo.findOne({ where: { ticket_id: ticket.id } });
+  assert.ok(row, 'ReviewDriftState 행이 생성돼야 한다');
+  assert.equal(row.last_classification, 'already_merged', 'merge-gate Q3 가 읽는 값이 already_merged 여야 한다');
+  assert.equal(row.reverification_count, 0, '저장된 카운터도 0 이어야 한다');
+  assert.equal(row.last_checked_base_sha, BASE_TIP, 'Q3 신선도 판정용 base tip 이 기록돼야 한다');
+
+  step('production 결과: require_fresh_base 보드에서 behind>0 이어도 Review -> Merging 이 막히지 않는다');
+  const lgtm = await va.mcp.callTool('add_comment', {
+    ticket_id: ticket.id, content: 'LGTM — 이미 병합된 브랜치 확인.', author_role: 'reviewer',
+  });
+  assert.ok(!lgtm?.isError, `리뷰어 코멘트가 남아야 한다: ${JSON.stringify(lgtm)}`);
+  // 이미 병합된 브랜치는 정의상 behind>0 / ahead=0 이다. baseTipSha 는 drift
+  // 체크가 본 것과 같게 둬야 Q3 신선도 가드를 통과한다.
+  await setMergeGateStub(3, 0, BASE_TIP);
+  const toMerging = await va.mcp.callTool('move_ticket', {
+    ticket_id: ticket.id, target_column_name: 'Merging', board_id: board.id,
+  });
+  assert.ok(
+    !toMerging?.isError,
+    `already_merged 는 stale-base 블록을 우회해야 한다(수정 전엔 merge_gate_stale_base): ${JSON.stringify(toMerging)}`,
+  );
+  const moved = await ticketRepo.findOne({ where: { id: ticket.id } });
+  assert.equal(moved?.column_id, merging.id, '티켓이 Merging 에 도착해야 한다');
+});

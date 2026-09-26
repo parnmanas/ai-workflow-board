@@ -11,6 +11,11 @@
 // test.mjs uses for DEFAULT_PROMPT_TEMPLATES) so the full truth table is
 // pinned without a network or a booted app — the qa-flows/review-drift.test.mjs
 // sibling covers the live MCP tool + episode-state persistence end to end.
+//
+// 티켓 6a9f9de9 이 축 하나를 더 얹는다: feature tip 이 이미 base tip 의 조상인
+// (= 이미 병합된) 브랜치. 그 경우 branchPaths 는 빈 배열이 되는데, Q1 의
+// repo-global 규칙 ③ 은 branch 쪽을 아예 보지 않고 발동하므로 이미 main 에
+// 들어간 브랜치가 `overlapping_drift` -> `rebase_required` 로 오분류됐다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -95,6 +100,61 @@ test('classifyDrift: budget gating - overlapping drift is a rebase candidate onl
   );
 });
 
+// ── 티켓 6a9f9de9: 이미 병합된 브랜치는 overlapping drift 가 아니다 ──────────
+test('classifyDrift: 이미 병합된 브랜치는 repo-global drift 앞에서도 already_merged 다 (오분류 재현)', () => {
+  // 재현 조건 그대로: 병합돼서 branchPaths 가 비었고, 그 사이 main 이
+  // package-lock.json 을 건드렸다. 수정 전에는 규칙 ③ 이 branch 쪽을 보지 않고
+  // 발동해 overlapping_drift -> rebase_required 가 나왔다.
+  assert.equal(
+    reviewDrift.classifyDrift([], ['package-lock.json'], 0, true),
+    'already_merged',
+    '이미 main 에 들어간 브랜치는 repo-global 변경이 있어도 rebase 대상이 아니다',
+  );
+  // 같은 입력에서 조상 사실만 빼면 기존 오분류가 그대로 재현된다 — 이 테스트가
+  // 무엇을 고쳤는지 대조군으로 못박는다.
+  assert.equal(
+    reviewDrift.classifyDrift([], ['package-lock.json'], 0, false),
+    'overlapping_drift',
+    '병합되지 않은 브랜치의 repo-global 규칙 ③ 은 그대로 유지돼야 한다',
+  );
+});
+
+test('classifyDrift: 병합-조상 판정이 overlap·budget 판정보다 먼저다', () => {
+  // 실제 경로 교집합이 있어도(= 규칙 ①), budget 이 남았든 소진됐든 결과는
+  // already_merged 하나로 수렴해야 한다. rebase 로 더 최신이 될 수 없는
+  // 브랜치이므로 budget 을 태울 이유 자체가 없다.
+  for (const count of [0, 1, 5]) {
+    assert.equal(
+      reviewDrift.classifyDrift(['a/b.ts'], ['a/b.ts'], count, true),
+      'already_merged',
+      `count=${count} 에서도 병합-조상이 우선해야 한다`,
+    );
+  }
+  // main 이 전혀 움직이지 않은 경우에도 같은 판정 — 병합 직후와 몇 분 뒤가
+  // 같은 verdict 여야 한다(fresh <-> already_merged 로 흔들리면 안 된다).
+  assert.equal(reviewDrift.classifyDrift([], [], 0, true), 'already_merged');
+});
+
+test('classifyDrift: 4번째 인자를 생략하면 티켓 6a9f9de9 이전과 바이트 단위로 같다', () => {
+  // 기존 호출자(테스트 포함)는 3-인자로 부른다 — 기본값이 false 여야 한다.
+  assert.equal(reviewDrift.classifyDrift([], ['package-lock.json'], 0), 'overlapping_drift');
+  assert.equal(reviewDrift.classifyDrift(['a/b.ts'], ['a/b.ts'], 1), 'overlapping_drift_budget_exhausted');
+  assert.equal(reviewDrift.classifyDrift(['apps/server/src/a.ts'], ['apps/client/src/b.ts'], 0), 'non_overlapping_drift');
+  assert.equal(reviewDrift.classifyDrift([], [], 0), 'fresh');
+});
+
+test('isFeatureContainedInBase: merge-base == feature tip 일 때만 참, 빈 SHA 는 거짓', () => {
+  assert.equal(typeof reviewDrift.isFeatureContainedInBase, 'function', '조상 판정 술어가 export 돼야 한다');
+  assert.equal(reviewDrift.isFeatureContainedInBase('sha-tip', 'sha-tip'), true, 'merge-base 가 feature tip 이면 base 에 포함된 것');
+  assert.equal(reviewDrift.isFeatureContainedInBase('sha-fork', 'sha-tip'), false, 'fork point 가 tip 과 다르면 아직 분기 중');
+  // 빈 문자열 두 개가 우연히 같다고 "이미 병합"으로 오판하면 미해결 probe 가
+  // 조용히 rebase 게이트를 통과시킨다 — availability-first 와 정반대 방향의
+  // 오류이므로 명시적으로 막는다.
+  assert.equal(reviewDrift.isFeatureContainedInBase('', ''), false, '빈 SHA 쌍은 병합 증거가 아니다');
+  assert.equal(reviewDrift.isFeatureContainedInBase('', 'sha-tip'), false);
+  assert.equal(reviewDrift.isFeatureContainedInBase('sha-tip', ''), false);
+});
+
 test('overlappingSubset: returns only the paths that actually overlap, not the whole mainDriftPaths set', () => {
   const branchPaths = ['apps/server/src/modules/mcp/shared/review-drift.ts'];
   const mainDriftPaths = [
@@ -129,6 +189,7 @@ test('overlappingSubset: no overlap -> empty array', () => {
 test('recommendationFor: only overlapping_drift (budget remaining) ever recommends a bounce', () => {
   assert.equal(reviewDrift.recommendationFor('fresh'), 'proceed');
   assert.equal(reviewDrift.recommendationFor('non_overlapping_drift'), 'proceed');
+  assert.equal(reviewDrift.recommendationFor('already_merged'), 'proceed', '이미 병합된 브랜치는 rebase 를 요구하지 않는다');
   assert.equal(reviewDrift.recommendationFor('overlapping_drift'), 'rebase_required');
   assert.equal(reviewDrift.recommendationFor('overlapping_drift_budget_exhausted'), 'proceed_no_action');
 });
@@ -161,7 +222,10 @@ test('decideMergeGate: omitting driftClassification is byte-for-byte the pre-59e
 test('decideMergeGate: non_overlapping_drift and budget_exhausted bypass the stale-base block', () => {
   const gate = { enabled: true, require_fresh_base: true, require_full_merge: true };
   const ba = { behind: 2, ahead: 0 };
-  for (const cls of ['non_overlapping_drift', 'overlapping_drift_budget_exhausted']) {
+  // already_merged 도 같은 집합에 든다 (티켓 6a9f9de9): 이미 병합된 브랜치는
+  // 정의상 behind>0 인데, 그 상태로 stale-base 를 막으면 classifier 가
+  // proceed 를 말하는 동안 게이트가 막는 Q3 데드락이 그대로 재현된다.
+  for (const cls of ['non_overlapping_drift', 'overlapping_drift_budget_exhausted', 'already_merged']) {
     const decision = mergeGate.decideMergeGate('review_to_merging', gate, ba, cls);
     assert.equal(decision.blocked, false, `${cls} must bypass the stale-base block (Q3 deadlock fix)`);
   }
