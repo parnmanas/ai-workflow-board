@@ -72,7 +72,7 @@ import { mergeEnvironmentConfig } from '../../common/environment-config';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { LogService } from '../../services/log.service';
 import { ActivityService } from '../../services/activity.service';
-import { GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl, sortWorkflowRunsNewestFirst } from '../../services/github-connector.service';
+import { compareRunIds, GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl, sortWorkflowRunsNewestFirst } from '../../services/github-connector.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { maxTicketPosition } from '../mcp/shared/ticket-helpers';
@@ -155,6 +155,23 @@ export interface RedStreakEvidence {
   lastFailedRunId: string;
   /** 그 run 의 `created_at` (ISO). 빈 문자열이면 하한선이 없다는 뜻이고 게이트는 적용되지 않는다. */
   lastFailedAt: string;
+  /** 하한선 run 이 속한 workflow (`CiRedAlert.workflow_id`). 같은 초 동률을 run id 로 깨는
+   *  것은 green run 이 **이 workflow 소속임이 확인될 때만** 허용된다 — 아래 게이트 주석
+   *  참고. 비어 있으면 판별 불가로 보고 동률을 깨지 않는다. */
+  workflowId?: string;
+}
+
+/**
+ * green run 이 하한선과 **같은 workflow** 임이 확인되는가. 양쪽 중 하나라도 workflow 를
+ * 모르면 `false` — 모르는 것을 "같다" 로 취급하면 이 티켓이 막으려던 형제 run 오탐이
+ * 그대로 되돌아온다. `listWorkflowRuns` 는 `workflow_id` 필드가 아예 없는 run 을
+ * (이물질이라는 증거가 없으므로) 버리지 않고 남기기 때문에, 그런 run 이 여기까지 온다.
+ */
+function isSameWorkflowAsEvidence(green: GitHubWorkflowRun, evidence?: RedStreakEvidence | null): boolean {
+  const recorded = String(evidence?.workflowId || '').trim();
+  const actual = String(green?.workflow_id || '').trim();
+  if (!recorded || !actual) return false;
+  return recorded === actual;
 }
 
 /**
@@ -168,9 +185,15 @@ export interface RedStreakEvidence {
  * 하나도 없는 main 에 복구 알림이 두 차례 발송됐다. 근거가 기존 실패보다 최신이 아니면
  * 그것은 복구가 아니라 앞뒤가 맞지 않는 읽기이므로 red 를 유지한다.
  *
- * 같은 `created_at` 도 복구가 아니다 — 한 푸시가 동시에 띄운 형제 run 은 그 실패를
- * *뒤이어* 고친 run 이 아니라 나란히 돈 run 이기 때문이다. 그래서 비교는 `>` 이지 `>=` 가
- * 아니다.
+ * **"더 최신" 은 정렬과 같은 전체 순서 `(created_at, run id)` 로 판정한다** (리뷰 지적).
+ * `created_at` 만 비교하면 `sortWorkflowRunsNewestFirst` 가 "가장 최신" 으로 골라 놓은
+ * run 을 이 게이트가 거부하는 모순이 생긴다 — 같은 workflow 에서 실패 run 직후 성공 run
+ * 이 같은 초에 만들어지는 **정상 복구**가 영구히 거부돼 alert 행이 갇힌다. 두 경로가 같은
+ * 비교(`compareRunIds`)를 쓰는 것이 이 함수의 계약이다.
+ *
+ * 다만 동률을 run id 로 깨는 것은 green 이 **같은 workflow** 일 때뿐이다. 한 푸시가 나란히
+ * 띄운 다른 workflow 의 성공은 id 가 더 클 수도 있지만 그 실패를 고친 run 이 아니다 —
+ * 이 티켓의 원래 오탐이 바로 그 형태이므로 workflow 판별이 안 되면 fail-closed 로 둔다.
  *
  * 예외 하나: **같은 run 이 재실행되어 green 으로 뒤집힌 경우**(`run_attempt` 증가)는 진짜
  * 복구다. run id 가 같고 `created_at` 도 그대로이므로 시각 비교만으로는 영원히 거부돼
@@ -184,7 +207,10 @@ function isRecoveryNewerThanEvidence(green: GitHubWorkflowRun, evidence?: RedStr
   if (!Number.isFinite(floorMs)) return true; // 하한선을 못 읽으면 게이트 근거가 없다
   const greenMs = new Date(green.created_at || '').getTime();
   if (!Number.isFinite(greenMs)) return false; // 시점을 못 읽는 run 으로는 복구를 주장할 수 없다
-  return greenMs > floorMs;
+  if (greenMs !== floorMs) return greenMs > floorMs;
+  // 같은 초 — 정렬이 쓰는 것과 같은 2순위 키로 깬다. 단, 같은 workflow 임이 확인될 때만.
+  return isSameWorkflowAsEvidence(green, evidence)
+    && compareRunIds(green.id || '', evidence?.lastFailedRunId || '') > 0;
 }
 
 /**
@@ -485,7 +511,14 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       runs,
       now,
       { minConsecutiveRuns: this.config.minRuns, minAgeMs: this.config.minAgeMs },
-      existing ? { lastFailedRunId: existing.last_run_id || '', lastFailedAt: existing.last_run_at || '' } : null,
+      existing
+        ? {
+          lastFailedRunId: existing.last_run_id || '',
+          lastFailedAt: existing.last_run_at || '',
+          // 같은 초 동률을 run id 로 깨도 되는지 판단하려면 하한선의 workflow 가 필요하다.
+          workflowId: existing.workflow_id || '',
+        }
+        : null,
     );
 
     if (evalResult.staleGreenRun) {
