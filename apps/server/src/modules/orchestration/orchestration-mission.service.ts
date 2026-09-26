@@ -21,6 +21,7 @@ import { Agent } from '../../entities/Agent';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { repairTruncatedMediaForRead } from '../mcp/shared/ticket-helpers';
 import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
@@ -1175,7 +1176,7 @@ export class OrchestrationMissionService {
     stepId: string,
     workspaceId: string,
     attachmentId: string,
-  ): Promise<StepAttachmentMeta & { file_data: string }> {
+  ): Promise<StepAttachmentMeta & { file_data: string; truncated: boolean }> {
     const step = await this.requireStep(stepId, workspaceId);
     if (!step.room_id) throw orchestrationError(404, 'attachment not found');
     const row = await this.dataSource.getRepository(TicketAttachment).findOne({
@@ -1184,7 +1185,9 @@ export class OrchestrationMissionService {
     if (!row || (row.owner_type !== 'chat_message' && row.owner_type !== 'chat_room')) {
       throw orchestrationError(404, 'attachment not found');
     }
-    return { ...projectStepAttachment(row), file_data: row.file_data };
+    // 잘린 채 저장된 옛 파일도 남은 부분은 보이게 한다(읽기 시점 복구, 저장은 불변).
+    const repaired = repairTruncatedMediaForRead(row.file_mimetype, row.file_data);
+    return { ...projectStepAttachment(row), file_data: repaired.file_data, truncated: repaired.truncated };
   }
 
   /**

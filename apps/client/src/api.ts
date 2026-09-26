@@ -2346,7 +2346,7 @@ export const api = {
   // Fetch a single attachment with its base64 payload — used for image preview
   // rendering and file download (decoded into a Blob client-side).
   getChatAttachment: (roomId: string, attachmentId: string) =>
-    request<ChatAttachment & { file_data: string }>(
+    request<ChatAttachment & { file_data: string; truncated?: boolean }>(
       `/chat-rooms/${roomId}/attachments/${attachmentId}`,
     ),
 
@@ -2592,7 +2592,7 @@ export const api = {
   },
   /** step 방 첨부 하나(바이트 포함). 썸네일·플레이어·다운로드가 Blob 으로 바꿔 쓴다. */
   getOrchestrationStepAttachment: (stepId: string, workspaceId: string, attachmentId: string) =>
-    request<OrchestrationStepAttachment & { file_data: string }>(
+    request<OrchestrationStepAttachment & { file_data: string; truncated?: boolean }>(
       `/orchestration/steps/${stepId}/attachments/${attachmentId}?workspace_id=${encodeURIComponent(workspaceId)}`,
     ),
   /** 미션의 검증 증거 갤러리 — 모든 step 방과 미션 방의 이미지·동영상, 최신순. */

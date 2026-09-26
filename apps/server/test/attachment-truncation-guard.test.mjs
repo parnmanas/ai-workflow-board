@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const helpers = await import(
   pathToFileURL(path.join(__dirname, '..', 'dist', 'modules', 'mcp', 'shared', 'ticket-helpers.js')).href
 );
-const { validateAttachmentMimetype, assertAttachmentNotTruncated } = helpers;
+const { validateAttachmentMimetype, assertAttachmentNotTruncated, repairTruncatedMediaForRead } = helpers;
 
 /** 1x1 PNG (완결). */
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
@@ -144,4 +144,51 @@ test('검사는 validateAttachmentMimetype 안에서 일어난다 — 새 업로
     `성공 반환 경로마다 검사가 있어야 한다 (반환 ${returns}개, 검사 ${checks}개) — ` +
       '한 경로만 빠져도 그 조합의 업로드는 검사 없이 저장된다',
   );
+});
+
+// ── 읽기 시점 복구 ───────────────────────────────────────────────────────────
+//
+// 업로드 게이트가 생기기 전에 저장된 잘린 파일이 남아 있다. 그 바이트는 쓸모없지 않다 —
+// 종료 마커만 붙이면 디코더가 도착한 스캔라인까지 그려 준다(실측: 한 장은 98% 복원).
+// 저장된 행은 고치지 않는다: 실제로 올라온 바이트가 기록이고, 덮어쓰면 무엇이 잘못
+// 올라왔는지의 증거가 사라진다.
+
+test('잘린 JPEG 은 읽을 때 종료 마커를 붙여 돌려주고, 일부라는 사실을 함께 알린다', () => {
+  const cutJpeg = jpeg({ eoi: false });
+  const out = repairTruncatedMediaForRead('image/jpeg', cutJpeg);
+  assert.equal(out.truncated, true, '화면이 "일부만"이라고 말할 근거가 필요하다');
+  const bytes = Buffer.from(out.file_data, 'base64');
+  assert.deepEqual([...bytes.subarray(-2)], [0xff, 0xd9], '스트림이 닫혀야 디코더가 받은 만큼 그린다');
+  assert.equal(
+    bytes.length,
+    Buffer.from(cutJpeg, 'base64').length + 2,
+    '내용을 지어내지 않는다 — 마커 2바이트만 덧붙인다',
+  );
+});
+
+test('온전한 파일은 한 바이트도 건드리지 않는다', () => {
+  for (const [mime, data] of [['image/jpeg', jpeg()], ['image/png', PNG], ['text/plain', b64(Buffer.from('log'))]]) {
+    const out = repairTruncatedMediaForRead(mime, data);
+    assert.equal(out.truncated, false);
+    assert.equal(out.file_data, data, `${mime} 은 그대로 나가야 한다`);
+  }
+});
+
+test('복구할 수 없는 형식도 잘렸다는 사실은 알린다 (PNG 는 청크·CRC 구조라 꼬리를 못 붙인다)', () => {
+  const out = repairTruncatedMediaForRead('image/png', cut(PNG, 8));
+  assert.equal(out.truncated, true);
+  assert.equal(out.file_data, cut(PNG, 8), '고치지 못할 때 바이트를 바꾸면 더 깨진다');
+});
+
+test('업로드 거부와 읽기 복구는 같은 판정을 쓴다 — 갈리면 "통과했는데 잘렸다고 표시"가 된다', () => {
+  const cases = [jpeg({ eoi: false }), cut(PNG, 8)];
+  for (const data of cases) {
+    const mime = data === cases[0] ? 'image/jpeg' : 'image/png';
+    assert.throws(() => assertAttachmentNotTruncated('x', mime, data), /incomplete/i);
+    assert.equal(repairTruncatedMediaForRead(mime, data).truncated, true);
+  }
+  for (const [mime, data] of [['image/jpeg', jpeg()], ['video/webm', b64(Buffer.from('webm'))]]) {
+    assert.doesNotThrow(() => assertAttachmentNotTruncated('x', mime, data));
+    assert.equal(repairTruncatedMediaForRead(mime, data).truncated, false);
+  }
 });

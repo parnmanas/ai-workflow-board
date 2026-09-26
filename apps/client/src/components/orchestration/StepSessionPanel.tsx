@@ -408,6 +408,7 @@ export default function StepSessionPanel({
                   key={`i-${row.item.id}`}
                   item={row.item}
                   mediaUrls={media.urls}
+                  mediaPartial={media.partial}
                   onEnsureMedia={media.ensure}
                   onOpenMedia={(meta, url) => setLightbox({ meta, url })}
                   onDownload={loadAttachment}
@@ -441,12 +442,14 @@ export default function StepSessionPanel({
 function ItemRow({
   item,
   mediaUrls,
+  mediaPartial,
   onEnsureMedia,
   onOpenMedia,
   onDownload,
 }: {
   item: OrchestrationStepSessionItem;
   mediaUrls: Record<string, string>;
+  mediaPartial: Record<string, boolean>;
   onEnsureMedia: (meta: EvidenceMediaMeta) => void;
   onOpenMedia: (meta: EvidenceMediaMeta, url: string) => void;
   onDownload: (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
@@ -541,6 +544,7 @@ function ItemRow({
         <AttachmentStrip
           attachments={attachments}
           mediaUrls={mediaUrls}
+          mediaPartial={mediaPartial}
           onEnsureMedia={onEnsureMedia}
           onOpenMedia={onOpenMedia}
           onDownload={onDownload}
@@ -558,12 +562,14 @@ function ItemRow({
 function AttachmentStrip({
   attachments,
   mediaUrls,
+  mediaPartial,
   onEnsureMedia,
   onOpenMedia,
   onDownload,
 }: {
   attachments: OrchestrationStepAttachment[];
   mediaUrls: Record<string, string>;
+  mediaPartial: Record<string, boolean>;
   onEnsureMedia: (meta: EvidenceMediaMeta) => void;
   onOpenMedia: (meta: EvidenceMediaMeta, url: string) => void;
   onDownload: (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
@@ -575,7 +581,14 @@ function AttachmentStrip({
       {media.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {media.map((a) => (
-            <EvidenceThumb key={a.id} meta={a} url={mediaUrls[a.id]} onEnsure={onEnsureMedia} onOpen={onOpenMedia} />
+            <EvidenceThumb
+              key={a.id}
+              meta={a}
+              url={mediaUrls[a.id]}
+              partial={mediaPartial[a.id]}
+              onEnsure={onEnsureMedia}
+              onOpen={onOpenMedia}
+            />
           ))}
         </div>
       )}

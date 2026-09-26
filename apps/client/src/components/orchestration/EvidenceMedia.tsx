@@ -23,8 +23,14 @@ export interface EvidenceMediaMeta {
   size_bytes: number;
 }
 
-/** id → base64 payload. 호출자가 어느 경로(step 첨부 / 채팅 첨부)로 읽을지 정한다. */
-export type EvidenceLoader = (meta: EvidenceMediaMeta) => Promise<{ file_data: string; mime_type?: string } | null>;
+/**
+ * id → base64 payload. 호출자가 어느 경로(step 첨부 / 채팅 첨부)로 읽을지 정한다.
+ * `truncated` 는 서버가 "이 파일은 끝까지 오지 않았다"고 알려 주는 값이다(읽기 시점에
+ * 스트림만 닫아 준 것) — 화면은 남은 부분을 그리되 **일부라는 사실을 함께** 말해야 한다.
+ */
+export type EvidenceLoader = (
+  meta: EvidenceMediaMeta,
+) => Promise<{ file_data: string; mime_type?: string; truncated?: boolean } | null>;
 
 /**
  * Blob URL 캐시. 같은 첨부를 두 번 받지 않고, 컴포넌트가 사라지면 전부 revoke 한다.
@@ -32,6 +38,7 @@ export type EvidenceLoader = (meta: EvidenceMediaMeta) => Promise<{ file_data: s
  */
 export function useEvidenceUrls(load: EvidenceLoader) {
   const [urls, setUrls] = useState<Record<string, string>>({});
+  const [partial, setPartial] = useState<Record<string, boolean>>({});
   const urlsRef = useRef<Record<string, string>>({});
   const inflight = useRef<Set<string>>(new Set());
   const failed = useRef<Set<string>>(new Set());
@@ -65,6 +72,7 @@ export function useEvidenceUrls(load: EvidenceLoader) {
           }
           const blob = base64ToBlob(full.file_data, full.mime_type || meta.mime_type || '');
           const url = URL.createObjectURL(blob);
+          if (full.truncated) setPartial((prev) => ({ ...prev, [id]: true }));
           setUrls((prev) => {
             if (prev[id]) {
               try {
@@ -87,19 +95,22 @@ export function useEvidenceUrls(load: EvidenceLoader) {
     [load],
   );
 
-  return { urls, ensure };
+  return { urls, ensure, partial };
 }
 
 /** 썸네일 한 장. 이미지는 잘라서, 동영상은 첫 프레임 + ▶ 표시. 클릭하면 라이트박스. */
 export function EvidenceThumb({
   meta,
   url,
+  partial,
   onEnsure,
   onOpen,
   size = 112,
 }: {
   meta: EvidenceMediaMeta;
   url: string | undefined;
+  /** 서버가 잘린 파일이라고 알려 준 경우 — 남은 부분만 그려진다. */
+  partial?: boolean;
   onEnsure: (meta: EvidenceMediaMeta) => void;
   onOpen: (meta: EvidenceMediaMeta, url: string) => void;
   size?: number;
@@ -135,7 +146,8 @@ export function EvidenceThumb({
         padding: 0,
         borderRadius: 7,
         border: `1px solid ${tokens.colors.border}`,
-        background: tokens.colors.border,
+        // contain 레터박스의 여백. 어두운 스크린샷과 이어지도록 검은 바탕을 쓴다.
+        background: '#111',
         overflow: 'hidden',
         cursor: url ? 'pointer' : 'default',
         display: 'flex',
@@ -160,24 +172,50 @@ export function EvidenceThumb({
           <span style={{ color: tokens.colors.textMuted }}>열 수 없습니다</span>
         </span>
       ) : url ? (
+        /*
+          `contain` 이다 — 예전 `cover` 는 정사각 썸네일에 맞추려고 **가운데를 잘랐고**,
+          그래서 넓은 대조표(900x180)는 아이콘 한두 개만, 잘린 스크린샷은 미디코드 영역인
+          회색 한가운데만 보였다. 운영자 눈에는 빈 칸이다(2026-09-26 실측: 잘린 3장의
+          중앙 크롭이 회색 85~99%). 증거 썸네일에서 중요한 것은 격자의 균일함이 아니라
+          **무엇이 찍혔는지**이므로 프레임 전체를 레터박스로 보여준다.
+        */
         video ? (
           <video
             src={url}
             muted
             preload="metadata"
             onError={() => setBroken(true)}
-            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
           />
         ) : (
           <img
             src={url}
             alt={meta.file_name}
             onError={() => setBroken(true)}
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
           />
         )
       ) : (
         <span style={{ fontSize: 11, color: tokens.colors.textSecondary }}>…</span>
+      )}
+      {partial && !broken && (
+        <span
+          data-testid="evidence-thumb-partial"
+          title="이 파일은 끝까지 올라오지 않았습니다 — 도착한 부분만 보입니다."
+          style={{
+            position: 'absolute',
+            left: 4,
+            top: 4,
+            fontSize: 9,
+            fontWeight: 700,
+            padding: '1px 5px',
+            borderRadius: 999,
+            background: 'rgba(0,0,0,0.7)',
+            color: tokens.colors.warningLight,
+          }}
+        >
+          일부만
+        </span>
       )}
       {video && !broken && (
         <span
@@ -205,11 +243,13 @@ export function EvidenceLightbox({
   meta,
   url,
   caption,
+  partial,
   onClose,
 }: {
   meta: EvidenceMediaMeta;
   url: string;
   caption?: string;
+  partial?: boolean;
   onClose: () => void;
 }) {
   const [broken, setBroken] = useState(false);
@@ -281,9 +321,14 @@ export function EvidenceLightbox({
       )}
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ display: 'flex', gap: 12, alignItems: 'center', color: '#ddd', fontSize: 12 }}
+        style={{ display: 'flex', gap: 12, alignItems: 'center', color: '#ddd', fontSize: 12, flexWrap: 'wrap', justifyContent: 'center' }}
       >
         <span>{caption || meta.file_name}</span>
+        {partial && (
+          <span data-testid="evidence-lightbox-partial" style={{ color: tokens.colors.warningLight }}>
+            ⚠ 일부만 도착한 파일입니다 — 올린 쪽에서 저장이 끝나기 전에 읽었습니다
+          </span>
+        )}
         <span style={{ color: '#999' }}>{formatBytes(meta.size_bytes)}</span>
         <button
           type="button"

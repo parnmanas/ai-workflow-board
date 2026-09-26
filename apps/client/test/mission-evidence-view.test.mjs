@@ -181,6 +181,36 @@ test('바이트는 왔는데 디코드가 안 되면 "깨진 파일"로 말한�
   assert.match(view.container.textContent, /깨진 파일/);
 });
 
+test('잘린 파일은 남은 부분을 보여주되 "일부만" 이라고 말한다', async (t) => {
+  // 2026-09-26: 잘린 스크린샷 3장이 화면에서 빈 칸으로 보였다. 브라우저는 사실 남은
+  // 부분을 그리고 있었는데, 썸네일이 `cover` 로 **가운데를 잘라** 미디코드 영역(회색)만
+  // 보여줬기 때문이다(중앙 크롭 회색 85~99%). 그래서 두 가지를 같이 고친다:
+  // 프레임 전체를 보여주고(contain), 일부라는 사실을 배지로 말한다 — 7% 만 남은
+  // 스크린샷을 온전한 증거로 읽으면 안 된다.
+  const dom = prepDom();
+  stubApi(t, {
+    listOrchestrationMissionEvidence: async () => ({ mission_id: 'm', items: [evidence({ id: 'att-1' })] }),
+    getOrchestrationStepAttachment: async (_s, _w, id) => ({
+      id, file_name: 'cut.jpg', mime_type: 'image/jpeg', size_bytes: 13676, is_media: true,
+      file_data: PNG, truncated: true,
+    }),
+  });
+  const view = mount(
+    React.createElement(MissionEvidencePane, { missionId: 'm', wsId: 'ws', refreshKey: 1, steps: [step('build')], onSelectStep: () => {} }),
+  );
+  await settle();
+  t.after(() => { view.unmount(); dom.cleanup(); });
+
+  assert.ok(view.container.querySelector('[data-testid="evidence-thumb-partial"]'), '일부만 도착했다고 말해야 한다');
+  const img = view.container.querySelector('[data-testid="evidence-thumb"] img');
+  assert.ok(img, '남은 부분은 그대로 보여준다 — 숨기지 않는다');
+  assert.match(
+    img.getAttribute('style') || '',
+    /object-fit: contain/,
+    '가운데를 잘라내면(cover) 잘린 이미지의 회색 부분만 보여 빈 칸처럼 읽힌다',
+  );
+});
+
 test('증거가 없으면 어떻게 올리는지 안내한다', async (t) => {
   const dom = prepDom();
   stubApi(t, { listOrchestrationMissionEvidence: async () => ({ mission_id: 'm', items: [] }) });
