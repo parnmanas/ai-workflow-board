@@ -578,6 +578,168 @@ test('repo 미연결과 fetch 실패는 서로 다른 provisioning 진단을 반
   }
 });
 
+// ── 동시 dispatch 의 origin ref CAS 경합 (티켓 0835f582) ─────────────────────
+//
+// 한 저장소의 per_ticket worktree 들은 `.awb/base/<resource>/.git` **하나** 를
+// 공유하고, 프로비저닝 fetch 는 어떤 락보다도 앞에서 돌기 때문에 같은 저장소로
+// 동시 dispatch 가 걸리면 `refs/remotes/origin/<branch>` 갱신에서 서로
+// compare-and-swap 경합한다. 진 쪽만 실패하고 ref 는 이미 목표값에 도달해 있어
+// 잃어버린 갱신도 손상도 없는데, 예전에는 그대로 `repository_fetch_failed` 로
+// 종결해 에이전트가 worktree 대신 fallback 프롬프트를 받았다.
+//
+// 이 경합은 진짜 git 으로 결정적으로 재현할 수 없다(경합 자체가 비결정적이다).
+// 그래서 PATH 최상단에 가짜 `git` 을 심어 **앞쪽 N 번의 fetch 만** 해당 stderr 로
+// 실패시키고 나머지 호출은 전부 진짜 git 에 위임한다 — 검증 대상은 git 이 그
+// 메시지를 만들어 내는 과정(버전마다 달라질 수 있다)이 아니라, production 의
+// resolveCwd 가 그 메시지를 보고 재시도하는지와 fetch 를 몇 번 부르는지다.
+// bash 스크립트라 win32 에서는 skip 한다 — 같은 패키지 clone-policy.test.mjs 가
+// 쓰는 방식과 동일하고, 문자열 판정 자체는 플랫폼 무관하게
+// dispatch-preflight.test.mjs 의 isGitRefLockRace 테스트가 단언한다.
+
+const POSIX = process.platform !== 'win32';
+
+/** dispatch 가 실제로 막혔을 때 git 이 찍은 stderr 그대로. */
+const REF_LOCK_RACE_STDERR = [
+  "error: cannot lock ref 'refs/remotes/origin/main': is at bd8bc4dd4cc3efceee5ed5b5153ad7dcf8cbf486 but expected fc9fccc524affba0e7b3bd359a83d77bf01e2609",
+  ' ! fc9fccc5..bd8bc4dd  main       -> origin/main  (unable to update local ref)',
+].join('\n');
+
+const AUTH_FAILURE_STDERR =
+  "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+
+/**
+ * PATH 최상단에 가짜 `git` 을 심는다. 앞쪽 `failFetches` 번의 `fetch` 호출은
+ * `failStderr` 를 내고 exit 1 하며, 그 이후의 fetch 와 fetch 가 아닌 모든 호출은
+ * 진짜 git 에 그대로 위임한다(그래서 프로비저닝의 나머지 단계는 실제로 동작한다).
+ * fetch 호출 횟수는 파일에 누적해 테스트가 직접 센다.
+ */
+async function installFetchFailingGit({ failFetches, failStderr }) {
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const dir = await fsp.mkdtemp(join(tmpdir(), 'awb-wt-fakegit-'));
+  const fetchLog = join(dir, 'fetch.log');
+  const script = `#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  if [ "$a" = "fetch" ]; then
+    printf 'fetch\\n' >> "$AWB_WT_FETCH_LOG"
+    if [ "$(wc -l < "$AWB_WT_FETCH_LOG")" -le "$AWB_WT_FAIL_FETCHES" ]; then
+      printf '%s\\n' "$AWB_WT_FAIL_STDERR" >&2
+      exit 1
+    fi
+    break
+  fi
+done
+exec ${JSON.stringify(realGit)} "$@"
+`;
+  await fsp.writeFile(join(dir, 'git'), script, { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}:${previousPath}`;
+  process.env.AWB_WT_FETCH_LOG = fetchLog;
+  process.env.AWB_WT_FAIL_FETCHES = String(failFetches);
+  process.env.AWB_WT_FAIL_STDERR = failStderr;
+  return {
+    async fetchCount() {
+      const raw = await fsp.readFile(fetchLog, 'utf8').catch(() => '');
+      return raw.split('\n').filter(Boolean).length;
+    },
+    async cleanup() {
+      process.env.PATH = previousPath;
+      delete process.env.AWB_WT_FETCH_LOG;
+      delete process.env.AWB_WT_FAIL_FETCHES;
+      delete process.env.AWB_WT_FAIL_STDERR;
+      await fsp.rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test('프로비저닝 fetch: origin ref CAS 경합은 1회 재시도로 흡수되고 fallback 하지 않는다', { skip: !POSIX }, async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'ref-lock-agent-dir');
+  const bootstrapRepo = { resourceId: 'repo-ref-lock', url: source.remote, branch: 'main' };
+  let fake = null;
+  try {
+    const wm = new WorktreeManager();
+    // base clone 은 정상 경로로 먼저 만든다 — 관찰 대상은 그 다음 dispatch 의 fetch 다.
+    const seeded = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_A, role: 'assignee', bootstrapRepo,
+    });
+    assert.equal(seeded.isWorktree, true);
+
+    // 원격을 한 커밋 전진시킨다 — 재시도 fetch 가 "실패를 삼켰을" 뿐인지,
+    // 진짜로 remote-tracking ref 를 갱신했는지 구분하는 핀이다.
+    git(source.repo, ['push', '-q', 'origin', 'HEAD:main']);
+    const advancedTip = git(source.repo, ['rev-parse', 'HEAD']);
+
+    fake = await installFetchFailingGit({ failFetches: 1, failStderr: REF_LOCK_RACE_STDERR });
+    const provisioned = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_B, role: 'assignee', bootstrapRepo,
+    });
+
+    assert.equal(provisioned.reason, undefined, '경합을 흡수했으니 fallback 사유가 없어야 한다');
+    assert.equal(provisioned.isWorktree, true);
+    assert.equal(await fake.fetchCount(), 2, '1회차 실패 후 정확히 한 번만 재시도해야 한다');
+    // 재시도가 실제 fetch 였음을 원격 tip 으로 증명한다.
+    assert.equal(provisioned.repositoryContext.baseSha, advancedTip);
+  } finally {
+    await fake?.cleanup();
+    await source.cleanup();
+  }
+});
+
+test('프로비저닝 fetch: ref CAS 경합이 2회 연속이면 repository_fetch_failed 로 종결한다', { skip: !POSIX }, async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'ref-lock-twice-agent-dir');
+  const bootstrapRepo = { resourceId: 'repo-ref-lock-twice', url: source.remote, branch: 'main' };
+  let fake = null;
+  try {
+    const wm = new WorktreeManager();
+    const seeded = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_A, role: 'assignee', bootstrapRepo,
+    });
+    assert.equal(seeded.isWorktree, true);
+
+    fake = await installFetchFailingGit({ failFetches: 2, failStderr: REF_LOCK_RACE_STDERR });
+    const failed = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_B, role: 'assignee', bootstrapRepo,
+    });
+
+    assert.equal(failed.reason, 'repository_fetch_failed');
+    assert.match(failed.detail, /cannot lock ref/);
+    assert.equal(await fake.fetchCount(), 2, '재시도는 1회뿐이어야 한다 — 무한 재시도가 아니다');
+  } finally {
+    await fake?.cleanup();
+    await source.cleanup();
+  }
+});
+
+test('프로비저닝 fetch: auth 실패는 재시도 없이 repository_auth_failed 로 종결한다', { skip: !POSIX }, async () => {
+  const source = await makeRepoWithRemote();
+  const workingDir = join(source.root, 'auth-no-retry-agent-dir');
+  const bootstrapRepo = { resourceId: 'repo-auth-no-retry', url: source.remote, branch: 'main' };
+  let fake = null;
+  try {
+    const wm = new WorktreeManager();
+    const seeded = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_A, role: 'assignee', bootstrapRepo,
+    });
+    assert.equal(seeded.isWorktree, true);
+
+    // failFetches:1 이라 재시도가 있었다면 2회차는 성공해 auth 블로커가 가려졌을
+    // 것이다 — 그래서 이 단언은 "재시도 안 함" 을 실제로 구분한다.
+    fake = await installFetchFailingGit({ failFetches: 1, failStderr: AUTH_FAILURE_STDERR });
+    const blocked = await wm.resolveCwd({
+      baseWorkingDir: workingDir, ticketId: TICKET_B, role: 'assignee', bootstrapRepo,
+    });
+
+    assert.equal(blocked.reason, 'repository_auth_failed');
+    assert.equal(blocked.isWorktree, false);
+    assert.equal(await fake.fetchCount(), 1, 'auth 실패는 재시도하지 않는다');
+  } finally {
+    await fake?.cleanup();
+    await source.cleanup();
+  }
+});
+
 test('one non-git container isolates base clones for different repository resources', async () => {
   const first = await makeRepoWithRemote();
   const second = await makeRepoWithRemote();

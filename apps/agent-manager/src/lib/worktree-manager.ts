@@ -59,6 +59,7 @@ import {
   decidePushReadiness,
   classifyWorktreeCheckout,
   isGitAuthFailure,
+  isGitRefLockRace,
   type PushReadinessDecision,
   type WorktreeCheckoutDecision,
 } from './dispatch-preflight.js';
@@ -75,6 +76,10 @@ const GIT_TIMEOUT_MS = 20_000;
 // are disabled), so a short timeout is a backstop against a hung askpass — well
 // under the git default so a network stall can't wedge a dispatch for long.
 const PUSH_PROBE_TIMEOUT_MS = 15_000;
+// remote-tracking ref CAS 경합을 진 fetch 를 재시도하기 전의 지연. 이긴 쪽의
+// ref 쓰기는 이미 끝났으니 즉시 재시도해도 되지만, 같은 순간 열려 있던 다른
+// `.lock` 에 다시 부딪히지 않도록 짧게 양보한다 (fetchBaseRepoWithRefLockRetry).
+const BASE_FETCH_REF_LOCK_RETRY_DELAY_MS = 250;
 const PROVISION_LOCK_TIMEOUT_MS = 20_000;
 const PROVISION_LOCK_STALE_MS = 60_000;
 const PROVISION_LOCK_HEARTBEAT_MS = 10_000;
@@ -255,6 +260,33 @@ function git(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<G
       },
     );
   });
+}
+
+/** 공유 base 저장소의 remote-tracking ref 를 갱신한다.
+ *
+ *  한 저장소의 모든 per_ticket worktree 가 `.awb/base/<resource>/.git` **하나** 를
+ *  공유하고, 이 fetch 는 어떤 프로비저닝 락보다도 앞에서 돌기 때문에 같은
+ *  저장소로 동시 dispatch 가 걸리면 서로 `refs/remotes/origin/<branch>` 갱신에서
+ *  compare-and-swap 경합한다. 진 쪽은
+ *  `cannot lock ref 'refs/remotes/origin/main': is at X but expected Y` 로 죽는데,
+ *  이긴 쪽이 **이 fetch 가 쓰려던 바로 그 값** 을 이미 써 놨으므로 잃어버린 갱신도
+ *  손상도 없다 — 그런데도 예전에는 그대로 `repository_fetch_failed` 로 종결해
+ *  에이전트가 worktree 대신 fallback 프롬프트를 받았다 (티켓 0835f582).
+ *
+ *  그래서 이 시그니처일 때만 짧은 지연 후 **1회** 재시도한다. 경합은 자기치유형이라
+ *  1회로 충분하다 — 이긴 쪽이 이미 목표값을 써 놨으니 재시도 fetch 는 갱신할 ref 가
+ *  없어(no-op) 다시 경합하지 않는다. 무한 재시도는 진짜 문제를 덮을 뿐이다.
+ *  auth 실패는 재시도하지 않는다 — 없는 credential 은 기다려도 생기지 않는다.
+ *  (run-provisioner 의 stale `.git/index.lock` 1회 재시도와 같은 모양이다.) */
+async function fetchBaseRepoWithRefLockRetry(repo: string): Promise<GitResult> {
+  const first = await git(repo, ['fetch', '--prune', 'origin']);
+  if (first.ok || isGitAuthFailure(first.stderr) || !isGitRefLockRace(first.stderr)) return first;
+  log(
+    '[worktree] base fetch lost a remote-tracking ref CAS to a concurrent dispatch; ' +
+      `retrying once in ${BASE_FETCH_REF_LOCK_RETRY_DELAY_MS}ms: ${repo}`,
+  );
+  await new Promise((resolve) => setTimeout(resolve, BASE_FETCH_REF_LOCK_RETRY_DELAY_MS));
+  return git(repo, ['fetch', '--prune', 'origin']);
 }
 
 export interface WorktreeInfo {
@@ -613,7 +645,7 @@ export class WorktreeManager {
 
     // 모든 신규/재개 dispatch는 먼저 원격을 갱신한다. 재개 worktree 자체에는
     // checkout/reset을 하지 않으므로 dirty 파일과 기존 브랜치는 그대로 보존된다.
-    const fetched = await git(localBaseRepo, ['fetch', '--prune', 'origin']);
+    const fetched = await fetchBaseRepoWithRefLockRetry(localBaseRepo);
     if (!fetched.ok) {
       const detail = maskCredential(fetched.stderr, args.bootstrapRepo?.credential).trim();
       const reason = isGitAuthFailure(detail) ? 'repository_auth_failed' : 'repository_fetch_failed';
