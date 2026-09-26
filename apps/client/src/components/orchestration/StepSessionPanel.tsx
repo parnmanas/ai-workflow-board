@@ -18,6 +18,7 @@ import {
 } from './EvidenceMedia';
 import { relativeTime } from '../../utils/time';
 import { eventColor, stepStyle } from './status';
+import { useConversationScroll } from '../../hooks/useConversationScroll';
 import {
   compactActivityLabel,
   describeStepActivity,
@@ -50,8 +51,11 @@ const PAGE_SIZE = 60;
 /** 진행 중인 step 의 전사(transcript)를 다시 읽는 주기. SSE 는 미션 단위라 방 내용은 폴링한다. */
 const LIVE_POLL_MS = 15_000;
 
-/** 이 거리 안쪽이면 "맨 아래를 보고 있다"고 보고 새 줄에 자동 추종한다. */
-const NEAR_BOTTOM_PX = 80;
+
+/** 행 하나의 정체성 — 마지막 행이 바뀌었는지(=아래에 새 줄이 붙었는지) 판정에 쓴다. */
+function rowKey(row: Row): string {
+  return row.kind === 'event' ? `e-${row.event.id}` : `i-${row.item.id}`;
+}
 
 type Row =
   | { at: number; kind: 'item'; item: OrchestrationStepSessionItem }
@@ -102,7 +106,8 @@ export default function StepSessionPanel({
   const [showOrder, setShowOrder] = useState(false);
   const [lightbox, setLightbox] = useState<{ meta: EvidenceMediaMeta; url: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const stickToBottom = useRef(true);
+  /** 이미지가 나중에 디코딩되며 높이가 자랄 때 바닥을 유지하기 위한 내용 래퍼. */
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   // 첨부 바이트는 step 첨부 경로로 읽는다 — 채팅 경로는 참여자 게이트라 step 방에서는
   // 사람이 못 읽는다. 세션 전사와 같은 게이트(orchestration 권한)를 탄다.
@@ -135,7 +140,6 @@ export default function StepSessionPanel({
   );
 
   useEffect(() => {
-    stickToBottom.current = true;
     void load();
   }, [load]);
 
@@ -153,8 +157,7 @@ export default function StepSessionPanel({
         limit: PAGE_SIZE,
         beforeId: nextBefore,
       });
-      // 위로 이어 붙이는 동안 아래로 따라가면 읽던 자리를 잃는다.
-      stickToBottom.current = false;
+      // 앞에 붙은 높이만큼의 보정은 공용 훅(규칙 1)이 한다.
       setItems((prev) => [...[...res.items].reverse(), ...prev]);
       setHasMore(res.has_more);
       setNextBefore(res.next_before_id);
@@ -166,16 +169,17 @@ export default function StepSessionPanel({
   const stepEvents = useMemo(() => events.filter((e) => e.step_id === step.id), [events, step.id]);
   const rows = useMemo(() => buildStepSessionRows(items, stepEvents), [items, stepEvents]);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [rows.length]);
-
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
-  };
+  // 스크롤 규칙은 chat 방·미션 대화·세션 전사와 같은 훅이 맡는다. step 을 바꾸면
+  // 새 전사를 다시 바닥에서 열어야 하므로 resetKey 가 step.id 다.
+  const { atBottom, scrollToBottom } = useConversationScroll({
+    scrollRef,
+    contentRef,
+    resetKey: step.id,
+    tailKey: rows.length === 0 ? null : rowKey(rows[rows.length - 1]),
+    contentKey: rows.length,
+    ready: !loading && rows.length > 0,
+    onLoadOlder: hasMore && nextBefore ? () => void loadOlder() : undefined,
+  });
 
   const now = Date.now();
   const activity = describeStepActivity(step, now);
@@ -362,10 +366,24 @@ export default function StepSessionPanel({
         )}
       </div>
 
+      {!atBottom && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom('auto')}
+          data-testid="step-session-jump-latest"
+          style={{
+            alignSelf: 'center', marginTop: -34, marginBottom: 6, fontSize: 11.5, padding: '4px 10px',
+            borderRadius: 999, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard,
+            color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
+          }}
+        >
+          ↓ 최신으로
+        </button>
+      )}
+
       {/* ── 전사 ───────────────────────────────────────────────────────────── */}
       <div
         ref={scrollRef}
-        onScroll={onScroll}
         style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px 14px' }}
       >
         {hasMore && (
@@ -399,7 +417,7 @@ export default function StepSessionPanel({
               : '아직 디스패치되지 않았습니다 — 작업 방은 디스패치 시점에 만들어집니다.'}
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div ref={contentRef} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {rows.map((row) =>
               row.kind === 'event' ? (
                 <EventRow key={`e-${row.event.id}`} event={row.event} />

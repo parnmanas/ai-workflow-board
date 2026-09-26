@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
+import { useConversationScroll } from '../../hooks/useConversationScroll';
 import { ActivityPill } from '../common/ActivityIndicator';
 import { roomActivity } from '../../activity';
 import type { AgentCurrentTask, ChatRoomListItem, ChatRoomMessageItem } from '../../types';
@@ -235,17 +236,6 @@ export interface ChatRoomViewProps {
   onSelectTask?: (ticketId: string, title: string) => void;
 }
 
-// Distance from the top (in px) at which we start fetching older history.
-// Small enough that we don't pre-fetch eagerly, large enough to hide the
-// network round-trip behind the user's scroll inertia.
-const LOAD_OLDER_THRESHOLD = 120;
-
-// Distance from the bottom (in px) within which we consider the viewer "at the
-// bottom" — i.e. reading the latest messages. Append-follow and the async
-// re-pin only fire inside this band; outside it the viewer is reading history
-// and we never drag them down.
-const NEAR_BOTTOM_THRESHOLD = 80;
-
 // 대화 화면 상단 참여자 로스터에서 칩으로 보여줄 최대 인원. 초과분은 "+N more" 로 접는다
 // (그룹 방은 최대 50명이라 전부 칩으로 깔면 헤더가 지나치게 커진다).
 const MAX_VISIBLE_PARTICIPANT_CHIPS = 8;
@@ -281,7 +271,6 @@ export default function ChatRoomView({
   /** 자유 참여 토글 요청이 진행 중인가 (ticket 995a9519). */
   const [openJoinPending, setOpenJoinPending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   // @-mentions in this room clear when the message carrying them is actually
   // on screen. Deliberately NOT tied to the room's read marker: a room opens
@@ -297,133 +286,31 @@ export default function ChatRoomView({
     onCleared: noteMentionsCleared,
   });
 
-  // ── Scroll management (ticket abd1ce81) ─────────────────────────────────────
-  // Three deliberately-separated behaviours:
-  //   1. Initial room load  → pin to bottom INSTANTLY in useLayoutEffect (no
-  //      animation). A smooth scrollIntoView here used to stall "in the middle":
-  //      async image attachments grew the list height mid-animation, so the
-  //      smooth scroll landed short of the now-taller bottom.
-  //   2. Live append (send / SSE) → smooth follow, but ONLY when the viewer is
-  //      already near the bottom. If they scrolled up to read history we leave
-  //      their position alone (no forced yank-to-bottom).
-  //   3. Async height growth (images decoding, markdown reflow) → re-pin to the
-  //      bottom while near-bottom; while reading history we do nothing and let
-  //      the browser's native scroll anchoring hold position (no older drift).
-  const lastMessageIdRef = useRef<string | null>(null);
-  const didInitialScrollRef = useRef(false);
-  const isNearBottomRef = useRef(true);
-
-  function scrollToBottom(behavior: ScrollBehavior) {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (behavior === 'smooth') {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
-    isNearBottomRef.current = true;
-  }
-
-  // Prepend anchor + initial instant pin + tail-append, in one layout effect so
-  // they all run before paint (no visible jump) with a deterministic priority.
-  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    // (1) Older-page prepend: restore the viewer's visual offset by the height
-    // delta so the list doesn't snap to the top. Highest priority; never
-    // touches tail tracking or the initial-scroll latch.
-    const anchor = prependAnchorRef.current;
-    if (anchor) {
-      const delta = el.scrollHeight - anchor.scrollHeight;
-      if (delta > 0) el.scrollTop = anchor.scrollTop + delta;
-      prependAnchorRef.current = null;
-      return;
-    }
-
-    if (loadingMessages || messages.length === 0) return;
-    const tailId = messages[messages.length - 1].id;
-
-    // (2) First committed message set for this room → instant bottom pin.
-    if (!didInitialScrollRef.current) {
-      didInitialScrollRef.current = true;
-      lastMessageIdRef.current = tailId;
-      scrollToBottom('auto');
-      return;
-    }
-
-    // (3) Tail id changed = a new message at the bottom (send / SSE append).
-    // Follow it only when the viewer is near the bottom; otherwise respect
-    // their scroll-up and don't drag them down.
-    if (tailId !== lastMessageIdRef.current) {
-      lastMessageIdRef.current = tailId;
-      if (isNearBottomRef.current) scrollToBottom('smooth');
-    }
-  }, [messages, loadingMessages]);
-
-  // Reset all scroll-tracking whenever the room changes — otherwise a stale
-  // lastMessageIdRef / latched initial-scroll from the previous room can
-  // suppress the new room's initial bottom pin.
-  useEffect(() => {
-    lastMessageIdRef.current = null;
-    prependAnchorRef.current = null;
-    didInitialScrollRef.current = false;
-    isNearBottomRef.current = true;
-  }, [room?.id]);
-
-  // Re-pin to the bottom as async content (image attachments decoding, markdown
-  // reflow) grows the list — but ONLY while the viewer is near the bottom. This
-  // is the other half of the "stops in the middle" fix: the instant pin above
-  // runs before images decode, so without this the bottom would creep away as
-  // they load. While reading history (not near bottom) we do nothing and let
-  // native scroll anchoring hold the viewer's spot, so older-image growth above
-  // the viewport doesn't drift the view.
+  // ── Scroll management ──────────────────────────────────────────────────────
+  //
+  // 규칙 네 가지(첫 진입 즉시 바닥 고정 · 근접할 때만 새 메시지 추종 · 과거 페이지
+  // prepend 보정 · 이미지 디코딩으로 높이가 자랄 때 재고정)는 원래 이 파일에서
+  // 티켓 abd1ce81 로 만들어졌고, 지금은 네 대화창(chat · mission 대화 · mission step
+  // 세션 · Agent Session 전사)이 공유하는 useConversationScroll 이 갖는다. 규칙을
+  // 고칠 일이 있으면 그 훅을 고칠 것 — 여기 사본을 되살리지 말 것.
   const contentRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const content = contentRef.current;
-    const el = scrollRef.current;
-    if (!content || !el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => {
-      // Don't fight an in-flight prepend anchor restore.
-      if (prependAnchorRef.current) return;
-      if (isNearBottomRef.current) el.scrollTop = el.scrollHeight;
-    });
-    ro.observe(content);
-    return () => ro.disconnect();
-  }, [room?.id, loadingMessages]);
+  const loadOlder = useCallback(() => {
+    if (!onLoadOlderMessages) return;
+    if (!hasMoreMessages || loadingOlderMessages) return;
+    const oldestId = messages[0]?.id;
+    if (!oldestId) return;
+    void onLoadOlderMessages(oldestId);
+  }, [onLoadOlderMessages, hasMoreMessages, loadingOlderMessages, messages]);
 
-  // Scroll listener: keeps `isNearBottomRef` current (gates append-follow and
-  // the ResizeObserver re-pin) and fires the older-page fetch when the viewer
-  // scrolls into the top zone. We listen on the viewport ref rather than an
-  // IntersectionObserver sentinel because the latter fires once on mount
-  // (sentinel visible inside the empty viewport) and would spuriously kick off
-  // a fetch before the user scrolls. The threshold + hasMoreMessages gate +
-  // loading guard together fire only on genuine upward scroll into the load zone.
-  useEffect(() => {
-    const el = scrollRef.current;
-    const loadOlder = onLoadOlderMessages;
-    if (!el) return;
-    function onScroll() {
-      if (!el) return;
-      isNearBottomRef.current =
-        el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_THRESHOLD;
-      if (!loadOlder) return;
-      if (!hasMoreMessages) return;
-      if (loadingOlderMessages) return;
-      if (messages.length === 0) return;
-      if (el.scrollTop > LOAD_OLDER_THRESHOLD) return;
-      const oldestId = messages[0]?.id;
-      if (!oldestId) return;
-      prependAnchorRef.current = {
-        scrollHeight: el.scrollHeight,
-        scrollTop: el.scrollTop,
-      };
-      void loadOlder(oldestId);
-    }
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
-  }, [hasMoreMessages, loadingOlderMessages, messages, onLoadOlderMessages]);
+  const { atBottom, scrollToBottom } = useConversationScroll({
+    scrollRef,
+    contentRef,
+    resetKey: room?.id ?? null,
+    tailKey: messages[messages.length - 1]?.id ?? null,
+    contentKey: messages.length,
+    ready: !loadingMessages && messages.length > 0,
+    onLoadOlder: loadOlder,
+  });
 
   async function handleLeave() {
     if (!room) return;
@@ -672,7 +559,7 @@ export default function ChatRoomView({
 
       {/* Older-message loading banner — sits OUTSIDE the scroll viewport so
           its appearance/disappearance doesn't perturb scrollHeight and break
-          the prepend scroll-anchor math in useLayoutEffect above. */}
+          the prepend scroll-anchor math in useConversationScroll. */}
       {loadingOlderMessages && (
         <div
           aria-live="polite"
@@ -728,8 +615,24 @@ export default function ChatRoomView({
             <MessageList messages={messages} participantCount={participantCount} participants={participants} currentUserId={currentUserId} />
           </div>
         )}
-        <div ref={bottomRef} />
       </div>
+
+      {/* 위에서 이력을 읽는 중일 때만 뜨는 복귀 버튼 — mission 대화·세션 전사와 같은
+          버튼이다(대화창 네 곳의 동작을 일치시킨다). */}
+      {!atBottom && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom('auto')}
+          data-testid="chat-jump-latest"
+          style={{
+            alignSelf: 'center', marginTop: -34, marginBottom: 6, fontSize: 11.5, padding: '4px 10px',
+            borderRadius: 999, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceCard,
+            color: tokens.colors.textSecondary, cursor: 'pointer', zIndex: 1,
+          }}
+        >
+          ↓ 최신으로
+        </button>
+      )}
 
       {/* Typing indicator */}
       {Object.keys(typingAgents).length > 0 && (
