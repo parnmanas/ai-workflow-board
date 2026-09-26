@@ -152,6 +152,18 @@ export interface TerminalTicketCleanupReport {
   benignHolds: string[];
   /** 위 정상 보류로 설명되는 잔여 브랜치 — 호출자가 알림 소음을 걸러내는 데 쓴다. */
   benignHeldBranches: string[];
+  /**
+   * **이미 부재**여서 지울 것이 없던 ref — 멱등 성공이며 오류가 아니다(ticket 6d580125).
+   *
+   * `removedLocalBranches`/`removedRemoteBranches` 와 **일부러 분리**한다: 저쪽은
+   * "이번 정리가 지웠다", 이쪽은 "이번 정리가 오기 전에 이미 없었다" 다. 둘을 한
+   * 필드에 합치면 정리가 실제로 무엇을 했는지 사후에 구분할 수 없고, 반대로 이쪽을
+   * `heldReasons` 에 넣으면 아무 문제도 없는 상태에 "⚠️ 정리를 보류했습니다" 경고가
+   * 붙는다 — 이 티켓이 고치는 바로 그 오탐이다.
+   */
+  alreadyAbsentLocalBranches: string[];
+  /** 원격 쪽 같은 구분. 담당자가 Merging step 5 에서 원격 브랜치를 이미 지운 정상 경로다. */
+  alreadyAbsentRemoteBranches: string[];
 }
 
 /**
@@ -1905,6 +1917,8 @@ export class WorktreeManager {
       heldReasons: [],
       benignHolds: [],
       benignHeldBranches: [],
+      alreadyAbsentLocalBranches: [],
+      alreadyAbsentRemoteBranches: [],
     };
     if (!opts.baseWorkingDir || !opts.ticketId) return report;
     const ticket8 = String(opts.ticketId).slice(0, 8);
@@ -2018,14 +2032,29 @@ export class WorktreeManager {
       // 어느 한쪽이라도 보존 대상이면 부분 삭제하지 않으며, 원격 삭제 시에는
       // 이 SHA를 lease로 사용해 검증 이후 전진한 ref를 지우지 않는다.
       const remoteTips = new Map<string, string>();
+      // 로컬도 같은 이유로 tip 을 고정한다(ticket 6d580125) — 아래 삭제는
+      // `branch -d` 가 아니라 이 SHA 를 조건으로 한 `update-ref -d` 다.
+      const localTips = new Map<string, string>();
       for (const branch of ownedBranches) {
         if (protectedBranches.has(branch) || blockedBranches.has(branch)) continue;
         if (localBranches.includes(branch)) {
-          const merged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
-          if (!merged.ok) {
-            report.heldReasons.push(`미병합/고유 커밋: ${branch}`);
-            blockedBranches.add(branch);
+          // **이름이 아니라 OID 로** 병합을 검증한다. 이름으로 검증하고 OID 를 따로
+          // 읽으면 그 사이에 ref 가 전진했을 때 "검증한 객체" 와 "lease 로 지울
+          // 객체" 가 달라져, 검증되지 않은 커밋을 지울 수 있다.
+          const tip = await git(entry.repo, ['rev-parse', '--verify', `refs/heads/${branch}`]);
+          if (tip.ok) {
+            const leasedTip = tip.stdout.trim();
+            const merged = await git(entry.repo, ['merge-base', '--is-ancestor', leasedTip, baseRef]);
+            if (!merged.ok) {
+              report.heldReasons.push(`미병합/고유 커밋: ${branch}`);
+              blockedBranches.add(branch);
+            } else {
+              localTips.set(branch, leasedTip);
+            }
           }
+          // tip 을 못 읽으면(열거 이후 사라짐) 여기서 막지 않는다 — 아래 삭제 루프가
+          // 저장소 상태로 "이미 부재" 로 판정한다. 로컬 ref 가 없다는 것이 원격 ref
+          // 정리를 보류할 이유는 아니므로 blockedBranches 에 넣지 않는다.
         }
         if (remoteBranches.includes(branch)) {
           const remoteRef = `refs/remotes/origin/${branch}`;
@@ -2072,12 +2101,31 @@ export class WorktreeManager {
           'origin',
           `:refs/heads/${branch}`,
         ]);
-        if (deleted.ok || /remote ref does not exist|unable to delete/i.test(deleted.stderr)) {
+        if (deleted.ok) {
           remotelyDeleted.add(branch);
-        } else {
-          report.heldReasons.push(`원격 브랜치 삭제 실패: origin/${branch}`);
-          blockedBranches.add(branch);
+          continue;
         }
+        // 실패 원인을 stderr 문구로 가르지 않는다 — **원격에 실제로 남아 있는지 물어본다**
+        // (ticket 6d580125). 담당자가 Merging step 5 에서 원격 브랜치를 이미 지웠으면
+        // 이 클론에는 remote-tracking ref 만 남는데(`worktree prune` 은 그것을 지우지
+        // 않는다) 그 stale 한 tip 을 lease 로 건 삭제는 `(delete) -> <branch> (stale
+        // info)` 로 거부된다. 그건 정리가 **이미 끝났다**는 뜻이지 실패가 아니다.
+        // 예전 판정식(`/remote ref does not exist|unable to delete/`)은 이 문구를 못
+        // 잡아 정상 경로를 그대로 `원격 브랜치 삭제 실패` 로 보고했다.
+        const stillOnRemote = await git(entry.repo, ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`]);
+        if (stillOnRemote.ok && stillOnRemote.stdout.trim() === '') {
+          report.alreadyAbsentRemoteBranches.push(branch);
+          // stale 한 remote-tracking ref 를 함께 정리한다. 남겨 두면 (1) 아래 로컬
+          // 분류가 "원격 ref 가 아직 있다" 로 읽어 정상 보류를 오류로 떨어뜨리고,
+          // (2) 다음 sweep 이 같은 실패 판정을 반복한다. 성공한 삭제 push 는 이
+          // ref 를 스스로 지우므로, 이 보정은 이미-부재 경로에만 필요하다.
+          await git(entry.repo, ['update-ref', '-d', `refs/remotes/origin/${branch}`]);
+          continue;
+        }
+        // ls-remote 자체가 실패했으면(네트워크·인증) 부재를 단정할 수 없다 —
+        // 조용히 성공으로 넘기지 않고 실제 실패로 보고한다(fail-closed).
+        report.heldReasons.push(`원격 브랜치 삭제 실패: origin/${branch}`);
+        blockedBranches.add(branch);
       }
 
       for (const [worktreePath, branch] of ownedSharedSlots) {
@@ -2110,16 +2158,23 @@ export class WorktreeManager {
         if (protectedBranches.has(branch)) continue;
         if (blockedBranches.has(branch)) continue;
         await this.#terminalCleanupHooks.beforeLocalDelete?.(branch);
-        const deleted = await git(entry.repo, ['branch', '-d', branch]);
-        if (deleted.ok || /not found/i.test(deleted.stderr)) {
-          report.removedLocalBranches.push(branch);
+
+        // 부재 판정은 stderr 문구가 아니라 **저장소 상태**로 한다(ticket 6d580125).
+        // 이미 없으면 지울 것이 없으니 멱등 성공이며, 오류 목록에 넣지 않는다.
+        const currentTip = await git(entry.repo, ['rev-parse', '--verify', `refs/heads/${branch}`]);
+        if (!currentTip.ok) {
+          report.alreadyAbsentLocalBranches.push(branch);
           continue;
         }
-        // 실패 원인을 stderr 문구로 가르지 않는다 — Git 버전·로캘마다 달라진다.
-        // 저장소 상태로 직접 판정한다(ticket 62407d4e). "잃는 것이 없다" 는 세
-        // 조건이 **삭제 실패 시점에** 모두 성립할 때만이다: 살아 있는 worktree 가
-        // 이 ref 를 물고 있고, 원격 ref 는 이미 없으며, 로컬 ref 가 여전히 base 에
-        // 포함돼 있다.
+
+        // 삭제 전에 이 ref 를 물고 있는 worktree 가 있는지 **먼저** 본다.
+        // `branch -d` 는 체크아웃된 ref 를 스스로 거부하지만 `update-ref -d` 는
+        // 거부하지 않고 지운다 — 그래서 이 확인이 없으면 살아 있는 worktree 를
+        // 없는 branch 위에 남겨 두게 된다(실측으로 확인한 두 명령의 차이).
+        //
+        // "잃는 것이 없다" 는 세 조건이 **이 시점에** 모두 성립할 때만이다: 살아 있는
+        // worktree 가 이 ref 를 물고 있고, 원격 ref 는 이미 없으며, 로컬 ref 가
+        // 여전히 base 에 포함돼 있다.
         //
         // 위 merge-base 검사 결과를 재사용하지 않고 base 포함을 여기서 다시 본다 —
         // 검사와 이 지점 사이에 재개된 worktree 가 같은 branch 를 체크아웃하고 새
@@ -2128,22 +2183,50 @@ export class WorktreeManager {
         // 대변하지 못하므로, 그 상태를 "조치 불필요" 로 덮으면 사람이 봐야 할
         // 유실 위험을 조용히 가린다.
         const holder = await this.#worktreeHoldingBranch(entry.repo, branch);
-        const remoteStillThere = await git(entry.repo, [
-          'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`,
-        ]);
-        if (holder && !remoteStillThere.ok) {
-          const stillMerged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
-          if (stillMerged.ok) {
-            report.benignHolds.push(`로컬 ref 보류(정상): ${branch} — 작업트리 ${holder} 가 체크아웃 중이고 원격 ref 는 이미 없음`);
-            report.benignHeldBranches.push(branch);
+        if (holder) {
+          const remoteStillThere = await git(entry.repo, [
+            'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`,
+          ]);
+          if (remoteStillThere.ok) {
+            // 원격 ref 가 남아 있으면 "잃는 것이 없다" 가 성립하지 않는다.
+            report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
           } else {
-            report.heldReasons.push(
-              `로컬 브랜치 삭제 실패(검증 이후 고유 커밋): ${branch} — 작업트리 ${holder} 가 체크아웃한 뒤 base 에 없는 커밋이 얹혔고 원격 ref 는 이미 없음`,
-            );
+            const stillMerged = await git(entry.repo, ['merge-base', '--is-ancestor', branch, baseRef]);
+            if (stillMerged.ok) {
+              report.benignHolds.push(`로컬 ref 보류(정상): ${branch} — 작업트리 ${holder} 가 체크아웃 중이고 원격 ref 는 이미 없음`);
+              report.benignHeldBranches.push(branch);
+            } else {
+              report.heldReasons.push(
+                `로컬 브랜치 삭제 실패(검증 이후 고유 커밋): ${branch} — 작업트리 ${holder} 가 체크아웃한 뒤 base 에 없는 커밋이 얹혔고 원격 ref 는 이미 없음`,
+              );
+            }
           }
-        } else {
-          report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
+          blockedBranches.add(branch);
+          continue;
         }
+
+        // 검증 시점의 OID 를 lease 로 걸어 원자적으로 지운다. `branch -d` 는 삭제
+        // 자격을 **HEAD(또는 upstream) 포함**으로 판정하는데, base 클론의 primary
+        // HEAD 는 `#freeBaseBranch` 가 detach 해 둔 시점에 고정돼 시간이 갈수록
+        // 뒤처지고 티켓 branch 에는 upstream 이 없다. 그래서 `origin/<base>` 에
+        // 완전히 포함된 branch 조차 `not fully merged` 로 거부돼, 위 검증을 통과한
+        // 정리가 `로컬 브랜치 삭제 실패` 로 보고됐다 — 이 티켓의 원인이다.
+        // `-D` 로 바꾸면 그 거부는 사라지지만 검증 이후 전진한 커밋을 조용히 잃는다.
+        // OID 조건부 삭제는 판정 기준을 검증 기준과 일치시키면서 전진을 거부한다.
+        const leasedTip = localTips.get(branch);
+        if (!leasedTip || leasedTip !== currentTip.stdout.trim()) {
+          report.heldReasons.push(
+            `로컬 브랜치 삭제 실패(검증 이후 ref 전진): ${branch} — 검증 시 ${leasedTip?.slice(0, 8) ?? '부재'} 였으나 지금 ${currentTip.stdout.trim().slice(0, 8)} 이라 lease 조건부 삭제를 거부했다`,
+          );
+          blockedBranches.add(branch);
+          continue;
+        }
+        const deleted = await git(entry.repo, ['update-ref', '-d', `refs/heads/${branch}`, leasedTip]);
+        if (deleted.ok) {
+          report.removedLocalBranches.push(branch);
+          continue;
+        }
+        report.heldReasons.push(`로컬 브랜치 삭제 실패: ${branch}`);
         blockedBranches.add(branch);
       }
       for (const branch of remotelyDeleted) {
@@ -2182,6 +2265,8 @@ export class WorktreeManager {
     report.benignHolds = [...new Set(report.benignHolds)];
     report.benignHeldBranches = [...new Set(report.benignHeldBranches)];
     report.remainingBranches = [...new Set(report.remainingBranches)];
+    report.alreadyAbsentLocalBranches = [...new Set(report.alreadyAbsentLocalBranches)];
+    report.alreadyAbsentRemoteBranches = [...new Set(report.alreadyAbsentRemoteBranches)];
     return report;
   }
 
