@@ -76,6 +76,7 @@ test/qa-flows/orchestration-restart-recovery.test.mjs
 test/qa-flows/orchestration-slot-provisioning.test.mjs
 test/qa-flows/orchestration-step-activity.test.mjs
 test/qa-flows/orchestration-step-evidence.test.mjs
+test/qa-flows/orchestration-step-retry-budget.test.mjs
 test/qa-flows/orchestration-team-global-scope.test.mjs
 test/qa-flows/pend-action-gate-mcp.test.mjs
 test/qa-flows/promotion-delay-reason.test.mjs

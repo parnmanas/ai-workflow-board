@@ -67,6 +67,7 @@ import {
   POST_ACTION_STALE_IN_FLIGHT_MS,
   SUMMARY_MAX,
   TERMINAL_MISSION_STATUSES,
+  MAX_STEP_ATTEMPTS_CEILING,
   isTerminalMissionStatus,
   allCriteriaMet,
   isAwaitingUser,
@@ -1233,11 +1234,20 @@ export class OrchestrationRunnerService {
     stepId: string,
     callerAgentId: string,
     input: {
-      action: 'retry' | 'reassign' | 'amend' | 'skip' | 'cancel';
+      action: 'retry' | 'reassign' | 'amend' | 'skip' | 'cancel' | 'set_retry_budget';
       assignee_agent_id?: string;
       instructions?: string;
       acceptance_criteria?: string;
       reason?: string;
+      /**
+       * 새 재시도 예산(절대값). `retry` 와 함께 주면 "예산을 채우고 지금 다시 돌려라"가
+       * 한 번의 호출로 끝나고, `set_retry_budget` 으로 단독 조절도 된다.
+       *
+       * **이미 쓴 시도 아래로는 내릴 수 없다.** 그래프 patch 의 `max_visits` 규칙과 같은
+       * 근거다 — 이미 일어난 실행을 소급해서 "예산 초과"로 만들지 않는다. 정확히 쓴
+       * 만큼으로 내리면 "이번이 마지막"이라는 뜻이 된다.
+       */
+      max_attempts?: number;
     },
   ): Promise<{ step: OrchestrationStep; dispatched: string[] }> {
     const step = await this.missions.requireStep(stepId);
@@ -1259,7 +1269,62 @@ export class OrchestrationRunnerService {
         }
       }
 
+      /*
+       * 재시도 예산 조절. switch **앞**에 두는 이유는 `retry` 와 한 번에 쓰이기 때문이다 —
+       * "예산을 채우고 지금 다시 돌려라"가 두 번의 호출이면 그 사이에 다른 판단이 끼어들고,
+       * 무엇보다 agent 가 예산 거부를 만난 그 자리에서 이어서 할 수 있어야 한다.
+       *
+       * 이 기능이 생긴 이유: 예산이 바닥나면 거부 메시지가 "새 step 으로 대체하라"고
+       * 안내했고, 그래서 orchestrator 가 audit-commit → audit-commit2 → audit-commit3 처럼
+       * **같은 일을 하는 노드를 복제**했다. 계획이 지저분해지고 이력이 세 조각으로 갈린다.
+       * 같은 노드를 다시 돌리는 편이 나은 경우가 훨씬 많다.
+       */
+      if (input.max_attempts !== undefined) {
+        const requested = Math.trunc(Number(input.max_attempts));
+        if (!Number.isFinite(requested) || requested < 1) {
+          throw orchestrationError(400, 'max_attempts must be a positive integer');
+        }
+        if (requested > MAX_STEP_ATTEMPTS_CEILING) {
+          throw orchestrationError(
+            400,
+            `max_attempts cannot exceed ${MAX_STEP_ATTEMPTS_CEILING} — if a step needs more than that, the work ` +
+              `itself is wrong, not the budget. Amend the instructions, reassign it, or split the step.`,
+          );
+        }
+        // 이미 쓴 시도 아래로는 못 내린다(그래프 patch 의 max_visits 규칙과 같은 근거).
+        if (requested < fresh.attempt) {
+          throw orchestrationError(
+            409,
+            `step "${fresh.step_key}" has already used ${fresh.attempt} attempt(s); max_attempts cannot be set ` +
+              `below that. Setting it to exactly ${fresh.attempt} means "this was the last one".`,
+          );
+        }
+        if (requested !== fresh.max_attempts) {
+          const before = fresh.max_attempts;
+          fresh.max_attempts = requested;
+          await this.stepRepo.save(fresh);
+          await this.missions.recordEvent(mission, {
+            type: 'step_retry_budget_changed',
+            step_id: fresh.id,
+            step_key: fresh.step_key,
+            message:
+              `Retry budget for "${fresh.title}" ${requested > before ? 'raised' : 'lowered'} ` +
+              `${before} → ${requested} (used ${fresh.attempt}) by ${orchestratorName}` +
+              `${input.reason ? `: ${input.reason}` : ''}`,
+            actor_type: 'agent',
+            actor_id: callerAgentId,
+            actor_name: orchestratorName,
+            data: { before, after: requested, attempt: fresh.attempt },
+          });
+        }
+      } else if (input.action === 'set_retry_budget') {
+        throw orchestrationError(400, 'set_retry_budget requires max_attempts');
+      }
+
       switch (input.action) {
+        // 예산만 바꾸고 끝낸다 — 지금 다시 돌릴지는 별도 판단이다(`retry` 와 같이 쓰면 한 번에).
+        case 'set_retry_budget':
+          break;
         case 'skip':
         case 'cancel': {
           if (isInFlight(fresh.status)) {
@@ -1336,11 +1401,22 @@ export class OrchestrationRunnerService {
           if (fresh.attempt >= fresh.max_attempts) {
             throw orchestrationError(
               409,
-              `step "${fresh.step_key}" has used all ${fresh.max_attempts} attempts. Reassign it to a different ` +
-                `agent, replace it with new steps, or fail the mission.`,
+              `step "${fresh.step_key}" has used all ${fresh.max_attempts} attempt(s). To run this same step ` +
+                `again, call update_orchestration_step with \`max_attempts\` raised (e.g. ${Math.min(
+                  fresh.attempt + 2,
+                  MAX_STEP_ATTEMPTS_CEILING,
+                )}) — you can send it together with action "retry" in one call, and amend \`instructions\` or ` +
+                `\`assignee_agent_id\` at the same time. Reuse this step unless the next round is genuinely ` +
+                `different work; cloning it into a near-duplicate step splits its history across nodes.`,
             );
           }
+          // 끝난 노드를 다시 돌리는 것도 정상 경로다(재작업). 직전 상태를 이벤트에 남겨
+          // 타임라인이 "done 이었던 노드를 다시 돌렸다"를 말할 수 있게 한다.
+          const priorStatus = fresh.status;
           if (input.instructions !== undefined) fresh.instructions = String(input.instructions).trim();
+          if (input.acceptance_criteria !== undefined) {
+            fresh.acceptance_criteria = String(input.acceptance_criteria).trim();
+          }
           if (input.assignee_agent_id) fresh.assignee_agent_id = input.assignee_agent_id;
           fresh.status = 'pending';
           fresh.finished_at = null;
@@ -1354,7 +1430,10 @@ export class OrchestrationRunnerService {
             type: 'step_retried',
             step_id: fresh.id,
             step_key: fresh.step_key,
-            message: `Step "${fresh.title}" queued for retry (attempt ${fresh.attempt + 1}/${fresh.max_attempts}) by ${orchestratorName}`,
+            message:
+              `Step "${fresh.title}" queued for retry (attempt ${fresh.attempt + 1}/${fresh.max_attempts}` +
+              `${priorStatus ? `, was ${priorStatus}` : ''}) by ${orchestratorName}` +
+              `${input.reason ? `: ${input.reason}` : ''}`,
             actor_type: 'agent',
             actor_id: callerAgentId,
             actor_name: orchestratorName,

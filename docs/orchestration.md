@@ -221,6 +221,37 @@ node/edge 는 거부된다.
 떴을 수 있는가"를 기준으로 보수적으로 센다. 루프가 예산을 미리 깎지 않고 매
 반복 실측을 다시 읽는 이유가 이 구분을 보존하기 위해서다.
 
+### 끝난 노드를 다시 돌린다 — 재시도 예산(`max_attempts`)
+
+step 은 생성 시 `max_attempts: 2` 를 받고, `attempt` 가 거기 닿으면 `retry` 가 409 로
+거부된다. 예산이 **바닥난 뒤에도 그 일을 더 해야 하는** 경우가 실제로는 흔하다(요구가
+바뀌었다 / 실패 원인을 이제 안다 / done 인데 한 군데만 고치면 된다). 그래서
+`update_orchestration_step` 이 `max_attempts` 를 받는다:
+
+| 호출 | 결과 |
+| --- | --- |
+| `action:'retry', max_attempts: 4` | 예산을 올리고 **같은 호출로** 재디스패치. `instructions` / `acceptance_criteria` / `assignee_agent_id` 도 같이 고칠 수 있다 |
+| `action:'set_retry_budget', max_attempts: 4` | 예산만 바꾼다 — 지금 다시 돌리지는 않는다 |
+
+규칙은 그래프 patch 의 `max_visits` 와 같은 근거를 쓴다 — **이미 일어난 실행을 소급
+무효화하지 않는다**:
+
+- 이미 쓴 `attempt` 아래로는 못 내린다. 정확히 쓴 만큼으로 내리는 것은 "이번이
+  마지막"의 표현이라 허용된다.
+- 상한은 `MAX_STEP_ATTEMPTS_CEILING`(20). 그보다 더 필요하면 예산이 아니라 그 일의
+  정의가 잘못된 것이다 — 지시문 수정·재배정·분할이 답이다.
+- 변경은 `step_retry_budget_changed` 로 타임라인에 남는다(`{before, after, attempt}`).
+
+**`retry` 는 `done` 노드에도 쓴다.** 재작업을 새 step 으로 만들면(`audit` → `audit2` →
+`audit3`) 한 작업의 이력(시도·결과·증거·타임라인·의존 배선)이 노드 수만큼 갈리고,
+그래프는 같은 말을 하는 노드로 붐빈다. 노드를 재활용하면 `attempt` 가 이어 올라가고
+`step_retried` 이벤트가 `was done` 처럼 직전 상태를 적어 "끝났던 것을 다시 돌렸다"가
+타임라인에 남는다. 새 step 이 맞는 경우는 **일 자체가 다를 때**뿐이다 — 산출물이 다르고,
+다른 사람이 맡고, 원래 노드의 결과를 입력으로 받는다면 그건 다음 step 이다.
+
+회귀: `test/qa-flows/orchestration-step-retry-budget.test.mjs`.
+
+
 ### verdict 와 중복 실행 통제
 
 evaluator/router node 의 step prompt 에는 그 node 에서 나가는 분기가 기대하는
@@ -1050,7 +1081,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `get_orchestration_mission` | 현재 계획·결과·타임라인·즉시 디스패치 가능 목록 |
 | `submit_orchestration_plan` | 계획 제출/수정 (**병합**: 기존 키는 미시작 시에만 갱신, 누락 키는 보존) · graph 모드에서는 선택적 `graph`(node/edge/예산) 또는 `graph_template`(이름 있는 형태)을 함께 받는다. 셋 다 없으면 **확정된 그래프를 보존**하고 새 step 만 고립 node 로 편입한다 — 버리려면 `reset_graph: true` |
 | `patch_orchestration_graph` | 실행 중인 그래프를 **부분** 수정 — 분기 열기/닫기, 의존 재배선, 반복 상한 조정, 폭주 loop 정지. plan 을 건드리지 않아 `plan_version` 을 소모하지 않는다 |
-| `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` |
+| `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` / `set_retry_budget` — `max_attempts` 를 함께 보내면 예산이 바닥난 노드도 **같은 노드로** 다시 돈다 |
 | `add_orchestration_note` | 타임라인에 판단 근거 기록 |
 | `complete_orchestration_mission` | `completed` / `failed` — **미션을 끝내는 유일한 경로** |
 
