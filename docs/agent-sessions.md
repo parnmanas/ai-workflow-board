@@ -277,7 +277,7 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
   폴백은 첫 실행에 패키지를 내려받느라 initialize 타임아웃(60s)을 넘길 수 있으니 장비에
   `npm i -g @zed-industries/codex-acp @agentclientprotocol/claude-agent-acp` 로 미리 설치해 두는 편이 낫다.
   특수한 레이아웃은 `AWB_ACP_COMMAND_CLAUDE` 등으로 절대 경로를 지정한다.
-- 첨부/이미지, 여러 사용자 동시 관람, 터미널(PTY) 모드는 범위 밖이다.
+- 첨부/이미지, 여러 사용자 동시 관람은 범위 밖이다. 터미널(PTY)은 별도 표면으로 갈라져 나갔다 — `docs/terminals.md`.
 
 ## 테스트
 

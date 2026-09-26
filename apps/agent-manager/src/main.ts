@@ -83,6 +83,7 @@ import type { SessionAwareConfig } from './lib/base-session-manager.js';
 import type { SubagentAwareConfig } from './lib/subagent-manager.js';
 import { MANAGER_CAPABILITIES, shutdownRuntimeProfiles, validateRuntimeProfile } from './lib/runtime-profiles.js';
 import { AgentSessionRunner, detectAcpSessionClis } from './lib/agent-session-runner.js';
+import { TerminalRunner } from './lib/terminal-runner.js';
 import { loadAgentInfo } from './lib/config.js';
 import { MessageOutbox } from './lib/outbox.js';
 import {
@@ -605,6 +606,16 @@ async function runRuntime(
     idleMinutes: Number((config as any)?.agent_sessions?.idle_minutes) || undefined,
     clientVersion: version,
   });
+  // Terminal(Runtime Host 셸) — 이 장비의 PTY 를 소유하고 출력을 서버로 중계한다
+  // (docs/terminals.md). `terminal_request` SSE 만 소비하며, 세션 러너와 독립적이다.
+  const terminalRunner = new TerminalRunner(config, {
+    getManagerId: () => loadAgentInfo()?.agent_id || '',
+    idleHours: Number((config as any)?.terminals?.idle_hours) || undefined,
+  });
+  // 하트비트 `terminal_shells` — 비어 있으면 서버가 이 장비를 터미널 목록에서 뺀다
+  // (PTY 모듈이 없거나 쓸 만한 셸이 없는 장비).
+  const terminalShells = await terminalRunner.availableShells();
+  log(`terminals: shells on this host = ${terminalShells.map((s) => s.id).join(', ') || '(none — terminal support off)'}`);
   // 하트비트 `acp_session_clis` — 이 장비에서 세션을 열 수 있는 CLI(PATH 만 본다).
   const acpSessionClis = await detectAcpSessionClis();
   log(`agent sessions: ACP-capable CLIs on this host = ${acpSessionClis.join(', ') || '(none)'}`);
@@ -1120,6 +1131,7 @@ async function runRuntime(
       runtimeProfileOverride,
       runtimeSupervisor,
       agentSessionRunner,
+      terminalRunner,
       poolReclaimTrigger: () =>
         reconcilePoolLeasesAll ? reconcilePoolLeasesAll('pool_exhausted') : Promise.resolve(0),
     },
@@ -1378,6 +1390,11 @@ async function runRuntime(
       acpSessionClis,
       // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
       agentSessionsProvider: () => agentSessionRunner.liveStates(),
+      // Terminal — 이 장비의 셸 목록(고정)과 지금 살아 있는 PTY 전체. 서버는 후자로
+      // 유령 행을 30초 안에 정리한다.
+      platform: process.platform,
+      terminalShells,
+      terminalsProvider: () => terminalRunner.liveStates(),
       // ST-5b — pass the registry as a snapshot source so each heartbeat
       // reports the currently-supervised agent_ids and their working dirs.
       managedAgents,
@@ -1634,6 +1651,11 @@ async function runRuntime(
       await agentSessionRunner.stopAll(stopReason);
     } catch (err: any) {
       log(`shutdown (agent sessions): ${err?.message ?? err}`);
+    }
+    try {
+      await terminalRunner.stopAll(stopReason);
+    } catch (err: any) {
+      log(`shutdown (terminals): ${err?.message ?? err}`);
     }
     try {
       await runtimeSupervisor.stopAll();

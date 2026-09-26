@@ -296,6 +296,13 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **CLI 설정**: Runtime Host × CLI 마다 워크스페이스 Credential 을 묶는다(`agent_session_cli_settings`, `PUT /api/agent-sessions/hosts/:managerId/:cli/settings`). 매니저는 바인딩된 credential 만 `GET /api/agent/sessions/credential/:id` 로 받아 **세션 전용 cli-home**(`session-homes/<cli>/<credential_id>`, 기록 디렉터리만 운영자 홈으로 링크)에 기존 어댑터 `prepareCliHome` 으로 적용한다 — 운영자 홈의 로그인 파일은 절대 건드리지 않는다. 비워 두면 장비의 `claude login` 상태를 그대로 쓴다.
 - `agent_session_request` payload(`credential_id` 포함) · `/api/agent/sessions/*` 바디·credential 응답 · 하트비트 `acp_session_clis` 는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/agent-sessions.md`.
 
+## Terminal (Runtime Host 셸)
+
+- Agent Session 과 **같은 배선, 다른 수명**: 표면(호스트 → 목록 → 하나)과 reverse RPC + driver SSE 는 세션을 그대로 따랐지만, 터미널은 장비에 기록이 없다 — PTY 프로세스가 곧 터미널이라 **살아 있는 것만 존재한다**. 죽은 행을 목록에 남기지 말 것(복원할 것이 없어 눌러도 아무 일도 안 일어나는 행이 된다). 다시 붙을 때 되살리는 것은 매니저가 들고 있는 스크롤백(256KiB)뿐이다.
+- 이름 규약: 엔티티 없음(메모리 라이브 상태만), 모듈 `modules/terminals`, REST `/api/terminals/hosts/:managerId/terminals[/:id/...]`(사용자) · `/api/agent/terminals/rpc/:requestId`, `/api/agent/terminals/:managerId/:id[/output]`(매니저), SSE `terminal_request`(→manager, scope 는 매니저 identity) · `terminal_update`/`terminal_output`(→driver UI), 권한 `terminals.use`(기본 admin 전용 — 사실상 그 장비 운영자 권한의 셸이다), 클라이언트 `components/terminals/*`(xterm.js), 매니저 `terminal-runner.ts` + `terminal-shells.ts`, 하트비트 `terminal_shells`/`terminals`/`platform`. 상수 단일 원천은 `apps/server/src/common/types/terminals.ts`.
+- PTY 는 **선택 의존성**(`@lydell/node-pty`, 플랫폼별 prebuild — linux/darwin/win32). 못 불러오면 던지지 않고 그 장비의 셸 목록을 비운다 → 서버가 터미널 호스트 목록에서 뺀다(409 `terminal_unsupported`). Windows 는 ConPTY 로 같은 경로를 탄다.
+- `terminal_request` payload · `/api/agent/terminals/*` 바디 · 하트비트 필드는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/terminals.md`.
+
 ## Skills (AWB 기능)
 
 - Global(`workspace_id NULL`) / Workspace 2계층. 같은 slug면 Workspace가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.

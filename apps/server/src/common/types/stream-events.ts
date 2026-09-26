@@ -10,6 +10,7 @@ import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
+import type { TerminalOutputChunk, TerminalSummary } from './terminals';
 import type {
   AgentSessionAuth,
   AgentSessionConfigOption,
@@ -45,7 +46,10 @@ export type StreamEventType =
   | 'ontology_graph_progress' // 티켓 964014f5: Ontology Graph 증분 갱신 진행 + graph_status 상태 — UI 전용, agent-manager 비소비
   | 'agent_session_request'  // Agent Session(CLI 직접 세션): 서버 → agent-manager 제어(open/prompt/permission/cancel/set_mode/close) — 대상 agent 스코프
   | 'agent_session_update'   // Agent Session: 세션 레코드 변경(status/title/mode/…) — UI 전용, 소유자만
-  | 'agent_session_event';   // Agent Session: 트랜스크립트 이벤트 1건(text/tool/permission/…) — UI 전용, 소유자만
+  | 'agent_session_event'    // Agent Session: 트랜스크립트 이벤트 1건(text/tool/permission/…) — UI 전용, 소유자만
+  | 'terminal_request'       // Terminal(Runtime Host 셸): 서버 → agent-manager 제어(open/attach/input/resize/close) — 대상 agent 스코프
+  | 'terminal_update'        // Terminal: 라이브 터미널 상태 변경(status/cwd/title/크기) — UI 전용, driver 만
+  | 'terminal_output';       // Terminal: PTY 출력 청크 — UI 전용, driver 만
 
 export interface StreamEventScope {
   board_id?: string;
@@ -1046,4 +1050,46 @@ export interface AgentSessionEventPayload {
   session_id: string;
   driver_user_id: string;
   event: AgentSessionEventRecord;
+}
+
+
+// ─── Terminal (Runtime Host 셸) ────────────────────────────────────────────
+// 서버는 상태 없는 중계자다 — 터미널은 매니저의 PTY 프로세스이고, 살아 있는 동안만
+// 존재한다. 상세: docs/terminals.md, 상수는 common/types/terminals.ts.
+
+/** 서버 → agent-manager. scope.agent_id 는 매니저 identity 라 그 매니저 SSE 연결에만 간다. */
+export interface TerminalRequestPayload {
+  manager_id: string;
+  workspace_id?: string;
+  /** common/types/terminals.ts 의 `TERMINAL_REQUEST_OPS`. */
+  op: string;
+  /** list / open / attach 는 RPC — 매니저가 `POST /api/agent/terminals/rpc/:id` 로 답한다. */
+  request_id?: string;
+  /** open 일 때만 null. */
+  terminal_id?: string | null;
+  /** open — 고른 셸 id(하트비트 `terminal_shells`). 비우면 장비 기본 셸. */
+  shell?: string | null;
+  cwd?: string;
+  title?: string;
+  cols?: number;
+  rows?: number;
+  /** input — 키 입력 원문(UTF-8 문자열 그대로. 제어문자 포함). */
+  data?: string;
+  /** 출력을 받을 사용자 — 마지막으로 열거나 attach 한 사람. */
+  driver_user_id: string;
+  issued_at: string;
+}
+
+/** UI 전용(driver 만). flatten 되어 `{ event_type, terminal, reason, timestamp }` 로 나간다. */
+export interface TerminalUpdatePayload {
+  terminal: TerminalSummary;
+  reason: string;
+}
+
+/** UI 전용(driver 만). flatten 되어 `{ event_type, manager_id, terminal_id, chunk, … }` 로 나간다. */
+export interface TerminalOutputPayload {
+  manager_id: string;
+  terminal_id: string;
+  driver_user_id: string;
+  chunk: TerminalOutputChunk;
 }

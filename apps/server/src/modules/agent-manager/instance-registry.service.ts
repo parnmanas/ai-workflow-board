@@ -262,6 +262,29 @@ export interface InstanceRecord {
   // 마지막 상태 패치를 못 받은 busy/awaiting_*)를 30초 안에 되돌릴 수 있다.
   // `undefined` 는 구버전 매니저(보고 안 함), `[]` 는 "살아 있는 세션 없음".
   agent_sessions?: AgentSessionHeartbeatEntry[];
+  // 이 매니저가 도는 OS(`process.platform`). Terminal 화면이 셸 이름을 설명할 때 쓴다.
+  // 구버전 매니저는 보내지 않는다.
+  platform?: string;
+  // Terminal(Runtime Host 셸): 이 장비에서 띄울 수 있는 셸. **비어 있으면 터미널을 못
+  // 여는 장비다** — 구버전 매니저이거나 PTY 모듈(@lydell/node-pty)이 설치되지 않았다.
+  terminal_shells?: TerminalShellHeartbeatEntry[];
+  // Terminal: 지금 이 매니저에 살아 있는 PTY 와 그 상태. agent_sessions 와 같은 규약으로
+  // 매 하트비트마다 전체 목록이 오므로 서버 메모리의 유령 행을 30초 안에 정리할 수 있다.
+  terminals?: TerminalHeartbeatEntry[];
+}
+
+/** 하트비트 `terminal_shells[]` 한 줄 — `apps/server/src/common/types/terminals.ts` 의 TerminalShellInfo 와 같은 모양. */
+export interface TerminalShellHeartbeatEntry {
+  id: string;
+  label: string;
+  path: string;
+  default?: boolean;
+}
+
+/** 하트비트 `terminals[]` 한 줄 — `apps/agent-manager/src/lib/instance-heartbeat.ts` 와 같은 모양. */
+export interface TerminalHeartbeatEntry {
+  terminal_id: string;
+  status: string;
 }
 
 /** 하트비트 `agent_sessions[]` 한 줄 — `apps/agent-manager/src/lib/instance-heartbeat.ts` 의 AgentSessionHeartbeatEntry 와 같은 모양. */

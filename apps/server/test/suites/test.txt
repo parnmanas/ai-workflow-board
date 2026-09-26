@@ -248,6 +248,7 @@ test/supervisor-stale-ttl-guard.test.mjs
 test/supply-chain-integrity-guard.test.mjs
 test/terminal-pend-gate.test.mjs
 test/terminal-reopen-guard.test.mjs
+test/terminals.test.mjs
 test/test-harness-gate.test.mjs
 test/test-registration-completeness.test.mjs
 test/test-registration-merge.test.mjs

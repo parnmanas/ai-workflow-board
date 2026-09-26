@@ -44,6 +44,7 @@ AWB applies the same principle that solved human collaboration: **give agents a 
 - **Multi-Workspace** — Isolated workspaces with role-based access control
 - **Real-time Updates** — SSE-powered live dashboard showing agent status, activity feeds, and typing indicators
 - **Agent Sessions** — Drive the CLIs on your Runtime Host machines (Claude Code / Codex / Hermes) directly over ACP, including the sessions already in each CLI's own history: streaming transcript, tool-call cards, permission prompts you approve. Nothing is stored in AWB — the CLI's session files are the source of truth. The primary work surface — see [`docs/agent-sessions.md`](docs/agent-sessions.md)
+- **Terminals** — Open a real shell on any Runtime Host machine (Linux/macOS PTY, Windows ConPTY) from the browser. Only live terminals are listed: a terminal *is* its process, so nothing is recorded and nothing lingers once it exits — see [`docs/terminals.md`](docs/terminals.md)
 - **Chat Rooms** — DM and group chat between users and agents with @mention support
 - **Resources & Credentials** — Manage reference materials (repos, docs, images, links) with optional vector search
 - **GitHub Connector** — Sync repository metadata, README, and file trees; search GitHub repos/code/issues via MCP

@@ -104,7 +104,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2193,6 +2193,43 @@ export const api = {
   closeHostSession: (managerId: string, cli: string, sessionId: string) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/close`,
+      { method: 'POST' },
+    ),
+
+  // ─── Terminals (Runtime Host 셸) ──────────────────────────────────────
+  // 서버: apps/server/src/modules/terminals. 살아 있는 터미널만 다룬다 — 기록이 없으므로
+  // 목록에 죽은 것은 나오지 않고, 스크롤백은 attach 가 한 번 넘겨준다.
+  listTerminalHosts: (workspaceId?: string) => {
+    const init: RequestInit = {};
+    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
+    return request<TerminalHost[]>('/terminals/hosts', init);
+  },
+  listHostTerminals: (managerId: string) =>
+    request<TerminalSummary[]>(`/terminals/hosts/${encodeURIComponent(managerId)}/terminals`),
+  openHostTerminal: (managerId: string, body: { shell?: string | null; cwd?: string; title?: string; cols?: number; rows?: number }) =>
+    request<TerminalSummary>(`/terminals/hosts/${encodeURIComponent(managerId)}/terminals`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** 붙으면서 driver 가 된다 — 이 호출 이후의 출력이 내 SSE 로 온다. */
+  attachHostTerminal: (managerId: string, terminalId: string, size?: { cols: number; rows: number }) =>
+    request<TerminalSnapshot>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}`
+      + (size ? `?cols=${size.cols}&rows=${size.rows}` : ''),
+    ),
+  writeHostTerminal: (managerId: string, terminalId: string, data: string) =>
+    request<{ ok: true }>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}/input`,
+      { method: 'POST', body: JSON.stringify({ data }) },
+    ),
+  resizeHostTerminal: (managerId: string, terminalId: string, cols: number, rows: number) =>
+    request<TerminalSummary>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}/resize`,
+      { method: 'POST', body: JSON.stringify({ cols, rows }) },
+    ),
+  closeHostTerminal: (managerId: string, terminalId: string) =>
+    request<TerminalSummary>(
+      `/terminals/hosts/${encodeURIComponent(managerId)}/terminals/${encodeURIComponent(terminalId)}/close`,
       { method: 'POST' },
     ),
 

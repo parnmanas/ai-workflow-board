@@ -3479,3 +3479,79 @@ export interface AgentSessionEventEvent {
   event: AgentSessionEventRecord;
   timestamp: string;
 }
+
+// ─── Terminal (Runtime Host 셸) ────────────────────────────────────────────
+// 서버 contract: apps/server/src/common/types/terminals.ts. 터미널은 매니저의 PTY
+// 프로세스이고 살아 있는 동안만 존재한다 — 기록이 없으므로 목록에 죽은 것은 없다.
+
+export type TerminalStatus = 'starting' | 'live' | 'exited' | 'error';
+
+export interface TerminalShellInfo {
+  id: string;
+  label: string;
+  path: string;
+  default?: boolean;
+}
+
+export interface TerminalHost {
+  manager_id: string;
+  instance_id: string;
+  hostname: string;
+  name: string;
+  /** 'win32' | 'linux' | 'darwin' | '' — 구버전 매니저는 빈 문자열. */
+  platform: string;
+  shells: TerminalShellInfo[];
+  plugin_version: string;
+  last_seen_at: string;
+  live_count: number;
+}
+
+export interface TerminalSummary {
+  manager_id: string;
+  manager_name: string;
+  terminal_id: string;
+  shell: string;
+  shell_label: string;
+  cwd: string;
+  title: string;
+  cols: number;
+  rows: number;
+  pid: number | null;
+  status: TerminalStatus | string;
+  exit_code: number | null;
+  last_error: string | null;
+  driver_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TerminalSnapshot {
+  terminal: TerminalSummary;
+  /** base64 원문 바이트 — 그대로 디코드해 xterm 에 write 한다. */
+  data: string;
+  /** 이 스냅샷에 담긴 마지막 청크의 seq. 이하의 라이브 청크는 버린다. */
+  seq: number;
+  truncated: boolean;
+}
+
+export interface TerminalOutputChunk {
+  seq: number;
+  data: string;
+  created_at: string;
+}
+
+export interface TerminalUpdateEvent {
+  event_type: 'terminal_update';
+  terminal: TerminalSummary;
+  reason: string;
+  timestamp: string;
+}
+
+export interface TerminalOutputEvent {
+  event_type: 'terminal_output';
+  manager_id: string;
+  terminal_id: string;
+  driver_user_id: string;
+  chunk: TerminalOutputChunk;
+  timestamp: string;
+}

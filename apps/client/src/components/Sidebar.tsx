@@ -162,6 +162,7 @@ export default function Sidebar({
   // Agent Session(CLI 직접 세션) — Chat 위에 오는 주 작업 표면. 행은 (Runtime Host × CLI)
   // 이고 세션 자체는 그 장비에 있다. 권한이 없는 사용자에겐 섹션을 그리지 않는다.
   const canUseSessions = hasPermission('agent_sessions.use');
+  const canUseTerminals = hasPermission('terminals.use');
   const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);
 
   // 워크스페이스를 바꾸면 펼침 상태를 초기 5개로 되돌린다. 30초 폴링이나
@@ -196,6 +197,16 @@ export default function Sidebar({
           label: 'AI Agents',
           icon: 'A',
         },
+        // Terminal(Runtime Host 셸) — 기본 admin 전용 권한이라 없는 사용자에게는 행 자체를
+        // 그리지 않는다(눌러도 403 인 행을 남겨 두지 않는다).
+        ...(canUseTerminals
+          ? [{
+            key: 'terminals',
+            path: `${workspaceBase}/terminals`,
+            label: 'Terminals',
+            icon: 'T',
+          }]
+          : []),
       ],
     },
     {

@@ -48,7 +48,9 @@ type StreamNamedEventType =
   | 'cli_login_progress'  // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태
   | 'ontology_graph_progress'  // 티켓 964014f5 — Ontology Graph 증분 갱신 진행 + graph_status
   | 'agent_session_update'   // Agent Session(CLI 직접 세션) — 세션 레코드 변경(소유자만)
-  | 'agent_session_event';   // Agent Session — 트랜스크립트 이벤트 1건(소유자만)
+  | 'agent_session_event'    // Agent Session — 트랜스크립트 이벤트 1건(소유자만)
+  | 'terminal_update'        // Terminal(Runtime Host 셸) — 라이브 터미널 상태 변경(driver 만)
+  | 'terminal_output';       // Terminal — PTY 출력 청크(driver 만)
 
 interface BoardStreamContextValue {
   /** Subscribe to a named SSE event (board_update/agent_typing/agent_trigger). */
@@ -254,6 +256,15 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       });
       eventSource.addEventListener('agent_session_event', (event: MessageEvent) => {
         dispatch('agent_session_event', event.data);
+      });
+
+      // Terminal(Runtime Host 셸) — 같은 규약으로 driver 에게만 온다. 터미널 화면이
+      // terminal_id 로 한 번 더 거른다.
+      eventSource.addEventListener('terminal_update', (event: MessageEvent) => {
+        dispatch('terminal_update', event.data);
+      });
+      eventSource.addEventListener('terminal_output', (event: MessageEvent) => {
+        dispatch('terminal_output', event.data);
       });
 
       eventSource.onerror = () => {
