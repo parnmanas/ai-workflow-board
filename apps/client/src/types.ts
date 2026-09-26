@@ -1017,9 +1017,11 @@ export interface Credential {
   // null = global (instance-level) credential shared across all workspaces.
   workspace_id: string | null;
   board_id: string | null;
-  // 'global' credentials are read-only inside a workspace view (editable only
-  // from the Admin global-credentials page); 'workspace' credentials are owned
-  // by the active workspace.
+  // 'global' credentials are inherited by every workspace; 'workspace' ones are
+  // owned by the active workspace. Unlike the other catalog kinds this is
+  // mutable in place — the Edit dialog lets a holder of
+  // admin.global_credentials move a credential either way, and everyone else
+  // sees globals as read-only.
   scope?: CatalogScope;
   name: string;
   description: string;

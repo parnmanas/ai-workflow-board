@@ -51,12 +51,23 @@ export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManag
     api.getWorkspace(wsId).then(setWorkspace).catch(() => setWorkspace(null));
   }, [wsId]);
 
+  // Credentials are the one catalog kind whose server-side global writes sit
+  // behind a dedicated permission (admin.global_credentials — see
+  // credentials.controller.ts canManageGlobal); every other kind only checks
+  // its own manage permission, so they keep the generic admin gate. Using
+  // admin.access for credentials made the UI and the server disagree in both
+  // directions: it offered Global to an admin-panel user the server would 403,
+  // and hid it from a user granted admin.global_credentials alone.
+  const canManageGlobalHere = kind === 'credentials'
+    ? hasPermission('admin.global_credentials')
+    : hasPermission('admin.access');
+
   const definitionProps = {
     workspaceId: wsId,
     catalogMode: true,
     createScope,
     allScopes: false,
-    canManageGlobal: hasPermission('admin.access'),
+    canManageGlobal: canManageGlobalHere,
   } as const;
 
   const manager = (() => {
@@ -64,7 +75,7 @@ export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManag
       case 'functions':
         return <FunctionManager {...definitionProps} />;
       case 'credentials':
-        return <CredentialManager {...definitionProps} />;
+        return <CredentialManager {...definitionProps} workspaceName={workspace?.name} />;
       case 'resources':
         return <ResourceManager {...definitionProps} />;
       case 'prompt-templates':
@@ -123,7 +134,7 @@ export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManag
                 color: tokens.colors.textPrimary,
               }}
             >
-              {hasPermission('admin.access') && <option value="global">Not set (Global)</option>}
+              {canManageGlobalHere && <option value="global">Not set (Global)</option>}
               <option value="workspace">{workspace?.name || 'Current Workspace'}</option>
             </select>
           </label>

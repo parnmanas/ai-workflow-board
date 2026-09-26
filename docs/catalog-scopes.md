@@ -97,6 +97,50 @@ Function/Credential/Resource/Prompt Template을 등록할 때 Workspace를 비�
 
 기존 `/catalog` URL은 북마크 호환을 위해 Functions 메뉴로 redirect한다.
 
+## Scope 변경 — Credential만 예외
+
+카탈로그 정의의 scope 는 **만든 뒤에 바뀌지 않는다**. Function / Resource /
+Prompt Template / Action / QA / Security / Workspace Schedule 의 update 경로는
+scope 가 달라진 요청을 400 으로 거부하고, 새 scope 의 행을 따로 만들라고
+안내한다. scope 는 그 행의 정체성에 가까워서, 옮기는 순간 그 행을 가리키던
+참조들이 조용히 다른 의미가 된다.
+
+`Credential` 만 예외다. 다른 카탈로그 정의는 내용을 다시 입력하면 그만이지만
+credential 의 내용은 **비밀값**이라, 새로 만들라고 하면 운영자가 토큰을 다시
+붙여넣고 그 credential 을 물고 있던 Agent · Resource · CLI 세션 설정 ·
+Outreach 채널을 전부 손으로 다시 지정해야 한다. 그래서
+`PATCH /api/credentials/:id` 는 `scope` 로 global ↔ workspace 이동을 허용한다
+(`credentials.controller.ts` → `update()`). 규칙 네 가지:
+
+- **권한**: global 쪽을 건드리는 모든 방향(global 행 편집, global 로 넓히기,
+  global 에서 좁히기)에 `admin.global_credentials` 가 필요하다. Workspace
+  credential 을 자기 workspace 안에서 고치는 것은 그대로 `admin.credentials`.
+  클라이언트도 **이 권한**으로 판단한다 — `admin.access` 를 대신 쓰면 서버가
+  403 할 선택지를 UI 가 제시하게 된다(`WorkspaceManagementPage.tsx`).
+- **목적지는 보고 있는 Workspace 다**: body 의 `workspace_id` 는 예전 의미
+  (호출자가 어느 workspace 에서 행동하는가)를 그대로 유지하면서, global 을
+  좁힐 때의 목적지 역할을 겸한다. 그래서 Workspace credential 이 다른
+  Workspace 로 한 번에 건너가지 못한다 — global 로 넓힌 뒤 다시 좁히면 되고,
+  그 경로에는 아래 dependent 검사가 걸린다.
+- **좁히기는 dependent 를 깨뜨리지 않는다**: `credential_id` 로 그 행을
+  가리키는 `agents` / `resources` / `agent_session_cli_settings` /
+  `outreach_channels` 중 목적지 Workspace 밖(다른 workspace 이거나
+  `workspace_id IS NULL` = 인스턴스 전역)에 있는 것이 하나라도 있으면 409 로
+  거부한다. 넓히기는 읽을 수 있는 쪽만 늘어나므로 검사하지 않는다.
+- **흔적을 남긴다**: 비밀값을 읽을 수 있는 범위가 바뀌는 일이므로 reveal 과
+  같은 급의 감사 항목(`credential_scope_changed`, old/new 는 `global` 또는
+  `workspace:<id>`)을 남긴다. 값 자체는 절대 담지 않는다.
+
+생성 시 scope 는 여전히 페이지 상단 "Workspace for new item" 선택이 정하고,
+Edit 다이얼로그의 scope 선택기는 기존 행에만 나온다. 회귀 테스트는
+`apps/server/test/credentials-scope-switch.test.mjs` 와
+`apps/client/test/credential-scope-switch-ui.test.mjs`.
+
+다른 카탈로그 타입에 같은 것을 붙이고 싶어지면, 먼저 "새로 만들기가 왜 안
+되는가" 를 credential 의 비밀값만큼 구체적으로 답할 수 있어야 한다. 답이
+"귀찮아서" 라면 붙이지 말 것 — 위 네 규칙(특히 dependent 검사)을 타입마다
+다시 설계해야 한다.
+
 ## 새 관리 객체 체크리스트
 
 1. 먼저 카탈로그 정의인지, 실행/소유 객체인지 결정한다.

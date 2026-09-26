@@ -72,6 +72,7 @@ test/consensus-state.test.mjs
 test/credential-mask.test.mjs
 test/credential-whitespace-normalize.test.mjs
 test/credentials-scope.test.mjs
+test/credentials-scope-switch.test.mjs
 test/cron-coverage-guard.test.mjs
 test/cross-workspace-holder-name.test.mjs
 test/default-role-assignments-config.test.mjs
