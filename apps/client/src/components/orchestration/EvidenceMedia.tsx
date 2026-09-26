@@ -201,7 +201,10 @@ export function EvidenceThumb({
       {partial && !broken && (
         <span
           data-testid="evidence-thumb-partial"
-          title="이 파일은 끝까지 올라오지 않았습니다 — 도착한 부분만 보입니다."
+          title={
+            '이 파일은 끝까지 도착하지 않아 아래쪽이 비어 있습니다. 보이는 부분은 실제로 찍힌 내용이지만, ' +
+            '나머지는 존재하지 않습니다 — 온전한 증거가 필요하면 담당 agent 에게 다시 올려 달라고 하세요.'
+          }
           style={{
             position: 'absolute',
             left: 4,
@@ -297,9 +300,9 @@ export function EvidenceLightbox({
           <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
             ⚠ 이 파일은 열 수 없습니다
           </div>
-          바이트는 서버에 저장돼 있지만 디코드되지 않습니다 — 올리는 쪽에서 아직 저장이 끝나지
-          않은 파일을 읽어 중간에 끊긴 경우입니다. 담당 agent 에게 다시 올려 달라고 하세요.
-          아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.
+          바이트는 서버에 저장돼 있지만 이미지로 해석되지 않습니다. 파일이 끝까지 오지 않았거나
+          형식이 맞지 않는 경우이고, 어느 쪽이든 화면에서 복구할 방법은 없습니다 — 담당 agent 에게
+          다시 올려 달라고 하세요. 아래 Download 로 원본 바이트는 그대로 받을 수 있습니다.
         </div>
       ) : video ? (
         <video
@@ -321,12 +324,25 @@ export function EvidenceLightbox({
       )}
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{ display: 'flex', gap: 12, alignItems: 'center', color: '#ddd', fontSize: 12, flexWrap: 'wrap', justifyContent: 'center' }}
+        style={{
+          display: 'flex',
+          gap: 12,
+          alignItems: 'center',
+          color: '#ddd',
+          fontSize: 12,
+          flexWrap: 'wrap',
+          justifyContent: 'center',
+          maxWidth: '80vw',
+          lineHeight: 1.6,
+          textAlign: 'center',
+        }}
       >
         <span>{caption || meta.file_name}</span>
         {partial && (
           <span data-testid="evidence-lightbox-partial" style={{ color: tokens.colors.warningLight }}>
-            ⚠ 일부만 도착한 파일입니다 — 올린 쪽에서 저장이 끝나기 전에 읽었습니다
+            ⚠ 끝까지 도착하지 않은 파일입니다 — 아래쪽 빈 부분은 처음부터 오지 않았습니다.
+            대개 캡처가 저장을 마치기 전에 읽혀서 생깁니다. 온전한 증거가 필요하면 담당 agent 에게
+            다시 올려 달라고 하세요(지금은 이런 파일이 업로드 단계에서 걸러집니다).
           </span>
         )}
         <span style={{ color: '#999' }}>{formatBytes(meta.size_bytes)}</span>
