@@ -26,7 +26,8 @@
     "test": "node test/run-suite.mjs --suite test",
     "test:qa": "node test/run-suite.mjs --suite test-qa",
     "test:qa:fast": "node test/run-suite.mjs --suite test-qa-fast",
-    "test:qa:pg": "node test/run-suite.mjs --suite test-qa-pg"
+    "test:qa:pg": "node test/run-suite.mjs --suite test-qa-pg",
+    "test:suites:sort": "node test/sort-suites.mjs"
   },
   "dependencies": {
     "@ast-grep/napi": "^0.45.1",

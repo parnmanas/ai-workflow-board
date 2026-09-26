@@ -242,6 +242,7 @@ test/stuck-detector-presence.test.mjs
 test/stuck-no-progress-decision.test.mjs
 test/stuck-ticket-detector-same-second-lifecycle.test.mjs
 test/subagent-appendlocks-eviction.test.mjs
+test/suite-manifest-sort.test.mjs
 test/supervisor-liveness-redispatch.test.mjs
 test/supervisor-offline-skip-audit.test.mjs
 test/supervisor-output-liveness-decision.test.mjs
