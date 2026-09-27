@@ -11,10 +11,12 @@
 //   2) 칩 숫자 = 그 카테고리를 눌렀을 때 실제로 남는 카드 수. 검색 중에도 같다.
 //   3) 호스트 그룹 키는 manager_agent_id — 이름이 아직 안 실려 온 정상 Agent 를
 //      "spawn 되지 않는다" 그룹에 넣지 않는다.
-//   4) 화면은 탭 두 개다: Agents / Runtime Hosts(admin). 한 화면에 쌓지 않는다.
+//   4) 프레임은 하나다: 왼쪽 Runtime Host 목록 + 오른쪽 내용. 호스트를 고르지 않은
+//      기본 상태의 내용이 이 Agent 그리드다.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 
 import {
@@ -167,21 +169,47 @@ test('그룹 축 셋이 각각 제 순서로 나오고, 빈 그룹은 만들지 
 
 const agentsPageSource = await readFile(new URL('../src/components/AgentsPage.tsx', import.meta.url), 'utf8');
 
-test('AI Agents 는 목록과 호스트 콘솔을 한 화면에 쌓지 않고 탭으로 가른다', () => {
-  assert.match(agentsPageSource, /<PageTabs/);
-  assert.match(agentsPageSource, /id: 'fleet'/);
-  assert.match(agentsPageSource, /label: 'Runtime Hosts'/);
-  // 두 표면이 동시에 렌더되면 "쌓기" 로 되돌아간 것이다 — 삼항으로 하나만 그린다.
-  assert.match(agentsPageSource, /tab === 'fleet' \? \(\s*<AgentFleetPanel/);
-  assert.match(agentsPageSource, /\) : \(\s*<AgentManagerPage/);
-  // Runtime Hosts 탭은 admin 에게만 존재한다(비활성 탭으로 남겨 두지 않는다).
-  assert.match(agentsPageSource, /canAccessAgentManager\s*\?\s*\[\{ id: 'runtime'/);
+test('프레임은 Runtime Host 목록 + 내용 하나다 — 탭으로 가르지 않는다', () => {
+  // 탭으로 갈랐더니 매니저 업데이트·CLI 버전 같은 호스트 조작이 통째로 다른 탭
+  // 뒤로 숨어 "여기서 뭘 하라는 건지" 를 알 수 없게 됐다(사용자 피드백).
+  // master/detail 한 프레임으로 되돌린다.
+  assert.doesNotMatch(agentsPageSource, /<PageTabs/);
+  assert.doesNotMatch(agentsPageSource, /label: 'Runtime Hosts'/);
+  assert.match(agentsPageSource, /<AgentManagerPage/);
 });
 
-test('레거시 /admin/agent-manager 리다이렉트가 Runtime Hosts 탭으로 떨어진다', () => {
-  // AdminPage 가 보내는 해시. 앵커만 남기고 탭을 안 맞추면 그 링크는 Agents 목록에
-  // 도착해 아무것도 설명하지 못한다.
-  assert.match(agentsPageSource, /RUNTIME_TAB_HASH = '#agent-manager-runtime'/);
-  assert.match(agentsPageSource, /window\.location\.hash === RUNTIME_TAB_HASH \? 'runtime' : 'fleet'/);
-  assert.match(agentsPageSource, /id="agent-manager-runtime"/);
+test('호스트를 고르지 않은 기본 상태의 내용이 Agent 그리드다', () => {
+  // 탭을 없애면서 Agent 가 다시 안 보이게 되면 이 화면을 탭으로 가른 원래 이유
+  // ("AI Agents 인데 Agent 가 안 보인다")로 되돌아간다. 빈 detail 자리에 넣는다.
+  assert.match(agentsPageSource, /emptyDetail=\{\s*<AgentFleetPanel/);
+
+  const managerSource = readFileSync(
+    new URL('../src/components/admin/AgentManagerPage.tsx', import.meta.url),
+    'utf8',
+  );
+  // 고른 호스트가 있으면 상세가 이기고, 없을 때만 emptyDetail 이 나온다.
+  assert.match(managerSource, /\) : emptyDetail !== undefined \? \(\s*emptyDetail/);
+});
+
+test('레거시 /admin/agent-manager 리다이렉트가 갈 앵커는 남아 있다', () => {
+  // AdminPage 가 보내는 해시. 화면이 하나뿐이라 탭을 고를 일은 없지만 앵커가
+  // 없으면 그 링크가 아무 데도 도착하지 못한다.
+  assert.match(agentsPageSource, /RUNTIME_ANCHOR_ID = 'agent-manager-runtime'/);
+  assert.match(agentsPageSource, /id=\{RUNTIME_ANCHOR_ID\}/);
+});
+
+test('매니저 버전·업데이트와 CLI 버전은 제목 달린 자기 자리에 있다', () => {
+  // 사용자 피드백: "agent manager 를 어떻게 업데이트할지, cli 버전이나 업데이트
+  // 어떻게 할지 다 사라지고 도대체 뭘 하라는건지". 둘 다 사실 나열(<dl>) 한복판에
+  // 파묻혀 있었고, 매니저 Update 버튼은 update_available 일 때만 나타나 최신인
+  // 호스트에서는 "여기서 올린다" 는 사실 자체가 화면에서 사라졌다.
+  const managerSource = readFileSync(
+    new URL('../src/components/admin/AgentManagerPage.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(managerSource, /Agent Manager\s*\n\s*<\/div>/);
+  assert.match(managerSource, /CLI 설치본\s*\n\s*<\/div>/);
+  // 최신일 때도 버튼 자리는 남는다 — 숨기면 어디서 올리는지 알 수 없다.
+  assert.match(managerSource, /\{inst\.update_available \? \(/);
+  assert.match(managerSource, /'업데이트 확인 불가' : '최신'/);
 });

@@ -55,6 +55,10 @@ interface AgentManagerPageProps {
   canManageRuntime?: boolean;
   onRetryAgents?: () => void;
   onOpenAgent?: (agentId: string) => void;
+  /** 호스트를 고르지 않았을 때 오른쪽에 그릴 것. AI Agents 화면은 여기에 Agent
+   *  그리드를 넣어, 호스트를 안 고른 기본 상태에서도 Agent 가 보이게 한다.
+   *  주지 않으면 예전처럼 "호스트를 고르세요" 안내가 뜬다. */
+  emptyDetail?: React.ReactNode;
 }
 
 const AGENT_LIFECYCLE_META: Record<
@@ -833,17 +837,19 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {inst.pid || '—'} / {inst.cli}
             </dd>
           </div>
-          <div>
-            <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Manager
-            </dt>
-            <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
-              v{inst.plugin_version}
-              {inst.mode === 'manager' && (
-                <ManagerVersionBadge inst={inst} />
-              )}
-            </dd>
-          </div>
+          {/* manager 는 아래 "Agent Manager" 섹션이 버전·업데이트를 모두 보여 주므로
+              여기서 또 적지 않는다. subagent 인스턴스에는 그 섹션이 없어 이 줄이
+              유일한 버전 표시다. */}
+          {inst.mode !== 'manager' && (
+            <div>
+              <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Manager
+              </dt>
+              <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
+                v{inst.plugin_version}
+              </dd>
+            </div>
+          )}
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Started
@@ -868,25 +874,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {inst.cli_adapters.length === 0 ? '—' : inst.cli_adapters.join(', ')}
             </dd>
           </div>
-          {/* 이 장비에 깔린 CLI 설치본들 + 그 자리에서 올리는 버튼.
-              같은 CLI 가 여러 줄일 수 있고 그게 정상이다 — ragnar 는 vLLM 백엔드용
-              으로 claude 를 두 벌 두고 runtime profile 의 `claude_executable` 로
-              고른다. 그래서 행의 단위는 CLI 가 아니라 **설치본(경로)** 이고,
-              Update 는 그 경로를 명시해 보낸다. 구버전 매니저(cli_installs 없음)는
-              예전처럼 CLI 당 한 줄로 접는다. */}
-          {inst.mode === 'manager' && (
-            <InstalledCliVersions
-              inst={inst}
-              pending={updateCliPending}
-              onUpdate={(cli, bin, needsSudo, method) => {
-                // 권한 상승이 필요한 설치본에서만 비밀번호를 묻는다. 필요 없는
-                // 설치본에 대고 묻는 것은 운영자의 root 비밀번호를 괜히 네트워크에
-                // 태우는 일이다.
-                if (needsSudo && bin) setSudoPrompt({ cli, bin, method: method || '' });
-                else void handleUpdateCli(cli, bin);
-              }}
-            />
-          )}
           {inst.mode === 'manager' && (
             <>
               <div style={{ gridColumn: '1 / -1' }}>
@@ -978,6 +965,102 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
           )}
         </dl>
 
+        {/* Agent Manager 자신의 버전과 업데이트.
+
+            예전에는 Update 버튼이 `update_available` 일 때만 액션 줄 한복판에
+            나타났다. 그래서 최신인 호스트에서는 "여기서 매니저를 올릴 수 있다" 는
+            사실 자체가 화면에서 사라졌고, 운영자는 어디서 올리는지 찾을 수 없었다.
+            버전과 상태는 늘 보이고, 올릴 수 있을 때만 버튼이 활성화된다. */}
+        {inst.mode === 'manager' && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${tokens.colors.border}` }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: tokens.colors.textMuted, marginBottom: 8 }}>
+              Agent Manager
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textStrong, fontFamily: 'monospace' }}>
+                v{inst.plugin_version}
+              </span>
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
+                {inst.install_mode || 'install mode unknown'}
+              </span>
+              <ManagerVersionBadge inst={inst} />
+              <div style={{ flex: 1 }} />
+              {inst.update_available ? (
+                <button
+                  onClick={handleUpdate}
+                  disabled={updatePending}
+                  style={{
+                    padding: '6px 14px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    background: updatePending ? tokens.colors.surfaceHover : tokens.colors.success,
+                    color: updatePending ? tokens.colors.textMuted : tokens.colors.surface,
+                    border: 'none',
+                    borderRadius: tokens.radii.md,
+                    cursor: updatePending ? 'wait' : 'pointer',
+                    fontFamily: 'inherit',
+                  }}
+                  title={
+                    inst.install_mode === 'npm-global'
+                      ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g --ignore-scripts awb-agent-manager@latest, then restart).`
+                      : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm ci + build, then re-exec).`
+                  }
+                >
+                  {updatePending ? 'Updating…' : `Update → v${inst.latest_version || '?'}`}
+                </button>
+              ) : (
+                // 버튼을 숨기지 않고 비활성으로 남긴다 — "여기가 매니저를 올리는
+                // 자리" 라는 사실은 최신일 때도 보여야 한다.
+                <button
+                  disabled
+                  style={{
+                    padding: '6px 14px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    background: 'transparent',
+                    color: tokens.colors.textMuted,
+                    border: `1px solid ${tokens.colors.border}`,
+                    borderRadius: tokens.radii.md,
+                    cursor: 'default',
+                    fontFamily: 'inherit',
+                  }}
+                  title={
+                    inst.update_available === undefined
+                      ? '이 매니저는 업데이트 확인을 보고하지 않는다 (구버전).'
+                      : '올릴 것이 없다.'
+                  }
+                >
+                  {inst.update_available === undefined ? '업데이트 확인 불가' : '최신'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* CLI 설치본 — 예전에는 사실 나열(<dl>) 한복판에 끼어 있어서, 정작
+            "이 장비의 claude 가 몇 버전이고 어디서 올리나" 를 찾을 수가 없었다.
+            버전과 Update 버튼은 이 화면에 온 이유 그 자체라 제목을 단 자기 자리에
+            둔다. */}
+        {inst.mode === 'manager' && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${tokens.colors.border}` }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: tokens.colors.textMuted, marginBottom: 8 }}>
+              CLI 설치본
+            </div>
+            <InstalledCliVersions
+              inst={inst}
+              hideLabel
+              pending={updateCliPending}
+              onUpdate={(cli, bin, needsSudo, method) => {
+                // 권한 상승이 필요한 설치본에서만 비밀번호를 묻는다. 필요 없는
+                // 설치본에 대고 묻는 것은 운영자의 root 비밀번호를 괜히 네트워크에
+                // 태우는 일이다.
+                if (needsSudo && bin) setSudoPrompt({ cli, bin, method: method || '' });
+                else void handleUpdateCli(cli, bin);
+              }}
+            />
+          </div>
+        )}
+
         {/* 호스트 단위 동작. `flexWrap` 이 필요한 이유: manager 인스턴스에서는 이 줄이
             최대 7개까지 늘어나는데, 감싸지 않으면 창이 좁을 때 버튼들이 눌려 라벨이
             잘리고 마지막 것이 컨테이너 밖으로 밀려 나간다. */}
@@ -1026,32 +1109,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               title="Rename the manager Agent identity. The new name becomes the prefix for every child agent in the UI."
             >
               Edit identity
-            </button>
-          )}
-          {inst.mode === 'manager' && inst.update_available && (
-            <button
-              onClick={handleUpdate}
-              disabled={updatePending}
-              style={{
-                padding: '6px 14px',
-                fontSize: 12,
-                fontWeight: 600,
-                background: updatePending ? tokens.colors.surfaceHover : tokens.colors.success,
-                color: updatePending ? tokens.colors.textMuted : tokens.colors.surface,
-                border: 'none',
-                borderRadius: tokens.radii.md,
-                cursor: updatePending ? 'wait' : 'pointer',
-                fontFamily: 'inherit',
-              }}
-              title={
-                inst.install_mode === 'npm-global'
-                  ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g --ignore-scripts awb-agent-manager@latest, then restart).`
-                  : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm ci + build, then re-exec).`
-              }
-            >
-              {updatePending
-                ? 'Updating…'
-                : `Update → v${inst.latest_version || '?'}`}
             </button>
           )}
           {inst.mode === 'manager' && (
@@ -1276,6 +1333,7 @@ export default function AgentManagerPage({
   canManageRuntime = true,
   onRetryAgents,
   onOpenAgent,
+  emptyDetail,
 }: AgentManagerPageProps) {
   const isMobile = useMediaQuery('(max-width: 767px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
@@ -1323,15 +1381,24 @@ export default function AgentManagerPage({
 
   // Auto-select the first instance once data arrives so the right pane has
   // something to render. Drops the selection if the instance disappears.
+  //
+  // `emptyDetail` 이 주어지면 자동 선택하지 않는다 — 그 경우 빈 상태가 "볼 것이 없는
+  // 자리" 가 아니라 **기본 화면**(AI Agents 의 Agent 그리드)이기 때문이다. 자동으로
+  // 호스트를 골라 버리면 Agent 목록을 첫 화면에서 볼 수 없다.
   useEffect(() => {
     if (instances.length === 0) {
       if (selectedId !== null) setSelectedId(null);
       return;
     }
+    if (emptyDetail !== undefined) {
+      // 고른 호스트가 사라졌으면 선택만 푼다(기본 화면으로 돌아간다).
+      if (selectedId && !instances.some((i) => i.instance_id === selectedId)) setSelectedId(null);
+      return;
+    }
     if (!isMobile && (!selectedId || !instances.some((i) => i.instance_id === selectedId))) {
       setSelectedId(instances[0].instance_id);
     }
-  }, [instances, isMobile, selectedId]);
+  }, [instances, isMobile, selectedId, emptyDetail]);
 
   const selected = instances.find((i) => i.instance_id === selectedId) || null;
   const representedAgentIds = useMemo(() => {
@@ -1400,6 +1467,36 @@ export default function AgentManagerPage({
           data-testid="mainframe-agents-list"
           style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
         >
+          {/* 기본 화면(Agent 그리드)으로 돌아가는 줄. 호스트를 한 번 고르고 나면
+              돌아갈 길이 없으면 그 화면은 사실상 없는 것이 된다 — 브라우저 뒤로
+              가기는 라우트가 안 바뀌어 소용이 없다. `emptyDetail` 을 준 화면에만
+              나온다(안 준 화면에서는 돌아갈 기본 화면 자체가 없다). */}
+          {emptyDetail !== undefined && (
+            <button
+              type="button"
+              onClick={() => setSelectedId(null)}
+              aria-current={selected ? undefined : 'true'}
+              style={{
+                width: '100%',
+                marginBottom: 12,
+                padding: '10px 12px',
+                textAlign: 'left',
+                fontSize: 12,
+                fontWeight: 600,
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+                color: selected ? tokens.colors.textSecondary : tokens.colors.textStrong,
+                background: selected ? 'transparent' : tokens.colors.surfaceHover,
+                border: `1px solid ${selected ? tokens.colors.border : tokens.colors.accent}`,
+                borderRadius: tokens.radii.md,
+              }}
+            >
+              모든 Agent
+              <div style={{ marginTop: 2, fontSize: 11, fontWeight: 400, color: tokens.colors.textMuted }}>
+                워크스페이스 전체 · 상태/호스트/CLI 로 묶어 보기
+              </div>
+            </button>
+          )}
           {grouped.length === 0 && !loading && (
             <div
               style={{
@@ -1488,6 +1585,8 @@ export default function AgentManagerPage({
               workspaceAgents={workspaceAgents}
               onOpenAgent={onOpenAgent}
             />
+          ) : emptyDetail !== undefined ? (
+            emptyDetail
           ) : (
             <div
               style={{
@@ -2811,10 +2910,13 @@ export function InstalledCliVersions({
   inst,
   pending,
   onUpdate,
+  hideLabel = false,
 }: {
   inst: AgentManagerInstance;
   pending: string | null;
   onUpdate: (cli: string, bin: string | undefined, needsSudo: boolean, method: string) => void;
+  /** 제목 달린 섹션 안에 놓을 때는 자체 라벨을 끈다 — 같은 말이 두 줄 겹친다. */
+  hideLabel?: boolean;
 }) {
   // 매니저가 설치본 목록을 보내면 그것이 진실이다. 안 보내면(구버전) cli_versions
   // 를 CLI 당 한 줄짜리 가짜 설치본으로 접어 같은 렌더 경로를 태운다.
@@ -2857,9 +2959,11 @@ export function InstalledCliVersions({
 
   return (
     <div style={{ gridColumn: '1 / -1' }}>
-      <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        Installed CLI versions
-      </dt>
+      {!hideLabel && (
+        <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Installed CLI versions
+        </dt>
+      )}
       <dd style={{ margin: '4px 0 0', color: tokens.colors.textStrong, display: 'flex', flexDirection: 'column', gap: 4 }}>
         {sorted.map((row) => {
           // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. 매니저가 행마다 알려주면

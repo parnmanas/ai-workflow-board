@@ -5,7 +5,6 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import PageHeader from './PageHeader';
-import PageTabs from './PageTabs';
 import DirectoryPicker from './admin/DirectoryPicker';
 import AgentManagerPage from './admin/AgentManagerPage';
 import AgentFleetPanel from './agents/AgentFleetPanel';
@@ -90,9 +89,9 @@ const EMPTY_MANAGED_FORM: {
  * 실시간 상태는 예전과 같이 BoardStreamContext 의 agent_status 봉투로 들어온다.
  */
 
-type AgentsTab = 'fleet' | 'runtime';
-
-const RUNTIME_TAB_HASH = '#agent-manager-runtime';
+// 레거시 `/admin/agent-manager` 리다이렉트가 떨어지는 앵커. 화면이 하나뿐이라
+// 스크롤 대상일 뿐 더 이상 탭을 고르지 않는다 — 아래 컨테이너의 `id` 로 남는다.
+const RUNTIME_ANCHOR_ID = 'agent-manager-runtime';
 
 interface StatusUpdate {
   agent_id: string;
@@ -174,13 +173,6 @@ export default function AgentsPage() {
   // the operator clicks a directory instead of typing an absolute path that
   // is meaningful only on that specific manager host.
   const [pickerOpen, setPickerOpen] = useState(false);
-  // 탭 선택은 해시에서 읽어 해시로 되쓴다 — 레거시 `agents#agent-manager-runtime`
-  // 리다이렉트가 Runtime Hosts 탭으로 바로 떨어지고, 그 탭을 연 채 새로고침해도
-  // 같은 탭이 다시 열린다.
-  const [tab, setTab] = useState<AgentsTab>(() =>
-    typeof window !== 'undefined' && window.location.hash === RUNTIME_TAB_HASH ? 'runtime' : 'fleet',
-  );
-
   const pendingStatusRef = useRef<StatusUpdate[]>([]);
   const agentsReadyRef = useRef(false);
 
@@ -217,20 +209,6 @@ export default function AgentsPage() {
   useEffect(() => {
     loadSnapshot();
   }, [loadSnapshot]);
-
-  // Runtime Hosts 는 admin 전용이다. 권한이 없는 사람이 해시로 그 탭을 열고 들어오면
-  // 빈 콘솔이 아니라 Agents 로 되돌린다.
-  useEffect(() => {
-    if (tab === 'runtime' && !canAccessAgentManager) setTab('fleet');
-  }, [tab, canAccessAgentManager]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const want = tab === 'runtime' ? RUNTIME_TAB_HASH : '';
-    if (window.location.hash === want) return;
-    // replaceState — 탭 전환은 뒤로 가기 이력에 쌓일 일이 아니다.
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${want}`);
-  }, [tab]);
 
   // 카드의 spawn/중지/재시작 버튼은 그 Agent 를 감독하는 호스트의 라이브 인스턴스가
   // 있어야 명령을 보낼 수 있다. admin 에게만, 그리고 목록 화면에서만 읽는다.
@@ -476,11 +454,7 @@ export default function AgentsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       <PageHeader
         title="AI Agents"
-        description={
-          tab === 'runtime'
-            ? '이 서버에 붙은 Runtime Host 와 그 위에서 도는 프로세스'
-            : '워크스페이스의 Agent — Runtime Host · 상태 · CLI 로 묶어 본다'
-        }
+        description="왼쪽에서 Runtime Host 를 고르면 그 장비의 버전·CLI·에이전트를 관리한다. 고르지 않으면 워크스페이스의 Agent 전체를 본다."
         actions={
           user?.role === 'admin' ? (
             <div style={{ display: 'flex', gap: 8 }}>
@@ -492,58 +466,42 @@ export default function AgentsPage() {
         }
       />
 
-      <PageTabs
-        activeId={tab}
-        tabs={[
-          { id: 'fleet', label: `Agents${agents ? ` (${agents.length})` : ''}`, onClick: () => setTab('fleet') },
-          // admin 이 아니면 탭 자체를 내보내지 않는다 — 눌러도 아무것도 못 보는
-          // 비활성 탭을 남겨 두는 것보다 없는 편이 정직하다.
-          ...(canAccessAgentManager
-            ? [{ id: 'runtime' as const, label: 'Runtime Hosts', onClick: () => setTab('runtime') }]
-            : []),
-        ]}
-      />
-
-      {/* 목록 탭은 세로로 스크롤한다(카드 그리드가 길어진다). Runtime Hosts 탭은
-          자체 master/detail 이 각자 스크롤하므로 바깥은 잠근다. */}
+      {/* 프레임은 하나다: 왼쪽 Runtime Host 목록 + 오른쪽 내용. 탭으로 갈랐더니
+          매니저 업데이트·CLI 버전 같은 호스트 조작이 통째로 다른 탭 뒤로 숨어
+          "여기서 뭘 하라는 건지" 를 알 수 없게 됐다. 호스트를 고르지 않은 기본
+          상태의 내용이 Agent 그리드라, Agent 도 첫 화면에서 그대로 보인다.
+          master/detail 이 각자 스크롤하므로 바깥은 잠근다. */}
       <div
-        id="agent-manager-runtime"
-        style={{
-          flex: 1,
-          minHeight: 0,
-          padding: 24,
-          overflowY: tab === 'fleet' ? 'auto' : 'hidden',
-          overflowX: 'hidden',
-        }}
+        id={RUNTIME_ANCHOR_ID}
+        style={{ flex: 1, minHeight: 0, padding: 24, overflow: 'hidden' }}
       >
-        {tab === 'fleet' ? (
-          <AgentFleetPanel
-            agents={agents || []}
-            loading={loading}
-            error={snapshotError}
-            onRetry={loadSnapshot}
-            onOpenAgent={openDetail}
-            managerInstances={managerInstances}
-            isAdmin={canAccessAgentManager}
-            onLifecycleDispatched={loadSnapshot}
-            emptyAction={
-              user?.role === 'admin' ? (
-                <Button variant="primary" size="sm" onClick={() => setShowManagedModal(true)}>
-                  + New Agent
-                </Button>
-              ) : undefined
-            }
-          />
-        ) : (
-          <AgentManagerPage
-            workspaceAgents={agents || []}
-            agentsLoading={loading}
-            agentsError={snapshotError}
-            canManageRuntime={canAccessAgentManager}
-            onRetryAgents={loadSnapshot}
-            onOpenAgent={openDetail}
-          />
-        )}
+        <AgentManagerPage
+          workspaceAgents={agents || []}
+          agentsLoading={loading}
+          agentsError={snapshotError}
+          canManageRuntime={canAccessAgentManager}
+          onRetryAgents={loadSnapshot}
+          onOpenAgent={openDetail}
+          emptyDetail={
+            <AgentFleetPanel
+              agents={agents || []}
+              loading={loading}
+              error={snapshotError}
+              onRetry={loadSnapshot}
+              onOpenAgent={openDetail}
+              managerInstances={managerInstances}
+              isAdmin={canAccessAgentManager}
+              onLifecycleDispatched={loadSnapshot}
+              emptyAction={
+                user?.role === 'admin' ? (
+                  <Button variant="primary" size="sm" onClick={() => setShowManagedModal(true)}>
+                    + New Agent
+                  </Button>
+                ) : undefined
+              }
+            />
+          }
+        />
       </div>
 
       {/* Agent detail surface moved to a real route in v0.32.x —
