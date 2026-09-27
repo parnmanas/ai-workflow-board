@@ -140,14 +140,77 @@ export async function listAllProcesses(): Promise<ProcNode[]> {
   return parseProcListUnix(res.stdout);
 }
 
-/** Enumerate + tree-walk: the live non-benign descendants of `rootPid`. */
+/**
+ * 셸 래퍼를 뚫고 **진짜 CLI 프로세스**를 찾는다. 스윕의 뿌리는 우리가 spawn 한 pid 가
+ * 아니라 이 함수가 돌려주는 pid 여야 한다.
+ *
+ * 왜 필요한가 (실측, 2026-09-27 ralf): Windows 에서 npm 글로벌 `.cmd` shim 으로만
+ * 설치된 CLI 는 cross-spawn 이 `cmd.exe /d /s /c <shim>` 으로 감싸 실행한다. 그래서
+ * `sess.pid` 는 **cmd.exe** 이고 진짜 CLI 는 그 외동 자식이다:
+ *
+ *     275388 cmd.exe    cmd.exe /d /s /c "…\nvm\v22.22.0\claude.cmd …"   ← spawn 한 pid
+ *     310260 claude.exe "…\node_modules\@anthropic-ai\claude-code\bin\claude.exe …"
+ *
+ * 턴 종료 스윕이 `sess.pid` 에서 내려가면 **자기 세션의 CLI 자신**이 "남겨진 백그라운드
+ * 태스크" 로 잡힌다 — 죽이고 run 을 error 로 마감한다. TXIV 의 T3/T4 예약 실행이 6일
+ * 연속 이렇게 실패했고, 매일 세션만 태우고 산출물이 없었다. POSIX 에서는 shim 이 없어
+ * 같은 코드가 멀쩡했기 때문에 Windows 호스트에서만 났다.
+ *
+ * 규칙: 뿌리가 셸 래퍼이고 자식이 **정확히 하나**일 때만 그 자식으로 내려간다.
+ *   - "정확히 하나" 가 안전 장치다. 래퍼가 CLI 말고 다른 자식도 갖고 있으면 그건 우리가
+ *     모르는 모양이므로 내려가지 않고 예전처럼 동작한다. CLI 가 띄운 진짜 백그라운드
+ *     작업은 CLI 의 **자식**(래퍼의 손자)이라 이 판정에 끼어들지 않는다.
+ *   - CLI 가 이미 죽어 래퍼만 남았으면 자식이 0개라 내려가지 않는다 — 스윕은 빈 결과를
+ *     보고 정상 종료로 처리한다.
+ *
+ * Pure — unit-tested.
+ */
+export function resolveSweepRoot(all: ProcNode[], rootPid: number): number {
+  const byParent = new Map<number, ProcNode[]>();
+  for (const p of all) {
+    const arr = byParent.get(p.ppid);
+    if (arr) arr.push(p);
+    else byParent.set(p.ppid, [p]);
+  }
+  const byPid = new Map(all.map((p) => [p.pid, p]));
+  let cur = rootPid;
+  // 래퍼가 래퍼를 부르는 경우(`cmd /c` → `sh -c`)까지만 허용한다. 상한이 없으면
+  // ppid 사이클이 있는 망가진 테이블에서 무한히 돈다.
+  for (let hop = 0; hop < 3; hop++) {
+    const node = byPid.get(cur);
+    if (!node || !isShellWrapperCmd(node.cmd)) return cur;
+    const children = byParent.get(cur) || [];
+    if (children.length !== 1) return cur;
+    cur = children[0].pid;
+  }
+  return cur;
+}
+
+/**
+ * 이 명령줄이 "무언가를 대신 실행해 주는 셸" 인가. `cmd.exe /c …`(cross-spawn 이
+ * `.cmd` shim 에 쓰는 형태)와 POSIX `sh -c …` 를 인정한다.
+ *
+ * 좁게 잡는다 — 인자 없이 대화형으로 뜬 셸은 대상이 아니다. 그런 셸은 우리가 실행을
+ * 위임한 래퍼가 아니라 누군가 띄워 둔 진짜 프로세스일 수 있고, 그것을 뚫고 내려가면
+ * 스윕의 뿌리가 엉뚱한 곳으로 옮겨 간다.
+ */
+export function isShellWrapperCmd(cmd: string): boolean {
+  // POSIX 쪽은 플래그가 뭉쳐 오는 형태(`bash -lc "…"`)도 받는다. `-[a-z]*c` 로 잡되
+  // 단어 경계를 요구해 `--config` 같은 긴 옵션은 걸리지 않게 한다.
+  return /(?:^|[\\/"])(?:cmd(?:\.exe)?"?\s+(?:\/[a-z]\s+)*\/c(?=\s|$)|(?:ba|z|da)?sh"?\s+(?:-[a-z]+\s+)*-[a-z]*c(?=\s|$))/i.test(cmd);
+}
+
+/** Enumerate + tree-walk: the live non-benign descendants of `rootPid`.
+ *
+ *  뿌리는 `resolveSweepRoot` 로 보정한다 — Windows 의 `cmd.exe /c <shim>` 래퍼를
+ *  뚫지 않으면 세션 자신의 CLI 가 orphan 으로 잡힌다(위 주석 참고). */
 export async function findLiveBackgroundTasks(
   rootPid: number,
   patterns: readonly RegExp[] = BENIGN_CMD_PATTERNS,
 ): Promise<ProcNode[]> {
   const all = await listAllProcesses();
   if (all.length === 0) return [];
-  return collectNonBenignDescendants(all, rootPid, patterns);
+  return collectNonBenignDescendants(all, resolveSweepRoot(all, rootPid), patterns);
 }
 
 // -- POSIX process-group enumeration (ticket 55d3063f) ------------------------
