@@ -19,6 +19,7 @@ import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './age
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
 import { findOnPath } from './find-on-path.js';
+import { describeHolders, findLockHolders, killHolder, selectKillTargets, type LockHolder } from './file-lock-holders.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { normalizeCredentialFields } from './credential-fields.js';
 import { log } from './logging.js';
@@ -85,6 +86,13 @@ export interface AgentSessionRequest {
   elicitation_content?: Record<string, unknown> | null;
   /** CLI 설정에 묶인 워크스페이스 Credential(open/prompt). 없으면 운영자 로그인 그대로. */
   credential_id?: string | null;
+  /** open — 세션 잠금을 쥔 **외부** 프로세스까지 종료하고 연다.
+   *
+   *  기본(false)에서도 AWB 가 띄운 유령 ACP 어댑터는 알아서 정리한다. 이 플래그가 여는
+   *  것은 그 너머, 운영자의 Codex 앱이나 터미널처럼 AWB 것이 아닌 프로세스를 죽이는
+   *  경우다 — 그쪽은 이 세션 하나가 아니라 그 앱의 다른 대화까지 함께 내려가므로,
+   *  화면이 주인의 이름·PID 를 보여 주고 확인을 받은 뒤에만 켜서 보낸다. */
+  force?: boolean;
   driver_user_id: string;
   issued_at: string;
 }
@@ -749,30 +757,21 @@ export class AgentSessionRunner {
         if (!loadSupported) {
           throw Object.assign(new Error(`The ${cli} ACP adapter cannot resume existing sessions (no loadSession capability).`), { code: 'resume_unsupported' });
         }
+        const attemptLoad = () => this.#withAuthRetry(client, cli, authMethods, env, () => client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers }));
         live.loading = true;
         try {
-          const loaded = await this.#withAuthRetry(client, cli, authMethods, env, () => client.loadSession({ sessionId: requestedSessionId, cwd, mcpServers }));
+          let loaded: unknown;
+          try {
+            loaded = await attemptLoad();
+          } catch (err: any) {
+            // 거절 사유를 다듬고, 잠금 때문이라면 주인을 찾아 정책대로 회복해 본다.
+            loaded = await this.#recoverFailedResume(err, {
+              cli, sessionId: requestedSessionId, cliHome: auth.cliHome, force: request.force === true, tag, retry: attemptLoad,
+            });
+          }
           modes = (loaded as any)?.modes;
           configOptions = (loaded as any)?.configOptions;
           resumed = true;
-        } catch (err: any) {
-          if (err?.code === 'auth_required') throw err;
-          // 어댑터는 `Internal error` 한 줄만 내고 진짜 이유는 `data.details` 에 담는다
-          // (예: `no rollout found for thread id …`). 그것까지 사용자에게 보여 준다.
-          const details = (err?.data as { details?: unknown } | undefined)?.details;
-          const detail = redactSecrets(String(details || err?.message || err));
-          // 가장 흔한 사유 하나는 문구만으로 조치를 알 수 없다: codex 는 스레드마다
-          // writer 락을 잡으므로, 그 세션이 터미널이나 Codex 앱에서 아직 열려 있으면
-          // `thread … already has an active writer` 로 거절한다. 원문만 보여 주면
-          // "무엇을 고치라는 건지" 가 빠지므로 조치를 덧붙인다.
-          const activeWriter = /already has an active writer/i.test(detail);
-          const hint = activeWriter
-            ? ' 이 세션이 그 장비의 다른 곳(터미널 또는 Codex 앱)에서 아직 열려 있습니다. 거기서 닫은 뒤 다시 Connect 하세요.'
-            : ' Fix that and reload, or start a new session in the same folder.';
-          throw Object.assign(
-            new Error(`${cli} could not resume this session: ${detail}.${hint}`),
-            { code: activeWriter ? 'resume_locked' : 'resume_failed', cause: err },
-          );
         } finally {
           live.loading = false;
         }
@@ -959,6 +958,110 @@ export class AgentSessionRunner {
       ...(after?.category === 'mode' ? { current_mode: live.currentMode } : {}),
       reason: 'config_option',
     });
+  }
+
+  // ─── 세션 잠금 회복 ────────────────────────────────────────────────────
+
+  /**
+   * 재개가 거절됐을 때의 회복 경로. 성공하면 load 결과를, 아니면 **사람이 읽을 사유가
+   * 담긴** 오류를 던진다.
+   *
+   * 잠금이 원인이면 주인을 찾아 정책을 적용한다:
+   *   - AWB 가 띄운 유령 ACP 어댑터 → 항상 정리한다. 잃는 것은 그 어댑터 프로세스뿐이다
+   *     (매니저가 재시작하면 이전 어댑터가 고아로 남아 잠금을 계속 쥐고 있는다).
+   *   - 그 밖의 프로세스 → `force` 없이는 손대지 않는다. 실측상 codex 의 잠금 주인은
+   *     스레드 전용 프로세스가 아니라 Codex 데스크톱 앱의 공용 `app-server` 였다 —
+   *     죽이면 이 세션만이 아니라 그 앱의 **다른 대화까지** 함께 끊긴다. 그래서 이름과
+   *     PID 를 오류 문구에 실어 보내고, 화면의 확인을 거친 재요청(`force`)만 종료한다.
+   *
+   * 무언가 놓아 줬으면 **한 번만** 다시 시도한다. 재시도도 실패하면 그 실패 사유를 말한다
+   * — "정리했다" 로 끝내면 사용자는 여전히 왜 안 되는지 모른다.
+   */
+  async #recoverFailedResume(
+    err: any,
+    ctx: { cli: string; sessionId: string; cliHome: string | null; force: boolean; tag: string; retry: () => Promise<unknown> },
+  ): Promise<unknown> {
+    if (err?.code === 'auth_required') throw err;
+    // 어댑터는 `Internal error` 한 줄만 내고 진짜 이유는 `data.details` 에 담는다
+    // (예: `no rollout found for thread id …`). 그것까지 사용자에게 보여 준다.
+    const details = (err?.data as { details?: unknown } | undefined)?.details;
+    const detail = redactSecrets(String(details || err?.message || err));
+    const fail = (message: string, code: string, cause: unknown): never => {
+      throw Object.assign(new Error(`${ctx.cli} could not resume this session: ${message}`), { code, cause });
+    };
+
+    // 잠금과 무관한 거절(존재하지 않는 스레드 등)은 여기서 끝난다.
+    if (!/already has an active writer/i.test(detail)) {
+      return fail(`${detail}. Fix that and reload, or start a new session in the same folder.`, 'resume_failed', err);
+    }
+
+    const { holders, killed } = await this.#reclaimSessionLock(ctx);
+    if (killed.length) {
+      try {
+        return await ctx.retry();
+      } catch (retryErr: any) {
+        const retryDetail = redactSecrets(String(
+          (retryErr?.data as { details?: unknown } | undefined)?.details || retryErr?.message || retryErr,
+        ));
+        return fail(
+          `${retryDetail}. 잠금을 쥐고 있던 ${describeHolders(killed)} 을(를) 종료했는데도 재개가 거절됐습니다.`,
+          'resume_failed',
+          retryErr,
+        );
+      }
+    }
+
+    const remaining = holders.filter((h) => h.kind === 'external');
+    if (remaining.length) {
+      // 주인을 특정했다 — 화면이 이름·PID 를 보여 주고 확인을 받을 수 있다.
+      return fail(
+        `${detail}. 이 세션의 잠금을 ${describeHolders(remaining)} 이(가) 쥐고 있습니다.`
+        + ' 거기서 닫으면 바로 열립니다. 강제로 열면 그 프로세스를 종료하는데,'
+        + ' 같은 프로세스가 보고 있던 다른 작업도 함께 끊깁니다.',
+        'resume_locked_external',
+        err,
+      );
+    }
+    // 주인을 못 찾았다. "아무도 안 쥐었다" 가 아니라 "모른다" 이므로 강제 열기를 권하지 않는다.
+    return fail(
+      `${detail}. 이 세션이 그 장비의 다른 곳(터미널 또는 Codex 앱)에서 아직 열려 있습니다.`
+      + ' 거기서 닫은 뒤 다시 Connect 하세요.',
+      'resume_locked',
+      err,
+    );
+  }
+
+  /** 이 세션의 잠금 파일 후보. 운영자 홈과(credential 을 묶었다면) 세션 전용 홈 양쪽을 본다. */
+  #sessionLockPaths(cli: string, sessionId: string, cliHome: string | null): string[] {
+    const spec = cliSessions(cli);
+    const rel = spec?.lockRelativePath?.(sessionId);
+    if (!rel) return [];
+    const homes = new Set<string>();
+    const operator = spec?.operatorHome(process.env);
+    if (operator) homes.add(operator);
+    if (cliHome) homes.add(cliHome);
+    return [...homes].map((home) => join(home, rel));
+  }
+
+  async #reclaimSessionLock(
+    ctx: { cli: string; sessionId: string; cliHome: string | null; force: boolean; tag: string },
+  ): Promise<{ holders: LockHolder[]; killed: LockHolder[] }> {
+    const paths = this.#sessionLockPaths(ctx.cli, ctx.sessionId, ctx.cliHome);
+    if (!paths.length) return { holders: [], killed: [] };
+    const byPid = new Map<number, LockHolder>();
+    for (const path of paths) {
+      for (const holder of await findLockHolders(path, { log })) byPid.set(holder.pid, holder);
+    }
+    const holders = [...byPid.values()].filter((h) => h.pid !== process.pid);
+    if (!holders.length) return { holders, killed: [] };
+    log(`${ctx.tag} session lock held by ${describeHolders(holders)}`);
+    const killed = selectKillTargets(holders, { force: ctx.force }).filter((h) => killHolder(h.pid, log));
+    if (killed.length) {
+      log(`${ctx.tag} reclaimed the session lock from ${describeHolders(killed)}`);
+      // 핸들이 실제로 닫히기까지 한 박자 준다. 바로 재시도하면 같은 잠금에 또 걸린다.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 500).unref?.(); });
+    }
+    return { holders, killed };
   }
 
   /**

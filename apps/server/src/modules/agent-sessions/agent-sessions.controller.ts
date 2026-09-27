@@ -78,7 +78,8 @@ export class AgentSessionsController {
     return this.run(res, 200, () => this.sessions.listSessions(ws, this.userId(req), managerId, cli));
   }
 
-  /** `{ session_id?, cwd?, title? }` — session_id 없으면 새 세션(session/new), 있으면 복원(session/load). */
+  /** `{ session_id?, cwd?, title?, force? }` — session_id 없으면 새 세션(session/new), 있으면 복원(session/load).
+   *  `force` 는 잠금을 쥔 외부 프로세스까지 종료하고 연다(화면의 확인 대화상자를 거친 재요청). */
   @Post('hosts/:managerId/:cli/sessions')
   async open(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const ws = this.workspaceId(req, res);
@@ -87,6 +88,7 @@ export class AgentSessionsController {
       session_id: typeof body?.session_id === 'string' ? body.session_id : null,
       cwd: typeof body?.cwd === 'string' ? body.cwd : '',
       title: typeof body?.title === 'string' ? body.title : '',
+      force: body?.force === true,
     }));
   }
 

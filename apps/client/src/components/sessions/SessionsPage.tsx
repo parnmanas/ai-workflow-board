@@ -445,26 +445,54 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // has an active writer` 라고 정확히 알려 주는데도 화면에는 그 말이 없었다). 서버도 같은
   // 사유를 세션 상태에 적지만, SSE 가 늦거나 유실돼도 눈에 남도록 여기서도 들고 있는다.
   const [connectError, setConnectError] = useState<string | null>(null);
+  // 잠금을 쥔 **외부** 프로세스를 매니저가 특정한 경우에만 켜진다(`resume_locked_external`).
+  // 그때만 "강제로 열기" 를 내놓는다 — 주인을 모르는 채로 강제 버튼을 보여 주면 눌러도
+  // 아무 일이 없거나, 무엇을 죽이는지 말해 주지 못한 채 죽이게 된다.
+  const [lockedByExternal, setLockedByExternal] = useState<string | null>(null);
   const autoConnectedRef = useRef<string | null>(null);
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (force = false) => {
     setConnecting(true);
     setConnectError(null);
+    setLockedByExternal(null);
     try {
-      setLive(await api.openHostSession(managerId, cli, { session_id: sessionId }));
+      setLive(await api.openHostSession(managerId, cli, { session_id: sessionId, ...(force ? { force: true } : {}) }));
     } catch (err: any) {
       const message = err?.message || 'Failed to connect to the session on the Runtime Host';
       setConnectError(message);
+      if (err?.code === 'resume_locked_external') setLockedByExternal(message);
       showToast(message, 'error');
     } finally {
       setConnecting(false);
     }
   }, [managerId, cli, sessionId, showToast]);
+
+  // 강제 열기는 확인을 **반드시** 거친다. 잠금 주인은 이 세션 전용 프로세스가 아닐 수 있고
+  // (실측: codex 의 주인은 Codex 앱의 공용 app-server 였다), 그러면 같은 프로세스가 물고
+  // 있던 다른 작업까지 함께 끊긴다. 그래서 매니저가 알려 준 이름·PID 를 그대로 보여 준다.
+  const forceConnect = useCallback(async () => {
+    const reason = lockedByExternal;
+    if (!reason) return;
+    const ok = await confirm({
+      title: '잠금을 쥔 프로세스를 종료하고 열까요?',
+      message: (
+        <span>
+          {reason}
+          <br /><br />
+          그 프로세스가 이 세션 말고 다른 작업도 하고 있었다면 그것까지 함께 중단됩니다.
+        </span>
+      ),
+      danger: true,
+      confirmLabel: '종료하고 열기',
+    });
+    if (!ok) return;
+    await connect(true);
+  }, [confirm, connect, lockedByExternal]);
   useEffect(() => {
     if (loading || !live || connecting || !shouldAutoConnect(status)) return;
     const marker = `${managerId}/${cli}/${sessionId}`;
     if (autoConnectedRef.current === marker) return;
     autoConnectedRef.current = marker;
-    void connect();
+    void connect(false);
   }, [loading, live, connecting, status, managerId, cli, sessionId, connect]);
 
   // 스크롤 규칙(첫 진입 바닥 고정 · 근접 추종 · 비동기 높이 재고정)은 chat 방·미션
@@ -742,7 +770,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         )}
         <div style={{ display: 'flex', gap: 6 }}>
           {canConnect(status) && !connecting && (
-            <Button variant="primary" size="sm" onClick={() => void connect()} title="Start the CLI process for this session on the Runtime Host and load its settings">
+            <Button variant="primary" size="sm" onClick={() => void connect(false)} title="Start the CLI process for this session on the Runtime Host and load its settings">
               {status === 'error' ? 'Reconnect' : 'Connect'}
             </Button>
           )}
@@ -756,8 +784,13 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       {/* 오류 배너 — 서버가 상태에 적어 둔 사유(last_error)와, 그게 도착하기 전의
           연결 실패 사유(connectError) 중 있는 것을 보여 준다. 둘 다 비어 있을 때만 숨긴다. */}
       {((status === 'error' && live?.last_error) || connectError) && (
-        <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}` }}>
-          {(status === 'error' && live?.last_error) || connectError}
+        <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{(status === 'error' && live?.last_error) || connectError}</span>
+          {lockedByExternal && !connecting && (
+            <Button variant="secondary" size="sm" onClick={() => void forceConnect()} title="잠금을 쥔 프로세스를 종료하고 이 세션을 엽니다">
+              강제로 열기…
+            </Button>
+          )}
         </div>
       )}
 

@@ -166,3 +166,72 @@ test('세션 id 없이 새로 여는 경우는 붙일 곳이 없으므로 상태
   // 유령 세션 행을 만들어 목록을 더럽히지는 않는다.
   assert.equal(failed.body.message, 'codex is not installed on this host');
 });
+
+test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 남의 프로세스를 죽이지 않는다', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createWorkspace(app, getDataSourceToken, 'open-force');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner3', role: 'admin' });
+  const token = app.get(AuthService).createSession(owner.id);
+  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder3', type: 'codex' });
+  const managerId = agent.manager_agent_id;
+  const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
+  await ds.getRepository('Agent').update({ id: managerId }, { name: 'ralf3' });
+  await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-ralf-3', agent_id: managerId, mode: 'manager', hostname: 'ralf3', plugin_version: 'test',
+      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 97,
+      started_at: new Date().toISOString(),
+    }),
+  });
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+
+  const SESSION_ID = '01a0e005-ccaa-7512-b4fb-b7278d260e34';
+  const fail = async (label) => {
+    await waitFor(() => requests.some((r) => r.op === 'open' && !r.answered), `open rpc (${label})`);
+    const req = requests.find((r) => r.op === 'open' && !r.answered);
+    req.answered = true;
+    await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, {
+      method: 'POST', headers: managerHeaders,
+      body: JSON.stringify({ manager_id: managerId, ok: false, error: 'locked', code: 'resume_locked_external' }),
+    });
+    return req;
+  };
+
+  // 1. 평범한 Connect(그리고 화면의 자동 연결)는 force 를 켜지 않는다. 여기서 켜지면
+  //    페이지를 여는 것만으로 남의 Codex 앱이 죽는다.
+  const plain = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
+    method: 'POST', headers, body: JSON.stringify({ session_id: SESSION_ID }),
+  });
+  const plainReq = await fail('plain');
+  assert.equal(plainReq.force, false);
+  const plainRes = await plain;
+  assert.equal(plainRes.body.error, 'resume_locked_external', '주인을 특정했다는 코드가 화면까지 보존된다');
+
+  // 2. 확인을 거친 재요청만 force 를 싣는다.
+  const forced = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
+    method: 'POST', headers, body: JSON.stringify({ session_id: SESSION_ID, force: true }),
+  });
+  const forcedReq = await fail('forced');
+  assert.equal(forcedReq.force, true);
+  await forced;
+
+  // 3. 문자열 'true' 같은 느슨한 값은 켜지지 않는다 — 파괴적 플래그는 정확히 true 만.
+  const sloppy = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
+    method: 'POST', headers, body: JSON.stringify({ session_id: SESSION_ID, force: 'true' }),
+  });
+  const sloppyReq = await fail('sloppy');
+  assert.equal(sloppyReq.force, false);
+  await sloppy;
+});

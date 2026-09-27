@@ -857,7 +857,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     userId: string,
     managerId: string,
     cli: string,
-    input: { session_id?: string | null; cwd?: string; title?: string },
+    input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean },
   ): Promise<AgentSessionLiveSnapshot> {
     const rec = this.requireHost(workspaceId, managerId, cli);
     const sessionId = input.session_id ? String(input.session_id) : null;
@@ -871,7 +871,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const runtimeProfile = await this.backendProfileFor(workspaceId, managerId, cli);
     let result: Record<string, any>;
     try {
-      result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile }, userId);
+      result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile, force: input.force === true }, userId);
     } catch (err: any) {
       // 실패 사유를 세션 상태에 남긴다.
       //

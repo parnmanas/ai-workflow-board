@@ -52,6 +52,39 @@ test('매니저가 active-writer 거절에 조치를 덧붙인다', () => {
   // 문구만으로 행동을 알 수 없으므로 어디서 닫아야 하는지까지 말한다.
   assert.match(runnerSource, /already has an active writer/);
   assert.match(runnerSource, /터미널 또는 Codex 앱/);
-  // 기계가 분기할 코드도 따로 준다(단순 resume_failed 와 구분된다).
-  assert.match(runnerSource, /activeWriter \? 'resume_locked' : 'resume_failed'/);
+  // 기계가 분기할 코드도 따로 준다(단순 resume_failed 와 구분된다). 주인을 특정했는지에
+  // 따라 코드가 갈린다 — 화면은 특정된 경우에만 "강제로 열기" 를 내놓는다.
+  assert.match(runnerSource, /'resume_locked_external'/);
+  assert.match(runnerSource, /'resume_locked'/);
+});
+
+// ─── 강제로 열기 ───────────────────────────────────────────────────────────
+//
+// 잠금 주인이 외부 프로세스일 때만 내놓는 선택지다. 사용자가 고른 정책은
+// "기본 안전 + 확인 후 강제" — 그래서 여기서 고정하는 것은 세 가지다:
+// (1) 주인을 특정했을 때만 버튼이 뜨고, (2) 확인 대화상자를 반드시 거치고,
+// (3) 자동 연결과 평범한 Connect 는 절대 force 를 켜지 않는다.
+
+test('주인을 특정한 경우에만 강제 열기를 내놓는다', () => {
+  // 매니저가 이름·PID 를 실어 보냈다는 신호가 `resume_locked_external` 이다.
+  // 주인을 모르는 `resume_locked` 에서 버튼을 띄우면 무엇을 죽이는지 말하지 못한다.
+  assert.match(source, /if \(err\?\.code === 'resume_locked_external'\) setLockedByExternal\(message\)/);
+  assert.match(source, /\{lockedByExternal && !connecting && \([\s\S]*?강제로 열기/);
+});
+
+test('강제 열기는 확인 대화상자를 거치고, 매니저가 말한 사유를 그대로 보여 준다', () => {
+  assert.match(source, /const forceConnect = useCallback\(async \(\) => \{/);
+  // 사유(주인의 이름·PID)가 대화상자 본문에 들어간다.
+  assert.match(source, /const ok = await confirm\(\{[\s\S]*?\{reason\}/);
+  assert.match(source, /danger: true/);
+  // 확인을 취소하면 아무것도 하지 않는다.
+  assert.match(source, /if \(!ok\) return;\s*\n\s*await connect\(true\);/);
+});
+
+test('자동 연결과 평범한 Connect 는 force 를 켜지 않는다', () => {
+  // 페이지를 여는 것만으로 남의 Codex 앱이 죽으면 안 된다.
+  assert.match(source, /void connect\(false\);/);
+  assert.match(source, /onClick=\{\(\) => void connect\(false\)\}/);
+  // 그리고 켜졌을 때만 본문에 실린다.
+  assert.match(source, /\.\.\.\(force \? \{ force: true \} : \{\}\)/);
 });

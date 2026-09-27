@@ -206,6 +206,14 @@ export interface CliSessionSpec {
   readonly supportsBackendProfile?: boolean;
   /** 기록 스캐너. 없으면 목록/기록은 AWB 인덱스만으로 답한다(hermes). */
   readonly store?: CliSessionStoreDriver;
+  /** 이 세션이 잡는 writer 잠금 파일의 **홈 기준 상대 경로**(codex 의
+   *  `thread-writer-locks/<id>.lock`). 재개가 "이미 writer 가 있다" 로 거절당했을 때
+   *  누가 쥐고 있는지 찾아 알려 주고, 확인을 받으면 그 프로세스를 정리하는 데 쓴다.
+   *
+   *  선언하지 않으면 그 CLI 에는 잠금 주인이라는 개념이 없다고 보고 강제 열기를
+   *  제공하지 않는다 — 없는 파일을 뒤져 "주인을 못 찾았다" 고 말하는 것보다,
+   *  애초에 그 선택지를 내놓지 않는 편이 정직하다. */
+  lockRelativePath?(sessionId: string): string;
 }
 
 // ─── effort preset ─────────────────────────────────────────────────────────

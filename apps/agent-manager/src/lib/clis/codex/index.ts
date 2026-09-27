@@ -88,6 +88,10 @@ export const codexModule = defineCliModule({
       if (env.NO_BROWSER === undefined) env.NO_BROWSER = '1';
     },
     store: codexSessionStore,
+    // codex 는 스레드마다 writer 잠금을 건다. 파일은 0바이트라 안에 주인 정보가 없고,
+    // 그 스레드가 터미널이나 Codex 앱에서 열려 있으면 재개가
+    // `thread … already has an active writer` 로 거절된다.
+    lockRelativePath: (sessionId) => `thread-writer-locks/${sessionId}.lock`,
   },
 
   effort: { keys: ['model'] },
