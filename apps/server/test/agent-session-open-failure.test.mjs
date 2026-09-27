@@ -167,6 +167,15 @@ test('세션 id 없이 새로 여는 경우는 붙일 곳이 없으므로 상태
   assert.equal(failed.body.message, 'codex is not installed on this host');
 });
 
+// `force` 는 파괴적 플래그다 — 켜지면 그 장비의 남의 프로세스가 죽는다. 그래서 두 가지를
+// 서로 다른 곳에서 본다:
+//
+//   - **켜는 조건**(정확히 `true` 일 때만, 자동 연결은 절대 안 켠다) → 이 테스트.
+//     서버 이벤트 이미터에서 읽으므로 빠르고 결정적이다.
+//   - **wire 까지 살아서 가는가** → `test/event-registry-payload-parity-guard.test.mjs`.
+//     event-registry 의 `map()` 이 선언된 payload 필드를 전부 실어 보내는지 전 이벤트에
+//     대해 기계적으로 검사한다. 실제로 이 필드를 처음 넣을 때 registry 에 빠뜨렸고 그
+//     가드가 잡았다 — 여기서 필드별로 흉내 내지 않고 그 가드에 맡긴다.
 test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 남의 프로세스를 죽이지 않는다', async (t) => {
   const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
@@ -198,13 +207,14 @@ test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 
   t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
 
   const SESSION_ID = '01a0e005-ccaa-7512-b4fb-b7278d260e34';
-  const fail = async (label) => {
+  /** 아직 답하지 않은 open 요청 하나를 집어 실패로 답한다. */
+  const takeOpen = async (label) => {
     await waitFor(() => requests.some((r) => r.op === 'open' && !r.answered), `open rpc (${label})`);
     const req = requests.find((r) => r.op === 'open' && !r.answered);
     req.answered = true;
     await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, {
       method: 'POST', headers: managerHeaders,
-      body: JSON.stringify({ manager_id: managerId, ok: false, error: 'locked', code: 'resume_locked_external' }),
+      body: JSON.stringify({ manager_id: managerId, ok: false, error: `locked (${label})`, code: 'resume_locked_external' }),
     });
     return req;
   };
@@ -214,8 +224,7 @@ test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 
   const plain = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
     method: 'POST', headers, body: JSON.stringify({ session_id: SESSION_ID }),
   });
-  const plainReq = await fail('plain');
-  assert.equal(plainReq.force, false);
+  assert.equal((await takeOpen('plain')).force, false);
   const plainRes = await plain;
   assert.equal(plainRes.body.error, 'resume_locked_external', '주인을 특정했다는 코드가 화면까지 보존된다');
 
@@ -223,15 +232,13 @@ test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 
   const forced = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
     method: 'POST', headers, body: JSON.stringify({ session_id: SESSION_ID, force: true }),
   });
-  const forcedReq = await fail('forced');
-  assert.equal(forcedReq.force, true);
+  assert.equal((await takeOpen('forced')).force, true);
   await forced;
 
   // 3. 문자열 'true' 같은 느슨한 값은 켜지지 않는다 — 파괴적 플래그는 정확히 true 만.
   const sloppy = call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions`, {
     method: 'POST', headers, body: JSON.stringify({ session_id: SESSION_ID, force: 'true' }),
   });
-  const sloppyReq = await fail('sloppy');
-  assert.equal(sloppyReq.force, false);
+  assert.equal((await takeOpen('sloppy')).force, false);
   await sloppy;
 });

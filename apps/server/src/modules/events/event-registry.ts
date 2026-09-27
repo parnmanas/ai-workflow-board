@@ -1357,6 +1357,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         elicitation_action: event.elicitation_action,
         elicitation_content: event.elicitation_content,
         credential_id: event.credential_id ?? null,
+        force: event.force,
         driver_user_id: event.driver_user_id,
         issued_at: event.issued_at,
       };
