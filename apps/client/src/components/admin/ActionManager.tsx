@@ -127,7 +127,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const [formPrompt, setFormPrompt] = useState('');
   // 대상은 배열이다 (티켓 fc3906c5) — 한 Action 을 여러 에이전트가 각자 실행한다.
   const [formAgentIds, setFormAgentIds] = useState<string[]>([]);
-  const [formCron, setFormCron] = useState('');
   const [formEnabled, setFormEnabled] = useState(true);
   const [formMaxRuns, setFormMaxRuns] = useState(10);
   const [formTrigger, setFormTrigger] = useState('');
@@ -182,7 +181,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormDescription('');
     setFormPrompt('');
     setFormAgentIds(agents[0] ? [agents[0].id] : []);
-    setFormCron('');
     setFormEnabled(true);
     setFormMaxRuns(10);
     setFormTrigger('');
@@ -198,7 +196,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormDescription(a.description);
     setFormPrompt(a.prompt);
     setFormAgentIds(actionTargets(a));
-    setFormCron(a.schedule_cron);
     setFormEnabled(a.enabled);
     setFormMaxRuns(a.max_runs);
     setFormTrigger(a.trigger || '');
@@ -236,7 +233,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           description: formDescription,
           prompt: formPrompt,
           target_agent_ids: formAgentIds,
-          schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
           ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
@@ -251,7 +247,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           description: formDescription,
           prompt: formPrompt,
           target_agent_ids: formAgentIds,
-          schedule_cron: formTrigger === 'on_ticket_done' ? '' : formCron,
           ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
@@ -415,8 +410,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
                   <> · <Badge variant="info">on_ticket_done</Badge>
                     {a.trigger_label && <> · label: <span style={{ color: tokens.colors.textSecondary }}>{a.trigger_label}</span></>}
                   </>
-                ) : a.schedule_cron ? (
-                  <> · Cron: <code style={{ color: tokens.colors.textSecondary }}>{a.schedule_cron}</code></>
                 ) : null}
               </div>
               {a.last_run_at && (
@@ -527,7 +520,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
                 fontFamily: 'inherit',
               }}
             >
-              <option value="">Manual / Cron</option>
+              <option value="">Manual (예약은 Workspace Schedules)</option>
               <option value="on_ticket_done">On Ticket Done</option>
             </select>
           </div>
@@ -575,15 +568,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
             workspaceId={effectiveWorkspaceId}
           />
           <div style={{ display: 'flex', gap: 12 }}>
-            {formTrigger !== 'on_ticket_done' && (
-              <Input
-                label="Schedule (cron)"
-                value={formCron}
-                onChange={(e) => setFormCron(e.target.value)}
-                placeholder="0 9 * * 1   (Mon 9am) — empty = manual"
-                style={{ flex: 2 }}
-              />
-            )}
             <Input
               label="Max runs"
               type="number"

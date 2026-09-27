@@ -1391,8 +1391,10 @@ export const api = {
   createWorkspaceSchedule: (data: {
     workspace_id: string;
     name: string;
-    target_agent_id: string;
-    task_prompt: string;
+    target_agent_id?: string;
+    task_prompt?: string;
+    /** 등록된 Action 실행 (task_prompt 와 택일). */
+    action_id?: string | null;
     cron?: string | null;
     interval_ms?: number | null;
     enabled?: boolean;
@@ -1404,6 +1406,8 @@ export const api = {
       name?: string;
       target_agent_id?: string;
       task_prompt?: string;
+      /** 등록된 Action 실행 (task_prompt 와 택일). null 로 보내면 프롬프트 형태로 되돌린다. */
+      action_id?: string | null;
       cron?: string | null;
       interval_ms?: number | null;
       enabled?: boolean;
@@ -2134,7 +2138,9 @@ export const api = {
     }),
   listHostSessions: (managerId: string, cli: string) =>
     request<AgentSessionSummary[]>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`),
-  openHostSession: (managerId: string, cli: string, input: { session_id?: string | null; cwd?: string; title?: string }) =>
+  /** `force` 는 세션 잠금을 쥔 외부 프로세스까지 종료하고 연다 — 매니저가 그 프로세스의
+   *  이름·PID 를 `resume_locked_external` 오류로 알려 준 뒤, 확인 대화상자를 거쳐서만 켠다. */
+  openHostSession: (managerId: string, cli: string, input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean }) =>
     request<AgentSessionLiveSnapshot>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`, {
       method: 'POST',
       body: JSON.stringify(input),

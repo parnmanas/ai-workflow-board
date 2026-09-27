@@ -27,7 +27,10 @@ test('legacy Agent Manager URL redirects into the workspace AI Agents runtime se
 test('AI Agents owns the admin-gated Agent Manager runtime surface', () => {
   assert.match(agentsPageSource, /import AgentManagerPage from '\.\/admin\/AgentManagerPage'/);
   assert.match(agentsPageSource, /hasPermission\('admin\.access'\)/);
-  assert.match(agentsPageSource, /id="agent-manager-runtime"/);
+  // 앵커 문자열은 상수로 뺐다 — 화면이 하나뿐이라 탭을 고르는 데 쓰이지 않고,
+  // AdminPage 가 보내는 해시가 도착할 자리로만 남는다.
+  assert.match(agentsPageSource, /RUNTIME_ANCHOR_ID = 'agent-manager-runtime'/);
+  assert.match(agentsPageSource, /id=\{RUNTIME_ANCHOR_ID\}/);
   assert.match(agentsPageSource, /<AgentManagerPage[\s\S]*workspaceAgents=\{agents \|\| \[\]\}/);
 });
 

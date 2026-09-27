@@ -994,6 +994,14 @@ export interface AgentSessionRequestPayload {
   /** CLI 설정에 묶인 워크스페이스 Credential — open/prompt 에만 실린다. 매니저는
    *  `GET /api/agent/sessions/credential/:id` 로 원문을 받아 세션 cli-home 에 적용한다. */
   credential_id?: string | null;
+  /** open — 세션 잠금을 쥔 **외부** 프로세스까지 종료하고 연다.
+   *
+   *  기본(false)에서도 매니저는 AWB 가 띄운 유령 ACP 어댑터를 알아서 정리한다. 이 플래그가
+   *  여는 것은 그 너머다: 운영자의 Codex 앱처럼 AWB 것이 아닌 프로세스를 죽이는 경우.
+   *  그쪽은 이 세션 하나가 아니라 같은 프로세스가 물고 있던 다른 작업까지 끊기므로,
+   *  화면이 주인의 이름·PID(매니저가 `resume_locked_external` 오류에 실어 보낸다)를
+   *  보여 주고 확인을 받은 뒤에만 켜서 보낸다. */
+  force?: boolean;
   /** 스트림을 받을 사용자 — 마지막으로 open/prompt 한 사람. */
   driver_user_id: string;
   issued_at: string;

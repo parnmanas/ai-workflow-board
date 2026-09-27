@@ -271,13 +271,17 @@ test('create: rejects both/neither cadence, requires target_agent_id + task_prom
     () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: 'a', taskPrompt: 'p' }),
     /one of cron or interval_ms is required/,
   );
+  // 프롬프트 형태에서만 대상 에이전트가 필수다(Action 형태는 Action 이 정한다).
   await assert.rejects(
     () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: '', taskPrompt: 'p', intervalMs: 5 * MIN }),
     /target_agent_id is required/,
   );
+  // 프롬프트도 action_id 도 없으면 "무엇을 할지" 가 비어 있다. Action 참조가
+  // 생기면서(크론 이관) 문구가 둘을 함께 말하도록 바뀌었다 — 하나만 말하면
+  // 사용자는 나머지 선택지를 모른다.
   await assert.rejects(
     () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: 'a', taskPrompt: '  ', intervalMs: 5 * MIN }),
-    /task_prompt is required/,
+    /one of task_prompt or action_id is required/,
   );
 });
 

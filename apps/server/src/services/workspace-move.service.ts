@@ -795,7 +795,7 @@ export class WorkspaceMoveService {
         // 대상은 두 컬럼을 함께 복사한다 (티켓 fc3906c5) — 배열을 빠뜨리면
         // 다중 대상 Action이 복사되면서 조용히 대표 대상 하나짜리로 줄어든다.
         prompt: src.prompt, target_agent_id: src.target_agent_id,
-        target_agent_ids: src.target_agent_ids, schedule_cron: src.schedule_cron,
+        target_agent_ids: src.target_agent_ids,
         trigger: src.trigger, trigger_label: src.trigger_label, enabled: src.enabled, max_runs: src.max_runs,
       }));
       destId = created.id;

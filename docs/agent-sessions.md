@@ -189,6 +189,36 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
   동안의 기록을 매니저에서 메꾸고 driver 를 되찾는다.
 - 사이드바·호스트 목록은 driver 전용 `agent_session_update` 로 행을 고치고, 매니저 인스턴스가 등록/제거되면 그 장비 목록을 다시 묻는다.
 
+### 세션 잠금 (`already has an active writer`)
+
+codex 는 스레드마다 writer 잠금을 건다(`<CODEX_HOME>/thread-writer-locks/<thread-id>.lock`). 그 스레드가
+장비의 터미널이나 Codex 데스크톱 앱에서 열려 있으면 AWB 의 재개는 `thread … already has an active writer`
+로 거절된다. 잠금 파일은 **0바이트**라 안에 주인 정보가 없다 — 그래서 매니저가 OS 에 직접 묻는다
+(`apps/agent-manager/src/lib/file-lock-holders.ts`: Windows 는 Restart Manager `rstrtmgr.dll`, POSIX 는
+`lsof` + `ps`). 조회는 절대 던지지 않는다: 못 알아내면 빈 목록이고, 그것은 "아무도 안 쥐었다" 가 아니라
+**"모른다"** 로 취급한다.
+
+잠금 파일의 위치는 CLI 모듈이 선언한다(`CliSessionSpec.lockRelativePath`) — 러너에 `if (cli === 'codex')`
+를 두지 않는다. 선언하지 않은 CLI 에는 잠금 주인이라는 개념이 없다고 보고 강제 열기를 제공하지 않는다.
+
+회복 정책은 **기본 안전 + 확인 후 강제** 다 (`selectKillTargets()` 한 곳에 있다):
+
+| 잠금 주인 | 기본 Connect | 확인을 거친 `force` |
+| --- | --- | --- |
+| AWB 가 띄운 ACP 어댑터 (`codex-acp` 등) | 묻지 않고 정리하고 **한 번** 재시도 | 같음 |
+| 그 밖의 프로세스 (Codex 앱, 터미널 codex) | 건드리지 않는다. 이름·PID 를 오류 문구에 실어 보낸다 (`resume_locked_external`) | 종료하고 재시도 |
+| 매니저 자신 | 대상 아님 | 대상 아님 |
+| 못 알아냄 | `resume_locked` — "그 장비에서 닫아라". 강제 열기를 내놓지 않는다 | — |
+
+외부 프로세스를 자동으로 죽이지 않는 이유는 측정된 사실이다: ralf 에서 잠금 주인은 스레드 전용 프로세스가
+아니라 Codex 앱의 공용 `codex.exe … app-server` 였다. 죽이면 이 세션 하나가 아니라 그 앱의 **다른 대화까지**
+끊긴다. 그래서 화면(`SessionsPage`)은 `resume_locked_external` 일 때만 "강제로 열기…" 를 띄우고, 매니저가
+말한 주인의 이름·PID 를 그대로 담은 확인 대화상자를 거친 뒤에야 `force: true` 를 보낸다. 자동 연결과 평범한
+Connect 는 절대 `force` 를 켜지 않는다 — 페이지를 여는 것만으로 운영자의 앱이 죽으면 안 된다.
+
+잠금 조회는 재개가 실제로 거절된 뒤에만 돈다(Windows 의 PowerShell 왕복이 1초 가까이 걸린다). 정상 Connect
+경로에는 비용이 없다.
+
 ### 긴 세션 (기록 창과 라이브 창)
 
 기록 파일은 수백 MB 까지 자란다(실측: rolf 의 codex rollout 353MB, ralf 176MB). 어느 쪽도 통째로 다루지 않는다.
@@ -292,7 +322,7 @@ cache_write` 로 계산한다.
 
 ## agent-manager contract 변경 규칙
 
-`agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`
+`agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id`·`force` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`
 는 서버와 agent-manager 가 같은 contract 를 본다 — 변경은 **같은 PR**. 버전은 손으로 올리지 않는다.
 `usage` 이벤트 payload 의 키도 같은 계약이다(서버 `common/types/agent-sessions.ts` 의 주석 ↔ 매니저
 `session-usage.ts` 의 `usageEventPayload`) — 키를 늘리면 화면(`sessionTranscript.logic.ts`)까지 한 PR 로 묶는다.

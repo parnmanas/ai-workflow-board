@@ -2,9 +2,14 @@
 
 Run a saved **Action** automatically the moment a ticket lands on a terminal
 column (Done), with the finished ticket injected into the prompt. This is the
-event-driven complement to the two existing Action triggers (cron schedule and
-manual `run_action`): some "continuous" work is tied to *a ticket finishing*,
-not to a clock.
+event-driven complement to the other ways an Action starts (a Workspace Schedule
+pointing at it with `action_id`, or a manual `run_action`): some "continuous"
+work is tied to *a ticket finishing*, not to a clock.
+
+> 크론은 더 이상 Action 에 없다 — `actions.schedule_cron` 은 Workspace Schedule 로
+> 옮겼다(`docs/workspace-schedules.md`). Action 은 "무엇을 · 누가 · 어디서" 만
+> 정의하고 "언제" 는 Schedule 이 정한다. 반대로 이 on-ticket-done 트리거는 시각이
+> 아니라 **무엇에 반응하는가**라서 Action 에 그대로 남아 있다.
 
 > Ticket: `16a6339c` ([Feature] 티켓 Done(terminal) 시 연결된 Action 자동 실행).
 > Implemented by `OnTicketDoneActionService` (`apps/server/src/modules/actions/`).

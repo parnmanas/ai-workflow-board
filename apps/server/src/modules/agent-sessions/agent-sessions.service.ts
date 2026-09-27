@@ -857,7 +857,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     userId: string,
     managerId: string,
     cli: string,
-    input: { session_id?: string | null; cwd?: string; title?: string },
+    input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean },
   ): Promise<AgentSessionLiveSnapshot> {
     const rec = this.requireHost(workspaceId, managerId, cli);
     const sessionId = input.session_id ? String(input.session_id) : null;
@@ -869,7 +869,33 @@ export class AgentSessionsService implements OnModuleDestroy {
     const credentialId = await this.boundCredentialId(workspaceId, managerId, cli);
     const configDefaults = await this.configDefaultsFor(workspaceId, managerId, cli);
     const runtimeProfile = await this.backendProfileFor(workspaceId, managerId, cli);
-    const result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile }, userId);
+    let result: Record<string, any>;
+    try {
+      result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile, force: input.force === true }, userId);
+    } catch (err: any) {
+      // 실패 사유를 세션 상태에 남긴다.
+      //
+      // 예전에는 이 오류가 HTTP 응답으로만 돌아갔다. 화면은 그걸 토스트 한 번으로
+      // 띄우고 끝냈고, 토스트가 사라지면 "Connect 눌렀는데 실패" 말고는 아무 근거도
+      // 남지 않았다 — 매니저는 정확한 사유를 알고 있는데(예: codex 의 `thread …
+      // already has an active writer`, 즉 그 세션이 다른 곳에서 열려 있다) 사용자는
+      // 그걸 볼 길이 없었다. 상태에 남기면 화면의 기존 "Last error" 줄이 그대로
+      // 그것을 계속 보여 준다.
+      //
+      // 기존 세션을 이어 여는 경우에만 남긴다 — 새 세션은 아직 id 가 없어 붙일 곳이 없다.
+      if (sessionId) {
+        const failed = await this.seedState(rec, managerId, cli, sessionId, {
+          cwd, title, status: 'error', driver_user_id: userId,
+        });
+        failed.driver_user_id = userId;
+        this.applyPatch(failed, {
+          status: 'error',
+          last_error: String(err?.message || 'Runtime Host could not open this session.'),
+        });
+        this.emitUpdate(failed, 'open_failed');
+      }
+      throw err;
+    }
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
     if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
     const state = await this.seedState(rec, managerId, cli, openedId, {

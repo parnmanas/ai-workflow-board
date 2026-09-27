@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import type { WorkspaceSchedule } from '../types';
+import type { Action, WorkspaceSchedule } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from './common';
@@ -52,6 +52,8 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
   const { showToast } = useToast();
   const [schedules, setSchedules] = useState<WorkspaceSchedule[]>([]);
   const [agents, setAgents] = useState<ScheduleAgent[]>([]);
+  // Action 형태 스케줄이 고를 대상. 크론이 Action 에서 이리로 옮겨 왔다.
+  const [actions, setActions] = useState<Action[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<WorkspaceSchedule | 'new' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<WorkspaceSchedule | null>(null);
@@ -60,12 +62,14 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
     if (!workspaceId) { setSchedules([]); setLoading(false); return; }
     setLoading(true);
     try {
-      const [scheduleList, agentList] = await Promise.all([
+      const [scheduleList, agentList, actionList] = await Promise.all([
         api.listWorkspaceSchedules(workspaceId).catch(() => []),
         api.getAgents(workspaceId).catch(() => []),
+        api.listActions(workspaceId).catch(() => []),
       ]);
       setSchedules(scheduleList || []);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+      setActions(actionList || []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load workspace schedules', 'error');
     } finally {
@@ -90,6 +94,14 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
     const a = agents.find((x) => x.id === id);
     return a ? formatAgentDisplayName(a) : id.slice(0, 8);
   }, [agents]);
+
+  // 대상 칸의 라벨. Action 형태에는 대상 에이전트가 없으므로(Action 이 정한다)
+  // 에이전트 id 를 8자리로 잘라 보여 주는 fallback 이 걸리면 안 된다.
+  const targetLabel = useCallback((s: WorkspaceSchedule) => {
+    if (!s.action_id) return agentName(s.target_agent_id);
+    const a = actions.find((x) => x.id === s.action_id);
+    return `Action: ${a ? a.name : s.action_id.slice(0, 8)}`;
+  }, [actions, agentName]);
 
   const handleToggle = async (s: WorkspaceSchedule) => {
     try {
@@ -165,7 +177,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
                   key={s.id}
                   s={s}
                   workspaceId={workspaceId}
-                  agentLabel={agentName(s.target_agent_id)}
+                  agentLabel={targetLabel(s)}
                   onEdit={() => setEditing(s)}
                   onToggle={() => handleToggle(s)}
                   onRunNow={() => handleRunNow(s)}
@@ -182,6 +194,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
           schedule={editing === 'new' ? null : editing}
           workspaceId={workspaceId}
           agents={agents}
+          actions={actions}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await load(); }}
         />
@@ -265,13 +278,17 @@ interface ScheduleEditorProps {
   schedule: WorkspaceSchedule | null;
   workspaceId: string;
   agents: ScheduleAgent[];
+  actions: Action[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function ScheduleEditor({ schedule, workspaceId, agents, onClose, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, workspaceId, agents, actions, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
+  // 무엇을 할지 — 프롬프트를 직접 쓰거나, 등록된 Action 을 고른다. 서버가 택일을 강제한다.
+  const [targetKind, setTargetKind] = useState<'prompt' | 'action'>(schedule?.action_id ? 'action' : 'prompt');
+  const [actionId, setActionId] = useState(schedule?.action_id ?? '');
   const [targetAgentId, setTargetAgentId] = useState(schedule?.target_agent_id ?? '');
   const [taskPrompt, setTaskPrompt] = useState(schedule?.task_prompt ?? '');
   // Cadence: edit either as an interval (value + unit) or a cron expr.
@@ -297,8 +314,12 @@ function ScheduleEditor({ schedule, workspaceId, agents, onClose, onSaved }: Sch
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
-    if (!targetAgentId) { showToast('대상 에이전트를 선택하세요', 'error'); return; }
-    if (!taskPrompt.trim()) { showToast('작업 프롬프트를 입력하세요', 'error'); return; }
+    if (targetKind === 'action') {
+      if (!actionId) { showToast('실행할 Action 을 선택하세요', 'error'); return; }
+    } else {
+      if (!targetAgentId) { showToast('대상 에이전트를 선택하세요', 'error'); return; }
+      if (!taskPrompt.trim()) { showToast('작업 프롬프트를 입력하세요', 'error'); return; }
+    }
     if (cadenceKind === 'cron') {
       if (cron.trim().split(/\s+/).length !== 5) { showToast('cron 은 5개 필드여야 합니다 (예: "0 3 * * *")', 'error'); return; }
     } else if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
@@ -308,8 +329,11 @@ function ScheduleEditor({ schedule, workspaceId, agents, onClose, onSaved }: Sch
     const base = {
       workspace_id: workspaceId,
       name: name.trim(),
-      target_agent_id: targetAgentId,
-      task_prompt: taskPrompt.trim(),
+      // 고르지 않은 쪽은 빈 값/ null 로 보내 서버의 택일 검증을 통과시킨다 —
+      // 종류를 바꿨을 때 옛 값이 남아 있으면 "둘 다 설정됨" 으로 거부된다.
+      target_agent_id: targetKind === 'action' ? '' : targetAgentId,
+      task_prompt: targetKind === 'action' ? '' : taskPrompt.trim(),
+      action_id: targetKind === 'action' ? actionId : null,
       enabled,
       // Send exactly one cadence; null the other so a kind-switch clears it.
       cron: cadenceKind === 'cron' ? cron.trim() : null,
@@ -355,23 +379,54 @@ function ScheduleEditor({ schedule, workspaceId, agents, onClose, onSaved }: Sch
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Input label="이름" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
 
-        <Select
-          label="대상 에이전트"
-          placeholder="— 에이전트 선택 —"
-          value={targetAgentId}
-          options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-          onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
-        />
-
         <div>
-          <label style={fieldLabel}>작업 프롬프트 (실행 시 에이전트에게 보낼 메시지)</label>
-          <textarea
-            style={textareaStyle}
-            value={taskPrompt}
-            placeholder="예: 어제자 빌드 로그를 점검하고 실패 항목을 요약해 주세요."
-            onChange={(e) => setTaskPrompt(e.target.value)}
-          />
+          <label style={fieldLabel}>무엇을 실행할까요</label>
+          <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+              <input type="radio" name="ws-sched-target" checked={targetKind === 'prompt'} onChange={() => setTargetKind('prompt')} />
+              프롬프트 직접 입력
+            </label>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
+              <input type="radio" name="ws-sched-target" checked={targetKind === 'action'} onChange={() => setTargetKind('action')} />
+              등록된 Action 실행
+            </label>
+          </div>
         </div>
+
+        {targetKind === 'action' ? (
+          <>
+            <Select
+              label="실행할 Action"
+              placeholder="— Action 선택 —"
+              value={actionId}
+              options={actions.map((a) => ({ value: a.id, label: a.name }))}
+              onChange={(e) => setActionId((e.target as HTMLSelectElement).value)}
+            />
+            <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: -6 }}>
+              대상 에이전트 · 작업 폴더 · 승인 여부는 그 Action 이 정의합니다. 여기서는 실행 시각만 정합니다.
+            </div>
+          </>
+        ) : (
+          <>
+            <Select
+              label="대상 에이전트"
+              placeholder="— 에이전트 선택 —"
+              value={targetAgentId}
+              options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
+              onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
+            />
+
+            <div>
+              <label style={fieldLabel}>작업 프롬프트 (실행 시 에이전트에게 보낼 메시지)</label>
+              <textarea
+                style={textareaStyle}
+                value={taskPrompt}
+                placeholder="예: 어제자 빌드 로그를 점검하고 실패 항목을 요약해 주세요."
+                onChange={(e) => setTaskPrompt(e.target.value)}
+              />
+            </div>
+          </>
+        )}
 
         {/* Cadence: interval vs cron */}
         <div>
