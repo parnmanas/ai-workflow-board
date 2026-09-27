@@ -72,6 +72,14 @@ jobs:
   publish:
     name: compute version + npm publish
     runs-on: ubuntu-latest
+    # main 에서만 publish 한다. `push` 트리거는 이미 main 한정이지만
+    # `workflow_dispatch` 는 **임의 ref** 로 실행할 수 있고, 이 잡에는 ref 조건이
+    # 없었다 — 즉 오래된 브랜치에서 dispatch 하면 의존성 감사가 한 번도 판정하지
+    # 않은 트리가 npm 에 올라가고, 그걸 `npm i -g awb-agent-manager` 하는 모든
+    # 호스트가 받는다. 이 축이 위험한 이유는 lockfile 이 아니라 선언 범위(`^`)를
+    # 설치 시점에 재해석하기 때문이다(scripts/audit-published-deps.mjs 의 `next` 축).
+    # 감사는 main 에서만 도므로 publish 대상 ref 도 main 으로 못박는다.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
