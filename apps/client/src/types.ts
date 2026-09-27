@@ -789,6 +789,10 @@ export interface QaSchedule {
  * cadence" trigger (ticket 8845be79 foundation; this UI = ticket 1927ed4a). When
  * due, the server opens a FRESH chat room, seats `target_agent_id`, and sends
  * `task_prompt` as the opening message (the QA/Security RUN dispatch shape).
+ *
+ * 무엇을 할지는 **둘 중 정확히 하나**다 — 위의 `task_prompt`(+`target_agent_id`),
+ * 또는 `action_id` 로 등록된 Action 실행. Action 형태에서는 대상·작업 폴더·승인·
+ * run 기록을 전부 Action 이 정의하므로 앞의 두 값은 비어 있다.
  * Cadence is exactly one of `cron` (5-field UTC) or `interval_ms`.
  * `next_run_at`/`last_run_at`/`last_room_id` track firing; `last_room_id`
  * deep-links to the most recent dispatched conversation. `board_id` is optional
@@ -801,6 +805,8 @@ export interface WorkspaceSchedule {
   name: string;
   target_agent_id: string;
   task_prompt: string;
+  /** 설정되면 이 Action 을 실행한다 (`task_prompt` 와 택일). */
+  action_id: string | null;
   cron: string | null;
   interval_ms: number | null;
   enabled: boolean;

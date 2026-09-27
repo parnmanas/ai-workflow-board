@@ -25,7 +25,6 @@ import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { prependBoardLanguageInstruction } from '../../common/harness-config';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/shared/terminal-pend-gate';
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
-import { parseCron } from './cron';
 import { enforceRunBudget } from '../../common/run-budget-guard';
 import { normalizeWorkspaceFolder, normalizeCheckoutMode, normalizeRepoRef } from '../../common/workspace-folder-options';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
@@ -138,6 +137,14 @@ function renderStandaloneCompletionContract(runId: string, workspaceId: string):
     `- Do this exactly once. A second call on the same run is ignored (the outcome is already recorded).`
   );
 }
+
+/**
+ * `schedule_cron` 은 Action 에서 Workspace Schedule 로 옮겼다. 저장 시도를 조용히
+ * 무시하면 운영자는 예약이 걸린 줄 알고 그 Action 이 영영 돌지 않는다.
+ */
+const SCHEDULE_CRON_MOVED =
+  'schedule_cron has moved off Action — create a Workspace Schedule with action_id pointing at this Action '
+  + '(POST /api/workspace-schedules, or the create_workspace_schedule MCP tool). Cron there is UTC.';
 
 export interface DispatchActionArgs {
   actionId: string;
@@ -361,10 +368,11 @@ export class ActionsService {
       throw makeError(400, 'Board-scoped Actions are no longer supported; create the Action in its Workspace');
     }
 
+    // 크론은 더 이상 Action 이 들고 있지 않다 — Workspace Schedule 이 `action_id` 로
+    // 이 Action 을 가리켜 예약한다. 조용히 무시하면 "예약했는데 안 돈다" 가 되므로
+    // 거부하고 갈 곳을 알려 준다.
     if (input.schedule_cron && input.schedule_cron.trim()) {
-      if (!parseCron(input.schedule_cron)) {
-        throw makeError(400, 'schedule_cron is invalid — expected 5 fields with `*` or integers');
-      }
+      throw makeError(400, SCHEDULE_CRON_MOVED);
     }
 
     if (input.trigger !== undefined && !this._isValidTrigger(input.trigger)) {
@@ -421,12 +429,8 @@ export class ActionsService {
         throw makeError(400, 'scope cannot be changed after creation');
       }
     }
-    if (patch.schedule_cron !== undefined) {
-      const next = patch.schedule_cron || '';
-      if (next.trim() && !parseCron(next)) {
-        throw makeError(400, 'schedule_cron is invalid — expected 5 fields with `*` or integers');
-      }
-      existing.schedule_cron = next;
+    if (patch.schedule_cron !== undefined && (patch.schedule_cron || '').trim()) {
+      throw makeError(400, SCHEDULE_CRON_MOVED);
     }
     if (patch.enabled !== undefined) existing.enabled = !!patch.enabled;
     if (patch.high_impact !== undefined) existing.high_impact = !!patch.high_impact;

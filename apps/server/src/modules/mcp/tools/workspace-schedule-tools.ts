@@ -33,6 +33,7 @@ function scheduleToJson(s: WorkspaceSchedule) {
     name: s.name,
     target_agent_id: s.target_agent_id,
     task_prompt: s.task_prompt,
+    action_id: s.action_id,
     cron: s.cron,
     interval_ms: s.interval_ms,
     enabled: s.enabled,
@@ -94,14 +95,19 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
   server.tool(
     'create_workspace_schedule',
     'Create a workspace schedule — a general-purpose "do this task at this time" trigger for ONE agent. ' +
-    'When due, it opens a fresh chat room, seats `target_agent_id`, and sends `task_prompt` as the opening ' +
+    '무엇을 할지는 둘 중 하나다 — `task_prompt`(+`target_agent_id`) 로 프롬프트를 직접 주거나, ' +
+    '`action_id` 로 등록된 Action 을 실행한다. 정확히 하나만 설정할 것. ' +
+    'Action 형태에서는 대상 에이전트·작업 폴더·승인(high_impact)·run 기록을 전부 Action 이 정의하고 ' +
+    '이 스케줄은 "언제" 만 정한다. (Action 자체의 `schedule_cron` 은 폐지됐다.) ' +
+    'When due with `task_prompt`, it opens a fresh chat room, seats `target_agent_id`, and sends it as the opening ' +
     'message (the QA/Security RUN dispatch shape). Set EXACTLY ONE of `cron` (5 UTC fields, e.g. "0 3 * * *") ' +
     'or `interval_ms` (>= 1000). `enabled` defaults true.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       name: z.string().describe('Schedule name (required)'),
-      target_agent_id: z.string().describe('The single agent the task is dispatched to (required)'),
-      task_prompt: z.string().describe('Free-text task message sent to the agent when the schedule fires (required)'),
+      target_agent_id: z.string().optional().describe('The single agent the task is dispatched to (task_prompt 형태에서 필수)'),
+      task_prompt: z.string().optional().describe('Free-text task message sent to the agent when the schedule fires (action_id 와 택일)'),
+      action_id: z.string().optional().describe('실행할 Action 의 id (task_prompt 와 택일)'),
       cron: z.string().optional().describe('5-field UTC cron (e.g. "0 3 * * *"). Mutually exclusive with interval_ms'),
       interval_ms: z.number().optional().describe('Fixed interval in ms (>= 1000). Mutually exclusive with cron'),
       enabled: z.boolean().optional().describe('Default true'),
@@ -115,6 +121,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
           name: args.name,
           targetAgentId: args.target_agent_id,
           taskPrompt: args.task_prompt,
+          actionId: args.action_id,
           cron: args.cron,
           intervalMs: args.interval_ms,
           enabled: args.enabled,
@@ -137,6 +144,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       name: z.string().optional(),
       target_agent_id: z.string().optional(),
       task_prompt: z.string().optional(),
+      action_id: z.string().nullable().optional(),
       cron: z.string().optional(),
       interval_ms: z.number().optional(),
       enabled: z.boolean().optional(),
@@ -148,6 +156,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
           name: patch.name,
           targetAgentId: patch.target_agent_id,
           taskPrompt: patch.task_prompt,
+          actionId: patch.action_id,
           cron: patch.cron,
           intervalMs: patch.interval_ms,
           enabled: patch.enabled,

@@ -17,7 +17,6 @@ import { Comment } from '../../entities/Comment';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { ActionsController } from './actions.controller';
 import { ActionsService } from './actions.service';
-import { ActionSchedulerService } from './action-scheduler.service';
 import { ActionRunReaperService } from './action-run-reaper.service';
 import { OnTicketDoneActionService } from './on-ticket-done-action.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
@@ -38,7 +37,7 @@ import { AgentsModule } from '../agents/agents.module';
     AgentsModule,
   ],
   controllers: [ActionsController],
-  providers: [ActionsService, ActionSchedulerService, ActionRunReaperService, OnTicketDoneActionService, AuthGuard, PermissionGuard],
+  providers: [ActionsService, ActionRunReaperService, OnTicketDoneActionService, AuthGuard, PermissionGuard],
   exports: [ActionsService],
 })
 export class ActionsModule {}

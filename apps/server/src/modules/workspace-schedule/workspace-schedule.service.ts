@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { WorkspaceSchedule } from '../../entities/WorkspaceSchedule';
+import { Action } from '../../entities/Action';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { Agent } from '../../entities/Agent';
@@ -11,6 +12,7 @@ import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
+import { ActionsService } from '../actions/actions.service';
 import { isValidCron, nextCronAfter } from '../qa/qa-cron';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -35,8 +37,12 @@ export interface CreateWorkspaceScheduleInput {
   workspaceId: string;
   boardId?: string | null;
   name: string;
-  targetAgentId: string;
-  taskPrompt: string;
+  /** 인라인 프롬프트 형태에서만. Action 형태에서는 Action 이 대상을 정한다. */
+  targetAgentId?: string;
+  /** 인라인 프롬프트 형태. `actionId` 와 정확히 택일. */
+  taskPrompt?: string;
+  /** Action 형태 — 등록된 Action 을 실행한다. `taskPrompt` 와 정확히 택일. */
+  actionId?: string | null;
   cron?: string | null;
   intervalMs?: number | null;
   enabled?: boolean;
@@ -50,6 +56,8 @@ export interface DispatchResult {
   schedule_id: string;
   room_id: string;
   agent_id: string;
+  /** Action 형태일 때 그 dispatch 가 만든 배치 키. 인라인 형태에서는 비어 있다. */
+  batch_id?: string;
 }
 
 /**
@@ -101,6 +109,10 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesce: InstanceQuiesceService,
+    @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
+    // Action 형태 스케줄의 발화 경로. ActionsModule → WorkspaceScheduleModule
+    // 방향 import 가 없으므로 순환이 아니다.
+    private readonly actions: ActionsService,
   ) {}
 
   onModuleInit(): void {
@@ -143,10 +155,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateWorkspaceScheduleInput): Promise<WorkspaceSchedule> {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    const targetAgentId = (input.targetAgentId || '').trim();
-    if (!targetAgentId) throw makeError(400, 'target_agent_id is required');
-    const taskPrompt = (input.taskPrompt || '').trim();
-    if (!taskPrompt) throw makeError(400, 'task_prompt is required');
+    const target = await this._validateTarget(input.workspaceId, input.targetAgentId, input.taskPrompt, input.actionId);
     await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const { cron, intervalMs } = this._validateCadence(input.cron, input.intervalMs);
@@ -156,8 +165,9 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       workspace_id: input.workspaceId,
       board_id: null,
       name: input.name.trim(),
-      target_agent_id: targetAgentId,
-      task_prompt: taskPrompt,
+      target_agent_id: target.targetAgentId,
+      task_prompt: target.taskPrompt,
+      action_id: target.actionId,
       cron,
       interval_ms: intervalMs,
       enabled,
@@ -181,15 +191,18 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
       throw makeError(400, 'scope cannot be changed after creation');
     }
-    if (patch.targetAgentId !== undefined) {
-      const next = (patch.targetAgentId || '').trim();
-      if (!next) throw makeError(400, 'target_agent_id cannot be empty');
-      schedule.target_agent_id = next;
-    }
-    if (patch.taskPrompt !== undefined) {
-      const next = (patch.taskPrompt || '').trim();
-      if (!next) throw makeError(400, 'task_prompt cannot be empty');
-      schedule.task_prompt = next;
+    // 대상(무엇을 할지)은 셋이 서로 배타적이라 한 덩어리로 다시 검증한다 — 하나만
+    // 패치해서 "프롬프트도 있고 action_id 도 있는" 상태로 빠지는 경로를 막는다.
+    if (patch.targetAgentId !== undefined || patch.taskPrompt !== undefined || patch.actionId !== undefined) {
+      const target = await this._validateTarget(
+        schedule.workspace_id,
+        patch.targetAgentId !== undefined ? patch.targetAgentId : schedule.target_agent_id,
+        patch.taskPrompt !== undefined ? patch.taskPrompt : schedule.task_prompt,
+        patch.actionId !== undefined ? patch.actionId : schedule.action_id,
+      );
+      schedule.target_agent_id = target.targetAgentId;
+      schedule.task_prompt = target.taskPrompt;
+      schedule.action_id = target.actionId;
     }
     if (patch.triggeredByType !== undefined) schedule.triggered_by_type = patch.triggeredByType || 'user';
 
@@ -314,7 +327,45 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
    * The sendMessage from a 'user' sender into an agent-occupied room is what
    * triggers the agent-manager spawn through the existing chat path.
    */
+  /**
+   * Action 형태의 발화. 방을 이 서비스가 만들지 **않는다** — ActionsService.dispatch 가
+   * 자기 파이프라인(ActionRun 기록 · batch · high_impact 승인 게이트 · fan-out)을
+   * 그대로 태우고, 여기서는 "언제" 만 책임진다. 수동 Run 버튼과 완전히 같은 경로라
+   * 예약 실행과 수동 실행의 결과가 갈리지 않는다.
+   *
+   * Action 이 삭제됐으면 스케줄을 **비활성화**한다. 매 틱 실패 로그를 쌓는 것보다,
+   * 운영자가 목록에서 꺼진 줄을 보고 지우거나 다시 연결하는 편이 낫다 — 이 스케줄이
+   * 영영 성공할 수 없다는 것은 이미 확정된 사실이라 재시도에 의미가 없다.
+   */
+  private async _dispatchAction(schedule: WorkspaceSchedule): Promise<DispatchResult> {
+    const action = await this.actionRepo.findOne({ where: { id: schedule.action_id! } });
+    if (!action) {
+      schedule.enabled = false;
+      schedule.next_run_at = null;
+      await this.scheduleRepo.save(schedule);
+      this.logService.warn('WorkspaceScheduler', 'action was deleted — schedule disabled', {
+        schedule_id: schedule.id, action_id: schedule.action_id,
+      });
+      throw makeError(400, `action not found: ${schedule.action_id}`);
+    }
+    const result = await this.actions.dispatch({
+      actionId: action.id,
+      triggeredByType: 'system',
+      triggeredById: '',
+    });
+    this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → action ${action.id}`, {
+      batch_id: result.batch_id, runs: result.runs.length,
+    });
+    return {
+      schedule_id: schedule.id,
+      room_id: result.room_id,
+      agent_id: result.run?.agent_id || '',
+      batch_id: result.batch_id,
+    };
+  }
+
   private async _dispatch(schedule: WorkspaceSchedule): Promise<DispatchResult> {
+    if (schedule.action_id) return this._dispatchAction(schedule);
     const agent = await this.agentRepo.findOne({ where: { id: schedule.target_agent_id } });
     if (!agent) throw makeError(400, 'target agent not found');
     // Workspace-scope safety: never dispatch into an agent outside this workspace.
@@ -370,6 +421,41 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (boardId) {
       throw makeError(400, 'Board-scoped schedules are no longer supported; create the schedule in its Workspace');
     }
+  }
+
+  /**
+   * "무엇을 할지" 를 정규화한다. 인라인 프롬프트(`task_prompt` + `target_agent_id`)와
+   * Action 참조(`action_id`)는 **정확히 하나만** 설정된다.
+   *
+   * 둘 다 허용하면 "어느 쪽이 이기는가" 가 dispatch 구현 세부에 숨는다 — 스케줄을
+   * 편집한 사람이 자기가 무엇을 예약했는지 화면만 보고 알 수 없게 된다. 그래서
+   * 저장 시점에 거부한다.
+   */
+  private async _validateTarget(
+    workspaceId: string,
+    targetAgentId: string | undefined,
+    taskPrompt: string | undefined,
+    actionId: string | null | undefined,
+  ): Promise<{ targetAgentId: string; taskPrompt: string; actionId: string | null }> {
+    const agent = (targetAgentId || '').trim();
+    const prompt = (taskPrompt || '').trim();
+    const action = (actionId || '').trim();
+
+    if (action) {
+      if (prompt) throw makeError(400, 'set exactly one of task_prompt or action_id, not both');
+      // 워크스페이스 밖의 Action 을 예약하지 못하게 한다 — 스케줄은 자기 워크스페이스
+      // 안에서만 무언가를 일으킬 수 있다.
+      const row = await this.actionRepo.findOne({ where: { id: action } });
+      if (!row) throw makeError(400, `action not found: ${action}`);
+      if (row.workspace_id !== workspaceId) throw makeError(400, 'action belongs to a different workspace');
+      // 대상·프롬프트는 Action 이 정의하므로 이쪽은 비운다. 남겨 두면 화면에
+      // 실행되지 않을 값이 계속 보인다.
+      return { targetAgentId: '', taskPrompt: '', actionId: action };
+    }
+
+    if (!prompt) throw makeError(400, 'one of task_prompt or action_id is required');
+    if (!agent) throw makeError(400, 'target_agent_id is required');
+    return { targetAgentId: agent, taskPrompt: prompt, actionId: null };
   }
 
   private _validateCadence(cron: string | null | undefined, intervalMs: number | null | undefined): { cron: string | null; intervalMs: number | null } {

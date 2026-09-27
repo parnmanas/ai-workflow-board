@@ -282,26 +282,45 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     );
   });
 
-  it('cron 스케줄과 on_ticket_done 훅이 같은 dispatch() 를 거쳐 fan-out 을 상속한다', () => {
+  it('예약 실행과 on_ticket_done 훅이 같은 dispatch() 를 거쳐 fan-out 을 상속한다', () => {
     // 두 트리거는 대상 순회를 스스로 하지 않고 dispatch() 에 위임한다 — 그래서
     // fan-out 이 자동으로 적용된다. 어느 한쪽이 자체 경로로 갈라지면 그 트리거만
     // 조용히 단일 대상으로 되돌아가므로 호출 형태를 고정한다.
-    for (const rel of [
-      '../src/modules/actions/action-scheduler.service.ts',
-      '../src/modules/actions/on-ticket-done-action.service.ts',
-    ]) {
-      const src = readFileSync(new URL(rel, import.meta.url), 'utf8');
-      assert.match(
-        src,
-        /await this\.actionsService\.dispatch\(\{/,
-        `${rel} 이 actionsService.dispatch() 를 거치지 않는다 — fan-out 을 상속하지 못한다`,
-      );
-      assert.doesNotMatch(
-        src,
-        /roomRepo\.save\(|runRepo\.save\(/,
-        `${rel} 이 run/방을 직접 만들고 있다 — dispatch() 우회는 fan-out 과 예산 가드를 모두 건너뛴다`,
-      );
-    }
+    //
+    // 예약 경로는 ActionSchedulerService 가 아니라 WorkspaceScheduleService 다 —
+    // Action 의 cron 이 Workspace Schedule 로 옮겨 갔다(docs/workspace-schedules.md).
+    // 그 파일은 인라인 프롬프트 형태 때문에 방을 만드는 코드도 함께 갖고 있으므로,
+    // Action 발화 함수(`#dispatchAction`) 안만 떼어 본다.
+    const scheduleSrc = readFileSync(
+      new URL('../src/modules/workspace-schedule/workspace-schedule.service.ts', import.meta.url),
+      'utf8',
+    );
+    const start = scheduleSrc.indexOf('private async _dispatchAction(');
+    assert.ok(start > -1, 'Action 발화 함수를 찾지 못했다 — 이름이 바뀌었으면 이 가드도 따라가야 한다');
+    const actionDispatch = scheduleSrc.slice(start, scheduleSrc.indexOf('private async _dispatch(', start));
+    assert.match(
+      actionDispatch,
+      /await this\.actions\.dispatch\(\{/,
+      '예약 실행이 ActionsService.dispatch() 를 거치지 않는다 — fan-out 을 상속하지 못한다',
+    );
+    assert.doesNotMatch(
+      actionDispatch,
+      /roomRepo\.save\(|participantRepo\.save\(|messaging\.sendMessage\(/,
+      '예약 실행이 방을 직접 만들고 있다 — ActionRun 기록·batch·승인 게이트가 예약 실행에서만 빠진다',
+    );
+
+    const hookRel = '../src/modules/actions/on-ticket-done-action.service.ts';
+    const hookSrc = readFileSync(new URL(hookRel, import.meta.url), 'utf8');
+    assert.match(
+      hookSrc,
+      /await this\.actionsService\.dispatch\(\{/,
+      `${hookRel} 이 actionsService.dispatch() 를 거치지 않는다 — fan-out 을 상속하지 못한다`,
+    );
+    assert.doesNotMatch(
+      hookSrc,
+      /roomRepo\.save\(|runRepo\.save\(/,
+      `${hookRel} 이 run/방을 직접 만들고 있다 — dispatch() 우회는 fan-out 과 예산 가드를 모두 건너뛴다`,
+    );
   });
 
   it('MCP run_action 응답이 레거시 키와 신규 배치 키를 모두 싣는다', () => {

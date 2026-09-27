@@ -1391,8 +1391,10 @@ export const api = {
   createWorkspaceSchedule: (data: {
     workspace_id: string;
     name: string;
-    target_agent_id: string;
-    task_prompt: string;
+    target_agent_id?: string;
+    task_prompt?: string;
+    /** 등록된 Action 실행 (task_prompt 와 택일). */
+    action_id?: string | null;
     cron?: string | null;
     interval_ms?: number | null;
     enabled?: boolean;
@@ -1404,6 +1406,8 @@ export const api = {
       name?: string;
       target_agent_id?: string;
       task_prompt?: string;
+      /** 등록된 Action 실행 (task_prompt 와 택일). null 로 보내면 프롬프트 형태로 되돌린다. */
+      action_id?: string | null;
       cron?: string | null;
       interval_ms?: number | null;
       enabled?: boolean;

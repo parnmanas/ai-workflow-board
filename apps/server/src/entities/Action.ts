@@ -54,10 +54,19 @@ export class Action {
   @Column({ type: 'varchar', default: '[]' })
   target_agent_ids: string;
 
-  // Optional cron-style schedule. Empty string = manual-only. Format: a
-  // simple subset (minute hour dom month dow with `*` and integer values).
-  // The scheduler service polls every minute and dispatches Runs whose next
-  // computed tick is due.
+  /**
+   * @deprecated 크론은 Workspace Schedule 로 옮겼다 — `workspace_schedules.action_id`
+   * 가 이 Action 을 가리키고 "언제" 는 그쪽이 정한다. 이유는
+   * `entities/WorkspaceSchedule.ts` 헤더 참조(구현이 두 벌이었고 이쪽은 로컬시간
+   * tick-match 라 서버가 그 1분에 죽어 있으면 실행이 조용히 사라졌다).
+   *
+   * 컬럼은 **이번 릴리스에서 아직 지우지 않는다.** `synchronize: true` 가 마이그레이션
+   * 보다 먼저 도므로, 엔티티에서 빼면 이관 마이그레이션이 읽기도 전에 컬럼이
+   * 사라진다. 이관이 끝난 다음 릴리스에서 컬럼째 제거할 것.
+   *
+   * 읽는 곳도 쓰는 곳도 없다 — 저장을 시도하면 ActionsService 가 400 으로 거부하고
+   * 갈 곳을 알려 준다.
+   */
   @Column({ type: 'varchar', default: '' })
   schedule_cron: string;
 

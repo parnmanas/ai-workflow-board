@@ -20,6 +20,19 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *   2. NEW ROOM PER RUN — every tick creates a new chat room (`last_room_id`
  *      records the most recent one). No reused per-schedule room.
  *
+ * **무엇을 할지는 두 형태다 — 정확히 하나만 설정된다** (ticket: Action cron 이관):
+ *   (a) `task_prompt` — 이 스케줄이 직접 들고 있는 프롬프트. 위 1·2 그대로.
+ *   (b) `action_id`   — 등록된 Action 을 실행한다. 대상 에이전트·작업 폴더·
+ *       repo·승인(high_impact)·fan-out·run 기록은 전부 **Action 이 정의**하고,
+ *       이 스케줄은 "언제"만 정한다. 그래서 (b) 에서는 `target_agent_id` 가
+ *       비어 있고 방도 이 서비스가 만들지 않는다 — ActionsService.dispatch 가
+ *       자기 파이프라인(ActionRun · batch · 승인 게이트)으로 처리한다.
+ *
+ * 이 분리의 이유: 예전에는 `actions.schedule_cron` 이 따로 있어 크론 구현이 두
+ * 벌이었다. Action 쪽은 로컬시간 tick-match 라 그 1분에 서버가 죽어 있으면 그날
+ * 실행이 조용히 사라졌고, 이쪽은 UTC + `next_run_at` 이라 따라잡았다. 한쪽으로
+ * 모으면서 남긴 것은 따라잡는 쪽이다.
+ *
  * Cadence: exactly one of `cron` (5-field UTC — see modules/qa/qa-cron.ts, reused)
  * or `interval_ms`. `next_run_at` is the precomputed next firing instant the tick
  * compares against; `last_run_at`/`last_room_id` record the most recent dispatch.
@@ -52,14 +65,23 @@ export class WorkspaceSchedule {
   @Column({ type: 'varchar' })
   name: string;
 
-  // The single agent this schedule dispatches the task to.
-  @Column({ type: 'varchar' })
+  // The single agent this schedule dispatches the task to. Action 형태
+  // (`action_id` 설정)에서는 **비어 있다** — 대상은 Action 이 정한다.
+  @Column({ type: 'varchar', default: '' })
   target_agent_id: string;
 
   // The free-text task message sent to the agent when the schedule fires. `text`
   // (not varchar) so long multi-line prompts are not truncated on either DB.
+  // Action 형태에서는 비어 있다.
   @Column({ type: 'text', default: '' })
   task_prompt: string;
+
+  // 실행할 Action. 설정되면 `task_prompt`/`target_agent_id` 대신 이쪽을 쓴다 —
+  // 서비스가 "정확히 하나" 를 강제한다. Action 이 삭제되면 이 스케줄은 매 틱
+  // 실패하는 대신 **스스로 비활성화**된다(서비스 `_dispatch` 참고): 없는 것을
+  // 매일 호출해 로그만 쌓는 것보다 운영자가 목록에서 보고 지우는 편이 낫다.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  action_id: string | null;
 
   // Exactly one cadence is set. cron is a 5-field UTC expression (qa-cron.ts);
   // interval_ms is a fixed gap in milliseconds. The service rejects "both"/"neither".

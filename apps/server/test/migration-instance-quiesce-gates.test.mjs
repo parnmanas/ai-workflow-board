@@ -42,7 +42,11 @@ const { AgentAutostartService } = await import(modPath('modules', 'agents', 'age
 // quiesce entirely: ActionScheduler, OutreachPolling, OrchestrationReaper,
 // QaRerunOnFix — plus OnTicketDoneActionService and FeaturesService, found
 // during the same audit to share the same class of gap.
-const { ActionSchedulerService } = await import(modPath('modules', 'actions', 'action-scheduler.service.js'));
+//
+// ActionSchedulerService 는 삭제됐다 — Action 의 cron 이 Workspace Schedule 로
+// 옮겨 갔기 때문이다. 그 게이트는 사라진 게 아니라 **WorkspaceScheduleService.runOnce
+// 로 합쳐졌고**, 그쪽 케이스는 이 파일 위에 이미 있다. 예약 실행 경로가 quiesce 를
+// 우회하지 않는다는 이 파일의 계약은 그대로 지켜진다.
 const { OnTicketDoneActionService } = await import(modPath('modules', 'actions', 'on-ticket-done-action.service.js'));
 const { OrchestrationReaperService } = await import(modPath('modules', 'orchestration', 'orchestration-reaper.service.js'));
 const { OutreachPollingService } = await import(modPath('modules', 'outreach', 'outreach-polling.service.js'));
@@ -103,11 +107,6 @@ test('AgentAutostartService chat-path autostart (_handleChatRequest) short-circu
   // is passed and the quiesce check is what actually gates this call — a
   // malformed event returning early would be a false positive for this test.
   await assert.doesNotReject(() => svc._handleChatRequest({ agent_id: 'a1', room_id: 'r1', workspace_id: 'w1' }));
-});
-
-test('[review round 1 P2] ActionSchedulerService tick short-circuits while quiesced, before querying any Action row', async () => {
-  const svc = new ActionSchedulerService(/* actionRepo */ {}, /* actionsService */ {}, logStub, quiescedTrue);
-  await assert.doesNotReject(() => svc._tick());
 });
 
 test('[review round 1 P2] OnTicketDoneActionService activity handler short-circuits while quiesced, before even reading the ticket', async () => {
