@@ -761,9 +761,17 @@ export class AgentSessionRunner {
           // (예: `no rollout found for thread id …`). 그것까지 사용자에게 보여 준다.
           const details = (err?.data as { details?: unknown } | undefined)?.details;
           const detail = redactSecrets(String(details || err?.message || err));
+          // 가장 흔한 사유 하나는 문구만으로 조치를 알 수 없다: codex 는 스레드마다
+          // writer 락을 잡으므로, 그 세션이 터미널이나 Codex 앱에서 아직 열려 있으면
+          // `thread … already has an active writer` 로 거절한다. 원문만 보여 주면
+          // "무엇을 고치라는 건지" 가 빠지므로 조치를 덧붙인다.
+          const activeWriter = /already has an active writer/i.test(detail);
+          const hint = activeWriter
+            ? ' 이 세션이 그 장비의 다른 곳(터미널 또는 Codex 앱)에서 아직 열려 있습니다. 거기서 닫은 뒤 다시 Connect 하세요.'
+            : ' Fix that and reload, or start a new session in the same folder.';
           throw Object.assign(
-            new Error(`${cli} could not resume this session: ${detail}. Fix that and reload, or start a new session in the same folder.`),
-            { code: 'resume_failed', cause: err },
+            new Error(`${cli} could not resume this session: ${detail}.${hint}`),
+            { code: activeWriter ? 'resume_locked' : 'resume_failed', cause: err },
           );
         } finally {
           live.loading = false;

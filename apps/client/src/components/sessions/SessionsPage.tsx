@@ -440,13 +440,21 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // 어댑터가 살아 있어야 오므로, 페이지에 들어오면 idle 세션은 자동으로 한 번 연결한다(터미널에서
   // `--resume` 하는 것과 같다). closed/error 는 Connect 버튼으로만.
   const [connecting, setConnecting] = useState(false);
+  // 연결 실패 사유를 화면에 **남겨 둔다**. 예전에는 토스트 한 번이 전부라, 그게 사라지면
+  // "Connect 눌렀는데 실패" 말고는 아무 근거도 안 남았다(실측: codex 가 `thread … already
+  // has an active writer` 라고 정확히 알려 주는데도 화면에는 그 말이 없었다). 서버도 같은
+  // 사유를 세션 상태에 적지만, SSE 가 늦거나 유실돼도 눈에 남도록 여기서도 들고 있는다.
+  const [connectError, setConnectError] = useState<string | null>(null);
   const autoConnectedRef = useRef<string | null>(null);
   const connect = useCallback(async () => {
     setConnecting(true);
+    setConnectError(null);
     try {
       setLive(await api.openHostSession(managerId, cli, { session_id: sessionId }));
     } catch (err: any) {
-      showToast(err?.message || 'Failed to connect to the session on the Runtime Host', 'error');
+      const message = err?.message || 'Failed to connect to the session on the Runtime Host';
+      setConnectError(message);
+      showToast(message, 'error');
     } finally {
       setConnecting(false);
     }
@@ -745,9 +753,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         </div>
       </header>
 
-      {live?.last_error && status === 'error' && (
+      {/* 오류 배너 — 서버가 상태에 적어 둔 사유(last_error)와, 그게 도착하기 전의
+          연결 실패 사유(connectError) 중 있는 것을 보여 준다. 둘 다 비어 있을 때만 숨긴다. */}
+      {((status === 'error' && live?.last_error) || connectError) && (
         <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}` }}>
-          {live.last_error}
+          {(status === 'error' && live?.last_error) || connectError}
         </div>
       )}
 
