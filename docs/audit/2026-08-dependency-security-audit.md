@@ -4577,3 +4577,238 @@ red 로 추적하던 `hermes-runtime-dispatch.test.mjs` 도 해소됐다. `depen
   어제 tip 을 들고 있는 것은 위험이 아니다(7절). (c) **PR #12 머지 여부** — 머지되면 2절의
   수정이 `main` 에 올라가고, 첫 cron 에서 `next` 축이 99 패키지로 올라간 것을 확인할 수 있다.
   (d) `production.private` 문자열은 **안전망**이다 — 드리프트로 오인하지 말 것(16회차 1절).
+
+## 재검증 로그 — 2026-09-28 (`main` @ `e52d3234`)
+
+18회차. **의존성은 조용했지만 게이트는 조용하지 않았다** — 발행 축이 감사받지 않은 ref 에서
+publish 될 수 있는 경로를 발견해 막았다. 또한 17회차의 운영자 판단 항목이 브랜치 삭제로
+종결됐다.
+
+1. **의존성 드리프트 0.** 루트 두 blob 이 `origin/main` 과 **글자 그대로 동일**
+   (`package.json` `3a357fd3`, `package-lock.json` `896fce76` — 17회차가 세운 새 기준값 그대로).
+   `main` 이 46개 파일 규모로 움직였지만 `apps/*/package.json` 의 변경은 `apps/client` 의
+   테스트 등록 script 한 줄뿐이었다. 루트 blob 규칙 **8회 연속 유지**(1절).
+2. **발견·수정 — publish 가 임의 ref 에서 나갈 수 있었다.**
+   `publish-agent-manager.yml` 의 `on.push.branches` 는 main 한정인데 `workflow_dispatch` 는
+   **임의 ref** 로 실행 가능하고, `publish` 잡에는 ref 조건이 **전혀 없었다**. 즉 잠든
+   브랜치에서 dispatch 하면 의존성 감사가 한 번도 판정하지 않은 트리가 npm 에 올라가고
+   `npm i -g awb-agent-manager` 하는 모든 호스트가 그것을 받는다. job 레벨 `if:` 로 막고
+   가드로 못박았다. **이번 회차의 코드 변경은 이것뿐이다**(2절).
+3. **종결 — 17회차 운영자 판단 항목.** `fix/prod-dependency-audit-gate` 가 origin 에서
+   **삭제**됐다. 이로써 취약(7건) ref 가 사라졌고, 은퇴한 `deploy.yml` 은 이제 **어느 ref 에도
+   없다**. 원격 브랜치는 **8개 → 3개**(4절).
+4. `main` 은 moderate/low **양쪽 0건** (547 패키지 / 588 버전 — 17회차와 동일 수치, lockfile
+   무변과 일치). `main` CI 전 잡 green, cron 의 schedule 전용 스텝 2개도 success(3·5절).
+
+### 1. 드리프트 없음 — 루트 blob 규칙 8회 연속
+
+| 대상 | 값 | 판정 |
+| --- | --- | --- |
+| `package.json` (root) | `3a357fd3` | 17회차와 동일 |
+| `package-lock.json` (root) | `896fce76` | 17회차와 동일 |
+
+`main` tip 은 `a1855811` → `e52d3234` 로 움직였고 머지 diff 는 46 파일 / +2144 −445 였다
+(workspace-schedules, session lock, terminal 관련). 그런데 루트 두 blob 이 모두 그대로이므로
+**의존성은 하나도 드리프트하지 않았다** — npm workspaces 는 워크스페이스별 의존성 집합까지
+루트 lockfile 의 `packages["apps/*"]` 노드에 적기 때문이다. 확인 사살로 `apps/*/package.json`
+diff 를 직접 떠 보니 `apps/client` 의 `test` script 에 `session-connect-error-visible.test.mjs`
+한 줄이 추가된 것이 전부였다(의존성 블록 무변). **큰 tip 점프는 드리프트 신호가 아니다.**
+
+발행물 쪽도 확인: `awb-agent-manager` 는 `1.6.244` → **`1.6.246`** 으로 두 번 더 publish 됐다.
+전부 main push 경로이고, 2절의 가드는 이 정상 경로를 건드리지 않는다(`push` 는 이미 main 한정).
+
+### 2. 발견·수정 — `workflow_dispatch` 가 감사받지 않은 ref 를 publish 할 수 있었다
+
+17회차의 교훈("초록 게이트가 곧 커버하는 게이트는 아니다 — 의존성이 들어올 때 각 게이트가
+그것을 **볼 수 있는지** 물어라")을 이번엔 트리거 쪽에 적용했다. 물음: **발행물이 감사받지 않은
+트리에서 나갈 수 있는 경로가 있는가?**
+
+`publish-agent-manager.yml` 의 상태:
+
+```yaml
+on:
+  push:
+    branches: [main]      # ← main 한정
+  workflow_dispatch:      # ← ref 제약 없음
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:                # ← job 레벨 if 가 없었다
+```
+
+`workflow_dispatch` 는 실행 시 임의 ref 를 고를 수 있다. `publish` 잡에 ref 조건이 없었으므로
+`gh workflow run publish-agent-manager.yml --ref sec-audit-20260824` 같은 실행이 **그 ref 의
+트리를 npm 에 publish** 한다. 버전은 레지스트리 latest 기준으로 계산되므로 정상적인 새 버전이
+나가고, `compute-publish-version.mjs` 는 ref 를 보지 않는다.
+
+**왜 이 축이 특히 위험한가.** 발행물은 lockfile 이 아니라 **선언 범위(`^`)를 설치 시점에
+재해석**한다 — `audit-published-deps.mjs` 의 `next` 축이 따로 존재하는 이유가 바로 이것이다.
+그래서 "lockfile 이 초록"은 이 경로에 아무 보장을 주지 않는다. 그리고 그 `next` 축 게이트는
+`ci.yml` 에서 도는데, `publish-agent-manager.yml` 은 **별개 워크플로**라 그 게이트를 통과할
+의무가 없다. 폭발 반경은 이 저장소에서 가장 크다(`npm i -g` 하는 모든 운영자 호스트).
+
+기존 `supply-chain-integrity-guard` 는 `npm publish --provenance` 와 `id-token: write` 는
+못박고 있었지만 **publish 대상 ref 는 못박지 않았다.** provenance 는 사후 귀속(attribution)을
+가능하게 할 뿐, 잠든 브랜치에서의 publish 를 **막지는** 않는다.
+
+조치 — job 레벨 `if:` 하나:
+
+```yaml
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+```
+
+설계 근거 두 가지:
+
+- **job 레벨**이어야 한다. step 별 `if:` 는 checkout·setup-node 를 이미 실행시킨 뒤라
+  잡 자체를 막지 못한다.
+- 리터럴 `'refs/heads/main'` 대신 `default_branch` 를 읽는다. AGENTS.md 가 경계하는 "숫자·이름을
+  베껴 적어 stale 해지는" 형태를 피하고 **진실의 출처를 가리키기** 위함이다. 기본 브랜치가
+  개명되면 이 조건은 자동으로 따라가고, 만약 `default_branch` 가 비면 조건은
+  `refs/heads/` 가 되어 **어떤 ref 와도 일치하지 않는다 — fail-closed**(publish 가 막히는
+  방향으로 실패한다). 이 저장소 감사 게이트들의 fail-closed 원칙과 같은 방향이다.
+
+가드는 `supply-chain-integrity-guard.test.mjs` 에 1건 추가(16 → 17). **뮤테이션으로 실측**해
+게이트가 tautology 가 아님을 확인했다:
+
+| 변형 | 결과 |
+| --- | --- |
+| `if:` 줄 제거 | exit 1 — "has no job-level `if:` guard" |
+| `if: github.actor != 'nobody'` (ref 무관 조건) | exit 1 — "must constrain `github.ref`" |
+| `if: github.ref == 'refs/heads/sec-audit-20260824'` (엉뚱한 브랜치) | exit 1 — "must pin the ref to the default branch" |
+
+세 경우 모두 실패시킨 뒤 원복해 17/17 green 을 재확인했다. 가드는 `workflow_dispatch` 선언
+존재도 함께 단언한다 — 나중에 그것이 사라져 이 가드의 전제가 무효가 되면 **스스로 stale 임을
+알리도록** 했다.
+
+### 3. 취약점 감사 — moderate/low 양쪽 0건
+
+| 임계 | 결과 | 규모 |
+| --- | --- | --- |
+| `moderate` | **0건** | 547 패키지 / 588 버전 |
+| `low` | **0건** | 547 패키지 / 588 버전 |
+
+17회차와 **동일 수치**다. lockfile blob 이 안 움직였으므로 일치하는 것이 정상이고, 값이 달라졌다면
+그것 자체가 조사 대상이었다.
+
+**overrides 8개 전부 해소된 버전으로 확인**(선언이 아니라 실제 해소값 기준):
+
+| override | 선언 | 해소 |
+| --- | --- | --- |
+| `multer` | `^2.3.0` | 2.3.0 |
+| `hono` | `^4.13.5` | 4.13.7 |
+| `@hono/node-server` | `^2.0.10` | 2.1.1 |
+| `@nestjs/swagger` → `js-yaml` | `^5.2.3` | 5.4.1 (hoisted) |
+| `cosmiconfig` → `js-yaml` | `^4.3.2` | 4.3.2 (nested) |
+| `@angular-devkit/core`·`fdir`·`vite` → `picomatch` | `^4.0.4` | 4.0.7 (단일 hoisted) |
+
+`packages[""].overrides` 는 이 lockfile 에 **여전히 없다** — 정상이다(해소 버전으로 판정할 것).
+`npm audit fix` 는 쓰지 않았고 root `overrides` 도 유지했다.
+
+### 4. 원격 브랜치 8 → 3, 그리고 운영자 판단 항목의 종결
+
+브랜치 수가 트리거이고 blob 전수가 확인이다. **8개 → 3개.**
+
+| ref | 루트 lockfile blob | 판정 |
+| --- | --- | --- |
+| `main` | `896fce76` | 기준 |
+| `sec-audit-20260926` (이 브랜치, PR #12) | `896fce76` | main 과 동일 |
+| `sec-audit-20260824` | `29d0a360` | 상이 — 잠들어 있음, 범위 밖 |
+
+사라진 5개 중 셋은 17회차가 취약으로 기록한 ref 다 — `fix/prod-dependency-audit-gate`(7건),
+`codex`·`ticket/2dc3c62f-mission-execution-workspace`(각 13건). 이제 **취약한 divergent ref 는
+`sec-audit-20260824` 하나**만 남았고, `ci.yml` 의 `pull_request:` 는 브랜치 필터가 없어 이 ref
+에서 PR 이 열리면 dependency-audit 이 무조건 걸린다(확인함). 되살려 쓸 일이 생기면 `main` 을
+먼저 머지할 것.
+
+**17회차 운영자 판단 항목 종결.** `fix/prod-dependency-audit-gate` 는 은퇴한 `deploy.yml` 의
+마지막 사본이었고, 그 브랜치가 삭제되면서 `deploy.yml` 은 남은 3개 ref 전부에서 **부재**다
+(직접 확인). 한편 `gh workflow list --all` 은 아직 `Deploy AI Workflow Board`(`261543002`) 를
+**active** 로 보여준다 — 이는 파일 없는 **고아 등록**이다. GitHub 은 대상 ref 에 워크플로
+파일이 있어야 dispatch 하므로 이 등록은 **무해·무동작**이다. 지난 회차들의 지시대로
+`workflow_dispatch` 로 시험하지 않았다(성공하면 그것이 곧 NAS 배포다). 이 스레드는 닫는다.
+
+### 5. `main` 건강 — 전 잡 green, cron 의 schedule 전용 스텝도 green
+
+범위 밖 red 는 단언하지 말고 확인한다는 원칙대로, 같은 run 에서 `dependency audit` 잡이
+success 인지를 봤다. 최신 push run `36315075601`(`e52d3234`, 내가 머지한 바로 그 tip):
+
+```
+success  dependency audit          success  apps/server full test suite (sqlite)
+success  qa-flows on Postgres      success  client unit + interaction tests
+success  agent-manager tests (ubuntu / windows)
+success  Ontology Graph browser smoke      success  chat-rooms join cast guard
+skipped  agent-manager windows flake repro (조건부)
+```
+
+**전 잡 success** — 16회차의 `hermes-runtime-dispatch` red 는 17회차에 이미 해소됐고 이번에도
+green 이다. `dependency audit` 잡의 스텝별 판정도 전부 success 이며, skip 된 2개는
+`배포 브랜치 lockfile 재감사`·`발행 트리 재감사`로 **schedule 전용**(push run 이므로 정상 skip)
+이다. 그 두 스텝이 실제로 도는지는 최신 cron run `36311178163`(2026-09-27T10:00Z)에서 확인 —
+**둘 다 success**. `!cancelled()` 수정이 계속 유지되고 있다(어떤 스텝도 선행 실패로 조용히
+건너뛰이지 않았다).
+
+### 6. 발행 축 — 커버리지 산술까지 재확인
+
+| 축 | 패키지 | advisory | install script |
+| --- | --- | --- | --- |
+| `live` (레지스트리 latest) | 100 | **0건** | 0개 |
+| `next` (선언 범위) | 99 | **0건** | 0개 |
+
+선언 범위 **5개 전부 상한 있음**. 17회차 수정의 효과를 산술로 교차 확인했다 — 매니페스트의
+런타임 항목은 `dependencies` 4개 + `optionalDependencies` 1개 = **5개**이고 게이트가 보고한
+수와 정확히 일치한다(17회차 이전에는 4개를 보고해 `@lydell/node-pty` 가 빠져 있었다).
+`AUDITED_DEPENDENCY_BLOCKS` + `unclassifiedDependencyBlocks()` tripwire 도 그대로 있다.
+
+**단, 이 초록은 이 브랜치의 스크립트로 얻은 것이다.** `origin/main` 의
+`scripts/audit-published-deps.mjs` 는 blob `3c60b3b9` 로 **아직 그 수정을 갖고 있지 않다**
+(이 브랜치는 `dd2ccb03`, `AUDITED_DEPENDENCY_BLOCKS` 검색 결과 0건). 즉 **PR #12 가 머지되기
+전까지 `main` 의 cron 은 `optionalDependencies` 에 대해 계속 눈먼 상태**다. 17회차에 이미
+원인·수정이 확정된 사안이므로 다시 파생시키지 않았다("불변 PR 안의 코드로 CI 동작을 예측하지
+말 것"의 대칭 — 고친 red 는 머지될 때까지 main 에 남는다). 실제 위험은 이번 회차에 수동으로
+0건임을 확인했으니 없고, **막힌 것은 자동 게이트의 시야뿐**이다. 조치는 하나: PR #12 머지.
+
+### 7. 이월 항목 추적
+
+- `@lydell/node-pty` 의 `^1.2.0-beta.15` 가 이후 prerelease 를 자동 수용하는 창(17회차 8절):
+  **아직 발화하지 않았다.** 레지스트리 최신 prerelease 는 여전히 `1.2.0-beta.15` 이고
+  `latest`/`beta` dist-tag 둘 다 그 값이다(`beta.16` 없음). lockfile 도 7개 플랫폼 패키지
+  전부 `1.2.0-beta.15`. 감사가 단독으로 바꿀 판단이 아니므로 사실만 갱신해 넘긴다.
+
+### 이번 회차에 돌린 것
+
+- 가드 7종 **125/125** (`apps/server` 직접 실행) — 변경 전 **124** 도 green 임을 먼저 확인
+- `audit-lockfile-advisories` — moderate **0건**, low **0건** (547/588)
+- `audit-install-scripts`, `audit-action-pins`, `audit-ci-branch-coverage`,
+  `audit-cron-coverage`, `audit-deploy-branch-deps` → 전부 **exit 0**
+- `audit-published-deps` (전체, 네트워크) → **live 100 / next 99, 양쪽 0건 + install script 0개**,
+  선언 범위 5개 전부 상한 있음 + 매니페스트 런타임 항목 수와 **산술 교차 확인**(6절)
+- overrides **8개**의 해소된 버전 확인, 중첩 override 대상(`js-yaml`·`picomatch`)까지 실측(3절)
+- 루트 두 blob + `apps/*/package.json` diff 직접 확인 → 드리프트 0(1절)
+- 원격 **3개** ref 의 루트 lockfile blob 전수(40자 hex 검사로 404 본문 오판 회피)(4절)
+- `main` push CI 최신 run **잡·스텝 단위** 판정 + 최신 cron run 의 schedule 전용 스텝 2개(5절)
+- `deploy.yml` 의 전 ref 부재 + 고아 워크플로 등록 확인(4절)
+- `@lydell/node-pty` 레지스트리 버전·dist-tag 재조회(7절)
+- 신규 가드의 **뮤테이션 3종 실측**(2절)
+
+`npm audit fix` 는 사용하지 않았고 root `overrides` 도 유지했다.
+**코드 변경: `publish-agent-manager.yml` 의 job 레벨 `if:` + 그 가드 1건**(2절).
+
+### 이월
+
+- **해소됨 — `fix/prod-dependency-audit-gate` 운영자 판단**: 브랜치가 삭제됐다. `deploy.yml` 은
+  어느 ref 에도 없고, 남은 `Deploy AI Workflow Board` 등록은 파일 없는 고아라 무동작이다.
+  **이 스레드는 닫혔다 — 다시 열지 말 것**(4절).
+- **조치 대기 — PR #12 머지**: 머지되어야 17회차의 `optionalDependencies` 수정과 이번 회차의
+  publish ref 가드가 `main` 에 올라간다. 그때까지 `main` cron 은 `optionalDependencies` 에
+  눈먼 상태다(6절). 머지 후 첫 cron 에서 `next` 축이 **99 패키지**로 올라간 것을 확인하면 종결.
+- **운영자/기능 소유자 판단**: `@lydell/node-pty` 의 `^1.2.0-beta.15` prerelease 자동 수용(7절).
+  아직 발화 안 함. 감사가 단독으로 바꾸지 않는다.
+- **잠든 취약 브랜치 1개** — `sec-audit-20260824` (blob `29d0a360`). 감사 범위 밖이고 PR 시
+  `ci.yml` 이 막는다. 되살려 쓸 일이 생기면 `main` 을 먼저 머지.
+- **운영자 인프라 항목 (11회차)** — cron liveness 는 저장소 안 가드로 닫을 수 없다. 외부
+  heartbeat 모니터가 필요하다. **재검토하지 말 것**.
+- **다음 회차 확인 항목** — (a) 루트 두 blob(현재 `3a357fd3` / `896fce76`). (b) 원격 브랜치
+  수(현재 **3**)와 ref 전체 lockfile blob. (c) **PR #12 머지 여부** 및 머지 후 첫 cron 의
+  `next` 축 패키지 수. (d) `production.private` 문자열은 **안전망**이다 — 드리프트로 오인하지
+  말 것(16회차 1절).
