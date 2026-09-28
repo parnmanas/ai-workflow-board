@@ -32,40 +32,7 @@ import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessi
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
-// ─── 사이드바 폴드 상태 쿠키 저장 ───────────────────────────────────────────
-
-const SIDEBAR_FOLD_KEY = 'awb_sidebar_fold';
-const SIDEBAR_FOLD_MAX_AGE = 60 * 60 * 24 * 365; // 1년
-
-interface SidebarFoldSnapshot {
-  sessions?: boolean;
-  chats?: boolean;
-  sections?: Record<string, boolean>;
-  hosts?: string[];
-}
-
-function loadSidebarFold(): Required<SidebarFoldSnapshot> {
-  try {
-    const match = document.cookie.split(';').find((c) => c.trim().startsWith(`${SIDEBAR_FOLD_KEY}=`));
-    const raw = match ? decodeURIComponent(match.trim().slice(SIDEBAR_FOLD_KEY.length + 1)) : null;
-    const parsed: SidebarFoldSnapshot = raw ? (JSON.parse(raw) as SidebarFoldSnapshot) : {};
-    return {
-      sessions: parsed.sessions ?? false,
-      chats: parsed.chats ?? false,
-      sections: parsed.sections ?? {},
-      hosts: parsed.hosts ?? [],
-    };
-  } catch {
-    return { sessions: false, chats: false, sections: {}, hosts: [] };
-  }
-}
-
-function saveSidebarFold(snap: Required<SidebarFoldSnapshot>): void {
-  try {
-    const value = encodeURIComponent(JSON.stringify(snap));
-    document.cookie = `${SIDEBAR_FOLD_KEY}=${value}; path=/; max-age=${SIDEBAR_FOLD_MAX_AGE}; SameSite=Lax`;
-  } catch { /* best-effort */ }
-}
+import { loadSidebarFold, saveSidebarFold } from './sidebarFold';
 
 interface SidebarProps {
   overlay: boolean;
@@ -129,21 +96,27 @@ export default function Sidebar({
   const [searchParams] = useSearchParams();
   // WORK 최상위 메뉴별 접기/펼치기. 기본은 모두 펼침 — 어느 메뉴 하나만 다르게
   // 동작하지 않도록 세 그룹이 같은 state 모양을 쓴다.
-  const [collapsedGroups, setCollapsedGroups] = React.useState<Partial<Record<WorkNavGroupKey, boolean>>>({});
+  const [collapsedGroups, setCollapsedGroups] = React.useState<Partial<Record<WorkNavGroupKey, boolean>>>(
+    // 저장본에서 복원한다. `foldInit` 는 아래에서 선언되므로 여기서 직접 읽는다 —
+    // useState 초기화 함수는 최초 렌더에 한 번만 돈다.
+    () => loadSidebarFold().groups as Partial<Record<WorkNavGroupKey, boolean>>,
+  );
   const [visibleGroupCounts, setVisibleGroupCounts] = React.useState<Partial<Record<WorkNavGroupKey, number>>>({});
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
   const [markingAllTicketsRead, setMarkingAllTicketsRead] = React.useState(false);
 
-  // 사이드바 폴드 상태 — localStorage 에서 초기화
+  // 사이드바 폴드 상태 — 저장본에서 초기화한다. **접기 지점은 빠짐없이 여기서
+  // 복원된다**; 하나라도 빠지면 그 메뉴만 새로고침마다 펼쳐져 돌아온다(실제로
+  // Teams/Orchestrations/Boards 와 호스트 아래 작업 폴더가 그랬다).
   const [foldInit] = React.useState(loadSidebarFold);
   const [sessionsCollapsed, setSessionsCollapsed] = React.useState(() => foldInit.sessions);
   const [chatsCollapsed, setChatsCollapsed] = React.useState(() => foldInit.chats);
   const [sectionCollapsed, setSectionCollapsed] = React.useState<Record<string, boolean>>(() => foldInit.sections);
   const [collapsedHosts, setCollapsedHosts] = React.useState<Set<string>>(() => new Set(foldInit.hosts));
-  const [collapsedHostCwds, setCollapsedHostCwds] = React.useState<Set<string>>(() => new Set());
-  const [expandedOlderCwds, setExpandedOlderCwds] = React.useState<Set<string>>(() => new Set());
+  const [collapsedHostCwds, setCollapsedHostCwds] = React.useState<Set<string>>(() => new Set(foldInit.hostCwds));
+  const [expandedOlderCwds, setExpandedOlderCwds] = React.useState<Set<string>>(() => new Set(foldInit.olderCwds));
   // 3일보다 오래된 작업 폴더를 펼쳐 둔 호스트. 세션 행과 같은 창을 쓴다(splitRecentCwdGroups).
-  const [expandedOlderHosts, setExpandedOlderHosts] = React.useState<Set<string>>(() => new Set());
+  const [expandedOlderHosts, setExpandedOlderHosts] = React.useState<Set<string>>(() => new Set(foldInit.olderHosts));
   const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
   const loadAttemptedRef = React.useRef<Set<string>>(new Set());
 
@@ -401,15 +374,24 @@ export default function Sidebar({
     });
   }, [loadHostSessions]);
 
-  // 폴드 상태를 localStorage에 저장
+  // 폴드 상태 저장. **접기 지점을 추가하면 이 객체와 의존성 배열에도 넣어야 한다** —
+  // 빠뜨리면 그 메뉴만 저장되지 않고, 화면에서는 접히는데 새로고침하면 돌아온다.
+  // `sidebar-fold-persistence.test.mjs` 가 이 목록과 복원 목록을 맞춰 본다.
   React.useEffect(() => {
     saveSidebarFold({
       sessions: sessionsCollapsed,
       chats: chatsCollapsed,
       sections: sectionCollapsed,
+      groups: collapsedGroups as Record<string, boolean>,
       hosts: Array.from(collapsedHosts),
+      hostCwds: Array.from(collapsedHostCwds),
+      olderCwds: Array.from(expandedOlderCwds),
+      olderHosts: Array.from(expandedOlderHosts),
     });
-  }, [sessionsCollapsed, chatsCollapsed, sectionCollapsed, collapsedHosts]);
+  }, [
+    sessionsCollapsed, chatsCollapsed, sectionCollapsed, collapsedGroups,
+    collapsedHosts, collapsedHostCwds, expandedOlderCwds, expandedOlderHosts,
+  ]);
 
   const toggleSection = React.useCallback((key: string) => {
     setSectionCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -520,14 +502,27 @@ export default function Sidebar({
     missionsLoading,
   });
 
-  // 딥링크(미션 상세 등)나 다른 화면에서 어떤 그룹의 영역으로 들어오면 접혀 있던
-  // 그 그룹을 편다 — 그러지 않으면 현재 위치를 가리키는 서브 항목이 접힌 채 숨는다.
-  // 사용자가 직접 접은 다른 그룹은 그대로 둔다.
+  // 앱 안에서 다른 그룹의 영역으로 **이동하면** 접혀 있던 그 그룹을 편다 — 그러지
+  // 않으면 현재 위치를 가리키는 서브 항목이 접힌 채 숨는다. 사용자가 직접 접은 다른
+  // 그룹은 그대로 둔다.
+  //
+  // **최초 렌더에서는 펴지 않는다.** 예전에는 마운트에서도 돌아서, 저장된 폴드를
+  // 복원해도 "지금 보고 있는 화면이 속한 그룹" 하나는 매번 다시 펼쳐졌다 — Boards 를
+  // 접어 둔 채 보드에서 새로고침하면 Boards 가 도로 펴졌다. 새로고침은 "이동" 이
+  // 아니라 **같은 자리로 돌아오는 것**이므로, 저장된 상태가 이긴다.
   const activeGroupKey = activeWorkGroupKey(workGroups);
+  // "이동했는가" 의 기준은 **경로**다. 효과 실행 횟수로 세면 안 된다 — `activeGroupKey`
+  // 는 팀·미션·보드 목록이 늦게 도착하면서 mount 이후에 null → 'boards' 로 채워지므로,
+  // "첫 실행만 건너뛰기" 는 엉뚱한 실행을 소비하고 정작 값이 생겼을 때 펴 버린다
+  // (실측: Boards 를 접어 둔 채 /boards 에서 새로고침하면 도로 펴졌다).
+  const mountedPathRef = React.useRef(location.pathname);
   React.useEffect(() => {
     if (!activeGroupKey) return;
+    // 같은 자리로 돌아온 것(새로고침·딥링크 전체 로드)은 이동이 아니다 — 저장된
+    // 폴드가 이긴다.
+    if (location.pathname === mountedPathRef.current) return;
     setCollapsedGroups((prev) => (prev[activeGroupKey] ? { ...prev, [activeGroupKey]: false } : prev));
-  }, [activeGroupKey]);
+  }, [activeGroupKey, location.pathname]);
 
   const subListTextStyle: React.CSSProperties = {
     padding: '6px 14px 8px 46px',
