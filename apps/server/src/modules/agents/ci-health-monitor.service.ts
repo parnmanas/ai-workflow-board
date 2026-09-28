@@ -49,13 +49,33 @@
  * 카운터로만 관측된다. 같은 run의 재실행 flip(run id 동일)은 진짜 복구이므로 통과시킨다.
  *
  * Ticket idempotency: the auto-created ticket carries
- * `operational_dedupe_key = "ci_red:{board_id}:{repo}:{branch}:{workflow_id}"`
+ * `operational_dedupe_key = "ci_red:{workspace_id}:{repo}:{branch}:{workflow_id}"`
  * under Ticket's pre-existing `uq_tickets_operational_dedupe_open` unique
  * index — INSERT-first, unique-violation-caught, winner-reused (never a
  * pre-SELECT check), mirroring `OutreachIngestService._createTicket` /
  * `_resolveDedupeCollision` exactly. `CiRedAlert.created_ticket_id` additionally
  * ensures at most one creation ATTEMPT per red episode even before any DB
  * race is in play.
+ *
+ * **Incident 수렴 — 티켓은 보드당 1건이 아니라 장애당 1건이다** (ticket 3886473a):
+ * 위 키에 들어가는 것은 board id 가 **아니라** workspace id 다. 같은 저장소를 감시하는
+ * 보드가 둘이면 예전에는 같은 실패 run 에 대해 실행 티켓이 2건 열렸고, 같은 assignee 가
+ * 양쪽에 붙어 같은 한 줄 수정을 두 번 dispatch 받았다(실측: AWB 보드와 토큰 절감 파일럿
+ * 보드가 같은 run 을 두고 쌍둥이 티켓을 열어, 사람이 선행조건을 걸었다 풀었다 하며 손으로
+ * 조정해야 했다). 이제 (workspace, repo, branch, workflow) 가 하나의 **incident** 이고,
+ * 먼저 trip 한 보드가 canonical 티켓을 만들며 나머지 보드는 그것을 **채택**한다 —
+ * `CiRedAlert.created_ticket_id` 가 같은 티켓을 가리키고(관계), 보드별 채팅 알림이 그
+ * 티켓을 링크하며(알림), 채택 사실은 canonical 티켓에 코멘트로 남는다. 보드별 감시·복구
+ * 판정·재알림 쿨다운은 그대로 보드별 `CiRedAlert` 행에 남으므로 보드별 가시성은 유지된다.
+ *
+ * 스코프에 workspace 가 들어가는 이유(빼면 안 되는 이유): 티켓·역할 배정·에이전트가 전부
+ * workspace 스코프다. 다른 workspace 의 티켓을 가리키면 그 보드에서는 열 수도 dispatch 할
+ * 수도 없는 죽은 참조가 되고, 알림 본문의 `/ws/{workspace_id}/ticket/{id}` 링크도 어긋난다.
+ * 서로 다른 저장소·브랜치·workflow 는 키가 다르므로 절대 합쳐지지 않는다.
+ *
+ * canonical 티켓이 **terminal 컬럼에 들어가면 그 incident 는 끝난 것**이므로 재사용하지
+ * 않는다 — 키를 반납시키고 새 티켓을 연다. 그러지 않으면 새 실패가 아무도 보지 않는 Done
+ * 티켓에 붙어 조용히 묻힌다.
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -281,6 +301,20 @@ function isUniqueConstraintError(error: unknown): boolean {
     || /unique constraint failed/i.test(message);
 }
 
+/**
+ * 한 CI 장애(incident)의 신원. **board id 는 들어가지 않는다** — 같은 workspace 안에서
+ * 같은 저장소·브랜치·workflow 를 감시하는 보드가 여럿이면 그것은 장애 N 건이 아니라
+ * 1 건이고, 실행 티켓도 1 건이어야 한다 (ticket 3886473a).
+ *
+ * workspace 는 반드시 들어간다 — 티켓·역할 배정·에이전트가 workspace 스코프라 다른
+ * workspace 의 티켓을 가리키면 그 보드에서 열 수도 dispatch 할 수도 없다.
+ */
+export function ciIncidentDedupeKey(
+  workspaceId: string, repoFullName: string, branch: string, workflowId: string,
+): string {
+  return `ci_red:${workspaceId}:${repoFullName}:${branch}:${workflowId}`;
+}
+
 interface MonitorTarget {
   owner: string;
   repo: string;
@@ -295,6 +329,10 @@ interface CiSweepStats {
   alerts_created: number;
   alerts_updated: number;
   tickets_created: number;
+  /** 새 티켓을 만드는 대신 다른 보드가 이미 연 canonical incident 티켓을 채택한 횟수
+   *  (ticket 3886473a). `tickets_created` 와 합쳐 "이번 sweep 이 red 로 본 보드 수" 가
+   *  된다 — 채택이 0 인데 보드가 여럿이면 수렴이 동작하지 않는다는 신호다. */
+  tickets_linked: number;
   delivery_failures: number;
   recovered: number;
   skipped_disabled: boolean;
@@ -307,6 +345,14 @@ interface CiSweepStats {
    *  횟수 (ticket 0ef405f9). 0 이 아니면 GitHub 응답이 그 sweep 에서 앞뒤가 맞지 않았다는
    *  뜻이다 — 알림은 나가지 않지만 'CI' 카테고리 warn 로그로 남는다. */
   stale_green_rejected: number;
+}
+
+/** `_resolveIncidentTicket` 의 결과 — 이 보드가 canonical 티켓을 직접 만들었는지
+ *  (`created`), 아니면 다른 보드가 이미 연 것을 채택했는지 구분한다. 채택 쪽만
+ *  canonical 티켓에 교차 보드 코멘트를 남긴다. */
+interface IncidentTicketOutcome {
+  ticketId: string;
+  created: boolean;
 }
 
 @Injectable()
@@ -368,7 +414,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   async sweep(now: Date = new Date()): Promise<CiSweepStats> {
     const stats: CiSweepStats = {
       boards_scanned: 0, targets_checked: 0, alerts_created: 0, alerts_updated: 0,
-      tickets_created: 0, delivery_failures: 0, recovered: 0,
+      tickets_created: 0, tickets_linked: 0, delivery_failures: 0, recovered: 0,
       skipped_disabled: !this.config.enabled,
       fetch_failures: 0,
       stale_green_rejected: 0,
@@ -570,11 +616,18 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
 
     if (this.config.createTicket && !row.created_ticket_id) {
       try {
-        const ticketId = await this._createOrReuseTicket(board, target, workflow, evalResult);
-        if (ticketId) {
-          row.created_ticket_id = ticketId;
+        const outcome = await this._resolveIncidentTicket(board, target, workflow, evalResult);
+        if (outcome) {
+          // 관계를 먼저 영속화한다 — 아래 교차 보드 코멘트가 실패하더라도 이 보드는
+          // 이미 canonical 티켓을 가리키고 있어야 다음 sweep 이 새 티켓을 열지 않는다.
+          row.created_ticket_id = outcome.ticketId;
           await alertRepo.save(row);
-          stats.tickets_created += 1;
+          if (outcome.created) {
+            stats.tickets_created += 1;
+          } else {
+            stats.tickets_linked += 1;
+            await this._noteAdditionalBoard(outcome.ticketId, board, target, workflow);
+          }
         }
       } catch (e) {
         this.logService.warn('CI', 'CI-red ticket auto-creation failed — will retry next sweep', {
@@ -664,6 +717,12 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
    * push happened to fix it, or masked the issue; closing the loop is left to
    * whoever is holding the ticket — then deletes the row (self-pruning, same
    * as StuckTicketAlert's unstuck path).
+   *
+   * 채팅 알림은 보드별로 나가지만(보드별 가시성), **티켓 코멘트는 incident 당 1회**다
+   * (ticket 3886473a): 여러 보드가 같은 canonical 티켓을 가리키므로 보드마다 남기면 같은
+   * 문장이 보드 수만큼 쌓인다. 내 행을 먼저 지운 뒤 그 티켓을 아직 red 로 보고 있는
+   * `CiRedAlert` 행이 0 건일 때만 남긴다 — 어느 보드의 조회가 실패해 red 로 남아 있는
+   * sweep 에서 성급히 복구를 선언하지 않는다는 뜻이기도 하다.
    */
   private async _handleRecovery(
     board: Board,
@@ -687,7 +746,14 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
-    if (row.created_ticket_id) {
+    // 먼저 지운다 — 아래 "이 incident 를 아직 red 로 보는 행이 남았는가" 판정에 내
+    // 행이 끼면 코멘트가 영원히 남지 않는다.
+    await this.dataSource.getRepository(CiRedAlert).delete({ id: row.id });
+
+    const stillRedElsewhere = row.created_ticket_id
+      ? await this.dataSource.getRepository(CiRedAlert).count({ where: { created_ticket_id: row.created_ticket_id } })
+      : 0;
+    if (row.created_ticket_id && stillRedElsewhere === 0) {
       try {
         const commentRepo = this.dataSource.getRepository(Comment);
         await commentRepo.save(commentRepo.create({
@@ -704,7 +770,6 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
-    await this.dataSource.getRepository(CiRedAlert).delete({ id: row.id });
     stats.recovered += 1;
   }
 
@@ -754,7 +819,9 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     const lines = [
       `main CI(\`${workflow.name}\`, workflow ${workflow.id})가 \`${target.repoFullName}@${target.branch}\`에서 연속 ${evalResult.streak}회 실패했습니다(최초 실패 후 약 ${ageH.toFixed(1)}시간 경과).`,
       '',
-      `이 보드는 use_pr=false라 CI 실패가 PR 체크로 노출되지 않습니다 — 원인을 조사해 고쳐주세요.`,
+      `이 저장소는 use_pr=false 운영이라 CI 실패가 PR 체크로 노출되지 않습니다 — 원인을 조사해 고쳐주세요.`,
+      '',
+      `이 티켓은 이 장애(저장소·브랜치·workflow) 전체의 canonical incident 티켓입니다 — 같은 장애를 감시하는 다른 보드는 새 티켓을 만들지 않고 이 티켓을 가리킵니다. 수정은 여기서만 진행하세요.`,
       '',
       evalResult.lastRun?.html_url ? `최신 run: ${evalResult.lastRun.html_url}` : '',
       '',
@@ -763,12 +830,22 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     return lines.join('\n');
   }
 
-  private async _createOrReuseTicket(
+  /**
+   * 이 red 에피소드가 가리킬 incident 티켓을 확정한다 — 새로 만들거나(`created: true`),
+   * 다른 보드가 이미 연 canonical 을 채택한다(`created: false`).
+   *
+   * 채택은 **예외 경로가 아니라 정상 경로**다 (ticket 3886473a): 키에서 board id 를 뺐으
+   * 므로 같은 장애를 보는 두 번째 보드는 매번 unique 위반을 거쳐 여기로 온다. 그래도
+   * INSERT-first 를 유지하는 이유는 pre-SELECT 가 경합을 막지 못하기 때문이다 — 승자를
+   * 정하는 것은 DB 의 UNIQUE 이고, 조회는 그 결과를 읽을 뿐이다. 에피소드당 보드당
+   * 한 번만 실행된다(`!row.created_ticket_id` 가드).
+   */
+  private async _resolveIncidentTicket(
     board: Board,
     target: MonitorTarget,
     workflow: GitHubWorkflow,
     evalResult: RedStreakResult,
-  ): Promise<string | null> {
+  ): Promise<IncidentTicketOutcome | null> {
     const column = await this._resolveTargetColumn(board.id);
     if (!column) {
       this.logService.warn('CI', 'no non-terminal column available for CI-red ticket — skipping creation', {
@@ -777,14 +854,75 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
     const now = new Date();
-    const dedupeKey = `ci_red:${board.id}:${target.repoFullName}:${target.branch}:${workflow.id}`;
+    const dedupeKey = ciIncidentDedupeKey(board.workspace_id || '', target.repoFullName, target.branch, workflow.id);
     const title = `CI red: ${target.repoFullName}@${target.branch} — ${workflow.name}`;
     const description = this._buildTicketDescription(target, workflow, evalResult, now);
     try {
-      return await this._insertTicket(board, column, dedupeKey, title, description);
+      return { ticketId: await this._insertTicket(board, column, dedupeKey, title, description), created: true };
     } catch (e) {
       if (!isUniqueConstraintError(e)) throw e;
       return await this._resolveTicketDedupeCollision(board, column, dedupeKey, title, description, e);
+    }
+  }
+
+  /**
+   * 홀더 티켓이 terminal 컬럼에 있는가. terminal 이면 그 incident 는 이미 닫힌 것이므로
+   * 새 실패를 거기 붙이면 아무도 보지 않는 Done 티켓에 조용히 묻힌다 (ticket 3886473a).
+   */
+  private async _isTerminalTicket(ticket: Ticket): Promise<boolean> {
+    if (!ticket.column_id) return false;
+    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
+    return isTerminalColumn(col);
+  }
+
+  /**
+   * 끝난(terminal 이거나 archive 된) 홀더에게서 incident 키를 반납받고 새 티켓을 연다.
+   * 반납 자체가 새 INSERT 의 자리를 비우는 유일한 방법이다 — 키는 UNIQUE 이므로.
+   */
+  private async _reopenIncident(
+    board: Board, column: BoardColumn, dedupeKey: string, title: string, description: string, staleHolder: Ticket,
+  ): Promise<IncidentTicketOutcome> {
+    const ticketRepo = this.dataSource.getRepository(Ticket);
+    staleHolder.operational_dedupe_key = null;
+    await ticketRepo.save(staleHolder);
+    try {
+      return { ticketId: await this._insertTicket(board, column, dedupeKey, title, description), created: true };
+    } catch (retryError) {
+      if (!isUniqueConstraintError(retryError)) throw retryError;
+      // 키를 반납받은 직후 다른 보드의 sweep 이 먼저 새 incident 를 열었다 — 그것이 승자다.
+      const fallbackWinner = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
+      if (fallbackWinner) return { ticketId: fallbackWinner.id, created: false };
+      throw retryError;
+    }
+  }
+
+  /**
+   * 이 보드가 새 티켓 대신 기존 canonical 티켓을 채택했음을 그 티켓에 남긴다 — 티켓만
+   * 보고도 이 장애가 어느 보드들에 걸쳐 있는지 알 수 있어야, 지난번처럼 두 담당 흐름이
+   * 같은 원인을 각자 조사하고 사람이 선행조건을 걸었다 풀었다 하며 손으로 조정하는 일이
+   * 되풀이되지 않는다 (ticket 3886473a). 복구 코멘트와 같은 경로로 Comment 행만 쓰고
+   * activity log 는 남기지 않으므로 역할 holder 를 재-dispatch 하지 않는다 — 수렴의
+   * 목적이 중복 dispatch 제거인데 그 사실을 알리는 코멘트가 dispatch 를 유발하면 모순이다.
+   */
+  private async _noteAdditionalBoard(
+    ticketId: string, board: Board, target: MonitorTarget, workflow: GitHubWorkflow,
+  ): Promise<void> {
+    try {
+      const commentRepo = this.dataSource.getRepository(Comment);
+      await commentRepo.save(commentRepo.create({
+        ticket_id: ticketId,
+        author_type: 'system',
+        author_id: '',
+        author: 'CiHealthMonitor',
+        content: `🔗 같은 CI 장애가 보드 \`${board.name}\` 에서도 감지됐습니다 — \`${target.repoFullName}@${target.branch}\`(${workflow.name}) 로 동일한 장애라 별도 실행 티켓을 만들지 않고 이 티켓으로 수렴시켰습니다. 수정은 이 티켓 한 건에서만 진행하세요.`,
+        type: 'note',
+      }));
+    } catch (e) {
+      // 관계(`CiRedAlert.created_ticket_id`)와 보드별 채팅 알림이 이미 수렴을 성립시키므로
+      // 이 코멘트 하나 때문에 sweep 을 실패시키지 않는다 — 다만 조용히 넘기지도 않는다.
+      this.logService.warn('CI', '교차 보드 채택 코멘트 작성 실패 (수렴 자체는 성립)', {
+        err: String(e), ticket_id: ticketId, board_id: board.id, repo: target.repoFullName,
+      });
     }
   }
 
@@ -837,33 +975,37 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * _insertTicket()'s INSERT hit the operational_dedupe_key unique index —
-   * another sweep (this process re-entering before the previous tick
-   * finished, or a second instance) already won this episode's key. Reuse
-   * the open winner; an archived legacy holder has its key released and
-   * creation retried once. Mirrors OutreachIngestService._resolveDedupeCollision
-   * exactly (ticket cc1c494e Plan decision D — INSERT-first, never a
-   * pre-SELECT / compensating-delete dance).
+   * this incident already has a holder. 두 갈래다:
+   *
+   *   - 홀더가 **열려 있고 terminal 이 아니다** → 그게 canonical 이다. 이 보드는 새
+   *     티켓을 만들지 않고 그것을 채택한다(`created: false`). 다른 보드의 sweep 이 먼저
+   *     연 경우와, 이 프로세스가 앞 tick 이 끝나기 전에 재진입한 경우가 여기로 온다.
+   *   - 홀더가 **archive 됐거나 terminal 이다** → 그 incident 는 끝났다. 키를 반납시키고
+   *     새 incident 를 연다 (ticket 3886473a: 본문이 요구한 "canonical 이 terminal 이 된
+   *     뒤 새 실패는 새 incident"). terminal 판정이 없던 시절에는 `archived_at IS NULL`
+   *     만 보고 Done 티켓을 그대로 재사용했고, 그러면 새 실패가 아무도 보지 않는 티켓에
+   *     붙어 묻혔다.
+   *
+   * 어느 갈래든 승자를 정하는 것은 DB 의 UNIQUE 이고 조회는 그 결과를 읽을 뿐이다 —
+   * OutreachIngestService._resolveDedupeCollision 과 같은 INSERT-first 규약(ticket
+   * cc1c494e Plan decision D), pre-SELECT / 보상삭제 춤이 아니다.
    */
   private async _resolveTicketDedupeCollision(
     board: Board, column: BoardColumn, dedupeKey: string, title: string, description: string, originalError: unknown,
-  ): Promise<string | null> {
+  ): Promise<IncidentTicketOutcome | null> {
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const openWinner = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
-    if (openWinner) return openWinner.id;
+    if (openWinner) {
+      if (!(await this._isTerminalTicket(openWinner))) return { ticketId: openWinner.id, created: false };
+      return await this._reopenIncident(board, column, dedupeKey, title, description, openWinner);
+    }
 
     const holder = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey } });
     if (!holder) throw originalError; // holder vanished mid-race — propagate, caller retries next sweep
-    if (!holder.archived_at) return holder.id; // committed between our two lookups — reuse it
-
-    holder.operational_dedupe_key = null;
-    await ticketRepo.save(holder);
-    try {
-      return await this._insertTicket(board, column, dedupeKey, title, description);
-    } catch (retryError) {
-      if (!isUniqueConstraintError(retryError)) throw retryError;
-      const fallbackWinner = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
-      if (fallbackWinner) return fallbackWinner.id;
-      throw retryError;
+    // committed between our two lookups — 열려 있고 terminal 이 아니면 그대로 채택한다.
+    if (!holder.archived_at && !(await this._isTerminalTicket(holder))) {
+      return { ticketId: holder.id, created: false };
     }
+    return await this._reopenIncident(board, column, dedupeKey, title, description, holder);
   }
 }

@@ -205,7 +205,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   const ticketRepo = ds.getRepository('Ticket');
   const messageRepo = ds.getRepository('ChatRoomMessage');
   const commentRepo = ds.getRepository('Comment');
-  const dedupeKey = `ci_red:${board.id}:acme/widgets:main:555`;
+  const dedupeKey = `ci_red:${ws.id}:acme/widgets:main:555`;
 
   await t.test('1. first sweep trips the red streak: alert row + chat alert + auto-created Backlog ticket', async () => {
     const stats = await monitor.sweep(NOW);
@@ -424,7 +424,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
       assert.equal(stats.alerts_created, 1, 'sweep must not globally skip when env token is absent but a board credential resolves');
       assert.equal(stats.tickets_created, 1);
 
-      const credDedupeKey = `ci_red:${board2.id}:acme/gizmos:main:777`;
+      const credDedupeKey = `ci_red:${ws.id}:acme/gizmos:main:777`;
       const ticket = await ticketRepo.findOne({ where: { operational_dedupe_key: credDedupeKey } });
       assert.ok(ticket, 'auto-created ticket must exist for the credential-only board');
     } finally {
@@ -475,7 +475,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     assert.ok(brokenLog, 'the logged failure must identify which board/repo it came from');
 
     assert.equal(stats.alerts_created, 1, 'the OTHER board must still be evaluated and alerted in the same sweep');
-    const healthyDedupeKey = `ci_red:${boardHealthy.id}:acme/healthy2:main:888`;
+    const healthyDedupeKey = `ci_red:${ws.id}:acme/healthy2:main:888`;
     const healthyTicket = await ticketRepo.findOne({ where: { operational_dedupe_key: healthyDedupeKey } });
     assert.ok(healthyTicket, 'the healthy board\'s ticket must still be auto-created despite the other board\'s GitHub call failing');
 
@@ -539,7 +539,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     );
     assert.ok(stats.fetch_failures >= 1, 'the bad-credential board\'s failure must still be counted');
 
-    const goodDedupeKey = `ci_red:${boardGood.id}:acme/shared:main:999`;
+    const goodDedupeKey = `ci_red:${ws.id}:acme/shared:main:999`;
     const goodTicket = await ticketRepo.findOne({ where: { operational_dedupe_key: goodDedupeKey } });
     assert.ok(goodTicket, 'the good-credential board must still get its own alert/ticket despite sharing owner/repo/branch/workflow with a board whose credential 401s');
 
