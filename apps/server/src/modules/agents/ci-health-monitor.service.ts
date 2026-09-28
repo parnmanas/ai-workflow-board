@@ -55,7 +55,10 @@
  * pre-SELECT check), mirroring `OutreachIngestService._createTicket` /
  * `_resolveDedupeCollision` exactly. `CiRedAlert.created_ticket_id` additionally
  * ensures at most one creation ATTEMPT per red episode even before any DB
- * race is in play.
+ * race is in play — 단 그 가드는 "연결이 있는가" 가 아니라 `_hasLiveIncidentTicket()`,
+ * 즉 **"연결된 티켓이 아직 canonical 로 살아 있는가"** 로 판정한다. 연결 유무만 보면
+ * canonical 이 복구 없이 terminal 로 옮겨진 뒤의 새 실패가 Done 티켓에 매달린 채 영원히
+ * 재평가되지 않는다 (아래 terminal 문단 참고).
  *
  * **Incident 수렴 — 티켓은 보드당 1건이 아니라 장애당 1건이다** (ticket 3886473a):
  * 위 키에 들어가는 것은 board id 가 **아니라** workspace id 다. 같은 저장소를 감시하는
@@ -75,7 +78,12 @@
  *
  * canonical 티켓이 **terminal 컬럼에 들어가면 그 incident 는 끝난 것**이므로 재사용하지
  * 않는다 — 키를 반납시키고 새 티켓을 연다. 그러지 않으면 새 실패가 아무도 보지 않는 Done
- * 티켓에 붙어 조용히 묻힌다.
+ * 티켓에 붙어 조용히 묻힌다. 이 판정은 **CI 가 복구되지 않은 상태에서도** 성립해야 한다:
+ * 복구는 감시 행을 지우지만, 운영자가 red 인 채로 티켓을 Done 으로 옮기는 전이는 행이
+ * 살아 있는 상태에서 벌어지기 때문이다. 그래서 재평가 가드가 연결 유무가 아니라 연결
+ * 대상의 생존을 본다. 부수 효과로, red 가 계속되는 동안 티켓을 Done 으로 닫으면 다음
+ * sweep 이 새 티켓을 연다 — 그게 이 감시자의 목적(아무도 모르는 red 를 없애는 것)이고,
+ * 닫아 두고 싶다면 CI 를 고치거나 `CI_MONITOR_CREATE_TICKET=false` 가 탈출구다.
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -614,7 +622,14 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     await alertRepo.save(row);
     if (isNewRow) stats.alerts_created += 1; else stats.alerts_updated += 1;
 
-    if (this.config.createTicket && !row.created_ticket_id) {
+    // 에피소드당 보드당 한 번만 티켓을 해소한다 — 다만 그 기준은 "연결이 있는가" 가 아니라
+    // **"연결된 티켓이 아직 이 incident 의 canonical 로 살아 있는가"** 다 (ticket 3886473a
+    // 리뷰 지적). `!row.created_ticket_id` 만 보면, canonical 이 **복구 없이** terminal 로
+    // 옮겨진 뒤에는 "연결이 남아 있다" 는 이유로 재평가 자체를 영원히 건너뛴다 — 그 뒤의
+    // 새 실패는 아무도 보지 않는 Done 티켓에 계속 매달린 채 새 incident 도 dispatch 도
+    // 생기지 않는다. 복구 경로는 행을 **지우므로** 이 전이를 가리지 못한다: 이것은 CI 가
+    // red 인 채로 벌어지는 전이라 행이 살아 있는 상태에서만 드러난다.
+    if (this.config.createTicket && !(await this._hasLiveIncidentTicket(row))) {
       try {
         const outcome = await this._resolveIncidentTicket(board, target, workflow, evalResult);
         if (outcome) {
@@ -873,6 +888,22 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     if (!ticket.column_id) return false;
     const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
     return isTerminalColumn(col);
+  }
+
+  /**
+   * 이 감시 행이 가리키는 티켓이 **아직 이 incident 의 canonical 로 쓸 수 있는가**.
+   * 연결이 없거나, 티켓이 사라졌거나, archive 됐거나, terminal 컬럼에 있으면 false —
+   * 그때는 다음 실패에서 새 incident 를 열어야 한다 (ticket 3886473a 리뷰 지적).
+   *
+   * 살아 있으면 true 라서, 정상적인 red 에피소드에서는 `_resolveIncidentTicket` 이 다시
+   * 돌지 않는다(에피소드당 보드당 1회 시도 규약 유지). 죽은 링크일 때만 재해소한다.
+   */
+  private async _hasLiveIncidentTicket(row: CiRedAlert): Promise<boolean> {
+    if (!row.created_ticket_id) return false;
+    const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: row.created_ticket_id } });
+    if (!ticket) return false;        // 하드 삭제됨 — 가리킬 것이 없다
+    if (ticket.archived_at) return false;
+    return !(await this._isTerminalTicket(ticket));
   }
 
   /**

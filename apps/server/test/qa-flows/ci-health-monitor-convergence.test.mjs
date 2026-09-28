@@ -159,6 +159,9 @@ test('CiHealthMonitorService — 교차 보드 incident 수렴 / 비수렴 / ter
     (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system');
 
   let canonicalId = '';
+  let reopenedId = '';
+  let owner = null;
+  let boardC = null;
 
   await t.test('1. 같은 workspace 의 두 보드가 같은 repo/branch/workflow 를 감시하면 실행 티켓은 1건이다', async () => {
     const stats = await monitor.sweep(NOW);
@@ -216,7 +219,7 @@ test('CiHealthMonitorService — 교차 보드 incident 수렴 / 비수렴 / ter
       workspace_id: ws.id, name: 'solo repo', type: 'repository',
       url: 'https://github.com/acme/solo', default_branch: 'main',
     }));
-    const boardC = await seedBoard('ci-converge-C', soloResource.id);
+    boardC = await seedBoard('ci-converge-C', soloResource.id);
     fetchState.repos['acme/solo'] = {
       workflows: [{ id: SOLO_WF, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }],
       runsByWorkflow: { [SOLO_WF]: redRuns(SOLO_WF, '9200') },
@@ -236,64 +239,111 @@ test('CiHealthMonitorService — 교차 보드 incident 수렴 / 비수렴 / ter
     assert.equal(stillOne.length, 1, '기존 incident 티켓은 그대로 1건');
   });
 
-  await t.test('3. canonical 이 terminal 이 된 뒤의 새 실패는 끝난 티켓을 재사용하지 않고 새 incident 를 연다', async () => {
+  // ─── 리뷰 지적 (ticket 3886473a): red 인 채로 벌어지는 terminal 전이 ─────────────
+  // 여기가 이 티켓의 진짜 상태 전이다. 복구를 먼저 거치면 감시 행이 **삭제되므로**,
+  // "연결이 남아 있어서 재평가를 건너뛴다" 는 결함이 가려진다. 아래는 복구 없이 —
+  // 즉 두 보드의 `ci_red_alerts` 행이 살아서 끝난 티켓을 가리키는 상태에서 — 더 최신
+  // 실패 run 이 도착했을 때를 공개 `sweep()` 으로 본다.
+
+  await t.test('3. 복구 없이 canonical 이 terminal 로 옮겨진 뒤 새 실패가 오면, 살아 있는 감시 행이 있어도 새 incident 를 연다 (리뷰 지적)', async () => {
     // canonical 이 있는 보드의 Done 컬럼으로 옮긴다 — 모니터가 읽는 것은 티켓의 컬럼이
-    // terminal 인지 하나뿐이다.
+    // terminal 인지 하나뿐이다. CI 는 건드리지 않는다: 여전히 red 다.
     const canonical = await ticketRepo.findOne({ where: { id: canonicalId } });
-    const owner = canonical.column_id === boardA.backlog.id ? boardA : boardB;
+    owner = canonical.column_id === boardA.backlog.id ? boardA : boardB;
     await ticketRepo.update(canonicalId, { column_id: owner.done.id });
 
-    // (가) 먼저 복구 — 두 보드의 감시 행이 사라지고, 복구 코멘트는 보드 수와 무관하게 1건.
-    const recoveredRun = run('9109', 'success', new Date(NOW.getTime() + 60_000).toISOString(), CONVERGE_WF);
-    fetchState.repos['acme/converge'].runsByWorkflow[CONVERGE_WF] = [recoveredRun, ...redRuns(CONVERGE_WF, '9100')];
-    const recoverStats = await monitor.sweep(new Date(NOW.getTime() + 120_000));
-    assert.equal(recoverStats.recovered, 2, '두 보드가 각각 복구를 인지한다');
-    assert.equal(
-      (await alertRepo.find({ where: { repo_full_name: 'acme/converge' } })).length, 0,
-      '복구 시 감시 행은 보드별로 모두 삭제된다',
+    // 사전 조건 — 복구가 없었으므로 두 보드의 감시 행이 그대로 살아 있고, 둘 다 이제
+    // 끝나 버린 티켓을 가리킨다. 이 상태가 결함이 드러나는 유일한 상태다.
+    const before = await alertRepo.find({ where: { repo_full_name: 'acme/converge' } });
+    assert.equal(before.length, 2, '사전 조건: 감시 행이 보드별로 살아 있어야 한다');
+    assert.deepEqual(
+      [...new Set(before.map((r) => r.created_ticket_id))], [canonicalId],
+      '사전 조건: 두 행 모두 방금 terminal 로 옮긴 티켓을 가리켜야 한다',
     );
-    const recoveryComments = (await commentRepo.find({ where: { ticket_id: canonicalId } }))
-      .filter((c) => c.content.includes('CI가 복구됐습니다'));
-    assert.equal(recoveryComments.length, 1, '복구 코멘트는 incident 당 1회 — 보드마다 쌓이면 안 된다');
 
-    // (나) 다시 red — 끝난 티켓에 붙이면 아무도 보지 않는 Done 티켓에 묻힌다.
+    // 더 최신 실패 run 이 추가된다 — 복구 신호는 없다.
     const laterMinutesAgo = (m) => new Date(NOW.getTime() + 600_000 - m * 60_000).toISOString();
     fetchState.repos['acme/converge'].runsByWorkflow[CONVERGE_WF] = [
       run('93003', 'failure', laterMinutesAgo(1), CONVERGE_WF),
       run('93002', 'failure', laterMinutesAgo(2), CONVERGE_WF),
       run('93001', 'failure', laterMinutesAgo(3), CONVERGE_WF),
     ];
-    const reopenStats = await monitor.sweep(new Date(NOW.getTime() + 660_000));
-    assert.equal(reopenStats.tickets_created, 1, 'terminal 이후의 새 실패는 새 티켓을 열어야 한다');
-    assert.equal(reopenStats.tickets_linked, 1, '나머지 보드는 그 새 티켓을 채택한다 — 수렴은 유지된다');
+
+    const stats = await monitor.sweep(new Date(NOW.getTime() + 660_000));
+    assert.equal(stats.recovered, 0, '이 전이는 CI 가 red 인 채로 벌어진다 — 복구가 끼면 시나리오가 공허해진다');
+    assert.equal(stats.tickets_created, 1, 'terminal 로 끝난 티켓을 재사용하지 않고 새 티켓을 열어야 한다');
+    assert.equal(stats.tickets_linked, 1, '나머지 보드는 그 새 티켓을 채택한다 — 수렴은 유지된다');
 
     const holder = await ticketRepo.findOne({ where: { operational_dedupe_key: convergeKey } });
     assert.ok(holder, '새 incident 가 키를 들고 있어야 한다');
     assert.notEqual(holder.id, canonicalId, '끝난 canonical 을 재사용하면 안 된다');
+    reopenedId = holder.id;
 
     const oldCanonical = await ticketRepo.findOne({ where: { id: canonicalId } });
     assert.equal(oldCanonical.column_id, owner.done.id, '끝난 티켓은 terminal 컬럼에 그대로 남는다');
     assert.equal(oldCanonical.operational_dedupe_key, null, '끝난 티켓은 incident 키를 반납해야 한다');
 
+    // 두 보드의 감시 행이 **재연결**돼야 한다 — 하나라도 옛 Done 티켓을 계속 가리키면
+    // 그 보드의 새 실패는 영영 아무도 보지 않는 티켓에 매달린다.
     const rows = await alertRepo.find({ where: { repo_full_name: 'acme/converge' } });
-    assert.equal(rows.length, 2);
-    assert.deepEqual([...new Set(rows.map((r) => r.created_ticket_id))], [holder.id]);
+    assert.equal(rows.length, 2, '감시 행은 그대로 보드별 2건');
+    assert.deepEqual(
+      [...new Set(rows.map((r) => r.created_ticket_id))], [holder.id],
+      '두 보드 모두 새 canonical 로 재연결돼야 한다',
+    );
+
+    // 새 canonical 에도 교차 보드 채택 기록이 남는다.
+    const adoption = (await commentRepo.find({ where: { ticket_id: holder.id } }))
+      .filter((c) => c.content.includes('에서도 감지됐습니다'));
+    assert.equal(adoption.length, 1, '채택 코멘트는 채택한 보드당 1회');
+
+    // dispatch 표면 — 열린 실행 티켓은 여전히 1건이다(새 incident 도 보드마다 열리지 않는다).
+    const terminalColumnIds = new Set([boardA.done.id, boardB.done.id, boardC.done.id]);
+    const openConverge = (await ticketRepo.find({ where: { workspace_id: ws.id } }))
+      .filter((tk) => tk.title.includes('acme/converge') && !terminalColumnIds.has(tk.column_id));
+    assert.equal(openConverge.length, 1, '열린 실행 티켓은 1건이어야 한다');
+    assert.equal(openConverge[0].id, holder.id);
   });
 
-  await t.test('4. 같은 저장소라도 workflow 가 다르면 별개 incident 다', async () => {
+  await t.test('4. 그 뒤 CI 가 복구되면 감시 행이 보드별로 모두 삭제되고, 복구 코멘트는 incident 당 1회만 남는다', async () => {
+    const recoveredRun = run('93009', 'success', new Date(NOW.getTime() + 720_000).toISOString(), CONVERGE_WF);
+    fetchState.repos['acme/converge'].runsByWorkflow[CONVERGE_WF] = [
+      recoveredRun,
+      run('93003', 'failure', new Date(NOW.getTime() + 540_000).toISOString(), CONVERGE_WF),
+    ];
+
+    const stats = await monitor.sweep(new Date(NOW.getTime() + 780_000));
+    assert.equal(stats.recovered, 2, '두 보드가 각각 복구를 인지한다');
+    assert.equal(
+      (await alertRepo.find({ where: { repo_full_name: 'acme/converge' } })).length, 0,
+      '복구 시 감시 행은 보드별로 모두 삭제된다',
+    );
+
+    const recoveryComments = (await commentRepo.find({ where: { ticket_id: reopenedId } }))
+      .filter((c) => c.content.includes('CI가 복구됐습니다'));
+    assert.equal(recoveryComments.length, 1, '복구 코멘트는 incident 당 1회 — 보드마다 쌓이면 안 된다');
+
+    // 이미 terminal 로 보낸 옛 티켓에는 이 incident 의 복구 코멘트가 가면 안 된다 —
+    // 그 티켓을 가리키는 감시 행은 3번에서 이미 사라졌다.
+    const staleComments = (await commentRepo.find({ where: { ticket_id: canonicalId } }))
+      .filter((c) => c.content.includes('CI가 복구됐습니다'));
+    assert.equal(staleComments.length, 0, '끝난 옛 티켓에 복구 코멘트가 붙으면 안 된다');
+  });
+
+  await t.test('5. 같은 저장소라도 workflow 가 다르면 별개 incident 다', async () => {
     const currentHolder = await ticketRepo.findOne({ where: { operational_dedupe_key: convergeKey } });
     fetchState.repos['acme/converge'].workflows = [
       { id: CONVERGE_WF, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' },
       { id: OTHER_WF, name: 'Publish', path: '.github/workflows/publish.yml', state: 'active' },
     ];
-    const publishAt = (m) => new Date(NOW.getTime() + 660_000 - m * 60_000).toISOString();
+    const publishAt = (m) => new Date(NOW.getTime() + 840_000 - m * 60_000).toISOString();
     fetchState.repos['acme/converge'].runsByWorkflow[OTHER_WF] = [
       run('94003', 'failure', publishAt(1), OTHER_WF),
       run('94002', 'failure', publishAt(2), OTHER_WF),
       run('94001', 'failure', publishAt(3), OTHER_WF),
     ];
 
-    const stats = await monitor.sweep(new Date(NOW.getTime() + 720_000));
+    const stats = await monitor.sweep(new Date(NOW.getTime() + 900_000));
     assert.equal(stats.tickets_created, 1, '새 workflow 의 장애는 자기 티켓을 새로 받아야 한다');
     assert.equal(stats.tickets_linked, 1, '그 새 incident 도 두 보드에 걸쳐 1건으로 수렴한다');
 
