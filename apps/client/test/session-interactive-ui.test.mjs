@@ -86,6 +86,61 @@ test('composer without commands never shows a popup and Enter sends', async () =
   }
 });
 
+test('composer: busy Enter queues instead of sending; queue flushes one at a time as busy toggles off', async () => {
+  const dom = setupDom();
+  try {
+    const sent = [];
+    let resolveSend;
+    const view = mount(h(SessionComposer, {
+      disabled: false, busy: true, placeholder: 'Prompt…', commands: [],
+      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
+      onCancel() {},
+    }));
+    const textarea = document.querySelector('textarea[aria-label="Prompt"]');
+    assert.equal(textarea.disabled, false, 'typing is not blocked while busy');
+
+    typeInto(textarea, 'first question');
+    keydown('Enter', { target: textarea });
+    assert.deepEqual(sent, [], 'busy: Enter does not send immediately');
+    assert.equal(textarea.value, '', 'the composer clears once the text is queued');
+    assert.equal(document.querySelector('[aria-label="Queued prompts"] li')?.textContent.includes('first question'), true, 'queued text is shown');
+
+    typeInto(textarea, 'second question');
+    keydown('Enter', { target: textarea });
+    assert.equal(document.querySelectorAll('[aria-label="Queued prompts"] li').length, 2, 'a second queued prompt stacks behind the first');
+
+    // 턴이 끝나 busy 가 false 로 넘어오면 큐 맨 앞만 흘려보낸다.
+    act(() => { view.rerender(h(SessionComposer, {
+      disabled: false, busy: false, placeholder: 'Prompt…', commands: [],
+      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
+      onCancel() {},
+    })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.deepEqual(sent, ['first question'], 'only the first queued item is flushed on the busy->false edge');
+    assert.equal(document.querySelectorAll('[aria-label="Queued prompts"] li').length, 1, 'the second item is still waiting');
+
+    resolveSend();
+    // 방금 보낸 프롬프트가 새 턴을 열어 busy 가 다시 true 로 돌아왔다가, 그 턴이 끝나 다시 false 가 된다.
+    act(() => { view.rerender(h(SessionComposer, {
+      disabled: false, busy: true, placeholder: 'Prompt…', commands: [],
+      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
+      onCancel() {},
+    })); });
+    act(() => { view.rerender(h(SessionComposer, {
+      disabled: false, busy: false, placeholder: 'Prompt…', commands: [],
+      onSend: (t) => new Promise((resolve) => { resolveSend = resolve; sent.push(t); }),
+      onCancel() {},
+    })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.deepEqual(sent, ['first question', 'second question'], 'the second queued item flushes on the next busy->false edge');
+    assert.equal(document.querySelector('[aria-label="Queued prompts"]'), null, 'the queue is empty once both are sent');
+    resolveSend();
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});
+
 test('transcript: an elicitation form renders from its schema, gates Submit on required fields, and reports typed answers', () => {
   const dom = setupDom();
   try {

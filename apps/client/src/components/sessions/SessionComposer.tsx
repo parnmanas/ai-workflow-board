@@ -9,6 +9,13 @@ import { applySlashCommand, matchSlashCommands } from './sessionTranscript.logic
  * Shift+Enter 줄바꿈, 한글 IME 조합 중 Enter 는 무시한다.
  * `/` 로 시작하면 어댑터가 알려 준 slash command 목록으로 자동완성한다
  * (↑/↓ 이동, Enter/Tab 선택, Esc 닫기) — 선택해도 전송하지 않고 텍스트만 채운다.
+ *
+ * `busy` 동안에도 입력은 막지 않는다 — 실제 CLI/Desktop 처럼 타이핑·Enter 를
+ * 그대로 받되, 전송 대신 큐에 쌓아 둔다(`queue`). `busy` 가 true→false 로
+ * 넘어가는 그 순간(턴 종료 — permission/elicitation 대기도 `busy` 에 포함되므로
+ * 사용자가 그 결정을 마친 뒤에만 넘어간다)에 큐 맨 앞을 하나 흘려보낸다. 그 전송이
+ * 다시 새 턴을 열어 `busy` 가 true 로 돌아오면, 다음 false 전환 때 그다음 항목을
+ * 흘려보내는 식으로 한 번에 하나씩만 나간다 — 세션은 한 턴만 처리할 수 있어서다.
  */
 export interface SessionComposerProps {
   disabled: boolean;
@@ -26,7 +33,32 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   const [sending, setSending] = useState(false);
   const [selected, setSelected] = useState(0);
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const [queue, setQueue] = useState<string[]>([]);
+  const queueRef = useRef<string[]>([]);
   const ref = useRef<HTMLTextAreaElement | null>(null);
+
+  const setQueueBoth = useCallback((next: string[]) => {
+    queueRef.current = next;
+    setQueue(next);
+  }, []);
+
+  const removeQueued = useCallback((index: number) => {
+    setQueueBoth(queueRef.current.filter((_, i) => i !== index));
+  }, [setQueueBoth]);
+
+  // busy 가 방금 false 로 넘어온 시점에만 큐 맨 앞을 흘려보낸다 — busy 가 그대로거나
+  // (다른 prop 변화로 effect 가 재실행돼도) true→true, false→false 는 무시한다.
+  const prevBusyRef = useRef(busy);
+  useEffect(() => {
+    const wasBusy = prevBusyRef.current;
+    prevBusyRef.current = busy;
+    if (!wasBusy || busy || disabled) return;
+    const [next, ...rest] = queueRef.current;
+    if (next === undefined) return;
+    setQueueBoth(rest);
+    setSending(true);
+    Promise.resolve(onSend(next)).finally(() => setSending(false));
+  }, [busy, disabled, onSend, setQueueBoth]);
 
   const slash = useMemo(() => matchSlashCommands(text, commands ?? []), [text, commands]);
   const popupOpen = slash.active && slash.matches.length > 0 && dismissedFor !== text;
@@ -53,7 +85,12 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
 
   const submit = useCallback(async () => {
     const value = text.trim();
-    if (!value || disabled || busy || sending) return;
+    if (!value || disabled || sending) return;
+    if (busy) {
+      setQueueBoth([...queueRef.current, value]);
+      setText('');
+      return;
+    }
     setSending(true);
     try {
       await onSend(value);
@@ -62,7 +99,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     } finally {
       setSending(false);
     }
-  }, [text, disabled, busy, sending, onSend]);
+  }, [text, disabled, busy, sending, onSend, setQueueBoth]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
@@ -77,7 +114,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     void submit();
   };
 
-  const locked = disabled || busy || sending;
+  const locked = disabled || sending;
   return (
     <div
       style={{
@@ -90,6 +127,38 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     >
       {hint && (
         <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, marginBottom: 6 }}>{hint}</div>
+      )}
+      {queue.length > 0 && (
+        <ul
+          aria-label="Queued prompts"
+          style={{
+            listStyle: 'none', margin: '0 0 6px', padding: 0, display: 'flex', flexDirection: 'column', gap: 4,
+          }}
+        >
+          {queue.map((q, i) => (
+            <li
+              key={i}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: tokens.radii.md,
+                border: `1px dashed ${tokens.colors.border}`, background: tokens.colors.surface,
+              }}
+            >
+              <span style={{ fontSize: 11, color: tokens.colors.textMuted, flexShrink: 0 }}>{i === 0 ? '다음 전송…' : `대기 ${i + 1}`}</span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q}</span>
+              <button
+                type="button"
+                onClick={() => removeQueued(i)}
+                aria-label="Remove queued prompt"
+                style={{
+                  flexShrink: 0, border: 'none', background: 'transparent', color: tokens.colors.textMuted,
+                  fontSize: 14, lineHeight: 1, cursor: 'pointer', padding: '2px 4px',
+                }}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
       {popupOpen && (
         <ul
@@ -148,7 +217,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             opacity: disabled ? 0.6 : 1,
           }}
         />
-        {busy ? (
+        {busy && (
           <button
             type="button"
             onClick={onCancel}
@@ -166,29 +235,29 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           >
             Cancel
           </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => void submit()}
-            disabled={locked || !text.trim()}
-            style={{
-              height: 40,
-              padding: '0 16px',
-              borderRadius: tokens.radii.lg,
-              border: 'none',
-              background: locked || !text.trim() ? tokens.colors.surfaceHover : tokens.gradients.accent,
-              color: locked || !text.trim() ? tokens.colors.textMuted : '#fff',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: locked || !text.trim() ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {sending ? 'Sending…' : 'Send'}
-          </button>
         )}
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={locked || !text.trim()}
+          title={busy ? '지금 보내지 않고, 현재 턴이 끝나면 큐 순서대로 전송합니다' : undefined}
+          style={{
+            height: 40,
+            padding: '0 16px',
+            borderRadius: tokens.radii.lg,
+            border: 'none',
+            background: locked || !text.trim() ? tokens.colors.surfaceHover : tokens.gradients.accent,
+            color: locked || !text.trim() ? tokens.colors.textMuted : '#fff',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: locked || !text.trim() ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {sending ? 'Sending…' : busy ? 'Queue' : 'Send'}
+        </button>
       </div>
       <div style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
-        Enter to send · Shift+Enter for a new line · {commands && commands.length ? `type / for ${commands.length} commands` : 'slash commands go straight to the CLI'}
+        {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · {commands && commands.length ? `type / for ${commands.length} commands` : 'slash commands go straight to the CLI'}
       </div>
     </div>
   );
