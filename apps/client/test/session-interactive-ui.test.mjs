@@ -133,7 +133,7 @@ test('composer: busy Enter queues instead of sending; queue flushes one at a tim
     })); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     assert.deepEqual(sent, ['first question', 'second question'], 'the second queued item flushes on the next busy->false edge');
-    assert.equal(document.querySelector('[aria-label="Queued prompts"]'), null, 'the queue is empty once both are sent');
+    assert.equal(Boolean(document.querySelector('[aria-label="Queued prompts"]')), false, '둘 다 전송되고 나면 큐가 비어 있다');
     resolveSend();
     view.unmount();
   } finally {
