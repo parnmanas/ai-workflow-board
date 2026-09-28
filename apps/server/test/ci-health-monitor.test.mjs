@@ -7,7 +7,7 @@
 import 'reflect-metadata';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateRedStreak, __test__ } from '../dist/modules/agents/ci-health-monitor.service.js';
+import { ciIncidentDedupeKey, evaluateRedStreak, __test__ } from '../dist/modules/agents/ci-health-monitor.service.js';
 import { compareRunIds, GitHubConnectorService } from '../dist/services/github-connector.service.js';
 
 const NOW = new Date('2026-08-10T12:00:00.000Z');
@@ -410,6 +410,31 @@ test('정렬: 응답이 뒤죽박죽 순서로 와도 판정은 (created_at, id)
     { isRed: a.isRed, isGreen: a.isGreen, streak: a.streak, last: a.lastRun.id },
   );
   assert.equal(b.lastRun.id, '4', '입력 순서와 무관하게 가장 최신 run 이 선택돼야 한다');
+});
+
+// ─── ticket 3886473a: incident 키 스코프 ─────────────────────────────────────
+// 이 키가 하나의 CI 장애를 식별한다. board id 가 들어가면 같은 저장소를 감시하는 보드
+// 수만큼 실행 티켓이 열리고 같은 수정이 여러 번 dispatch 된다(이 티켓의 원인).
+
+test('incident 키: 같은 workspace·repo·branch·workflow 면 어느 보드가 만들든 같은 키다 (ticket 3886473a)', () => {
+  const fromBoardA = ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555');
+  const fromBoardB = ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555');
+  assert.equal(fromBoardA, fromBoardB);
+  assert.equal(fromBoardA, 'ci_red:ws-1:acme/widgets:main:555');
+});
+
+test('incident 키: workspace 가 다르면 합쳐지지 않는다 — 티켓·역할·에이전트가 workspace 스코프다', () => {
+  assert.notEqual(
+    ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555'),
+    ciIncidentDedupeKey('ws-2', 'acme/widgets', 'main', '555'),
+  );
+});
+
+test('incident 키: 저장소·브랜치·workflow 중 하나라도 다르면 별개 장애다', () => {
+  const base = ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '555');
+  assert.notEqual(base, ciIncidentDedupeKey('ws-1', 'acme/gizmos', 'main', '555'));
+  assert.notEqual(base, ciIncidentDedupeKey('ws-1', 'acme/widgets', 'release', '555'));
+  assert.notEqual(base, ciIncidentDedupeKey('ws-1', 'acme/widgets', 'main', '556'));
 });
 
 test('readConfigFromEnv: CI_MONITOR_MIN_RUNS / CI_MONITOR_CREATE_TICKET env overrides are honored', () => {

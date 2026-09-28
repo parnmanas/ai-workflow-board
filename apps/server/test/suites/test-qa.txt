@@ -26,6 +26,7 @@ test/qa-flows/board-worktree-convention.test.mjs
 test/qa-flows/chat-attachment-security.test.mjs
 test/qa-flows/chat-attachments.test.mjs
 test/qa-flows/chat-message-read.test.mjs
+test/qa-flows/ci-health-monitor-convergence.test.mjs
 test/qa-flows/ci-health-monitor.test.mjs
 test/qa-flows/column-role-policy.test.mjs
 test/qa-flows/comment-content-projection.test.mjs

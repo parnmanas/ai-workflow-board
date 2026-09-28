@@ -85,6 +85,11 @@ test('CiHealthMonitorService source defines the sweep loop, env config, and thre
   // atomically via DB UNIQUE before the side effect, not before-and-after).
   assert.match(code, /operational_dedupe_key/, 'ticket creation must set operational_dedupe_key for idempotency');
   assert.match(code, /isUniqueConstraintError/, 'must catch the unique-violation and resolve the collision, not pre-SELECT');
+  // ticket 3886473a — incident 키는 workspace 스코프여야 한다. board id 가 다시 들어가면
+  // 같은 저장소를 감시하는 보드 수만큼 실행 티켓이 열리고 같은 수정이 여러 번 dispatch 된다.
+  assert.match(code, /export\s+function\s+ciIncidentDedupeKey\s*\(/, 'incident 키를 만드는 단일 원천 함수가 있어야 한다');
+  assert.match(code, /ciIncidentDedupeKey\(\s*board\.workspace_id/, '티켓 키는 board id 가 아니라 workspace id 로 만들어야 한다');
+  assert.doesNotMatch(code, /`ci_red:\$\{board\.id\}/, 'board id 를 incident 키에 다시 넣으면 안 된다 (ticket 3886473a 회귀)');
 });
 
 test('agents.module.ts wires CiHealthMonitorService and CiRedAlert', () => {
