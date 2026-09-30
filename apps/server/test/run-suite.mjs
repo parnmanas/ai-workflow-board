@@ -22,69 +22,44 @@
 //   node test/run-suite.mjs <step> [step...] step 을 인자로 직접 나열한다.
 //                                            런북·임시 실행이 쓰는 기존 형태로 유지된다.
 //
+// argv 판정부는 test/helpers/run-suite-argv.mjs 로 갈라져 있다 — 가드가 package.json
+// 의 커맨드를 러너와 같은 규칙에 통과시켜 보기 위한 것이다(티켓 9647c1ef).
+//
 // package.json 이 파일 목록을 직접 들고 있던 시절에는 그 한 줄이 1만 자를 넘어
 // 서로 무관한 테스트 추가끼리도 항상 병합 충돌이 났다. 매니페스트 형식과 그
 // 이유는 test/helpers/suite-manifest.mjs 헤더 참조.
 
 import { spawn } from 'node:child_process';
 import { readSuiteSteps, suiteManifestPath } from './helpers/suite-manifest.mjs';
+import { classifyRunSuiteArgv } from './helpers/run-suite-argv.mjs';
 
-function normalizeSteps(rawSteps) {
-  const normalized = [];
-  for (let i = 0; i < rawSteps.length; i++) {
-    // POSIX shells use single quotes for grouping, but cmd.exe treats them as
-    // ordinary characters. npm therefore passes `'npm run test:qa'` as three
-    // argv entries on Windows. Reassemble that package.json form so the same
-    // suite definition works on both platforms.
-    if (
-      rawSteps[i].startsWith("'npm")
-      && rawSteps[i + 1] === 'run'
-      && rawSteps[i + 2]?.endsWith("'")
-    ) {
-      normalized.push(
-        `${rawSteps[i].slice(1)} run ${rawSteps[i + 2].slice(0, -1)}`,
-      );
-      i += 2;
-      continue;
-    }
-    normalized.push(rawSteps[i]);
-  }
-  return normalized;
-}
-
-// `--suite <name>` 이면 매니페스트에서 읽고, 아니면 위치 인자를 그대로 step 으로 쓴다.
+// argv 판정 자체는 test/helpers/run-suite-argv.mjs 의 순수 함수가 한다 — 여기서는
+// 그 결론을 실행으로 옮기기만 한다. 갈라놓은 이유는 그 파일 헤더에 있다(티켓
+// 9647c1ef): 판정이 이 CLI 안에만 있으면 package.json 의 커맨드가 러너에게
+// 거부되는 argv 인지 아무 가드도 확인할 수 없다.
+//
 // 매니페스트를 못 읽으면 반드시 0 이 아닌 코드로 죽어야 한다 — 조용히 0 step 을
 // 돌고 끝나면 CI 가 초록으로 보이면서 실제로는 아무것도 안 돈다.
 function resolveSteps(argv) {
-  if (argv[0] !== '--suite') return normalizeSteps(argv);
-
-  const suite = argv[1];
-  if (!suite) {
-    console.error('usage: node test/run-suite.mjs --suite <name>');
+  const verdict = classifyRunSuiteArgv(argv);
+  if (verdict.kind === 'error') {
+    console.error(verdict.message);
     process.exit(1);
   }
-  if (argv.length > 2) {
-    console.error(
-      `[run-suite] --suite 는 단독으로 쓴다 — 남은 인자: ${argv.slice(2).join(' ')}`,
-    );
-    process.exit(1);
-  }
+  if (verdict.kind === 'steps') return verdict.steps;
 
   try {
-    return readSuiteSteps(suite);
+    // readSuiteSteps 는 빈 매니페스트도 던진다 — 빈 목록이 돌아올 길은 없다.
+    return readSuiteSteps(verdict.suite);
   } catch (err) {
     console.error(
-      `[run-suite] 스위트 매니페스트를 읽지 못했다 (${suiteManifestPath(suite)}): ${err.message}`,
+      `[run-suite] 스위트 매니페스트를 읽지 못했다 (${suiteManifestPath(verdict.suite)}): ${err.message}`,
     );
     process.exit(1);
   }
 }
 
 const steps = resolveSteps(process.argv.slice(2));
-if (steps.length === 0) {
-  console.error('usage: node test/run-suite.mjs --suite <name> | <step> [step...]');
-  process.exit(1);
-}
 
 function runStep(step) {
   return new Promise((resolve) => {
