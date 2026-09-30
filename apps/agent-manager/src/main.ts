@@ -24,7 +24,7 @@ import {
   setRunningVersion,
   UpdateChecker,
 } from './lib/self-update.js';
-import { insideAgentSession } from './lib/supervisor.js';
+import { effectivePlatform, insideAgentSession, restartHint } from './lib/supervisor.js';
 import { BOOT_VERIFY_TIMEOUT_MS } from './lib/self-update-rollback.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
@@ -446,7 +446,7 @@ async function runRuntime(
     // AWB 세션(ACP 어댑터 자식) 안에서 매니저를 직접 띄우면 세션이 끝날 때 함께 죽는다.
     log(
       'agent-manager: started from inside an AWB agent session (AWB_SESSION_ID set) — ' +
-        'this process dies with the session; prefer `systemctl --user restart awb-agent-manager`',
+        `this process dies with the session. ${restartHint(effectivePlatform())} instead of running it here.`,
     );
   }
   let lock: LockHandle;
