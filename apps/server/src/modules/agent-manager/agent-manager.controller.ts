@@ -713,6 +713,10 @@ export class AgentManagerController {
       ? (typeof body.latest_version === 'string' ? body.latest_version : null)
       : undefined;
     const update_available = hasField('update_available') ? Boolean(body.update_available) : undefined;
+    const installed_version = hasField('installed_version')
+      ? (typeof body.installed_version === 'string' ? body.installed_version.slice(0, 64) : null)
+      : undefined;
+    const restart_required = hasField('restart_required') ? Boolean(body.restart_required) : undefined;
     // Install mode ('npm-global' | 'unknown'). Passed through verbatim (string)
     // so a mode this server doesn't enumerate — including the retired 'git' from
     // a not-yet-updated manager — still round-trips to the UI. Omitted by
@@ -838,6 +842,8 @@ export class AgentManagerController {
       cli_latest_versions,
       latest_version,
       update_available,
+      installed_version,
+      restart_required,
       install_mode,
       update_channel,
       update_last_checked_at,

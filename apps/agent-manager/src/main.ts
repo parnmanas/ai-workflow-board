@@ -21,8 +21,10 @@ import {
   runBootVerification,
   runBootVerificationTimeout,
   runSelfUpdate,
+  setRunningVersion,
   UpdateChecker,
 } from './lib/self-update.js';
+import { insideAgentSession } from './lib/supervisor.js';
 import { BOOT_VERIFY_TIMEOUT_MS } from './lib/self-update-rollback.js';
 import { runSetup, type SetupOptions } from './lib/setup.js';
 import { installService, uninstallService, type ServicePlatform } from './lib/service-install.js';
@@ -381,6 +383,8 @@ async function main(): Promise<void> {
   }
 
   const version = readPkgVersion();
+  // 자체 업데이트/하트비트의 "현재 버전" 은 이 값이다 — 디스크가 나중에 갈려도 바뀌지 않는다.
+  setRunningVersion(version);
   process.stdout.write(`awb-agent-manager v${version}\n`);
   process.stdout.write(`  home:        ${AGENT_MANAGER_HOME}\n`);
 
@@ -438,12 +442,26 @@ async function runRuntime(
 ): Promise<void> {
   void argv; // reserved for future re-exec hook
 
+  if (insideAgentSession()) {
+    // AWB 세션(ACP 어댑터 자식) 안에서 매니저를 직접 띄우면 세션이 끝날 때 함께 죽는다.
+    log(
+      'agent-manager: started from inside an AWB agent session (AWB_SESSION_ID set) — ' +
+        'this process dies with the session; prefer `systemctl --user restart awb-agent-manager`',
+    );
+  }
   let lock: LockHandle;
   try {
     lock = await acquireAgentLock({ role: 'manager', version, force: flags.force });
   } catch (err: any) {
-    if (err?.code === 'EAGENTLOCKED') {
+    if (err?.code === 'EAGENTHANDOFF') {
+      // 감독 중인 매니저에게 재기동을 넘겼다 — 원하던 효과(새 빌드 실행)는 그쪽에서 난다.
       log(`agent-manager: ${err.message}`);
+      process.stdout.write(`${err.message}\n`);
+      process.exit(0);
+    }
+    if (err?.code === 'EAGENTLOCKED' || err?.code === 'EAGENTSUPERVISED') {
+      log(`agent-manager: ${err.message}`);
+      process.stderr.write(`${err.message}\n`);
       process.exit(2);
     }
     throw err;

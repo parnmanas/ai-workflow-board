@@ -53,6 +53,7 @@ import {
   processStartTimeMs,
   readProcessStartTicks,
 } from './boot-identity.js';
+import { detectSupervisor, forceTakeoverAllowed, FORCE_TAKEOVER_ENV, insideAgentSession } from './supervisor.js';
 
 export const LOCK_PATH = join(AGENT_MANAGER_HOME, 'agent.lock');
 const RECOVERY_LOCK_PATH = `${LOCK_PATH}.recovery`;
@@ -90,6 +91,8 @@ export interface LockPayload {
    *  부팅 기준 단조 값이라 wall-clock 조정에 면역 — pid 재사용을 시각 환산 없이
    *  정확히 가려낸다. */
   pid_start_ticks: number | null;
+  /** 소유자를 띄운 감독자('systemd') — 없으면 null. `--force` takeover 판정에 쓴다. */
+  supervisor: string | null;
 }
 
 export interface LockHandle {
@@ -108,6 +111,7 @@ export interface ParsedLock {
   boot_id?: string;
   boot_time_ms?: number;
   pid_start_ticks?: number;
+  supervisor?: string | null;
 }
 
 interface AcquireOptions {
@@ -129,6 +133,71 @@ function parseLockPayload(parsed: any): ParsedLock | null {
     boot_id: typeof parsed.boot_id === 'string' && parsed.boot_id ? parsed.boot_id : undefined,
     boot_time_ms: Number.isFinite(parsed.boot_time_ms) ? parsed.boot_time_ms : undefined,
     pid_start_ticks: Number.isFinite(parsed.pid_start_ticks) ? parsed.pid_start_ticks : undefined,
+    supervisor: typeof parsed.supervisor === 'string' && parsed.supervisor ? parsed.supervisor : null,
+  };
+}
+
+/** `1.2.3` 꼴만 비교한다(그 외는 0). self-update.ts 의 compareSemver 와 같은 규칙이지만,
+ *  락 모듈이 자체 업데이트 모듈(프로세스 spawn 등)을 끌어오지 않도록 여기 둔다. */
+export function compareLockVersions(a: string | undefined, b: string | undefined): number {
+  const parse = (v: string | undefined): number[] | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v || '');
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i += 1) {
+    if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+export type TakeoverDecision =
+  | { kind: 'takeover' }
+  | { kind: 'handoff'; reason: string }
+  | { kind: 'refuse'; reason: string };
+
+/**
+ * 살아 있는 소유자에게 `--force` 가 무엇을 해야 하는지.
+ *
+ * 원래 `--force` 는 소유자에게 SIGTERM 을 보내고 자리를 차지했다. 그 소유자가 systemd 가
+ * 감독하는 서비스라면 결과가 나쁘다: 서비스는 SIGTERM 에 exit 0 으로 내려가 Restart=on-failure
+ * 가 다시 띄우지 않고, 자리를 차지한 포그라운드/세션 프로세스가 끝나는 순간 매니저가
+ * 아예 없어진다. 그래서
+ *   - 소유자가 감독 중이거나 contender 가 AWB 세션 안이면: contender 의 빌드가 더 새로울 때
+ *     SIGUSR2 로 **재기동을 넘기고** 물러난다(handoff). 아니면 거부한다.
+ *   - contender 자신이 systemd 아래(서비스 재시작이 멈춘 전임자를 밀어내는 경우)거나,
+ *     운영자가 AWB_AGENT_MANAGER_TAKEOVER=1 로 명시했으면 예전대로 takeover.
+ */
+export function decideForceTakeover(input: {
+  ownerVersion: string | undefined;
+  ownerSupervisor: string | null | undefined;
+  contenderVersion: string;
+  contenderSupervisor: string | null;
+  contenderInSession: boolean;
+  takeoverAllowed: boolean;
+}): TakeoverDecision {
+  const protectedOwner = input.ownerSupervisor === 'systemd' || input.contenderInSession;
+  if (!protectedOwner || input.contenderSupervisor === 'systemd' || input.takeoverAllowed) {
+    return { kind: 'takeover' };
+  }
+  const where = input.contenderInSession ? 'an AWB agent session' : 'a foreground shell';
+  const ownerLabel = input.ownerSupervisor === 'systemd' ? 'the systemd-managed manager' : 'the running manager';
+  if (compareLockVersions(input.contenderVersion, input.ownerVersion) > 0) {
+    return {
+      kind: 'handoff',
+      reason:
+        `this build (v${input.contenderVersion}) is newer than ${ownerLabel} (v${input.ownerVersion || '?'}); ` +
+        `started from ${where}, so instead of taking over it was asked to re-exec in place (SIGUSR2) and load the installed build`,
+    };
+  }
+  return {
+    kind: 'refuse',
+    reason:
+      `${ownerLabel} (v${input.ownerVersion || '?'}) is live and not older than this build (v${input.contenderVersion}); ` +
+      `refusing --force takeover from ${where}. Use \`systemctl --user restart awb-agent-manager\` (or the admin UI Restart), ` +
+      `or set ${FORCE_TAKEOVER_ENV}=1 to take over anyway`,
   };
 }
 
@@ -469,6 +538,7 @@ export async function acquireAgentLock(opts: AcquireOptions): Promise<LockHandle
     boot_id: boot.id,
     boot_time_ms: boot.approxBootTimeMs,
     pid_start_ticks: readProcessStartTicks(process.pid),
+    supervisor: detectSupervisor(),
   };
 
   // ELOCKRACE 일 때만 다시 돈다 — (a) 회수 경로가 create 레이스에서 이미 죽은
@@ -519,13 +589,45 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
   }
 
   if (!force) {
+    const newerBuild = compareLockVersions(payload.version, existing.version) > 0;
     const e: any = new Error(
       `AWB agent-manager lockfile held by pid=${existing.pid} role=${existing.role || '?'} ` +
-        `version=${existing.version || '?'} since ${existing.started_at || '?'} ` +
+        `version=${existing.version || '?'}${existing.supervisor ? ` (${existing.supervisor})` : ''} since ${existing.started_at || '?'} ` +
         `[${verdict.reason}: ${verdict.detail}]. ` +
-        `Stop it first, or pass --force to take over.`,
+        (newerBuild
+          ? `This build (v${payload.version}) is newer than the running manager — reload it in place with ` +
+            '`systemctl --user kill -s SIGUSR2 awb-agent-manager` (or the admin UI Restart) instead of starting a second instance.'
+          : 'Stop it first, or pass --force to take over.'),
     );
     e.code = 'EAGENTLOCKED';
+    throw e;
+  }
+
+  const decision = decideForceTakeover({
+    ownerVersion: existing.version,
+    ownerSupervisor: existing.supervisor,
+    contenderVersion: payload.version,
+    contenderSupervisor: detectSupervisor(),
+    contenderInSession: insideAgentSession(),
+    takeoverAllowed: forceTakeoverAllowed(),
+  });
+  if (decision.kind === 'handoff') {
+    log(`[lockfile] --force: handing off to owner pid=${existing.pid} — ${decision.reason}`);
+    try {
+      process.kill(existing.pid, 'SIGUSR2');
+    } catch (err: any) {
+      log(`[lockfile] --force: SIGUSR2 to owner pid=${existing.pid} failed: ${err?.message ?? err}`);
+    }
+    const e: any = new Error(
+      `AWB agent-manager pid=${existing.pid} (v${existing.version || '?'}) is live; ${decision.reason}. Not starting a second instance.`,
+    );
+    e.code = 'EAGENTHANDOFF';
+    throw e;
+  }
+  if (decision.kind === 'refuse') {
+    log(`[lockfile] --force: refused — ${decision.reason}`);
+    const e: any = new Error(`AWB agent-manager pid=${existing.pid} is live; ${decision.reason}`);
+    e.code = 'EAGENTSUPERVISED';
     throw e;
   }
 

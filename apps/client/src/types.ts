@@ -2306,6 +2306,10 @@ export interface AgentManagerInstance {
   // version compare degrades to "no info" in that case.
   latest_version?: string | null;
   update_available?: boolean;
+  // 디스크 설치본 버전. plugin_version(실행 중)과 다르면 restart_required — 프로세스 밖에서
+  // `npm i -g` 가 돌아 재기동만 남은 상태. 구버전 매니저는 undefined.
+  installed_version?: string | null;
+  restart_required?: boolean;
   // How the manager was installed. npm is the only distribution channel, so
   // 'npm-global' is the sole auto-updatable mode (Update button works).
   // Anything else renders "manual updates only": 'unknown' (npm unreachable),

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
+import { installedVersionBadge, managerUpdateAction } from './managerUpdateAction';
 import type {
   Agent,
   AgentCredentialEntry,
@@ -641,13 +642,14 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // `agent_instance_update` event with the new manager version — no polling.
   const handleUpdate = async () => {
     if (updatePending) return;
+    const action = managerUpdateAction(inst);
     const ok = await confirm({
-      title: 'Update manager',
+      title: action.kind === 'restart' ? 'Restart manager' : 'Update manager',
       message:
-        inst.install_mode === 'npm-global'
-          ? 'Update this manager? It will reinstall from npm (npm i -g --ignore-scripts awb-agent-manager@latest) and restart.'
-          : 'Update this manager? It will pull the latest source, rebuild, and restart.',
-      confirmLabel: 'Update',
+        action.kind === 'restart' || action.kind === 'update'
+          ? action.confirm
+          : 'Update this manager? It will reinstall from npm and restart.',
+      confirmLabel: action.kind === 'restart' ? 'Restart' : 'Update',
       danger: false,
     });
     if (!ok) return;
@@ -655,8 +657,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     try {
       const resp = await api.sendAgentManagerCommand(inst.instance_id, { command: 'update_manager' });
       showToast(
-        `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — manager will rebuild + re-exec; ` +
-          `it'll reappear in ~30s with the new version.`,
+        action.kind === 'restart'
+          ? `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — the installed build is already on disk; the manager restarts into it and reappears in ~30s.`
+          : `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — manager will rebuild + re-exec; ` +
+            `it'll reappear in ~30s with the new version.`,
         'success',
       );
     } catch (err: any) {
@@ -983,9 +987,18 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
                 {inst.install_mode || 'install mode unknown'}
               </span>
+              {installedVersionBadge(inst) && (
+                <span
+                  data-testid="manager-restart-required"
+                  style={{ fontSize: 11, color: tokens.colors.warning, fontFamily: 'monospace' }}
+                  title="The package on disk was replaced (e.g. npm i -g from a shell or session) while this process kept running the older build. Restart to load it."
+                >
+                  ({installedVersionBadge(inst)})
+                </span>
+              )}
               <ManagerVersionBadge inst={inst} />
               <div style={{ flex: 1 }} />
-              {inst.update_available ? (
+              {managerUpdateAction(inst).kind === 'restart' || managerUpdateAction(inst).kind === 'update' ? (
                 <button
                   onClick={handleUpdate}
                   disabled={updatePending}
@@ -1000,13 +1013,9 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
                     cursor: updatePending ? 'wait' : 'pointer',
                     fontFamily: 'inherit',
                   }}
-                  title={
-                    inst.install_mode === 'npm-global'
-                      ? `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (npm i -g --ignore-scripts awb-agent-manager@latest, then restart).`
-                      : `Update from v${inst.plugin_version} → v${inst.latest_version || '?'} (git pull + npm ci + build, then re-exec).`
-                  }
+                  title={managerUpdateAction(inst).title}
                 >
-                  {updatePending ? 'Updating…' : `Update → v${inst.latest_version || '?'}`}
+                  {updatePending ? (managerUpdateAction(inst).kind === 'restart' ? 'Restarting…' : 'Updating…') : managerUpdateAction(inst).label}
                 </button>
               ) : (
                 // 버튼을 숨기지 않고 비활성으로 남긴다 — "여기가 매니저를 올리는
@@ -1024,13 +1033,9 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
                     cursor: 'default',
                     fontFamily: 'inherit',
                   }}
-                  title={
-                    inst.update_available === undefined
-                      ? '이 매니저는 업데이트 확인을 보고하지 않는다 (구버전).'
-                      : '올릴 것이 없다.'
-                  }
+                  title={managerUpdateAction(inst).title}
                 >
-                  {inst.update_available === undefined ? '업데이트 확인 불가' : '최신'}
+                  {managerUpdateAction(inst).label}
                 </button>
               )}
             </div>

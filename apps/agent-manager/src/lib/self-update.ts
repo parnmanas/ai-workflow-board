@@ -59,6 +59,7 @@ import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
+import { detectSupervisor } from './supervisor.js';
 import {
   BOOT_VERIFY_TIMEOUT_MS,
   MAX_INSTALL_ATTEMPTS,
@@ -358,8 +359,13 @@ export function evaluateUpdatePolicyGate(input: {
 }
 
 export interface UpdateStatus {
-  /** Currently-running manager version (from package.json on disk). */
+  /** 실행 중인 매니저 버전 — 부팅 때 잡은 값(getRunningVersion). */
   current_version: string;
+  /** 지금 디스크에 설치된 빌드 버전(dist/package.json). 실행 중 버전과 다를 수 있다. */
+  installed_version: string;
+  /** installed_version !== current_version — 디스크는 갈렸는데 프로세스가 옛 코드를 돈다.
+   *  update_manager / SIGUSR2 로 재기동해야 반영된다. */
+  restart_required: boolean;
   /** Latest version published on the active channel, or null when we couldn't
    *  read it (network error / auto-update off / first tick hasn't run yet). */
   latest_version: string | null;
@@ -389,6 +395,9 @@ export interface UpdateStatus {
 export interface SelfUpdateResult {
   changed: boolean;
   summary: string;
+  /** true 면 `changed:false` 가 "레지스트리에 실행 중 버전보다 새 것이 없다" 는 정상
+   *  결과다 — 실패도, 대기도 아니다. update_manager ack 는 이것을 ok 로 보낸다. */
+  upToDate?: boolean;
   /** Set when runSelfUpdate scheduled a detached re-exec. The caller (SSE
    *  command handler / SIGUSR1 path) inspects this so it can hand the ack
    *  POST + log line a head start before the parent exits. */
@@ -483,6 +492,8 @@ export interface SelfUpdatePorts {
   restart?: () => void;
   /** 새로 설치된 진입점이 실제로 뜨는지 확인 */
   probe?: (input: { expectVersion: string }) => Promise<EntrypointProbeResult>;
+  /** 디스크 설치본 버전 리더 — 테스트에서 실행본과 다른 값을 주입한다. */
+  installedVersion?: () => string;
 }
 
 interface RunResult {
@@ -525,6 +536,37 @@ export function classifyInstallMode(npmGlobalRoot: string | null): InstallMode {
 /** Classify how this manager was installed by probing `npm root -g`. */
 export function detectInstallMode(): InstallMode {
   return classifyInstallMode(detectNpmGlobalRoot());
+}
+
+/**
+ * 실행 중인 코드의 버전 — main.ts 가 부팅 시 한 번 잡아 넘긴다.
+ *
+ * `readBundledVersion()`(dist/package.json)은 **디스크의 설치본** 버전이다. 프로세스가
+ * 떠 있는 동안 누군가 `npm i -g` 로 설치본을 갈아끼우면 둘이 갈라진다 — 그때 디스크
+ * 값을 "현재 버전" 으로 읽으면 자체 업데이트가 "이미 최신" 이라며 재기동을 건너뛰고,
+ * 하트비트는 부팅 버전을 보고해 화면에는 계속 업데이트 가능으로 남는다(rolf 에서 실제로
+ * 그랬다). 그래서 "현재" 는 언제나 부팅 때 잡은 값이고, 디스크 값은 별도 개념
+ * (installed_version / restart_required)으로 다룬다.
+ */
+let runningVersionOverride: string | null = null;
+
+export function setRunningVersion(version: string | null | undefined): void {
+  runningVersionOverride = version && /^\d+\.\d+\.\d+/.test(version) ? version : null;
+}
+
+/** 부팅 시 잡은 실행 버전. main.ts 가 아직 안 넘겼으면(테스트/dev) 디스크 값으로 대신한다. */
+export function getRunningVersion(): string {
+  return runningVersionOverride ?? (readBundledVersion() || '0.0.0');
+}
+
+/** 지금 디스크에 설치된 빌드의 버전 — 실행 중 버전과 다를 수 있다. */
+export function readInstalledVersion(): string {
+  return readBundledVersion() || '0.0.0';
+}
+
+export function restartRequiredFor(running: string, installed: string): boolean {
+  if (!/^\d+\.\d+\.\d+/.test(running) || !/^\d+\.\d+\.\d+/.test(installed)) return false;
+  return compareSemver(installed, running) !== 0;
 }
 
 /**
@@ -709,6 +751,8 @@ export class UpdateChecker {
       installMode?: InstallMode;
       updateChannel?: string;
       currentVersion?: string;
+      /** 디스크 설치본 버전 리더(테스트 주입). 기본 readInstalledVersion. */
+      installedVersion?: () => string;
       /** See setCountInFlightSessions — accepted here too so a test can
        *  construct a fully-wired checker in one call. */
       countInFlightSessions?: () => number;
@@ -758,7 +802,9 @@ export class UpdateChecker {
     );
     // The build-time snapshot (dist/package.json) is the running code's own
     // version — frozen at build, so it always matches what is actually loaded.
-    const current_version = opts.currentVersion ?? (readBundledVersion() || '0.0.0');
+    const current_version = opts.currentVersion ?? getRunningVersion();
+    this.#installedVersion = opts.installedVersion ?? readInstalledVersion;
+    const installed_version = this.#installedVersion();
     // last_error is reserved for actionable failures (registry unreachable,
     // unparseable response, …). "npm not available" is signalled via
     // install_mode='unknown' + a one-line log on start; the UI uses that to
@@ -766,6 +812,8 @@ export class UpdateChecker {
     // "check failed".
     this.#status = {
       current_version,
+      installed_version,
+      restart_required: restartRequiredFor(current_version, installed_version),
       latest_version: null,
       update_available: false,
       install_mode,
@@ -776,8 +824,31 @@ export class UpdateChecker {
     };
   }
 
+  /** 디스크 설치본 버전 리더. */
+  #installedVersion: () => string = readInstalledVersion;
+  #restartRequiredLogged = false;
+
   /** Snapshot of the current cache. Heartbeat reads this on every tick. */
   status(): UpdateStatus {
+    // 설치본 버전은 매번 디스크에서 다시 읽는다 — 프로세스 밖에서 `npm i -g` 가 돌면
+    // 다음 하트비트가 곧바로 restart_required 를 광고해야 한다.
+    let installed_version = this.#status.installed_version;
+    try {
+      installed_version = this.#installedVersion() || installed_version;
+    } catch {
+      /* 읽기 실패 — 직전 값 유지 */
+    }
+    const restart_required = restartRequiredFor(this.#status.current_version, installed_version);
+    if (restart_required && !this.#restartRequiredLogged) {
+      this.#restartRequiredLogged = true;
+      this.#log(
+        `Self-update: installed build v${installed_version} on disk differs from running v${this.#status.current_version} — ` +
+          'restart required (update_manager from the admin UI, or SIGUSR2) before the new build is live',
+      );
+    } else if (!restart_required) {
+      this.#restartRequiredLogged = false;
+    }
+    this.#status = { ...this.#status, installed_version, restart_required };
     // Defensive copy so the caller can't accidentally mutate the cache.
     return { ...this.#status };
   }
@@ -1581,10 +1652,14 @@ async function runNpmGlobalSelfUpdate(
   out: (msg: string) => void,
   channel: string,
 ): Promise<SelfUpdateResult> {
-  const current = readBundledVersion();
+  const current = getRunningVersion();
   const channelSpec = npmChannelSpec(channel);
   const ports = resolvePorts(opts, out);
-  out(`Self-update: npm-global mode (current v${current}) — target ${channelSpec}`);
+  const installed = ports.installedVersion() || current;
+  out(
+    `Self-update: npm-global mode (running v${current}` +
+      `${installed !== current ? `, installed v${installed}` : ''}) — target ${channelSpec}`,
+  );
 
   // 설치 전에 증명을 먼저 본다. dry-run 보다도 앞에 두는 이유: dry-run 의 목적이
   // "이 업데이트가 실제로 진행될지"를 보고하는 것이라, 거부될 업데이트를
@@ -1608,10 +1683,20 @@ async function runNpmGlobalSelfUpdate(
   // this is the earliest point we can know "is there actually anything to
   // do" — skip before it costs a session-drain check or an npm install.
   if (verdict.version && compareSemver(verdict.version, current) <= 0) {
-    const summary = `npm-global update skipped: already on v${current} (registry has v${verdict.version})`;
+    const summary =
+      `npm-global update skipped: already running v${current} (registry has v${verdict.version})` +
+      (restartRequiredFor(current, installed)
+        ? ` — note: disk has v${installed}; use restart_manager / SIGUSR2 to load it`
+        : '');
     out(`Self-update: ${summary}`);
-    return { changed: false, summary };
+    return { changed: false, summary, upToDate: true };
   }
+
+  // 디스크에 이미 대상(또는 그보다 새) 빌드가 있으면 설치는 건너뛰고 **재기동만** 한다.
+  // 프로세스 밖에서 `npm i -g` 가 먼저 돈 경우다(rolf 에서 세션이 그렇게 했다) — 예전엔
+  // 디스크 값을 "현재" 로 읽어 "이미 최신" 으로 끝냈고, 실행 중 프로세스는 옛 코드로
+  // 남았다.
+  const restartOnly = !!verdict.version && compareSemver(installed, verdict.version) >= 0;
 
   // ticket 9408b308: 운영자가 명시적으로 지시한 개시라면, 여기서 확정된 대상
   // 버전을 이 호스트의 승인으로 기록한다. 이 지점인 이유는 "승인 시점 = 새
@@ -1643,7 +1728,9 @@ async function runNpmGlobalSelfUpdate(
 
   // Dry-run / test hook: report intent without spawning the helper or exiting.
   if (opts.noReExec) {
-    const summary = `npm-global update: would run \`npm install -g --ignore-scripts ${installSpec}\` + restart (re-exec skipped)`;
+    const summary = restartOnly
+      ? `npm-global update: v${installed} is already installed on disk (running v${current}) — would restart to load it (re-exec skipped)`
+      : `npm-global update: would run \`npm install -g --ignore-scripts ${installSpec}\` + restart (re-exec skipped)`;
     out(`Self-update: ${summary}`);
     return { changed: true, summary, willReExec: false };
   }
@@ -1669,6 +1756,40 @@ async function runNpmGlobalSelfUpdate(
   // ticket 23753dc7 (정책 G): 이 버전에 대한 설치 실패가 누적돼 있으면 상한과
   // 백오프를 먼저 본다. 카운터는 파일에 있으므로 재기동을 넘어 이어진다 —
   // 메모리에 두면 매번 0부터 다시 세어 상한이 무의미해진다.
+  if (restartOnly) {
+    // 재기동하기 전에 디스크의 빌드가 뜨는지 확인한다 — 손으로 설치한 빌드가 깨져
+    // 있으면 systemd 의 Restart=on-failure 루프에 빠지기 전에 여기서 멈춘다.
+    const probe = await ports.probe({ expectVersion: installed });
+    if (!probe.ok) {
+      const summary =
+        `npm-global update refused: installed build v${installed} on disk failed to start (${probe.detail}) — ` +
+        `staying on running v${current}; reinstall it (npm i -g --ignore-scripts ${MANAGER_PACKAGE_NAME}@${installed})`;
+      out(`Self-update: ${summary}`);
+      return { changed: false, summary };
+    }
+    // 설치 경로와 같은 부팅 검증을 건다: 새 빌드가 하트비트 한 번을 못 내면 실행 중이던
+    // 버전으로 되돌린다. 되돌릴 대상의 provenance 를 확인하지 못하면 검증 없이 재기동한다
+    // (설치는 이미 끝난 상태라 거부해 봐야 옛 코드로 남을 뿐이다).
+    const rollbackSpec = await resolveVerifiedRollbackSpec({
+      previousVersion: current,
+      verifyProvenance: ports.verifyProvenance,
+      out,
+    });
+    if (rollbackSpec) {
+      const record = newInstallRecord({ previousVersion: current, targetVersion: installed, nowMs: Date.now(), carryFrom: null });
+      writeBootVerificationRecord(withAwaitingBoot(record, Date.now()), opts.stateDir);
+      out(`Self-update: boot verification armed for v${installed} (rollback target v${current} if no heartbeat succeeds)`);
+    } else {
+      out(`Self-update: no verified rollback target for v${current} — restarting into v${installed} without boot verification`);
+    }
+    const summary = `npm-global update: v${installed} already installed on disk (running v${current}); restarting manager to load it`;
+    out(`Self-update: ${summary}`);
+    _lastReExecScheduled = true;
+    _pendingRestartReason = 'self_update_restart';
+    setTimeout(() => ports.restart(), 1500).unref?.();
+    return { changed: true, summary, willReExec: true };
+  }
+
   const targetVersion = verdict.version ?? '';
   const nowMs = Date.now();
   // 대상 버전을 특정하지 못하는 경우는 provenance 게이트를 명시적으로 우회한
@@ -1998,6 +2119,7 @@ function resolvePorts(opts: SelfUpdateOpts, out: (msg: string) => void): Require
     verifyProvenance: p.verifyProvenance ?? ((channel) => verifyNpmGlobalProvenance(out, channel)),
     restart: p.restart ?? (() => reExecManager(out)),
     probe: p.probe ?? ((input) => probeInstalledEntrypoint(input)),
+    installedVersion: p.installedVersion ?? (() => readInstalledVersion()),
   };
 }
 
@@ -2449,13 +2571,17 @@ export async function restartManager(opts: SelfUpdateOpts = {}): Promise<SelfUpd
   }
   selfUpdateInFlight = true;
   try {
-    const version = readBundledVersion();
+    const running = getRunningVersion();
+    const installed = readInstalledVersion();
+    const version = restartRequiredFor(running, installed)
+      ? `running v${running} → installed v${installed}`
+      : `v${running}`;
     if (opts.noReExec) {
-      const summary = `restart_manager: re-exec skipped (v${version})`;
+      const summary = `restart_manager: re-exec skipped (${version})`;
       out(`Restart: ${summary}`);
       return { changed: true, summary, willReExec: false };
     }
-    const summary = `restart_manager: re-execing manager (v${version}) in place`;
+    const summary = `restart_manager: re-execing manager (${version}) in place`;
     out(`Restart: ${summary}`);
     _lastReExecScheduled = true;
     setTimeout(() => {
@@ -2488,7 +2614,7 @@ export async function restartManager(opts: SelfUpdateOpts = {}): Promise<SelfUpd
  * (ours) don't get one.
  */
 function isManagedBySystemd(): boolean {
-  return Boolean(process.env.INVOCATION_ID || process.env.JOURNAL_STREAM);
+  return detectSupervisor() === 'systemd';
 }
 
 /**

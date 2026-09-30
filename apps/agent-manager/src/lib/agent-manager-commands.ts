@@ -438,7 +438,7 @@ export class AgentManagerCommandHandler {
       countInFlightSessions: this.#deps.countInFlightSessions,
       approvalSource: 'update_manager',
     });
-    if (!result.changed && !result.deferred) {
+    if (!result.changed && !result.deferred && !result.upToDate) {
       throw new Error(`update_manager: ${result.summary}`);
     }
     return `update_manager ok: ${result.summary}`;

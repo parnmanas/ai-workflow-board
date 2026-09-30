@@ -328,7 +328,9 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
       // 운영자 셸의 API 키가 credential 을 덮지 않아야 한다 + 운영자 홈은 env 로 고정.
       // 운영자 환경의 CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY 등이 테스트에
       // 흘러들어오면 "credential 없는 operator-login" 케이스가 오염된다 — 명시적으로 덮는다.
-      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined },
+      // 러너 셸의 ANTHROPIC_BASE_URL/ANTHROPIC_MODEL(예: Claude Code 세션 안에서 테스트를 돌릴 때)이
+      // 픽스처로 새면 "프로파일 없음 → 기본 엔드포인트" 단언이 환경에 따라 흔들린다 — 걷어낸다.
+      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: undefined, ANTHROPIC_MODEL: undefined, CLAUDE_CODE_MAX_CONTEXT_TOKENS: undefined },
       credentialFetcher: async (id, ws) => {
         fetches.push({ id, ws });
         return provider ? { credential_id: id, provider, fields } : null;

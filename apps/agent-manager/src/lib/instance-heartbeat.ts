@@ -338,6 +338,9 @@ export interface InstanceHeartbeatPayload {
   // Older AWB servers ignore them; newer ones surface them on the admin UI.
   latest_version?: string | null;
   update_available?: boolean;
+  /** 디스크 설치본 버전 — plugin_version(실행 중)과 다르면 restart_required. */
+  installed_version?: string | null;
+  restart_required?: boolean;
   // Install mode ('npm-global' | 'unknown') — lets the admin UI show a working
   // Update button for npm-global installs instead of "manual updates only".
   // Older managers omit it, or report the retired 'git' mode; either way the UI
@@ -637,6 +640,8 @@ export class InstanceHeartbeat {
           ? {
               latest_version: updateStatus.latest_version,
               update_available: updateStatus.update_available,
+              installed_version: updateStatus.installed_version,
+              restart_required: updateStatus.restart_required,
               install_mode: updateStatus.install_mode,
               update_channel: updateStatus.update_channel,
               update_last_checked_at: updateStatus.last_checked_at,

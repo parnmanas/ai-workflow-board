@@ -209,6 +209,10 @@ export interface InstanceRecord {
   // The manager's UpdateChecker fills these from `git fetch` + remote
   // package.json on a slow timer; older managers leave them undefined.
   latest_version?: string | null;       // version on origin/<branch> or npm registry
+  // 디스크 설치본 버전(dist/package.json) — plugin_version(실행 중)과 다르면 restart_required.
+  // 프로세스 밖에서 `npm i -g` 가 돈 뒤 재기동이 안 된 상태를 화면이 구분해 보여주는 근거.
+  installed_version?: string | null;
+  restart_required?: boolean;
   update_available?: boolean;           // latest > current (semver-aware)
   // How the manager was installed: 'npm-global' | 'unknown'. Passed through
   // verbatim (typed as string for forward-compat, and because managers predating
