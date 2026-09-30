@@ -167,19 +167,22 @@ export type TakeoverDecision =
  * 아예 없어진다. 그래서
  *   - 소유자가 감독 중이거나 contender 가 AWB 세션 안이면: contender 의 빌드가 더 새로울 때
  *     SIGUSR2 로 **재기동을 넘기고** 물러난다(handoff). 아니면 거부한다.
- *   - contender 자신이 systemd 아래(서비스 재시작이 멈춘 전임자를 밀어내는 경우)거나,
- *     운영자가 AWB_AGENT_MANAGER_TAKEOVER=1 로 명시했으면 예전대로 takeover.
+ *   - 운영자가 AWB_AGENT_MANAGER_TAKEOVER=1 로 명시했을 때만 예전대로 takeover.
+ *
+ * "contender 가 systemd 아래면 서비스 재시작이니 takeover" 같은 예외는 두지 않는다. 진짜
+ * unit 재시작은 systemd 가 이전 main 프로세스를 먼저 끝낸 뒤 시작하므로 살아 있는 소유자를
+ * 만나지 않고(stale lock 은 --force 없이 회수된다), 반면 INVOCATION_ID 같은 표식은 데스크톱
+ * 앱의 자식 셸까지 물려받아 그 예외가 실제 서비스를 죽이는 구멍이 됐다.
  */
 export function decideForceTakeover(input: {
   ownerVersion: string | undefined;
   ownerSupervisor: string | null | undefined;
   contenderVersion: string;
-  contenderSupervisor: string | null;
   contenderInSession: boolean;
   takeoverAllowed: boolean;
 }): TakeoverDecision {
   const protectedOwner = input.ownerSupervisor === 'systemd' || input.contenderInSession;
-  if (!protectedOwner || input.contenderSupervisor === 'systemd' || input.takeoverAllowed) {
+  if (!protectedOwner || input.takeoverAllowed) {
     return { kind: 'takeover' };
   }
   const where = input.contenderInSession ? 'an AWB agent session' : 'a foreground shell';
@@ -607,7 +610,6 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
     ownerVersion: existing.version,
     ownerSupervisor: existing.supervisor,
     contenderVersion: payload.version,
-    contenderSupervisor: detectSupervisor(),
     contenderInSession: insideAgentSession(),
     takeoverAllowed: forceTakeoverAllowed(),
   });

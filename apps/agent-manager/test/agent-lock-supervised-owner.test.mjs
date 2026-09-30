@@ -7,8 +7,10 @@
 //   1. 소유자가 systemd 감독 아래면: contender 가 더 새 빌드 → SIGUSR2 로 재기동을 넘기고
 //      EAGENTHANDOFF, 아니면 EAGENTSUPERVISED. 소유자는 SIGTERM 을 받지 않는다.
 //   2. contender 가 AWB 세션(AWB_SESSION_ID) 안이면 소유자가 감독 중이 아니어도 같은 규칙.
-//   3. contender 자신이 systemd 아래(서비스 재시작)거나 AWB_AGENT_MANAGER_TAKEOVER=1 이면
-//      예전대로 takeover.
+//   3. AWB_AGENT_MANAGER_TAKEOVER=1 일 때만 예전대로 takeover. contender 가 INVOCATION_ID /
+//      JOURNAL_STREAM 을 물려받았어도(systemd 가 띄운 데스크톱 앱의 자식 셸) 예외가 아니다 —
+//      그 오판이 rolf 의 서비스를 실제로 죽였다. 감독 판정은 부모 프로세스(또는 테스트 seam
+//      AWB_AGENT_MANAGER_SUPERVISOR)로 한다.
 //   4. --force 없이는 언제나 EAGENTLOCKED 이고, 더 새 빌드면 SIGUSR2 안내가 붙는다.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +21,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { compareLockVersions, decideForceTakeover } from '../dist/lib/agent-lockfile.js';
+import { detectSupervisor } from '../dist/lib/supervisor.js';
 
 const lockModuleUrl = pathToFileURL(
   join(fileURLToPath(new URL('.', import.meta.url)), '../dist/lib/agent-lockfile.js'),
@@ -50,7 +53,7 @@ async function startOwner(home, { version, env = {} }) {
     setInterval(() => {}, 1000);
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
-    env: { ...process.env, AWB_AGENT_MANAGER_HOME: home, INVOCATION_ID: undefined, JOURNAL_STREAM: undefined, AWB_SESSION_ID: undefined, ...env },
+    env: { ...process.env, AWB_AGENT_MANAGER_HOME: home, AWB_AGENT_MANAGER_SUPERVISOR: 'none', AWB_SESSION_ID: undefined, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.add(child);
@@ -86,7 +89,7 @@ async function contend(home, { version, force, env = {} }) {
     }
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
-    env: { ...process.env, AWB_AGENT_MANAGER_HOME: home, INVOCATION_ID: undefined, JOURNAL_STREAM: undefined, AWB_SESSION_ID: undefined, AWB_AGENT_MANAGER_TAKEOVER: undefined, ...env },
+    env: { ...process.env, AWB_AGENT_MANAGER_HOME: home, AWB_AGENT_MANAGER_SUPERVISOR: 'none', AWB_SESSION_ID: undefined, AWB_AGENT_MANAGER_TAKEOVER: undefined, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -101,14 +104,13 @@ async function contend(home, { version, force, env = {} }) {
 const settle = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test('decideForceTakeover: pure rules', () => {
-  const base = { ownerVersion: '1.6.246', contenderVersion: '1.6.247', contenderSupervisor: null, contenderInSession: false, takeoverAllowed: false };
+  const base = { ownerVersion: '1.6.246', contenderVersion: '1.6.247', contenderInSession: false, takeoverAllowed: false };
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: null }).kind, 'takeover', 'unsupervised owner, foreground contender → legacy takeover');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd' }).kind, 'handoff', 'systemd owner + newer build → handoff');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', contenderVersion: '1.6.246' }).kind, 'refuse', 'systemd owner + same build → refuse');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', contenderVersion: '1.6.200' }).kind, 'refuse', 'systemd owner + older build → refuse');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: null, contenderInSession: true }).kind, 'handoff', 'inside an AWB session the owner is protected even without systemd');
-  assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', contenderSupervisor: 'systemd' }).kind, 'takeover', 'a systemd-started contender (service restart) may take over');
-  assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', takeoverAllowed: true }).kind, 'takeover', 'operator override');
+  assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', takeoverAllowed: true }).kind, 'takeover', 'operator override is the ONLY way past a supervised owner');
   assert.equal(compareLockVersions('1.6.247', '1.6.246'), 1);
   assert.equal(compareLockVersions('1.6.246', '1.6.246'), 0);
   assert.equal(compareLockVersions('e2e', '1.6.246'), 0, 'non-semver compares equal (no false "newer")');
@@ -116,7 +118,7 @@ test('decideForceTakeover: pure rules', () => {
 
 test('systemd-managed owner + newer build with --force → SIGUSR2 hand-off, owner keeps running', async () => {
   const home = await makeHome('handoff');
-  const owner = await startOwner(home, { version: '1.6.246', env: { INVOCATION_ID: 'fake-unit-invocation' } });
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   assert.match(owner.stdout, /"supervisor":"systemd"/, 'owner lock records its supervisor');
 
   const { stdout } = await contend(home, { version: '1.6.247', force: true });
@@ -131,7 +133,7 @@ test('systemd-managed owner + newer build with --force → SIGUSR2 hand-off, own
 
 test('systemd-managed owner + same build with --force → refused, owner untouched', async () => {
   const home = await makeHome('refuse');
-  const owner = await startOwner(home, { version: '1.6.246', env: { INVOCATION_ID: 'fake-unit-invocation' } });
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   const { stdout } = await contend(home, { version: '1.6.246', force: true });
   assert.match(stdout, /^REJECTED:EAGENTSUPERVISED:/m, stdout);
   assert.match(stdout, /AWB_AGENT_MANAGER_TAKEOVER=1/, 'the refusal names the override');
@@ -153,18 +155,29 @@ test('inside an AWB session, --force against an unsupervised owner hands off ins
   owner.child.kill('SIGKILL');
 });
 
-test('a systemd-started contender (service restart) still takes over a supervised owner', async () => {
-  const home = await makeHome('service-restart');
-  const owner = await startOwner(home, { version: '1.6.246', env: { INVOCATION_ID: 'old-invocation' } });
-  const { stdout } = await contend(home, { version: '1.6.247', force: true, env: { INVOCATION_ID: 'new-invocation' } });
-  assert.match(stdout, /^ACQUIRED:/m, stdout);
-  await owner.exited();
-  assert.match(owner.stdout, /OWNER_SIGTERM/, 'legacy takeover terminated the owner');
+test('inherited INVOCATION_ID / JOURNAL_STREAM on the contender do NOT unlock a takeover (the rolf regression)', async () => {
+  const home = await makeHome('inherited-markers');
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
+  // Claude Code 데스크톱 앱처럼 systemd 가 띄운 프로세스의 자식 셸은 이 두 변수를 물려받는다.
+  const { stdout } = await contend(home, { version: '1.6.247', force: true, env: { INVOCATION_ID: 'inherited', JOURNAL_STREAM: '8:12345' } });
+  assert.match(stdout, /^REJECTED:EAGENTHANDOFF:/m, stdout);
+  await settle(300);
+  assert.match(owner.stdout, /OWNER_SIGUSR2/);
+  assert.doesNotMatch(owner.stdout, /OWNER_SIGTERM/, 'the service is never terminated by an inherited-env contender');
+  assert.ok(owner.alive());
+  owner.child.kill('SIGKILL');
+});
+
+test('detectSupervisor: parent-process based, with the explicit seam; env markers alone mean nothing', () => {
+  assert.equal(detectSupervisor({ AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' }), 'systemd');
+  assert.equal(detectSupervisor({ AWB_AGENT_MANAGER_SUPERVISOR: 'none', INVOCATION_ID: 'x', JOURNAL_STREAM: 'y' }), null);
+  // 이 테스트 러너의 부모는 node(또는 npm)이지 systemd 가 아니다 — 물려받은 표식이 있어도 null.
+  assert.equal(detectSupervisor({ INVOCATION_ID: 'inherited', JOURNAL_STREAM: '8:1' }), null);
 });
 
 test('AWB_AGENT_MANAGER_TAKEOVER=1 restores the legacy takeover from a foreground shell', async () => {
   const home = await makeHome('override');
-  const owner = await startOwner(home, { version: '1.6.246', env: { INVOCATION_ID: 'fake-unit-invocation' } });
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   const { stdout } = await contend(home, { version: '1.6.247', force: true, env: { AWB_AGENT_MANAGER_TAKEOVER: '1' } });
   assert.match(stdout, /^ACQUIRED:/m, stdout);
   await owner.exited();
@@ -172,7 +185,7 @@ test('AWB_AGENT_MANAGER_TAKEOVER=1 restores the legacy takeover from a foregroun
 
 test('without --force a live owner is always EAGENTLOCKED; a newer build gets the SIGUSR2 hint', async () => {
   const home = await makeHome('locked');
-  const owner = await startOwner(home, { version: '1.6.246', env: { INVOCATION_ID: 'fake-unit-invocation' } });
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   const newer = await contend(home, { version: '1.6.247', force: false });
   assert.match(newer.stdout, /^REJECTED:EAGENTLOCKED:/m, newer.stdout);
   assert.match(newer.stdout, /SIGUSR2/, 'newer build → reload hint');

@@ -1,21 +1,46 @@
 /**
  * 이 프로세스가 어떤 감독자 아래서 도는지 / 어떤 맥락에서 실행됐는지.
  *
- * - systemd v232+ 는 unit 이 띄운 프로세스에 INVOCATION_ID 를 항상 넣고, JOURNAL_STREAM 은
- *   그보다 오래된 폴백이다. 둘 다 없으면 systemd 밖(Windows, 셸, launchd …)이다.
- *   /proc/1/comm 은 보지 않는다 — 사용자 세션 매니저가 non-systemd init 아래 돌 수 있다.
- * - AWB_SESSION_ID 는 agent-session-runner 가 세션 프로세스(ACP 어댑터와 그 자식)에 넣는다.
- *   그 안에서 매니저 바이너리를 직접 실행하면 세션이 끝날 때 함께 죽는다 — 락 takeover 를
- *   막고 실행 중인 서비스에 넘기는 근거로 쓴다.
+ * 감독자 판정은 **부모 프로세스**로 한다: systemd user unit 의 main 프로세스는 부모가
+ * `systemd --user`(comm "systemd")다. 환경변수 INVOCATION_ID / JOURNAL_STREAM 은 쓰지 않는다
+ * — systemd 가 띄운 데스크톱 앱(예: Claude Code)의 자식 셸까지 그 변수를 물려받아, 거기서
+ * 매니저를 직접 띄우면 "서비스가 띄운 프로세스" 로 오판했다(rolf 에서 실제로 그렇게 서비스가
+ * 대체돼 내려갔다).
+ *
+ * `AWB_AGENT_MANAGER_SUPERVISOR=systemd|none` 은 테스트/운영 seam 이다. 감독 중이라고 주장하면
+ * `--force` 로부터 **보호**될 뿐 어떤 권한도 생기지 않으므로 오용 위험이 없다.
+ *
+ * AWB_SESSION_ID 는 agent-session-runner 가 세션 프로세스(ACP 어댑터와 그 자식)에 넣는다.
+ * 그 안에서 매니저 바이너리를 직접 실행하면 세션이 끝날 때 함께 죽는다 — 락 takeover 를
+ * 막고 실행 중인 서비스에 넘기는 근거로 쓴다.
  *
  * self-update.ts(재기동 경로)와 agent-lockfile.ts(takeover 판정)가 같은 판정을 봐야 하므로
  * 여기 한 곳에만 둔다.
  */
+import { readFileSync } from 'node:fs';
 
 export type Supervisor = 'systemd' | null;
 
-export function detectSupervisor(env: NodeJS.ProcessEnv = process.env): Supervisor {
-  return env.INVOCATION_ID || env.JOURNAL_STREAM ? 'systemd' : null;
+export const SUPERVISOR_OVERRIDE_ENV = 'AWB_AGENT_MANAGER_SUPERVISOR';
+
+function parentComm(pid: number): string | null {
+  try {
+    const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+    const m = /^PPid:\s*(\d+)/m.exec(status);
+    const ppid = m ? Number(m[1]) : 0;
+    if (!(ppid > 0)) return null;
+    return readFileSync(`/proc/${ppid}/comm`, 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+export function detectSupervisor(env: NodeJS.ProcessEnv = process.env, pid: number = process.pid): Supervisor {
+  const override = env[SUPERVISOR_OVERRIDE_ENV]?.trim().toLowerCase();
+  if (override === 'systemd') return 'systemd';
+  if (override === 'none') return null;
+  if (process.platform !== 'linux') return null;
+  return parentComm(pid) === 'systemd' ? 'systemd' : null;
 }
 
 export function insideAgentSession(env: NodeJS.ProcessEnv = process.env): boolean {

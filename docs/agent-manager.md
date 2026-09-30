@@ -556,7 +556,7 @@ self-update 는 npm-global 설치 모드에서만 동작한다. 아래는 현재
 | 강제 재시작 | 연기가 벽시계 10분(`SELF_UPDATE_DRAIN_MAX_WAIT_MS`)을 넘으면 남은 세션을 `reason=self_update_restart` 로 태그하고 강행한다 | 같은 함수 |
 | 재기동 | 분리된 임시 헬퍼가 매니저 종료를 기다렸다가 `npm i -g` 후 재기동한다 | `NPM_GLOBAL_UPDATER_SOURCE` |
 | 실행본 ≠ 설치본 | "현재 버전" 은 **부팅 때 잡은 실행 버전**(`setRunningVersion`)이다. 프로세스 밖에서 `npm i -g` 가 돌아 디스크(`dist/package.json`)만 새 버전이면 하트비트가 `installed_version` + `restart_required` 를 광고하고, `update_manager` 는 설치를 건너뛰고 **재기동만** 한다(디스크 빌드 기동 probe → drain → 부팅 검증 arm → re-exec). 레지스트리가 실행 버전보다 새 것이 없으면 `upToDate` 로 ok ack | `self-update.ts` → `runNpmGlobalSelfUpdate()`, `UpdateChecker.status()` |
-| 직접 실행 보호 | 락 소유자가 systemd 감독 아래 있거나 contender 가 AWB 세션(`AWB_SESSION_ID`) 안이면 `--force` 는 소유자를 죽이지 않는다: 이 빌드가 더 새로우면 SIGUSR2 로 재기동을 **넘기고** exit 0(`EAGENTHANDOFF`), 아니면 거부 exit 2(`EAGENTSUPERVISED`). contender 자신이 systemd 아래이거나 `AWB_AGENT_MANAGER_TAKEOVER=1` 이면 예전 takeover | `agent-lockfile.ts` → `decideForceTakeover()`, `supervisor.ts` |
+| 직접 실행 보호 | 락 소유자가 systemd 감독 아래 있거나 contender 가 AWB 세션(`AWB_SESSION_ID`) 안이면 `--force` 는 소유자를 죽이지 않는다: 이 빌드가 더 새로우면 SIGUSR2 로 재기동을 **넘기고** exit 0(`EAGENTHANDOFF`), 아니면 거부 exit 2(`EAGENTSUPERVISED`). `AWB_AGENT_MANAGER_TAKEOVER=1` 일 때만 예전 takeover. 감독 판정은 **부모 프로세스**(`systemd --user`)로 한다 — INVOCATION_ID 는 데스크톱 앱의 자식 셸까지 물려받아 근거가 못 된다(테스트 seam `AWB_AGENT_MANAGER_SUPERVISOR`) | `agent-lockfile.ts` → `decideForceTakeover()`, `supervisor.ts` |
 
 drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 의
 `countInFlightSessions`). 에이전트가 스스로 갱신을 트리거하면 보통 `deferred` 가 먼저
