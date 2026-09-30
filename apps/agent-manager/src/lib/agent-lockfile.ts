@@ -53,7 +53,7 @@ import {
   processStartTimeMs,
   readProcessStartTicks,
 } from './boot-identity.js';
-import { detectSupervisor, effectivePlatform, forceTakeoverAllowed, FORCE_TAKEOVER_ENV, insideAgentSession } from './supervisor.js';
+import { detectSupervisor, effectivePlatform, forceTakeoverAllowed, FORCE_TAKEOVER_ENV, insideAgentSession, restartHint } from './supervisor.js';
 
 export const LOCK_PATH = join(AGENT_MANAGER_HOME, 'agent.lock');
 const RECOVERY_LOCK_PATH = `${LOCK_PATH}.recovery`;
@@ -184,23 +184,6 @@ export type TakeoverDecision =
 /** 이 플랫폼에서 소유자에게 SIGUSR2 재기동을 보낼 수 있는가. win32 에는 그 시그널이 없다. */
 function supportsRestartSignal(platform: NodeJS.Platform): boolean {
   return platform !== 'win32';
-}
-
-/** 감독 중인 매니저를 운영자가 실제로 재기동할 수 있는 경로. systemctl 은 linux 전용이라
- *  다른 플랫폼에 그 명령을 안내하면 유일한 단서가 실행 불가능한 지시가 된다.
- *
- *  `kind` 는 linux 에서만 갈린다 — 서비스를 내렸다 올리는 `restart` 와 제자리에서 다시 읽는
- *  `reload`(SIGUSR2) 는 systemctl 명령이 다르다. 비-linux 에는 어느 쪽이든 실제로 동작하는
- *  경로가 하나뿐이라 모드와 무관하게 같은 문장을 돌려준다.
- *
- *  이 축은 `supportsRestartSignal()` 과 **다른 축이다**: 여기는 systemctl 실행 가능성
- *  (linux), 저기는 SIGUSR2 존재 여부(win32 제외). darwin 은 SIGUSR2 는 있지만 systemctl 은
- *  없으므로 두 축이 실제로 갈린다. */
-function restartHint(platform: NodeJS.Platform, kind: 'restart' | 'reload' = 'restart'): string {
-  if (platform !== 'linux') return 'Restart it from the admin UI (or send the `restart_manager` command)';
-  return kind === 'reload'
-    ? 'Reload it in place with `systemctl --user kill -s SIGUSR2 awb-agent-manager` (or the admin UI Restart)'
-    : 'Use `systemctl --user restart awb-agent-manager` (or the admin UI Restart)';
 }
 
 export function decideForceTakeover(input: {

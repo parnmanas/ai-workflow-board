@@ -62,6 +62,23 @@ export function effectivePlatform(env: NodeJS.ProcessEnv = process.env): NodeJS.
   return override ? (override as NodeJS.Platform) : process.platform;
 }
 
+/** 감독 중인 매니저를 운영자가 실제로 재기동할 수 있는 경로. systemctl 은 linux 전용이라
+ *  다른 플랫폼에 그 명령을 안내하면 유일한 단서가 실행 불가능한 지시가 된다.
+ *
+ *  `kind` 는 linux 에서만 갈린다 — 서비스를 내렸다 올리는 `restart` 와 제자리에서 다시 읽는
+ *  `reload`(SIGUSR2) 는 systemctl 명령이 다르다. 비-linux 에는 어느 쪽이든 실제로 동작하는
+ *  경로가 하나뿐이라 모드와 무관하게 같은 문장을 돌려준다.
+ *
+ *  이 축은 agent-lockfile.ts 의 `supportsRestartSignal()` 과 **다른 축이다**: 여기는 systemctl 실행 가능성
+ *  (linux), 저기는 SIGUSR2 존재 여부(win32 제외). darwin 은 SIGUSR2 는 있지만 systemctl 은
+ *  없으므로 두 축이 실제로 갈린다. */
+export function restartHint(platform: NodeJS.Platform, kind: 'restart' | 'reload' = 'restart'): string {
+  if (platform !== 'linux') return 'Restart it from the admin UI (or send the `restart_manager` command)';
+  return kind === 'reload'
+    ? 'Reload it in place with `systemctl --user kill -s SIGUSR2 awb-agent-manager` (or the admin UI Restart)'
+    : 'Use `systemctl --user restart awb-agent-manager` (or the admin UI Restart)';
+}
+
 /** 운영자가 감독 중인 매니저까지 `--force` 로 밀어내겠다고 명시하는 탈출구. */
 export const FORCE_TAKEOVER_ENV = 'AWB_AGENT_MANAGER_TAKEOVER';
 
