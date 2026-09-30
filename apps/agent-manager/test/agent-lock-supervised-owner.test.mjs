@@ -6,6 +6,10 @@
 // 매니저가 아예 없어진다. 이제는
 //   1. 소유자가 systemd 감독 아래면: contender 가 더 새 빌드 → SIGUSR2 로 재기동을 넘기고
 //      EAGENTHANDOFF, 아니면 EAGENTSUPERVISED. 소유자는 SIGTERM 을 받지 않는다.
+//      단 handoff 는 SIGUSR2 가 있는 플랫폼 전용이다 — win32 에서는 그 시그널이 없어
+//      `process.kill` 이 던지고, 예전에는 그것을 삼킨 채 EAGENTHANDOFF(→ exit 0)를 올려
+//      "일어나지 않은 재기동" 을 성공으로 보고했다. 그 플랫폼에서는 refuse 로 판정한다.
+//      그래서 아래 세 테스트는 skip 이 아니라 **분기**다: skip 하면 같은 구멍이 다시 조용해진다.
 //   2. contender 가 AWB 세션(AWB_SESSION_ID) 안이면 소유자가 감독 중이 아니어도 같은 규칙.
 //   3. AWB_AGENT_MANAGER_TAKEOVER=1 일 때만 예전대로 takeover. contender 가 INVOCATION_ID /
 //      JOURNAL_STREAM 을 물려받았어도(systemd 가 띄운 데스크톱 앱의 자식 셸) 예외가 아니다 —
@@ -89,7 +93,15 @@ async function contend(home, { version, force, env = {} }) {
     }
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
-    env: { ...process.env, AWB_AGENT_MANAGER_HOME: home, AWB_AGENT_MANAGER_SUPERVISOR: 'none', AWB_SESSION_ID: undefined, AWB_AGENT_MANAGER_TAKEOVER: undefined, ...env },
+    env: {
+      ...process.env,
+      AWB_AGENT_MANAGER_HOME: home,
+      AWB_AGENT_MANAGER_SUPERVISOR: 'none',
+      AWB_SESSION_ID: undefined,
+      AWB_AGENT_MANAGER_TAKEOVER: undefined,
+      AWB_AGENT_MANAGER_PLATFORM: undefined,
+      ...env,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -103,31 +115,77 @@ async function contend(home, { version, force, env = {} }) {
 
 const settle = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// win32 에는 SIGUSR2 가 없다 — 이 축이 갈리는 유일한 이유다.
+const HANDOFF_AVAILABLE = process.platform !== 'win32';
+
+/** 보호된 소유자 + 더 새 빌드 + `--force` 의 결과. 플랫폼에 따라 에러 코드와 시그널 수신이
+ *  갈리지만 "소유자는 SIGTERM 을 받지 않고 살아 있다" 는 양쪽에서 같다. */
+async function assertProtectedFromNewerBuild(stdout, owner) {
+  if (HANDOFF_AVAILABLE) {
+    assert.match(stdout, /^REJECTED:EAGENTHANDOFF:/m, stdout);
+  } else {
+    assert.match(stdout, /^REJECTED:EAGENTSUPERVISED:/m, stdout);
+    assert.match(stdout, /has no SIGUSR2/, stdout);
+    assert.match(stdout, /restart_manager/, '거부 사유가 실제로 동작하는 대체 경로를 남긴다');
+  }
+  await settle(300);
+  if (HANDOFF_AVAILABLE) {
+    assert.match(owner.stdout, /OWNER_SIGUSR2/, 'owner was asked to re-exec in place');
+  } else {
+    assert.doesNotMatch(owner.stdout, /OWNER_SIGUSR2/, 'win32 에서는 보낼 수 있는 시그널이 없다');
+  }
+  assert.doesNotMatch(owner.stdout, /OWNER_SIGTERM/, 'owner was NOT terminated');
+  assert.ok(owner.alive(), 'owner still alive');
+}
+
 test('decideForceTakeover: pure rules', () => {
-  const base = { ownerVersion: '1.6.246', contenderVersion: '1.6.247', contenderInSession: false, takeoverAllowed: false };
+  const base = { ownerVersion: '1.6.246', contenderVersion: '1.6.247', contenderInSession: false, takeoverAllowed: false, platform: 'linux' };
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: null }).kind, 'takeover', 'unsupervised owner, foreground contender → legacy takeover');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd' }).kind, 'handoff', 'systemd owner + newer build → handoff');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', contenderVersion: '1.6.246' }).kind, 'refuse', 'systemd owner + same build → refuse');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', contenderVersion: '1.6.200' }).kind, 'refuse', 'systemd owner + older build → refuse');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: null, contenderInSession: true }).kind, 'handoff', 'inside an AWB session the owner is protected even without systemd');
   assert.equal(decideForceTakeover({ ...base, ownerSupervisor: 'systemd', takeoverAllowed: true }).kind, 'takeover', 'operator override is the ONLY way past a supervised owner');
+  // 플랫폼 축 — 같은 입력에서 SIGUSR2 가 없는 플랫폼만 handoff 대신 refuse 로 갈린다.
+  const win = { ...base, platform: 'win32' };
+  assert.equal(decideForceTakeover({ ...win, ownerSupervisor: 'systemd' }).kind, 'refuse', 'win32: SIGUSR2 가 없어 handoff 가 성립하지 않는다');
+  assert.equal(decideForceTakeover({ ...win, ownerSupervisor: null, contenderInSession: true }).kind, 'refuse', 'win32: 세션 축에서도 같다');
+  assert.match(
+    decideForceTakeover({ ...win, ownerSupervisor: 'systemd' }).reason,
+    /has no SIGUSR2/,
+    'win32 거부 사유는 왜 넘길 수 없는지 밝힌다',
+  );
+  assert.match(
+    decideForceTakeover({ ...win, ownerSupervisor: 'systemd' }).reason,
+    /restart_manager/,
+    'win32 거부 사유는 systemctl 대신 실제로 동작하는 경로를 안내한다',
+  );
+  assert.equal(decideForceTakeover({ ...win, ownerSupervisor: null }).kind, 'takeover', 'win32: 보호 대상이 아니면 그대로 takeover');
+  assert.equal(decideForceTakeover({ ...win, ownerSupervisor: 'systemd', takeoverAllowed: true }).kind, 'takeover', 'win32: 운영자 override 는 그대로 통한다');
+  assert.match(
+    decideForceTakeover({ ...base, ownerSupervisor: 'systemd', contenderVersion: '1.6.246' }).reason,
+    /systemctl --user restart/,
+    'linux 거부 사유는 systemctl 경로를 그대로 안내한다',
+  );
+  assert.doesNotMatch(
+    decideForceTakeover({ ...win, ownerSupervisor: 'systemd', contenderVersion: '1.6.246' }).reason,
+    /systemctl/,
+    'win32 에 systemctl 을 안내하면 유일한 단서가 실행 불가능한 지시가 된다',
+  );
+
   assert.equal(compareLockVersions('1.6.247', '1.6.246'), 1);
   assert.equal(compareLockVersions('1.6.246', '1.6.246'), 0);
   assert.equal(compareLockVersions('e2e', '1.6.246'), 0, 'non-semver compares equal (no false "newer")');
 });
 
-test('systemd-managed owner + newer build with --force → SIGUSR2 hand-off, owner keeps running', async () => {
+test('systemd-managed owner + newer build with --force → owner protected (SIGUSR2 hand-off where the platform has it), owner keeps running', async () => {
   const home = await makeHome('handoff');
   const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   assert.match(owner.stdout, /"supervisor":"systemd"/, 'owner lock records its supervisor');
 
   const { stdout } = await contend(home, { version: '1.6.247', force: true });
-  assert.match(stdout, /^REJECTED:EAGENTHANDOFF:/m, stdout);
   assert.match(stdout, /newer than the systemd-managed manager/);
-  await settle(300);
-  assert.match(owner.stdout, /OWNER_SIGUSR2/, 'owner was asked to re-exec in place');
-  assert.doesNotMatch(owner.stdout, /OWNER_SIGTERM/, 'owner was NOT terminated');
-  assert.ok(owner.alive(), 'owner still alive');
+  await assertProtectedFromNewerBuild(stdout, owner);
   owner.child.kill('SIGKILL');
 });
 
@@ -143,15 +201,14 @@ test('systemd-managed owner + same build with --force → refused, owner untouch
   owner.child.kill('SIGKILL');
 });
 
-test('inside an AWB session, --force against an unsupervised owner hands off instead of killing it', async () => {
+test('inside an AWB session, --force against an unsupervised owner protects it instead of killing it', async () => {
   const home = await makeHome('session');
   const owner = await startOwner(home, { version: '1.6.246' });
   const { stdout } = await contend(home, { version: '1.6.247', force: true, env: { AWB_SESSION_ID: 'ses_test' } });
-  assert.match(stdout, /^REJECTED:EAGENTHANDOFF:/m, stdout);
-  assert.match(stdout, /started from an AWB agent session/);
-  await settle(300);
-  assert.match(owner.stdout, /OWNER_SIGUSR2/);
-  assert.doesNotMatch(owner.stdout, /OWNER_SIGTERM/);
+  // 양쪽 플랫폼의 문구에 공통으로 남는 부분만 본다 — linux 는 "started from an AWB agent
+  // session", win32 는 "refusing --force takeover from an AWB agent session" 이다.
+  assert.match(stdout, /from an AWB agent session/);
+  await assertProtectedFromNewerBuild(stdout, owner);
   owner.child.kill('SIGKILL');
 });
 
@@ -160,11 +217,36 @@ test('inherited INVOCATION_ID / JOURNAL_STREAM on the contender do NOT unlock a 
   const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   // Claude Code 데스크톱 앱처럼 systemd 가 띄운 프로세스의 자식 셸은 이 두 변수를 물려받는다.
   const { stdout } = await contend(home, { version: '1.6.247', force: true, env: { INVOCATION_ID: 'inherited', JOURNAL_STREAM: '8:12345' } });
-  assert.match(stdout, /^REJECTED:EAGENTHANDOFF:/m, stdout);
+  await assertProtectedFromNewerBuild(stdout, owner);
+  owner.child.kill('SIGKILL');
+});
+
+// 위 세 테스트의 win32 축은 windows-latest 잡에서만 실제로 실행된다. 그 잡 하나에 기대면
+// 언젠가 그 잡이 빠지거나 skip 되는 순간 "일어나지 않은 재기동을 exit 0 으로 보고" 하던
+// 구멍이 다시 조용해지므로, 플랫폼 seam 으로 같은 경로를 **모든** OS 에서 한 번 더 고정한다.
+// tmpdir()/path.join 까지 win32 로 바꿀 수는 없으니 갈리는 축 하나만 바꿔 끼운다.
+test('AWB_AGENT_MANAGER_PLATFORM=win32: hand-off 대신 거부하고, 소유자는 아무 시그널도 받지 않는다', async () => {
+  const home = await makeHome('win32-seam');
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
+
+  const { stdout } = await contend(home, {
+    version: '1.6.247',
+    force: true,
+    env: { AWB_AGENT_MANAGER_PLATFORM: 'win32' },
+  });
+  // 더 새 빌드인데도 handoff 가 아니다 — 보낼 수 있는 시그널이 없기 때문이고, 그 사실이
+  // 운영자에게 남는 유일한 단서다.
+  assert.match(stdout, /^REJECTED:EAGENTSUPERVISED:/m, stdout);
+  assert.match(stdout, /newer than the systemd-managed manager/, stdout);
+  assert.match(stdout, /win32 has no SIGUSR2/, stdout);
+  assert.match(stdout, /restart_manager/, '거부 사유가 실제로 동작하는 대체 경로를 남긴다');
+  assert.doesNotMatch(stdout, /systemctl/, 'win32 에 systemctl 을 안내하지 않는다');
+  assert.doesNotMatch(stdout, /REJECTED:EAGENTHANDOFF/, stdout);
+
   await settle(300);
-  assert.match(owner.stdout, /OWNER_SIGUSR2/);
-  assert.doesNotMatch(owner.stdout, /OWNER_SIGTERM/, 'the service is never terminated by an inherited-env contender');
-  assert.ok(owner.alive());
+  assert.doesNotMatch(owner.stdout, /OWNER_SIGUSR2/, '보낼 수 없는 시그널을 보냈다고 하지 않는다');
+  assert.doesNotMatch(owner.stdout, /OWNER_SIGTERM/, '보호 대상은 여전히 SIGTERM 을 받지 않는다');
+  assert.ok(owner.alive(), 'owner still alive');
   owner.child.kill('SIGKILL');
 });
 

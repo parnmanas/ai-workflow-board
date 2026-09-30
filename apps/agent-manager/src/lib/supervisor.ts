@@ -47,6 +47,21 @@ export function insideAgentSession(env: NodeJS.ProcessEnv = process.env): boolea
   return Boolean(env.AWB_SESSION_ID);
 }
 
+/**
+ * `--force` 판정이 보는 플랫폼. `AWB_AGENT_MANAGER_PLATFORM` 은
+ * `AWB_AGENT_MANAGER_SUPERVISOR` 와 같은 성질의 seam 이다 — 이 값으로 갈리는 것은
+ * "SIGUSR2 재기동을 넘길 수 있는가" 하나뿐이고, 그 답이 no 면 takeover 를 **거부**하는
+ * 쪽으로만 움직이므로 어떤 권한도 생기지 않는다. 대신 win32 전용 분기를 어느 OS 에서든
+ * 통합 테스트로 고정할 수 있다 — 그 분기를 Windows 잡에만 맡겨 두면, 그 잡이 언젠가
+ * 빠지는 순간 같은 구멍이 다시 조용해진다.
+ */
+export const PLATFORM_OVERRIDE_ENV = 'AWB_AGENT_MANAGER_PLATFORM';
+
+export function effectivePlatform(env: NodeJS.ProcessEnv = process.env): NodeJS.Platform {
+  const override = env[PLATFORM_OVERRIDE_ENV]?.trim();
+  return override ? (override as NodeJS.Platform) : process.platform;
+}
+
 /** 운영자가 감독 중인 매니저까지 `--force` 로 밀어내겠다고 명시하는 탈출구. */
 export const FORCE_TAKEOVER_ENV = 'AWB_AGENT_MANAGER_TAKEOVER';
 

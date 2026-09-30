@@ -53,7 +53,7 @@ import {
   processStartTimeMs,
   readProcessStartTicks,
 } from './boot-identity.js';
-import { detectSupervisor, forceTakeoverAllowed, FORCE_TAKEOVER_ENV, insideAgentSession } from './supervisor.js';
+import { detectSupervisor, effectivePlatform, forceTakeoverAllowed, FORCE_TAKEOVER_ENV, insideAgentSession } from './supervisor.js';
 
 export const LOCK_PATH = join(AGENT_MANAGER_HOME, 'agent.lock');
 const RECOVERY_LOCK_PATH = `${LOCK_PATH}.recovery`;
@@ -173,13 +173,34 @@ export type TakeoverDecision =
  * unit 재시작은 systemd 가 이전 main 프로세스를 먼저 끝낸 뒤 시작하므로 살아 있는 소유자를
  * 만나지 않고(stale lock 은 --force 없이 회수된다), 반면 INVOCATION_ID 같은 표식은 데스크톱
  * 앱의 자식 셸까지 물려받아 그 예외가 실제 서비스를 죽이는 구멍이 됐다.
+ *
+ * handoff 는 **SIGUSR2 가 있는 플랫폼에서만** 성립한다. win32 에는 그 시그널이 없어
+ * `process.kill(pid, 'SIGUSR2')` 가 `Unknown signal: SIGUSR2` 로 던지는데, 호출부의 catch 가
+ * 그것을 삼키고도 EAGENTHANDOFF 를 올려 main.ts 가 exit 0 을 냈다 — 소유자는 옛 빌드 그대로인데
+ * 호출자는 "재기동을 넘겼다" 로 읽는 조용한 실패다. 그래서 그런 플랫폼에서는 handoff 대신
+ * refuse 로 판정하고, 실제로 동작하는 대체 경로(관리자 UI Restart / `restart_manager`)를
+ * 거부 사유에 적는다. 파일 기반 크로스플랫폼 재기동 요청은 이 판정의 범위 밖이다.
  */
+/** 이 플랫폼에서 소유자에게 SIGUSR2 재기동을 보낼 수 있는가. win32 에는 그 시그널이 없다. */
+function supportsRestartSignal(platform: NodeJS.Platform): boolean {
+  return platform !== 'win32';
+}
+
+/** 감독 중인 매니저를 운영자가 실제로 재기동할 수 있는 경로. systemctl 은 linux 전용이라
+ *  다른 플랫폼에 그 명령을 안내하면 유일한 단서가 실행 불가능한 지시가 된다. */
+function restartHint(platform: NodeJS.Platform): string {
+  return platform === 'linux'
+    ? 'Use `systemctl --user restart awb-agent-manager` (or the admin UI Restart)'
+    : 'Restart it from the admin UI (or send the `restart_manager` command)';
+}
+
 export function decideForceTakeover(input: {
   ownerVersion: string | undefined;
   ownerSupervisor: string | null | undefined;
   contenderVersion: string;
   contenderInSession: boolean;
   takeoverAllowed: boolean;
+  platform: NodeJS.Platform;
 }): TakeoverDecision {
   const protectedOwner = input.ownerSupervisor === 'systemd' || input.contenderInSession;
   if (!protectedOwner || input.takeoverAllowed) {
@@ -187,7 +208,18 @@ export function decideForceTakeover(input: {
   }
   const where = input.contenderInSession ? 'an AWB agent session' : 'a foreground shell';
   const ownerLabel = input.ownerSupervisor === 'systemd' ? 'the systemd-managed manager' : 'the running manager';
+  const hint = restartHint(input.platform);
   if (compareLockVersions(input.contenderVersion, input.ownerVersion) > 0) {
+    if (!supportsRestartSignal(input.platform)) {
+      return {
+        kind: 'refuse',
+        reason:
+          `this build (v${input.contenderVersion}) is newer than ${ownerLabel} (v${input.ownerVersion || '?'}), ` +
+          `but ${input.platform} has no SIGUSR2 so the in-place re-exec hand-off cannot be delivered; ` +
+          `refusing --force takeover from ${where}. ${hint} to load this build, ` +
+          `or set ${FORCE_TAKEOVER_ENV}=1 to take over anyway`,
+      };
+    }
     return {
       kind: 'handoff',
       reason:
@@ -199,7 +231,7 @@ export function decideForceTakeover(input: {
     kind: 'refuse',
     reason:
       `${ownerLabel} (v${input.ownerVersion || '?'}) is live and not older than this build (v${input.contenderVersion}); ` +
-      `refusing --force takeover from ${where}. Use \`systemctl --user restart awb-agent-manager\` (or the admin UI Restart), ` +
+      `refusing --force takeover from ${where}. ${hint}, ` +
       `or set ${FORCE_TAKEOVER_ENV}=1 to take over anyway`,
   };
 }
@@ -612,6 +644,7 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
     contenderVersion: payload.version,
     contenderInSession: insideAgentSession(),
     takeoverAllowed: forceTakeoverAllowed(),
+    platform: effectivePlatform(),
   });
   if (decision.kind === 'handoff') {
     log(`[lockfile] --force: handing off to owner pid=${existing.pid} — ${decision.reason}`);
