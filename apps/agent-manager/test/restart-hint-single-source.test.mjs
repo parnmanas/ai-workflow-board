@@ -38,12 +38,20 @@ function tsFiles(dir) {
   );
 }
 
+/** 소스를 줄 배열로 끊는다. 구분자가 `\r?\n` 인 것이 핵심이다 — Windows 체크아웃은 CRLF 라
+ *  `split('\n')` 으로 끊으면 모든 줄 끝에 `\r` 가 남고, 아래 `=== '}'` 같은 정확 비교가 그
+ *  플랫폼에서만 조용히 빗나간다. `startsWith` 는 영향을 안 받아 더 헷갈린다: 여는 줄은 찾고
+ *  닫는 줄만 못 찾아 "닫는 괄호를 찾아야 한다" 로 터진다(windows-latest 잡만 빨갛게 났던 이유). */
+function sourceLines(text) {
+  return text.split(/\r?\n/);
+}
+
 /** 각 줄에서 주석을 제거한 사본. 블록 주석은 여러 줄에 걸치므로 상태를 들고 훑는다.
  *  줄 번호를 유지해야 위반을 지목할 수 있어서 줄 단위 배열로 돌려준다. */
 function stripComments(source) {
   const out = [];
   let inBlock = false;
-  for (const line of source.split('\n')) {
+  for (const line of sourceLines(source)) {
     let code = '';
     let i = 0;
     while (i < line.length) {
@@ -111,10 +119,11 @@ test('운영자 지시용 systemctl 문자열은 supervisor.ts 의 restartHint()
   );
 
   // 그 파일 안에서도 restartHint() 본문 밖으로 새지 않아야 한다.
-  const lines = readFileSync(join(srcRoot, 'lib/supervisor.ts'), 'utf8').split('\n');
+  const lines = sourceLines(readFileSync(join(srcRoot, 'lib/supervisor.ts'), 'utf8'));
   const start = lines.findIndex((line) => line.startsWith('export function restartHint('));
   assert.ok(start >= 0, 'supervisor.ts 에 restartHint() 가 있어야 한다');
-  const end = lines.findIndex((line, index) => index > start && line === '}');
+  // trimEnd 는 CRLF 와 별개의 둘째 방어선이다 — 닫는 줄에 공백이 붙어도 같은 실패로 새지 않게.
+  const end = lines.findIndex((line, index) => index > start && line.trimEnd() === '}');
   assert.ok(end > start, 'restartHint() 의 닫는 괄호를 찾아야 한다');
 
   const code = stripComments(lines.join('\n'));
