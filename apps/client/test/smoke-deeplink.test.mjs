@@ -4,8 +4,8 @@
 //
 // - TicketArtifactController 가 `?ticket=<id>` 를 관찰해 패널을 열고 파라미터를 제거.
 // - App 의 WorkspaceSectionRedirect 가 `/ws/:wsId?ticket=..` → `sessions?ticket=..` 로
-//   쿼리를 실어 나른다(수정 전: search 유실로 딥링크가 셸에 도달 못함). chat 모드의
-//   기본 랜딩은 Agent Session 목록(sessions)이다 — viewMode.defaultSectionForMode.
+//   쿼리를 실어 나른다(수정 전: search 유실로 딥링크가 셸에 도달 못함).
+//   기본 랜딩은 Agent Session 목록(sessions)이다.
 //
 // 실행:  node --import tsx --test apps/client/test/smoke-deeplink.test.mjs
 import test from 'node:test';
@@ -17,7 +17,6 @@ import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx'
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import TicketArtifactController from '../src/components/TicketArtifactController.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
-import { ViewModeProvider } from '../src/contexts/ViewModeContext.tsx';
 import { WorkspaceSectionRedirect } from '../src/App.tsx';
 
 const h = React.createElement;
@@ -89,15 +88,11 @@ test('MINOR-1: /ws/:wsId?ticket= 리다이렉트가 쿼리스트링을 보존한
         MemoryRouter,
         { initialEntries: ['/ws/w1?ticket=T1&comment=C9'] },
         h(
-          ViewModeProvider,
+          Routes,
           null,
-          h(
-            Routes,
-            null,
-            // chat 기본 모드 → sessions 로 리다이렉트하며 search 를 실어 나른다
-            h(Route, { path: '/ws/:wsId', element: h(WorkspaceSectionRedirect) }),
-            h(Route, { path: '/ws/:wsId/sessions', element: h(LocationProbe) }),
-          ),
+          // 기본 모드 → sessions 로 리다이렉트하며 search 를 실어 나른다
+          h(Route, { path: '/ws/:wsId', element: h(WorkspaceSectionRedirect) }),
+          h(Route, { path: '/ws/:wsId/sessions', element: h(LocationProbe) }),
         ),
       ),
     );

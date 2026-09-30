@@ -33,7 +33,7 @@ export type ChatFirstHomeViewState =
   | { status: 'ready'; assistantName: string };
 
 const QUICK_LINKS: { label: string; section: string; hint: string }[] = [
-  { label: 'Boards', section: 'boards', hint: '칸반 보드 (Advanced)' },
+  { label: 'Boards', section: 'boards', hint: '칸반 보드' },
   { label: 'AI Agents', section: 'agents', hint: '에이전트 관리' },
   { label: 'Chat', section: 'chat', hint: '전체 대화 룸' },
 ];

@@ -37,7 +37,6 @@ async function stubApi(page) {
   await page.addInitScript(({ workspaceId }) => {
     localStorage.setItem('auth_token', 'e2e-token');
     localStorage.setItem('currentWorkspaceId', workspaceId);
-    localStorage.setItem('awb.viewMode', 'advanced');
   }, { workspaceId: workspace.id });
 
   await page.route('**/api/**', async route => {

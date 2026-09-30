@@ -3,8 +3,6 @@ import { Outlet, useNavigate, useParams, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import { useDialogFocus } from './useDialogFocus';
 import WorkspaceSelector from './WorkspaceSelector';
-import ViewModeToggle from './ViewModeToggle';
-import { useViewMode } from '../contexts/ViewModeContext';
 import { ArtifactPanelProvider } from '../contexts/ArtifactPanelContext';
 import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
 import TicketArtifactController from './TicketArtifactController';
@@ -36,9 +34,8 @@ import type { ChatRoomListItem } from '../types';
  */
 export default function AppLayout() {
   const isMobile = useMediaQuery('(max-width: 767px)');
-  const { mode } = useViewMode();
-  // Desktop keeps the Hermes-style navigation visible in both Chat and
-  // Advanced modes. Only narrow mobile viewports use the off-canvas drawer.
+  // Desktop keeps the Hermes-style navigation visible. Only narrow mobile
+  // viewports use the off-canvas drawer.
   const drawerMode = isMobile;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const navigate = useNavigate();
@@ -104,8 +101,8 @@ export default function AppLayout() {
     setActiveWorkspaceId(currentWorkspaceId);
   }, [currentWorkspaceId]);
 
-  // AuthContext also exposes a currentWorkspaceId (read by ViewModeToggle's
-  // Chat/Advanced toggle, the legacy WorkspacedRedirect/WorkspaceDefaultRedirect
+  // AuthContext also exposes a currentWorkspaceId (read by the legacy
+  // WorkspacedRedirect/WorkspaceDefaultRedirect
   // routes, and NotificationContext's unread-badge fetch), but its only setter
   // (setCurrentWorkspace) is called exclusively from the login workspace picker.
   // That left it as the one drift source the sync above (comment block up top)
@@ -353,14 +350,13 @@ export default function AppLayout() {
                 onUpdateBoard={handleUpdateBoard}
               />
             )}
-            {mode === 'chat' && <ArtifactToggleButton />}
-            <ViewModeToggle />
+            <ArtifactToggleButton />
           </div>
         )}
 
         {/* Desktop top bar stays compact because primary navigation lives in
-            the persistent Sidebar. It retains workspace switching, the Chat
-            artifact toggle, and the Chat/Advanced mode control. */}
+            the persistent Sidebar. It retains workspace switching and the Chat
+            artifact toggle. */}
         {!drawerMode && (
           <div
             data-testid="app-header"
@@ -387,8 +383,7 @@ export default function AppLayout() {
               onUpdateBoard={handleUpdateBoard}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {mode === 'chat' && <ArtifactToggleButton />}
-              <ViewModeToggle />
+              <ArtifactToggleButton />
             </div>
           </div>
         )}

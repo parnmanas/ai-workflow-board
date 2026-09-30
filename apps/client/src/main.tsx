@@ -74,8 +74,7 @@ style.textContent = `
   }
   /* Off-canvas(드로어) 사이드바 — 모바일 전용.
      AppLayout 이 drawerMode 일 때 .awb-sidebar--overlay 를 부여하므로 미디어쿼리에
-     의존하지 않고 데스크톱에서도 동일한 햄버거 드로어를 재사용한다. Advanced 데스크톱은
-     이 클래스가 없어 기존 상시 사이드바 그대로다. */
+     의존하지 않고 데스크톱에서도 동일한 햄버거 드로어를 재사용한다. */
   .awb-sidebar--overlay {
     position: fixed;
     top: 0;

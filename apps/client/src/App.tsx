@@ -8,7 +8,6 @@ import LoginPage from './components/LoginPage';
 import AppLayout from './components/AppLayout';
 import { ChunkLoadErrorBoundary } from './components/common';
 import { tokens } from './tokens';
-import { ViewModeProvider, useViewMode, defaultSectionForMode } from './contexts/ViewModeContext';
 
 // 라우트 단위 코드 스플리팅: 무거운 페이지 컴포넌트를 지연 로드해 초기 번들을
 // 작게 유지한다 (티켓 33a8ccc4 — 1.18MB 단일 청크 경고 해소).
@@ -30,7 +29,7 @@ const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsP
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
 const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
-// Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 chat 모드의 기본 랜딩.
+// Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 기본 랜딩.
 const SessionsPage = lazy(() => import('./components/sessions/SessionsPage'));
 const TerminalsPage = lazy(() => import('./components/terminals/TerminalsPage'));
 // 오케스트레이션 모드 — 칸반 보드와 같은 최상위 작업 표면.
@@ -66,23 +65,21 @@ export function WorkspacedRedirect({ to }: { to: string }) {
   return <Navigate to={`/ws/${currentWorkspaceId}/${to}${search}`} replace />;
 }
 
-// Redirects / to the workspace's mode-aware default section once auth resolves
-// (Chat-first → sessions, Advanced → boards). Carries the query string through
+// Redirects / to the workspace's default section (sessions — Agent Session 목록이
+// 주 작업 표면). Carries the query string through
 // so a bookmarked `/?ticket=<id>` deep-link reaches the shell (에픽 리뷰 MINOR-1).
 export function WorkspaceDefaultRedirect() {
   const { currentWorkspaceId } = useAuth();
-  const { mode } = useViewMode();
   const { search } = useLocation();
   if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/${defaultSectionForMode(mode)}${search}`} replace />;
+  return <Navigate to={`/ws/${currentWorkspaceId}/sessions${search}`} replace />;
 }
 
-// Redirects /ws/:wsId to the mode-aware default section (relative). Preserves the
+// Redirects /ws/:wsId to the default section (sessions). Preserves the
 // query string so `/ws/:wsId?ticket=<id>` keeps the deep-link param (MINOR-1).
 export function WorkspaceSectionRedirect() {
-  const { mode } = useViewMode();
   const { search } = useLocation();
-  return <Navigate to={`${defaultSectionForMode(mode)}${search}`} replace />;
+  return <Navigate to={`sessions${search}`} replace />;
 }
 
 function LegacyCatalogRedirect() {
@@ -273,9 +270,7 @@ export default function App() {
       <AuthProvider>
         <LoadingProvider>
           <ConfirmProvider>
-            <ViewModeProvider>
-              <AppContent />
-            </ViewModeProvider>
+            <AppContent />
           </ConfirmProvider>
         </LoadingProvider>
       </AuthProvider>

@@ -75,7 +75,6 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   await page.addInitScript(({ authToken, workspaceId }) => {
     localStorage.setItem('auth_token', authToken);
     localStorage.setItem('currentWorkspaceId', workspaceId);
-    localStorage.setItem('awb.viewMode', 'advanced');
   }, { authToken: token, workspaceId: workspace.id });
 
   const statuses = [];

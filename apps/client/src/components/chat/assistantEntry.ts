@@ -3,7 +3,7 @@
 // Chat-first 랜딩이 workspace 의 `assistant_agent_id` 를 해석하고, 기존 chat-rooms
 // DM 프리셋(에이전트와의 DM 룸)을 find-or-create 하기 위한 결정 로직을 컴포넌트에서
 // 분리했다. fetch·라우팅 같은 부수효과는 컨테이너가, 판정은 여기서 — node:test 로
-// 직접 검증한다(composerSend·viewMode DI-추출 선례).
+// 직접 검증한다(composerSend DI-추출 선례).
 //
 // 핵심 규칙(planner 결정 a):
 //   - 미지정(null)일 때 임의 에이전트를 자동 선택하지 않는다 → 'unset'.

@@ -19,7 +19,7 @@ import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink'
  *
  * 컨테이너/뷰 분리: 순수 <TicketArtifactView>(state props)로 상태별(로딩·오류·로드)
  * 마크업을 react-dom/server 로 회귀 테스트하고(jsdom 없이), fetch·부수효과는 컨테이너가
- * 담당한다(ArtifactPanel·viewMode 선례).
+ * 담당한다(ArtifactPanel 선례).
  *
  * "보드에서 열기" 버튼(티켓 7815a958): 뷰는 onOpenOnBoard 콜백이 주어질 때만 버튼을
  * 렌더한다(ErrorState 의 onRetry 와 동일한 선택적 렌더 관례). 활성/비활성은 ticket.

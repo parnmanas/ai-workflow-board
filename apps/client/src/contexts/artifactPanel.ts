@@ -2,7 +2,7 @@
  * Artifact 패널 순수 로직 (에픽 bf65ca00 · Phase 1 · S1 공통 셸).
  *
  * 우측 Artifact 패널의 열림/내용 상태를 컴포넌트에서 분리해 node:test 로 직접
- * 구동한다(contexts/viewMode.ts 선례, 루트 CLAUDE.md: 레포에 jsdom 없음).
+ * 구동한다(chat/utils/composerSend.ts 선례, 루트 CLAUDE.md: 레포에 jsdom 없음).
  * S1 은 프레임과 상태 전이만 제공하고, 실제 티켓 상세 내용(node)은 S3 에서
  * openArtifact() 로 주입된다 — 그때 이 리듀서는 변경 없이 재사용된다.
  */
