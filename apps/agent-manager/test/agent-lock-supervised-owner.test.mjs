@@ -15,7 +15,11 @@
 //      JOURNAL_STREAM 을 물려받았어도(systemd 가 띄운 데스크톱 앱의 자식 셸) 예외가 아니다 —
 //      그 오판이 rolf 의 서비스를 실제로 죽였다. 감독 판정은 부모 프로세스(또는 테스트 seam
 //      AWB_AGENT_MANAGER_SUPERVISOR)로 한다.
-//   4. --force 없이는 언제나 EAGENTLOCKED 이고, 더 새 빌드면 SIGUSR2 안내가 붙는다.
+//   4. --force 없이는 언제나 EAGENTLOCKED 이고, 더 새 빌드면 재기동 안내가 붙는다 — 그 문구도
+//      플랫폼별로 갈린다. 이건 handoff 축(SIGUSR2 존재 여부)과 **다른 축**이다 — systemctl 은
+//      linux 전용이라 darwin 은 SIGUSR2 는 있어도 그 명령을 못 돌린다. 이 경로의 메시지는
+//      exit 2 + stderr 로만 남는 유일한 운영자 단서라, 실행 불가능한 지시가 거기 남으면
+//      운영자에게 아무 경로도 없는 것과 같다.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -117,6 +121,9 @@ const settle = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // win32 에는 SIGUSR2 가 없다 — 이 축이 갈리는 유일한 이유다.
 const HANDOFF_AVAILABLE = process.platform !== 'win32';
+// 안내 문구가 갈리는 축은 그것과 다르다 — systemctl 은 linux 전용이라 darwin 도 비-linux 쪽이다.
+// contend() 는 AWB_AGENT_MANAGER_PLATFORM 을 항상 벗겨 넘기므로 seam 을 안 준 호출은 네이티브 축이다.
+const SYSTEMCTL_AVAILABLE = process.platform === 'linux';
 
 /** 보호된 소유자 + 더 새 빌드 + `--force` 의 결과. 플랫폼에 따라 에러 코드와 시그널 수신이
  *  갈리지만 "소유자는 SIGTERM 을 받지 않고 살아 있다" 는 양쪽에서 같다. */
@@ -270,12 +277,52 @@ test('without --force a live owner is always EAGENTLOCKED; a newer build gets th
   const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
   const newer = await contend(home, { version: '1.6.247', force: false });
   assert.match(newer.stdout, /^REJECTED:EAGENTLOCKED:/m, newer.stdout);
-  assert.match(newer.stdout, /SIGUSR2/, 'newer build → reload hint');
+  if (SYSTEMCTL_AVAILABLE) {
+    assert.match(newer.stdout, /systemctl --user kill -s SIGUSR2 awb-agent-manager/, 'linux: 제자리 재적재 명령을 그대로 안내한다');
+  } else {
+    assert.doesNotMatch(newer.stdout, /systemctl/, 'systemctl 이 없는 플랫폼에 그 명령을 안내하지 않는다');
+    assert.match(newer.stdout, /restart_manager/, '대신 실제로 동작하는 경로를 남긴다');
+  }
   assert.match(newer.stdout, /\(systemd\)/, 'owner supervisor shown');
   const same = await contend(home, { version: '1.6.246', force: false });
   assert.match(same.stdout, /^REJECTED:EAGENTLOCKED:/m);
   assert.match(same.stdout, /pass --force to take over/);
   await settle(200);
   assert.doesNotMatch(owner.stdout, /OWNER_SIGUSR2|OWNER_SIGTERM/);
+  owner.child.kill('SIGKILL');
+});
+
+// 위 테스트가 보는 것은 이 잡이 도는 OS 하나의 축뿐이다. 문구가 갈리는 두 쪽을
+// **모든** OS 에서 한 번씩 고정해 두지 않으면, 어느 한 잡이 빠지는 순간 실행 불가능한
+// 지시가 조용히 돌아온다 — :225-227 의 근거를 비-force 경로에 그대로 적용한다.
+test('AWB_AGENT_MANAGER_PLATFORM: 비-force 의 더 새 빌드 안내도 플랫폼별로 갈린다', async () => {
+  const home = await makeHome('locked-platform-seam');
+  const owner = await startOwner(home, { version: '1.6.246', env: { AWB_AGENT_MANAGER_SUPERVISOR: 'systemd' } });
+
+  const win = await contend(home, {
+    version: '1.6.247',
+    force: false,
+    env: { AWB_AGENT_MANAGER_PLATFORM: 'win32' },
+  });
+  assert.match(win.stdout, /^REJECTED:EAGENTLOCKED:/m, win.stdout);
+  assert.doesNotMatch(win.stdout, /systemctl/, 'win32 에 systemctl 을 안내하면 유일한 단서가 실행 불가능한 지시가 된다');
+  assert.match(win.stdout, /restart_manager/, '거기에도 실제로 동작하는 대체 경로를 남긴다');
+
+  const linux = await contend(home, {
+    version: '1.6.247',
+    force: false,
+    env: { AWB_AGENT_MANAGER_PLATFORM: 'linux' },
+  });
+  assert.match(linux.stdout, /^REJECTED:EAGENTLOCKED:/m, linux.stdout);
+  assert.match(
+    linux.stdout,
+    /systemctl --user kill -s SIGUSR2 awb-agent-manager/,
+    'linux 명령은 글자 그대로 보존된다 — 이 변경은 문구를 갈라 넣을 뿐 바꾸지 않는다',
+  );
+
+  // --force 가 없으므로 어느 쪽도 실제 재기동을 시도하지 않는다 — 안내만 한다.
+  await settle(200);
+  assert.doesNotMatch(owner.stdout, /OWNER_SIGUSR2|OWNER_SIGTERM/, '비-force 경로는 소유자를 건드리지 않는다');
+  assert.ok(owner.alive(), 'owner still alive');
   owner.child.kill('SIGKILL');
 });

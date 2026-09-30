@@ -187,11 +187,20 @@ function supportsRestartSignal(platform: NodeJS.Platform): boolean {
 }
 
 /** 감독 중인 매니저를 운영자가 실제로 재기동할 수 있는 경로. systemctl 은 linux 전용이라
- *  다른 플랫폼에 그 명령을 안내하면 유일한 단서가 실행 불가능한 지시가 된다. */
-function restartHint(platform: NodeJS.Platform): string {
-  return platform === 'linux'
-    ? 'Use `systemctl --user restart awb-agent-manager` (or the admin UI Restart)'
-    : 'Restart it from the admin UI (or send the `restart_manager` command)';
+ *  다른 플랫폼에 그 명령을 안내하면 유일한 단서가 실행 불가능한 지시가 된다.
+ *
+ *  `kind` 는 linux 에서만 갈린다 — 서비스를 내렸다 올리는 `restart` 와 제자리에서 다시 읽는
+ *  `reload`(SIGUSR2) 는 systemctl 명령이 다르다. 비-linux 에는 어느 쪽이든 실제로 동작하는
+ *  경로가 하나뿐이라 모드와 무관하게 같은 문장을 돌려준다.
+ *
+ *  이 축은 `supportsRestartSignal()` 과 **다른 축이다**: 여기는 systemctl 실행 가능성
+ *  (linux), 저기는 SIGUSR2 존재 여부(win32 제외). darwin 은 SIGUSR2 는 있지만 systemctl 은
+ *  없으므로 두 축이 실제로 갈린다. */
+function restartHint(platform: NodeJS.Platform, kind: 'restart' | 'reload' = 'restart'): string {
+  if (platform !== 'linux') return 'Restart it from the admin UI (or send the `restart_manager` command)';
+  return kind === 'reload'
+    ? 'Reload it in place with `systemctl --user kill -s SIGUSR2 awb-agent-manager` (or the admin UI Restart)'
+    : 'Use `systemctl --user restart awb-agent-manager` (or the admin UI Restart)';
 }
 
 export function decideForceTakeover(input: {
@@ -630,8 +639,8 @@ async function attemptAcquire(payload: LockPayload, force: boolean): Promise<Loc
         `version=${existing.version || '?'}${existing.supervisor ? ` (${existing.supervisor})` : ''} since ${existing.started_at || '?'} ` +
         `[${verdict.reason}: ${verdict.detail}]. ` +
         (newerBuild
-          ? `This build (v${payload.version}) is newer than the running manager — reload it in place with ` +
-            '`systemctl --user kill -s SIGUSR2 awb-agent-manager` (or the admin UI Restart) instead of starting a second instance.'
+          ? `This build (v${payload.version}) is newer than the running manager. ` +
+            `${restartHint(effectivePlatform(), 'reload')} instead of starting a second instance.`
           : 'Stop it first, or pass --force to take over.'),
     );
     e.code = 'EAGENTLOCKED';
