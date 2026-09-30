@@ -48,12 +48,22 @@ export function insideAgentSession(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /**
- * `--force` 판정이 보는 플랫폼. `AWB_AGENT_MANAGER_PLATFORM` 은
- * `AWB_AGENT_MANAGER_SUPERVISOR` 와 같은 성질의 seam 이다 — 이 값으로 갈리는 것은
- * "SIGUSR2 재기동을 넘길 수 있는가" 하나뿐이고, 그 답이 no 면 takeover 를 **거부**하는
- * 쪽으로만 움직이므로 어떤 권한도 생기지 않는다. 대신 win32 전용 분기를 어느 OS 에서든
- * 통합 테스트로 고정할 수 있다 — 그 분기를 Windows 잡에만 맡겨 두면, 그 잡이 언젠가
- * 빠지는 순간 같은 구멍이 다시 조용해진다.
+ * 플랫폼 판정의 단일 창구. `AWB_AGENT_MANAGER_PLATFORM` 은 `AWB_AGENT_MANAGER_SUPERVISOR` 와
+ * 같은 성질의 seam 이다 — 이 값을 보는 곳은 두 종류이고, 어느 쪽도 권한을 만들지 않는다.
+ *
+ *   1. takeover 판정 — agent-lockfile.ts 의 `decideForceTakeover()` 가
+ *      `supportsRestartSignal()`(`!== 'win32'`)로
+ *      "SIGUSR2 재기동을 넘길 수 있는가" 를 묻는다. 답이 no 면 takeover 를 **거부**하는
+ *      쪽으로만 움직이므로 거짓 값으로 얻을 수 있는 것이 없다.
+ *   2. 운영자 재기동 안내 문구 — `restartHint()`(`=== 'linux'`)가 "systemctl 이 있는가" 를
+ *      묻는다. 락 경로 두 곳과, 락 밖인 `main.ts` 의 세션 내 직접 실행 경고가 같이 본다.
+ *      문자열을 고를 뿐 아무 동작도 실행하지 않아 거짓 값은 안내를 틀리게 할 뿐 상태를
+ *      바꾸지 못한다.
+ *
+ * 두 축은 경계가 다르다(`restartHint()` 주석 참조) — darwin 에서 실제로 갈리므로 한쪽을
+ * 보고 다른 쪽을 추측하지 말 것. 대신 win32 전용 분기를 어느 OS 에서든 통합 테스트로
+ * 고정할 수 있다 — 그 분기를 Windows 잡에만 맡겨 두면, 그 잡이 언젠가 빠지는 순간 같은
+ * 구멍이 다시 조용해진다.
  */
 export const PLATFORM_OVERRIDE_ENV = 'AWB_AGENT_MANAGER_PLATFORM';
 
