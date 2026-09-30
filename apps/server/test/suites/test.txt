@@ -112,6 +112,7 @@ test/manager-capabilities-heartbeat.test.mjs
 test/manager-capability-dispatch-gate.test.mjs
 test/manager-capability-gate.test.mjs
 test/manager-drift-monitor-behavior.test.mjs
+test/manager-installed-version-heartbeat.test.mjs
 test/manager-update-approval-heartbeat.test.mjs
 test/mcp-harness-marker-sanitizer.test.mjs
 test/mcp-server-orphan-leak-guard.test.mjs

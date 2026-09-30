@@ -23,7 +23,7 @@
     "migration:revert": "tsx ../../node_modules/typeorm/cli.js migration:revert -d src/db.ts",
     "test:catalog-scope": "node --test test/agent-manager-instance-supersede.test.mjs test/catalog-scope.test.mjs test/catalog-scope-promotion.test.mjs",
     "test:auto-notice": "node --test test/comment-tools-auto-notice.test.mjs",
-    "test": "node test/run-suite.mjs --suite test test/manager-installed-version-heartbeat.test.mjs",
+    "test": "node test/run-suite.mjs --suite test",
     "test:qa": "node test/run-suite.mjs --suite test-qa",
     "test:qa:fast": "node test/run-suite.mjs --suite test-qa-fast",
     "test:qa:pg": "node test/run-suite.mjs --suite test-qa-pg",
