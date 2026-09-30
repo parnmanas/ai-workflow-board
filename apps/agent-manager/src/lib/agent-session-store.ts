@@ -14,8 +14,9 @@
 //
 // 스토어 드라이버가 없는 CLI(hermes)는 AWB 화면에서 만든 세션만 인덱스로 기억한다.
 
-import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -72,6 +73,10 @@ export interface AgentSessionStoreOptions {
   /** 외부 명령 실행기(기본: execFile). 스캐너가 CLI 자신의 도구를 부를 때 쓴다
    *  (opencode `db`). 테스트가 실제 CLI 없이 매핑을 검증할 수 있도록 주입 가능하게 둔다. */
   exec?: (bin: string, args: string[]) => Promise<string>;
+  /** 대용량 stdout 을 temp 파일로 받아오는 실행기(기본: spawn + 파일 리다이렉트).
+   *  `exec`/`opencodeQuery` 가 주입되면(테스트) 그쪽에 위임하고, 생략 시에만 실제
+   *  파일 경로를 탄다 — 기존 테스트는 pipe 그대로 hermetic 하게 돈다. */
+  runToFile?: (bin: string, args: string[]) => Promise<string>;
   /** @deprecated `exec` — opencode `db <sql>` 만 가로채던 옛 테스트 seam. */
   opencodeQuery?: (sql: string) => Promise<string>;
   indexPath?: string;
@@ -102,6 +107,47 @@ async function defaultExec(bin: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+/**
+ * stdout 을 temp 파일로 받아오는 외부 명령 실행기. `opencode db` 는 출력이 파이프
+ * 버퍼(64KB)를 넘기면 플러시를 기다리지 않고 종료해 잘린 JSON 을 내놓고 exit 0 으로
+ * 끝나므로(1.18.32 실측) pipe 캡처(execFile)로는 큰 세션의 기록을 절대 온전히 읽을
+ * 수 없다 — 파일 리다이렉트는 항상 온전하다. 기록처럼 크기가 커질 수 있는 조회는
+ * 이쪽을 쓴다. 세션 프롬프트가 들어 있어 0o600 으로 만들고 finally 에서 지운다.
+ */
+async function defaultRunToFile(bin: string, args: string[]): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'awb-opencode-db-'));
+  const outPath = join(dir, 'out.json');
+  const fh = await open(outPath, 'w', 0o600);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(bin, args, { stdio: ['ignore', fh.fd, 'pipe'], windowsHide: true });
+      let stderr = '';
+      child.stderr?.on('data', (chunk) => {
+        stderr += String(chunk);
+        if (stderr.length > 8000) stderr = stderr.slice(-8000);
+      });
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(Object.assign(
+          new Error(`timed out after ${EXTERNAL_COMMAND_TIMEOUT_MS}ms: ${bin} ${args[0] ?? ''}`),
+          { code: 'ETIMEDOUT' },
+        ));
+      }, EXTERNAL_COMMAND_TIMEOUT_MS);
+      timer.unref?.();
+      child.on('error', (err) => { clearTimeout(timer); reject(err); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(Object.assign(new Error(`${bin} exited ${code}: ${stderr.slice(0, 500)}`), { code: 'EEXIT' }));
+      });
+    });
+    return await readFile(outPath, 'utf8');
+  } finally {
+    await fh.close().catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 export class AgentSessionStore {
   readonly indexPath: string;
   readonly #homes: Record<string, string>;
@@ -109,6 +155,7 @@ export class AgentSessionStore {
   readonly #listLimit: number;
   readonly #historyLimit: number;
   readonly #exec: (bin: string, args: string[]) => Promise<string>;
+  readonly #runToFile: (bin: string, args: string[]) => Promise<string>;
 
   constructor(options: AgentSessionStoreOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -123,6 +170,10 @@ export class AgentSessionStore {
       ?? (opencodeQuery
         ? (bin, args) => (bin === 'opencode' && args[0] === 'db' ? opencodeQuery(args[1]) : defaultExec(bin, args))
         : defaultExec);
+    // 테스트 seam(exec/opencodeQuery)이 있으면 둘 다 그 가짜를 탄다 — 기존 테스트가
+    // hermetic 하게 그대로 돈다. 운영(주입 없음)에서만 실제 파일 경로를 탄다.
+    const exec = this.#exec;
+    this.#runToFile = options.runToFile ?? ((options.exec || opencodeQuery) ? exec : defaultRunToFile);
   }
 
   /** @deprecated 테스트 호환 — `homes.claude`. */
@@ -144,7 +195,13 @@ export class AgentSessionStore {
     if (!driver) return null;
     return {
       driver,
-      ctx: { home: this.#homeFor(cli), listLimit: this.#listLimit, historyLimit: this.#historyLimit, exec: this.#exec },
+      ctx: {
+        home: this.#homeFor(cli),
+        listLimit: this.#listLimit,
+        historyLimit: this.#historyLimit,
+        exec: this.#exec,
+        runToFile: this.#runToFile,
+      },
     };
   }
 

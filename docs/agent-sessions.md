@@ -53,6 +53,11 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   parent_id IS NULL` 만 가져온다(보관됨·하위 세션은 사용자가 열 수 없다). 질의 실패(미설치·스키마 변경·타임아웃 10초)는
   **빈 목록으로 접는다** — 목록 하나가 세션 화면 전체를 못 쓰게 만들면 안 된다. Hermes 는 AWB 가 만든 세션만
   로컬 인덱스(`$AWB_AGENT_MANAGER_HOME/agent-sessions.json`)로 기억한다.
+  - **opencode 출력은 파이프가 아니라 temp 파일로 받는다** (`runToFile`, 2026-09-30 실측). `opencode db` 는 결과가
+    파이프 버퍼(64KB)를 넘기면 stdout 플러시를 기다리지 않고 종료해 잘린 JSON 을 내놓고도 exit 0 으로 끝난다
+    (파이프 5회 중 4회 잘림, 파일 리다이렉트는 항상 온전). 잘린 JSON 은 파싱이 깨져 `[]` 로 접히므로, 일 좀 시킨
+    세션(기록 수십 KB 이상)의 history 가 통째로 비어 보이는 사고가 났다 — 새 세션(작은 출력)에서는 정상이라
+    "가끔 된다" 처럼 보였다. 작은 출력·테스트 seam 은 기존 pipe(`exec`) 그대로다.
 - **매니저 `agent-session-runner.ts`** — 세션당 ACP 어댑터 프로세스. 명령 우선순위: env `AWB_ACP_COMMAND_<CLI>` →
   PATH 의 `claude-agent-acp` / `codex-acp` / `hermes-acp` → `npx --yes @agentclientprotocol/claude-agent-acp` /
   `@agentclientprotocol/codex-acp`. **어댑터는 두 패키지 모두 `@agentclientprotocol/*`** — zed-industries 의 codex-acp 는

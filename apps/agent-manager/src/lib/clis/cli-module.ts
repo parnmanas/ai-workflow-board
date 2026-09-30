@@ -164,6 +164,13 @@ export interface CliSessionStoreContext {
   readonly historyLimit: number;
   /** 외부 명령 실행 seam(opencode `db` 질의 등). 실패는 throw. */
   readonly exec: (bin: string, args: string[]) => Promise<string>;
+  /**
+   * 대용량 stdout 을 temp 파일로 받아오는 실행 seam. `opencode db` 는 출력이 파이프
+   * 버퍼(64KB)를 넘기면 stdout 플러시를 기다리지 않고 종료해 잘린 JSON 을 내놓고
+   * exit 0 으로 끝난다(1.18.32 실측 — 파이프 5회 중 4회 잘림, 파일 리다이렉트는 항상
+   * 온전). 기록 조회는 이쪽을 쓴다. 없으면 `exec` 로 떨어진다(작은 출력·테스트).
+   */
+  readonly runToFile?: (bin: string, args: string[]) => Promise<string>;
 }
 
 export interface CliSessionStoreDriver {

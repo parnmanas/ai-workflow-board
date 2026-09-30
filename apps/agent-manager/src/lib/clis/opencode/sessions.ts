@@ -5,6 +5,12 @@
 // 질의한다 — (1) 스키마가 opencode 것이고 (2) WAL 락을 그쪽이 관리하며 (3) agent-manager
 // 에 sqlite 의존성을 새로 들이지 않아도 되기 때문이다.
 //
+// 단, 출력은 파이프가 아니라 temp 파일로 받는다(`ctx.runToFile`): `opencode db` 는 결과가
+// 파이프 버퍼(64KB)를 넘기면 stdout 플러시를 기다리지 않고 종료해 잘린 JSON 을 내놓고도
+// exit 0 으로 끝나고(1.18.32 실측), 잘린 JSON 은 파싱이 깨져 `[]` 로 접힌다. 일 좀 시킨
+// 세션(기록 수십 KB 이상)의 history 가 통째로 비어 보이던 원인이 이것이다. 파일
+// 리다이렉트는 같은 조건에서 항상 온전하다.
+//
 // 실패(미설치·스키마 변경·타임아웃)는 빈 결과로 접는다 — 목록 조회 하나가 세션 화면
 // 전체를 못 쓰게 만들면 안 되고, 세션 화면은 기록이 없어도 열려야 한다(프롬프트는 보낼 수 있다).
 
@@ -40,8 +46,10 @@ export function opencodeUsageFromPart(part: Record<string, any> | null): Session
 }
 
 async function query<T>(ctx: CliSessionStoreContext, sql: string): Promise<T[]> {
+  // runToFile 우선 — 위 주석의 파이프 잘림 회피. 없는 옛 호출자(테스트)는 pipe 그대로.
+  const run = ctx.runToFile ?? ctx.exec;
   try {
-    const parsed = JSON.parse(await ctx.exec('opencode', ['db', sql, '--format', 'json', '--log-level', 'ERROR']));
+    const parsed = JSON.parse(await run('opencode', ['db', sql, '--format', 'json', '--log-level', 'ERROR']));
     return Array.isArray(parsed) ? (parsed as T[]) : [];
   } catch {
     return [];

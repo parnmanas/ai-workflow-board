@@ -248,3 +248,87 @@ test('opencode 기록: 세션 id 형식이 아니면 SQL 을 아예 던지지 �
   assert.equal(called, false, 'id 는 SQL 에 문자열로 박히므로 형식 검사가 1차 방어선이다');
   assert.deepEqual(history.events, []);
 });
+
+// ─── 파이프 잘림 회귀: `opencode db` 출력이 파이프 버퍼를 넘기면 잘린다 ───────
+//
+// opencode 1.18.32 실측: `db` 결과가 파이프 버퍼(64KB)를 넘기면 stdout 플러시를
+// 기다리지 않고 종료해 잘린 JSON 을 내놓고도 exit 0 으로 끝난다(파이프 5회 중 4회
+// 잘림, 파일 리다이렉트는 항상 온전). 잘린 JSON 은 파싱이 깨져 `[]` 로 접히므로,
+// 일 좀 시킨 세션(기록 수십 KB 이상)의 history 가 통째로 비어 보였다. 그래서 질의는
+// temp 파일로 받는다(`runToFile`). 아래 가짜 `opencode` 는 그 동작을 그대로 흉내낸다
+// (`process.stdout.write` 뒤 즉시 `process.exit(0)` — 파이프로는 잘리고 파일로는 온전).
+
+test('opencode db: 큰 출력은 temp 파일로 받아야 온전하다 (파이프 잘림 회귀)', { skip: process.platform === 'win32' ? 'POSIX fake binary' : false }, async (t) => {
+  const { mkdtemp, writeFile, chmod } = await import('node:fs/promises');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const dir = await mkdtemp(join(tmpdir(), 'awb-fake-opencode-'));
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dir, { recursive: true, force: true })));
+
+  // 64KB를 훌쩍 넘는 유효 JSON 페이로드 세 가지(목록/개수/기록).
+  const sessions = Array.from({ length: 400 }, (_, i) => row({ id: `ses_big${i}`, title: `Session ${i} ` + 't'.repeat(100) }));
+  const parts = Array.from({ length: 100 }, (_, i) => partRow(
+    i % 2 ? 'msg_even' : 'msg_odd',
+    i % 2 ? 'assistant' : 'user',
+    i % 2 ? { type: 'text', text: `answer ${i} ` + 'y'.repeat(2000) } : { type: 'text', text: `prompt ${i}` },
+  ));
+  await writeFile(join(dir, 'sessions.json'), JSON.stringify(sessions));
+  await writeFile(join(dir, 'count.json'), JSON.stringify([{ n: parts.length }]));
+  await writeFile(join(dir, 'parts.json'), JSON.stringify(parts));
+  const stub = '#!/usr/bin/env node\n'
+    + "const fs = require('fs');\n"
+    + `const d = ${JSON.stringify(dir)};\n`
+    + 'const sql = process.argv[3] || ""; // [node, script, "db", <sql>, ...]\n'
+    + 'const file = /count\\(\\*\\)/.test(sql) ? "count.json" : /FROM session/.test(sql) ? "sessions.json" : "parts.json";\n'
+    + 'const full = fs.readFileSync(require("path").join(d, file), "utf8");\n'
+    // opencode 실측 그대로: stdout 이 파일이면 온전, 파이프면 64KB에서 잘라먹고 exit 0.
+    // (`write` + 즉시 `exit` 의 플러시 레이스는 비결정적이라, 스텁은 파이프를 감지해
+    // 결정적으로 64KB까지만 쓴다 — 받는 쪽이 보는 모양은 같다: 잘린 JSON + exit 0.)
+    + 'const isFile = (() => { try { return fs.fstatSync(1).isFile(); } catch { return false; } })();\n'
+    + 'process.stdout.write(isFile ? full : full.slice(0, 65536));\n'
+    + 'process.exit(0);\n';
+  await writeFile(join(dir, 'opencode'), stub, { mode: 0o755 });
+  await chmod(join(dir, 'opencode'), 0o755);
+
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${dir}${prevPath ? (await import('node:path')).delimiter + prevPath : ''}`;
+  t.after(() => { process.env.PATH = prevPath; });
+
+  // 전제 확인: 같은 스텁을 파이프로 받으면 잘린다(opencode 실측과 같은 메커니즘).
+  const piped = await execFileAsync('opencode', ['db', 'SELECT 1', '--format', 'json'], { maxBuffer: 32 * 1024 * 1024 })
+    .then(({ stdout }) => stdout, (err) => { throw new Error('stub must exit 0, like opencode: ' + err.message); });
+  assert.throws(() => JSON.parse(piped), '파이프 캡처는 잘린 JSON 이어야 이 테스트가 버그를 재현한다');
+
+  // 주입 없는 운영 경로(default runToFile)로는 목록·기록이 모두 온전해야 한다.
+  const store = new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-pipe-${Math.random().toString(16).slice(2)}.json`),
+    listLimit: 500,
+  });
+  const list = await store.listSessions('opencode');
+  assert.equal(list.length, 400, '목록 400건이 잘림 없이 와야 한다');
+
+  const history = await store.readHistory('opencode', 'ses_big0');
+  assert.ok(history.events.length > 0, '기록이 비어 있으면 안 된다');
+  assert.equal(history.truncated, false);
+  assert.ok(history.events.some((e) => e.type === 'user_prompt' && e.payload.text === 'prompt 0'));
+  assert.ok(history.events.some((e) => e.type === 'text' && String(e.payload.text).startsWith('answer 1')));
+});
+
+test('opencode 질의는 runToFile 을 우선하고, 없으면 exec 로 떨어진다', async () => {
+  const good = JSON.stringify([row()]);
+  // runToFile 가짜가 있으면 exec 가짜(실패)는 타지 않아야 한다.
+  const preferred = new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-pref-${Math.random().toString(16).slice(2)}.json`),
+    exec: async () => { throw new Error('exec must not be used when runToFile is present'); },
+    runToFile: async () => good,
+  });
+  assert.equal((await preferred.listSessions('opencode')).length, 1);
+
+  // runToFile 주입이 없으면 exec 가짜를 그대로 쓴다(기존 테스트 경로).
+  const fallback = new AgentSessionStore({
+    indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-fb-${Math.random().toString(16).slice(2)}.json`),
+    exec: async () => good,
+  });
+  assert.equal((await fallback.listSessions('opencode')).length, 1);
+});
