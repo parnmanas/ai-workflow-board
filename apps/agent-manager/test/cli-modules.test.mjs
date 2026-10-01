@@ -113,7 +113,14 @@ test('effort 슬라이스 선택이 모듈 선언을 따른다 (옛 selectEffort
 
 test('Agent Session: ACP 명령·감지가 모듈 슬라이스에서 나온다', async () => {
   const codex = await resolveAcpCommandForCli('codex');
-  assert.ok(codex.command === 'npx' || codex.command.endsWith('codex-acp'), `codex → codex-acp 또는 npx 패키지: ${codex.command}`);
+  // 어댑터는 매니저의 의존성으로 번들되고 번들본이 PATH 보다 앞이다 — 그때는
+  // `node <번들 js>` 가 나온다(bundled-acp-adapter.test.mjs 가 그 순서를 고정한다).
+  // 번들이 없는 설치에서는 예전처럼 PATH 의 codex-acp 나 npx 로 떨어진다.
+  const codexOk =
+    codex.command === 'npx' ||
+    codex.command.endsWith('codex-acp') ||
+    (codex.command === process.execPath && /codex-acp[\\/]/.test(codex.args[0] ?? ''));
+  assert.ok(codexOk, `codex → 번들 codex-acp · PATH codex-acp · npx 중 하나: ${codex.command} ${codex.args.join(' ')}`);
   const opencode = await resolveAcpCommandForCli('opencode');
   assert.deepEqual(opencode.args, ['acp']);
   await assert.rejects(() => resolveAcpCommandForCli('pi'), /No ACP adapter is known for CLI "pi"/);

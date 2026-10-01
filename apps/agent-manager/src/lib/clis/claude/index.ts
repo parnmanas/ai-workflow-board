@@ -14,6 +14,7 @@ import type { RuntimeCapabilities } from '../../runtime/runtime-types.js';
 import { defineCliModule } from '../cli-module.js';
 import { claudeLogin } from './login.js';
 import { claudeSessionStore } from './sessions.js';
+import { resolveBundledAcpCommand } from '../bundled-acp.js';
 
 /** claude 계열(claude/deepseek)이 공유하는 런타임 capability. */
 export const CLAUDE_FAMILY_CAPABILITIES: RuntimeCapabilities = {
@@ -97,6 +98,11 @@ export const claudeModule = defineCliModule({
       return !!(await findOnPath('claude-agent-acp')) || !!(await findOnPath('claude'));
     },
     async resolveAcpCommand(findOnPath) {
+      // 매니저와 함께 설치된 번들본이 먼저다 — 어댑터 버전이 세션의 모델 목록·
+      // capability 를 정하므로 매니저와 같이 움직여야 한다(bundled-acp.ts 참고).
+      // PATH 의 수동 설치본은 번들이 없는 구버전 설치 호환용으로 남긴다.
+      const bundled = resolveBundledAcpCommand('@agentclientprotocol/claude-agent-acp', 'claude-agent-acp');
+      if (bundled) return bundled;
       const found = await findOnPath('claude-agent-acp');
       return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
     },

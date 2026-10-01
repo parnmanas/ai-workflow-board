@@ -289,7 +289,16 @@ test('command resolution: env override, npx fallback, unknown cli; detectAcpSess
   }
   await assert.rejects(() => resolveAcpCommandForCli('pi'), /No ACP adapter/);
   const claude = await resolveAcpCommandForCli('claude');
-  assert.ok(claude.command === 'npx' || /claude-agent-acp/.test(claude.command));
+  // 어댑터는 매니저 의존성으로 번들되고 번들본이 PATH 보다 앞이다 — 그때는 명령이
+  // `node`(process.execPath)이고 패키지 경로가 args 에 실린다. 번들이 없는 설치에서는
+  // 예전처럼 PATH 의 claude-agent-acp 나 npx 로 떨어진다. 순서 자체는
+  // bundled-acp-adapter.test.mjs 가 고정한다.
+  assert.ok(
+    claude.command === 'npx' ||
+      /claude-agent-acp/.test(claude.command) ||
+      /claude-agent-acp/.test(claude.args[0] ?? ''),
+    `claude → 번들·PATH·npx 중 하나: ${claude.command} ${claude.args.join(' ')}`,
+  );
 
   const binDir = await mkdtemp(join(tmpdir(), 'awb-acp-bin-'));
   t.after(() => rm(binDir, { recursive: true, force: true }));
