@@ -26,7 +26,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import { TicketArchivedError, isTerminalColumn } from '../shared/archive-helpers';
 import { detectDeferralToTerminal, formatDeferralTerminalWarning } from '../shared/deferral-terminal-guard';
 import { findColumnByName } from '../shared/ticket-helpers';
-import { resolveAgentDisplayName } from '../../../utils/agent-name';
+import { resolveAgentDisplayName, isUuidShapedId } from '../../../utils/agent-name';
 import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import { recordCommentMentionDispatch } from '../../../common/mention-dispatch-correlation';
 import { resolveAuthorRole as resolveAuthorRoleImpl, mergeAuthorRoleIntoMetadata } from './author-role';
@@ -245,7 +245,17 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           const display = await resolveAgentDisplayName(dataSource.getRepository(Agent), resolvedAuthorId);
           authorName = display || caller?.agentName || `Agent #${resolvedAuthorId}`;
         } else {
-          const user = await dataSource.getRepository(User).findOne({ where: { id: resolvedAuthorId } });
+          // Postgres 에서 `User.id` 는 real uuid 컬럼이라(`entities/User.ts` 의
+          // `@PrimaryGeneratedColumn('uuid')`) 비-uuid author_id 로 findOne 하면
+          // `invalid input syntax for type uuid` 로 **throw** 해 add_comment
+          // 자체가 실패한다 — sqlite 는 매칭 0건으로 조용히 아래 폴백을 쓴다.
+          // ticket a825872b: dedff9a3 이 Agent.id 에 적용한 것과 같은 결함
+          // 클래스이고, 같은 술어로 uuid 모양이 아니면 쿼리 없이 폴백해 두
+          // 백엔드의 동작을 일치시킨다. author_id 는 원래부터 실존 사용자인지
+          // 검증하지 않는 인자라 권한 약화도 없다.
+          const user = isUuidShapedId(resolvedAuthorId)
+            ? await dataSource.getRepository(User).findOne({ where: { id: resolvedAuthorId } })
+            : null;
           authorName = user?.name || `User #${resolvedAuthorId}`;
         }
       }
@@ -758,7 +768,13 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         const display = await resolveAgentDisplayName(dataSource.getRepository(Agent), authorId);
         authorName = display || caller?.agentName || `Agent #${authorId}`;
       } else {
-        const user = await dataSource.getRepository(User).findOne({ where: { id: authorId } });
+        // 비-uuid id 를 real uuid 컬럼에 던지지 않는다 — add_comment 쪽 같은
+        // 조회의 주석 참고(ticket a825872b). 이 헬퍼는 ask_question ·
+        // answer_question · record_decision · record_agreement · propose_move ·
+        // handoff_to_agent 가 공유하므로 여섯 툴이 같은 가드를 받는다.
+        const user = isUuidShapedId(authorId)
+          ? await dataSource.getRepository(User).findOne({ where: { id: authorId } })
+          : null;
         authorName = user?.name || `User #${authorId}`;
       }
     }

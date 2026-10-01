@@ -37,6 +37,18 @@ const SEPARATOR = '/';
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// 같은 판정을 필요로 하는 다른 엔티티 조회를 위한 술어. `User.id` 도
+// `@PrimaryGeneratedColumn('uuid')` 라 Postgres 에서 real uuid 컬럼이고, 비-uuid
+// id 를 findOne 에 그대로 넘기면 위와 똑같이 throw 한다(ticket a825872b —
+// comment 작성자 이름 해석). 그 호출자가 정규식을 새로 만들지 않도록 술어만
+// 내보낸다. **UUID_RE 자체를 export 하지 말 것**: `common/artifact-ref.ts` 가
+// 같은 이름으로 version/variant nibble 까지 고정한 더 엄격한 정규식을 이미
+// export 하고 있어, 혼동해 import 하면 Postgres 가 받아들이는 uuid 를 거짓
+// 거부해 이름이 조용히 폴백된다.
+export function isUuidShapedId(id: string | null | undefined): id is string {
+  return !!id && UUID_RE.test(id);
+}
+
 export interface AgentDisplayInput {
   name?: string | null;
   manager_name?: string | null;
@@ -85,7 +97,7 @@ export async function resolveAgentDisplayName(
   // `invalid input syntax for type uuid` 로 **throw** 해 호출자를 끌고 내려간다:
   // board_update SSE 매핑이 그 throw 를 먹고 프레임을 통째로 유실했다.
   // sqlite 에서는 어차피 매칭되는 행이 없어 null 이었으므로 동작 보존이다.
-  if (!agentId || !UUID_RE.test(agentId)) return null;
+  if (!isUuidShapedId(agentId)) return null;
   const agent = await agentRepo.findOne({ where: { id: agentId } });
   if (!agent) return null;
   const map = await resolveAgentDisplayMap(agentRepo, [agent]);
@@ -109,9 +121,7 @@ export async function resolveAgentDisplayNamesByIds(
   // Keep only UUID-shaped ids — a non-uuid actor id (system label, deleted
   // row) can never be an Agent.id, and passing it to `Agent.id IN (...)` throws
   // on Postgres (uuid column). See UUID_RE note above.
-  const distinct = Array.from(new Set(
-    ids.filter((id): id is string => !!id && UUID_RE.test(id)),
-  ));
+  const distinct = Array.from(new Set(ids.filter(isUuidShapedId)));
   if (distinct.length === 0) return new Map();
   const agents = await agentRepo.find({
     where: { id: In(distinct) } as any,
