@@ -103,6 +103,11 @@ type CommandKind =
   // 범위는 에이전트가 아니라 **하나의 설치본**이다: 같은 CLI 를 여러 벌 두는 것은
   // 정상 구성이라(vLLM 백엔드용 두 번째 claude) "이 장비의 claude" 는 애매하다.
   | 'update_cli'
+  // 이 호스트의 올릴 수 있는 설치본을 **전부** 올린다. args: { sudo_ticket? }.
+  // update_cli 를 설치본마다 따로 보내는 것과 결과가 같아야 하므로 판단 규칙
+  // (updatable · 이미 최신인지)을 공유한다. 실패는 설치본 단위로 격리되고 ack 는
+  // 요약 한 줄이다 — restart_all_agents / update_plugins 와 같은 fan-out 계약.
+  | 'update_all_clis'
   // 운영자가 화면에서 승인한 권한 상승 명령 하나. args: { request_id, sudo_ticket }.
   // **실행할 명령은 args 에 없다** — 매니저가 승인된 정본을 서버에서 다시 받아
   // 간다(claimPrivilegedCommand). 운영자가 읽고 승인한 것과 도는 것이 갈라지면
@@ -133,6 +138,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'cli_login_cancel',
   'refresh_available_models',
   'update_cli',
+  'update_all_clis',
   'run_privileged_command',
 ]);
 
@@ -219,6 +225,9 @@ export interface CommandHandlerDeps {
   updateCli?:
     | ((cli: string, bin?: string | null, sudoTicket?: string | null) => Promise<UpdateCliResult>)
     | null;
+  /** 이 호스트의 올릴 수 있는 설치본을 전부 올린다. updateCli 와 같은 이유로
+   *  optional — 배선되지 않은 매니저는 명확한 사유로 error ack 한다. */
+  updateAllClis?: ((sudoTicket?: string | null) => Promise<UpdateAllClisResult>) | null;
   /** 운영자가 승인한 권한 상승 명령 하나를 실행한다. 배선되지 않은 매니저는
    *  명확한 사유로 error ack 한다 — 조용히 성공한 척하지 않는다. */
   runPrivilegedCommand?:
@@ -236,6 +245,21 @@ export interface RunPrivilegedCommandResult {
 }
 
 /** update_cli 한 번의 결과. */
+/** update_all_clis 한 번의 결과 — ack 요약 문구를 정하는 데 쓴다. 설치본 단위로
+ *  결과가 갈리므로 "몇 개 성공/실패" 가 아니라 **어느 설치본이** 어떻게 됐는지를
+ *  싣는다: 같은 CLI 를 여러 벌 두는 것이 정상 구성이라 CLI 이름만으로는 특정되지
+ *  않는다. */
+export interface UpdateAllClisResult {
+  /** 실제로 시도한 설치본 수(이미 최신이거나 updatable 이 아닌 것은 제외). */
+  attempted: number;
+  updated: Array<{ cli: string; path: string; detail: string }>;
+  failed: Array<{ cli: string; path: string; detail: string }>;
+  /** 권한 상승이 필요한데 sudo 티켓이 없어 건너뛴 설치본 — 실패가 아니라 "운영자가
+   *  비밀번호를 줘야 올라간다" 는 뜻이므로 따로 센다. */
+  skippedSudo: Array<{ cli: string; path: string }>;
+  heartbeatPosted: boolean;
+}
+
 export interface UpdateCliResult {
   /** 이 CLI 가 자체 업데이터를 갖고 있는지(`CliAdapter.cliUpdate()` 가 null 이 아닌지).
    *  false 면 업데이트를 시도하지도 않았다는 뜻이라 실패가 아니다. */
@@ -362,6 +386,8 @@ export class AgentManagerCommandHandler {
         return this.#refreshAvailableModels();
       case 'update_cli':
         return this.#updateCli(payload);
+      case 'update_all_clis':
+        return this.#updateAllClis(payload);
       case 'run_privileged_command':
         return this.#runPrivilegedCommand(payload);
     }
@@ -1118,6 +1144,40 @@ export class AgentManagerCommandHandler {
    * 끝나면 버전을 다시 읽어 하트비트 캐시를 교체하고 즉시 한 번 보낸다 — 운영자가 정기 tick
    * (최대 30초)을 기다리지 않고 새 버전을 화면에서 보게 한다.
    */
+  /**
+   * 이 호스트의 올릴 수 있는 설치본을 **전부** 올린다(`update_all_clis`).
+   *
+   * 설치본마다 update_cli 를 따로 보내는 것과 결과가 같아야 하므로 "무엇을 올릴지"
+   * 는 매니저가 자기 설치 열거(refreshCliInstalls)로 정한다 — 클라이언트가 목록을
+   * 실어 보내면 화면이 낡은 순간 엉뚱한 설치본을 올리게 된다.
+   *
+   * ack 는 요약 한 줄이다. 설치본 단위 성패가 섞이므로 "전부 성공" 이 아닌 경우를
+   * 성공으로 뭉개지 않는다: 하나라도 실패하면 throw 해서 error ack 로 보낸다 —
+   * 운영자가 토스트 하나만 보고 "다 됐다" 고 믿으면 안 되기 때문이다.
+   */
+  async #updateAllClis(payload: AgentManagerCommandPayload): Promise<string> {
+    const updateAll = this.#deps.updateAllClis;
+    if (!updateAll) throw new Error('update_all_clis is not wired on this manager');
+    const sudoTicket = typeof payload.args?.sudo_ticket === 'string' ? payload.args.sudo_ticket.trim() : '';
+    const r = await updateAll(sudoTicket || null);
+    const parts: string[] = [];
+    parts.push(`${r.updated.length}/${r.attempted} updated`);
+    if (r.updated.length) parts.push(`ok: ${r.updated.map((u) => `${u.cli}@${u.path}`).join(', ')}`);
+    if (r.skippedSudo.length) {
+      parts.push(`needs sudo (skipped): ${r.skippedSudo.map((u) => `${u.cli}@${u.path}`).join(', ')}`);
+    }
+    if (r.failed.length) {
+      const detail = r.failed.map((f) => `${f.cli}@${f.path}: ${f.detail}`).join(' | ');
+      throw new Error(`update_all_clis — ${parts.join('; ')}; failed: ${detail}`);
+    }
+    if (r.attempted === 0) {
+      return r.skippedSudo.length
+        ? `update_all_clis → nothing to update without sudo (${parts.join('; ')})`
+        : 'update_all_clis → every install is already up to date (no-op)';
+    }
+    return `update_all_clis — ${parts.join('; ')}`;
+  }
+
   async #updateCli(payload: AgentManagerCommandPayload): Promise<string> {
     const update = this.#deps.updateCli;
     if (!update) throw new Error('update_cli is not wired on this manager');

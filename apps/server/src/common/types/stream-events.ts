@@ -812,6 +812,11 @@ export type AgentManagerCommand =
   // 같은 장비의 모든 에이전트·세션이 즉시 새 바이너리를 쓴다. 끝나면 매니저가
   // 버전을 다시 읽어 즉시 하트비트 1회를 보낸다(heartbeat `cli_versions`).
   | 'update_cli'
+  // 같은 호스트의 **올릴 수 있는 설치본 전부**를 한 번에 올린다. args: { sudo_ticket? }.
+  // 무엇을 올릴지는 매니저가 자기 설치 열거로 정한다 — 화면이 보낸 목록을 믿으면
+  // 그 목록이 낡은 순간 엉뚱한 설치본을 올리게 된다. 설치본 단위로 실패가 격리되고
+  // ack 는 요약 한 줄이며, 하나라도 실패하면 error ack 다("다 됐다" 로 뭉개지 않는다).
+  | 'update_all_clis'
   // 세션/채팅의 agent 가 요청하고 **운영자가 화면에서 승인한** 권한 상승 명령
   // 하나를 실행한다. args: { request_id, sudo_ticket }.
   //

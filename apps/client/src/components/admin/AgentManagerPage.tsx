@@ -520,7 +520,12 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const [restartAllPending, setRestartAllPending] = useState(false);
   const [updatePending, setUpdatePending] = useState(false);
   const [refreshModelsPending, setRefreshModelsPending] = useState(false);
-  const [updateCliPending, setUpdateCliPending] = useState<string | null>(null);
+  // 진행 중인 **설치본 키** 집합. 예전에는 단일 슬롯(string | null)이라 한 설치본을
+  // 올리는 동안 이 호스트의 Update 버튼이 전부 잠겼다 — 서버·매니저에는 락이 없고
+  // 명령은 원래 겹쳐 돌 수 있으므로, 그 전역 차단은 UI 의 우연한 부작용이었다.
+  // 진짜 레이스(같은 npm prefix 공유)는 매니저의 withCliUpdateLock 이 막는다.
+  const [updateCliPending, setUpdateCliPending] = useState<ReadonlySet<string>>(() => new Set());
+  const [updateAllCliPending, setUpdateAllCliPending] = useState(false);
   // 권한 상승이 필요한 설치본의 Update 를 눌렀을 때 뜨는 비밀번호 모달의 대상.
   // 비밀번호 자체는 이 컴포넌트가 아니라 모달 안에서만 살고, 제출되는 즉시
   // 티켓으로 바뀌어 사라진다 — 여기에 담아 두지 않는다.
@@ -703,8 +708,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // `bin` 은 같은 CLI 가 여러 벌 깔린 호스트에서 어느 설치본인지 못 박는다 —
   // 생략하면 매니저가 지금 해석되는 설치본을 고른다.
   const handleUpdateCli = async (cli: string, bin?: string, sudoTicket?: string) => {
-    if (updateCliPending) return;
-    setUpdateCliPending(bin || cli);
+    const key = bin || cli;
+    // 같은 설치본을 두 번 누르는 것만 막는다. 다른 설치본은 동시에 올려도 된다.
+    if (updateCliPending.has(key)) return;
+    setUpdateCliPending((prev) => new Set(prev).add(key));
     try {
       const resp = await api.sendAgentManagerCommand(inst.instance_id, {
         command: 'update_cli',
@@ -731,7 +738,56 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     } catch (err: any) {
       showToast(`update_cli failed: ${err?.message || err}`, 'error');
     } finally {
-      setUpdateCliPending(null);
+      setUpdateCliPending((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
+  // 올릴 수 있는 설치본을 한 번에 전부. 매니저가 자기 설치 열거로 대상을 정하고
+  // 설치본 단위로 실패를 격리한 뒤 요약 한 줄로 ack 한다 — 하나라도 실패하면
+  // error ack 이므로 "다 됐다" 로 뭉개지지 않는다.
+  const handleUpdateAllClis = async () => {
+    if (updateAllCliPending) return;
+    const ok = await confirm({
+      title: '모든 CLI 업데이트',
+      message:
+        `${inst.hostname} 에서 올릴 수 있는 CLI 설치본을 전부 최신으로 올립니다. ` +
+        '같은 설치 디렉터리를 공유하는 설치본끼리만 차례로 돌고, 나머지는 동시에 올라갑니다. ' +
+        'sudo 가 필요한 설치본은 건너뛰고 결과에 그렇다고 적습니다. ' +
+        '이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?',
+      confirmLabel: '전부 업데이트',
+      danger: false,
+    });
+    if (!ok) return;
+    setUpdateAllCliPending(true);
+    try {
+      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
+        command: 'update_all_clis',
+        args: {},
+      });
+      const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
+      // 여러 벌을 올리므로 한 벌짜리(~4분)보다 창을 넓게 잡는다.
+      const ack = await waitForCommandAck(resp.command_id, { attempts: 240, intervalMs: 2000 });
+      if (ack.state === 'error') {
+        showToast(`CLI 전체 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        return;
+      }
+      if (ack.state !== 'ok') {
+        showToast(
+          `update_all_clis 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
+          'info',
+        );
+        return;
+      }
+      await reloadInstance(inst.instance_id);
+      showToast(ack.detail || `CLI 전체 업데이트 완료${idTail}`, 'success');
+    } catch (err: any) {
+      showToast(`update_all_clis failed: ${err?.message || err}`, 'error');
+    } finally {
+      setUpdateAllCliPending(false);
     }
   };
 
@@ -1055,6 +1111,8 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               inst={inst}
               hideLabel
               pending={updateCliPending}
+              onUpdateAll={handleUpdateAllClis}
+              updateAllPending={updateAllCliPending}
               onUpdate={(cli, bin, needsSudo, method) => {
                 // 권한 상승이 필요한 설치본에서만 비밀번호를 묻는다. 필요 없는
                 // 설치본에 대고 묻는 것은 운영자의 root 비밀번호를 괜히 네트워크에
@@ -2915,11 +2973,17 @@ export function InstalledCliVersions({
   inst,
   pending,
   onUpdate,
+  onUpdateAll,
+  updateAllPending = false,
   hideLabel = false,
 }: {
   inst: AgentManagerInstance;
-  pending: string | null;
+  /** 지금 올리는 중인 설치본 키 집합. 한 설치본의 진행이 다른 행을 잠그면 안 된다. */
+  pending: ReadonlySet<string>;
   onUpdate: (cli: string, bin: string | undefined, needsSudo: boolean, method: string) => void;
+  /** "전부 올리기". 무엇을 올릴지는 매니저가 자기 설치 열거로 정하므로 목록을 싣지 않는다. */
+  onUpdateAll?: () => void;
+  updateAllPending?: boolean;
   /** 제목 달린 섹션 안에 놓을 때는 자체 라벨을 끈다 — 같은 말이 두 줄 겹친다. */
   hideLabel?: boolean;
 }) {
@@ -2962,6 +3026,17 @@ export function InstalledCliVersions({
     (a, b) => a.cli.localeCompare(b.cli) || Number(b.active) - Number(a.active) || a.path.localeCompare(b.path),
   );
 
+  // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. 매니저가 행마다 알려주면 그것을
+  // 쓰고(snap/brew 는 null — npm 의 숫자를 들이대면 안 되는 채널이다), 아예 안 보내는
+  // 구버전 매니저일 때만 CLI 단위 값으로 접는다.
+  const latestFor = (row: CliInstallEntry): string | null =>
+    row.latest_version !== undefined ? row.latest_version : inst.cli_latest_versions?.[row.cli] ?? null;
+  // "전부 올리기" 를 켤지 정하는 규칙은 **행의 Update 버튼이 뜨는 규칙과 같아야 한다** —
+  // 갈리면 버튼이 화면과 다른 것을 올린다고 말하게 된다.
+  const updatableRows = sorted.filter(
+    (row) => row.updatable && cliUpdateState(row.version, latestFor(row)) !== 'up-to-date',
+  );
+
   return (
     <div style={{ gridColumn: '1 / -1' }}>
       {!hideLabel && (
@@ -2974,10 +3049,7 @@ export function InstalledCliVersions({
           // 최신 버전은 CLI 가 아니라 **설치본**에 속한다. 매니저가 행마다 알려주면
           // 그것을 쓴다(snap/brew 는 null — npm 의 숫자를 들이대면 안 되는 채널이다).
           // 구버전 매니저는 아예 안 보내므로(undefined) 그때만 CLI 단위 값으로 접는다.
-          const latest =
-            row.latest_version !== undefined
-              ? row.latest_version
-              : inst.cli_latest_versions?.[row.cli] ?? null;
+          const latest = latestFor(row);
           const state = cliUpdateState(row.version, latest);
           const upToDate = state === 'up-to-date';
           // 자기 채널로는 최신인데 같은 호스트에 더 새 설치본이 있는 경우. 이때
@@ -2998,8 +3070,10 @@ export function InstalledCliVersions({
               '이 채널에서는 더 올라갈 곳이 없으므로, 쓰지 않는다면 지우는 편이 낫습니다.'
             : '';
           const key = row.path || row.cli;
-          const busy = pending === key;
-          const disabled = pending !== null || upToDate;
+          const busy = pending.has(key);
+          // **이 행만** 잠근다. 예전엔 `pending !== null` 이라 다른 설치본까지 전부
+          // 죽었고, ack 대기가 최대 4분이라 그동안 아무것도 못 눌렀다.
+          const disabled = busy || upToDate;
           // 같은 CLI 가 한 벌뿐이면 경로는 소음이다 — 여러 벌일 때만 짚어 준다.
           const showPath = Boolean(row.path) && (perCli.get(row.cli) ?? 0) > 1;
           return (
@@ -3087,6 +3161,37 @@ export function InstalledCliVersions({
             </span>
           );
         })}
+        {/* 한 번에 전부 올리기. 설치본마다 따로 누르던 것을 모아서 할 뿐이라 켜고 끄는
+            규칙은 행 버튼과 같다(updatableRows). 무엇을 올릴지는 매니저가 자기 설치
+            열거로 정하므로 여기서 목록을 실어 보내지 않는다 — 화면이 낡은 순간
+            엉뚱한 설치본을 올리게 된다. */}
+        {onUpdateAll && updatableRows.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <button
+              onClick={onUpdateAll}
+              disabled={updateAllPending}
+              style={{
+                padding: '3px 10px',
+                fontSize: 11,
+                fontWeight: 700,
+                background: 'transparent',
+                color: tokens.colors.textStrong,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.sm,
+                cursor: updateAllPending ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+              }}
+              title={
+                `update_all_clis — 올릴 수 있는 설치본 ${updatableRows.length}개를 한 번에 올립니다 ` +
+                `(${updatableRows.map((r) => r.cli).join(', ')}). ` +
+                '같은 설치 디렉터리를 공유하는 것끼리만 차례로 돌고 나머지는 동시에 올라갑니다. ' +
+                'sudo 가 필요한 설치본은 건너뛰고 그렇다고 알려줍니다 — 그건 행의 Update 로 올리세요.'
+              }
+            >
+              {updateAllPending ? `전부 업데이트 중…` : `전부 업데이트 (${updatableRows.length})`}
+            </button>
+          </div>
+        )}
       </dd>
     </div>
   );

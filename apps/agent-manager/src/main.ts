@@ -835,6 +835,107 @@ async function runRuntime(
     }
   };
 
+  // ─── CLI 업데이트 직렬화 ────────────────────────────────────────────────
+  //
+  // 같은 설치 디렉터리(= npm global prefix)를 공유하는 설치본끼리는 동시에 올리면
+  // 서로의 설치를 깨뜨린다 — `npm --prefix <P> install -g` 두 개가 한 node_modules
+  // 를 두고 경쟁한다. 그래서 직렬화의 단위는 "전역" 도 "CLI" 도 아닌 **공유 자원**,
+  // 즉 설치본이 놓인 디렉터리다. 다른 prefix·다른 호스트는 공유하는 것이 없으므로
+  // 그대로 병렬로 돈다.
+  //
+  // 예전에는 클라이언트가 업데이트 중에 Update 버튼을 **전부** 잠가 사실상 전역
+  // 직렬화가 됐는데, 그건 UI 의 우연한 부작용이었지 이 레이스를 막는 설계가 아니었다
+  // (서버·매니저 어디에도 락이 없었다). UI 를 제 범위로 되돌리는 변경과 짝이다.
+  const cliUpdateLocks = new Map<string, Promise<unknown>>();
+  /** 설치본 경로 → 공유 자원 키(그 설치본이 놓인 디렉터리). 구분자는 플랫폼마다
+   *  다르므로 둘 다 본다 — Windows 경로가 POSIX 매니저에 실려 올 일은 없지만,
+   *  경로 조작을 플랫폼 기본 path.* 로 하면 조용히 어긋난다. */
+  const installPrefixKey = (binPath: string): string => {
+    const cut = Math.max(binPath.lastIndexOf('/'), binPath.lastIndexOf('\\'));
+    return canonicalPathKey(cut > 0 ? binPath.slice(0, cut) : binPath);
+  };
+  const withCliUpdateLock = async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = cliUpdateLocks.get(key);
+    let release!: () => void;
+    const mine = new Promise<void>((r) => (release = r));
+    const composed = (prev ?? Promise.resolve()).then(() => mine);
+    cliUpdateLocks.set(key, composed);
+    if (prev) await prev.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      // 체인이 다 빠진 뒤에만 지운다 — 뒤에 줄 선 쪽이 이미 값을 교체했다면 그쪽 것이다.
+      if (cliUpdateLocks.get(key) === composed) cliUpdateLocks.delete(key);
+    }
+  };
+
+  /** 설치본 **하나**를 올린다(해석·검증·실행까지). 하트비트/재열거 같은 뒷정리는
+   *  하지 않는다 — 여러 벌을 올릴 때 N 번 반복하지 않도록 호출자가 한 번만 한다. */
+  const runOneCliUpdate = async (
+    cli: string,
+    bin: string | null,
+    sudoTicket: string | null,
+  ) => {
+    let target: string | null = null;
+    if (bin) {
+      const known = await listCliInstalls(cli);
+      const match = known.find((i) => i.path === bin || canonicalPathKey(i.path) === canonicalPathKey(bin));
+      if (!match) {
+        throw new Error(
+          `update_cli: ${bin} is not a known ${cli} install on this host ` +
+            `(known: ${known.map((i) => i.path).join(', ') || 'none'})`,
+        );
+      }
+      target = match.path;
+    }
+    const probeBin = target ?? createAdapter(cli).resolveBin();
+    // 이 설치본의 채널 기준 최신. npm 판의 숫자를 snap 설치본에 들이대지 않는다.
+    let targetLatest: string | null = null;
+    try {
+      targetLatest = await latestForInstall(cli, probeBin, detectInstallMethod(probeBin, createAdapter(cli).updatePackage()));
+    } catch {
+      /* 해석 실패 — 최신을 모른 채로 진행한다(업데이터의 말을 믿되 그렇다고 적는다). */
+    }
+    return withCliUpdateLock(installPrefixKey(probeBin), () =>
+      runCliUpdate(
+        cli,
+        { log },
+        {
+          bin: target,
+          // 최신 버전을 함께 넘긴다 — "버전이 안 움직였다" 를 *이미 최신* 과
+          // *못 올렸다* 로 가르는 유일한 근거다(없으면 업데이터의 종료 코드를
+          // 믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다).
+          latest: targetLatest,
+          // 권한 상승이 실제로 필요한 분기에 도달했을 때만 불린다. 티켓이 안 왔으면
+          // 아예 배선하지 않아, 비밀번호를 당겨 올 수단 자체가 없는 상태로 돈다.
+          getSudoPassword: sudoTicket
+            ? async () => (await fetchSudoTicket(config, sudoTicket))?.password ?? null
+            : null,
+        },
+      ),
+    );
+  };
+
+  /** 업데이트 뒤 캐시를 되짚고 하트비트 1회를 보낸다. 여러 설치본을 올렸어도 한 번만. */
+  const afterCliUpdate = async (anyOk: boolean): Promise<boolean> => {
+    if (anyOk) {
+      try {
+        availableModels = await gatherAvailableModels();
+        availableModelsAt = new Date().toISOString();
+      } catch (err: any) {
+        log(`update_cli: model re-enumeration failed: ${err?.message ?? err}`);
+      }
+    }
+    // cliVersions 는 여기서 직접 건드리지 않는다 — refreshCliInstalls 가 **활성
+    // 설치본** 기준으로 되짚는다. 방금 올린 것이 활성이 아닐 수 있다.
+    await refreshCliInstalls();
+    // 최신 버전도 다시 읽는다. 방금 올렸다면 설치 == 최신이 되어 UI 의 버튼이
+    // 곧바로 비활성으로 접히고, 올리지 못했다면 그대로 활성으로 남는다.
+    await refreshCliLatestVersions();
+    return (await instanceHeartbeat._real?.postNow()) ?? false;
+  };
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
@@ -876,60 +977,51 @@ async function runRuntime(
     // 열거한 설치본 목록에 있는 경로만 받아들인다. 임의 경로를 실행하면 커맨드
     // 하나가 호스트에서 무엇이든 돌릴 수 있는 통로가 된다.
     updateCli: async (cli: string, bin?: string | null, sudoTicket?: string | null) => {
-      let target: string | null = null;
-      if (bin) {
-        const known = await listCliInstalls(cli);
-        const match = known.find((i) => i.path === bin || canonicalPathKey(i.path) === canonicalPathKey(bin));
-        if (!match) {
-          throw new Error(
-            `update_cli: ${bin} is not a known ${cli} install on this host ` +
-              `(known: ${known.map((i) => i.path).join(', ') || 'none'})`,
-          );
-        }
-        target = match.path;
-      }
-      // 이 설치본의 채널 기준 최신. npm 판의 숫자를 snap 설치본에 들이대지 않는다.
-      let targetLatest: string | null = null;
-      try {
-        const probeBin = target ?? createAdapter(cli).resolveBin();
-        targetLatest = await latestForInstall(cli, probeBin, detectInstallMethod(probeBin, createAdapter(cli).updatePackage()));
-      } catch {
-        /* 해석 실패 — 최신을 모른 채로 진행한다(업데이터의 말을 믿되 그렇다고 적는다). */
-      }
-      const outcome = await runCliUpdate(
-        cli,
-        { log },
-        {
-          bin: target,
-          // 최신 버전을 함께 넘긴다 — "버전이 안 움직였다" 를 *이미 최신* 과
-          // *못 올렸다* 로 가르는 유일한 근거다(없으면 업데이터의 종료 코드를
-          // 믿는 수밖에 없고, 그게 ragnar 회귀의 뿌리였다).
-          latest: targetLatest,
-          // 권한 상승이 실제로 필요한 분기에 도달했을 때만 불린다. 티켓이 안 왔으면
-          // 아예 배선하지 않아, 비밀번호를 당겨 올 수단 자체가 없는 상태로 돈다.
-          getSudoPassword: sudoTicket
-            ? async () => (await fetchSudoTicket(config, sudoTicket))?.password ?? null
-            : null,
-        },
-      );
-      // cliVersions 는 여기서 직접 건드리지 않는다 — 아래 refreshCliInstalls 가
-      // **활성 설치본** 기준으로 되짚는다. 방금 올린 것이 활성이 아닐 수 있다.
-      if (outcome.ok) {
-        try {
-          availableModels = await gatherAvailableModels();
-          availableModelsAt = new Date().toISOString();
-        } catch (err: any) {
-          log(`update_cli: model re-enumeration failed after ${cli} update: ${err?.message ?? err}`);
-        }
-      }
-      // 설치 목록을 다시 읽어 새 버전이 UI 의 그 행에 바로 반영되게 한다.
-      await refreshCliInstalls();
-      // 최신 버전도 다시 읽는다. 방금 올렸다면 설치 == 최신이 되어 UI 의 버튼이
-      // 곧바로 비활성으로 접히고, 올리지 못했다면 그대로 활성으로 남는다 —
-      // 어느 쪽이든 다음 하트비트 한 번으로 화면이 사실과 맞는다.
-      await refreshCliLatestVersions();
-      const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
+      const outcome = await runOneCliUpdate(cli, bin ?? null, sudoTicket ?? null);
+      const heartbeatPosted = await afterCliUpdate(outcome.ok);
       return { ...outcome, heartbeatPosted };
+    },
+    // 이 호스트의 **올릴 수 있는 설치본 전부**를 한 번에 올린다. 설치본마다 따로
+    // 누르던 것을 모아서 할 뿐이라 판단 규칙은 같다 — updatable 이 아니거나 이미
+    // 최신인 설치본은 건너뛴다. 실패는 설치본 단위로 격리하고 요약 한 줄로 ack 한다
+    // (restart_all_agents / update_plugins 와 같은 계약).
+    //
+    // 설치본끼리는 **병렬로** 돈다. 직렬화는 공유 자원 단위로만 일어난다:
+    // withCliUpdateLock 이 같은 prefix 를 가리키는 것들만 줄 세우므로, 서로 다른
+    // prefix 에 깔린 CLI 들은 실제로 동시에 올라간다. 전부 직렬로 돌리면 CLI 가
+    // 네다섯이면 몇 분이 그대로 합산된다.
+    //
+    // 권한 상승이 필요한 설치본은 티켓이 없으면 **건너뛰고 그렇다고 보고한다** —
+    // 티켓 없이 시도해 봐야 실패할 뿐이고, 그 실패를 "업데이트 실패" 로 섞어 보고하면
+    // 운영자가 무엇을 해야 하는지 알 수 없다.
+    updateAllClis: async (sudoTicket?: string | null) => {
+      await refreshCliInstalls();
+      const upToDate = (i: CliInstallEntry): boolean =>
+        Boolean(i.latest_version && i.version && i.latest_version === i.version);
+      const candidates = cliInstalls.filter((i) => i.updatable && !upToDate(i));
+      const skippedSudo = sudoTicket ? [] : candidates.filter((i) => i.needs_sudo);
+      const runnable = sudoTicket ? candidates : candidates.filter((i) => !i.needs_sudo);
+      const results = await Promise.all(
+        runnable.map(async (i) => {
+          try {
+            const r = await runOneCliUpdate(i.cli, i.path, sudoTicket ?? null);
+            return { cli: i.cli, path: i.path, ok: r.ok, supported: r.supported, detail: r.detail };
+          } catch (err: any) {
+            // 한 설치본의 실패가 나머지를 막지 않는다.
+            return { cli: i.cli, path: i.path, ok: false, supported: true, detail: err?.message ?? String(err) };
+          }
+        }),
+      );
+      const updated = results.filter((r) => r.ok);
+      const failed = results.filter((r) => !r.ok);
+      const heartbeatPosted = await afterCliUpdate(updated.length > 0);
+      return {
+        attempted: runnable.length,
+        updated: updated.map((r) => ({ cli: r.cli, path: r.path, detail: r.detail })),
+        failed: failed.map((r) => ({ cli: r.cli, path: r.path, detail: r.detail })),
+        skippedSudo: skippedSudo.map((i) => ({ cli: i.cli, path: i.path })),
+        heartbeatPosted,
+      };
     },
     // 운영자가 화면에서 승인한 권한 상승 명령 하나를 실행한다.
     //

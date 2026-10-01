@@ -212,6 +212,14 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
   assert.equal(pinned.ok, true);
   assert.equal((await readOutcome(pinned.command_id)).command, 'update_cli');
 
+  // 설치본마다 따로 누르던 것을 한 번에 하는 verb. 허용목록에서 빠지면 "전부
+  // 업데이트" 버튼이 400 "unknown command" 로 죽고, 그 실패는 매니저 로그에 흔적조차
+  // 남지 않는다 — update_cli 와 같은 이유로 여기서 고정한다. 무엇을 올릴지는 매니저가
+  // 정하므로 args 는 비어 있다(sudo 티켓만 선택적으로 실린다).
+  const all = await readJson(await sendCommand('update_all_clis', {}), 202);
+  assert.equal(all.ok, true);
+  assert.equal((await readOutcome(all.command_id)).command, 'update_all_clis');
+
   // 오타 verb 는 기존대로 거부된다.
   await readJson(await sendCommand('update_clis'), 400);
 });

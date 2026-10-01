@@ -413,6 +413,96 @@ const updateOk = (over = {}) => ({
   ...over,
 });
 
+// ─── update_all_clis — 올릴 수 있는 설치본을 **전부** ────────────────────────
+//
+// 무엇을 올릴지는 매니저(main.ts)가 자기 설치 열거로 정하고, 여기서는 fan-out
+// 계약만 본다: 설치본 단위 실패 격리, 요약 ack, 하나라도 실패하면 error ack,
+// 올릴 게 없으면 깔끔한 no-op, 미배선이면 명확한 사유.
+
+function updateAllHandler(updateAllClis) {
+  return new AgentManagerCommandHandler(
+    { url: 'https://awb.cliupdate.example', apiKey: 'manager-key', delegation: {} },
+    { getInstanceId: () => 'instance-1', registry: registryStub(), updateAllClis },
+  );
+}
+
+const sendUpdateAll = (handler, args = {}) =>
+  handler.handle(JSON.stringify({
+    command_id: 'update-all-1',
+    instance_id: 'instance-1',
+    command: 'update_all_clis',
+    args,
+  }));
+
+test('update_all_clis 는 올린 설치본을 요약해 ok ack 한다', async () => {
+  const handler = updateAllHandler(async () => ({
+    attempted: 2,
+    updated: [
+      { cli: 'claude', path: '/n/bin/claude', detail: 'claude 1 → 2' },
+      { cli: 'codex', path: '/n/bin/codex', detail: 'codex 3 → 4' },
+    ],
+    failed: [],
+    skippedSudo: [],
+    heartbeatPosted: true,
+  }));
+  await sendUpdateAll(handler);
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  assert.match(ack.detail, /2\/2 updated/);
+  // 같은 CLI 를 여러 벌 두는 것이 정상 구성이라, CLI 이름만으로는 무엇이 올라갔는지
+  // 특정되지 않는다 — 경로가 ack 에 남아야 한다.
+  assert.match(ack.detail, /claude@\/n\/bin\/claude/);
+  assert.match(ack.detail, /codex@\/n\/bin\/codex/);
+});
+
+test('update_all_clis 는 하나라도 실패하면 error ack 한다 — 부분 성공을 성공으로 뭉개지 않는다', async () => {
+  const handler = updateAllHandler(async () => ({
+    attempted: 2,
+    updated: [{ cli: 'claude', path: '/n/bin/claude', detail: 'claude 1 → 2' }],
+    failed: [{ cli: 'codex', path: '/n/bin/codex', detail: 'EACCES' }],
+    skippedSudo: [],
+    heartbeatPosted: true,
+  }));
+  await sendUpdateAll(handler);
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  // 성공한 쪽도 함께 적는다 — 무엇이 올라갔고 무엇이 안 올라갔는지 둘 다 필요하다.
+  assert.match(ack.detail, /1\/2 updated/);
+  assert.match(ack.detail, /codex@\/n\/bin\/codex: EACCES/);
+});
+
+test('update_all_clis: sudo 가 필요한 설치본은 건너뛰되 그렇다고 보고한다 (실패가 아니다)', async () => {
+  const handler = updateAllHandler(async () => ({
+    attempted: 1,
+    updated: [{ cli: 'claude', path: '/n/bin/claude', detail: 'claude 1 → 2' }],
+    failed: [],
+    skippedSudo: [{ cli: 'codex', path: '/usr/local/bin/codex' }],
+    heartbeatPosted: true,
+  }));
+  await sendUpdateAll(handler);
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok', 'sudo 로 건너뛴 것은 실패가 아니다');
+  assert.match(ack.detail, /needs sudo \(skipped\): codex@\/usr\/local\/bin\/codex/);
+});
+
+test('update_all_clis: 올릴 것이 없으면 깔끔한 no-op ack', async () => {
+  const handler = updateAllHandler(async () => ({
+    attempted: 0, updated: [], failed: [], skippedSudo: [], heartbeatPosted: false,
+  }));
+  await sendUpdateAll(handler);
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  assert.match(ack.detail, /already up to date/);
+});
+
+test('update_all_clis: 배선되지 않은 매니저는 조용히 성공한 척하지 않는다', async () => {
+  const handler = updateAllHandler(null);
+  await sendUpdateAll(handler);
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /not wired/);
+});
+
 test('update_cli 는 args.cli 를 그대로 올리고 before → after 를 ack detail 에 담는다', async () => {
   const seen = [];
   const handler = updateCliHandler(async (cli) => {

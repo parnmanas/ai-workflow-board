@@ -88,6 +88,12 @@ export default function AgentLifecycleControls({
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [pending, setPending] = useState<AgentManagerCommandKind | null>(null);
+  // CLI 업데이트는 lifecycle 명령과 **슬롯을 나눠 쓰지 않는다**. 같은 슬롯을 쓰던
+  // 때는 ack 대기가 최대 4분이라 그동안 이 카드의 Start/Stop/Restart 가 전부
+  // 잠겼는데, 그 차단은 보호 장치도 아니었다 — 같은 호스트의 다른 에이전트 카드와
+  // Runtime Hosts 화면은 애초에 안 잠겼으므로 "업데이트 중 spawn 금지" 를 강제한
+  // 적이 없다. 막는 것은 같은 버튼 중복 클릭뿐이다.
+  const [cliPending, setCliPending] = useState(false);
   const [wdInput, setWdInput] = useState('');
 
   const instanceId = managerInstance?.instance_id ?? null;
@@ -162,7 +168,7 @@ export default function AgentLifecycleControls({
     ? ` (${currentCliVersion}${latestCliVersion && !cliUpToDate ? ` → ${latestCliVersion}` : ''})`
     : '';
   const updateCli = useCallback(async () => {
-    if (!instanceId || !updatableCli || pending || cliUpToDate) return;
+    if (!instanceId || !updatableCli || cliPending || cliUpToDate) return;
     const ok = await confirm({
       title: 'CLI 업데이트',
       message:
@@ -178,7 +184,7 @@ export default function AgentLifecycleControls({
       danger: false,
     });
     if (!ok) return;
-    setPending('update_cli');
+    setCliPending(true);
     try {
       const resp = await api.sendAgentManagerCommand(instanceId, {
         command: 'update_cli',
@@ -196,7 +202,7 @@ export default function AgentLifecycleControls({
     } catch (err: any) {
       showToast(`명령 실패: ${err?.message || err}`, 'error');
     } finally {
-      setPending(null);
+      setCliPending(false);
     }
   }, [
     agentId,
@@ -204,7 +210,7 @@ export default function AgentLifecycleControls({
     currentCliVersion,
     cliUpToDate,
     instanceId,
-    pending,
+    cliPending,
     confirm,
     showToast,
     onDispatched,
@@ -321,7 +327,7 @@ export default function AgentLifecycleControls({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={!managerOnline || pending !== null || cliUpToDate}
+                disabled={!managerOnline || cliPending || cliUpToDate}
                 onClick={updateCli}
                 title={
                   !managerOnline ? managerOfflineTitle
@@ -334,7 +340,7 @@ export default function AgentLifecycleControls({
                       '다른 설치본을 고르려면 Runtime Hosts 화면을 쓰세요.'
                 }
               >
-                {pending === 'update_cli'
+                {cliPending
                   ? `${updatableCli} 업데이트 중…`
                   : cliUpToDate
                   ? `${updatableCli} ${currentCliVersion} (최신)`

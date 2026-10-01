@@ -70,6 +70,10 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   // 끝난 뒤 spawn 되는 CLI 는 새 버전이다 — 장비 전역 영향이라 관리자 전용
   // 경로(다른 verb 와 같은 가드)로만 들어온다.
   'update_cli',
+  // 같은 호스트의 올릴 수 있는 설치본을 전부 올린다. update_cli 를 설치본마다
+  // 보내는 것과 영향 범위가 같아 같은 가드를 쓴다 — 다만 한 번에 여러 벌이
+  // 움직이므로 ack 는 설치본 단위 성패를 요약해서 돌려준다.
+  'update_all_clis',
   // 운영자가 화면에서 승인한 권한 상승 명령 하나. 승인 흐름이 발급하는 경로
   // (approve 엔드포인트)에서만 디스패치되지만, 다른 verb 와 같은 관리자 가드를
   // 통과하므로 허용목록에도 명시한다.

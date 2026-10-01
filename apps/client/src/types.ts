@@ -2556,7 +2556,11 @@ export type AgentManagerCommandKind =
   | 'refresh_available_models'
   // 호스트에 설치된 CLI 자체를 최신으로 올린다(`claude update` / `codex update`).
   // args: { cli? }. 범위는 에이전트가 아니라 Runtime Host 전체.
-  | 'update_cli';
+  | 'update_cli'
+  // 같은 호스트의 올릴 수 있는 설치본을 **전부** 올린다. args: { sudo_ticket? }.
+  // 무엇을 올릴지는 매니저가 자기 설치 열거로 정한다 — 화면이 목록을 실어 보내면
+  // 그 목록이 낡은 순간 엉뚱한 설치본을 올리게 된다.
+  | 'update_all_clis';
 
 export interface AgentManagerCommandResult {
   ok: boolean;

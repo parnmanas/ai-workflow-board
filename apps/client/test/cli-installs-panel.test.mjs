@@ -10,6 +10,12 @@
 //   2) 이미 최신인 행만 잠긴다. 최신을 **모르는** 행은 잠기지 않는다.
 //   3) 우리가 못 올리는 설치본(snap 등)은 방법만 보여주고 버튼이 없다.
 //   4) 구버전 매니저(cli_installs 없음)는 예전처럼 cli_versions 로 접힌다.
+//   5) 한 설치본을 올리는 동안 **다른 행은 잠기지 않는다**. 예전에는 disabled 가
+//      `pending !== null` 이라 설치본 하나를 올리면 그 호스트의 Update 가 전부
+//      죽었고, ack 대기가 최대 4분이라 그동안 아무것도 못 눌렀다. 서버·매니저에는
+//      락이 없으므로 그 전역 차단은 UI 의 우연한 부작용이었다(진짜 레이스인 "같은
+//      npm prefix 공유" 는 매니저의 withCliUpdateLock 이 막는다).
+//   6) 올릴 것이 있으면 "전부 업데이트" 를 내놓고, 그 켜짐 규칙은 행 버튼과 같다.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -35,9 +41,11 @@ const BASE = {
 const STALE = '/home/parn/.local/bin/claude';
 const FRESH = '/home/parn/.nvm/versions/node/v22.23.1/bin/claude';
 
-function render(t, inst, onUpdate = () => {}) {
+// `pending` 은 **진행 중인 설치본 키 집합**이다(단일 슬롯이 아니다) — 한 설치본을
+// 올리는 동안 다른 행까지 잠기지 않게 하려고 집합으로 바꿨다.
+function render(t, inst, onUpdate = () => {}, pending = new Set(), extra = {}) {
   const view = mount(
-    React.createElement(InstalledCliVersions, { inst, pending: null, onUpdate }),
+    React.createElement(InstalledCliVersions, { inst, pending, onUpdate, ...extra }),
   );
   t.after(() => view.unmount());
   return view;
@@ -356,4 +364,72 @@ test('더 새 설치본이 없으면 그냥 최신이다 — 경고가 번지지
   const text = view.container.textContent;
   assert.ok(text.includes('최신'));
   assert.equal(text.includes('뒤처짐'), false);
+});
+
+
+// ─── 동시 업데이트 ──────────────────────────────────────────────────────────
+
+/** 같은 호스트에 서로 다른 prefix 로 깔린 두 설치본. */
+const TWO_INSTALLS = {
+  ...BASE,
+  cli_installs: [
+    {
+      cli: 'claude', path: '/home/parn/.npm-global/bin/claude', version: '2.0.0',
+      method: 'npm --prefix /home/parn/.npm-global', updatable: true, needs_sudo: false,
+      latest_version: '2.1.0', active: true,
+    },
+    {
+      cli: 'codex', path: '/usr/lib/node/bin/codex', version: '0.9.0',
+      method: 'npm --prefix /usr/lib/node', updatable: true, needs_sudo: false,
+      latest_version: '1.0.0', active: true,
+    },
+  ],
+};
+
+test('한 설치본을 올리는 동안 다른 설치본의 Update 는 눌린 채로 남는다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  // claude 만 진행 중.
+  const view = render(t, TWO_INSTALLS, () => {}, new Set(['/home/parn/.npm-global/bin/claude']));
+  await act(async () => {});
+  const updateButtons = buttons(view).filter((b) => /Update|업데이트 중/.test(b.textContent));
+  const busy = updateButtons.find((b) => b.textContent.includes('업데이트 중'));
+  const other = updateButtons.find((b) => b.textContent === 'Update');
+  assert.ok(busy, '진행 중인 행은 진행 중이라고 말한다');
+  assert.equal(busy.disabled, true, '같은 설치본 중복 클릭은 막는다');
+  assert.ok(other, '다른 설치본의 Update 는 그대로 있다');
+  assert.equal(other.disabled, false, '다른 설치본은 동시에 올릴 수 있어야 한다');
+});
+
+test('"전부 업데이트" 는 올릴 것이 있을 때만 뜨고, 개수는 행 버튼과 같은 규칙으로 센다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const calls = [];
+  const view = render(t, TWO_INSTALLS, () => {}, new Set(), { onUpdateAll: () => calls.push(1) });
+  await act(async () => {});
+  const all = buttons(view).find((b) => b.textContent.includes('전부 업데이트'));
+  assert.ok(all, '올릴 수 있는 설치본이 있으면 버튼이 뜬다');
+  assert.match(all.textContent, /\(2\)/, '올릴 수 있는 설치본 수를 그대로 쓴다');
+  click(all);
+  assert.deepEqual(calls, [1]);
+});
+
+test('전부 최신이면 "전부 업데이트" 를 내놓지 않는다 — 누를 이유가 없는 버튼을 두지 않는다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const view = render(
+    t,
+    {
+      ...BASE,
+      cli_installs: TWO_INSTALLS.cli_installs.map((i) => ({ ...i, latest_version: i.version })),
+    },
+    () => {},
+    new Set(),
+    { onUpdateAll: () => {} },
+  );
+  await act(async () => {});
+  assert.equal(
+    buttons(view).some((b) => b.textContent.includes('전부 업데이트')),
+    false,
+  );
 });
