@@ -29,6 +29,7 @@ import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
 import { refreshHostModels, summarizeHostModels } from '../../cli/hostModels';
 import { reloadInstance, waitForCommandAck } from './agentManagerModelRefresh';
+import { INSTANCE_OP, finishInstanceOp, pendingInstallKeys, startInstanceOp, useInstanceOps } from './instanceOps';
 import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersions';
 
 /**
@@ -516,20 +517,27 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   const degraded = degradedReason(inst);
   const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
-  const [restartPending, setRestartPending] = useState(false);
-  const [restartAllPending, setRestartAllPending] = useState(false);
-  const [updatePending, setUpdatePending] = useState(false);
-  const [refreshModelsPending, setRefreshModelsPending] = useState(false);
-  // 진행 중인 **설치본 키** 집합. 예전에는 단일 슬롯(string | null)이라 한 설치본을
-  // 올리는 동안 이 호스트의 Update 버튼이 전부 잠겼다 — 서버·매니저에는 락이 없고
-  // 명령은 원래 겹쳐 돌 수 있으므로, 그 전역 차단은 UI 의 우연한 부작용이었다.
-  // 진짜 레이스(같은 npm prefix 공유)는 매니저의 withCliUpdateLock 이 막는다.
-  const [updateCliPending, setUpdateCliPending] = useState<ReadonlySet<string>>(() => new Set());
-  const [updateAllCliPending, setUpdateAllCliPending] = useState(false);
+  // 진행 중 플래그는 **호스트별 스토어**에서 읽는다(instanceOps.ts). 이 컴포넌트는 선택된
+  // 호스트 하나만 그리고 호스트를 바꿔도 재사용되므로, useState 로 두면 A 의 진행 중이 B 화면을
+  // 잠갔다 — A 의 CLI 를 올리는 동안 B 의 CLI 를 못 올린 원인이다.
+  const activeOps = useInstanceOps(inst.instance_id);
+  const restartPending = activeOps.has(INSTANCE_OP.restart);
+  const restartAllPending = activeOps.has(INSTANCE_OP.restartAll);
+  const updatePending = activeOps.has(INSTANCE_OP.updateManager);
+  const refreshModelsPending = activeOps.has(INSTANCE_OP.refreshModels);
+  // 진행 중인 **설치본 키** 집합 — 같은 호스트의 다른 설치본은 동시에 올릴 수 있다. 진짜
+  // 레이스(같은 npm prefix 공유)는 매니저의 withCliUpdateLock 이 막는다.
+  const updateCliPending = pendingInstallKeys(activeOps);
+  const updateAllCliPending = activeOps.has(INSTANCE_OP.updateAllClis);
   // 권한 상승이 필요한 설치본의 Update 를 눌렀을 때 뜨는 비밀번호 모달의 대상.
   // 비밀번호 자체는 이 컴포넌트가 아니라 모달 안에서만 살고, 제출되는 즉시
   // 티켓으로 바뀌어 사라진다 — 여기에 담아 두지 않는다.
   const [sudoPrompt, setSudoPrompt] = useState<{ cli: string; bin: string; method: string } | null>(null);
+  // 이 패널은 호스트를 바꿔도 재사용된다 — 호스트 A 에서 연 sudo 대상(A 의 설치본 경로)이
+  // 남아 있으면 B 의 instance id 로 제출되어 "그런 설치본 없음" 으로 거절된다. 바뀌면 비운다.
+  useEffect(() => {
+    setSudoPrompt(null);
+  }, [inst.instance_id]);
   // Manager Agent.name + description live in the agents table, separate
   // from inst.hostname (OS hostname). The header shows hostname; this
   // load surfaces the Agent.name (used as the children's display prefix)
@@ -587,6 +595,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // re-execs and reappears as an `agent_instance_update` event with the
   // same manager version (the wire field is plugin_version; no polling needed here).
   const handleRestart = async () => {
+    const id = inst.instance_id;
     if (restartPending) return;
     const ok = await confirm({
       title: 'Restart manager',
@@ -594,9 +603,9 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       confirmLabel: 'Restart',
     });
     if (!ok) return;
-    setRestartPending(true);
+    if (!startInstanceOp(id, INSTANCE_OP.restart)) return;
     try {
-      const resp: any = await api.restartAgentManagerInstance(inst.instance_id);
+      const resp: any = await api.restartAgentManagerInstance(id);
       const idTail = typeof resp?.command_id === 'string' ? ` (id=${resp.command_id.slice(0, 8)})` : '';
       showToast(
         `${resp?.message || 'restart_manager dispatched'}${idTail} — manager will reappear in ~30s.`,
@@ -605,7 +614,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     } catch (err: any) {
       showToast(`Restart failed: ${err?.message || err}`, 'error');
     } finally {
-      setRestartPending(false);
+      finishInstanceOp(id, INSTANCE_OP.restart);
     }
   };
 
@@ -615,6 +624,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // only carries command_id; the exact restarted count lands in the async ack
   // (server-logged), so we surface the *target* count from agent_ids instead.
   const handleRestartAllAgents = async () => {
+    const id = inst.instance_id;
     if (restartAllPending) return;
     const targetCount = inst.agent_ids?.length ?? 0;
     const ok = await confirm({
@@ -624,9 +634,9 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       confirmLabel: 'Restart all',
     });
     if (!ok) return;
-    setRestartAllPending(true);
+    if (!startInstanceOp(id, INSTANCE_OP.restartAll)) return;
     try {
-      const resp = await api.restartAllAgents(inst.instance_id);
+      const resp = await api.restartAllAgents(id);
       const idTail = resp?.command_id ? ` (id=${resp.command_id.slice(0, 8)})` : '';
       showToast(
         `restart_all_agents dispatched${idTail} — ${targetCount} agent(s) will restart, ` +
@@ -636,7 +646,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     } catch (err: any) {
       showToast(`restart_all_agents failed: ${err?.message || err}`, 'error');
     } finally {
-      setRestartAllPending(false);
+      finishInstanceOp(id, INSTANCE_OP.restartAll);
     }
   };
 
@@ -646,6 +656,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // and relaunches. Either way we see the restart on the client as an
   // `agent_instance_update` event with the new manager version — no polling.
   const handleUpdate = async () => {
+    const id = inst.instance_id;
     if (updatePending) return;
     const action = managerUpdateAction(inst);
     const ok = await confirm({
@@ -658,9 +669,9 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       danger: false,
     });
     if (!ok) return;
-    setUpdatePending(true);
+    if (!startInstanceOp(id, INSTANCE_OP.updateManager)) return;
     try {
-      const resp = await api.sendAgentManagerCommand(inst.instance_id, { command: 'update_manager' });
+      const resp = await api.sendAgentManagerCommand(id, { command: 'update_manager' });
       showToast(
         action.kind === 'restart'
           ? `update_manager dispatched (id=${resp.command_id.slice(0, 8)}) — the installed build is already on disk; the manager restarts into it and reappears in ~30s.`
@@ -671,7 +682,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     } catch (err: any) {
       showToast(`update_manager failed: ${err?.message || err}`, 'error');
     } finally {
-      setUpdatePending(false);
+      finishInstanceOp(id, INSTANCE_OP.updateManager);
     }
   };
 
@@ -684,8 +695,8 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // 쓰면 커맨드와 무관한 정기 하트비트가 조건을 충족시켜 재열거 전 값을 성공으로
   // 오표시한다(리뷰 지적). 성공 ack 이후에만 인스턴스 목록을 다시 읽는다.
   const handleRefreshModels = async () => {
-    if (refreshModelsPending) return;
-    setRefreshModelsPending(true);
+    const id = inst.instance_id;
+    if (!startInstanceOp(id, INSTANCE_OP.refreshModels)) return;
     try {
       // 모든 모델 화면과 같은 경로 — 서버가 재열거 커맨드의 ack 를 기다린 뒤 새 목록을 준다.
       const fresh = await refreshHostModels(inst.agent_id);
@@ -695,7 +706,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     } catch (err: any) {
       showToast(`refresh_available_models failed: ${err?.message || err}`, 'error');
     } finally {
-      setRefreshModelsPending(false);
+      finishInstanceOp(id, INSTANCE_OP.refreshModels);
     }
   };
 
@@ -708,12 +719,14 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // `bin` 은 같은 CLI 가 여러 벌 깔린 호스트에서 어느 설치본인지 못 박는다 —
   // 생략하면 매니저가 지금 해석되는 설치본을 고른다.
   const handleUpdateCli = async (cli: string, bin?: string, sudoTicket?: string) => {
-    const key = bin || cli;
-    // 같은 설치본을 두 번 누르는 것만 막는다. 다른 설치본은 동시에 올려도 된다.
-    if (updateCliPending.has(key)) return;
-    setUpdateCliPending((prev) => new Set(prev).add(key));
+    // 호출 시점의 호스트를 붙잡는다 — 끝날 때 사용자는 이미 다른 호스트를 보고 있을 수 있다.
+    const id = inst.instance_id;
+    const host = inst.hostname;
+    const op = INSTANCE_OP.updateCli(bin || cli);
+    // 같은 호스트의 같은 설치본 중복 클릭만 막는다. 다른 설치본·다른 호스트는 동시에 된다.
+    if (!startInstanceOp(id, op)) return;
     try {
-      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
+      const resp = await api.sendAgentManagerCommand(id, {
         command: 'update_cli',
         // sudo_ticket 은 **티켓 id 일 뿐 비밀번호가 아니다**. 매니저가 권한 상승이
         // 실제로 필요한 순간에 이 id 로 서버에서 1회 당겨 간다.
@@ -723,26 +736,22 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       // CLI 업데이터는 모델 재열거보다 훨씬 오래 걸리므로 창을 넓게 잡는다(~4분).
       const ack = await waitForCommandAck(resp.command_id, { attempts: 120, intervalMs: 2000 });
       if (ack.state === 'error') {
-        showToast(`${cli} 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        showToast(`[${host}] ${cli} 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
         return;
       }
       if (ack.state !== 'ok') {
         showToast(
-          `update_cli 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
+          `[${host}] update_cli 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
           'info',
         );
         return;
       }
-      await reloadInstance(inst.instance_id);
-      showToast(ack.detail || `${cli} 업데이트 완료${idTail}`, 'success');
+      await reloadInstance(id);
+      showToast(`[${host}] ${ack.detail || `${cli} 업데이트 완료${idTail}`}`, 'success');
     } catch (err: any) {
-      showToast(`update_cli failed: ${err?.message || err}`, 'error');
+      showToast(`[${host}] update_cli failed: ${err?.message || err}`, 'error');
     } finally {
-      setUpdateCliPending((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
+      finishInstanceOp(id, op);
     }
   };
 
@@ -750,6 +759,8 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // 설치본 단위로 실패를 격리한 뒤 요약 한 줄로 ack 한다 — 하나라도 실패하면
   // error ack 이므로 "다 됐다" 로 뭉개지지 않는다.
   const handleUpdateAllClis = async () => {
+    const id = inst.instance_id;
+    const host = inst.hostname;
     if (updateAllCliPending) return;
     const ok = await confirm({
       title: '모든 CLI 업데이트',
@@ -762,9 +773,9 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       danger: false,
     });
     if (!ok) return;
-    setUpdateAllCliPending(true);
+    if (!startInstanceOp(id, INSTANCE_OP.updateAllClis)) return;
     try {
-      const resp = await api.sendAgentManagerCommand(inst.instance_id, {
+      const resp = await api.sendAgentManagerCommand(id, {
         command: 'update_all_clis',
         args: {},
       });
@@ -772,22 +783,22 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
       // 여러 벌을 올리므로 한 벌짜리(~4분)보다 창을 넓게 잡는다.
       const ack = await waitForCommandAck(resp.command_id, { attempts: 240, intervalMs: 2000 });
       if (ack.state === 'error') {
-        showToast(`CLI 전체 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        showToast(`[${host}] CLI 전체 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
         return;
       }
       if (ack.state !== 'ok') {
         showToast(
-          `update_all_clis 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
+          `[${host}] update_all_clis 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`,
           'info',
         );
         return;
       }
-      await reloadInstance(inst.instance_id);
-      showToast(ack.detail || `CLI 전체 업데이트 완료${idTail}`, 'success');
+      await reloadInstance(id);
+      showToast(`[${host}] ${ack.detail || `CLI 전체 업데이트 완료${idTail}`}`, 'success');
     } catch (err: any) {
-      showToast(`update_all_clis failed: ${err?.message || err}`, 'error');
+      showToast(`[${host}] update_all_clis failed: ${err?.message || err}`, 'error');
     } finally {
-      setUpdateAllCliPending(false);
+      finishInstanceOp(id, INSTANCE_OP.updateAllClis);
     }
   };
 
