@@ -38,6 +38,7 @@ test/backlog-promotion-sort-prefix.test.mjs
 test/base-repo-binding.test.mjs
 test/board-language-dispatch-guard.test.mjs
 test/board-lessons-dispatch.test.mjs
+test/board-update-sentinel-actor-frame.test.mjs
 test/boot-concurrent-sessions.test.mjs
 test/boot-helper-port-isolation.test.mjs
 test/boot-port-guard.test.mjs

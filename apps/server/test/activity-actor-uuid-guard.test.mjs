@@ -17,11 +17,12 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, '..', 'dist');
 
-const { resolveAgentDisplayNamesByIds } = await import(
+const { resolveAgentDisplayNamesByIds, resolveAgentDisplayName } = await import(
   'file://' + path.join(DIST, 'utils', 'agent-name.js')
 );
 
 const AGENT_UUID = '11111111-1111-4111-8111-111111111111';
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function fakeAgentRepo(captured) {
   return {
@@ -64,4 +65,51 @@ test('all-non-uuid ids → empty map, no DB query at all (no throw)', async () =
   const map = await resolveAgentDisplayNamesByIds(repo, ['system', '', 'auto-advance']);
   assert.equal(map.size, 0, 'no agents to resolve');
   assert.equal(captured.length, 0, 'short-circuits before hitting the DB when nothing is uuid-shaped');
+});
+
+// ── 단일 id 경로 (티켓 dedff9a3) ────────────────────────────────────────────
+// 위의 배치 형제만 고쳐졌고(e7c87517 / 커밋 d9f2a177) 같은 파일의 단일 id 버전
+// resolveAgentDisplayName() 은 가드 없이 findOne 을 쳤다. Postgres 에서는 그게
+// null 이 아니라 **throw** 이고, board_update SSE 매핑이 그 throw 를 먹어
+// 프레임을 통째로 유실시켰다(그 회귀는 board-update-sentinel-actor-frame).
+//
+// fake repo 가 Postgres 처럼 **던지도록** 만든 것이 핵심이다 — 가드를 되돌리면
+// 여기서 "null 아님" 이 아니라 예외로 깨지므로 공허하게 통과할 수 없다.
+function pgLikeSingleAgentRepo(calls) {
+  return {
+    async findOne(opts) {
+      const id = opts?.where?.id;
+      calls.push(id);
+      if (!UUID_SHAPE.test(String(id ?? ''))) {
+        throw new Error(`invalid input syntax for type uuid: "${id}"`);
+      }
+      return id === AGENT_UUID ? { id, name: 'Bob', manager_agent_id: null } : null;
+    },
+    async find() { return []; },
+  };
+}
+
+test('resolveAgentDisplayName 은 비-uuid actor id 를 쿼리 전에 걸러낸다 (Postgres uuid throw 회피)', async () => {
+  const calls = [];
+  const repo = pgLikeSingleAgentRepo(calls);
+
+  // 티켓에 실측으로 기록된 세 sentinel. 전부 쿼리 없이 null 이어야 한다.
+  for (const sentinel of ['system', 'auto-advance', 'test-user']) {
+    assert.equal(
+      await resolveAgentDisplayName(repo, sentinel), null,
+      `'${sentinel}' 는 Agent 가 아니므로 null 이어야 한다`,
+    );
+  }
+  // 'manual by …' 류 라벨과 빈 값도 같은 취급.
+  assert.equal(await resolveAgentDisplayName(repo, 'manual by Parn'), null);
+  assert.equal(await resolveAgentDisplayName(repo, ''), null);
+
+  assert.deepEqual(calls, [], 'findOne 이 한 번도 호출되지 않았다 (가드가 쿼리 앞에 선다)');
+});
+
+test('resolveAgentDisplayName 의 실제 agent uuid 는 그대로 조회된다 (가드가 공허하지 않다)', async () => {
+  const calls = [];
+  const repo = pgLikeSingleAgentRepo(calls);
+  assert.equal(await resolveAgentDisplayName(repo, AGENT_UUID), 'Bob');
+  assert.deepEqual(calls, [AGENT_UUID], 'uuid 모양 id 는 가드를 통과해 조회된다');
 });
