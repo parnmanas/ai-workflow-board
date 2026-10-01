@@ -23,7 +23,6 @@ import SessionComposer from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
-import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -515,13 +514,14 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     () => describeSessionAuth(live?.auth, host?.cli_settings?.[cli]?.name),
     [live?.auth, host, cli],
   );
-  // 모델 목록은 다른 화면과 같은 단일 소스(src/cli/hostModels.ts)에서 온다 — 지금 연결된
-  // 어댑터가 보고한 것만 보여주면 새 세션 대화상자·세션 설정과 목록이 어긋난다.
-  const hostModels = useHostModels(managerId, cli);
-  const configOptions = useMemo(
-    () => withHostModelOption(live?.config_options ?? [], hostModels.models),
-    [live?.config_options, hostModels.models],
-  );
+  // **살아 있는 어댑터가 보고한 것만** 쓴다. 호스트가 아는 모델을 여기에 덧붙이면 안
+  // 된다 — 이 드롭다운은 목록이 아니라 **조작기**이고, 고른 값은 그대로 ACP
+  // `session/set_config_option` 으로 가서 어댑터가 모르는 id 면 거절당한다(실측:
+  // 덧붙인 claude-opus-5-5 를 고르면 에러). 새 세션 대화상자가 호스트 전체 합집합을
+  // 보여주는 것은 거기서는 "무엇으로 띄울지" 를 고르는 것이라 옳고, 이 둘이 다른 것은
+  // 결함이 아니다. 두 화면의 목록이 어긋나 보였던 진짜 원인은 호스트 열거 쪽이었다
+  // (Windows shim 스캔 + 하드코딩 폴백, 커밋 cc3dd106).
+  const configOptions = live?.config_options ?? [];
   const commands = live?.available_commands ?? [];
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
   const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
