@@ -869,6 +869,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     const credentialId = await this.boundCredentialId(workspaceId, managerId, cli);
     const configDefaults = await this.configDefaultsFor(workspaceId, managerId, cli);
     const runtimeProfile = await this.backendProfileFor(workspaceId, managerId, cli);
+    // `open` RPC 는 최대 2분까지 걸린다. 그 사이 이 세션의 상태는 매니저가 밀어 주는
+    // 이벤트 패치로 얼마든지 앞서 나간다(프롬프트가 들어와 busy 가 되는 등). 그래서
+    // RPC 가 돌아온 뒤 open 결과의 status 를 **무조건** 쓰면 그보다 최신인 상태를 과거로
+    // 되돌린다 — 페이지에 들어오면 idle 세션마다 자동 연결이 걸리므로, 그 창에서 프롬프트를
+    // 보낸 세션이 "돌고 있는데 ready" 로 영구히 고착됐다. 비교 근거로 RPC 전 세대를 적어 둔다.
+    const stateBefore = sessionId ? this.live.get(liveKey(managerId, cli, sessionId)) : undefined;
+    const generationBefore = stateBefore?.updated_at ?? null;
     let result: Record<string, any>;
     try {
       result = await this.rpc<Record<string, any>>(managerId, cli, 'open', { workspace_id: workspaceId, session_id: sessionId, cwd, title, credential_id: credentialId, config_defaults: configDefaults, runtime_profile: runtimeProfile, force: input.force === true }, userId);
@@ -898,14 +905,28 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     const openedId = typeof result?.session_id === 'string' ? result.session_id : sessionId;
     if (!openedId || !SESSION_ID_RE.test(openedId)) throw new AgentSessionError(502, 'manager_error', 'Runtime Host did not return a session id.');
+    // seedState 는 있으면 그대로 돌려주므로, "RPC 중에 생겼는가" 는 그 호출 **전에** 봐야 한다.
+    const stateExistedBeforeSeed = this.live.has(liveKey(managerId, cli, openedId));
     const state = await this.seedState(rec, managerId, cli, openedId, {
       cwd: typeof result?.cwd === 'string' && result.cwd ? result.cwd : cwd,
       title: typeof result?.title === 'string' ? result.title : title,
       status: 'ready',
       driver_user_id: userId,
     });
+    // RPC 중에 상태가 앞서 나갔으면 open 결과의 status 는 **쓰지 않는다**(이미 과거다).
+    // 구조 정보(mode·config_options·auth)는 그 세션의 정적 성질이라 그대로 반영한다.
+    //
+    // "앞서 나갔다" 에는 두 가지가 있다 — 세대가 올라간 것과, **없던 상태가 생긴 것**.
+    // 뒤엣것을 빠뜨리면 가드가 헛돈다: 처음 연결하는 세션은 RPC 를 보낼 때 라이브 상태가
+    // 아직 없고, 그 사이 도착한 이벤트 relay 가 상태를 busy 로 만들어 두기 때문이다
+    // (바로 이 경로가 "돌고 있는데 ready" 의 실제 재현 조건이다).
+    const advancedDuringOpen = stateBefore
+      ? state.updated_at > (generationBefore as number)
+      : stateExistedBeforeSeed;
     this.applyPatch(state, {
-      status: typeof result?.status === 'string' ? result.status : 'ready',
+      ...(advancedDuringOpen
+        ? {}
+        : { status: typeof result?.status === 'string' ? result.status : 'ready' }),
       current_mode: result?.current_mode ?? null,
       available_modes: Array.isArray(result?.available_modes) ? result.available_modes : [],
       // 매니저의 open 답에 실린 세션 설정·명령 — 화면이 SSE 패치를 기다리지 않고 바로 셀렉트를 그린다.

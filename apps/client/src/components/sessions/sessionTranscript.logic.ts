@@ -13,7 +13,13 @@
  *   - `turn` started 는 블록을 만들지 않고, finished 는 stop_reason 이 end_turn 이
  *     아닐 때만 남긴다(취소/거절/오류를 사용자가 볼 수 있게)
  */
-import type { AgentSessionAuth, AgentSessionCommand, AgentSessionEventRecord, AgentSessionStatus } from '../../types';
+import type {
+  AgentSessionAuth,
+  AgentSessionCommand,
+  AgentSessionEventRecord,
+  AgentSessionLiveSnapshot,
+  AgentSessionStatus,
+} from '../../types';
 import { cliLabel } from '../../cli/catalog';
 import { sessionActivity } from '../../activity';
 import type { ActivityView } from '../../activity';
@@ -524,6 +530,46 @@ export function applySlashCommand(command: AgentSessionCommand): string {
 }
 
 /** 목록에서 seq 갭이 있으면(SSE 유실) true — 페이지가 재조회한다. */
+/**
+ * 라이브 스냅샷 머지 — **과거가 현재를 덮지 못하게 한다.**
+ *
+ * 세션 상태는 서로 지연이 다른 세 경로로 들어온다: SSE 패치(즉시) · 하트비트 스냅샷
+ * (30초 주기) · RPC 응답(`history`/`open`/`prompt` … 최대 120초). 예전에는 7곳의
+ * `setLive(...)` 가 전부 무조건 덮어써서, 느린 RPC 응답이 **더 최신인 SSE 패치를 과거
+ * 상태로 되돌렸다.** 서버의 재조정은 edge-triggered 라("보고된 상태 == 내 상태면 그냥
+ * 반환") 한 번 틀어지면 교정 SSE 가 오지 않아 그대로 고착된다 — 그래서 "대화는 끝났는데
+ * working", "돌고 있는데 ready" 가 둘 다 나왔다. busy 에 고착되면 입력한 프롬프트가
+ * 전송되지 않고 조용히 큐에 쌓이므로 증상보다 더 아프다.
+ *
+ * 스냅샷은 이미 `updated_at` 을 싣고 있었다 — 비교하는 쪽이 없었을 뿐이다.
+ *
+ * 규칙:
+ *   - `next` 가 null 이면 그대로(명시적 초기화는 존중한다).
+ *   - 들고 있는 것이 없으면 그대로 채택.
+ *   - **다른 세션**의 스냅샷이면 비교하지 않고 교체한다(세션 전환은 시간 역행이 아니다).
+ *   - 같은 세션인데 `updated_at` 이 더 과거면 **버린다**.
+ *   - 시각을 파싱할 수 없으면(구버전 서버 등) 예전처럼 채택한다 — 순서를 모를 때
+ *     멈춰 있는 것보다 최신일 가능성에 거는 편이 낫다.
+ */
+export function mergeLiveSnapshot(
+  prev: AgentSessionLiveSnapshot | null,
+  next: AgentSessionLiveSnapshot | null,
+): AgentSessionLiveSnapshot | null {
+  if (!next) return next;
+  if (!prev) return next;
+  if (
+    prev.session_id !== next.session_id ||
+    prev.manager_id !== next.manager_id ||
+    prev.cli !== next.cli
+  ) {
+    return next;
+  }
+  const prevAt = Date.parse(prev.updated_at);
+  const nextAt = Date.parse(next.updated_at);
+  if (!Number.isFinite(prevAt) || !Number.isFinite(nextAt)) return next;
+  return nextAt < prevAt ? prev : next;
+}
+
 export function hasSeqGap(events: AgentSessionEventRecord[]): boolean {
   for (let i = 1; i < events.length; i += 1) {
     if (events[i].seq !== events[i - 1].seq + 1) return true;

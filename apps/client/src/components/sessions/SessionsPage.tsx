@@ -31,6 +31,7 @@ import {
   describeSessionAuth,
   describeSessionStatus,
   isWaitingStatus,
+  mergeLiveSnapshot,
   pendingInteraction,
   runtimeLabel,
   sessionDisplayTitle,
@@ -365,7 +366,15 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [summary, setSummary] = useState<AgentSessionSummary | null>(null);
-  const [live, setLive] = useState<AgentSessionLiveSnapshot | null>(null);
+  const [live, setLiveRaw] = useState<AgentSessionLiveSnapshot | null>(null);
+  // **과거가 현재를 덮지 못하게** 모든 갱신을 한 규칙으로 모은다. 상태는 지연이 서로 다른
+  // 세 경로(SSE 즉시 · 하트비트 30초 · RPC 최대 120초)로 들어오는데, 예전에는 7곳에서
+  // 무조건 덮어써서 느린 RPC 응답이 최신 SSE 패치를 되돌렸다 — 그게 "대화는 끝났는데
+  // working", "돌고 있는데 ready" 의 원인이다. 판정 근거(`updated_at`)는 스냅샷에 이미
+  // 실려 있었고 비교하는 쪽만 없었다. 규칙은 mergeLiveSnapshot 에 있다.
+  const setLive = useCallback((next: AgentSessionLiveSnapshot | null) => {
+    setLiveRaw((prev) => mergeLiveSnapshot(prev, next));
+  }, []);
   const [events, setEvents] = useState<AgentSessionEventRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
