@@ -25,7 +25,7 @@ process.env.PORT = process.env.UPDATE_CLI_PORT || '0';
 
 const INSTANCE_ID = 'update-cli-instance';
 
-function heartbeatBody(managerId, cliVersions, cliLatestVersions, cliInstalls) {
+function heartbeatBody(managerId, cliVersions, cliLatestVersions, cliInstalls, acp) {
   return {
     instance_id: INSTANCE_ID,
     agent_id: managerId,
@@ -38,6 +38,8 @@ function heartbeatBody(managerId, cliVersions, cliLatestVersions, cliInstalls) {
     started_at: new Date().toISOString(),
     ...(cliVersions ? { cli_versions: cliVersions } : {}),
     ...(cliLatestVersions ? { cli_latest_versions: cliLatestVersions } : {}),
+    ...(acp?.adapters ? { acp_adapters: acp.adapters } : {}),
+    ...(acp?.latest ? { acp_adapter_latest_versions: acp.latest } : {}),
     ...(cliInstalls ? { cli_installs: cliInstalls } : {}),
   };
 }
@@ -72,11 +74,11 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
     return body ? JSON.parse(body) : null;
   };
 
-  const postHeartbeat = (cliVersions, cliLatestVersions, cliInstalls) =>
+  const postHeartbeat = (cliVersions, cliLatestVersions, cliInstalls, acp) =>
     fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
       method: 'POST',
       headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
-      body: JSON.stringify(heartbeatBody(manager.id, cliVersions, cliLatestVersions, cliInstalls)),
+      body: JSON.stringify(heartbeatBody(manager.id, cliVersions, cliLatestVersions, cliInstalls, acp)),
     });
 
   const instanceRow = async () => {
@@ -222,6 +224,40 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
 
   // 오타 verb 는 기존대로 거부된다.
   await readJson(await sendCommand('update_clis'), 400);
+
+  // ─── ACP 어댑터 버전 보고 ────────────────────────────────────────────────
+  //
+  // 어댑터는 모델 id 를 자기 번들에 하드코딩하므로 **어댑터 버전이 세션의 모델 목록을
+  // 정한다**. 세 호스트의 claude-agent-acp 가 0.79.0 (최신 0.84.0) 으로 조용히 5버전
+  // 썩어 Opus 5.5 가 세션에 안 떴고, 화면에는 그 사실을 알 단서가 하나도 없었다.
+  // 그래서 버전·출처를 하트비트에 싣는다 — 서버가 보존해야 UI 가 읽을 수 있다.
+  await readJson(
+    await postHeartbeat({ claude: '2.1.286' }, null, null, {
+      adapters: [
+        { cli: 'claude', package: '@agentclientprotocol/claude-agent-acp', version: '0.84.0', source: 'bundled' },
+        { cli: 'codex', package: '@agentclientprotocol/codex-acp', version: '1.13.1', source: 'path' },
+        { cli: 'opencode', package: null, version: null, source: 'builtin' },
+        // 알 수 없는 source 는 서버가 버린다 — UI 가 모르는 어휘를 그리지 않게.
+        { cli: 'bogus', package: 'x', version: '1', source: 'not-a-source' },
+      ],
+      latest: { '@agentclientprotocol/claude-agent-acp': '0.84.0' },
+    }),
+    201,
+  );
+  const withAdapters = await instanceRow();
+  assert.deepEqual(
+    (withAdapters.acp_adapters ?? []).map((a) => [a.cli, a.version, a.source]),
+    [
+      ['claude', '0.84.0', 'bundled'],
+      ['codex', '1.13.1', 'path'],
+      ['opencode', null, 'builtin'],
+    ],
+    '알려진 source 만 보존된다',
+  );
+  assert.deepEqual(withAdapters.acp_adapter_latest_versions, {
+    '@agentclientprotocol/claude-agent-acp': '0.84.0',
+  });
 });
 
 exitAfterTests();
+

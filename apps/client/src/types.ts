@@ -2197,6 +2197,16 @@ export interface AgentLaunchSpecEntry {
 }
 
 // One Runtime Host instance heartbeating against AWB.
+/** Runtime Host 가 쓰는 ACP 어댑터 한 줄 (하트비트 `acp_adapters`).
+ *  `source` = 어디서 온 어댑터인가: bundled(매니저와 함께 설치 — 정상) ·
+ *  path(장비 전역 설치 — 번들 없는 구버전 매니저) · npx · override · builtin. */
+export interface AcpAdapterReport {
+  cli: string;
+  package: string | null;
+  version: string | null;
+  source: 'override' | 'bundled' | 'path' | 'npx' | 'builtin';
+}
+
 /** Runtime Host 에 깔린 CLI 설치본 한 줄 (하트비트 `cli_installs`). */
 /**
  * 세션/채팅의 agent 가 요청하고 운영자 승인을 기다리는 권한 상승 명령 하나.
@@ -2301,6 +2311,13 @@ export interface AgentManagerInstance {
   // 실행될 설치본", `path` 는 `update_cli` 의 `args.bin` 으로 그대로 돌아간다.
   // 구버전 매니저는 보내지 않으므로, 없으면 화면은 `cli_versions` 한 줄로 접는다.
   cli_installs?: CliInstallEntry[];
+  // 이 장비가 쓰는 ACP 어댑터와 버전. **어댑터 버전이 세션의 모델 목록·capability 를
+  // 정한다** — 어댑터가 모델 id 를 자기 번들에 하드코딩하므로, CLI 를 올려도 어댑터가
+  // 뒤처지면 새 모델을 세션에서 고를 수 없다(실측: claude-agent-acp 0.79.0 이 세 호스트에서
+  // 조용히 5버전 썩어 Opus 5.5 가 세션에 안 떴다). 구버전 매니저는 보내지 않는다.
+  acp_adapters?: AcpAdapterReport[];
+  // 위 어댑터 패키지의 npm 최신 버전(패키지명 → 버전). 조회 실패는 키가 없다(= 모름).
+  acp_adapter_latest_versions?: Record<string, string>;
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.

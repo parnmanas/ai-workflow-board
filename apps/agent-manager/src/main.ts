@@ -55,7 +55,9 @@ import { cliDispatch, cliModulesWith, findCliModule } from './lib/clis/index.js'
 // 진입점이라 테스트에서 import 할 수 없어서, 재사용·검증 가능하도록 lib 로 뺐다.
 import { AVAILABLE_MODELS_REFRESH_MS, gatherAvailableModels } from './lib/available-models.js';
 import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
-import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions } from './lib/cli-latest.js';
+import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions, fetchLatestVersionsForSpecs } from './lib/cli-latest.js';
+import { acpAdapterPackages, collectAcpAdapters } from './lib/clis/acp-adapter-info.js';
+import { findOnPath } from './lib/find-on-path.js';
 import { runWithSudo } from './lib/sudo-runner.js';
 import { describeInstallMethod, detectInstallMethod, type InstallMethod } from './lib/cli-install-method.js';
 import { readSnapChannelLatest } from './lib/snap-channel.js';
@@ -637,6 +639,17 @@ async function runRuntime(
   // 하트비트 `acp_session_clis` — 이 장비에서 세션을 열 수 있는 CLI(PATH 만 본다).
   const acpSessionClis = await detectAcpSessionClis();
   log(`agent sessions: ACP-capable CLIs on this host = ${acpSessionClis.join(', ') || '(none)'}`);
+  // 어댑터 버전이 세션의 모델 목록·capability 를 정한다(acp-adapter-info.ts). 번들본은
+  // 매니저를 올리지 않으면 바뀌지 않으므로 부팅 시 한 번만 읽는다. 로그에도 남겨
+  // "그 fix 가 반영됐나" 를 호스트에서 바로 확인할 수 있게 한다.
+  const acpAdapters = await collectAcpAdapters(findOnPath);
+  log(
+    'agent sessions: ACP adapters = ' +
+      (acpAdapters
+        .filter((a) => a.source !== 'builtin')
+        .map((a) => `${a.cli}:${a.version ?? '?'}(${a.source})`)
+        .join(', ') || '(none)'),
+  );
   const runtimeSupervisor = new RuntimeSupervisor({
     rootDir: MANAGED_AGENTS_DIR,
     awbUrl: config.url,
@@ -820,6 +833,19 @@ async function runRuntime(
       if (row.active && row.version) fromActive[row.cli] = row.version;
     }
     cliVersions = { ...cliVersions, ...fromActive };
+  };
+
+  // 어댑터 패키지의 npm 최신 버전. cliLatestVersions 와 같은 느린 타이머가 채운다 —
+  // 설치본과 짝을 이뤄야 UI 가 "뒤처졌다" 를 말할 수 있다.
+  let acpAdapterLatestVersions: Record<string, string> = {};
+  const refreshAcpAdapterLatestVersions = async (): Promise<void> => {
+    const specs = acpAdapterPackages();
+    if (specs.length === 0) return;
+    try {
+      acpAdapterLatestVersions = await fetchLatestVersionsForSpecs(specs, { log });
+    } catch (err: any) {
+      log(`acp adapter latest-version refresh failed: ${err?.message ?? err}`);
+    }
   };
 
   const refreshCliLatestVersions = async (): Promise<void> => {
@@ -1498,6 +1524,8 @@ async function runRuntime(
       cliLatestVersionsProvider: () => cliLatestVersions,
       cliInstallsProvider: () => cliInstalls,
       acpSessionClis,
+      acpAdapters,
+      acpAdapterLatestVersionsProvider: () => acpAdapterLatestVersions,
       // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
       agentSessionsProvider: () => agentSessionRunner.liveStates(),
       // Terminal — 이 장비의 셸 목록(고정)과 지금 살아 있는 PTY 전체. 서버는 후자로
@@ -1678,8 +1706,10 @@ async function runRuntime(
     // tick 부터 실린다). 이후는 느린 타이머 — CLI 배포는 시간 단위로 움직이고,
     // 여기서 레지스트리를 자주 치는 것은 화면에 아무것도 더해 주지 않는다.
     void refreshCliInstalls().then(() => refreshCliLatestVersions());
+    void refreshAcpAdapterLatestVersions();
     cliLatestTimer = setInterval(() => {
       void refreshCliInstalls().then(() => refreshCliLatestVersions());
+      void refreshAcpAdapterLatestVersions();
     }, CLI_LATEST_REFRESH_MS);
     cliLatestTimer.unref?.();
     // 모델 목록도 주기적으로 다시 센다 — 호스트에서 provider 를 로그인하거나 CLI 가 모델을

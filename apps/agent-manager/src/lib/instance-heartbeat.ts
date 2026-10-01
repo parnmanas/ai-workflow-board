@@ -24,6 +24,7 @@ import type { UpdateChecker } from './self-update.js';
 import type { SpawnFailureSnapshot } from './spawn-failure-tracker.js';
 import type { RuntimeCapabilityReport } from './runtime/runtime-health.js';
 import type { AgentLaunchSpecEntry } from './launch-spec.js';
+import type { AcpAdapterEntry } from './clis/acp-adapter-info.js';
 
 export type InstanceMode = 'manager';
 
@@ -105,6 +106,17 @@ export interface InstanceMeta {
   // Agent Session(CLI 직접 세션) — 이 장비에서 ACP 어댑터로 세션을 열 수 있는 CLI
   // (agent-session-runner.ts detectAcpSessionClis). 부팅 시 한 번 계산한 정적 값.
   acpSessionClis?: string[] | null;
+  // ticket: 어댑터 버전 가시화. ACP 어댑터는 모델 id 를 자기 번들에 하드코딩하므로
+  // **어댑터 버전이 세션의 모델 목록·capability 를 정한다**. 예전에는 AWB 가 CLI 버전만
+  // 보고하고 어댑터는 "있다/없다" 만 봤기 때문에, 세 호스트의 claude-agent-acp 가
+  // 0.79.0 (최신 0.84.0) 으로 조용히 5버전 썩어도 아무도 볼 수 없었다. 어댑터가 매니저
+  // 의존성으로 번들된 뒤에는 `source` 가 "번들본이 실제로 쓰이는지" 까지 알려 준다.
+  // 부팅 시 한 번 계산한 정적 값이다 — 번들본은 매니저를 올리지 않으면 바뀌지 않는다.
+  acpAdapters?: AcpAdapterEntry[] | null;
+  /** 위 어댑터 패키지들의 **최신 배포 버전**(패키지명 → 버전). cliLatestVersions 와 같은
+   *  느린 타이머가 채운다. 설치 버전과 짝을 이뤄 UI 가 뒤처짐을 판정한다 — 이것 없이는
+   *  버전만 보이고 "올릴 게 있는가" 를 알 수 없다. 조회 실패한 패키지는 키가 없다. */
+  acpAdapterLatestVersionsProvider?: (() => Record<string, string> | null) | null;
   // Agent Session — 지금 살아 있는 세션 프로세스와 상태(AgentSessionRunner.liveStates). 매 tick 전체
   // 목록을 보내 서버 메모리의 유령 상태(마지막 패치를 못 받은 busy/awaiting_*)를 되돌리게 한다.
   // 배선되면 비어 있어도 `[]` 를 보낸다 — "살아 있는 세션 없음" 이 정보이기 때문이다.
@@ -403,6 +415,7 @@ export class InstanceHeartbeat {
     const availableModelsAtProvider = meta?.availableModelsAtProvider ?? null;
     const cliVersionsProvider = meta?.cliVersionsProvider ?? null;
     const cliLatestVersionsProvider = meta?.cliLatestVersionsProvider ?? null;
+    const acpAdapterLatestVersionsProvider = meta?.acpAdapterLatestVersionsProvider ?? null;
     const cliInstallsProvider = meta?.cliInstallsProvider ?? null;
     const runtimeCapabilities =
       meta?.runtimeCapabilities && typeof meta.runtimeCapabilities === 'object'
@@ -578,6 +591,18 @@ export class InstanceHeartbeat {
           cliLatestVersions = null;
         }
       }
+      // 어댑터 최신 버전 — cliLatestVersions 와 같은 best-effort 계약(실패하면 필드가
+      // 빠질 뿐, 하트비트는 계속 간다).
+      let acpAdapterLatest: Record<string, string> | null = null;
+      if (acpAdapterLatestVersionsProvider) {
+        try {
+          const live = acpAdapterLatestVersionsProvider();
+          acpAdapterLatest = live && typeof live === 'object' ? live : null;
+        } catch (err: any) {
+          log(`Instance heartbeat: acp-adapter-latest provider failed: ${err?.message ?? err}`);
+          acpAdapterLatest = null;
+        }
+      }
       let cliInstalls: CliInstallEntry[] | null = null;
       if (cliInstallsProvider) {
         try {
@@ -613,6 +638,10 @@ export class InstanceHeartbeat {
           : {}),
         ...(cliInstalls && cliInstalls.length ? { cli_installs: cliInstalls } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
+        ...(meta?.acpAdapters?.length ? { acp_adapters: meta.acpAdapters } : {}),
+        ...(acpAdapterLatest && Object.keys(acpAdapterLatest).length
+          ? { acp_adapter_latest_versions: acpAdapterLatest }
+          : {}),
         ...(agentSessions ? { agent_sessions: agentSessions } : {}),
         ...(meta?.platform ? { platform: meta.platform } : {}),
         ...(meta?.terminalShells?.length ? { terminal_shells: meta.terminalShells } : {}),

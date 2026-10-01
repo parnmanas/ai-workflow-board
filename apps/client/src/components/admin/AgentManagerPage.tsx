@@ -3165,6 +3165,7 @@ export function InstalledCliVersions({
             규칙은 행 버튼과 같다(updatableRows). 무엇을 올릴지는 매니저가 자기 설치
             열거로 정하므로 여기서 목록을 실어 보내지 않는다 — 화면이 낡은 순간
             엉뚱한 설치본을 올리게 된다. */}
+        <AcpAdapterVersions inst={inst} />
         {onUpdateAll && updatableRows.length > 0 && (
           <div style={{ marginTop: 6 }}>
             <button
@@ -3193,6 +3194,66 @@ export function InstalledCliVersions({
           </div>
         )}
       </dd>
+    </div>
+  );
+}
+
+/**
+ * ACP 어댑터 버전 — 세션의 모델 목록·capability 를 **실제로** 정하는 값.
+ *
+ * 왜 이 줄이 필요한가: 어댑터는 모델 id 를 자기 번들에 하드코딩한다. 그래서 CLI 를
+ * 최신으로 올려도 어댑터가 뒤처지면 새 모델을 세션에서 고를 수 없다. 2026-10-01 에
+ * 세 호스트의 claude-agent-acp 가 0.79.0 (최신 0.84.0) 으로 조용히 5버전 썩어
+ * Opus 5.5 가 세션에 영영 안 떴고, 화면에는 그 사실을 알 단서가 하나도 없었다.
+ *
+ * **Update 버튼을 두지 않는다.** 어댑터는 매니저의 의존성으로 번들되므로 올리는 유일한
+ * 경로가 매니저 업데이트다 — 어댑터만 따로 `npm i -g` 해도 번들본이 이겨서 아무 효과가
+ * 없다. 눌러도 안 되는 버튼을 두는 대신, 무엇이 뒤처졌고 무엇을 해야 하는지 말한다.
+ */
+function AcpAdapterVersions({ inst }: { inst: AgentManagerInstance }) {
+  const rows = (inst.acp_adapters ?? []).filter((a) => a.source !== 'builtin');
+  if (rows.length === 0) return null;
+  const latestOf = (pkg: string | null): string | null =>
+    (pkg && inst.acp_adapter_latest_versions?.[pkg]) || null;
+  return (
+    <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <div style={{ fontSize: 10.5, color: tokens.colors.textMuted }}>
+        ACP 어댑터 — 세션의 모델 목록을 정합니다
+      </div>
+      {rows.map((a) => {
+        const latest = latestOf(a.package);
+        const behind = !!(a.version && latest && cliUpdateState(a.version, latest) === 'outdated');
+        // 번들본이 아니면 그 자체가 신호다: 매니저가 구버전이라 번들을 안 들고 있다.
+        const notBundled = a.source !== 'bundled';
+        return (
+          <div
+            key={`${a.cli}:${a.package ?? ''}`}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: tokens.colors.textSecondary }}
+          >
+            <span style={{ fontWeight: 600 }}>{a.cli}</span>
+            <span style={{ fontFamily: 'monospace' }}>{a.version ?? '버전 미상'}</span>
+            {behind && (
+              <span style={{ color: tokens.colors.warning }} title={`npm 최신 ${latest} — 매니저를 올리면 함께 갱신됩니다.`}>
+                → {latest} 뒤처짐
+              </span>
+            )}
+            {notBundled && (
+              <span
+                style={{ color: tokens.colors.warning }}
+                title={
+                  a.source === 'path'
+                    ? '장비에 전역 설치된 어댑터를 쓰고 있습니다 — 이 매니저는 어댑터를 번들하지 않는 구버전입니다. 매니저를 올리면 어댑터가 함께 따라옵니다.'
+                    : a.source === 'npx'
+                    ? '설치돼 있지 않아 실행할 때마다 npx 로 당겨옵니다. 매니저를 올리면 번들본이 들어옵니다.'
+                    : '운영자가 AWB_ACP_COMMAND 로 어댑터 명령을 고정했습니다 — 버전은 AWB 가 알 수 없습니다.'
+                }
+              >
+                ({a.source})
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

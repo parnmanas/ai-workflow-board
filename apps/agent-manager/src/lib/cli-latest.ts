@@ -112,8 +112,31 @@ export async function fetchCliLatestVersions(
     bySpec.set(spec, list);
   }
 
+  const bySpecVersion = await fetchLatestVersionsForSpecs(bySpec.keys(), deps);
   const out: Record<string, string> = {};
   for (const [spec, sharing] of bySpec) {
+    const version = bySpecVersion[spec];
+    if (!version) continue;
+    for (const cli of sharing) out[cli] = version;
+  }
+  return out;
+}
+
+/**
+ * npm 스펙 → 최신 버전. `fetchCliLatestVersions` 가 쓰는 조회를 **패키지 단위로**
+ * 쓰려는 호출자를 위해 분리했다(ACP 어댑터처럼 cliType 에 매달리지 않는 패키지).
+ *
+ * 계약은 같다: 조회에 실패한 스펙은 **키 자체가 빠진다** — "최신을 모른다" 가
+ * "최신이다" 로 둔갑하면 안 된다.
+ */
+export async function fetchLatestVersionsForSpecs(
+  specs: Iterable<string>,
+  deps: CliLatestDeps = {},
+): Promise<Record<string, string>> {
+  const npmView = deps.npmView ?? defaultNpmView;
+  const log = deps.log ?? (() => {});
+  const out: Record<string, string> = {};
+  for (const spec of new Set([...specs].filter(Boolean))) {
     try {
       const r = await npmView(spec);
       const version = r.ok ? parseNpmViewVersion(r.stdout) : null;
@@ -123,7 +146,7 @@ export async function fetchCliLatestVersions(
         log(`[cli-latest] npm view ${spec} failed: ${reason.slice(0, 200)}`);
         continue;
       }
-      for (const cli of sharing) out[cli] = version;
+      out[spec] = version;
     } catch (err: any) {
       log(`[cli-latest] npm view ${spec} threw: ${err?.message ?? err}`);
     }

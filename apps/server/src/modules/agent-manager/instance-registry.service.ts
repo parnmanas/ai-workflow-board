@@ -261,6 +261,15 @@ export interface InstanceRecord {
   // (claude / codex / hermes 중 실제로 실행 파일이 잡히는 것). 구버전 매니저는
   // undefined — 그때는 cli_adapters ∩ ACP_SESSION_CLIS 로 추정한다.
   acp_session_clis?: string[];
+  // 이 장비가 쓰는 ACP 어댑터와 그 버전. **어댑터 버전이 세션의 모델 목록·capability 를
+  // 정한다**(어댑터가 모델 id 를 자기 번들에 하드코딩한다) — CLI 버전만 보고는 왜 새 모델이
+  // 안 보이는지 알 수 없다. `source` 는 어디서 온 어댑터인지: bundled(매니저와 함께 설치 —
+  // 정상) / path(장비 전역 설치 — 번들 없는 구버전 매니저) / npx / override / builtin.
+  // 구버전 매니저는 보내지 않는다.
+  acp_adapters?: AcpAdapterReport[];
+  /** 위 어댑터 패키지들의 npm 최신 버전(패키지명 → 버전). 설치본과 짝을 이뤄 UI 가
+   *  뒤처짐을 판정한다. 조회 실패한 패키지는 키가 없다("모른다" ≠ "최신이다"). */
+  acp_adapter_latest_versions?: Record<string, string>;
   // Agent Session(CLI 직접 세션) — 이 매니저에 지금 살아 있는 세션 프로세스와 그 상태.
   // 매 하트비트마다 전체 목록이 오므로 서버 메모리의 유령 상태(매니저 재시작·연결 단절로
   // 마지막 상태 패치를 못 받은 busy/awaiting_*)를 30초 안에 되돌릴 수 있다.
@@ -292,6 +301,15 @@ export interface TerminalHeartbeatEntry {
 }
 
 /** 하트비트 `agent_sessions[]` 한 줄 — `apps/agent-manager/src/lib/instance-heartbeat.ts` 의 AgentSessionHeartbeatEntry 와 같은 모양. */
+/** 하트비트 `acp_adapters` 한 줄. agent-manager 의 AcpAdapterEntry 와 같은 모양 —
+ *  server·agent-manager 공동 contract 이므로 변경은 같은 PR 로. */
+export interface AcpAdapterReport {
+  cli: string;
+  package: string | null;
+  version: string | null;
+  source: 'override' | 'bundled' | 'path' | 'npx' | 'builtin';
+}
+
 export interface AgentSessionHeartbeatEntry {
   cli: string;
   session_id: string;

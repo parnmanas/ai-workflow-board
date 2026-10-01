@@ -507,6 +507,29 @@ export class AgentManagerController {
     const acp_session_clis = Array.isArray(body?.acp_session_clis)
       ? body.acp_session_clis.filter((s: unknown): s is string => typeof s === 'string' && !!s)
       : undefined;
+    // 이 장비가 쓰는 ACP 어댑터와 버전. 어댑터 버전이 세션의 모델 목록을 정하므로
+    // 뒤처짐이 화면에 보여야 한다. 들어온 값은 길이를 자르고 source 는 알려진 값만 받는다.
+    const ACP_SOURCES = new Set(['override', 'bundled', 'path', 'npx', 'builtin']);
+    const acp_adapters = Array.isArray(body?.acp_adapters)
+      ? body.acp_adapters
+        .filter((e: any) => e && typeof e === 'object' && typeof e.cli === 'string' && ACP_SOURCES.has(e.source))
+        .slice(0, 32)
+        .map((e: any) => ({
+          cli: String(e.cli).slice(0, 32),
+          package: typeof e.package === 'string' ? e.package.slice(0, 200) : null,
+          version: typeof e.version === 'string' ? e.version.slice(0, 64) : null,
+          source: e.source as 'override' | 'bundled' | 'path' | 'npx' | 'builtin',
+        }))
+      : undefined;
+    const acp_adapter_latest_versions =
+      body?.acp_adapter_latest_versions && typeof body.acp_adapter_latest_versions === 'object'
+        ? Object.fromEntries(
+            Object.entries(body.acp_adapter_latest_versions as Record<string, unknown>)
+              .filter(([, v]) => typeof v === 'string' && !!v)
+              .slice(0, 32)
+              .map(([k, v]) => [String(k).slice(0, 200), String(v).slice(0, 64)]),
+          )
+        : undefined;
     // Agent Session — 지금 살아 있는 세션 프로세스와 상태(전체 목록). 구버전 매니저는 undefined.
     const agent_sessions = Array.isArray(body?.agent_sessions)
       ? body.agent_sessions
@@ -826,6 +849,8 @@ export class AgentManagerController {
       runtime_capabilities,
       manager_capabilities,
       acp_session_clis,
+      acp_adapters,
+      acp_adapter_latest_versions,
       ...(agent_sessions !== undefined ? { agent_sessions } : {}),
       ...(platform !== undefined ? { platform } : {}),
       ...(terminal_shells !== undefined ? { terminal_shells } : {}),
