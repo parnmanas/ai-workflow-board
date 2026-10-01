@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCliBin } from '../cli-resolver.js';
+import { log } from '../logging.js';
 import { scanBinaryStrings, latestPerFamily, dedupe } from './model-introspect.js';
 import {
   ADAPTER_CAPABILITIES,
@@ -142,17 +143,14 @@ function permissionArgs(
   return ['--permission-mode', mode];
 }
 
-// Fallback ids used only when binary introspection can't read the installed
-// claude executable. Kept minimal (one current id per family); the live
-// per-install list from scanBinaryStrings() supersedes this whenever available.
-// 바이너리 스캔이 아무것도 못 찾았을 때의 폴백. 스캔이 성공하면 쓰이지 않으므로
-// "지금 맞는 값" 이면 충분하고, 정확한 최신은 언제나 스캔이 정한다.
-const CLAUDE_CURATED_MODELS = [
-  'claude-opus-5',
-  'claude-sonnet-5',
-  'claude-haiku-4-5',
-  'claude-fable-5-1',
-];
+// 스캔이 실패했을 때의 폴백으로 **구체 모델 id 를 하드코딩하지 않는다.** 그런 목록은
+// 정의상 썩고(모델이 나올 때마다 사람이 범프해야 한다), 하류에서 실제 열거 결과와
+// 구분되지 않아 "스캔이 통째로 실패함" 을 "목록이 좀 오래됨" 처럼 보이게 한다 —
+// Windows shim 을 스캔하던 ralf 가 CLI 를 올려도 Opus 5.5 를 영영 못 본 것이 그
+// 비용이었다. 그리고 애초에 불필요하다: 아래 listModels 가 항상 함께 반환하는
+// alias(opus/sonnet/haiku/fable)가 설치된 CLI 에서 각 family 의 최신을 자동으로
+// 따라가므로, 스캔이 실패한 바로 그 상황에서 alias 만으로 이미 썩지 않는 정답이 된다.
+// 구체 id 를 핀해야 하면 UI 의 자유 입력 탈출구를 쓴다.
 
 // Claude Code 2.1.220 embeds the newest opus/sonnet ids as major-only
 // (`claude-opus-5`), while older ids may still carry a minor
@@ -459,17 +457,27 @@ export class ClaudeCliAdapter extends CliAdapter {
   async listModels(): Promise<string[]> {
     const aliases = ['opus', 'sonnet', 'haiku', 'fable'];
     let dynamic: string[] = [];
+    let scanned: string | null = null;
     try {
-      const bin = this.resolveBin();
+      scanned = this.resolveBin();
       // Accept clean `family-major` and `family-major-minor` forms. Numeric
       // components are capped at 1-2 digits so dated build ids are rejected;
       // the trailing lookahead also drops -v1/-fast and compound variants.
-      dynamic = latestPerFamily(await scanBinaryStrings(bin, CLAUDE_MODEL_SCAN_PATTERN));
+      dynamic = latestPerFamily(await scanBinaryStrings(scanned, CLAUDE_MODEL_SCAN_PATTERN));
     } catch {
       dynamic = [];
     }
-    const fullNames = dynamic.length ? dynamic : CLAUDE_CURATED_MODELS;
-    return dedupe([...aliases, ...fullNames]);
+    // 실패를 **소리내어** 알린다. 예전에는 조용히 하드코딩 목록으로 내려가서, 스캔이
+    // 통째로 실패한 호스트가 "목록이 좀 오래됐다" 처럼 보였다 — 실제로는 재열거로 절대
+    // 낫지 않는 상태였고, 그 구분이 화면에도 로그에도 없어서 진단이 며칠 걸렸다.
+    if (!dynamic.length) {
+      log(
+        `[claude] model scan found no ids in ${scanned ?? '<unresolved bin>'} — ` +
+          'offering family aliases only. Concrete ids will stay missing until the scan works ' +
+          '(on Windows check that resolveBin is not handing back a batch shim).',
+      );
+    }
+    return dedupe([...aliases, ...dynamic]);
   }
 
   configDirEnv(): string {

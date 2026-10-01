@@ -60,18 +60,29 @@ test('latestPerFamily prefers major 5 over older major-minor ids', () => {
   ]);
 });
 
-test('listModels fallback keeps stable aliases first and exposes current curated ids', async () => {
+// 스캔이 실패했을 때 **구체 모델 id 를 하드코딩으로 메꾸지 않는다.** 예전에는 큐레이션
+// 목록(claude-opus-5 …)을 끼워 넣었는데, 그 목록은 정의상 썩고(모델이 나올 때마다 사람이
+// 범프해야 한다) 하류에서 실제 열거 결과와 구분되지 않아 "스캔이 통째로 실패함" 을
+// "목록이 좀 오래됨" 처럼 보이게 했다 — Windows shim 을 스캔하던 ralf 가 CLI 를 올려도
+// Opus 5.5 를 영영 못 본 것이 그 비용이다(claude-model-scan-windows-shim.test.mjs).
+// alias 는 설치된 CLI 에서 각 family 의 최신을 자동으로 따라가므로 썩지 않는다.
+test('listModels: 스캔이 실패하면 alias 만 남는다 — 하드코딩 구체 id 로 메꾸지 않는다', async () => {
   const adapter = new ClaudeCliAdapter();
   adapter.resolveBin = () => '/nonexistent/claude-for-model-enum-test';
 
-  assert.deepEqual(await adapter.listModels(), [
-    'opus',
-    'sonnet',
-    'haiku',
-    'fable',
-    'claude-opus-5',
-    'claude-sonnet-5',
-    'claude-haiku-4-5',
-    'claude-fable-5-1',
-  ]);
+  const models = await adapter.listModels();
+  assert.deepEqual(models, ['opus', 'sonnet', 'haiku', 'fable']);
+  assert.equal(
+    models.some((m) => m.startsWith('claude-')),
+    false,
+    '구체 id 가 하나라도 있으면 하드코딩 폴백이 되살아난 것이다',
+  );
+});
+
+test('listModels: resolveBin 이 던져도 alias 는 남고 던지지 않는다', async () => {
+  const adapter = new ClaudeCliAdapter();
+  adapter.resolveBin = () => {
+    throw new Error('claude is not installed');
+  };
+  assert.deepEqual(await adapter.listModels(), ['opus', 'sonnet', 'haiku', 'fable']);
 });
