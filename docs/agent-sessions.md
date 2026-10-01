@@ -312,6 +312,18 @@ tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된�
 없다** — 파이프라인을 고치면 어댑터가 이미지를 내보내는 모든 CLI 에 공통으로 적용되고,
 에이전트가 "표시 툴을 부르기로 선택" 할 필요도 없다.
 
+이미지는 **세 군데**에서 온다 — 셋 다 같은 `image` 이벤트로 접힌다:
+- `agent_message_chunk` 의 `{type:'image'}` content (에이전트가 직접 내보낸 이미지)
+- **tool 결과** — `tool_call_update.content[]` 의 `{type:'content', content:{type:'image', data, mimeType}}`.
+  PNG 를 Read 한 경우가 이것이다. 예전에는 `rawOutput` 만 읽어 이미지가 사라지고 옆의 모델용 주석
+  (`[Image: original 3437x674, displayed at 2000x392 …]`)만 보였다. 이미지는 그 tool 카드 **바로 뒤**에
+  그리고(`tool_call_id` 를 싣는다), `rawOutput` 의 base64 는 걷어내 출력이 상한에 걸리지 않게 한다.
+- **기록** — 세션을 다시 열면 전사는 CLI 홈의 기록 파일에서 다시 만들어진다. claude 파서가 tool_result·
+  사용자 메시지의 이미지 블록을 store 컨텍스트의 `storeImage` 통로(런너가 건다)로 보관하고 참조만 낸다.
+
+참조는 **내용 주소**(base64 의 sha256 앞 32자)다 — 라이브로 받은 것과 기록에서 다시 읽은 것이 같은
+참조가 되어 두 번 저장하지 않고, 같은 tool 결과가 업데이트로 다시 와도 한 번만 그린다.
+
 **바이트는 이벤트에 싣지 않는다.** base64 는 원본의 1.33배라 스크린샷 한 장이 payload
 상한(`AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS`)을 넘기고, 넘기면 `{truncated:true}` 로 바뀌어
 또 사라진다. 그래서 흐름은 이렇다:

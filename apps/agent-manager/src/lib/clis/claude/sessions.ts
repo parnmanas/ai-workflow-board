@@ -206,6 +206,21 @@ export const claudeSessionStore: CliSessionStoreDriver = {
       turnUsage = null;
       turnUsageAt = undefined;
     };
+    // 이미지 블록 → 보관 후 참조만 이벤트로. 바이트를 payload 에 실으면 상한에 걸려 잘리고, 창 안에
+    // 원본 blob 이 남아 메모리도 먹는다. 보관 통로가 없으면(테스트·구버전 호출자) 건너뛴다.
+    const pushImage = async (block: unknown, toolCallId: string, ts: string | undefined): Promise<void> => {
+      if (!isRecord(block) || block.type !== 'image' || !ctx.storeImage) return;
+      const source = isRecord(block.source) ? block.source : null;
+      if (!source || source.type !== 'base64' || typeof source.data !== 'string' || !source.data) return;
+      const stored = await ctx.storeImage(sessionId, source.data).catch(() => null);
+      if (!stored) return;
+      push('image', {
+        image_ref: stored.ref,
+        mime_type: typeof source.media_type === 'string' ? source.media_type : 'application/octet-stream',
+        size: stored.size,
+        ...(toolCallId ? { tool_call_id: toolCallId } : {}),
+      }, ts);
+    };
     for await (const rec of readJsonlRecords(path)) {
       if (!cwd && typeof rec.cwd === 'string') cwd = rec.cwd;
       if (!createdAt && typeof rec.timestamp === 'string') createdAt = rec.timestamp;
@@ -234,12 +249,21 @@ export const claudeSessionStore: CliSessionStoreDriver = {
             turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
             if (!firstPrompt) firstPrompt = block.text;
             push('user_prompt', { text: block.text }, ts);
+          } else if (block.type === 'image') {
+            // 사용자가 붙여 넣은 이미지.
+            await pushImage(block, '', ts);
           } else if (block.type === 'tool_result') {
+            const toolCallId = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
             push('tool_update', {
-              tool_call_id: typeof block.tool_use_id === 'string' ? block.tool_use_id : '',
+              tool_call_id: toolCallId,
               status: block.is_error ? 'failed' : 'completed',
               output: truncate(textOfBlocks(block.content), TOOL_TEXT_MAX),
             }, ts);
+            // tool 결과 이미지(PNG 를 Read 한 경우 등). 예전에는 textOfBlocks 가 텍스트만 뽑아 이미지는
+            // 사라지고 모델용 주석(`[Image: original 3437x674 …]`)만 전사에 남았다.
+            if (Array.isArray(block.content)) {
+              for (const inner of block.content) await pushImage(inner, toolCallId, ts);
+            }
           }
         }
         continue;

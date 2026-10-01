@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 
-import type { RuntimeEvent } from '../runtime-events.js';
+import type { RuntimeEvent, RuntimeImage } from '../runtime-events.js';
 import type {
   AcpAuthStatus,
   AcpElicitationOutcome,
@@ -117,6 +117,46 @@ function normalizeUsage(sessionId: string, usageValue: unknown): RuntimeEvent {
   };
 }
 
+/**
+ * tool 결과(`tool_call_update.content[]`)의 이미지들. 어댑터(claude-agent-acp)는 Read 한 PNG 같은
+ * tool 결과 이미지를 `{type:'content', content:{type:'image', data, mimeType}}` 로 싣는다.
+ * 예전에는 이 배열을 읽지 않고 `rawOutput` 만 써서, 이미지는 사라지고 옆에 붙은 모델용 주석
+ * (`[Image: original 3437x674, displayed at 2000x392 …]`)만 화면에 남았다.
+ */
+function imagesFromToolContent(content: unknown): RuntimeImage[] {
+  if (!Array.isArray(content)) return [];
+  const out: RuntimeImage[] = [];
+  for (const item of content) {
+    const wrapper = objectValue(item);
+    const block = stringValue(wrapper.type) === 'content' ? objectValue(wrapper.content) : wrapper;
+    if (stringValue(block.type) !== 'image') continue;
+    const data = stringValue(block.data);
+    const uri = stringValue(block.uri);
+    if (!data && !uri) continue;
+    out.push({ mimeType: stringValue(field(block, 'mimeType', 'mime_type')), data, uri });
+  }
+  return out;
+}
+
+/**
+ * 원시 tool 출력에서 이미지 base64 를 걷어낸다. 이미지는 따로 흐르므로 출력에는 "이미지가
+ * 있었다" 는 표식만 남긴다. 모양은 SDK(`{type:'image', source:{type:'base64', data}}`)와
+ * ACP(`{type:'image', data}`) 둘 다 받는다. 그 외 값은 그대로 둔다.
+ */
+export function stripImageData(value: unknown, depth = 0): unknown {
+  if (depth > 6 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => stripImageData(v, depth + 1));
+  const obj = value as Record<string, unknown>;
+  if (obj.type === 'image') {
+    const source = objectValue(obj.source);
+    const mime = stringValue(field(obj, 'mimeType', 'mime_type')) || stringValue(source.media_type);
+    return { type: 'image', ...(mime ? { mime_type: mime } : {}), note: 'image shown in the transcript' };
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) out[k] = stripImageData(v, depth + 1);
+  return out;
+}
+
 function normalizeUpdate(
   paramsValue: unknown,
   childToolCalls: Set<string>,
@@ -190,6 +230,7 @@ function normalizeUpdate(
         output: field(update, 'rawOutput', 'raw_output'),
       };
     }
+    const images = imagesFromToolContent(update.content);
     return {
       type: status === 'completed' || status === 'failed'
         ? 'tool_completed'
@@ -197,7 +238,10 @@ function normalizeUpdate(
       sessionId,
       toolCallId,
       status: status || undefined,
-      output: field(update, 'rawOutput', 'raw_output'),
+      // base64 는 걷어낸다 — 이미지는 `images` 로 따로 흐르고, 그대로 두면 payload 상한에 걸려
+      // 출력 전체가 `{truncated}` 로 바뀐다.
+      output: stripImageData(field(update, 'rawOutput', 'raw_output')),
+      ...(images.length ? { images } : {}),
     };
   }
   if (kind === 'usage_update') {

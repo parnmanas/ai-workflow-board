@@ -12,7 +12,7 @@
 // 없다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
 
 import { access, constants as fsConstants, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
 import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
@@ -236,6 +236,8 @@ interface LiveSession {
   authStatus: AgentSessionAuthPatch | null;
   /** backend profile lease — 프로세스를 회수할 때 같이 반납한다. */
   runtimeLease: RuntimeLease | null;
+  /** 이미 발행한 이미지(`<tool_call_id>:<ref>`) — 같은 tool 결과가 업데이트로 다시 와도 한 번만. */
+  emittedImages: Set<string>;
   /** 이 프로세스의 cli-home(세션 전용 홈, 운영자 로그인이면 null). 진행 신호 3
    *  (cli-home 서브트리 mtime)의 스캔 루트다 — 없으면 그 신호만 건너뛴다. */
   cliHome: string | null;
@@ -289,6 +291,11 @@ const MAX_TOOL_TEXT_CHARS = 16_000;
  */
 const SESSION_MAX_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_PAYLOAD_CHARS = 200_000;
+/** 이미지 참조 = base64 의 sha256 앞 32자. 라이브와 기록이 같은 이미지에 같은 참조를 쓴다. */
+function imageRefOf(base64: string): string {
+  return createHash('sha256').update(base64).digest('hex').slice(0, 32);
+}
+
 /** 보관·전달할 이미지 한 장의 상한. 넘으면 사실을 알리고 버린다 — 조용히 사라지는 것보다 낫다. */
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
@@ -454,6 +461,8 @@ export class AgentSessionRunner {
   constructor(config: AwbConfig, options: AgentSessionRunnerOptions) {
     this.#config = config;
     this.#store = options.store ?? new AgentSessionStore();
+    // 기록에서 다시 읽은 이미지도 라이브와 같은 scratch·같은 참조 규칙으로 보관한다.
+    this.#store.setImageSink?.((cli, sessionId, base64) => this.storeHistoryImage(cli, sessionId, base64));
     this.#options = {
       getManagerId: options.getManagerId,
       idleMinutes: options.idleMinutes ?? DEFAULT_IDLE_MINUTES,
@@ -792,6 +801,7 @@ export class AgentSessionRunner {
         runtimeLease: auth.runtimeLease ?? null,
         cliHome: auth.cliHome,
         lastOutputAtMs: null,
+        emittedImages: new Set(),
         closing: false,
         exited: false,
       };
@@ -1469,6 +1479,9 @@ export class AgentSessionRunner {
           payload: { tool_call_id: event.toolCallId, status: event.status ?? (event.type === 'tool_completed' ? 'completed' : 'in_progress'), output: boundedValue(event.output) },
           turn_id: turnId,
         }]);
+        // tool 결과 이미지(PNG 를 Read 한 경우 등)는 그 tool 카드 바로 뒤에 그린다. 예전에는 버려지고
+        // 모델용 주석(`[Image: original …]`)만 남았다.
+        for (const image of event.images ?? []) this.#emitImage(live, image, turnId, event.toolCallId);
         return;
       case 'child_finished':
         this.#flushBuffers(live, turnId);
@@ -1737,13 +1750,14 @@ export class AgentSessionRunner {
     live: LiveSession,
     event: { mimeType: string; data: string; uri: string },
     turnId: string | undefined,
+    toolCallId?: string,
   ): void {
     const mimeType = event.mimeType || 'application/octet-stream';
     // 어댑터가 URL 로 준 경우 — 바이트가 없으니 참조만 넘긴다.
     if (!event.data && event.uri) {
       this.#enqueue(live, [{
         type: 'image',
-        payload: { image_ref: '', mime_type: mimeType, size: 0, uri: event.uri },
+        payload: { image_ref: '', mime_type: mimeType, size: 0, uri: event.uri, ...(toolCallId ? { tool_call_id: toolCallId } : {}) },
         turn_id: turnId,
       }]);
       return;
@@ -1768,26 +1782,64 @@ export class AgentSessionRunner {
       }]);
       return;
     }
-    const ref = `${live.nonce}-${randomUUID().slice(0, 8)}`;
-    const key = `${this.#key(live.cli, live.sessionId)}:${ref}`;
-    const dir = this.#imageDir(live.cli, live.sessionId);
+    const ref = imageRefOf(event.data);
+    // 같은 tool 결과가 업데이트로 다시 와도 한 번만 그린다.
+    // 메시지 이미지는 같은 그림이 다른 턴에 다시 나올 수 있으므로 턴까지 키에 넣는다.
+    const seenKey = `${toolCallId ?? `turn:${turnId ?? ''}`}:${ref}`;
+    if (live.emittedImages.has(seenKey)) return;
+    live.emittedImages.add(seenKey);
+    void this.#persistImage(live.cli, live.sessionId, ref, bytes);
+    this.#enqueue(live, [{
+      type: 'image',
+      payload: { image_ref: ref, mime_type: mimeType, size: bytes.length, ...(toolCallId ? { tool_call_id: toolCallId } : {}) },
+      turn_id: turnId,
+    }]);
+  }
+
+  /**
+   * 이미지 바이트를 이 세션의 scratch 에 쓴다. 참조는 **내용 주소**(sha256)라 같은 이미지는 같은
+   * 파일이다 — 라이브로 받은 것과 나중에 기록에서 다시 읽은 것이 같은 참조가 되어, 두 번 저장하지도
+   * 화면이 서로 다른 참조를 들고 헤매지도 않는다. 쓰기는 기다리지 않고 돌리며(순서를 지키려고 이벤트를
+   * 먼저 보낸다), 읽기가 진행 중인 쓰기를 기다린다.
+   */
+  #persistImage(cli: string, sessionId: string, ref: string, bytes: Buffer): Promise<void> {
+    const key = `${this.#key(cli, sessionId)}:${ref}`;
+    const pending = this.#imageWrites.get(key);
+    if (pending) return pending;
+    const dir = this.#imageDir(cli, sessionId);
+    const path = join(dir, ref);
     const write = (async () => {
+      // 이미 있으면 다시 쓰지 않는다 — 내용 주소라 같은 바이트다.
+      if (await stat(path).then(() => true, () => false)) return;
       await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, ref), bytes);
+      await writeFile(path, bytes);
     })();
     this.#imageWrites.set(key, write);
     void write
       .catch((err: any) => {
-        log(`[agent-session] image write failed ${live.cli}/${live.sessionId.slice(0, 8)}: ${err?.message ?? err}`);
+        log(`[agent-session] image write failed ${cli}/${sessionId.slice(0, 8)}: ${err?.message ?? err}`);
       })
       .finally(() => {
         if (this.#imageWrites.get(key) === write) this.#imageWrites.delete(key);
       });
-    this.#enqueue(live, [{
-      type: 'image',
-      payload: { image_ref: ref, mime_type: mimeType, size: bytes.length },
-      turn_id: turnId,
-    }]);
+    return write.catch(() => undefined);
+  }
+
+  /**
+   * 기록 파서용 이미지 저장 통로. 세션을 다시 열면 전사는 CLI 홈의 기록 파일에서 다시 만들어지는데,
+   * 그 파일에 들어 있는 이미지(tool 결과의 PNG 등)도 같은 경로로 보이게 한다. 참조를 돌려준다.
+   */
+  async storeHistoryImage(cli: string, sessionId: string, base64: string): Promise<{ ref: string; size: number } | null> {
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(base64, 'base64');
+    } catch {
+      return null;
+    }
+    if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) return null;
+    const ref = imageRefOf(base64);
+    await this.#persistImage(cli, sessionId, ref, bytes);
+    return { ref, size: bytes.length };
   }
 
   /** 이 세션의 이미지 보관 디렉터리. 세션 단위로 나눠 두어 close 때 통째로 지운다. */

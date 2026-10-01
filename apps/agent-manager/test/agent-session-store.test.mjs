@@ -250,3 +250,81 @@ test('a long codex session returns only the newest events, numbered by absolute 
   assert.ok(big, 'the window still carries tool calls');
   assert.ok(JSON.stringify(big.payload).length < 40_000, 'oversized payloads are cut as they enter the window');
 });
+
+// 세션을 **다시 열었을 때도** tool 결과 이미지가 나온다 (실측 2026-10-02).
+//
+// 증상: PNG 를 Read 한 자리에 이미지 대신 모델용 주석만 나왔다 —
+//   [Image: original 3437x674, displayed at 2000x392. Multiply coordinates by 1.72 …]
+// 전사는 CLI 홈의 기록 파일에서 다시 만들어지는데, 파서가 tool_result 를 `textOfBlocks` 로
+// 텍스트만 뽑아 이미지 블록을 버렸다. 이제 이미지를 보관 통로(`storeImage`)로 넘기고 참조만
+// `image` 이벤트로 낸다 — 바이트를 payload 에 실으면 상한에 걸리고 창 안에 blob 이 남는다.
+const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+
+async function seedImageSession(t, home) {
+  const id = '11111111-2222-4333-8444-666666666666';
+  const dir = join(home.claudeHome, 'projects', '-tmp-work-img');
+  await mkdir(dir, { recursive: true });
+  const ts = (s) => `2026-10-02T00:00:${String(s).padStart(2, '0')}.000Z`;
+  await writeFile(join(dir, `${id}.jsonl`), jsonl([
+    { type: 'user', uuid: 'u1', sessionId: id, cwd: '/tmp/work/img', timestamp: ts(1), message: { role: 'user', content: 'show me the concept' } },
+    { type: 'assistant', uuid: 'a1', sessionId: id, timestamp: ts(2), message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_img', name: 'Read', input: { file_path: 'E:\\concept.png' } }] } },
+    { type: 'user', uuid: 'u2', sessionId: id, timestamp: ts(3), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_img', content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_1x1 } },
+      { type: 'text', text: '[Image: original 3437x674, displayed at 2000x392. Multiply coordinates by 1.72 to map to original image.]' },
+    ] }] } },
+    { type: 'assistant', uuid: 'a2', sessionId: id, timestamp: ts(4), message: { role: 'assistant', content: [{ type: 'text', text: 'Here it is.' }] } },
+  ]));
+  return id;
+}
+
+test('claude history: tool 결과 이미지는 보관 후 참조만 image 이벤트로 — 바이트는 이벤트에 없다', async (t) => {
+  const home = await seedHome(t);
+  const id = await seedImageSession(t, home);
+  const store = new AgentSessionStore(home);
+  const stored = [];
+  store.setImageSink(async (cli, sessionId, base64) => {
+    stored.push({ cli, sessionId, base64 });
+    return { ref: 'ref-from-runner', size: Buffer.from(base64, 'base64').length };
+  });
+  const history = await store.readHistory('claude', id);
+  const types = history.events.map((e) => e.type);
+  const at = types.indexOf('tool_update');
+  assert.equal(types[at + 1], 'image', 'tool 카드 바로 뒤에 이미지가 온다');
+  const image = history.events[at + 1];
+  assert.deepEqual(
+    { ref: image.payload.image_ref, mime: image.payload.mime_type, tool: image.payload.tool_call_id },
+    { ref: 'ref-from-runner', mime: 'image/png', tool: 'toolu_img' },
+  );
+  assert.equal(stored.length, 1);
+  assert.deepEqual([stored[0].cli, stored[0].sessionId, stored[0].base64], ['claude', id, PNG_1x1]);
+  assert.equal(JSON.stringify(history.events).includes(PNG_1x1), false, '바이트는 어떤 이벤트에도 실리지 않는다');
+  assert.ok(history.events.some((e) => e.type === 'text' && e.payload.text === 'Here it is.'), '뒤 이벤트는 그대로');
+});
+
+test('claude history: 보관 통로가 없으면 이미지를 건너뛰고 나머지는 그대로 읽는다', async (t) => {
+  const home = await seedHome(t);
+  const id = await seedImageSession(t, home);
+  const history = await new AgentSessionStore(home).readHistory('claude', id);
+  assert.equal(history.events.some((e) => e.type === 'image'), false);
+  assert.ok(history.events.some((e) => e.type === 'tool_update'));
+});
+
+test('runner 가 기록 이미지 통로를 건다 — 기록에서 읽은 이미지를 image RPC 로 다시 받을 수 있다', async (t) => {
+  const { AgentSessionRunner } = await import('../dist/lib/agent-session-runner.js');
+  const home = await seedHome(t);
+  const id = await seedImageSession(t, home);
+  const scratch = await mkdtemp(join(tmpdir(), 'awb-session-scratch-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const store = new AgentSessionStore(home);
+  const runner = new AgentSessionRunner(
+    { url: 'http://127.0.0.1:0', apiKey: 'k' },
+    { getManagerId: () => 'm', store, sessionHomesDir: join(scratch, 'session-homes'), idleMinutes: 0 },
+  );
+  t.after(() => runner.shutdown?.());
+  const history = await store.readHistory('claude', id);
+  const image = history.events.find((e) => e.type === 'image');
+  assert.ok(image, '런너가 통로를 걸었으면 기록에서 이미지가 나온다');
+  assert.match(image.payload.image_ref, /^[a-f0-9]{32}$/, '라이브와 같은 내용 주소 참조');
+  const back = await runner.readStoredImage('claude', id, image.payload.image_ref);
+  assert.equal(back?.base64, PNG_1x1, '보관된 바이트가 image RPC 로 그대로 돌아온다');
+});

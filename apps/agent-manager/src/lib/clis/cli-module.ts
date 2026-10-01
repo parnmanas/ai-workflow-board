@@ -171,6 +171,11 @@ export interface CliSessionStoreContext {
    * 온전). 기록 조회는 이쪽을 쓴다. 없으면 `exec` 로 떨어진다(작은 출력·테스트).
    */
   readonly runToFile?: (bin: string, args: string[]) => Promise<string>;
+  /**
+   * 기록 파일 안의 이미지(tool 결과의 PNG 등)를 보관하고 참조를 받는다. 기록 파서는 바이트를
+   * 이벤트에 싣지 않고 `image` 이벤트로 참조만 낸다(payload 상한·메모리). 없으면 이미지를 건너뛴다.
+   */
+  readonly storeImage?: (sessionId: string, base64: string) => Promise<{ ref: string; size: number } | null>;
 }
 
 export interface CliSessionStoreDriver {

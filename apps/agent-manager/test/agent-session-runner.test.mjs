@@ -194,12 +194,21 @@ test('open(new) → prompt stream → permission relay → turn finished, and th
     server.events(sid).map((e) => e.type),
     // 이미지는 fixture 가 보낸 **제 자리**(text 뒤, tool_call 앞)에 와야 한다. 파일 쓰기를
     // await 한 뒤 enqueue 하면 seq 가 늦게 매겨져 맨 뒤로 밀린다 — 그 버그를 이 순서가 막는다.
-    ['system', 'turn', 'reasoning', 'text', 'image', 'tool_call', 'tool_update', 'permission_request'],
+    // 두 번째 `image` 는 **tool 결과 이미지**(PNG 를 Read 한 경우)다 — 그 tool 카드 바로 뒤에 온다.
+    // 예전에는 rawOutput 만 읽어 이 이미지가 사라지고 모델용 주석(`[Image: original …]`)만 남았다.
+    ['system', 'turn', 'reasoning', 'text', 'image', 'tool_call', 'tool_update', 'image', 'permission_request'],
   );
+  const toolImage = server.events(sid).filter((e) => e.type === 'image')[1];
+  assert.equal(toolImage.payload.tool_call_id, 'tool-1', 'tool 결과 이미지는 어느 tool 의 것인지 싣는다');
+  assert.equal(toolImage.payload.mime_type, 'image/png');
+  const toolUpdate = server.events(sid).find((e) => e.type === 'tool_update');
+  assert.equal(JSON.stringify(toolUpdate.payload.output).includes('iVBORw0KGgo'), false, 'tool 출력에는 base64 가 남지 않는다');
   const image = server.events(sid).find((e) => e.type === 'image');
   assert.equal(image.payload.mime_type, 'image/png');
   assert.ok(image.payload.size > 0, '크기는 원본 바이트 수다');
-  assert.match(image.payload.image_ref, /^[A-Za-z0-9-]+$/, '참조는 경로 조작이 불가능한 모양이다');
+  assert.match(image.payload.image_ref, /^[a-f0-9]{32}$/, '참조는 내용 주소(sha256 앞 32자)다 — 경로 조작이 불가능하다');
+  // 같은 바이트면 같은 참조 — 라이브와 기록이 같은 이미지를 같은 참조로 가리킨다.
+  assert.equal(toolImage.payload.image_ref, image.payload.image_ref);
   // **바이트는 이벤트에 없다** — base64 를 실으면 payload 상한에 걸려 또 사라진다.
   assert.equal(image.payload.data, undefined);
   assert.equal(JSON.stringify(image.payload).length < 300, true, 'payload 는 작게 유지된다');

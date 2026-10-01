@@ -1,3 +1,10 @@
+/** 이미지 한 장 — base64(`data`) 또는 URL(`uri`) 중 하나. */
+export interface RuntimeImage {
+  mimeType: string;
+  data: string;
+  uri: string;
+}
+
 export type RuntimeEvent =
   | {
       type: 'message_delta';
@@ -42,6 +49,9 @@ export type RuntimeEvent =
       toolCallId: string;
       status?: string;
       output?: unknown;
+      /** tool 결과에 실린 이미지(PNG 를 Read 한 경우 등). ACP `content[]` 의 image 블록에서 뽑는다 —
+       *  예전에는 `rawOutput` 만 읽어 이미지가 사라지고 옆의 텍스트 주석만 남았다. */
+      images?: RuntimeImage[];
     }
   | {
       type: 'usage';

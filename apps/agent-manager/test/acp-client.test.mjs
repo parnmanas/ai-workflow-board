@@ -67,6 +67,15 @@ test('ACP lifecycle correlates requests and normalizes updates', async (t) => {
   assert.ok(events[2].data.startsWith('iVBORw0KGgo'), 'base64 바이트가 그대로 전달된다');
   assert.equal(events[2].uri, '');
   assert.equal(events[3].toolCallId, 'tool-1');
+  // tool 결과 이미지 — 예전에는 rawOutput 만 읽어 이미지가 사라지고 주석 텍스트만 남았다.
+  const completed = events.find((e) => e.type === 'tool_completed' && e.toolCallId === 'tool-1');
+  assert.equal(completed.images?.length, 1, 'content[] 의 이미지 블록이 뽑힌다');
+  assert.equal(completed.images[0].mimeType, 'image/png');
+  assert.ok(completed.images[0].data.startsWith('iVBORw0KGgo'));
+  // rawOutput 의 base64 는 걷어낸다 — 남겨 두면 payload 상한에 걸려 출력 전체가 잘린다.
+  assert.equal(JSON.stringify(completed.output).includes('iVBORw0KGgo'), false, 'base64 가 출력에 남지 않는다');
+  assert.deepEqual(completed.output[0], { type: 'text', text: 'done' }, '텍스트는 그대로 둔다');
+  assert.equal(completed.output[1].type, 'image');
   assert.equal(events[5].totalTokens, 21);
 
   await client.cancel(session.sessionId);

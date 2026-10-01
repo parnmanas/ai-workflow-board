@@ -156,6 +156,7 @@ export class AgentSessionStore {
   readonly #historyLimit: number;
   readonly #exec: (bin: string, args: string[]) => Promise<string>;
   readonly #runToFile: (bin: string, args: string[]) => Promise<string>;
+  #imageSink: ((cli: string, sessionId: string, base64: string) => Promise<{ ref: string; size: number } | null>) | null = null;
 
   constructor(options: AgentSessionStoreOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -174,6 +175,11 @@ export class AgentSessionStore {
     // hermetic 하게 그대로 돈다. 운영(주입 없음)에서만 실제 파일 경로를 탄다.
     const exec = this.#exec;
     this.#runToFile = options.runToFile ?? ((options.exec || opencodeQuery) ? exec : defaultRunToFile);
+  }
+
+  /** 기록 파서가 이미지를 보관할 통로(런너가 건다 — scratch 위치와 참조 규칙은 런너의 것이다). */
+  setImageSink(sink: ((cli: string, sessionId: string, base64: string) => Promise<{ ref: string; size: number } | null>) | null): void {
+    this.#imageSink = sink;
   }
 
   /** @deprecated 테스트 호환 — `homes.claude`. */
@@ -201,6 +207,9 @@ export class AgentSessionStore {
         historyLimit: this.#historyLimit,
         exec: this.#exec,
         runToFile: this.#runToFile,
+        ...(this.#imageSink
+          ? { storeImage: (sessionId: string, base64: string) => this.#imageSink!(cli, sessionId, base64) }
+          : {}),
       },
     };
   }

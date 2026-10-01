@@ -401,7 +401,16 @@ rl.on('line', (line) => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'tool-1',
             status: 'completed',
-            rawOutput: { text: 'done' },
+            // claude-agent-acp 가 PNG 를 Read 한 결과를 보내는 모양 그대로: rawOutput 은 SDK 원본
+            // (base64 포함), content[] 는 ACP 로 변환된 블록(이미지 + 모델용 주석 텍스트).
+            rawOutput: [
+              { type: 'text', text: 'done' },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' } },
+            ],
+            content: [
+              { type: 'content', content: { type: 'image', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', mimeType: 'image/png' } },
+              { type: 'content', content: { type: 'text', text: '[Image: original 1x1, displayed at 1x1.]' } },
+            ],
           },
         },
       });
