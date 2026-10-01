@@ -2147,6 +2147,22 @@ export const api = {
     }),
   getHostSession: (managerId: string, cli: string, sessionId: string) =>
     request<AgentSessionDetail>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}`),
+  /**
+   * 세션이 내보낸 이미지 한 장의 **바이트**. `<img src>` 는 Authorization 헤더를 보낼 수
+   * 없으므로, 토큰을 쿼리로 노출하는 별도 인증 경로를 만드는 대신(로그·referrer 로 새어
+   * 나간다) 여기서 헤더로 받아 Blob URL 로 바꿔 쓴다 — 엔드포인트는 기존 가드
+   * (`agent_sessions.use`) 를 그대로 통과한다.
+   */
+  getHostSessionImage: async (managerId: string, cli: string, sessionId: string, imageRef: string): Promise<Blob> => {
+    const path = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
+      + `/sessions/${encodeURIComponent(sessionId)}/image/${encodeURIComponent(imageRef)}`;
+    const resp = await fetch(`${BASE}${path}`, { headers: getAuthHeaders() });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(text || `image fetch failed (${resp.status})`);
+    }
+    return resp.blob();
+  },
   promptHostSession: (managerId: string, cli: string, sessionId: string, text: string) =>
     request<{ turn_id: string; live: AgentSessionLiveSnapshot }>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/prompt`,

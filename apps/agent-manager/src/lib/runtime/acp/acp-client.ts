@@ -131,6 +131,18 @@ function normalizeUpdate(
 
   if (kind === 'agent_message_chunk' || kind === 'user_message_chunk') {
     const content = objectValue(update.content);
+    // 이미지 블록은 `.text` 가 없다 — 예전에는 그래서 빈 문자열이 되어 **조용히 사라졌다**.
+    // 어댑터(claude-agent-acp)는 실제로 `{type:'image', data:<base64>, mimeType}` 를
+    // 이 업데이트에 실어 보낸다(tool 결과 이미지도 같은 모양으로 변환된다).
+    if (stringValue(content.type) === 'image') {
+      return {
+        type: 'image_block',
+        sessionId,
+        mimeType: stringValue(field(content, 'mimeType', 'mime_type')),
+        data: stringValue(content.data),
+        uri: stringValue(content.uri),
+      };
+    }
     return { type: 'message_delta', sessionId, text: stringValue(content.text) };
   }
   if (kind === 'agent_thought_chunk') {

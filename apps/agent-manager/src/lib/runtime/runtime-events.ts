@@ -4,6 +4,22 @@ export type RuntimeEvent =
       sessionId: string;
       text: string;
     }
+  /**
+   * 에이전트가 내보낸 이미지 한 장(ACP `agent_message_chunk` 의 `{type:'image'}` content).
+   *
+   * 예전에는 이 블록이 `message_delta` 의 `content.text` 만 읽히면서 **조용히 사라졌다** —
+   * 이미지에는 `.text` 가 없어 빈 문자열이 됐다. 사용자가 "이미지를 보여달라" 고 해도
+   * 아무것도 나오지 않은 원인이다.
+   *
+   * `data` 는 base64, `uri` 는 어댑터가 URL 형태로 준 경우(둘 중 하나만 온다).
+   */
+  | {
+      type: 'image_block';
+      sessionId: string;
+      mimeType: string;
+      data: string;
+      uri: string;
+    }
   | {
       type: 'reasoning_delta';
       sessionId: string;

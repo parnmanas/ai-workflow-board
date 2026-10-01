@@ -11,7 +11,7 @@
 // 기존 chat/ticket 세션 매니저와 달리 AWB Agent identity·프롬프트 래핑·히스토리 재조립이
 // 없다. 답변은 MCP 툴 호출이 아니라 agent_message_chunk 스트림이다.
 
-import { access, constants as fsConstants, lstat, mkdir, readdir, rm, stat, symlink } from 'node:fs/promises';
+import { access, constants as fsConstants, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
@@ -64,7 +64,7 @@ export interface AgentSessionRequest {
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
    *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart';
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -74,6 +74,8 @@ export interface AgentSessionRequest {
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
+  /** image — 보관된 이미지 참조(이벤트 payload 의 `image_ref`). */
+  image_ref?: string;
   /** set_config_option */
   config_id?: string;
   config_value?: string | boolean;
@@ -287,6 +289,8 @@ const MAX_TOOL_TEXT_CHARS = 16_000;
  */
 const SESSION_MAX_LINE_BYTES = 64 * 1024 * 1024;
 const MAX_PAYLOAD_CHARS = 200_000;
+/** 보관·전달할 이미지 한 장의 상한. 넘으면 사실을 알리고 버린다 — 조용히 사라지는 것보다 낫다. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOW_KINDS = new Set(['allow_once', 'allow_always', 'allow_session']);
 /** Agent Session 을 열 수 있는 CLI(세션 슬라이스를 선언한 모듈). */
 export const ACP_SESSION_CLIS: readonly string[] = cliModulesWith('sessions').map((m) => m.id);
@@ -437,6 +441,8 @@ export async function detectAcpSessionClis(env: NodeJS.ProcessEnv = process.env)
 
 export class AgentSessionRunner {
   readonly #config: AwbConfig;
+  /** 진행 중인 이미지 파일 쓰기 — 이벤트를 먼저 보내므로 읽기가 이걸 기다린다. */
+  readonly #imageWrites = new Map<string, Promise<void>>();
   readonly #options: Required<Pick<AgentSessionRunnerOptions, 'idleMinutes' | 'permissionTimeoutMs' | 'requestTimeoutMs' | 'promptTimeoutMs' | 'flushIntervalMs' | 'sessionHomesDir' | 'silenceWarnMs'>>
     & Pick<AgentSessionRunnerOptions, 'commandResolver' | 'baseEnv' | 'clientVersion' | 'mcpServers' | 'getManagerId' | 'credentialFetcher' | 'maxLineBytes'>;
   readonly #store: AgentSessionStore;
@@ -593,6 +599,18 @@ export class AgentSessionRunner {
           const sessions = await this.#store.listSessions(cli);
           const withLive = sessions.map((s) => ({ ...s, live_status: this.#live.get(this.#key(cli, s.session_id)) ? this.#statusOf(this.#live.get(this.#key(cli, s.session_id))!) : undefined }));
           await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: { sessions: withLive } });
+          return;
+        }
+        case 'image': {
+          // 보관된 이미지 한 장의 바이트. 세션이 살아 있지 않아도 답한다 — 화면을 다시
+          // 열면 전사의 이미지도 다시 그려져야 하고, 바이트는 프로세스가 아니라 디스크에 있다.
+          if (!sessionId) throw Object.assign(new Error('session_id is required'), { code: 'not_found' });
+          const stored = await this.readStoredImage(cli, sessionId, String(request.image_ref || ''));
+          if (!stored) {
+            await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: 'Image not found on this Runtime Host.', code: 'not_found' });
+            return;
+          }
+          await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: { base64: stored.base64 } });
           return;
         }
         case 'history': {
@@ -1399,6 +1417,17 @@ export class AgentSessionRunner {
         live.textBuffer += event.text;
         this.#scheduleFlush(live);
         return;
+      case 'image_block': {
+        // 바이트는 이벤트에 싣지 않는다 — base64 는 1.33배로 불어나 스크린샷 한 장이
+        // payload 상한을 넘기고, 그러면 `{truncated:true}` 가 되어 이미지가 조용히
+        // 사라진다. 디스크에 두고 작은 참조만 보낸다(`image` RPC 로 바이트를 받는다).
+        //
+        // 텍스트 버퍼를 먼저 비운다 — 이미지는 대화 흐름의 한 자리를 차지하므로,
+        // 앞서 흐르던 문장 뒤에 와야 순서가 맞는다.
+        this.#flushBuffers(live, turnId);
+        this.#emitImage(live, event, turnId);
+        return;
+      }
       case 'reasoning_delta':
         live.reasoningBuffer += event.text;
         this.#scheduleFlush(live);
@@ -1693,6 +1722,93 @@ export class AgentSessionRunner {
   }
 
   /** 세션당 FIFO — 서버는 저장하지 않지만 소유자 UI 는 seq 순서로 병합한다. 찍힌 행을 돌려준다. */
+  /**
+   * 에이전트가 내보낸 이미지 — **참조만** 이벤트로 보내고 바이트는 디스크에 둔다.
+   *
+   * 이벤트는 **동기로** 찍는다. 예전 구현은 파일 쓰기를 await 한 뒤 enqueue 했는데, seq 는
+   * enqueue 시점에 매겨지므로 이미지가 전사의 **맨 뒤로 밀렸다** — 문장 중간에 있어야 할
+   * 그림이 대화 끝에 붙었다(회귀 테스트가 이것을 잡았다). 그래서 참조를 먼저 발급해 순서를
+   * 확정하고, 쓰기는 뒤따라 돌린다. 아직 쓰는 중인 ref 를 화면이 먼저 요청할 수 있으므로
+   * `readStoredImage` 가 그 약속을 기다린다.
+   *
+   * AWB 는 이 바이트를 저장하지 않는다 — 장비에 남고 요청마다 매니저가 읽어 준다.
+   */
+  #emitImage(
+    live: LiveSession,
+    event: { mimeType: string; data: string; uri: string },
+    turnId: string | undefined,
+  ): void {
+    const mimeType = event.mimeType || 'application/octet-stream';
+    // 어댑터가 URL 로 준 경우 — 바이트가 없으니 참조만 넘긴다.
+    if (!event.data && event.uri) {
+      this.#enqueue(live, [{
+        type: 'image',
+        payload: { image_ref: '', mime_type: mimeType, size: 0, uri: event.uri },
+        turn_id: turnId,
+      }]);
+      return;
+    }
+    if (!event.data) return;
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(event.data, 'base64');
+    } catch {
+      return;
+    }
+    if (bytes.length === 0) return;
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      // 버리더라도 **조용히** 버리지 않는다 — 조용한 소실이 이 버그의 본질이었다.
+      this.#enqueue(live, [{
+        type: 'system',
+        payload: {
+          text: `Agent sent a ${Math.round(bytes.length / 1024)}KB image — too large to show (cap ${Math.round(MAX_IMAGE_BYTES / 1024)}KB).`,
+          code: 'image_too_large',
+        },
+        turn_id: turnId,
+      }]);
+      return;
+    }
+    const ref = `${live.nonce}-${randomUUID().slice(0, 8)}`;
+    const key = `${this.#key(live.cli, live.sessionId)}:${ref}`;
+    const dir = this.#imageDir(live.cli, live.sessionId);
+    const write = (async () => {
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, ref), bytes);
+    })();
+    this.#imageWrites.set(key, write);
+    void write
+      .catch((err: any) => {
+        log(`[agent-session] image write failed ${live.cli}/${live.sessionId.slice(0, 8)}: ${err?.message ?? err}`);
+      })
+      .finally(() => {
+        if (this.#imageWrites.get(key) === write) this.#imageWrites.delete(key);
+      });
+    this.#enqueue(live, [{
+      type: 'image',
+      payload: { image_ref: ref, mime_type: mimeType, size: bytes.length },
+      turn_id: turnId,
+    }]);
+  }
+
+  /** 이 세션의 이미지 보관 디렉터리. 세션 단위로 나눠 두어 close 때 통째로 지운다. */
+  #imageDir(cli: string, sessionId: string): string {
+    return join(this.#options.sessionHomesDir, '..', 'session-images', cli, sessionId);
+  }
+
+  /** `image` RPC — 보관된 이미지 한 장의 바이트. 참조는 경로 조작이 불가능한 모양만 받는다. */
+  async readStoredImage(cli: string, sessionId: string, ref: string): Promise<{ mimeType: string; base64: string } | null> {
+    if (!/^[A-Za-z0-9-]{1,80}$/.test(ref)) return null;
+    // 화면이 이벤트를 받자마자 요청하면 쓰기가 아직 끝나지 않았을 수 있다 — 순서를 지키려고
+    // 이벤트를 먼저 보내기 때문이다. 그 약속을 기다린 뒤에 읽는다(실패해도 아래 read 가 판정).
+    await this.#imageWrites.get(`${this.#key(cli, sessionId)}:${ref}`)?.catch(() => undefined);
+    try {
+      const bytes = await readFile(join(this.#imageDir(cli, sessionId), ref));
+      return { mimeType: '', base64: bytes.toString('base64') };
+    } catch {
+      return null;
+    }
+  }
+
   #enqueue(live: LiveSession, events: AgentSessionEventInput[], state?: AgentSessionStatePatch): StampedEvent[] {
     // 세션 id 가 정해지기 전(session/new 응답 전)에 어댑터가 보내는 알림은 보낼 곳이 없다. 예전엔
     // seq 만 올리고 버려서 이후 행의 seq 가 한 칸씩 어긋났고, UI 의 유실 감지(hasSeqGap)가 계속

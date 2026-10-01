@@ -71,6 +71,39 @@ export class AgentSessionsController {
     return this.run(res, 200, () => this.sessions.setCliSettings(ws, this.userId(req), managerId, cli, body?.credential_id ?? null, body?.default_config, body?.backend_profile_id));
   }
 
+  /**
+   * 세션이 내보낸 이미지 한 장을 **바이트로** 돌려준다 — 브라우저가 `<img src>` 로 바로 읽는다.
+   *
+   * JSON 이 아니라 바이너리로 내보내는 이유: 전사 이벤트는 payload 상한이 있고 base64 는
+   * 원본의 1.33배라, 스크린샷을 이벤트에 실으면 상한에 걸려 **조용히 사라졌다**. 그래서
+   * 이벤트는 참조만 싣고 바이트는 이 경로로 받는다. 바이트는 AWB 에 저장되지 않고 매니저가
+   * 장비에서 그때그때 읽어 온다(이 표면의 "세션 내용을 저장하지 않는다" 원칙 그대로).
+   */
+  @Get('hosts/:managerId/:cli/sessions/:sessionId/image/:imageRef')
+  async image(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Param('imageRef') imageRef: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    try {
+      const bytes = await this.sessions.readImage(ws, this.userId(req), managerId, cli, sessionId, imageRef);
+      // mime 은 이벤트 payload 가 들고 있다(화면이 아는 값) — 여기서는 바이트만 책임진다.
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', String(bytes.length));
+      // 참조는 내용 주소처럼 1회성이라 안전하게 캐시된다 — 같은 ref 는 같은 바이트다.
+      res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+      return res.end(bytes);
+    } catch (err: any) {
+      const status = typeof err?.status === 'number' ? err.status : 500;
+      return res.status(status).json({ error: err?.code || 'image_failed', message: err?.message || 'Could not read the image.' });
+    }
+  }
+
   @Get('hosts/:managerId/:cli/sessions')
   async list(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
     const ws = this.workspaceId(req, res);

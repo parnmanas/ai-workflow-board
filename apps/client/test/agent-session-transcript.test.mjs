@@ -468,6 +468,51 @@ test('붙일 블록이 없는 usage 도 버리지 않는다', () => {
   assert.equal(blocks[0].totalTokens, 7);
 });
 
+// 에이전트가 내보낸 이미지 (실측 2026-10-01: "이미지를 보여달라" 고 해도 아무것도 안 나왔다).
+//
+// 원인은 AWB 가 ACP content block 에서 `.text` 만 읽은 것 — 이미지 블록에는 `.text` 가 없어
+// 빈 문자열이 되어 **조용히 사라졌다**(acp-client.ts). 어댑터는 실제로
+// `{type:'image', data:<base64>, mimeType}` 을 agent_message_chunk 에 실어 보낸다.
+//
+// 바이트는 이벤트에 싣지 않는다: base64 는 원본의 1.33배라 스크린샷 한 장이 payload 상한을
+// 넘기고, 넘기면 `{truncated:true}` 로 바뀌어 또 사라진다. 그래서 이벤트는 참조만 싣고
+// 화면이 전용 엔드포인트에서 바이트를 받는다.
+test('image 이벤트는 참조·mime·크기를 블록으로 만든다 — 바이트는 싣지 않는다', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('text', { text: '여기 스크린샷입니다:' }),
+    ev('image', { image_ref: 'ab12cd34-ef56', mime_type: 'image/png', size: 524288 }),
+  ]);
+  assert.deepEqual(blocks.map((b) => b.kind), ['assistant', 'image']);
+  const img = blocks[1];
+  assert.equal(img.imageRef, 'ab12cd34-ef56');
+  assert.equal(img.mimeType, 'image/png');
+  assert.equal(img.size, 524288);
+  assert.equal(img.uri, '');
+});
+
+test('어댑터가 URL 로 준 외부 이미지는 uri 로 들어온다', () => {
+  seq = 0;
+  const blocks = buildTranscript([ev('image', { uri: 'https://example.com/a.png', mime_type: 'image/png' })]);
+  assert.equal(blocks[0].kind, 'image');
+  assert.equal(blocks[0].uri, 'https://example.com/a.png');
+  assert.equal(blocks[0].imageRef, '');
+});
+
+test('이미지는 텍스트 병합을 깨지 않는다 — 앞뒤 문장이 각자 이어진다', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('text', { text: '먼저 ' }),
+    ev('text', { text: '이것:' }),
+    ev('image', { image_ref: 'r1', mime_type: 'image/png', size: 10 }),
+    ev('text', { text: '다음은 ' }),
+    ev('text', { text: '저것:' }),
+  ]);
+  assert.deepEqual(blocks.map((b) => b.kind), ['assistant', 'image', 'assistant']);
+  assert.equal(blocks[0].text, '먼저 이것:');
+  assert.equal(blocks[2].text, '다음은 저것:', '이미지 뒤의 청크도 자기들끼리 병합된다');
+});
+
 test('usage 줄은 캐시를 포함한 합계를 보여 준다 — claude 의 "in 2" 가 전부가 아니다', () => {
   const claude = {
     inputTokens: 2,

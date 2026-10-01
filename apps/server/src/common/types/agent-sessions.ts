@@ -54,6 +54,12 @@ export const AGENT_SESSION_EVENT_TYPES = [
   'turn',                 // { phase: 'started'|'finished', stop_reason? }
   'error',                // { message, code? }
   'system',               // { text }
+  // { image_ref, mime_type, size, alt? } — 에이전트가 내보낸 이미지 한 장.
+  //
+  // **바이트는 여기 없다.** base64 는 원본의 1.33배라 스크린샷 한 장이 payload 상한을
+  // 넘기고, 예전에는 그 경우 `{truncated:true}` 로 바뀌어 이미지가 조용히 사라졌다.
+  // 바이트는 `image` RPC op 으로 매니저에서 따로 받아 전용 엔드포인트가 스트리밍한다.
+  'image',
 ] as const;
 export type AgentSessionEventType = (typeof AGENT_SESSION_EVENT_TYPES)[number];
 
@@ -78,6 +84,14 @@ export const AGENT_SESSION_REQUEST_OPS = [
   // 세션에는 새 모델이 끝내 나타나지 않았다). 기록은 CLI 홈에 있으므로 재시작해도
   // 대화는 이어진다 — 죽는 것은 프로세스뿐이다.
   'restart',
+  // 이 세션이 내보낸 이미지 한 장의 **바이트**를 가져온다. { image_ref }
+  //
+  // 왜 이벤트에 싣지 않는가: base64 는 원본의 1.33배로 불어나므로 스크린샷 한 장이
+  // 이벤트 payload 상한(AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS)을 쉽게 넘긴다. 예전에는
+  // 상한을 넘기면 `{truncated:true}` 로 바뀌어 **이미지가 조용히 사라졌다**. 그래서
+  // 이벤트는 `{mime_type, size, image_ref}` 만 싣고 바이트는 이 op 으로 따로 받는다 —
+  // AWB 가 세션 내용을 저장하지 않는다는 원칙도 그대로 유지된다(바이트는 매니저가 들고 있다).
+  'image',
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 

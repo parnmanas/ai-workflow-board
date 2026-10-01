@@ -573,6 +573,13 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     }
   }, [managerId, cli, sessionId, showToast]);
 
+  // 전사의 이미지 바이트. `<img src>` 는 Authorization 헤더를 못 보내므로 전사가 URL 이
+  // 아니라 Blob 을 받아 쓴다 — 토큰을 쿼리로 노출하는 두 번째 인증 경로를 만들지 않기 위해서다.
+  const loadImage = useCallback(
+    (imageRef: string) => api.getHostSessionImage(managerId, cli, sessionId, imageRef),
+    [managerId, cli, sessionId],
+  );
+
   const setConfigOption = useCallback(async (configId: string, value: string | boolean) => {
     try {
       await api.setHostSessionConfigOption(managerId, cli, sessionId, configId, value);
@@ -823,6 +830,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
             onDecidePermission={(requestId, optionId) => void decide(requestId, optionId)}
             onAnswerElicitation={(elicitationId, action, content) => void answerElicitation(elicitationId, action, content)}
             permissionsEnabled={isWaitingStatus(status) || status === 'busy'}
+            loadImage={loadImage}
           />
           </div>
         )}

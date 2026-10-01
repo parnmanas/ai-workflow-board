@@ -293,6 +293,34 @@ codex-acp 는 주입된 MCP 서버의 연결 결과를 **update 가 따라오지
 - 새 세션 모달은 **열릴 때만** 기본 호스트/CLI/cwd 를 채운다. `hosts` 는 매니저 하트비트마다 새 배열로 내려오므로 그것을
   초기화 트리거로 쓰면 사용자가 고르던 호스트·cwd·제목이 30초 간격으로 되돌아간다(`new-session-modal-host-refresh.test.mjs`).
 
+## 이미지 (`image` 이벤트 · `image` RPC)
+
+에이전트가 내보낸 이미지를 전사에 그린다. ACP 는 이미 실어 보내고 있었고 AWB 가 버렸다 —
+`acp-client.ts` 가 content block 에서 `.text` 만 읽었기 때문에 **이미지 블록은 조용히
+사라졌다**(실측: "이미지를 보여달라" 고 해도 아무것도 안 나왔다). 어댑터가 실제로 보내는
+모양은 `agent_message_chunk` 의 `content: {type:'image', data:<base64>, mimeType}` 이고,
+tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된다. **MCP 를 따로 만들 필요가
+없다** — 파이프라인을 고치면 어댑터가 이미지를 내보내는 모든 CLI 에 공통으로 적용되고,
+에이전트가 "표시 툴을 부르기로 선택" 할 필요도 없다.
+
+**바이트는 이벤트에 싣지 않는다.** base64 는 원본의 1.33배라 스크린샷 한 장이 payload
+상한(`AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS`)을 넘기고, 넘기면 `{truncated:true}` 로 바뀌어
+또 사라진다. 그래서 흐름은 이렇다:
+
+1. 매니저가 바이트를 자기 scratch(`session-images/<cli>/<sessionId>/<ref>`)에 쓰고,
+   이벤트는 `{image_ref, mime_type, size}` 만 싣는다. 어댑터가 URL 로 준 외부 이미지는
+   `{uri}` 만 싣는다(가져올 바이트가 없다). 상한(8MB) 초과는 **버리되 조용히 버리지 않고**
+   system 줄로 알린다 — 조용한 소실이 이 버그의 본질이었다.
+2. **이벤트는 동기로 찍는다.** 파일 쓰기를 await 한 뒤 enqueue 하면 seq 가 늦게 매겨져
+   이미지가 전사 맨 뒤로 밀린다(문장 중간의 그림이 대화 끝에 붙는다 — 회귀 테스트가 고정).
+   쓰기 완료 전에 화면이 요청할 수 있으므로 `readStoredImage` 가 그 약속을 기다린다.
+3. 화면은 `GET /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/image/:ref` 로
+   바이트를 받는다. 서버는 `image` RPC 로 매니저에서 읽어 와 **저장하지 않고** 흘려보낸다.
+4. 클라이언트는 그 응답을 **Blob URL** 로 바꿔 `<img>` 에 쓴다. `<img src>` 는 Authorization
+   헤더를 못 보내는데, `rawResourceUrl` 처럼 토큰을 쿼리에 싣는 두 번째 인증 경로는 만들지
+   않았다(로그·referrer 로 샌다) — 엔드포인트는 기존 가드(`agent_sessions.use`)를 그대로
+   통과하고, Blob URL 은 컴포넌트 unmount 때 revoke 한다.
+
 ## 토큰 사용량 (`usage` 이벤트)
 
 전사의 턴마다 붙는 작은 회색 줄이다. **출처가 두 개**이고, 둘 다 CLI 별 매핑을 거친 뒤

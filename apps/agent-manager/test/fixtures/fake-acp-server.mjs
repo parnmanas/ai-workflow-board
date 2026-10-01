@@ -359,6 +359,24 @@ rl.on('line', (line) => {
           },
         },
       });
+      // 이미지 블록 — 실제 claude-agent-acp 가 보내는 모양 그대로(base64 + mimeType).
+      // 예전에는 클라이언트가 `.text` 만 읽어 이것이 조용히 사라졌다.
+      send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: message.params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            // 1x1 PNG
+            content: {
+              type: 'image',
+              data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+              mimeType: 'image/png',
+            },
+          },
+        },
+      });
       send({
         jsonrpc: '2.0',
         method: 'session/update',

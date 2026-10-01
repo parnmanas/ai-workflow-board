@@ -985,6 +985,10 @@ export interface AgentSessionRequestPayload {
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
+  /** image — 가져올 이미지의 참조(이벤트 payload 의 `image_ref`). 바이트는 이벤트에 싣지
+   *  않고 이 op 으로 따로 받는다 — base64 는 1.33배로 불어나 payload 상한을 넘기고,
+   *  그러면 이미지가 `{truncated:true}` 로 바뀌어 조용히 사라진다. */
+  image_ref?: string;
   /** set_config_option — ACP session config option id 와 값(select 는 value id, boolean 은 true/false). */
   config_id?: string;
   config_value?: string | boolean;

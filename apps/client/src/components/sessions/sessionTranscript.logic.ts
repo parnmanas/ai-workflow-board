@@ -190,6 +190,21 @@ export type TranscriptBlock =
     }
   | { kind: 'turn'; key: string; seq: number; turnId: string; stopReason: string }
   | { kind: 'error'; key: string; seq: number; turnId: string; message: string; code: string | null }
+  /**
+   * 에이전트가 내보낸 이미지 한 장. **바이트는 여기 없다** — `imageRef` 로 전용
+   * 엔드포인트에서 받는다(이벤트에 base64 를 실으면 payload 상한에 걸려 조용히 사라진다).
+   * `uri` 는 어댑터가 URL 로 준 경우(외부 이미지) — 그때는 ref 가 비어 있다.
+   */
+  | {
+      kind: 'image';
+      key: string;
+      seq: number;
+      turnId: string;
+      imageRef: string;
+      mimeType: string;
+      size: number;
+      uri: string;
+    }
   | { kind: 'system'; key: string; seq: number; text: string };
 
 function str(v: unknown, fallback = ''): string {
@@ -405,6 +420,18 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         }
         break;
       }
+      case 'image':
+        blocks.push({
+          kind: 'image',
+          key: ev.id,
+          seq: ev.seq,
+          turnId,
+          imageRef: str(p.image_ref),
+          mimeType: str(p.mime_type) || 'application/octet-stream',
+          size: num(p.size),
+          uri: str(p.uri),
+        });
+        break;
       case 'usage':
         // **대화 흐름에 끼워 넣지 않는다.** usage 는 턴 단위 메타데이터인데, 예전에는
         // 도착 순서대로 블록을 push 했다. 그러면 스트리밍 중인 텍스트 사이에 끼어

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import { renderMarkdown } from '../chat/utils/markdown';
 import { usageSummaryParts } from './sessionTranscript.logic';
@@ -21,6 +21,11 @@ export interface SessionTranscriptProps {
   onAnswerElicitation?: (elicitationId: string, action: ElicitationAction, content: Record<string, unknown> | null) => void;
   /** 세션이 살아 있지 않으면(closed/suspended) 미결 권한·질문 버튼을 잠근다. */
   permissionsEnabled: boolean;
+  /** 이미지 참조 → 바이트. 라우트 파라미터를 아는 페이지가 넘긴다(전사는 표현만 책임진다).
+   *  `<img src>` 는 Authorization 헤더를 못 보내므로 URL 이 아니라 Blob 을 받아서 쓴다 —
+   *  토큰을 쿼리로 노출하는 두 번째 인증 경로를 만들지 않기 위해서다. 안 넘기면 이미지
+   *  블록은 "볼 수 없음" 으로 접힌다. */
+  loadImage?: (imageRef: string) => Promise<Blob>;
 }
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -582,7 +587,80 @@ function Note({ children, tone }: { children: React.ReactNode; tone: 'muted' | '
   );
 }
 
-export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled }: SessionTranscriptProps) {
+/**
+ * 에이전트가 내보낸 이미지 한 장.
+ *
+ * 바이트는 이벤트에 실려 오지 않는다(base64 는 1.33배로 불어나 payload 상한에 걸리고,
+ * 예전에는 그래서 이미지가 조용히 사라졌다) — 참조로 따로 받아 Blob URL 로 그린다.
+ * URL 은 이 컴포넌트 수명에 묶고 unmount 때 revoke 한다(안 하면 전사를 오래 열어 둘수록
+ * 브라우저 메모리에 blob 이 쌓인다).
+ */
+function ImageBlock({
+  block,
+  loadImage,
+}: {
+  block: Extract<TranscriptBlock, { kind: 'image' }>;
+  loadImage?: (imageRef: string) => Promise<Blob>;
+}) {
+  const [url, setUrl] = useState<string>(block.uri || '');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // 어댑터가 URL 로 준 외부 이미지는 그대로 쓴다 — 가져올 바이트가 없다.
+    if (block.uri || !block.imageRef || !loadImage) return;
+    let revoked = false;
+    let objectUrl = '';
+    void (async () => {
+      try {
+        const blob = await loadImage(block.imageRef);
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      } catch (err: any) {
+        if (!revoked) setError(err?.message || '이미지를 가져오지 못했습니다');
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [block.uri, block.imageRef, loadImage]);
+
+  const sizeLabel = block.size ? `, ${Math.round(block.size / 1024)}KB` : '';
+  if (error) {
+    return (
+      <div data-block="image" style={{ fontSize: 11.5, color: tokens.colors.warning }}>
+        이미지를 가져오지 못했습니다 — {error}
+      </div>
+    );
+  }
+  if (!url) {
+    return (
+      <div data-block="image" style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
+        이미지 불러오는 중… ({block.mimeType}{sizeLabel})
+      </div>
+    );
+  }
+  return (
+    <a data-block="image" href={url} target="_blank" rel="noreferrer" style={{ display: 'block', maxWidth: '100%' }}>
+      <img
+        src={url}
+        alt={`agent image (${block.mimeType})`}
+        // 전사 폭을 넘지 않게만 제한한다 — 원본은 새 탭에서 본다.
+        style={{
+          maxWidth: '100%',
+          maxHeight: 420,
+          objectFit: 'contain',
+          borderRadius: tokens.radii.md,
+          border: `1px solid ${tokens.colors.border}`,
+          background: tokens.colors.surface,
+        }}
+      />
+    </a>
+  );
+}
+
+export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage }: SessionTranscriptProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {blocks.map((block) => {
@@ -617,6 +695,8 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             );
           case 'plan':
             return <PlanBlock key={block.key} block={block} />;
+          case 'image':
+            return <ImageBlock key={block.key} block={block} loadImage={loadImage} />;
           case 'usage': {
             const parts = usageSummaryParts(block);
             // 조각이 하나도 없으면(모두 0) 아무것도 그리지 않는다 — "0 tokens" 는

@@ -170,7 +170,7 @@ const CWD_MAX = 1024;
 const TITLE_MAX = 200;
 const MAX_PENDING = 200;
 const LIVE_TTL_MS = 24 * 60 * 60_000;
-const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000 } as const;
+const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000, image: 30_000 } as const;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
 const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input']);
 const CONFIG_ID_MAX = 128;
@@ -739,7 +739,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   private rpc<T>(
     managerId: string,
     cli: string,
-    op: 'list' | 'history' | 'open',
+    op: 'list' | 'history' | 'open' | 'image',
     args: Partial<AgentSessionRequestPayload>,
     driverUserId: string,
   ): Promise<T> {
@@ -851,6 +851,30 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   // ─── 사용자 쓰기 ───────────────────────────────────────────────────────
+
+  /**
+   * 세션이 내보낸 이미지 한 장의 바이트.
+   *
+   * **AWB 는 이 바이트를 저장하지 않는다** — 매니저가 장비에 들고 있고 요청마다 받아 간다
+   * (세션 내용을 저장하지 않는다는 이 표면의 원칙 그대로). 그래서 이벤트 payload 는
+   * `{image_ref, mime_type, size}` 만 싣고, 상한에 걸려 이미지가 조용히 사라지는 일이 없다.
+   */
+  async readImage(
+    workspaceId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    imageRef: string,
+  ): Promise<Buffer> {
+    this.requireHost(workspaceId, managerId, cli);
+    this.assertSessionId(sessionId);
+    if (!/^[A-Za-z0-9-]{1,80}$/.test(imageRef)) throw new AgentSessionError(400, 'image_ref_invalid');
+    const result = await this.rpc<{ base64?: string }>(managerId, cli, 'image', { session_id: sessionId, image_ref: imageRef }, userId);
+    const base64 = typeof result?.base64 === 'string' ? result.base64 : '';
+    if (!base64) throw new AgentSessionError(404, 'image_not_found');
+    return Buffer.from(base64, 'base64');
+  }
 
   async openSession(
     workspaceId: string,

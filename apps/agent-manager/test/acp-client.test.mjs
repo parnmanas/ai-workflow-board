@@ -58,11 +58,16 @@ test('ACP lifecycle correlates requests and normalizes updates', async (t) => {
   assert.equal(response.stopReason, 'end_turn');
   assert.deepEqual(
     events.map((event) => event.type),
-    ['reasoning_delta', 'message_delta', 'tool_started', 'tool_completed', 'usage'],
+    ['reasoning_delta', 'message_delta', 'image_block', 'tool_started', 'tool_completed', 'usage'],
   );
   assert.equal(events[1].text, 'hello');
-  assert.equal(events[2].toolCallId, 'tool-1');
-  assert.equal(events[4].totalTokens, 21);
+  // 이미지 블록은 `.text` 가 없다 — 예전에는 message_delta 의 빈 텍스트로 뭉개져 사라졌다.
+  // 이 단언이 "이미지를 보여달라고 했는데 아무것도 안 나온다" 의 회귀 가드다.
+  assert.equal(events[2].mimeType, 'image/png');
+  assert.ok(events[2].data.startsWith('iVBORw0KGgo'), 'base64 바이트가 그대로 전달된다');
+  assert.equal(events[2].uri, '');
+  assert.equal(events[3].toolCallId, 'tool-1');
+  assert.equal(events[5].totalTokens, 21);
 
   await client.cancel(session.sessionId);
   await client.closeSession(session.sessionId);

@@ -187,7 +187,22 @@ test('open(new) → prompt stream → permission relay → turn finished, and th
   await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
   const permission = server.events(sid).find((e) => e.type === 'permission_request');
   assert.equal(permission.state?.status, 'awaiting_permission');
-  assert.deepEqual(server.events(sid).map((e) => e.type), ['system', 'turn', 'reasoning', 'text', 'tool_call', 'tool_update', 'permission_request']);
+  // `image` — fixture 가 보낸 이미지 블록이 끝까지 흘러 세션 이벤트가 된다. 예전에는
+  // acp-client 가 content 의 `.text` 만 읽어 **조용히 사라졌다**("이미지를 보여달라" 고 해도
+  // 아무것도 안 나온 원인). 위치도 계약이다: 이미지는 앞서 흐르던 text 뒤에 와야 순서가 맞는다.
+  assert.deepEqual(
+    server.events(sid).map((e) => e.type),
+    // 이미지는 fixture 가 보낸 **제 자리**(text 뒤, tool_call 앞)에 와야 한다. 파일 쓰기를
+    // await 한 뒤 enqueue 하면 seq 가 늦게 매겨져 맨 뒤로 밀린다 — 그 버그를 이 순서가 막는다.
+    ['system', 'turn', 'reasoning', 'text', 'image', 'tool_call', 'tool_update', 'permission_request'],
+  );
+  const image = server.events(sid).find((e) => e.type === 'image');
+  assert.equal(image.payload.mime_type, 'image/png');
+  assert.ok(image.payload.size > 0, '크기는 원본 바이트 수다');
+  assert.match(image.payload.image_ref, /^[A-Za-z0-9-]+$/, '참조는 경로 조작이 불가능한 모양이다');
+  // **바이트는 이벤트에 없다** — base64 를 실으면 payload 상한에 걸려 또 사라진다.
+  assert.equal(image.payload.data, undefined);
+  assert.equal(JSON.stringify(image.payload).length < 300, true, 'payload 는 작게 유지된다');
   assert.equal(server.events(sid).find((e) => e.type === 'text').payload.text, 'hello');
   assert.equal(server.events(sid).find((e) => e.type === 'turn').state.status, 'busy');
   assert.ok(server.events(sid).every((e, i) => e.seq === i + 1), 'seq is contiguous per session');
