@@ -251,6 +251,8 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
   const permissionIndex = new Map<string, number>();
   const elicitationIndex = new Map<string, number>();
   const planIndex = new Map<string, number>();
+  /** 턴 → 그 턴의 usage 블록(마지막 값). 흐름에 끼우지 않고 끝에서 배치한다. */
+  const usageByTurn = new Map<string, Extract<TranscriptBlock, { kind: 'usage' }>>();
   for (const ev of events) {
     const p = ev.payload || {};
     const turnId = ev.turn_id || '';
@@ -404,7 +406,13 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         break;
       }
       case 'usage':
-        blocks.push({
+        // **대화 흐름에 끼워 넣지 않는다.** usage 는 턴 단위 메타데이터인데, 예전에는
+        // 도착 순서대로 블록을 push 했다. 그러면 스트리밍 중인 텍스트 사이에 끼어
+        // `text` 병합 조건(직전 블록이 같은 턴의 assistant)을 깨뜨려 한 문장이 쪼개졌다
+        // (실측: "이 세션이 끊" / "465k tokens" / "깁니다" — 한 턴에 usage 가 여러 번
+        // 오므로 토큰 줄이 두 번 찍히기도 했다). 턴별로 **마지막 값 하나만** 들고
+        // 있다가(usage 는 누적값이다) 아래에서 그 턴의 끝에 붙인다.
+        usageByTurn.set(turnId, {
           kind: 'usage',
           key: ev.id,
           seq: ev.seq,
@@ -439,7 +447,28 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         break;
     }
   }
-  return blocks;
+  if (usageByTurn.size === 0) return blocks;
+  // usage 를 각 턴의 **마지막 블록 뒤에** 한 번만 놓는다. 흐름 중간에 끼우지 않으므로
+  // 스트리밍 텍스트가 쪼개지지 않고, 턴당 하나뿐이라 토큰 줄이 중복되지 않는다.
+  const turnOf = (b: TranscriptBlock): string => ('turnId' in b ? b.turnId : '');
+  const lastIndexOfTurn = new Map<string, number>();
+  blocks.forEach((b, i) => lastIndexOfTurn.set(turnOf(b), i));
+  const out: TranscriptBlock[] = [];
+  const pending = new Map(usageByTurn);
+  blocks.forEach((b, i) => {
+    out.push(b);
+    const turn = turnOf(b);
+    if (lastIndexOfTurn.get(turn) === i) {
+      const usage = pending.get(turn);
+      if (usage) {
+        out.push(usage);
+        pending.delete(turn);
+      }
+    }
+  });
+  // 붙일 자리를 못 찾은 usage(그 턴에 다른 블록이 없는 경우)는 맨 끝에 — 버리지 않는다.
+  for (const usage of pending.values()) out.push(usage);
+  return out;
 }
 
 /**

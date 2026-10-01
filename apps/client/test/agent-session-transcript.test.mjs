@@ -408,6 +408,66 @@ test('splitRecentCwdGroups folds working folders whose newest session is older t
 // 화면은 in/out/total 만 찍었고 claude 는 total 을 주지 않아 "tokens in 2 · out 346 ·
 // total 0" 처럼 나왔다 — 실제로 쓴 3.6만 토큰이 화면에서 사라져 있었다.
 
+// usage 이벤트가 **스트리밍 중인 텍스트 사이에** 와도 문장이 쪼개지지 않는다 (실측 2026-10-01).
+//
+// 증상: 세션 대화에 이런 것이 나왔다 —
+//
+//   …제가 셸에서 하면 이 세션이 끊
+//   465k tokens
+//   465k tokens
+//   깁니다).
+//
+// `text` 병합 조건은 "직전 블록이 같은 턴의 assistant" 다. 예전에는 usage 를 도착 순서대로
+// push 했기 때문에, 턴 도중에 온 usage 가 그 체인을 끊어 뒤따르는 청크가 **새 assistant
+// 블록**이 됐다 — 한 문장이 토큰 줄을 사이에 두고 두 조각으로 갈렸다. 한 턴에 usage 가
+// 여러 번 오면 토큰 줄도 그만큼 중복됐다.
+//
+// usage 는 턴 단위 메타데이터이므로 흐름에서 빼고 그 턴의 끝에 하나만 놓는다.
+test('턴 도중에 온 usage 가 텍스트를 쪼개지 않고, 턴당 한 줄만 남는다', () => {
+  seq = 0;
+  const events = [
+    ev('user_prompt', { text: 'q' }),
+    ev('text', { text: '이 세션이 끊' }),
+    // 스트리밍 도중 도착 — 여기가 예전에 문장을 자른 지점이다.
+    ev('usage', { input_tokens: 1, output_tokens: 2, total_tokens: 400000 }),
+    ev('usage', { input_tokens: 1, output_tokens: 3, total_tokens: 465000 }),
+    ev('text', { text: '깁니다).' }),
+  ];
+  const blocks = buildTranscript(events);
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ['prompt', 'assistant', 'usage'],
+    'usage 는 턴 끝에 하나만 — 흐름 중간에 끼지 않는다',
+  );
+  assert.equal(blocks[1].text, '이 세션이 끊깁니다).', '문장이 이어져야 한다');
+  assert.equal(blocks[2].totalTokens, 465000, '누적값이므로 마지막 usage 가 답이다');
+});
+
+test('여러 턴이 섞여도 usage 는 각 턴의 끝에 하나씩 붙는다', () => {
+  seq = 0;
+  const events = [
+    ev('user_prompt', { text: 'q1' }, 't1'),
+    ev('text', { text: 'a' }, 't1'),
+    ev('usage', { total_tokens: 100 }, 't1'),
+    ev('text', { text: 'b' }, 't1'),
+    ev('user_prompt', { text: 'q2' }, 't2'),
+    ev('text', { text: 'c' }, 't2'),
+    ev('usage', { total_tokens: 200 }, 't2'),
+  ];
+  const blocks = buildTranscript(events);
+  assert.deepEqual(blocks.map((b) => b.kind), ['prompt', 'assistant', 'usage', 'prompt', 'assistant', 'usage']);
+  assert.equal(blocks[1].text, 'ab', '같은 턴의 청크는 usage 를 건너뛰고 이어진다');
+  assert.equal(blocks[2].totalTokens, 100);
+  assert.equal(blocks[5].totalTokens, 200);
+});
+
+test('붙일 블록이 없는 usage 도 버리지 않는다', () => {
+  seq = 0;
+  const blocks = buildTranscript([ev('usage', { total_tokens: 7 })]);
+  assert.deepEqual(blocks.map((b) => b.kind), ['usage']);
+  assert.equal(blocks[0].totalTokens, 7);
+});
+
 test('usage 줄은 캐시를 포함한 합계를 보여 준다 — claude 의 "in 2" 가 전부가 아니다', () => {
   const claude = {
     inputTokens: 2,
