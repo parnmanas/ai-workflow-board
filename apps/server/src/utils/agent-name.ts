@@ -79,6 +79,13 @@ export async function resolveAgentDisplayName(
   agentRepo: Repository<Agent>,
   agentId: string,
 ): Promise<string | null> {
+  // 비-uuid actor id 는 정의상 Agent 가 아니다 — 같은 UUID_RE 가드를 배치 형제
+  // resolveAgentDisplayNamesByIds 가 이미 쓰고 있고, 단일 id 경로만 남아 있었다.
+  // Postgres 에서 Agent.id 는 real uuid 라 'system'/'auto-advance' 로 findOne 하면
+  // `invalid input syntax for type uuid` 로 **throw** 해 호출자를 끌고 내려간다:
+  // board_update SSE 매핑이 그 throw 를 먹고 프레임을 통째로 유실했다.
+  // sqlite 에서는 어차피 매칭되는 행이 없어 null 이었으므로 동작 보존이다.
+  if (!agentId || !UUID_RE.test(agentId)) return null;
   const agent = await agentRepo.findOne({ where: { id: agentId } });
   if (!agent) return null;
   const map = await resolveAgentDisplayMap(agentRepo, [agent]);

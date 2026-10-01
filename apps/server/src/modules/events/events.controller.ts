@@ -144,8 +144,26 @@ export class EventsController implements OnModuleDestroy {
         this.resolveTicketColumnSnapshot(ticketId, entityId),
       // Same (id → canonical display) resolver ActivityService uses on read, so
       // the realtime board_update frame and a later refetch never disagree.
-      resolveActorDisplayName: (actorId) =>
-        actorId ? resolveAgentDisplayName(this.agentRepo, actorId) : Promise.resolve(null),
+      //
+      // 이름 보강은 장식이므로 어떤 이유로든 프레임을 죽이지 못하게 2차 방어로
+      // 감싼다 — 감싸지 않았을 때 actor_id 하나의 uuid 캐스팅 오류가 아래 catch
+      // 까지 올라가 eventSubject.next() 를 건너뛰고 board_update 를 통째로
+      // 유실시켰다. 유실되면 agent-manager 의 worktree 회수(moved/archived)와 웹
+      // UI 실시간 갱신이 함께 죽는다. resolveBoardId 는 반대로 감싸지 말 것 —
+      // board 가 없으면 scope 를 만들 수 없어 현재의 skip 이 정답이다.
+      resolveActorDisplayName: async (actorId) => {
+        if (!actorId) return null;
+        try {
+          return await resolveAgentDisplayName(this.agentRepo, actorId);
+        } catch (err) {
+          this.logService.warn(
+            'SSE',
+            `actor 이름 보강 실패 — 저장된 actor_name 으로 프레임을 내보낸다: ${err}`,
+            { actor_id: actorId },
+          );
+          return null;
+        }
+      },
     };
 
     for (const def of EVENT_TYPES) {
