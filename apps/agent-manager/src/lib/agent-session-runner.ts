@@ -237,7 +237,25 @@ interface LiveSession {
   exited: boolean;
 }
 
-const DEFAULT_IDLE_MINUTES = 30;
+/**
+ * Agent Session 의 idle reap — **기본은 끔(0)**.
+ *
+ * 예전 기본값은 30분이었다. 그런데 이 판정이 보는 것은 `live.turn` 과 대기 중인
+ * 권한/질문뿐이고, **세션 프로세스가 들고 있는 자식들은 전혀 보지 않는다.** CLI 세션은
+ * 내부적으로 서브에이전트를 띄우고, 백그라운드 셸을 돌리고, 긴 빌드/테스트를 기다린다 —
+ * 그 작업들은 ACP 턴 경계와 일치하지 않는다. 턴이 끝난 뒤에도 아직 돌고 있는 자식이
+ * 있을 수 있고, 그 상태로 30분이 지나면 세션을 죽이면서 그것들을 같이 날렸다.
+ *
+ * "응답이 없으니 죽여도 된다" 는 판단은 이 층에서 할 수 없다. 느린 것·멎은 것·자식을
+ * 기다리는 것이 여기서 구분되지 않는다 — 90초 침묵에 경고만 하고 턴을 끊지 않는 것과
+ * 같은 이유다(SILENT_TURN_WARN_MS 주석). 그래서 수명 결정은 **사람에게 남긴다**:
+ * 화면의 Close, 또는 매니저 재시작.
+ *
+ * 되살리려면 매니저 `config.json` 의 `agent_sessions.idle_minutes` 를 양수로 둔다
+ * (0 이하는 타이머를 아예 걸지 않는다). 그때도 위 한계는 그대로이니, 자식이 도는
+ * 작업을 맡기는 호스트에서는 켜지 말 것.
+ */
+const DEFAULT_IDLE_MINUTES = 0;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;

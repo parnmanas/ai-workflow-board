@@ -77,7 +77,11 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   격리는 그 디렉터리가 아니라 `OPENCODE_AUTH_CONTENT` env 가 맡으므로(cli-adapters/opencode.ts) 기록을 공유해도
   자격증명은 섞이지 않는다.
   기존 세션은 `session/load`(cwd 는 기록에서), 새 세션은 `session/new`. load 재생분은 버린다(UI 가 history 로 이미 가짐).
-  유휴 30분(`config.agent_sessions.idle_minutes`) 또는 close 로 프로세스 회수 → 상태 idle/closed, 다음 prompt 가 다시 연다.
+  프로세스 회수는 **close 뿐이다** — 유휴 reap 은 기본으로 꺼져 있다(`agent_sessions.idle_minutes` 기본 0).
+  예전 기본값 30분은 `live.turn` 과 대기 중 권한/질문만 보고 판정했는데, 세션이 내부적으로 띄운 서브에이전트·
+  백그라운드 셸·긴 빌드는 ACP 턴 경계와 일치하지 않는다 — 턴이 끝난 뒤에도 도는 자식이 있고, 그걸 모른 채
+  세션을 죽이면 같이 날아갔다. "응답이 없으니 죽여도 된다" 를 이 층에서 판단할 수 없으므로(90초 침묵에 경고만
+  하고 턴을 끊지 않는 것과 같은 이유) 수명 결정은 사람에게 남긴다. 양수로 두면 켜지지만 그 한계는 그대로다.
 - **클라이언트 `components/sessions`** — 호스트 목록 → 호스트×CLI 세션 목록(장비의 기록) → 트랜스크립트(history + 라이브
   스트림) + 컴포저. 목록은 최근 3일(`SESSION_RECENCY_WINDOW_MS`)을 기준으로 접는다 — **세션 행과 작업 폴더 그룹이 같은 창**을
   쓴다(`splitRecentSessions` / `splitRecentCwdGroups`). 사이드바가 폴더는 전부 펼쳐 놓고 세션만 접던 어긋남을 없앤 것이고,
