@@ -1349,6 +1349,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         permission_request_id: event.permission_request_id,
         option_id: event.option_id,
         mode_id: event.mode_id,
+        image_ref: event.image_ref,
         config_id: event.config_id,
         config_value: event.config_value,
         config_defaults: event.config_defaults,
