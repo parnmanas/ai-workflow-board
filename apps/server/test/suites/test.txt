@@ -72,6 +72,7 @@ test/comment-dedupe-created-at-precision.test.mjs
 test/comment-tools-dedupe.test.mjs
 test/comment-tools-pending-gate-toctou.test.mjs
 test/comment-tools-pending-gate.test.mjs
+test/comment-tools-user-author-uuid-guard.test.mjs
 test/completion-verification-gate.test.mjs
 test/consensus-meta-self-exclusion-grep.test.mjs
 test/consensus-state.test.mjs

@@ -10,6 +10,7 @@ test/qa-flows/backlog-promotion-pg-slot-race.test.mjs
 test/qa-flows/chat-attachments.test.mjs
 test/qa-flows/chat-dm-promotion-pg-race.test.mjs
 test/qa-flows/chat-message-read.test.mjs
+test/qa-flows/comment-author-uuid-guard-pg.test.mjs
 test/qa-flows/comment-dedupe-pg.test.mjs
 test/qa-flows/comment-pagination.test.mjs
 test/qa-flows/dispatch-intent-pg-race.test.mjs
