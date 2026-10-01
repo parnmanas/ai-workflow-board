@@ -23,6 +23,7 @@ import SessionComposer from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
+import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -514,7 +515,13 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     () => describeSessionAuth(live?.auth, host?.cli_settings?.[cli]?.name),
     [live?.auth, host, cli],
   );
-  const configOptions = live?.config_options ?? [];
+  // 모델 목록은 다른 화면과 같은 단일 소스(src/cli/hostModels.ts)에서 온다 — 지금 연결된
+  // 어댑터가 보고한 것만 보여주면 새 세션 대화상자·세션 설정과 목록이 어긋난다.
+  const hostModels = useHostModels(managerId, cli);
+  const configOptions = useMemo(
+    () => withHostModelOption(live?.config_options ?? [], hostModels.models),
+    [live?.config_options, hostModels.models],
+  );
   const commands = live?.available_commands ?? [];
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
   const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
