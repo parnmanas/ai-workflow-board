@@ -24,6 +24,7 @@ import { AGENT_MANAGER_HOME } from './constants.js';
 import { normalizeCredentialFields } from './credential-fields.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
+import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import {
   fetchSessionCredential,
   patchAgentSessionState,
@@ -233,29 +234,36 @@ interface LiveSession {
   authStatus: AgentSessionAuthPatch | null;
   /** backend profile lease — 프로세스를 회수할 때 같이 반납한다. */
   runtimeLease: RuntimeLease | null;
+  /** 이 프로세스의 cli-home(세션 전용 홈, 운영자 로그인이면 null). 진행 신호 3
+   *  (cli-home 서브트리 mtime)의 스캔 루트다 — 없으면 그 신호만 건너뛴다. */
+  cliHome: string | null;
+  /** 어댑터가 **무엇이든** 내보낸 마지막 시각(epoch ms). 진행 신호 1.
+   *  `#enqueue` 한 곳에서만 찍는다 — 모든 이벤트가 그 깔때기를 지난다. */
+  lastOutputAtMs: number | null;
   closing: boolean;
   exited: boolean;
 }
 
 /**
- * Agent Session 의 idle reap — **기본은 끔(0)**.
+ * Agent Session 의 유휴 회수 창 — 기본 3시간.
  *
- * 예전 기본값은 30분이었다. 그런데 이 판정이 보는 것은 `live.turn` 과 대기 중인
- * 권한/질문뿐이고, **세션 프로세스가 들고 있는 자식들은 전혀 보지 않는다.** CLI 세션은
- * 내부적으로 서브에이전트를 띄우고, 백그라운드 셸을 돌리고, 긴 빌드/테스트를 기다린다 —
- * 그 작업들은 ACP 턴 경계와 일치하지 않는다. 턴이 끝난 뒤에도 아직 돌고 있는 자식이
- * 있을 수 있고, 그 상태로 30분이 지나면 세션을 죽이면서 그것들을 같이 날렸다.
+ * 예전에는 30분이었고, 판정이 `live.turn` 과 대기 중 권한/질문만 봤다. 그래서 세션이 들고
+ * 있는 자식들(서브에이전트 · 백그라운드 셸 · 긴 빌드)을 보지 못해 **일하고 있는 세션을
+ * 죽였다**. 그 기본값을 한 번 0(끔)으로 내렸다가, 이제 chat/ticket 세션이 이미 쓰고 있는
+ * 3-신호 진행 gate(`session-progress.ts`, 티켓 6ff827cb)를 붙이고 다시 켠다.
  *
- * "응답이 없으니 죽여도 된다" 는 판단은 이 층에서 할 수 없다. 느린 것·멎은 것·자식을
- * 기다리는 것이 여기서 구분되지 않는다 — 90초 침묵에 경고만 하고 턴을 끊지 않는 것과
- * 같은 이유다(SILENT_TURN_WARN_MS 주석). 그래서 수명 결정은 **사람에게 남긴다**:
- * 화면의 Close, 또는 매니저 재시작.
+ * 지배 원칙은 그 모듈이 정한 그대로다: **타이머 만료는 CHECK 이고 KILL 이 아니다.** 시계가
+ * 흘렀다는 것은 증거가 아니고, 죽이는 근거는 진행 증거의 *부재* 뿐이다(`#reapIfIdle`).
+ * 게다가 이 타이머는 턴이 도는 동안에는 아예 걸리지 않으므로, 회수 후보는 "턴도 없고,
+ * 출력도 없고, 자손 프로세스도 없고, cli-home 에 쓰기도 없는" 세션뿐이다.
  *
- * 되살리려면 매니저 `config.json` 의 `agent_sessions.idle_minutes` 를 양수로 둔다
- * (0 이하는 타이머를 아예 걸지 않는다). 그때도 위 한계는 그대로이니, 자식이 도는
- * 작업을 맡기는 호스트에서는 켜지 말 것.
+ * 창을 30분이 아니라 3시간으로 둔 이유: 회수가 공짜가 아니다. 전사는 디스크에 남아
+ * `--resume` 으로 복원되지만 CLI 의 따뜻한 컨텍스트는 사라진다. 자원 회수의 이득이
+ * 그 비용을 넘는 지점은 "잠깐 자리를 비웠다" 가 아니라 "사실상 버려졌다" 쪽이다.
+ *
+ * `agent_sessions.idle_minutes` 로 조절하고, **0 이하면 타이머를 아예 걸지 않는다**(완전 끔).
  */
-const DEFAULT_IDLE_MINUTES = 0;
+const DEFAULT_IDLE_MINUTES = 180;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 6 * 60 * 60_000;
@@ -764,6 +772,8 @@ export class AgentSessionRunner {
         authSource: auth.source,
         authStatus: null,
         runtimeLease: auth.runtimeLease ?? null,
+        cliHome: auth.cliHome,
+        lastOutputAtMs: null,
         closing: false,
         exited: false,
       };
@@ -1694,6 +1704,9 @@ export class AgentSessionRunner {
       live.preSessionEvents.push(...events);
       return [];
     }
+    // 진행 신호 1 — 어댑터가 무엇이든 내보냈다. 모든 이벤트가 이 깔때기를 지나므로
+    // 여기서만 찍으면 된다(throttle 하지 않는다 — idle gate 의 증거라 한 줄도 놓치면 안 된다).
+    if (events.length) live.lastOutputAtMs = Date.now();
     const now = new Date().toISOString();
     const stamped: StampedEvent[] = events.map((e) => {
       live.seq += 1;
@@ -1716,13 +1729,58 @@ export class AgentSessionRunner {
     const ms = this.#options.idleMinutes * 60_000;
     if (ms <= 0) return;
     live.idleTimer = setTimeout(() => {
-      if (live.turn || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0) {
+      // **타이머 만료는 CHECK 이고 KILL 이 아니다** (session-progress.ts 의 지배 원칙).
+      // 시계가 흘렀다는 것 자체는 증거가 아니다 — 죽이는 근거는 진행 증거의 *부재* 뿐이다.
+      void this.#reapIfIdle(live, ms);
+    }, ms);
+    live.idleTimer.unref?.();
+  }
+
+  /**
+   * 유휴 타이머가 만료됐다 — **회수해도 되는지 확인한다.**
+   *
+   * 턴·대기 중 권한/질문만 보던 예전 판정은 세션이 들고 있는 자식들을 보지 못해, 서브에이전트나
+   * 백그라운드 빌드가 도는 세션을 죽였다. chat/ticket 세션 쪽은 이 문제를 이미 3-신호 gate 로
+   * 풀어 놨으므로(`session-progress.ts`, 티켓 6ff827cb) 같은 판정을 그대로 쓴다 — 두 세션 타입이
+   * 한 규칙을 공유하니 한쪽만 고쳐지는 드리프트도 없다. 신호 셋 중 **하나라도** 신선하면 살아있다:
+   *
+   *   1. 어댑터 출력(`lastOutputAtMs`)
+   *   2. 살아있는 비-benign 자손 프로세스 — 에이전트가 띄워 기다리는 긴 빌드·테스트
+   *   3. cli-home 서브트리 mtime — **같은 OS 프로세스 안에서 도는 서브에이전트/Workflow**.
+   *      그건 stdout 도 자식 프로세스도 만들지 않지만 transcript 파일은 계속 자란다.
+   *
+   * 신호가 하나도 없으면 "죽었다" 가 아니라 "관측 가능한 증거가 없다" 다 — 순수한 외부 대기는
+   * 어느 신호에도 안 걸린다(session-progress.ts 의 gap 3). 그래서 이 경로는 기본으로 꺼져 있고
+   * (`agent_sessions.idle_minutes` 기본 0), 켠 호스트에서만 돈다.
+   */
+  async #reapIfIdle(live: LiveSession, freshMs: number): Promise<void> {
+    if (live.closing || live.exited) return;
+    // 턴·승인 대기는 gate 를 돌릴 필요도 없는 확정 신호다.
+    if (live.turn || live.pendingPermissions.size > 0 || live.pendingElicitations.size > 0) {
+      this.#touch(live);
+      return;
+    }
+    const pid = live.client.process?.pid ?? null;
+    if (pid) {
+      let progress: ProgressCheckResult | null = null;
+      try {
+        progress = await checkSessionProgress(
+          { pid, cliHomeDir: live.cliHome, cwd: live.cwd, freshMs },
+          live.lastOutputAtMs,
+        );
+      } catch (err: any) {
+        // 판정을 못 했으면 **죽이지 않는다** — 증거 없음과 확인 실패는 다르다.
+        log(`[agent-session] idle gate failed ${live.cli}/${live.sessionId.slice(0, 8)}: ${err?.message ?? err} — keeping the session`);
         this.#touch(live);
         return;
       }
-      void this.#closeLive(live.cli, live.sessionId, 'idle', 'idle');
-    }, ms);
-    live.idleTimer.unref?.();
+      if (progress.alive) {
+        log(`[agent-session] idle timer fired but ${live.cli}/${live.sessionId.slice(0, 8)} is alive (${progress.reasons.join('; ')}) — re-arming`);
+        this.#touch(live);
+        return;
+      }
+    }
+    await this.#closeLive(live.cli, live.sessionId, 'idle', 'idle');
   }
 
   #clearIdle(live: LiveSession): void {
@@ -1775,7 +1833,8 @@ export class AgentSessionRunner {
     const text = finalStatus === 'closed'
       ? 'Agent process stopped.'
       : reason === 'idle'
-        ? `Idle for ${this.#options.idleMinutes} min — agent process stopped. The next prompt reopens the session.`
+        ? `No progress for ${this.#options.idleMinutes} min (no output, no background task, no cli-home activity) `
+          + '— agent process stopped. The next prompt reopens the session.'
         : reason === 'credential_changed'
           ? 'CLI settings changed — reopening the session with the new credential.'
           : `Agent process stopped (${reason}). The next prompt reopens the session.`;
