@@ -50,6 +50,29 @@ async function waitForTicket(ds, ticketId, predicate, timeoutMs = 4000) {
   }
 }
 
+// 티켓의 ActivityLog 행을 `predicate(rows)` 가 성립할 때까지 유계 폴링한다.
+// 위 waitForTicket 이 반환했다는 사실은 cascade 의 감사행이 이미 들어왔다는 증거가
+// 아니다 — column_id UPDATE 는 트랜잭션 안에서 커밋되지만 `moved` /
+// actor_id='auto-advance' 행은 그 커밋 *이후* 에 기록된다(trigger-loop.service.ts,
+// 롤백된 이동이 SSE 를 타지 않게 하려는 의도된 설계). sql.js 는 트랜잭션 직렬화 큐
+// 때문에 이 틈이 사실상 0 이고 Postgres 는 실제 왕복이 있어 틈이 열린다 — 그래서
+// `qa-flows on Postgres` 에서만 나던 flake 였다.
+// 상한을 넘겨도 throw 하지 않고 *마지막 스냅샷* 을 반환한다: halt 로 잘못 분기한
+// 진짜 회귀가 호출부의 단언 메시지 대신 불투명한 "Timeout" 으로 바뀌면 진단이
+// 나빠지기 때문이다.
+async function waitForTicketActivity(ds, ticketId, predicate, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  const repo = ds.getRepository('ActivityLog');
+  let rows = [];
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    rows = await repo.find({ where: { ticket_id: ticketId } });
+    if (predicate(rows)) return rows;
+    if (Date.now() > deadline) return rows;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 // Settle helper for the HALT case: there is no positive state change to wait
 // for (the ticket must stay put), so give the listener a beat to run and prove
 // it did NOT advance.
@@ -279,9 +302,11 @@ test('auto-advance halts fully-unassigned tickets and advances staffed ones', as
   );
 
   step('(d) NO orphan-halt flag was written — a reporter is a holder, not an orphan');
-  const reporterLogs = await ds
-    .getRepository('ActivityLog')
-    .find({ where: { ticket_id: reporterOnly.id } });
+  // 두 단언은 *같은 스냅샷* 으로 평가한다 — 따로 조회하면 긍정/부정 단언이 서로
+  // 다른 시점을 보게 된다.
+  const reporterLogs = await waitForTicketActivity(ds, reporterOnly.id, (rows) =>
+    rows.some((l) => l.action === 'moved' && l.actor_id === 'auto-advance'),
+  );
   assert.ok(
     !reporterLogs.some((l) => l.action === 'auto_advance_halted_unassigned'),
     `reporter-only ticket must NOT produce an auto_advance_halted_unassigned row; got ${JSON.stringify(reporterLogs.map((l) => l.action))}`,
