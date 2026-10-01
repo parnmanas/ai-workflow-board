@@ -307,7 +307,7 @@ export interface AcpAdapterReport {
   cli: string;
   package: string | null;
   version: string | null;
-  source: 'override' | 'bundled' | 'path' | 'npx' | 'builtin';
+  source: 'override' | 'managed' | 'bundled' | 'path' | 'npx' | 'builtin';
 }
 
 export interface AgentSessionHeartbeatEntry {

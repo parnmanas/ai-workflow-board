@@ -433,3 +433,68 @@ test('전부 최신이면 "전부 업데이트" 를 내놓지 않는다 — 누�
     false,
   );
 });
+
+// ─── ACP 어댑터 Update ──────────────────────────────────────────────────────
+//
+// 어댑터는 모델 id 를 자기 번들에 하드코딩하므로 어댑터 버전이 세션의 모델 목록을 정한다. 매니저
+// 번들본은 의존성 범위에 묶여 새 어댑터를 따라오지 못해 — 운영자가 올릴 방법이 없었다. 이제 어댑터
+// 줄마다 Update(`update_acp_adapter`)가 있고, "전부 업데이트" 도 뒤처진 어댑터를 센다.
+
+const WITH_ADAPTERS = (version, latest, source = 'bundled') => ({
+  ...BASE,
+  cli_installs: [],
+  acp_adapters: [
+    { cli: 'claude', package: '@agentclientprotocol/claude-agent-acp', version, source },
+    { cli: 'opencode', package: null, version: null, source: 'builtin' },
+  ],
+  acp_adapter_latest_versions: { '@agentclientprotocol/claude-agent-acp': latest },
+});
+
+const adapterButton = (view) =>
+  view.container.querySelector('[data-acp-adapter="claude"] button');
+
+test('뒤처진 어댑터는 Update 가 열려 있고, 누르면 그 CLI 로 요청한다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const calls = [];
+  const view = render(t, WITH_ADAPTERS('0.84.0', '0.85.0'), () => {}, new Set(), { onUpdateAdapter: (cli) => calls.push(cli) });
+  await act(async () => {});
+  const row = view.container.querySelector('[data-acp-adapter="claude"]');
+  assert.match(row.textContent, /0\.84\.0/);
+  assert.match(row.textContent, /0\.85\.0 뒤처짐/);
+  const button = adapterButton(view);
+  assert.ok(button, '어댑터 줄에 Update 가 있어야 한다 — 없던 것이 이번 수정의 전부다');
+  assert.equal(button.disabled, false);
+  click(button);
+  assert.deepEqual(calls, ['claude']);
+  // 별도 어댑터가 없는 CLI(builtin)는 그리지 않는다 — 올릴 패키지가 없다.
+  assert.equal(Boolean(view.container.querySelector('[data-acp-adapter="opencode"]')), false);
+});
+
+test('최신인 어댑터의 Update 는 잠기고, 진행 중이면 진행 중이라고 말한다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const latest = render(t, WITH_ADAPTERS('0.85.0', '0.85.0', 'managed'), () => {}, new Set(), { onUpdateAdapter: () => {} });
+  await act(async () => {});
+  assert.equal(adapterButton(latest).disabled, true);
+  assert.match(latest.container.querySelector('[data-acp-adapter="claude"]').textContent, /\(managed\)/);
+  latest.unmount();
+
+  const busy = render(t, WITH_ADAPTERS('0.84.0', '0.85.0'), () => {}, new Set(), {
+    onUpdateAdapter: () => {},
+    adapterPending: new Set(['claude']),
+  });
+  await act(async () => {});
+  assert.equal(adapterButton(busy).textContent.trim(), '업데이트 중…');
+  assert.equal(adapterButton(busy).disabled, true);
+});
+
+test('"전부 업데이트" 는 뒤처진 어댑터도 센다 — CLI 가 전부 최신이어도 어댑터만 뒤처지면 뜬다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const view = render(t, WITH_ADAPTERS('0.84.0', '0.85.0'), () => {}, new Set(), { onUpdateAll: () => {} });
+  await act(async () => {});
+  const all = buttons(view).find((b) => b.textContent.includes('전부 업데이트'));
+  assert.ok(all, 'CLI 설치본은 없어도 뒤처진 어댑터가 있으면 버튼이 뜬다');
+  assert.match(all.textContent, /\(1\)/);
+});

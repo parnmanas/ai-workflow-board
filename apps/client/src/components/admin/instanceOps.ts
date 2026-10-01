@@ -71,6 +71,8 @@ export const INSTANCE_OP = {
   updateAllClis: 'update_all_clis',
   /** 설치본 단위. 같은 호스트의 다른 설치본은 동시에 올릴 수 있다. */
   updateCli: (installKey: string) => `update_cli:${installKey}`,
+  /** ACP 어댑터 단위(cli). */
+  updateAdapter: (cli: string) => `update_acp_adapter:${cli}`,
 } as const;
 
 const UPDATE_CLI_PREFIX = 'update_cli:';
@@ -80,6 +82,17 @@ export function pendingInstallKeys(active: ReadonlySet<string>): ReadonlySet<str
   const out = new Set<string>();
   for (const op of active) {
     if (op.startsWith(UPDATE_CLI_PREFIX)) out.add(op.slice(UPDATE_CLI_PREFIX.length));
+  }
+  return out;
+}
+
+const UPDATE_ADAPTER_PREFIX = 'update_acp_adapter:';
+
+/** 올리는 중인 ACP 어댑터(cli) 집합. */
+export function pendingAdapterClis(active: ReadonlySet<string>): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const op of active) {
+    if (op.startsWith(UPDATE_ADAPTER_PREFIX)) out.add(op.slice(UPDATE_ADAPTER_PREFIX.length));
   }
   return out;
 }

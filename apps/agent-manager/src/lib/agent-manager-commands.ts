@@ -72,6 +72,7 @@ import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
 import { cliDispatch, credentialProviderKind, findCliModule, requiredCredentialFields } from './clis/index.js';
 import { runSelfUpdate, restartManager } from './self-update.js';
 import type { CliLoginManager } from './cli-login.js';
+import type { AcpAdapterUpdateResult } from './clis/acp-adapter-update.js';
 
 type CommandKind =
   | 'spawn_agent'
@@ -108,6 +109,11 @@ type CommandKind =
   // (updatable · 이미 최신인지)을 공유한다. 실패는 설치본 단위로 격리되고 ack 는
   // 요약 한 줄이다 — restart_all_agents / update_plugins 와 같은 fan-out 계약.
   | 'update_all_clis'
+  // ACP 어댑터(claude-agent-acp · codex-acp)를 올린다. args: { cli? } — 생략하면 전부.
+  // 어댑터 버전이 세션의 모델 목록을 정하는데(모델 id 가 어댑터 번들에 하드코딩돼 있다),
+  // 매니저 번들본은 의존성 범위에 묶여 새 어댑터를 따라오지 못한다. 그래서 매니저 홈에
+  // 최신을 설치하고, 해석은 홈 설치본과 번들본 중 더 새 것을 쓴다(clis/bundled-acp.ts).
+  | 'update_acp_adapter'
   // 운영자가 화면에서 승인한 권한 상승 명령 하나. args: { request_id, sudo_ticket }.
   // **실행할 명령은 args 에 없다** — 매니저가 승인된 정본을 서버에서 다시 받아
   // 간다(claimPrivilegedCommand). 운영자가 읽고 승인한 것과 도는 것이 갈라지면
@@ -139,6 +145,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'refresh_available_models',
   'update_cli',
   'update_all_clis',
+  'update_acp_adapter',
   'run_privileged_command',
 ]);
 
@@ -228,6 +235,10 @@ export interface CommandHandlerDeps {
   /** 이 호스트의 올릴 수 있는 설치본을 전부 올린다. updateCli 와 같은 이유로
    *  optional — 배선되지 않은 매니저는 명확한 사유로 error ack 한다. */
   updateAllClis?: ((sudoTicket?: string | null) => Promise<UpdateAllClisResult>) | null;
+  /** ACP 어댑터를 올린다(cli 생략 시 전부). 배선되지 않은 매니저는 명확한 사유로 error ack. */
+  updateAcpAdapters?:
+    | ((cli?: string | null) => Promise<{ results: AcpAdapterUpdateResult[]; heartbeatPosted: boolean }>)
+    | null;
   /** 운영자가 승인한 권한 상승 명령 하나를 실행한다. 배선되지 않은 매니저는
    *  명확한 사유로 error ack 한다 — 조용히 성공한 척하지 않는다. */
   runPrivilegedCommand?:
@@ -388,6 +399,8 @@ export class AgentManagerCommandHandler {
         return this.#updateCli(payload);
       case 'update_all_clis':
         return this.#updateAllClis(payload);
+      case 'update_acp_adapter':
+        return this.#updateAcpAdapter(payload);
       case 'run_privileged_command':
         return this.#runPrivilegedCommand(payload);
     }
@@ -1176,6 +1189,25 @@ export class AgentManagerCommandHandler {
         : 'update_all_clis → every install is already up to date (no-op)';
     }
     return `update_all_clis — ${parts.join('; ')}`;
+  }
+
+  /**
+   * ACP 어댑터를 올린다(`update_acp_adapter`). 하나라도 실패하면 error ack — "다 됐다" 로
+   * 뭉개지 않는다. 이미 열려 있는 세션은 옛 어댑터 프로세스를 그대로 쓴다는 사실을 ack 에 싣는다
+   * (운영자가 "올렸는데 왜 그대로냐" 를 묻지 않도록).
+   */
+  async #updateAcpAdapter(payload: AgentManagerCommandPayload): Promise<string> {
+    const update = this.#deps.updateAcpAdapters;
+    if (!update) throw new Error('update_acp_adapter is not wired on this manager');
+    const cli = typeof payload.args?.cli === 'string' ? payload.args.cli.trim() : '';
+    const { results } = await update(cli || null);
+    if (results.length === 0) {
+      throw new Error(`update_acp_adapter: no package adapter is known for ${cli ? `cli=${cli}` : 'this manager'}`);
+    }
+    const failed = results.filter((r) => !r.ok);
+    const line = results.map((r) => r.detail).join(' | ');
+    if (failed.length) throw new Error(`update_acp_adapter — ${line}`);
+    return `update_acp_adapter — ${line}`;
   }
 
   async #updateCli(payload: AgentManagerCommandPayload): Promise<string> {

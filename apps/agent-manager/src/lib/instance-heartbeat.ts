@@ -111,8 +111,10 @@ export interface InstanceMeta {
   // 보고하고 어댑터는 "있다/없다" 만 봤기 때문에, 세 호스트의 claude-agent-acp 가
   // 0.79.0 (최신 0.84.0) 으로 조용히 5버전 썩어도 아무도 볼 수 없었다. 어댑터가 매니저
   // 의존성으로 번들된 뒤에는 `source` 가 "번들본이 실제로 쓰이는지" 까지 알려 준다.
-  // 부팅 시 한 번 계산한 정적 값이다 — 번들본은 매니저를 올리지 않으면 바뀌지 않는다.
+  // 정적 값이 아니라 provider 다 — `update_acp_adapter` 가 매니저 홈에 새 어댑터를 올리면
+  // 재시작 없이 바뀌므로, 매 tick 현재 값을 읽어야 화면이 바로 따라온다.
   acpAdapters?: AcpAdapterEntry[] | null;
+  acpAdaptersProvider?: (() => AcpAdapterEntry[] | null) | null;
   /** 위 어댑터 패키지들의 **최신 배포 버전**(패키지명 → 버전). cliLatestVersions 와 같은
    *  느린 타이머가 채운다. 설치 버전과 짝을 이뤄 UI 가 뒤처짐을 판정한다 — 이것 없이는
    *  버전만 보이고 "올릴 게 있는가" 를 알 수 없다. 조회 실패한 패키지는 키가 없다. */
@@ -591,6 +593,14 @@ export class InstanceHeartbeat {
           cliLatestVersions = null;
         }
       }
+      let acpAdaptersNow: AcpAdapterEntry[] | null = meta?.acpAdapters ?? null;
+      if (meta?.acpAdaptersProvider) {
+        try {
+          acpAdaptersNow = meta.acpAdaptersProvider() ?? acpAdaptersNow;
+        } catch (err: any) {
+          log(`Instance heartbeat: acp-adapters provider failed: ${err?.message ?? err}`);
+        }
+      }
       // 어댑터 최신 버전 — cliLatestVersions 와 같은 best-effort 계약(실패하면 필드가
       // 빠질 뿐, 하트비트는 계속 간다).
       let acpAdapterLatest: Record<string, string> | null = null;
@@ -638,7 +648,7 @@ export class InstanceHeartbeat {
           : {}),
         ...(cliInstalls && cliInstalls.length ? { cli_installs: cliInstalls } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
-        ...(meta?.acpAdapters?.length ? { acp_adapters: meta.acpAdapters } : {}),
+        ...(acpAdaptersNow?.length ? { acp_adapters: acpAdaptersNow } : {}),
         ...(acpAdapterLatest && Object.keys(acpAdapterLatest).length
           ? { acp_adapter_latest_versions: acpAdapterLatest }
           : {}),

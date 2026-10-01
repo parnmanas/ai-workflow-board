@@ -2198,13 +2198,14 @@ export interface AgentLaunchSpecEntry {
 
 // One Runtime Host instance heartbeating against AWB.
 /** Runtime Host 가 쓰는 ACP 어댑터 한 줄 (하트비트 `acp_adapters`).
- *  `source` = 어디서 온 어댑터인가: bundled(매니저와 함께 설치 — 정상) ·
+ *  `source` = 어디서 온 어댑터인가: managed(운영자가 update_acp_adapter 로 올린 것) ·
+ *  bundled(매니저와 함께 설치 — 정상) ·
  *  path(장비 전역 설치 — 번들 없는 구버전 매니저) · npx · override · builtin. */
 export interface AcpAdapterReport {
   cli: string;
   package: string | null;
   version: string | null;
-  source: 'override' | 'bundled' | 'path' | 'npx' | 'builtin';
+  source: 'override' | 'managed' | 'bundled' | 'path' | 'npx' | 'builtin';
 }
 
 /** Runtime Host 에 깔린 CLI 설치본 한 줄 (하트비트 `cli_installs`). */
@@ -2577,7 +2578,10 @@ export type AgentManagerCommandKind =
   // 같은 호스트의 올릴 수 있는 설치본을 **전부** 올린다. args: { sudo_ticket? }.
   // 무엇을 올릴지는 매니저가 자기 설치 열거로 정한다 — 화면이 목록을 실어 보내면
   // 그 목록이 낡은 순간 엉뚱한 설치본을 올리게 된다.
-  | 'update_all_clis';
+  | 'update_all_clis'
+  // ACP 어댑터를 올린다. args: { cli? } — 생략하면 전부. 매니저 홈에 설치하고 매니저 번들본과
+  // 비교해 더 새 쪽을 쓴다(번들본은 의존성 범위에 묶여 새 어댑터를 따라오지 못한다).
+  | 'update_acp_adapter';
 
 export interface AgentManagerCommandResult {
   ok: boolean;

@@ -19,7 +19,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// 운영자 홈과 격리한다 — 그 장비에서 update_acp_adapter 로 더 새 어댑터를 올려 두었다면 해석이
+// managed 를 고르므로, "번들본이 쓰인다" 는 이 파일의 단언이 장비 상태에 따라 깨진다.
+process.env.AWB_ACP_ADAPTERS_DIR = mkdtempSync(join(tmpdir(), 'awb-acp-empty-'));
 
 import { resolveBundledAcpCommand } from '../dist/lib/clis/bundled-acp.js';
 import { cliSessions } from '../dist/lib/clis/index.js';

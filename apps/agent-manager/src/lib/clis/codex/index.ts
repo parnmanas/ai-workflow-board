@@ -10,7 +10,7 @@ import { defineCliModule } from '../cli-module.js';
 import { oneshotCapabilities } from '../shared-capabilities.js';
 import { codexLogin } from './login.js';
 import { codexSessionStore } from './sessions.js';
-import { resolveBundledAcpCommand } from '../bundled-acp.js';
+import { resolveAcpAdapter } from '../bundled-acp.js';
 
 export function resolveCodexHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.CODEX_HOME?.trim() || join(homedir(), '.codex');
@@ -79,8 +79,9 @@ export const codexModule = defineCliModule({
       // 세대의 코어를 번들해 최신 모델을 쓴다. zed-industries 것은 2026-07 에 archive 됐고
       // 옛 코어라 새 모델을 "requires a newer version of Codex" 로 거부한다.
       // 번들본 우선 — claude 와 같은 이유(bundled-acp.ts).
-      const bundled = resolveBundledAcpCommand('@agentclientprotocol/codex-acp', 'codex-acp');
-      if (bundled) return bundled;
+      // managed(운영자가 올린 것) / bundled 중 더 새 것 — bundled-acp.ts.
+      const adapter = resolveAcpAdapter('@agentclientprotocol/codex-acp', 'codex-acp');
+      if (adapter) return { command: adapter.command, args: adapter.args };
       const found = await findOnPath('codex-acp');
       return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/codex-acp'] };
     },

@@ -74,6 +74,9 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   // 보내는 것과 영향 범위가 같아 같은 가드를 쓴다 — 다만 한 번에 여러 벌이
   // 움직이므로 ack 는 설치본 단위 성패를 요약해서 돌려준다.
   'update_all_clis',
+  // ACP 어댑터를 올린다(args.cli 생략 시 전부). 매니저 홈에 설치하므로 권한 상승이 필요 없고
+  // 프로세스도 재시작하지 않지만, 그 장비의 새 세션 전부가 새 어댑터를 쓰므로 같은 관리자 가드.
+  'update_acp_adapter',
   // 운영자가 화면에서 승인한 권한 상승 명령 하나. 승인 흐름이 발급하는 경로
   // (approve 엔드포인트)에서만 디스패치되지만, 다른 verb 와 같은 관리자 가드를
   // 통과하므로 허용목록에도 명시한다.
@@ -509,7 +512,7 @@ export class AgentManagerController {
       : undefined;
     // 이 장비가 쓰는 ACP 어댑터와 버전. 어댑터 버전이 세션의 모델 목록을 정하므로
     // 뒤처짐이 화면에 보여야 한다. 들어온 값은 길이를 자르고 source 는 알려진 값만 받는다.
-    const ACP_SOURCES = new Set(['override', 'bundled', 'path', 'npx', 'builtin']);
+    const ACP_SOURCES = new Set(['override', 'managed', 'bundled', 'path', 'npx', 'builtin']);
     const acp_adapters = Array.isArray(body?.acp_adapters)
       ? body.acp_adapters
         .filter((e: any) => e && typeof e === 'object' && typeof e.cli === 'string' && ACP_SOURCES.has(e.source))
@@ -518,7 +521,7 @@ export class AgentManagerController {
           cli: String(e.cli).slice(0, 32),
           package: typeof e.package === 'string' ? e.package.slice(0, 200) : null,
           version: typeof e.version === 'string' ? e.version.slice(0, 64) : null,
-          source: e.source as 'override' | 'bundled' | 'path' | 'npx' | 'builtin',
+          source: e.source as 'override' | 'managed' | 'bundled' | 'path' | 'npx' | 'builtin',
         }))
       : undefined;
     const acp_adapter_latest_versions =

@@ -12,18 +12,13 @@
 // PATH 에 옛 전역 설치가 남아 있어도 번들본이 이기도록 해석 순서를 바꿨으므로,
 // `source` 가 'path' 로 나오면 그 매니저는 번들이 없는 구버전이라는 뜻이다.
 //
-// **업데이트 경로에 대한 중요한 사실**: 번들본을 쓰는 매니저에서 어댑터만 따로
-// `npm i -g` 해도 **아무 효과가 없다**(번들본이 이긴다). 올리는 유일한 경로는
-// 매니저를 올리는 것이고, 매니저가 가져오는 버전은 AWB 저장소의 의존성 범위가
-// 정한다. 그래서 화면은 "어댑터 Update 버튼" 을 내놓아선 안 된다 — 눌러도 안 되는
-// 버튼이 된다. 대신 뒤처짐을 보여주고, 그것이 AWB 쪽 범위 조정 사항임을 말한다.
-
-import { createRequire } from 'node:module';
+// **업데이트 경로**: 전역 `npm i -g <adapter>` 는 효과가 없다(번들본이 PATH 보다 앞이다).
+// 운영자가 올리는 길은 `update_acp_adapter` 커맨드다 — 매니저 홈(`acp-adapters/`)에 설치하고,
+// 해석은 managed/bundled 중 더 새 것을 고른다(bundled-acp.ts). 매니저 번들의 의존성 범위
+// (`^0.84.0`)에 묶이지 않는다.
 
 import { cliSessions, listCliModules } from './index.js';
-import { resolveBundledAcpCommand } from './bundled-acp.js';
-
-const require_ = createRequire(import.meta.url);
+import { resolveAcpAdapter } from './bundled-acp.js';
 
 /** 하트비트에 싣는 어댑터 한 줄. server·agent-manager 공동 contract. */
 export interface AcpAdapterEntry {
@@ -36,12 +31,13 @@ export interface AcpAdapterEntry {
   /**
    * 어디서 온 어댑터인가 — 해석 순서와 같은 어휘다.
    *   override: env AWB_ACP_COMMAND_<CLI> 가 정했다 (운영자가 고정한 것)
+   *   managed : 운영자가 `update_acp_adapter` 로 매니저 홈에 올린 것 (번들보다 새 것일 때만 쓰인다)
    *   bundled : 매니저와 함께 설치된 것 (정상 상태)
    *   path    : 장비에 전역 설치된 것 (번들 없는 구버전 매니저)
    *   npx     : 그때그때 당겨오는 것 (설치돼 있지 않다)
    *   builtin : CLI 자신이 ACP 를 내장한다 (별도 어댑터 없음)
    */
-  source: 'override' | 'bundled' | 'path' | 'npx' | 'builtin';
+  source: 'override' | 'managed' | 'bundled' | 'path' | 'npx' | 'builtin';
 }
 
 /** CLI → 어댑터 npm 패키지. 모듈 선언에서 끌어낼 수 없는 유일한 값이라 여기 둔다
@@ -51,6 +47,16 @@ const ADAPTER_PACKAGES: Readonly<Record<string, { pkg: string; bin: string }>> =
   claude: { pkg: '@agentclientprotocol/claude-agent-acp', bin: 'claude-agent-acp' },
   codex: { pkg: '@agentclientprotocol/codex-acp', bin: 'codex-acp' },
 };
+
+/** CLI 의 어댑터 패키지·bin 이름. 별도 어댑터가 없는 CLI(opencode 등)는 null. */
+export function acpAdapterSpec(cli: string): { pkg: string; bin: string } | null {
+  return ADAPTER_PACKAGES[cli] ?? null;
+}
+
+/** 패키지 어댑터를 쓰는 CLI 들. */
+export function acpAdapterClis(): string[] {
+  return Object.keys(ADAPTER_PACKAGES);
+}
 
 /** 이 빌드가 어댑터 버전을 보고할 수 있는 패키지들 — npm latest 조회 대상. */
 export function acpAdapterPackages(): string[] {
@@ -83,9 +89,9 @@ export async function collectAcpAdapters(
       out.push({ cli: module.id, package: known.pkg, version: null, source: 'override' });
       continue;
     }
-    const bundled = resolveBundledAcpCommand(known.pkg, known.bin);
-    if (bundled) {
-      out.push({ cli: module.id, package: known.pkg, version: readVersion(known.pkg), source: 'bundled' });
+    const adapter = resolveAcpAdapter(known.pkg, known.bin);
+    if (adapter) {
+      out.push({ cli: module.id, package: known.pkg, version: adapter.version, source: adapter.source });
       continue;
     }
     const onPath = await findOnPath(known.bin).catch(() => null);
@@ -100,14 +106,4 @@ export async function collectAcpAdapters(
     });
   }
   return out;
-}
-
-/** 번들된 패키지의 version. 못 읽으면 null. */
-function readVersion(pkg: string): string | null {
-  try {
-    const manifest = require_(`${pkg}/package.json`) as { version?: unknown };
-    return typeof manifest.version === 'string' ? manifest.version : null;
-  } catch {
-    return null;
-  }
 }

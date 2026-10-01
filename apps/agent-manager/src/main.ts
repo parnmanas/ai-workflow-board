@@ -56,7 +56,9 @@ import { cliDispatch, cliModulesWith, findCliModule } from './lib/clis/index.js'
 import { AVAILABLE_MODELS_REFRESH_MS, gatherAvailableModels } from './lib/available-models.js';
 import { candidateKeyFor, listCliInstalls, npmLatestApplies, runCliUpdate } from './lib/cli-update.js';
 import { CLI_LATEST_REFRESH_MS, fetchCliLatestVersions, fetchLatestVersionsForSpecs } from './lib/cli-latest.js';
-import { acpAdapterPackages, collectAcpAdapters } from './lib/clis/acp-adapter-info.js';
+import { acpAdapterClis, acpAdapterPackages, acpAdapterSpec, collectAcpAdapters } from './lib/clis/acp-adapter-info.js';
+import { compareVersions, managedAdapterRoot } from './lib/clis/bundled-acp.js';
+import { type AcpAdapterUpdateResult, updateManagedAcpAdapter } from './lib/clis/acp-adapter-update.js';
 import { findOnPath } from './lib/find-on-path.js';
 import { runWithSudo } from './lib/sudo-runner.js';
 import { describeInstallMethod, detectInstallMethod, type InstallMethod } from './lib/cli-install-method.js';
@@ -642,7 +644,7 @@ async function runRuntime(
   // 어댑터 버전이 세션의 모델 목록·capability 를 정한다(acp-adapter-info.ts). 번들본은
   // 매니저를 올리지 않으면 바뀌지 않으므로 부팅 시 한 번만 읽는다. 로그에도 남겨
   // "그 fix 가 반영됐나" 를 호스트에서 바로 확인할 수 있게 한다.
-  const acpAdapters = await collectAcpAdapters(findOnPath);
+  let acpAdapters = await collectAcpAdapters(findOnPath);
   log(
     'agent sessions: ACP adapters = ' +
       (acpAdapters
@@ -962,6 +964,37 @@ async function runRuntime(
     return (await instanceHeartbeat._real?.postNow()) ?? false;
   };
 
+  // ─── ACP 어댑터 업데이트 ────────────────────────────────────────────────
+  //
+  // 어댑터 버전이 세션의 모델 목록을 정한다(어댑터가 모델 id 를 번들에 하드코딩한다). 번들본은
+  // 매니저 의존성 범위에 묶여 새 어댑터를 따라오지 못하므로, 운영자가 매니저 홈에 최신을 올린다
+  // (clis/acp-adapter-update.ts). 모든 어댑터가 한 홈의 node_modules 를 공유하므로 같은 락으로
+  // 직렬화한다 — CLI 설치본끼리 prefix 를 공유할 때와 같은 이유다.
+  const runAdapterUpdates = async (clis: readonly string[]): Promise<AcpAdapterUpdateResult[]> => {
+    const out: AcpAdapterUpdateResult[] = [];
+    for (const cli of clis) {
+      const spec = acpAdapterSpec(cli);
+      if (!spec) continue;
+      out.push(await withCliUpdateLock(`acp-adapters:${managedAdapterRoot()}`, () =>
+        updateManagedAcpAdapter(spec.pkg, spec.bin, { log })));
+    }
+    // 재시작 없이 화면이 바로 따라오게 — 버전·출처를 다시 읽고 최신 버전도 다시 조회한다.
+    acpAdapters = await collectAcpAdapters(findOnPath);
+    await refreshAcpAdapterLatestVersions();
+    return out;
+  };
+  /** 최신보다 뒤처진 어댑터를 쓰는 CLI 들. 최신을 모르는 것은 넣지 않는다("모름" ≠ "뒤처짐"). */
+  const behindAdapterClis = (): string[] =>
+    acpAdapters
+      .filter((a) => {
+        if (!a.package || !a.version) return false;
+        if (a.source !== 'managed' && a.source !== 'bundled') return false;
+        const latest = acpAdapterLatestVersions[a.package];
+        const cmp = latest ? compareVersions(a.version, latest) : null;
+        return cmp !== null && cmp < 0;
+      })
+      .map((a) => a.cli);
+
   const commandHandler = new AgentManagerCommandHandler(config, {
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
@@ -1038,16 +1071,31 @@ async function runRuntime(
           }
         }),
       );
+      // "전부" 에는 ACP 어댑터도 들어간다 — 운영자에게 어댑터는 CLI 의 일부로 보이고, 세션의
+      // 모델 목록을 정하는 것도 어댑터다. 최신보다 뒤처진 것만 올린다.
+      await refreshAcpAdapterLatestVersions();
+      const adapterResults = await runAdapterUpdates(behindAdapterClis());
+      for (const a of adapterResults) {
+        results.push({ cli: `${a.package}`, path: managedAdapterRoot(), ok: a.ok, supported: true, detail: a.detail });
+      }
       const updated = results.filter((r) => r.ok);
       const failed = results.filter((r) => !r.ok);
       const heartbeatPosted = await afterCliUpdate(updated.length > 0);
       return {
-        attempted: runnable.length,
+        attempted: runnable.length + adapterResults.length,
         updated: updated.map((r) => ({ cli: r.cli, path: r.path, detail: r.detail })),
         failed: failed.map((r) => ({ cli: r.cli, path: r.path, detail: r.detail })),
         skippedSudo: skippedSudo.map((i) => ({ cli: i.cli, path: i.path })),
         heartbeatPosted,
       };
+    },
+    // ACP 어댑터를 올린다. cli 를 주면 그 CLI 의 어댑터만, 안 주면 패키지 어댑터 전부.
+    // 이미 최신이어도 설치를 시도한다 — 운영자가 명시로 누른 것이고, npm 이 알아서 no-op 한다.
+    updateAcpAdapters: async (cli?: string | null) => {
+      const targets = cli ? [cli] : acpAdapterClis();
+      const results = await runAdapterUpdates(targets);
+      const heartbeatPosted = (await instanceHeartbeat._real?.postNow()) ?? false;
+      return { results, heartbeatPosted };
     },
     // 운영자가 화면에서 승인한 권한 상승 명령 하나를 실행한다.
     //
@@ -1525,6 +1573,7 @@ async function runRuntime(
       cliInstallsProvider: () => cliInstalls,
       acpSessionClis,
       acpAdapters,
+      acpAdaptersProvider: () => acpAdapters,
       acpAdapterLatestVersionsProvider: () => acpAdapterLatestVersions,
       // 살아 있는 세션 프로세스 전체 — 서버가 유령 busy/awaiting 상태를 30초 안에 되돌린다.
       agentSessionsProvider: () => agentSessionRunner.liveStates(),

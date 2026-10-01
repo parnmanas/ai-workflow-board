@@ -17,11 +17,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// 운영자 홈과 격리 — 장비에 managed 어댑터가 있으면 source 가 'managed' 가 된다.
+process.env.AWB_ACP_ADAPTERS_DIR = mkdtempSync(join(tmpdir(), 'awb-acp-empty-'));
 
 import { acpAdapterPackages, collectAcpAdapters } from '../dist/lib/clis/acp-adapter-info.js';
 import { findOnPath } from '../dist/lib/find-on-path.js';
 
-const SOURCES = new Set(['override', 'bundled', 'path', 'npx', 'builtin']);
+const SOURCES = new Set(['override', 'managed', 'bundled', 'path', 'npx', 'builtin']);
 
 test('어댑터 패키지 목록은 비어 있지 않고 npm 스펙 모양이다', () => {
   const pkgs = acpAdapterPackages();

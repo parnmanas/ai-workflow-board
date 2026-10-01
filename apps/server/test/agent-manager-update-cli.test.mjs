@@ -222,6 +222,11 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
   assert.equal(all.ok, true);
   assert.equal((await readOutcome(all.command_id)).command, 'update_all_clis');
 
+  // ACP 어댑터를 올리는 verb. 허용목록에서 빠지면 어댑터 줄의 Update 가 400 으로 죽는다.
+  const adapter = await readJson(await sendCommand('update_acp_adapter', { cli: 'claude' }), 202);
+  assert.equal(adapter.ok, true);
+  assert.equal((await readOutcome(adapter.command_id)).command, 'update_acp_adapter');
+
   // 오타 verb 는 기존대로 거부된다.
   await readJson(await sendCommand('update_clis'), 400);
 
@@ -237,6 +242,8 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
         { cli: 'claude', package: '@agentclientprotocol/claude-agent-acp', version: '0.84.0', source: 'bundled' },
         { cli: 'codex', package: '@agentclientprotocol/codex-acp', version: '1.13.1', source: 'path' },
         { cli: 'opencode', package: null, version: null, source: 'builtin' },
+        // 운영자가 update_acp_adapter 로 매니저 홈에 올린 어댑터.
+        { cli: 'gemini', package: '@x/gemini-acp', version: '2.0.0', source: 'managed' },
         // 알 수 없는 source 는 서버가 버린다 — UI 가 모르는 어휘를 그리지 않게.
         { cli: 'bogus', package: 'x', version: '1', source: 'not-a-source' },
       ],
@@ -251,6 +258,7 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
       ['claude', '0.84.0', 'bundled'],
       ['codex', '1.13.1', 'path'],
       ['opencode', null, 'builtin'],
+      ['gemini', '2.0.0', 'managed'],
     ],
     '알려진 source 만 보존된다',
   );

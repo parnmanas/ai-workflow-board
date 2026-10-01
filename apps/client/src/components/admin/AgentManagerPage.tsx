@@ -17,6 +17,7 @@ import type {
   PairingTokenSafe,
   SubagentSummary,
   WorktreeStatusEntry,
+  AcpAdapterReport,
 } from '../../types';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -29,7 +30,7 @@ import ManagedAgentDialog from './ManagedAgentDialog';
 // ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
 import { refreshHostModels, summarizeHostModels } from '../../cli/hostModels';
 import { reloadInstance, waitForCommandAck } from './agentManagerModelRefresh';
-import { INSTANCE_OP, finishInstanceOp, pendingInstallKeys, startInstanceOp, useInstanceOps } from './instanceOps';
+import { INSTANCE_OP, finishInstanceOp, pendingAdapterClis, pendingInstallKeys, startInstanceOp, useInstanceOps } from './instanceOps';
 import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersions';
 
 /**
@@ -528,6 +529,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   // 진행 중인 **설치본 키** 집합 — 같은 호스트의 다른 설치본은 동시에 올릴 수 있다. 진짜
   // 레이스(같은 npm prefix 공유)는 매니저의 withCliUpdateLock 이 막는다.
   const updateCliPending = pendingInstallKeys(activeOps);
+  const adapterPending = pendingAdapterClis(activeOps);
   const updateAllCliPending = activeOps.has(INSTANCE_OP.updateAllClis);
   // 권한 상승이 필요한 설치본의 Update 를 눌렀을 때 뜨는 비밀번호 모달의 대상.
   // 비밀번호 자체는 이 컴포넌트가 아니라 모달 안에서만 살고, 제출되는 즉시
@@ -755,6 +757,35 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
+  // ACP 어댑터 하나를 올린다. 매니저 홈에 최신을 설치하고, 매니저는 홈 설치본과 번들본 중 더 새
+  // 것을 쓴다 — 번들본은 매니저 의존성 범위에 묶여 새 어댑터를 따라오지 못하기 때문이다. 매니저는
+  // 재시작되지 않는다. 이미 열린 세션은 옛 어댑터 프로세스를 그대로 쓰므로 Restart 해야 적용된다.
+  const handleUpdateAdapter = async (cli: string) => {
+    const id = inst.instance_id;
+    const host = inst.hostname;
+    const op = INSTANCE_OP.updateAdapter(cli);
+    if (!startInstanceOp(id, op)) return;
+    try {
+      const resp = await api.sendAgentManagerCommand(id, { command: 'update_acp_adapter', args: { cli } });
+      const idTail = ` (id=${resp.command_id.slice(0, 8)})`;
+      const ack = await waitForCommandAck(resp.command_id, { attempts: 150, intervalMs: 2000 });
+      if (ack.state === 'error') {
+        showToast(`[${host}] ${cli} 어댑터 업데이트 실패${idTail} — ${ack.detail || '사유 미상'}`, 'error');
+        return;
+      }
+      if (ack.state !== 'ok') {
+        showToast(`[${host}] update_acp_adapter 전송됨${idTail} — 아직 진행 중입니다. 끝나면 다음 하트비트에 새 버전이 실립니다.`, 'info');
+        return;
+      }
+      await reloadInstance(id);
+      showToast(`[${host}] ${ack.detail || `${cli} 어댑터 업데이트 완료${idTail}`}`, 'success');
+    } catch (err: any) {
+      showToast(`[${host}] update_acp_adapter failed: ${err?.message || err}`, 'error');
+    } finally {
+      finishInstanceOp(id, op);
+    }
+  };
+
   // 올릴 수 있는 설치본을 한 번에 전부. 매니저가 자기 설치 열거로 대상을 정하고
   // 설치본 단위로 실패를 격리한 뒤 요약 한 줄로 ack 한다 — 하나라도 실패하면
   // error ack 이므로 "다 됐다" 로 뭉개지지 않는다.
@@ -765,7 +796,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     const ok = await confirm({
       title: '모든 CLI 업데이트',
       message:
-        `${inst.hostname} 에서 올릴 수 있는 CLI 설치본을 전부 최신으로 올립니다. ` +
+        `${inst.hostname} 에서 올릴 수 있는 CLI 설치본과 뒤처진 ACP 어댑터를 전부 최신으로 올립니다. ` +
         '같은 설치 디렉터리를 공유하는 설치본끼리만 차례로 돌고, 나머지는 동시에 올라갑니다. ' +
         'sudo 가 필요한 설치본은 건너뛰고 결과에 그렇다고 적습니다. ' +
         '이 장비의 모든 에이전트·세션이 다음 spawn 부터 새 버전을 씁니다. 계속할까요?',
@@ -1124,6 +1155,8 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               pending={updateCliPending}
               onUpdateAll={handleUpdateAllClis}
               updateAllPending={updateAllCliPending}
+              onUpdateAdapter={(cli) => void handleUpdateAdapter(cli)}
+              adapterPending={adapterPending}
               onUpdate={(cli, bin, needsSudo, method) => {
                 // 권한 상승이 필요한 설치본에서만 비밀번호를 묻는다. 필요 없는
                 // 설치본에 대고 묻는 것은 운영자의 root 비밀번호를 괜히 네트워크에
@@ -2980,12 +3013,16 @@ function SudoPasswordModal({
 // 버튼 잠금은 삼항이다(utils/cliVersions): 최신이면 잠그고, 구버전이면 목표
 // 버전을 보여주고, **최신을 모르면 잠그지 않는다** — 모른다고 잠그면 npm 조회가
 // 실패한 호스트에서 올릴 길이 사라진다.
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 export function InstalledCliVersions({
   inst,
   pending,
   onUpdate,
   onUpdateAll,
   updateAllPending = false,
+  onUpdateAdapter,
+  adapterPending = EMPTY_SET,
   hideLabel = false,
 }: {
   inst: AgentManagerInstance;
@@ -2995,6 +3032,10 @@ export function InstalledCliVersions({
   /** "전부 올리기". 무엇을 올릴지는 매니저가 자기 설치 열거로 정하므로 목록을 싣지 않는다. */
   onUpdateAll?: () => void;
   updateAllPending?: boolean;
+  /** ACP 어댑터 하나 올리기(cli 단위). */
+  onUpdateAdapter?: (cli: string) => void;
+  /** 올리는 중인 어댑터(cli) 집합. */
+  adapterPending?: ReadonlySet<string>;
   /** 제목 달린 섹션 안에 놓을 때는 자체 라벨을 끈다 — 같은 말이 두 줄 겹친다. */
   hideLabel?: boolean;
 }) {
@@ -3015,7 +3056,10 @@ export function InstalledCliVersions({
         // 값으로 접혀야 예전 동작이 그대로 유지된다.
         active: true,
       }));
-  if (installs.length === 0) return null;
+  // 설치본이 없어도 어댑터 줄은 그린다 — 설치본 열거가 실패한 호스트에서 어댑터 Update 까지
+  // 숨으면 안 된다(둘은 별개의 출처다).
+  const hasAdapters = (inst.acp_adapters ?? []).some((a) => a.source !== 'builtin');
+  if (installs.length === 0 && !hasAdapters) return null;
 
   const perCli = new Map<string, number>();
   for (const row of installs) perCli.set(row.cli, (perCli.get(row.cli) ?? 0) + 1);
@@ -3047,6 +3091,8 @@ export function InstalledCliVersions({
   const updatableRows = sorted.filter(
     (row) => row.updatable && cliUpdateState(row.version, latestFor(row)) !== 'up-to-date',
   );
+  // "전부" 에는 뒤처진 ACP 어댑터도 들어간다 — 매니저의 update_all_clis 가 같은 규칙으로 올린다.
+  const behindAdapters = behindAcpAdapters(inst);
 
   return (
     <div style={{ gridColumn: '1 / -1' }}>
@@ -3176,8 +3222,8 @@ export function InstalledCliVersions({
             규칙은 행 버튼과 같다(updatableRows). 무엇을 올릴지는 매니저가 자기 설치
             열거로 정하므로 여기서 목록을 실어 보내지 않는다 — 화면이 낡은 순간
             엉뚱한 설치본을 올리게 된다. */}
-        <AcpAdapterVersions inst={inst} />
-        {onUpdateAll && updatableRows.length > 0 && (
+        <AcpAdapterVersions inst={inst} pending={adapterPending} onUpdate={onUpdateAdapter} />
+        {onUpdateAll && updatableRows.length + behindAdapters.length > 0 && (
           <div style={{ marginTop: 6 }}>
             <button
               onClick={onUpdateAll}
@@ -3194,13 +3240,14 @@ export function InstalledCliVersions({
                 fontFamily: 'inherit',
               }}
               title={
-                `update_all_clis — 올릴 수 있는 설치본 ${updatableRows.length}개를 한 번에 올립니다 ` +
-                `(${updatableRows.map((r) => r.cli).join(', ')}). ` +
+                `update_all_clis — 올릴 수 있는 설치본 ${updatableRows.length}개` +
+                `${behindAdapters.length ? `와 뒤처진 ACP 어댑터 ${behindAdapters.length}개` : ''}를 한 번에 올립니다 ` +
+                `(${[...updatableRows.map((r) => r.cli), ...behindAdapters.map((a) => `${a.cli}-acp`)].join(', ')}). ` +
                 '같은 설치 디렉터리를 공유하는 것끼리만 차례로 돌고 나머지는 동시에 올라갑니다. ' +
                 'sudo 가 필요한 설치본은 건너뛰고 그렇다고 알려줍니다 — 그건 행의 Update 로 올리세요.'
               }
             >
-              {updateAllPending ? `전부 업데이트 중…` : `전부 업데이트 (${updatableRows.length})`}
+              {updateAllPending ? `전부 업데이트 중…` : `전부 업데이트 (${updatableRows.length + behindAdapters.length})`}
             </button>
           </div>
         )}
@@ -3209,19 +3256,35 @@ export function InstalledCliVersions({
   );
 }
 
+/** 이 호스트의 어댑터 중 최신보다 뒤처진 것(최신을 모르면 넣지 않는다 — "모름" ≠ "뒤처짐"). */
+export function behindAcpAdapters(inst: AgentManagerInstance): AcpAdapterReport[] {
+  return (inst.acp_adapters ?? []).filter((a) => {
+    if (a.source !== 'managed' && a.source !== 'bundled') return false;
+    const latest = (a.package && inst.acp_adapter_latest_versions?.[a.package]) || null;
+    return !!(a.version && latest && cliUpdateState(a.version, latest) === 'outdated');
+  });
+}
+
 /**
  * ACP 어댑터 버전 — 세션의 모델 목록·capability 를 **실제로** 정하는 값.
  *
- * 왜 이 줄이 필요한가: 어댑터는 모델 id 를 자기 번들에 하드코딩한다. 그래서 CLI 를
- * 최신으로 올려도 어댑터가 뒤처지면 새 모델을 세션에서 고를 수 없다. 2026-10-01 에
- * 세 호스트의 claude-agent-acp 가 0.79.0 (최신 0.84.0) 으로 조용히 5버전 썩어
- * Opus 5.5 가 세션에 영영 안 떴고, 화면에는 그 사실을 알 단서가 하나도 없었다.
+ * 어댑터는 모델 id 를 자기 번들에 하드코딩한다. 그래서 CLI 를 최신으로 올려도 어댑터가
+ * 뒤처지면 새 모델을 세션에서 고를 수 없다(2026-10-01: claude-agent-acp 0.79.0 이 세 호스트에서
+ * 조용히 5버전 썩어 Opus 5.5 가 세션에 안 떴다).
  *
- * **Update 버튼을 두지 않는다.** 어댑터는 매니저의 의존성으로 번들되므로 올리는 유일한
- * 경로가 매니저 업데이트다 — 어댑터만 따로 `npm i -g` 해도 번들본이 이겨서 아무 효과가
- * 없다. 눌러도 안 되는 버튼을 두는 대신, 무엇이 뒤처졌고 무엇을 해야 하는지 말한다.
+ * **Update 는 `update_acp_adapter` 다** — 매니저 홈에 최신을 설치하고 해석이 홈 설치본과 매니저
+ * 번들본 중 더 새 것을 쓴다. 전역 `npm i -g` 로는 안 된다(번들본이 PATH 보다 앞이다). 이미 열린
+ * 세션은 옛 어댑터 프로세스를 그대로 쓰므로 새 세션이나 세션 Restart 부터 적용된다.
  */
-function AcpAdapterVersions({ inst }: { inst: AgentManagerInstance }) {
+function AcpAdapterVersions({
+  inst,
+  pending,
+  onUpdate,
+}: {
+  inst: AgentManagerInstance;
+  pending: ReadonlySet<string>;
+  onUpdate?: (cli: string) => void;
+}) {
   const rows = (inst.acp_adapters ?? []).filter((a) => a.source !== 'builtin');
   if (rows.length === 0) return null;
   const latestOf = (pkg: string | null): string | null =>
@@ -3233,34 +3296,68 @@ function AcpAdapterVersions({ inst }: { inst: AgentManagerInstance }) {
       </div>
       {rows.map((a) => {
         const latest = latestOf(a.package);
-        const behind = !!(a.version && latest && cliUpdateState(a.version, latest) === 'outdated');
-        // 번들본이 아니면 그 자체가 신호다: 매니저가 구버전이라 번들을 안 들고 있다.
-        const notBundled = a.source !== 'bundled';
+        const state = a.version && latest ? cliUpdateState(a.version, latest) : null;
+        const behind = state === 'outdated';
+        const upToDate = state === 'up-to-date';
+        const busy = pending.has(a.cli);
+        // 올릴 수 있는 것은 패키지 어댑터뿐이다 — env 로 고정한 것(override)은 AWB 가 손대면 안 된다.
+        const updatable = !!a.package && a.source !== 'override';
         return (
           <div
             key={`${a.cli}:${a.package ?? ''}`}
+            data-acp-adapter={a.cli}
             style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: tokens.colors.textSecondary }}
           >
             <span style={{ fontWeight: 600 }}>{a.cli}</span>
             <span style={{ fontFamily: 'monospace' }}>{a.version ?? '버전 미상'}</span>
             {behind && (
-              <span style={{ color: tokens.colors.warning }} title={`npm 최신 ${latest} — 매니저를 올리면 함께 갱신됩니다.`}>
+              <span style={{ color: tokens.colors.warning }} title={`npm 최신 ${latest}`}>
                 → {latest} 뒤처짐
               </span>
             )}
-            {notBundled && (
-              <span
-                style={{ color: tokens.colors.warning }}
+            {upToDate && <span style={{ color: tokens.colors.textMuted }}>(최신)</span>}
+            <span
+              style={{ color: a.source === 'bundled' || a.source === 'managed' ? tokens.colors.textMuted : tokens.colors.warning }}
+              title={
+                a.source === 'managed'
+                  ? '운영자가 올린 어댑터(매니저 홈)를 쓰고 있습니다 — 매니저 번들본보다 새 버전입니다.'
+                  : a.source === 'bundled'
+                  ? '매니저와 함께 설치된 어댑터를 쓰고 있습니다.'
+                  : a.source === 'path'
+                  ? '장비에 전역 설치된 어댑터를 쓰고 있습니다 — 이 매니저는 어댑터를 번들하지 않는 구버전입니다.'
+                  : a.source === 'npx'
+                  ? '설치돼 있지 않아 실행할 때마다 npx 로 당겨옵니다.'
+                  : '운영자가 AWB_ACP_COMMAND 로 어댑터 명령을 고정했습니다 — 버전은 AWB 가 알 수 없습니다.'
+              }
+            >
+              ({a.source})
+            </span>
+            {updatable && onUpdate && (
+              <button
+                onClick={() => onUpdate(a.cli)}
+                disabled={busy || upToDate}
+                style={{
+                  padding: '2px 8px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  background: 'transparent',
+                  color: tokens.colors.textStrong,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.sm,
+                  cursor: busy ? 'wait' : upToDate ? 'default' : 'pointer',
+                  fontFamily: 'inherit',
+                  opacity: upToDate && !busy ? 0.5 : 1,
+                }}
                 title={
-                  a.source === 'path'
-                    ? '장비에 전역 설치된 어댑터를 쓰고 있습니다 — 이 매니저는 어댑터를 번들하지 않는 구버전입니다. 매니저를 올리면 어댑터가 함께 따라옵니다.'
-                    : a.source === 'npx'
-                    ? '설치돼 있지 않아 실행할 때마다 npx 로 당겨옵니다. 매니저를 올리면 번들본이 들어옵니다.'
-                    : '운영자가 AWB_ACP_COMMAND 로 어댑터 명령을 고정했습니다 — 버전은 AWB 가 알 수 없습니다.'
+                  upToDate
+                    ? `${a.package} 는 최신입니다 (${latest}).`
+                    : `update_acp_adapter — ${a.package} 를 최신으로 올립니다` +
+                      `${latest ? ` (${a.version} → ${latest})` : ' (최신 버전 확인 불가 — 눌러서 시도할 수 있습니다)'}. ` +
+                      '매니저 홈에 설치하므로 매니저는 재시작되지 않습니다. 이미 열린 세션은 Restart 해야 새 어댑터를 씁니다.'
                 }
               >
-                ({a.source})
-              </span>
+                {busy ? '업데이트 중…' : 'Update'}
+              </button>
             )}
           </div>
         );

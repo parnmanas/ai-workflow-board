@@ -503,6 +503,63 @@ test('update_all_clis: 배선되지 않은 매니저는 조용히 성공한 척�
   assert.match(ack.detail, /not wired/);
 });
 
+// ─── update_acp_adapter — 운영자가 ACP 어댑터를 올린다 ─────────────────────────
+
+function adapterHandler(updateAcpAdapters) {
+  return new AgentManagerCommandHandler(
+    { url: 'https://awb.cliupdate.example', apiKey: 'manager-key', delegation: {} },
+    { getInstanceId: () => 'instance-1', registry: registryStub(), updateAcpAdapters },
+  );
+}
+const sendAdapter = (handler, args = {}) =>
+  handler.handle(JSON.stringify({ command_id: 'acp-1', instance_id: 'instance-1', command: 'update_acp_adapter', args }));
+const adapterOk = (over = {}) => ({
+  package: '@agentclientprotocol/claude-agent-acp', ok: true, before: '0.84.0', after: '0.85.0', source: 'managed',
+  detail: '@agentclientprotocol/claude-agent-acp 0.84.0 → 0.85.0 (managed) — new sessions use it; restart open sessions to pick it up',
+  ...over,
+});
+
+test('update_acp_adapter 는 args.cli 를 넘기고 결과를 ack 에 담는다', async () => {
+  const seen = [];
+  await sendAdapter(adapterHandler(async (cli) => { seen.push(cli); return { results: [adapterOk()], heartbeatPosted: true }; }), { cli: 'claude' });
+  assert.deepEqual(seen, ['claude']);
+  const ack = ackBody();
+  assert.equal(ack.status, 'ok');
+  assert.match(ack.detail, /0\.84\.0 → 0\.85\.0/);
+  assert.match(ack.detail, /restart open sessions/, '열린 세션에는 바로 적용되지 않는다는 사실이 ack 에 남는다');
+});
+
+test('update_acp_adapter: cli 를 생략하면 전부(null)를 요청한다', async () => {
+  const seen = [];
+  await sendAdapter(adapterHandler(async (cli) => { seen.push(cli); return { results: [adapterOk(), adapterOk({ package: '@agentclientprotocol/codex-acp' })], heartbeatPosted: true }; }));
+  assert.deepEqual(seen, [null]);
+  assert.equal(ackBody().status, 'ok');
+});
+
+test('update_acp_adapter: 하나라도 실패하면 error ack — "다 됐다" 로 뭉개지 않는다', async () => {
+  await sendAdapter(adapterHandler(async () => ({
+    results: [adapterOk(), adapterOk({ package: '@agentclientprotocol/codex-acp', ok: false, detail: 'codex-acp: npm install failed — 404' })],
+    heartbeatPosted: true,
+  })));
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /404/);
+});
+
+test('update_acp_adapter: 알려진 패키지 어댑터가 없으면 명확한 사유로 error', async () => {
+  await sendAdapter(adapterHandler(async () => ({ results: [], heartbeatPosted: false })), { cli: 'opencode' });
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /no package adapter is known for cli=opencode/);
+});
+
+test('update_acp_adapter: 배선되지 않은 매니저는 조용히 성공한 척하지 않는다', async () => {
+  await sendAdapter(adapterHandler(null));
+  const ack = ackBody();
+  assert.equal(ack.status, 'error');
+  assert.match(ack.detail, /not wired/);
+});
+
 test('update_cli 는 args.cli 를 그대로 올리고 before → after 를 ack detail 에 담는다', async () => {
   const seen = [];
   const handler = updateCliHandler(async (cli) => {

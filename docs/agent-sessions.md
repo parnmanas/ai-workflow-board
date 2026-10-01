@@ -58,12 +58,21 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
     (파이프 5회 중 4회 잘림, 파일 리다이렉트는 항상 온전). 잘린 JSON 은 파싱이 깨져 `[]` 로 접히므로, 일 좀 시킨
     세션(기록 수십 KB 이상)의 history 가 통째로 비어 보이는 사고가 났다 — 새 세션(작은 출력)에서는 정상이라
     "가끔 된다" 처럼 보였다. 작은 출력·테스트 seam 은 기존 pipe(`exec`) 그대로다.
-- **매니저 `agent-session-runner.ts`** — 세션당 ACP 어댑터 프로세스. 명령 우선순위: env `AWB_ACP_COMMAND_<CLI>` →
-  PATH 의 `claude-agent-acp` / `codex-acp` / `hermes-acp` → `npx --yes @agentclientprotocol/claude-agent-acp` /
-  `@agentclientprotocol/codex-acp`. **어댑터는 두 패키지 모두 `@agentclientprotocol/*`** — zed-industries 의 codex-acp 는
-  2026-07 에 archive 됐고 옛 Codex 코어(rust-v0.137)라 새 모델을 "requires a newer version of Codex" 로 거부한다.
-  `@agentclientprotocol/codex-acp` 는 설치된 codex CLI 와 같은 세대의 `@openai/codex` 를 번들한다. 장비에는
-  `npm i -g @agentclientprotocol/codex-acp @agentclientprotocol/claude-agent-acp` 로 미리 설치해 둔다(npx 폴백은 첫 실행이 느리다).
+- **매니저 `agent-session-runner.ts`** — 세션당 ACP 어댑터 프로세스. 명령 우선순위(`clis/bundled-acp.ts`):
+  env `AWB_ACP_COMMAND_<CLI>` → **managed / bundled 중 더 새 것** → PATH 의 `claude-agent-acp` / `codex-acp` /
+  `hermes-acp` → `npx --yes <pkg>`. 어댑터는 모델 id 를 **자기 번들에 하드코딩**하므로 어댑터 버전이 세션의
+  모델 목록·capability 를 정한다(0.79.0 이 세 호스트에서 조용히 5버전 썩어 Opus 5.5 가 세션에 안 뜬 적이 있다).
+  - **bundled** — `awb-agent-manager` 의존성(`^0.84.0` / `^1.12.0`). 매니저와 함께 깔리지만 범위에 묶여, 새 어댑터가
+    나와도 매니저를 다시 깔아서는 따라오지 않는다.
+  - **managed** — 운영자가 Runtime Hosts 의 어댑터 줄 **Update**(`update_acp_adapter`, "전부 업데이트" 에도 포함)로
+    매니저 홈 `acp-adapters/` 에 `npm install --prefix … <pkg>@latest` 한 것. 홈에 두므로 **매니저 업데이트에도
+    살아남고**, 전역 prefix 를 건드리지 않아 권한 상승이 필요 없다. 둘 다 있으면 더 새 쪽을 쓴다 — 운영자가 올린 것이
+    매니저 재설치로 되돌아가지 않고, 나중에 번들이 더 새 걸 가져오면 낡은 홈 설치본이 그것을 가리지도 않는다.
+  - 전역 `npm i -g <adapter>` 는 **효과가 없다**(번들이 PATH 보다 앞이다). 이미 열린 세션은 옛 어댑터 프로세스를 그대로
+    쓰므로 업데이트 후 세션 Restart 가 필요하다. 하트비트 `acp_adapters[].source` 가 지금 무엇이 쓰이는지 알려 준다.
+  - **어댑터는 두 패키지 모두 `@agentclientprotocol/*`** — zed-industries 의 codex-acp 는 2026-07 에 archive 됐고 옛 Codex
+    코어(rust-v0.137)라 새 모델을 "requires a newer version of Codex" 로 거부한다. `@agentclientprotocol/codex-acp` 는
+    설치된 codex CLI 와 같은 세대의 `@openai/codex` 를 번들한다.
   env 는 매니저 프로세스 그대로(운영자 CLI 홈), AWB MCP 서버는 매니저 키로 주입. codex 에는 `NO_BROWSER=1` 을 더해
   브라우저 로그인 auth method 를 숨긴다. `session/new`/`load` 가 auth required(-32000) 로 거부되면 환경에 API 키가 있을 때
   api-key 계열 ACP `authenticate` 를 한 번 시도하고, 아니면 "장비에서 `<cli> login` 하거나 credential 을 묶으라" 는 오류를 낸다.
