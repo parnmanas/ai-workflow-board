@@ -312,6 +312,44 @@ test('runSelfUpdate: resolves near-instantly on a short-circuit path (no reintro
   }
 });
 
+test('runSelfUpdate: 핀의 실패 버전은 설치하지 않고, 새 버전은 그대로 진행한다', async (t) => {
+  // ralf 2026-10-03: 핀이 채널을 동결해 다음 정상 버전까지 막았다. 이제 핀은 실패
+  // 버전의 자동 재설치만 막는다 — 재시도(다음 버전)는 막지 않는다.
+  const BAD = '9.9.9';
+  const GOOD = '9.9.10';
+  const runForTarget = async (target) => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'awb-self-update-'));
+    t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+    await fsp.writeFile(
+      join(stateDir, 'self-update-pin.json'),
+      JSON.stringify({ version: '1.6.94', badVersion: BAD, reason: 'boot verification failed', pinnedAtMs: 1 }),
+    );
+    _resetSelfUpdateInFlightForTests();
+    try {
+      return await runSelfUpdate({
+        log: () => {},
+        noReExec: true,
+        stateDir,
+        ports: {
+          verifyProvenance: async () => ({ ok: true, version: target, reason: 'test-stub' }),
+          install: async () => { throw new Error('must not install'); },
+          restart: () => {},
+          probe: async () => ({ ok: true, reportedVersion: target, detail: 'test-stub' }),
+          installedVersion: () => '1.6.94',
+        },
+      });
+    } finally {
+      _resetSelfUpdateInFlightForTests();
+    }
+  };
+  const skipped = await runForTarget(BAD);
+  assert.equal(skipped.changed, false);
+  assert.match(skipped.summary, /skipped/);
+  assert.match(skipped.summary, new RegExp(BAD.replace(/\./g, '\\.')));
+  const proceeds = await runForTarget(GOOD);
+  assert.match(proceeds.summary, /would run/, '새 버전은 핀과 무관하게 진행된다');
+});
+
 test('runSelfUpdate: self-update mutex releases promptly — a following restart_manager is not silently swallowed', async () => {
   // Reviewer requirement: "drain 중 operator restart_manager 정책이 명시적으로
   // 동작함(최소 무음 skip 금지)". The exact deferred branch needs a real npm

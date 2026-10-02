@@ -2343,6 +2343,11 @@ export interface AgentManagerInstance {
   update_channel?: string | null;
   update_last_checked_at?: string | null;
   update_last_error?: string | null;
+  // 업데이트 실패 버전·사유 — 실패한 버전만 스킵하고 새 버전 오퍼는 막지 않는다.
+  // `null` = 실패 없음, undefined = 모르는 구버전 매니저.
+  update_skipped_version?: string | null;
+  update_failed_version?: string | null;
+  update_failure_reason?: string | null;
   open_breaker_count?: number;
   /** ticket 3d180f85 — per-reason count of dispatches suppressed by the manager's
    *  provision-spanning twin guard (e.g. { inflight_dispatch: 3 }). Informational

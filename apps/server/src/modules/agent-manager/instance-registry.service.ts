@@ -228,6 +228,11 @@ export interface InstanceRecord {
   // `undefined` = the manager predates the field entirely. Keep the two
   // apart: only a reporting manager's `null` means "the request cleared".
   update_approval_pending_version?: string | null;
+  // 업데이트 실패 버전·사유 — 매니저가 핀·부팅 기록에서 투영한다. 실패한 버전만
+  // 스킵하고 새 버전 오퍼는 막지 않는다. `null` = 실패 없음, undefined = 모르는 구버전.
+  update_skipped_version?: string | null;
+  update_failed_version?: string | null;
+  update_failure_reason?: string | null;
   // Live count reported by the manager's in-memory circuit breaker.
   open_breaker_count?: number;
   // ticket 3d180f85 — per-reason count of dispatches suppressed by the manager's

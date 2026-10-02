@@ -116,14 +116,19 @@ export interface BootVerificationRecord {
 }
 
 /**
- * 복귀 핀. 이 파일이 있으면 자동 업데이트는 이 버전 밖으로 나가지 않는다.
+ * 복귀 핀. 실패한 버전의 **자동 재설치만** 막는다 — 채널 전체를 동결하지 않는다.
+ * 새 버전이 올라오면 핀과 무관하게 정상 오퍼·설치된다(ralf 2026-10-03: 채널 동결은
+ * 다음 버전까지 막아 호스트를 264 에 가뒀다).
  *
  * **해제는 사람만 한다** — 이 모듈은 핀을 쓰기만 하고 어디서도 지우지 않는다.
  * 자동 해제 경로를 만들면 "복귀 → 해제 → 같은 나쁜 버전 재설치 → 복귀" 루프가
  * 그대로 되살아나기 때문이다(정책 G). 운영자의 해제 수단은 파일 삭제다.
  */
 export interface UpdatePinRecord {
+  /** 복귀해서 지금 돌고 있는 버전. */
   version: string;
+  /** 부팅·설치에 실패한 버전 — 자동으로는 다시 집지 않는다. */
+  badVersion: string;
   reason: string;
   pinnedAtMs: number;
 }
@@ -318,8 +323,18 @@ export function readUpdatePin(dir: string = AGENT_MANAGER_HOME): UpdatePinRecord
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const version = typeof raw.version === 'string' ? raw.version.trim() : '';
   if (!/^\d+\.\d+\.\d+/.test(version)) return null;
+  // 구형 핀에는 badVersion 필드가 없다 — 사유 꼬리의 "(bad build vX.Y.Z)" 에서
+  // 복원한다(pinRolledBackVersion 이 붙이던 형식). 둘 다 없으면(손수 만든 핀)
+  // 스킵 대상 없이 사유만 남긴다 — 모르는 버전을 막는 것보다 막지 않는 쪽이
+  // 다음 버전 흐름을 막지 않는다.
+  let badVersion = typeof raw.badVersion === 'string' ? raw.badVersion.trim() : '';
+  if (!/^\d+\.\d+\.\d+/.test(badVersion)) {
+    const m = /\(bad build v(\d+\.\d+\.\d+)\)/.exec(typeof raw.reason === 'string' ? raw.reason : '');
+    badVersion = m ? m[1] : '';
+  }
   return {
     version,
+    badVersion,
     reason: typeof raw.reason === 'string' ? raw.reason : '',
     pinnedAtMs: Number.isFinite(Number(raw.pinnedAtMs)) ? Math.trunc(Number(raw.pinnedAtMs)) : 0,
   };
@@ -576,7 +591,7 @@ export function evaluateBootVerification(input: {
         return {
           kind: 'rollback_landed',
           rollbackToVersion: record.previousVersion,
-          summary: `rollback to v${record.previousVersion} landed — channel stays pinned to it`,
+          summary: `rollback to v${record.previousVersion} landed — v${record.targetVersion} will be skipped automatically`,
         };
       }
       if (onTarget) {
@@ -594,8 +609,7 @@ export function evaluateBootVerification(input: {
           rollbackToVersion: record.previousVersion,
           summary:
             `rollback to v${record.previousVersion} failed ${record.rollbackAttempts} time(s) — ` +
-            `giving up automatic recovery, still running v${record.targetVersion}; ` +
-            `channel stays pinned to v${record.previousVersion} (operator action required)`,
+            `giving up automatic recovery, still running v${record.targetVersion} (operator action required)`,
         };
       }
       return staleDecision(record, currentVersion);

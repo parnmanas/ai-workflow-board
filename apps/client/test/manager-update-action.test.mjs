@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { installedVersionBadge, managerUpdateAction } from '../src/components/admin/managerUpdateAction.ts';
+import { installedVersionBadge, managerUpdateAction, updateFailureBadge } from '../src/components/admin/managerUpdateAction.ts';
 
 test('disk newer than the running process → restart action, even when the registry has nothing newer', () => {
   const inst = { plugin_version: '1.6.246', latest_version: '1.6.247', update_available: true, installed_version: '1.6.247', restart_required: true, install_mode: 'npm-global' };
@@ -31,4 +31,22 @@ test('nothing to do / old manager', () => {
   assert.equal(managerUpdateAction({ plugin_version: '1.6.200' }).kind, 'unknown');
   // restart_required 만 true 이고 installed_version 이 없으면(있을 수 없는 조합) 재기동을 권하지 않는다
   assert.notEqual(managerUpdateAction({ plugin_version: '1.6.246', restart_required: true, update_available: false }).kind, 'restart');
+});
+
+test('update failure badge: skipped version shows why it is not offered; new versions unaffected', () => {
+  assert.equal(updateFailureBadge({ plugin_version: '1.6.264' }), null, '실패 없으면 배지 없음');
+  const skipped = updateFailureBadge({
+    plugin_version: '1.6.264', latest_version: '1.6.265', update_available: false,
+    update_skipped_version: '1.6.265', update_failed_version: '1.6.265',
+    update_failure_reason: 'boot verification failed for v1.6.265 (bad build v1.6.265)',
+  });
+  assert.equal(skipped.label, '(v1.6.265 skipped)');
+  assert.match(skipped.title, /boot verification failed/);
+  assert.match(skipped.title, /newer versions are still offered/);
+  // 새 버전이 올라오면 스킵 표시 없이 실패 이력만 남는다 — 오퍼를 가리지 않는다.
+  const history = updateFailureBadge({
+    plugin_version: '1.6.264', latest_version: '1.6.266', update_available: true,
+    update_skipped_version: null, update_failed_version: '1.6.265', update_failure_reason: 'boot verification failed',
+  });
+  assert.equal(history.label, '(v1.6.265 failed before)');
 });

@@ -772,6 +772,18 @@ export class AgentManagerController {
           ? body.update_approval_pending_version.slice(0, 64)
           : null)
       : undefined;
+    // 업데이트 실패 버전·사유 — 매니저가 핀·부팅 기록에서 투영한다. 같은
+    // absent-vs-null 규율: `null` 은 "실패 없음", undefined 는 "모르는 구버전".
+    // 실패한 버전만 스킵하고 새 버전 오퍼는 막지 않는다.
+    const update_skipped_version = hasField('update_skipped_version')
+      ? (typeof body.update_skipped_version === 'string' ? body.update_skipped_version.slice(0, 64) : null)
+      : undefined;
+    const update_failed_version = hasField('update_failed_version')
+      ? (typeof body.update_failed_version === 'string' ? body.update_failed_version.slice(0, 64) : null)
+      : undefined;
+    const update_failure_reason = hasField('update_failure_reason')
+      ? (typeof body.update_failure_reason === 'string' ? body.update_failure_reason.slice(0, 500) : null)
+      : undefined;
     const open_breaker_count = hasField('open_breaker_count') && Number.isFinite(body.open_breaker_count)
       ? Math.max(0, Math.trunc(Number(body.open_breaker_count)))
       : undefined;
@@ -881,6 +893,9 @@ export class AgentManagerController {
       update_last_checked_at,
       update_last_error,
       update_approval_pending_version,
+      update_skipped_version,
+      update_failed_version,
+      update_failure_reason,
       open_breaker_count,
       dispatch_suppression_counts,
       dispatch_block_counts,

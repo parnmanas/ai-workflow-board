@@ -1095,6 +1095,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
                 </span>
               )}
               <ManagerVersionBadge inst={inst} />
+              <UpdateFailureBadge inst={inst} />
               <div style={{ flex: 1 }} />
               {managerUpdateAction(inst).kind === 'restart' || managerUpdateAction(inst).kind === 'update' ? (
                 <button
@@ -3381,6 +3382,22 @@ function AcpAdapterVersions({
   );
 }
 
+// ─── UpdateFailureBadge — 업데이트 시도 실패 사유. 실패한 버전만 스킵하고 새 버전
+// 오퍼는 막지 않으므로, 이 배지는 "왜 저 버전이 안 뜨나"의 답이다. 핀이 없으면(구버전
+// 매니저) 아무것도 그리지 않는다. 핀 해제는 호스트의 핀 파일 삭제(사람만).
+function UpdateFailureBadge({ inst }: { inst: AgentManagerInstance }) {
+  const badge = updateFailureBadge(inst);
+  if (!badge) return null;
+  return (
+    <span
+      style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.warning }}
+      title={badge.title}
+    >
+      ⚠ {badge.label}
+    </span>
+  );
+}
+
 // ─── ManagerVersionBadge — render `(→ vX.Y.Z available)` next to the manager version
 // when the manager's UpdateChecker says a newer build is on origin/<branch>. A
 // pre-update manager (no UpdateChecker fields in the heartbeat) renders nothing
@@ -3433,9 +3450,11 @@ function ManagerVersionBadge({ inst }: { inst: AgentManagerInstance }) {
       <span
         style={{ marginLeft: 8, fontSize: 11, color: tokens.colors.textMuted }}
         title={
-          inst.update_last_checked_at
-            ? `Up to date as of ${inst.update_last_checked_at}`
-            : 'Update checker has not yet completed its first poll'
+          inst.update_skipped_version
+            ? `v${inst.update_skipped_version} was skipped (failed before) — newer versions are still offered. Up to date otherwise${inst.update_last_checked_at ? ` as of ${inst.update_last_checked_at}` : ''}`
+            : inst.update_last_checked_at
+              ? `Up to date as of ${inst.update_last_checked_at}`
+              : 'Update checker has not yet completed its first poll'
         }
       >
         (up to date)

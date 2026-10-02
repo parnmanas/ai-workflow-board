@@ -160,27 +160,36 @@ export function isAutoUpdateDisabled(channel: string): boolean {
 }
 
 /**
- * 복귀 핀을 반영한 실효 채널 (ticket 23753dc7 — 정책 C·G).
- *
- * 부팅 검증에 실패해 이전 버전으로 되돌린 뒤에는 채널을 그 정확한 버전으로
- * 고정한다. 이것이 "같은 나쁜 버전을 즉시 다시 집지 않는다"를 만드는 장치다:
- * 채널이 dist-tag(`latest`) 로 남아 있으면 다음 tick 이 곧바로 같은 불량
- * 버전을 다시 해석해 재설치 루프가 된다. 정확한 버전으로 고정하면 provenance
- * 조회도 그 버전만 해석하고, 이어지는 `compareSemver(target, current) <= 0`
- * 스킵에 걸려 아무것도 설치하지 않는다.
- *
- * `off` 는 핀보다도 우선한다 — 운영자가 건 하드 핀이 자동 복구가 건 핀에
- * 덮이면 안 된다(정책 D).
- *
- * 핀 해제는 사람만 한다: 핀 파일을 지우는 것이 유일한 해제 수단이고, 이
- * 코드베이스 어디에도 핀을 지우는 경로는 없다.
+ * 실패한 버전과 같은지 판정한다 — 채널은 핀과 무관하게 그대로 두고, 해석된 대상이
+ * 핀의 badVersion 과 같을 때만 건너뛴다. 예전에는 채널 자체를 핀 버전으로
+ * 고정했는데, 그러면 다음 정상 버전까지 막혀 호스트가 옛 버전에 갇혔다
+ * (ralf 2026-10-03 — 265 실패가 266 오퍼까지 막음). 루프 방지는 그대로다:
+ * 나쁜 버전으로의 자동 설치 경로는 이 판정 하나뿐이고, update_manager 는
+ * 버전을 지정할 수 없어 같은 버전을 명시적으로 재시도할 수도 없다.
+ * 핀 해제는 사람만 한다(파일 삭제).
  */
-export function resolveEffectiveUpdateChannel(
-  channel: string,
-  pin: UpdatePinRecord | null,
-): string {
-  if (channel === UPDATE_CHANNEL_OFF) return channel;
-  return pin?.version ? pin.version : channel;
+export function isPinnedBadVersion(pin: UpdatePinRecord | null, version: string | null): boolean {
+  if (!pin?.badVersion || !version) return false;
+  return version === pin.badVersion;
+}
+
+/**
+ * AI agent·대시보드에 보여줄 실패 투영. 핀 사유가 있으면 그것을, 없으면 진행 중
+ * 부팅 기록의 실패 사유를 쓴다. 둘 다 없으면 null — "실패 없음"과 "모름"을
+ * 구분하기 위해 빈 문자열이 아니라 null 로 둔다.
+ */
+export function failureProjection(stateDir?: string): { failed: string | null; reason: string | null } {
+  const pin = readUpdatePin(stateDir);
+  if (pin?.badVersion) return { failed: pin.badVersion, reason: pin.reason || null };
+  const record = readBootVerificationRecord(stateDir);
+  if (
+    record &&
+    (record.phase === 'install_failed' || record.phase === 'install_blocked' || record.phase === 'rolling_back') &&
+    record.reason
+  ) {
+    return { failed: record.targetVersion || null, reason: record.reason };
+  }
+  return { failed: null, reason: null };
 }
 
 /** `awb-agent-manager@<channel>` — the npm spec for the active channel. */
@@ -271,7 +280,7 @@ export interface UpdatePolicyGateResult {
  */
 export function evaluateUpdatePolicyGate(input: {
   policy: UpdatePolicy;
-  /** 실효 채널 (`resolveEffectiveUpdateChannel` 결과). */
+  /** 설정된 업데이트 채널 (핀은 채널을 바꾸지 않고 실패 버전 스킵에만 쓴다). */
   channel: string;
   /** `AWB_AGENT_MANAGER_UPDATE_WINDOW` 원문. 미설정이면 null/빈 문자열. */
   windowRaw: string | null | undefined;
@@ -393,6 +402,16 @@ export interface UpdateStatus {
    *  버전. 승인 대기 중이 아니면 null. 하트비트가 이 값을 서버로 날라
    *  관리자가 대시보드를 열지 않아도 요청이 감사 기록으로 남게 한다. */
   update_approval_pending_version: string | null;
+  /**
+   * 자동 재설치를 막고 있는 실패 버전 — 핀의 badVersion 과 레지스트리 latest 가
+   * 같을 때만 값이 있다. 다르면(새 버전이 올라오면) null 로 돌아가 오퍼가 흐른다.
+   * AI agent·대시보드가 "왜 업데이트가 안 뜨나"를 이 값과 사유로 안다.
+   */
+  update_skipped_version: string | null;
+  /** update_skipped_version 에 든 버전이 실패한 버전 — 핀·부팅 기록의 target. */
+  update_failed_version: string | null;
+  /** update_failed_version 이 실패한 사유 — 핀 reason, 없으면 부팅 기록 reason. */
+  update_failure_reason: string | null;
 }
 
 export interface SelfUpdateResult {
@@ -796,13 +815,12 @@ export class UpdateChecker {
         return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
       });
     const install_mode = opts.installMode ?? classifyInstallMode(detectNpmGlobalRoot());
-    // ticket 23753dc7: 복귀 핀이 걸려 있으면 그 정확한 버전이 실효 채널이다.
-    // 체커가 광고하는 `update_available` 까지 핀을 반영해야, 되돌린 호스트의
-    // 대시보드가 방금 되돌린 불량 버전을 다시 "업데이트 가능"으로 띄우지 않는다.
-    const update_channel = resolveEffectiveUpdateChannel(
-      resolveUpdateChannel(opts.updateChannel),
-      readUpdatePin(opts.stateDir),
-    );
+    // 채널은 설정 그대로 둔다 — 핀은 실패 버전 스킵에만 쓰고 채널을 동결하지
+    // 않는다. 동결하던 시절에는 다음 정상 버전까지 막혀 호스트가 옛 버전에
+    // 갇혔다(ralf 2026-10-03). 대신 tick 이 latest==badVersion 이면 available 을
+    // 내리고 스킵 사유를 남겨, 되돌린 불량 버전이 다시 "업데이트 가능"으로
+    // 뜨지 않게 한다(아래 #tickNpmGlobal).
+    const update_channel = resolveUpdateChannel(opts.updateChannel);
     // The build-time snapshot (dist/package.json) is the running code's own
     // version — frozen at build, so it always matches what is actually loaded.
     const current_version = opts.currentVersion ?? getRunningVersion();
@@ -824,6 +842,9 @@ export class UpdateChecker {
       last_checked_at: null,
       last_error: null,
       update_approval_pending_version: null,
+      update_skipped_version: null,
+      update_failed_version: null,
+      update_failure_reason: null,
     };
   }
 
@@ -852,6 +873,25 @@ export class UpdateChecker {
       this.#restartRequiredLogged = false;
     }
     this.#status = { ...this.#status, installed_version, restart_required };
+    // 실패 투영은 tick 없이도 최신으로 — 핀 삭제 같은 외부 변화를 다음 하트비트가
+    // 곧바로 반영한다(체커 5분 주기를 기다리지 않는다). 스킵이 풀리면 available 도
+    // 같은 기준으로 다시 계산한다.
+    const failure = failureProjection(this.#stateDir);
+    const update_skipped_version =
+      failure.failed && this.#status.latest_version === failure.failed ? failure.failed : null;
+    let update_available = this.#status.update_available;
+    if (!update_skipped_version && this.#status.latest_version) {
+      update_available = compareSemver(this.#status.latest_version, this.#status.current_version) > 0;
+    } else if (update_skipped_version) {
+      update_available = false;
+    }
+    this.#status = {
+      ...this.#status,
+      update_available,
+      update_skipped_version,
+      update_failed_version: failure.failed,
+      update_failure_reason: failure.reason,
+    };
     // Defensive copy so the caller can't accidentally mutate the cache.
     return { ...this.#status };
   }
@@ -863,7 +903,7 @@ export class UpdateChecker {
    *  sessions to drain — see hasPendingSelfUpdate(). */
   setCountInFlightSessions(fn: () => number): void {
     this.#countInFlightSessions = fn;
-  }
+  };
 
   start(): void {
     if (this.#stopped || this.#timer) return;
@@ -1124,11 +1164,19 @@ export class UpdateChecker {
         return;
       }
       const current = this.#status.current_version;
-      const update_available = compareSemver(latest, current) > 0;
+      const pin = readUpdatePin(this.#stateDir);
+      let update_available = compareSemver(latest, current) > 0;
+      // 핀의 실패 버전이 최신이면 오퍼하지 않는다 — 새 버전은 이 판정과 무관하다.
+      const update_skipped_version = pin?.badVersion && latest === pin.badVersion ? latest : null;
+      if (update_skipped_version) update_available = false;
+      const failure = failureProjection(this.#stateDir);
       this.#status = {
         ...this.#status,
         latest_version: latest,
         update_available,
+        update_skipped_version,
+        update_failed_version: failure.failed,
+        update_failure_reason: failure.reason,
         last_checked_at: new Date().toISOString(),
         last_error: null,
       };
@@ -1359,15 +1407,14 @@ async function runSelfUpdateLocked(
     out(`Self-update: ${summary}`);
     return { changed: false, summary };
   }
-  // ticket 23753dc7: 복귀 핀이 있으면 채널을 그 정확한 버전으로 고정한다.
-  // 아래 provenance 조회와 already-latest 스킵이 이 채널을 그대로 쓰므로,
-  // 되돌린 뒤에는 같은 불량 버전이 다시 해석될 수 없다(루프 부재).
+  // 복귀 핀은 채널을 동결하지 않는다 — 실패한 버전의 자동 재설치만 막는다.
+  // 새 버전이 올라오면 핀과 무관하게 정상 오퍼·설치된다. 핀 해제는 사람 몫(파일 삭제).
   const pin = readUpdatePin(opts.stateDir);
-  let channel = resolveEffectiveUpdateChannel(rawChannel, pin);
-  if (pin) {
+  let channel = rawChannel;
+  if (pin?.badVersion) {
     out(
-      `Self-update: channel pinned to v${pin.version} by rollback (${pin.reason || 'no reason recorded'}) — ` +
-        `delete ${updatePinPath(opts.stateDir)} to release`,
+      `Self-update: v${pin.badVersion} will be skipped automatically (${pin.reason || 'no reason recorded'}) — ` +
+        `newer versions are unaffected; delete ${updatePinPath(opts.stateDir)} to retry it (operator only)`,
     );
   } else if (opts.pinnedTargetVersion) {
     // ticket 9408b308: 승인된 개시는 승인된 그 버전만 설치한다. 채널을 다시
@@ -1693,6 +1740,19 @@ async function runNpmGlobalSelfUpdate(
         : '');
     out(`Self-update: ${summary}`);
     return { changed: false, summary, upToDate: true };
+  }
+
+  // 복귀 핀이 가리키는 실패 버전은 자동·수동(버전 지정이 없어 같은 경로) 막론하고
+  // 설치하지 않는다 — 재시도 루프 방지(정책 G). 새 버전은 이 게이트와 무관하다.
+  // 해제(해당 버전 재시도)는 핀 파일 삭제 = 사람만 한다.
+  const badPin = readUpdatePin(opts.stateDir);
+  if (verdict.version && isPinnedBadVersion(badPin, verdict.version)) {
+    const summary =
+      `npm-global update skipped: v${verdict.version} failed before and is pinned against reinstall` +
+      (badPin?.reason ? ` (${badPin.reason})` : '') +
+      ` — newer versions are unaffected; delete ${updatePinPath(opts.stateDir)} to retry it (operator only)`;
+    out(`Self-update: ${summary}`);
+    return { changed: false, summary };
   }
 
   // 디스크에 이미 대상(또는 그보다 새) 빌드가 있으면 설치는 건너뛰고 **재기동만** 한다.
@@ -2279,12 +2339,12 @@ function pinRolledBackVersion(
   reason: string,
 ): void {
   writeUpdatePin(
-    { version, reason: `${reason} (bad build v${badVersion})`, pinnedAtMs: Date.now() },
+    { version, badVersion, reason: `${reason} (bad build v${badVersion})`, pinnedAtMs: Date.now() },
     opts.stateDir,
   );
   out(
-    `Self-update: update channel pinned to v${version} — v${badVersion} will not be reinstalled ` +
-      `automatically. Release by deleting ${updatePinPath(opts.stateDir)} (operator only).`,
+    `Self-update: v${badVersion} will be skipped automatically (${reason}) — ` +
+      `newer versions are unaffected; delete ${updatePinPath(opts.stateDir)} to retry it (operator only).`,
   );
 }
 

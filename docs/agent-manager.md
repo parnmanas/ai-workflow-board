@@ -679,6 +679,12 @@ RestartOnFailure 가 동작하지 않아 장시간 다운됐다. 원인 둘을 �
   부팅이 새 예산으로 다시 정리한다(죽었으면 sidecar 와 함께 격리 해제).
   Windows 에서는 `taskkill /T /F` 트리 킬을 쓴다 — bare kill 은 `.cmd` shim 체인의
   자식을 남긴다. kill errno(EPERM 등)는 격리 사유에 남긴다.
+- **복귀 핀은 실패 버전만 스킵하고 채널을 동결하지 않는다.** 핀은 `{version(복귀됨),
+  badVersion(실패), reason}` 을 싣고, 체커·설치 게이트는 latest==badVersion 일 때만
+  건너뛴다. 새 버전이 올라오면 핀과 무관하게 오퍼·설치된다. 실패 사유는 하트비트
+  (`update_failed_version`/`update_failure_reason`, 스킵 중이면
+  `update_skipped_version`)로 서버·UI·AI agent 에 보인다. 핀 해제는 여전히 사람만
+  (핀 파일 삭제) — 자동 해제는 재설치 루프를 되살린다.
 - **예약 작업이 있으면 업데이터 인계는 태스크를 경유한다.** `update-handoff.json`
   (버전·구 pid)을 쓰고 `schtasks /Run` 으로 깨운 뒤 스스로 종료한다. 새 매니저는
   태스크가 띄우므로 감시 안에서 태어나 — 죽으면 1분 간격으로 다시 뜬다. 구 pid 가

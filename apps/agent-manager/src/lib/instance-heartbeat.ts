@@ -686,6 +686,9 @@ export class InstanceHeartbeat {
               update_last_checked_at: updateStatus.last_checked_at,
               update_last_error: updateStatus.last_error,
               update_approval_pending_version: updateStatus.update_approval_pending_version ?? null,
+              update_skipped_version: updateStatus.update_skipped_version ?? null,
+              update_failed_version: updateStatus.update_failed_version ?? null,
+              update_failure_reason: updateStatus.update_failure_reason ?? null,
             }
           : {}),
       };

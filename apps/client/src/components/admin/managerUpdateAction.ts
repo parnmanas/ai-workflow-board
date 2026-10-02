@@ -16,6 +16,9 @@ export interface ManagerUpdateActionInput {
   installed_version?: string | null;
   restart_required?: boolean;
   install_mode?: string | null;
+  update_skipped_version?: string | null;
+  update_failed_version?: string | null;
+  update_failure_reason?: string | null;
 }
 
 export type ManagerUpdateAction =
@@ -62,4 +65,26 @@ export function managerUpdateAction(inst: ManagerUpdateActionInput): ManagerUpda
 export function installedVersionBadge(inst: ManagerUpdateActionInput): string | null {
   if (!inst.restart_required || !inst.installed_version) return null;
   return `installed v${inst.installed_version} — restart required`;
+}
+
+/**
+ * 업데이트 실패 배지 내용 — 실패한 버전만 스킵하고 새 버전 오퍼는 막지 않으므로,
+ * "왜 저 버전이 안 뜨나"의 답을 separate 배지로 둔다. 없으면 null.
+ */
+export function updateFailureBadge(inst: ManagerUpdateActionInput): { label: string; title: string } | null {
+  const failed = inst.update_failed_version;
+  const reason = inst.update_failure_reason;
+  if (!failed && !reason) return null;
+  const skipped = inst.update_skipped_version;
+  return {
+    label: skipped && skipped === failed ? `(v${failed} skipped)` : `(v${failed || '?'} failed before)`,
+    title: [
+      failed ? `v${failed} failed to update` : 'A previous update failed',
+      reason || 'no reason recorded',
+      skipped && skipped === failed
+        ? 'It is skipped automatically; newer versions are still offered.'
+        : 'Newer versions are still offered.',
+      'To retry it, delete the pin file on the host (operator only).',
+    ].join(' — '),
+  };
 }

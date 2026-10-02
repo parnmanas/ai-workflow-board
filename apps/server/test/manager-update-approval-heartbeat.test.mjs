@@ -182,4 +182,37 @@ test('승인 대기가 아닌 하트비트는 감사행을 남기지 않고, 구
   assert.equal(rows.length, 0, '대기 중이 아니면 감사행이 없어야 한다');
 });
 
+test('업데이트 실패 버전·사유를 실은 하트비트는 레지스트리에 저장된다 (AI agent 가시성)', async (t) => {
+  // ralf 2026-10-03: 업데이트 실패가 어디에도 남지 않아 "왜 안 뜨나"를 알 수 없었다.
+  // 실패한 버전만 스킵하고 새 버전 오퍼는 막지 않으므로, 사유는 레지스트리까지만
+  // 흐르고 감사행은 남기지 않는다(승인 요청과 달리 반복 하트비트마다 쌓일 수 있다).
+  const { port, manager, workspace, key, app } = await setup(t, 0, 'update-failure');
+  await heartbeat(port, key, manager, workspace, {
+    instance_id: 'update-failure-1',
+    latest_version: '1.6.265',
+    update_available: false,
+    update_channel: 'latest',
+    update_skipped_version: '1.6.265',
+    update_failed_version: '1.6.265',
+    update_failure_reason: 'boot verification failed for v1.6.265 (bad build v1.6.265)',
+  });
+  const record = app.get(InstanceRegistryService).get('update-failure-1');
+  assert.ok(record, 'instance record must exist after the heartbeat');
+  assert.equal(record.update_skipped_version, '1.6.265');
+  assert.equal(record.update_failed_version, '1.6.265');
+  assert.match(record.update_failure_reason, /boot verification failed/);
+
+  // 실패 없는 하트비트는 null 로 돌아온다 — undefined(구버전)와 구분된다.
+  await heartbeat(port, key, manager, workspace, {
+    instance_id: 'update-failure-2',
+    latest_version: '1.6.266',
+    update_available: true,
+    update_skipped_version: null,
+    update_failed_version: null,
+    update_failure_reason: null,
+  });
+  const clean = app.get(InstanceRegistryService).get('update-failure-2');
+  assert.equal(clean.update_failure_reason, null);
+});
+
 exitAfterTests();

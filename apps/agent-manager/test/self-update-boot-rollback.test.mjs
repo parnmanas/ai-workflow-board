@@ -33,7 +33,7 @@ import {
   resolveVerifiedRollbackSpec,
   runBootVerificationTimeout,
   runSelfUpdate,
-  resolveEffectiveUpdateChannel,
+  isPinnedBadVersion,
   runBootVerification,
   UpdateChecker,
   UPDATE_CHANNEL_OFF,
@@ -318,6 +318,8 @@ test('runBootVerification: 부팅 실패를 주입하면 이전 버전으로 복
   assert.ok(pin, '복귀는 반드시 핀을 남긴다');
   assert.equal(pin.version, OLDER_VERSION);
   assert.notEqual(pin.version, RUNNING_VERSION, '나쁜 버전이 핀되면 안 된다');
+  // 핀은 실패 버전(badVersion)을 함께 싣는다 — 채널 동결이 아니라 그 버전 스킵용이다.
+  assert.equal(pin.badVersion, RUNNING_VERSION);
   // 핀 사유가 사람이 읽을 수 있어야 한다 — 왜 멈췄는지 알아야 풀 수 있다.
   assert.match(pin.reason, /boot verification failed/);
   assert.match(pin.reason, new RegExp(RUNNING_VERSION.replace(/\./g, '\\.')));
@@ -327,7 +329,7 @@ test('runBootVerification: 부팅 실패를 주입하면 이전 버전으로 복
     lines.some((l) => l.startsWith('Self-update: ') && /boot verification failed/.test(l)),
     `Self-update: 접두사 로그가 없다: ${JSON.stringify(lines)}`,
   );
-  assert.ok(lines.some((l) => l.includes('pinned to') && l.includes(OLDER_VERSION)));
+  assert.ok(lines.some((l) => l.includes('will be skipped automatically') && l.includes(RUNNING_VERSION)));
 
   // 부팅 실패에는 재시도가 없다: 복귀 시도는 정확히 1회로 기록된다.
   const after = readBootVerificationRecord(dir);
@@ -402,23 +404,35 @@ test('markBootVerified: 하트비트 1회 성공이 기록을 지우되 핀은 �
   assert.equal(markBootVerified({ stateDir: dir, log: () => {} }), false);
 });
 
-// ─── 4. 핀이 다음 tick 을 막는다 (루프 부재) ────────────────────────────────
+// ─── 4. 핀이 채널을 동결하지 않는다 — 실패 버전만 스킵한다 ───────────────────
+//
+// ralf 2026-10-03: 채널 동결은 실패 버전(265)뿐 아니라 다음 정상 버전(266)까지
+// 막아 호스트를 옛 버전에 가뒀다. 핀은 이제 "그 버전 자동 재설치 금지" 표식이고,
+// 새 버전 오퍼·설치는 핀과 무관하게 흐른다.
 
-test('resolveEffectiveUpdateChannel: 핀이 있으면 dist-tag 대신 그 정확한 버전을 쓴다', () => {
-  const pin = { version: OLDER_VERSION, reason: 'r', pinnedAtMs: 1 };
-  assert.equal(resolveEffectiveUpdateChannel('latest', pin), OLDER_VERSION);
-  // 핀이 없으면 원래 채널 그대로 — 정상 경로의 동작은 변하지 않는다.
-  assert.equal(resolveEffectiveUpdateChannel('latest', null), 'latest');
-  assert.equal(resolveEffectiveUpdateChannel('next', null), 'next');
-  // off 는 운영자가 건 하드 핀이라 복귀 핀보다 우선한다.
-  assert.equal(resolveEffectiveUpdateChannel(UPDATE_CHANNEL_OFF, pin), UPDATE_CHANNEL_OFF);
+test('isPinnedBadVersion: 실패 버전하고만 같으면 true', () => {
+  assert.equal(isPinnedBadVersion({ version: '1.6.264', badVersion: '1.6.265', reason: 'r', pinnedAtMs: 1 }, '1.6.265'), true);
+  assert.equal(isPinnedBadVersion({ version: '1.6.264', badVersion: '1.6.265', reason: 'r', pinnedAtMs: 1 }, '1.6.266'), false);
+  assert.equal(isPinnedBadVersion(null, '1.6.265'), false);
+  assert.equal(isPinnedBadVersion({ version: '1.6.264', badVersion: '', reason: 'r', pinnedAtMs: 1 }, '1.6.264'), false);
 });
 
-test('UpdateChecker: 핀이 걸린 홈에서는 채널이 핀 버전으로 시작한다', (t) => {
+test('readUpdatePin: 구형 핀(사유 꼬리)은 badVersion 을 복원한다', (t) => {
   const dir = freshStateDir(t);
   writeFileSync(
     updatePinPath(dir),
-    JSON.stringify({ version: OLDER_VERSION, reason: 'rollback', pinnedAtMs: 1 }),
+    JSON.stringify({ version: OLDER_VERSION, reason: 'boot verification failed for v9.9.9 (bad build v9.9.9)', pinnedAtMs: 1 }),
+    'utf8',
+  );
+  const pin = readUpdatePin(dir);
+  assert.equal(pin.badVersion, '9.9.9');
+});
+
+test('UpdateChecker: 핀이 걸린 홈에서도 채널은 그대로, 실패 버전만 스킵한다', async (t) => {
+  const dir = freshStateDir(t);
+  writeFileSync(
+    updatePinPath(dir),
+    JSON.stringify({ version: OLDER_VERSION, badVersion: '9.9.9', reason: 'boot verification failed', pinnedAtMs: 1 }),
     'utf8',
   );
   const checker = new UpdateChecker({
@@ -426,11 +440,39 @@ test('UpdateChecker: 핀이 걸린 홈에서는 채널이 핀 버전으로 시�
     updateChannel: 'latest',
     currentVersion: OLDER_VERSION,
     stateDir: dir,
+    npmView: async () => ({ ok: true, stdout: '9.9.9\n', stderr: '' }),
     log: () => {},
   });
   const status = checker.status();
-  assert.equal(status.update_channel, OLDER_VERSION);
-  assert.notEqual(status.update_channel, 'latest', '핀을 무시하면 다음 tick 이 불량 버전을 다시 집는다');
+  assert.equal(status.update_channel, 'latest', '핀을 무시...가 아니라 핀이 채널을 바꾸지 않는다');
+  const checked = await checker.checkNow();
+  assert.equal(checked.update_available, false, '실패 버전은 오퍼하지 않는다');
+  assert.equal(checked.latest_version, '9.9.9', 'latest 자체는 정직하게 둔다');
+  assert.equal(checked.update_skipped_version, '9.9.9');
+  assert.equal(checked.update_failed_version, '9.9.9');
+  assert.match(checked.update_failure_reason, /boot verification failed/);
+});
+
+test('UpdateChecker: 새 버전이 올라오면 핀과 무관하게 오퍼된다', async (t) => {
+  const dir = freshStateDir(t);
+  writeFileSync(
+    updatePinPath(dir),
+    JSON.stringify({ version: OLDER_VERSION, badVersion: '9.9.9', reason: 'boot verification failed', pinnedAtMs: 1 }),
+    'utf8',
+  );
+  const checker = new UpdateChecker({
+    installMode: 'npm-global',
+    updateChannel: 'latest',
+    currentVersion: OLDER_VERSION,
+    stateDir: dir,
+    npmView: async () => ({ ok: true, stdout: '9.9.10\n', stderr: '' }),
+    log: () => {},
+  });
+  const checked = await checker.checkNow();
+  assert.equal(checked.update_available, true, '다음 버전은 막지 않는다');
+  assert.equal(checked.update_skipped_version, null);
+  // 실패 이력은 핀이 있는 한 남는다 — 사유를 알아야 사람이 핀을 풀 수 있다.
+  assert.equal(checked.update_failed_version, '9.9.9');
 });
 
 // ─── 5. 프로세스 재시작을 넘어 보존된다 (실제 자식 프로세스) ────────────────
@@ -516,8 +558,8 @@ test('복귀 핀과 그 사유가 프로세스 재시작을 넘어 보존되고 
   assert.equal(rolled.outcome.kind, 'rollback');
   assert.equal(rolled.pin.version, OLDER_VERSION);
 
-  // 프로세스 #2 — 새 프로세스가 핀을 읽어 채널을 고정한다. 이것이 "다음 tick 이
-  // 같은 나쁜 버전을 다시 집지 않는다"의 실제 집행 지점이다.
+  // 프로세스 #2 — 새 프로세스가 핀을 읽는다. 핀은 채널을 동결하지 않고 실패 버전만
+  // 가리킨다 — "다음 tick 이 같은 나쁜 버전을 다시 집지 않는다"는 스킵 판정이 맡는다.
   const nextTick = runInChildProcess(
     home,
     `
@@ -530,11 +572,11 @@ test('복귀 핀과 그 사유가 프로세스 재시작을 넘어 보존되고 
   `,
   );
   assert.equal(nextTick.pin.version, OLDER_VERSION, '핀이 재시작을 넘어 남아야 한다');
+  assert.equal(nextTick.pin.badVersion, running, '실패 버전이 핀에 남아야 한다');
   assert.match(nextTick.pin.reason, /boot verification failed/, '핀 사유도 함께 보존된다');
-  assert.equal(nextTick.channel, OLDER_VERSION);
-  assert.notEqual(nextTick.channel, running, '재시작 뒤 채널이 불량 버전으로 되돌아갔다');
+  assert.equal(nextTick.channel, 'latest', '핀과 무관하게 채널은 그대로다');
 
-  // 프로세스 #3 — 운영자가 핀 파일을 지우면(유일한 해제 수단) 다시 시도 가능해진다.
+  // 프로세스 #3 — 운영자가 핀 파일을 지우면(유일한 해제 수단) 사유 표시도 함께 사라진다.
   unlinkSync(join(home, 'self-update-pin.json'));
   const released = runInChildProcess(
     home,
