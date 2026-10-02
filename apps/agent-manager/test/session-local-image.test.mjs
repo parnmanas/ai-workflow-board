@@ -1,6 +1,7 @@
-// 세션 답 속 로컬 경로 이미지(`![alt](E:/…png)`) — 매니저가 그 장비에서 읽어 주는 `local_image` RPC.
+// 세션 답 속 로컬 경로 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`) — 매니저가 그 장비에서 읽어 주는 `local_image` RPC.
 //   1. 경로 모양: 드라이브 문자 · `/E:/`(win32) · file:// · ~ · 상대(cwd 기준) · `%20`.
-//   2. 이미지 파일만: 확장자 + 매직 바이트(이름만 .png 인 텍스트는 거절), SVG 거절, 상한.
+//   2. 미리보기 파일만: 이미지(확장자 + 매직 바이트, 이름만 .png 인 텍스트는 거절, SVG 거절, 상한)와
+//      html/md(확장자 + 텍스트 확인 — NUL 바이트가 있으면 거절).
 //   3. 러너가 RPC 로 { base64, mime_type } 을 돌려주고, 실패는 코드와 함께 ok:false 로 답한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,6 +99,27 @@ test('readLocalImage: 이미지가 아니거나 너무 크면 이유와 함께 �
   assert.equal(await codeOf('big.png'), 'too_large');
   assert.equal(await codeOf('missing.png'), 'not_found');
   assert.equal(await codeOf(''), 'not_found', '디렉터리는 파일이 아니다');
+});
+
+test('readLocalImage: html/md 미리보기 파일을 이미지와 같은 통으로 읽는다', async (t) => {
+  const dir = await scratch(t);
+  const html = '<!doctype html><html><body>보고서</body></html>';
+  const md = '# 보고서\n\n- 항목\n';
+  await writeFile(join(dir, 'report.html'), html);
+  await writeFile(join(dir, 'notes.MD'), md);
+  const gotHtml = await readLocalImage(join(dir, 'report.html'), '');
+  assert.deepEqual([gotHtml.mimeType, gotHtml.bytes.toString('utf8')], ['text/html', html]);
+  const gotMd = await readLocalImage('notes.MD', dir);
+  assert.deepEqual([gotMd.mimeType, gotMd.bytes.toString('utf8')], ['text/markdown', md]);
+});
+
+test('readLocalImage: 확장자만 .md 인 바이너리는 거절한다', async (t) => {
+  const dir = await scratch(t);
+  await writeFile(join(dir, 'evil.md'), Buffer.concat([Buffer.from('# x\n'), Buffer.from([0x00, 0x01, 0x02])]));
+  await writeFile(join(dir, 'empty.md'), '');
+  const codeOf = (p) => readLocalImage(join(dir, p), '').then(() => 'ok', (e) => e.code);
+  assert.equal(await codeOf('evil.md'), 'not_image', 'NUL 바이트가 있으면 텍스트가 아니다');
+  assert.equal(await codeOf('empty.md'), 'not_image', '빈 파일은 미리보기가 아니다');
 });
 
 test('runner: local_image RPC 가 바이트와 mime 을 돌려주고 실패는 코드로 답한다', async (t) => {

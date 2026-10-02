@@ -943,7 +943,8 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /**
-   * 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) — 매니저가 그 장비에서 읽어 준다.
+   * 에이전트가 답에 **경로로** 적은 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`) —
+   * 매니저가 그 장비에서 읽어 준다(이미지·html·md).
    *
    * Codex 데스크톱 앱은 같은 마크다운을 자기 장비의 파일로 그린다. AWB 화면은 다른 장비라
    * 경로만으로는 아무것도 못 그리므로 매니저에게 바이트를 받는다. 저장하지 않는다.
@@ -975,9 +976,15 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     const base64 = typeof result?.base64 === 'string' ? result.base64 : '';
     if (!base64) throw new AgentSessionError(404, 'image_not_found');
-    const mimeType = typeof result?.mime_type === 'string' && /^image\/[a-z0-9.+-]+$/.test(result.mime_type) && result.mime_type !== 'image/svg+xml'
-      ? result.mime_type
-      : 'application/octet-stream';
+    // 매니저가 읽어 준 미리보기 파일의 mime — 이미지와 텍스트 미리보기(html/md)만 통과시킨다.
+    // SVG 는 매니저가 이미 거절하지만, 고의로 변조된 매니저를 상대로도 AWB origin 에서 스크립트가
+    // 돌지 않게 여기서 한 번 더 걸러 octet-stream 으로 떨어뜨린다.
+    const rawMime = typeof result?.mime_type === 'string' ? result.mime_type : '';
+    const mimeType = rawMime === 'text/html' || rawMime === 'text/markdown'
+      ? rawMime
+      : (/^image\/[a-z0-9.+-]+$/.test(rawMime) && rawMime !== 'image/svg+xml'
+        ? rawMime
+        : 'application/octet-stream');
     return { bytes: Buffer.from(base64, 'base64'), mimeType };
   }
 

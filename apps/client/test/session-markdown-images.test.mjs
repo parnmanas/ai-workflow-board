@@ -55,3 +55,44 @@ test('이미지가 없으면 글 하나, 빈 글이면 아무것도 없다', () 
   assert.deepEqual(splitMarkdownImages('그냥 글 [링크](x)'), [{ kind: 'text', text: '그냥 글 [링크](x)' }]);
   assert.deepEqual(splitMarkdownImages(''), []);
 });
+
+test('로컬 html/md 는 이미지와 같은 자리에서 파일 미리보기로 떼어 낸다 — `!` 유무와 무관', () => {
+  const text = '보고서 나왔습니다.\n![결과](./report.html)\n[상세](./notes.md)\n확인해 주세요.';
+  assert.deepEqual(splitMarkdownImages(text), [
+    { kind: 'text', text: '보고서 나왔습니다.' },
+    { kind: 'file', alt: '결과', target: './report.html', source: 'local', fileKind: 'html' },
+    { kind: 'file', alt: '상세', target: './notes.md', source: 'local', fileKind: 'markdown' },
+    { kind: 'text', text: '확인해 주세요.' },
+  ]);
+});
+
+test('html/md 판정은 확장자로만 — 대소문자·쿼리·절대경로도 받는다', () => {
+  const t = [
+    '![a](E:\\out\\Report.HTML)',
+    '![b](/home/u/notes.Markdown?rev=2)',
+    '[c](<C:/Program Files/r e p o r t.htm>)',
+  ].join('\n');
+  assert.deepEqual(splitMarkdownImages(t).map((s) => [s.target, s.fileKind]), [
+    ['E:\\out\\Report.HTML', 'html'],
+    ['/home/u/notes.Markdown?rev=2', 'markdown'],
+    ['C:/Program Files/r e p o r t.htm', 'html'],
+  ]);
+});
+
+test('html/md 가 아닌 일반 링크는 건드리지 않고 한 텍스트로 남긴다', () => {
+  assert.deepEqual(splitMarkdownImages('그냥 글 [링크](./other.txt) 끝'), [
+    { kind: 'text', text: '그냥 글 [링크](./other.txt) 끝' },
+  ]);
+  // 이미지 문법의 비-html/md 로컬 경로도 기존대로 이미지다(매니저가 사유와 함께 거절).
+  assert.deepEqual(splitMarkdownImages('![a](E:/x.txt)'), [
+    { kind: 'image', alt: 'a', target: 'E:/x.txt', source: 'local' },
+  ]);
+});
+
+test('코드 안의 파일 문법은 예시다 — 그리지 않는다', () => {
+  const text = '인라인 `[a](./r.html)` 와\n```md\n![b](./b.md)\n```\n밖의 ![c](./c.html)';
+  assert.deepEqual(
+    splitMarkdownImages(text).filter((s) => s.kind === 'file').map((s) => s.target),
+    ['./c.html'],
+  );
+});

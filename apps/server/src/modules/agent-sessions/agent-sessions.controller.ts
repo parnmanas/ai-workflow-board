@@ -105,8 +105,9 @@ export class AgentSessionsController {
   }
 
   /**
-   * 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`)의 바이트 — Runtime Host 의 매니저가
-   * 그 장비에서 읽어 준다(이미지 파일만). 경로는 `?path=`, 상대 경로의 기준은 `?cwd=`.
+   * 에이전트가 답에 **경로로** 적은 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`)의
+   * 바이트 — Runtime Host 의 매니저가 그 장비에서 읽어 준다(이미지·html·md). 경로는 `?path=`,
+   * 상대 경로의 기준은 `?cwd=`.
    *
    * 위 `image` 와 달리 캐시하지 않는다: 같은 경로의 파일은 다시 그려질 수 있다(Codex 앱이 경로로
    * 캐시해 덮어쓴 스크린샷을 옛 그림으로 보여 준 버그가 있다).
@@ -128,6 +129,9 @@ export class AgentSessionsController {
       res.setHeader('Content-Type', image.mimeType);
       res.setHeader('Content-Length', String(image.bytes.length));
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // html 을 이 URL 로 직접 열어도 스크립트가 돌지 않게 한다 — 화면의 iframe(`sandbox=""`)와
+      // 별개로, URL 을 복사해 탭에 붙여넣는 경우까지 막는다.
+      if (image.mimeType === 'text/html') res.setHeader('Content-Security-Policy', 'sandbox');
       res.setHeader('Cache-Control', 'no-store');
       return res.end(image.bytes);
     } catch (err: any) {

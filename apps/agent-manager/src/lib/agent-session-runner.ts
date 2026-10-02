@@ -77,7 +77,7 @@ export interface AgentSessionRequest {
   mode_id?: string;
   /** image — 보관된 이미지 참조(이벤트 payload 의 `image_ref`). */
   image_ref?: string;
-  /** local_image — 에이전트가 답에 적은 이미지 경로(`![alt](path)`). 상대 경로는 세션 cwd 기준. */
+  /** local_image — 에이전트가 답에 적은 미리보기 파일 경로(`![alt](path)` 이미지·html·md). 상대 경로는 세션 cwd 기준. */
   image_path?: string;
   /** set_config_option */
   config_id?: string;
@@ -626,8 +626,9 @@ export class AgentSessionRunner {
           return;
         }
         case 'local_image': {
-          // 에이전트가 답에 적은 경로의 이미지(Codex 앱이 `![alt](E:/…png)` 를 그리는 것과 같은 일).
-          // 상대 경로의 기준은 살아 있는 세션의 cwd, 없으면 화면이 아는 cwd 다.
+          // 에이전트가 답에 적은 경로의 미리보기 파일(Codex 앱이 `![alt](E:/…png)` 를 그리는 것과 같은 일).
+          // 이미지뿐 아니라 html/md 도 같은 통으로 읽는다 — 상대 경로의 기준은 살아 있는 세션의 cwd,
+          // 없으면 화면이 아는 cwd 다.
           const live = sessionId ? this.#live.get(this.#key(cli, sessionId)) : undefined;
           try {
             const image = await readLocalImage(String(request.image_path || ''), live?.cwd || request.cwd || '');

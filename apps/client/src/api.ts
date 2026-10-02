@@ -2163,7 +2163,7 @@ export const api = {
     }
     return resp.blob();
   },
-  /** 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) — 그 Runtime Host 의 매니저가 읽어 준다.
+  /** 에이전트가 답에 **경로로** 적은 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`) — 그 Runtime Host 의 매니저가 읽어 준다.
    *  `cwd` 는 상대 경로의 기준. 실패하면 서버가 준 사유(message)로 던진다. */
   getHostSessionLocalImage: async (managerId: string, cli: string, sessionId: string, path: string, cwd: string): Promise<Blob> => {
     const query = new URLSearchParams({ path, ...(cwd ? { cwd } : {}) });

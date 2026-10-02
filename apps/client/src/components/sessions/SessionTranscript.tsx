@@ -134,11 +134,16 @@ function PromptBlock({ text }: { text: string }) {
 }
 
 function AssistantBlock({ text, loadLocalImage }: { text: string; loadLocalImage?: (path: string) => Promise<Blob> }) {
-  // 공통 렌더러는 이미지 문법을 모른다 — 그림 자리만 먼저 떼어 내고 나머지 글은 그대로 그린다.
+  // 공통 렌더러는 이미지·파일 문법을 모른다 — 미리보기 자리만 먼저 떼어 내고 나머지 글은 그대로 그린다.
+  // 이미지와 로컬 html/md 는 같은 통(`local_image` RPC)으로 받으므로 로더도 하나를 공유한다.
   const nodes = useMemo(
-    () => splitMarkdownImages(text).map((seg, i) => (seg.kind === 'text'
-      ? <React.Fragment key={i}>{renderMarkdown(seg.text)}</React.Fragment>
-      : <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} />)),
+    () => splitMarkdownImages(text).map((seg, i) => {
+      if (seg.kind === 'text') return <React.Fragment key={i}>{renderMarkdown(seg.text)}</React.Fragment>;
+      if (seg.kind === 'file') {
+        return <MarkdownFile key={i} alt={seg.alt} target={seg.target} fileKind={seg.fileKind} loadLocalFile={loadLocalImage} />;
+      }
+      return <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} />;
+    }),
     [text, loadLocalImage],
   );
   return (
@@ -758,6 +763,143 @@ function MarkdownImage({
       </a>
       <figcaption style={{ marginTop: 2 }}>{caption}</figcaption>
     </figure>
+  );
+}
+
+/** 경로 끝 파일명으로 `download` 파일명을 만든다. 못 읽으면 확장자만 붙인다. */
+function downloadName(target: string, fallbackExt: string): string {
+  const base = target.split(/[\\/]/).pop()?.split(/[?#]/)[0]?.trim();
+  if (base) return base;
+  return `preview.${fallbackExt}`;
+}
+
+/**
+ * 에이전트 답 속의 로컬 html/md 미리보기(`![결과](./report.html)`, `[보고서](./notes.md)`).
+ * 이미지와 같은 통(`local_image` RPC)으로 바이트를 받아 그 자리에서 펼친다.
+ *
+ * - html: `sandbox=""` iframe — 스크립트·같은-origin 취급을 전부 막아 AWB origin 으로
+ *   돌 수 없게 한다. 새 탭 열기 대신 다운로드 링크를 둔다(새 탭 Blob URL 은 샌드박스가
+ *   안 걸려 스크립트가 AWB origin 으로 돌 수 있다).
+ * - md: 텍스트로 받아 기존 XSS-safe `renderMarkdown` 으로 그린다(새 마크다운 파서 없음).
+ *
+ * 못 읽으면 이미지와 똑같이 경로와 사유를 그 자리에 보인다.
+ */
+function MarkdownFile({
+  alt,
+  target,
+  fileKind,
+  loadLocalFile,
+}: {
+  alt: string;
+  target: string;
+  fileKind: 'html' | 'markdown';
+  loadLocalFile?: (path: string) => Promise<Blob>;
+}) {
+  const [url, setUrl] = useState<string>('');
+  const [mdText, setMdText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!loadLocalFile) return;
+    let revoked = false;
+    let objectUrl = '';
+    setUrl('');
+    setMdText(null);
+    setError(null);
+    void (async () => {
+      try {
+        const blob = await loadLocalFile(target);
+        if (revoked) return;
+        if (fileKind === 'html') {
+          objectUrl = URL.createObjectURL(blob);
+          setUrl(objectUrl);
+        } else {
+          setMdText(await blob.text());
+        }
+      } catch (err: any) {
+        if (!revoked) setError(err?.message || '파일을 가져오지 못했습니다');
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [target, fileKind, loadLocalFile]);
+
+  const label = fileKind === 'html' ? 'HTML' : 'Markdown';
+  const caption = (
+    <span style={{ fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' }} title={target}>
+      {alt ? `${alt} — ` : ''}{target}
+    </span>
+  );
+  if (!loadLocalFile) {
+    return <div data-block="markdown-file" style={{ whiteSpace: 'normal' }}>📄 {label} {caption}</div>;
+  }
+  if (error) {
+    return (
+      <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
+        {label} 파일을 가져오지 못했습니다 — {error}
+        <div>{caption}</div>
+      </div>
+    );
+  }
+  if (fileKind === 'html') {
+    if (!url) {
+      return (
+        <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
+          {label} 불러오는 중… {caption}
+        </div>
+      );
+    }
+    return (
+      <figure data-block="markdown-file" style={{ margin: '6px 0', whiteSpace: 'normal' }}>
+        <iframe
+          src={url}
+          sandbox=""
+          title={alt || target}
+          style={{
+            display: 'block',
+            width: '100%',
+            height: 480,
+            borderRadius: tokens.radii.md,
+            border: `1px solid ${tokens.colors.border}`,
+            background: '#fff',
+          }}
+        />
+        <figcaption style={{ marginTop: 2, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{caption}</span>
+          <a href={url} download={downloadName(target, 'html')} style={{ fontSize: 11, color: tokens.colors.accent }}>
+            다운로드
+          </a>
+        </figcaption>
+      </figure>
+    );
+  }
+  if (mdText === null) {
+    return (
+      <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
+        {label} 불러오는 중… {caption}
+      </div>
+    );
+  }
+  return (
+    <div
+      data-block="markdown-file"
+      style={{
+        margin: '6px 0',
+        whiteSpace: 'normal',
+        borderRadius: tokens.radii.md,
+        border: `1px solid ${tokens.colors.border}`,
+        background: tokens.colors.surface,
+        padding: '8px 12px',
+        maxWidth: 860,
+      }}
+    >
+      <div style={{ marginBottom: 4 }}>{caption}</div>
+      <div style={{ maxHeight: 480, overflow: 'auto', fontSize: 13, lineHeight: 1.6, color: tokens.colors.textPrimary, wordBreak: 'break-word' }}>
+        {renderMarkdown(mdText)}
+      </div>
+    </div>
   );
 }
 
