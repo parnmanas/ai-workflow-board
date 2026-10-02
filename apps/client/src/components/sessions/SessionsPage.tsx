@@ -458,6 +458,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // 그때만 "강제로 열기" 를 내놓는다 — 주인을 모르는 채로 강제 버튼을 보여 주면 눌러도
   // 아무 일이 없거나, 무엇을 죽이는지 말해 주지 못한 채 죽이게 된다.
   const [lockedByExternal, setLockedByExternal] = useState<string | null>(null);
+  // 서버가 저장해 둔 오류 코드로도 판단한다. 예전엔 이 페이지의 Connect 가 실패한 순간에만 켜져서,
+  // 세션을 다시 열면(상태가 error 라 자동 연결도 안 한다) 저장된 문구만 배너에 남고 버튼은 사라졌다.
+  const canForceOpen = !!lockedByExternal || (status === 'error' && live?.last_error_code === 'resume_locked_external');
   const autoConnectedRef = useRef<string | null>(null);
   const connect = useCallback(async (force = false) => {
     setConnecting(true);
@@ -479,7 +482,10 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // (실측: codex 의 주인은 Codex 앱의 공용 app-server 였다), 그러면 같은 프로세스가 물고
   // 있던 다른 작업까지 함께 끊긴다. 그래서 매니저가 알려 준 이름·PID 를 그대로 보여 준다.
   const forceConnect = useCallback(async () => {
-    const reason = lockedByExternal;
+    // 이 페이지에서 받은 실패 사유가 없으면(세션을 다시 연 경우) 서버가 저장해 둔 사유를 쓴다 —
+    // 어느 쪽이든 매니저가 특정한 잠금 주인의 이름·PID 가 들어 있다.
+    const reason = lockedByExternal
+      || (live?.last_error_code === 'resume_locked_external' ? live.last_error : null);
     if (!reason) return;
     const ok = await confirm({
       title: '잠금을 쥔 프로세스를 종료하고 열까요?',
@@ -495,7 +501,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     });
     if (!ok) return;
     await connect(true);
-  }, [confirm, connect, lockedByExternal]);
+  }, [confirm, connect, lockedByExternal, live?.last_error, live?.last_error_code]);
   useEffect(() => {
     if (loading || !live || connecting || !shouldAutoConnect(status)) return;
     const marker = `${managerId}/${cli}/${sessionId}`;
@@ -815,7 +821,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       {((status === 'error' && live?.last_error) || connectError) && (
         <div role="alert" style={{ padding: '8px 16px', fontSize: 12, color: tokens.colors.dangerLight, background: `${tokens.colors.dangerBg}66`, borderBottom: `1px solid ${tokens.colors.border}`, display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ flex: 1, minWidth: 0 }}>{(status === 'error' && live?.last_error) || connectError}</span>
-          {lockedByExternal && !connecting && (
+          {canForceOpen && !connecting && (
             <Button variant="secondary" size="sm" onClick={() => void forceConnect()} title="잠금을 쥔 프로세스를 종료하고 이 세션을 엽니다">
               강제로 열기…
             </Button>

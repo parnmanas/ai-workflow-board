@@ -1047,6 +1047,8 @@ export interface AgentSessionLiveSnapshot {
   /** 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 주지 않으면 null. */
   auth: AgentSessionAuth | null;
   last_error: string | null;
+  /** last_error 의 기계용 코드(`resume_locked_external` 이면 화면이 "강제로 열기" 를 낸다). */
+  last_error_code: string | null;
   driver_user_id: string | null;
   updated_at: string;
 }

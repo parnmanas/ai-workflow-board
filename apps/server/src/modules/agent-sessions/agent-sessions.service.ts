@@ -125,6 +125,9 @@ export interface ManagerStatePatch {
   auth?: AgentSessionAuth | null;
   resume_supported?: boolean;
   last_error?: string | null;
+  /** last_error 의 기계용 코드(`resume_locked_external` 등). 화면이 그 코드로 할 수 있는 일
+   *  (강제로 열기)을 정한다 — 문구만 저장하면 페이지를 새로 연 뒤엔 무엇을 할 수 있는지 잃는다. */
+  last_error_code?: string | null;
   reason?: string;
 }
 
@@ -143,6 +146,7 @@ interface LiveState {
   auth: AgentSessionAuth | null;
   resume_supported: boolean;
   last_error: string | null;
+  last_error_code: string | null;
   driver_user_id: string | null;
   updated_at: number;
 }
@@ -970,6 +974,9 @@ export class AgentSessionsService implements OnModuleDestroy {
         this.applyPatch(failed, {
           status: 'error',
           last_error: String(err?.message || 'Runtime Host could not open this session.'),
+          // 코드도 남긴다 — 화면이 "강제로 열기" 를 낼지 이 코드로 정한다. 예전엔 버튼이 그 페이지의
+          // Connect 가 실패한 순간에만 켜져서, 세션을 다시 열면 문구만 보이고 버튼은 사라졌다.
+          last_error_code: typeof err?.code === 'string' ? err.code : null,
         });
         this.emitUpdate(failed, 'open_failed');
       }
@@ -1037,6 +1044,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.driver_user_id = userId;
     state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
     state.last_error = null;
+    state.last_error_code = null;
     state.updated_at = Date.now();
     if (!state.title) state.title = text.trim().replace(/\s+/g, ' ').slice(0, 80);
     const live = this.emitUpdate(state, 'prompt');
@@ -1198,6 +1206,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (state.status === 'idle' || state.status === 'closed' || state.status === 'error') {
       state.status = 'starting';
       state.last_error = null;
+      state.last_error_code = null;
       state.updated_at = Date.now();
       this.emitUpdate(state, 'settings');
     }
@@ -1457,6 +1466,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       auth: null,
       resume_supported: false,
       last_error: null,
+      last_error_code: null,
       driver_user_id: seed.driver_user_id,
       updated_at: Date.now(),
     };
@@ -1496,7 +1506,13 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (patch.available_commands !== undefined) state.available_commands = normalizeCommands(patch.available_commands);
     if (patch.auth !== undefined) state.auth = normalizeAuth(patch.auth);
     if (patch.resume_supported !== undefined) state.resume_supported = !!patch.resume_supported;
-    if (patch.last_error !== undefined) state.last_error = patch.last_error ? String(patch.last_error).slice(0, 4000) : null;
+    if (patch.last_error !== undefined) {
+      state.last_error = patch.last_error ? String(patch.last_error).slice(0, 4000) : null;
+      // 문구가 바뀌면 코드도 그 문구의 것이어야 한다 — 이전 오류의 코드가 남아 엉뚱한 버튼을 내지 않게.
+      state.last_error_code = state.last_error && typeof patch.last_error_code === 'string'
+        ? patch.last_error_code.slice(0, 64)
+        : null;
+    }
     state.updated_at = Date.now();
   }
 
@@ -1523,6 +1539,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       auth: state.auth,
       resume_supported: state.resume_supported,
       last_error: state.last_error,
+      last_error_code: state.last_error_code,
       driver_user_id: state.driver_user_id,
       updated_at: iso(state.updated_at),
     };

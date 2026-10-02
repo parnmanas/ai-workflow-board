@@ -69,7 +69,9 @@ test('주인을 특정한 경우에만 강제 열기를 내놓는다', () => {
   // 매니저가 이름·PID 를 실어 보냈다는 신호가 `resume_locked_external` 이다.
   // 주인을 모르는 `resume_locked` 에서 버튼을 띄우면 무엇을 죽이는지 말하지 못한다.
   assert.match(source, /if \(err\?\.code === 'resume_locked_external'\) setLockedByExternal\(message\)/);
-  assert.match(source, /\{lockedByExternal && !connecting && \([\s\S]*?강제로 열기/);
+  // 판단은 canForceOpen 하나 — 이 페이지의 실패(lockedByExternal) 또는 서버가 저장한 코드. 어느 쪽이든
+  // 근거는 매니저가 주인을 특정했다는 `resume_locked_external` 뿐이다.
+  assert.match(source, /\{canForceOpen && !connecting && \([\s\S]*?강제로 열기/);
 });
 
 test('강제 열기는 확인 대화상자를 거치고, 매니저가 말한 사유를 그대로 보여 준다', () => {
@@ -87,4 +89,20 @@ test('자동 연결과 평범한 Connect 는 force 를 켜지 않는다', () => 
   assert.match(source, /onClick=\{\(\) => void connect\(false\)\}/);
   // 그리고 켜졌을 때만 본문에 실린다.
   assert.match(source, /\.\.\.\(force \? \{ force: true \} : \{\}\)/);
+});
+
+// 세션을 **다시 열었을 때도** 강제 열기가 나온다 (실측 2026-10-02).
+//
+// 증상: "강제로 열기 버튼이 없어". 배너 문구는 서버가 저장한 last_error 에서 오는데, 버튼은 이 페이지의
+// Connect 가 실패한 순간에만 켜지는 화면 로컬 상태(lockedByExternal)였다. 세션 페이지를 새로 열면 상태가
+// error 라 자동 연결도 하지 않으므로, 문구만 남고 버튼은 끝내 나오지 않았다. 이제 서버가 코드도 저장하고
+// (last_error_code), 화면은 그 코드로도 버튼을 낸다 — 누르면 저장된 사유(주인의 이름·PID)를 보여 준다.
+test('저장된 오류 코드로도 강제 열기를 낸다 — 이 페이지에서 Connect 를 누르지 않았어도', () => {
+  assert.match(
+    source,
+    /const canForceOpen = !!lockedByExternal \|\| \(status === 'error' && live\?\.last_error_code === 'resume_locked_external'\);/,
+  );
+  assert.match(source, /\{canForceOpen && !connecting && \(/);
+  // 버튼이 나와도 눌러서 아무 일이 없으면 안 된다 — 사유를 저장된 last_error 에서도 가져온다.
+  assert.match(source, /const reason = lockedByExternal\s*\n\s*\|\| \(live\?\.last_error_code === 'resume_locked_external' \? live\.last_error : null\);/);
 });

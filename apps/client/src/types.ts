@@ -3498,6 +3498,8 @@ export interface AgentSessionLiveSnapshot {
   auth: AgentSessionAuth | null;
   resume_supported: boolean;
   last_error: string | null;
+  /** last_error 의 기계용 코드. `resume_locked_external` 이면 "강제로 열기" 를 낸다. 구버전 서버는 없음. */
+  last_error_code?: string | null;
   driver_user_id: string | null;
   updated_at: string;
 }

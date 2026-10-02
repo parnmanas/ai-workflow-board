@@ -102,6 +102,8 @@ test('open 이 실패하면 그 사유가 세션 상태에 남고 driver 에게 
   );
   assert.equal(update.data.session.status, 'error');
   assert.equal(update.data.session.last_error, REASON);
+  // 기계용 코드도 함께 남는다 — 화면은 이 코드로 "강제로 열기" 를 낼지 정한다.
+  assert.equal(update.data.session.last_error_code, 'resume_locked');
 
   // 3. 그리고 그 상태가 **남는다** — 다시 조회해도 같은 사유를 돌려준다.
   //    (배너가 토스트와 달리 계속 보이는 근거.) 조회는 기록 RPC 를 한 번 더 태우므로
@@ -117,6 +119,9 @@ test('open 이 실패하면 그 사유가 세션 상태에 남고 driver 에게 
   assert.equal(after.status, 200, after.text);
   assert.equal(after.body.live.status, 'error');
   assert.equal(after.body.live.last_error, REASON);
+  // 다시 조회해도 코드가 남는다. 예전엔 버튼이 그 페이지의 Connect 실패 순간에만 켜져서, 세션을 다시
+  // 열면 문구만 보이고 "강제로 열기" 는 사라졌다(실측: ralf 의 ChatGPT 앱이 codex 스레드를 쥔 경우).
+  assert.equal(after.body.live.last_error_code, 'resume_locked');
 });
 
 test('세션 id 없이 새로 여는 경우는 붙일 곳이 없으므로 상태를 만들지 않는다', async (t) => {
