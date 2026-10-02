@@ -24,6 +24,7 @@ import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
+import { hasLiveQuarantine } from './orphan-cleanup.js';
 import {
   ADAPTER_CAPABILITIES,
   PARSE_STAGE,
@@ -815,9 +816,16 @@ export class BaseSessionManager {
       // manager 재시작/model fallback은 --resume으로 이어간다. 활성 프로세스는
       // dispatch가 위의 _getLiveSession 경로에서 stdin을 재사용하므로 여기까지
       // 오지 않으며, orphan 정리는 종료 확인 뒤에만 이 분기를 허용한다.
-      const sessionMode = await adapter.hasPersistedSession(agentContext?.cli_home_dir, sessionKey)
+      let sessionMode: 'persistent' | 'resume' = await adapter.hasPersistedSession(agentContext?.cli_home_dir, sessionKey)
         ? 'resume'
         : 'persistent';
+      if (sessionMode === 'resume' && await hasLiveQuarantine()) {
+        // 죽이지 못한 stale CLI 가 살아 있는 동안은 같은 세션 UUID 를 다시 물지
+        // 않는다 — fresh 로 띄우면 a511b50b 의 `already in use` 충돌이 원천 차단된다.
+        // pid 가 죽으면 다음 부팅이 격리를 해제하고 resume 으로 돌아간다.
+        log(`${this.#logTag} quarantine active: forcing fresh session instead of --resume (${this.#keyField}=${sessionKey})`);
+        sessionMode = 'persistent';
+      }
       log(`${this.#logTag} ${adapter.cliType} lifecycle: ${this.#keyField}=${sessionKey} mode=${sessionMode}`);
       // spec 을 리터럴로 두 번 쓰지 않고 변수로 뽑는다 (ticket 20fff298 리뷰 3R) —
       // SubagentManager.spawn 사이트와 같은 이유다. 실행 사양 기록이 **최종

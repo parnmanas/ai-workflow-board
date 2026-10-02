@@ -26,7 +26,9 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { AGENT_MANAGER_HOME } from './constants.js';
 
-const SERVICE_NAME = 'awb-agent-manager';
+/** Windows 예약 작업 이름 — 업데이터의 task 경유 인계(schtasks /Run)가 같은 값을 쓴다. */
+export const WINDOWS_TASK_NAME = 'awb-agent-manager';
+const SERVICE_NAME = WINDOWS_TASK_NAME;
 const LAUNCHD_LABEL = 'com.awb.agent-manager';
 const SERVICE_DIR = join(AGENT_MANAGER_HOME, 'service');
 const WINDOWS_LAUNCHER_PATH = join(SERVICE_DIR, 'launch-hidden.vbs');

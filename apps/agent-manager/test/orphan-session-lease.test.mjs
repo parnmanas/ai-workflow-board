@@ -138,7 +138,7 @@ test('manager 재시작 orphan 정리는 이전 CLI 종료를 확인한 뒤 side
 
   const result = await cleanupOrphanSubagents(dir);
 
-  assert.deepEqual(result, { scanned: 1, reaped: 1, skipped: 0, failed: 0 });
+  assert.deepEqual(result, { scanned: 1, reaped: 1, skipped: 0, failed: 0, failedPids: [] });
   assert.equal(alive(child.pid), false, '정리 완료 시점에는 이전 CLI 프로세스가 종료돼야 한다');
   await assert.rejects(fsp.access(cfg));
   await assert.rejects(fsp.access(pid));

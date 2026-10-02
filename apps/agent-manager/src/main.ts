@@ -14,6 +14,7 @@ import { loadConfig, resolveAgentId } from './lib/config.js';
 import { installCrashHandlers, log } from './lib/logging.js';
 import { acquireAgentLock, type LockHandle } from './lib/agent-lockfile.js';
 import {
+  consumeUpdateHandoff,
   isSystemdReExecPending,
   markBootVerified,
   pendingRestartReason,
@@ -454,6 +455,17 @@ async function runRuntime(
     );
   }
   let lock: LockHandle;
+  // 업데이터의 예약 작업 인계 — 구 매니저가 죽어 락이 풀릴 때까지 기다렸다가 정상
+  // 회수한다(강제 인수 없음). 기다려도 안 죽으면 표식을 버리고 정상 획득으로 가서,
+  // 살아 있는 owner 면 빨리 실패하고 예약 작업이 1분 뒤 다시 띄운다.
+  try {
+    const handoff = await consumeUpdateHandoff({ version });
+    if (handoff !== 'none') {
+      log(`agent-manager: update handoff ${handoff} (v${version})`);
+    }
+  } catch (err: any) {
+    log(`agent-manager: update handoff check failed: ${err?.message ?? err}`);
+  }
   try {
     lock = await acquireAgentLock({ role: 'manager', version, force: flags.force });
   } catch (err: any) {
@@ -539,18 +551,28 @@ async function runRuntime(
   // SSE를 열기 전에 이전 manager가 남긴 persistent CLI의 종료를 확인한다.
   // 백그라운드 정리와 첫 chat dispatch가 경합하면 동일 Claude session UUID가
   // 잠시 겹쳐 `already in use`가 다시 발생할 수 있다.
+  //
+  // 단, 정리 실패가 부팅 전체를 중단시키지는 않는다 — ralf 실측(2026-10-03):
+  // 끝나지 않은 CLI 하나 때문에 exit 1 로 죽고, 업데이터가 띄운 프로세스라 재시작
+  // 장치도 없어 장시간 다운됐다. 죽이지 못한 프로세스는 격리 파일에 남고, 살아 있는
+  // 동안 resume 으로 같은 세션 UUID 를 다시 물지 않으므로(a511b50b 의 충돌도 막는다)
+  // 다음 부팅이 새 예산으로 다시 정리한다.
   try {
     const r = await cleanupOrphanSubagents(undefined, false);
     if (r.failed) {
-      throw new Error(`${r.failed} orphan CLI process(es) could not be terminated`);
+      log(
+        `Orphan subagent cleanup: ${r.failed} process(es) could not be terminated — ` +
+          `quarantined (${(r.failedPids ?? []).map((f) => `pid=${f.pid}`).join(', ')}) and continuing boot. ` +
+          `Resume is forced to fresh sessions until they exit; see subagents/quarantine.json.`,
+      );
     }
     if (r.scanned > 0) {
       log(`Orphan subagent cleanup: scanned=${r.scanned} reaped=${r.reaped} skipped=${r.skipped ?? 0}`);
     }
   } catch (err: any) {
+    // 디렉터리 읽기 실패 등 정리 자체가 안 돈 경우 — 개별 항목 실패와 달리 여기는
+    // 실제로 모르는 상태이므로 기록만 남기고 계속한다. 부팅 중단은 어떤 경우에도 없다.
     log(`Orphan subagent cleanup failed: ${err?.message ?? err}`);
-    lock.release();
-    throw err;
   }
   cleanupOrphanHermesProcesses()
     .then((r) => {

@@ -54,12 +54,15 @@
 //     SIGUSR1) does the heavy lifting.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
 import { detectSupervisor } from './supervisor.js';
+import { AGENT_MANAGER_HOME } from './constants.js';
+import { WINDOWS_TASK_NAME } from './service-install.js';
+import { isPidAlive } from './orphan-cleanup.js';
 import {
   BOOT_VERIFY_TIMEOUT_MS,
   MAX_INSTALL_ATTEMPTS,
@@ -2618,9 +2621,129 @@ function isManagedBySystemd(): boolean {
 }
 
 /**
+ * 업데이터 → 예약 작업 인계 표식 (`$AWB_AGENT_MANAGER_HOME/update-handoff.json`).
+ *
+ * 배경(ralf 2026-10-03): 업데이터가 detached 자식을 직접 띄우면 그 프로세스는 예약
+ * 작업의 감시 밖이라, 부팅 실패로 죽어도 RestartOnFailure 가 동작하지 않고 장시간
+ * 다운됐다. 예약 작업이 있으면 인계를 `schtasks /Run` 으로 넘겨 새 매니저가 태스크
+ * 감시 안에서 태어나게 한다 — 죽으면 1분 간격으로 다시 뜬다.
+ */
+export const UPDATE_HANDOFF_FILENAME = 'update-handoff.json';
+
+export interface UpdateHandoff {
+  /** 방금 설치된 버전 — 이 버전의 부팅만 이 표식을 소비한다. */
+  version: string;
+  /** 인계를 넘기는 쪽(구 매니저) pid — 죽음을 확인하고 락을 회수한다. */
+  pid: number;
+  at: string;
+}
+
+export function updateHandoffPath(dir: string = AGENT_MANAGER_HOME): string {
+  return join(dir, UPDATE_HANDOFF_FILENAME);
+}
+
+export function writeUpdateHandoff(dir: string, handoff: UpdateHandoff): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    /* home 은 이미 있다 — 없어도 아래 쓰기에서 드러난다 */
+  }
+  writeFileSync(updateHandoffPath(dir), JSON.stringify(handoff), 'utf8');
+}
+
+export function removeUpdateHandoff(dir: string): void {
+  try {
+    unlinkSync(updateHandoffPath(dir));
+  } catch {
+    /* 없으면 할 일 없음 */
+  }
+}
+
+/**
+ * 업데이터 → 예약 작업 인계 표식 (`$AWB_AGENT_MANAGER_HOME/update-handoff.json`).
+ *
+ * 배경(ralf 2026-10-03): 업데이터가 detached 자식을 직접 띄우면 그 프로세스는 예약
+ * 작업의 감시 밖이라, 부팅 실패로 죽어도 RestartOnFailure 가 동작하지 않고 장시간
+ * 다운됐다. 예약 작업이 있으면 인계를 `schtasks /Run` 으로 넘겨 새 매니저가 태스크
+ * 감시 안에서 태어나게 한다 — 죽으면 1분 간격으로 다시 뜬다.
+ */
+export type ConsumeHandoffResult = 'none' | 'stale' | 'ready' | 'timeout';
+
+/**
+ * 부팅 진입 시 인계 표식을 소비한다. 구 매니저가 죽을 때까지 기다렸다가(락 해제를
+ * 전제로 하므로 강제 인수 없이 정상 회수된다) 진행한다. 기다려도 안 죽으면 표식을
+ * 버리고 정상 획득으로 간다 — 살아 있는 owner 면 EAGENTLOCKED 로 빨리 실패하고
+ * 예약 작업이 1분 뒤 다시 띄운다.
+ */
+export async function consumeUpdateHandoff(opts: {
+  dir?: string;
+  version: string;
+  pollMs?: number;
+  timeoutMs?: number;
+}): Promise<ConsumeHandoffResult> {
+  const path = updateHandoffPath(opts.dir ?? AGENT_MANAGER_HOME);
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return 'none';
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    removeUpdateHandoff(opts.dir ?? AGENT_MANAGER_HOME);
+    return 'stale';
+  }
+  if (!parsed || typeof parsed.version !== 'string' || !Number.isInteger(parsed.pid) || parsed.pid <= 0) {
+    removeUpdateHandoff(opts.dir ?? AGENT_MANAGER_HOME);
+    return 'stale';
+  }
+  if (parsed.version !== opts.version) {
+    removeUpdateHandoff(opts.dir ?? AGENT_MANAGER_HOME);
+    return 'stale';
+  }
+  const pollMs = opts.pollMs ?? 1000;
+  const deadline = Date.now() + (opts.timeoutMs ?? 75_000);
+  while (isPidAlive(parsed.pid)) {
+    if (Date.now() >= deadline) {
+      removeUpdateHandoff(opts.dir ?? AGENT_MANAGER_HOME);
+      return 'timeout';
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  removeUpdateHandoff(opts.dir ?? AGENT_MANAGER_HOME);
+  return 'ready';
+}
+
+/** 예약 작업 `awb-agent-manager` 가 등록돼 있는가(Windows). schtasks 조회 실패는 없음으로 본다. */
+export function windowsScheduledTaskExists(taskName: string = WINDOWS_TASK_NAME): boolean {
+  if (process.platform !== 'win32') return false;
+  try {
+    const r = spawnSync('schtasks', ['/Query', '/TN', taskName], { stdio: 'ignore', windowsHide: true });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+export type ReexecStrategy = 'systemd' | 'task' | 'detached';
+
+/** 재기동 경로 판정 — 순수 함수라 매트릭스 테스트가 쉽다. */
+export function resolveReexecStrategy(opts: {
+  systemdManaged: boolean;
+  platform?: NodeJS.Platform;
+  taskExists?: boolean;
+}): ReexecStrategy {
+  if (opts.systemdManaged) return 'systemd';
+  if ((opts.platform ?? process.platform) === 'win32' && opts.taskExists) return 'task';
+  return 'detached';
+}
+
+/**
  * Re-exec the manager so the just-built dist/main.js takes over.
  *
- * Two strategies depending on the supervisor:
+ * Three strategies depending on the supervisor:
  *
  * 1. **systemd**(Linux + `.service` 유닛): 부모 프로세스가 exit 1로 종료되면
  *    유닛의 `Restart=on-failure`가 새 프로세스를 띄운다(0이 아닌 exit가 바로
@@ -2633,11 +2756,18 @@ function isManagedBySystemd(): boolean {
  *    inactive(dead) and the operator's Update button vanishes with no
  *    replacement process.
  *
- * 2. **everything else** (Windows, raw bash, macOS launchd, npm-global
- *    install): spawn a detached child with --force and SIGTERM-self. No
- *    cgroup means the child outlives the parent's exit; the --force lets the
- *    child take over the agent lockfile without a 60s wait.
- */
+  * 2. **Windows 예약 작업**(`awb-agent-manager` 태스크가 있을 때): 인계 표식을
+  *    쓰고 `schtasks /Run` 으로 태스크를 깨운 뒤 스스로 SIGTERM 종료한다. 새 매니저는
+  *    태스크가 띄우므로 감시 안에서 태어나 — 부팅 실패로 죽어도 1분 간격으로 다시
+  *    뜬다(detached 자식은 감시 밖이라 이게 안 됐다). 표식 버전과 맞는 부팅만 표식을
+  *    소비하고, 구 매니저가 죽을 때까지 최대 75초 기다렸다가 락을 정상 회수한다.
+  *    `/Run` 이 실패하면 아래 detached 로 떨어진다.
+  *
+  * 3. **everything else** (task 없는 Windows, raw bash, macOS launchd, npm-global
+  *    install): spawn a detached child with --force and SIGTERM-self. No
+  *    cgroup means the child outlives the parent's exit; the --force lets the
+  *    child take over the agent lockfile without a 60s wait.
+  */
 function reExecManager(out: (msg: string) => void): void {
   if (isManagedBySystemd()) {
     out('Self-update: re-exec via systemd (Restart=on-failure → exit 1)');
@@ -2661,6 +2791,33 @@ function reExecManager(out: (msg: string) => void): void {
       setTimeout(() => process.exit(1), 30_000).unref?.();
     }, 250).unref?.();
     return;
+  }
+
+  // systemd 분기는 위에서 return 했다 — 여기서는 항상 false 다.
+  if (resolveReexecStrategy({ systemdManaged: false, taskExists: windowsScheduledTaskExists() }) === 'task') {
+    // 예약 작업 경유 인계 — 새 매니저가 태스크 감시 안에서 태어난다.
+    const target = readInstalledVersion();
+    if (/^\d+\.\d+\.\d+/.test(target)) {
+      try {
+        writeUpdateHandoff(AGENT_MANAGER_HOME, { version: target, pid: process.pid, at: new Date().toISOString() });
+        const run = spawnSync('schtasks', ['/Run', '/TN', WINDOWS_TASK_NAME], { stdio: 'ignore', windowsHide: true });
+        if (run.status === 0) {
+          out(`Self-update: handoff via scheduled task (${WINDOWS_TASK_NAME} → v${target}) — exiting for takeover`);
+          setTimeout(() => {
+            try {
+              process.kill(process.pid, 'SIGTERM');
+            } catch {
+              process.exit(0);
+            }
+            setTimeout(() => process.exit(1), 30_000).unref?.();
+          }, 250).unref?.();
+          return;
+        }
+        out('Self-update: schtasks /Run failed — falling back to detached re-exec');
+      } catch (err: any) {
+        out(`Self-update: task handoff failed (${err?.message ?? err}) — falling back to detached re-exec`);
+      }
+    }
   }
 
   const execPath = process.execPath;

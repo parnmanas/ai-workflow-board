@@ -667,6 +667,29 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
    holder 가 컬럼 진입 이후 응답한 적이 있으면 그 role 을 재시드하지 않는다. 착수 직후
    claim + 코멘트를 남기는 관례상, 장시간 작업 중 죽은 세션이 정확히 이 조건에 걸린다.
 
+### 부팅 정리 실패와 감시 밖 재기동 (2026-10-03 ralf)
+
+1.6.264 → 1.6.265 업데이트 직후 새 매니저가 부팅 단계의 orphan 정리에서 실패하고
+exit 1 로 꺼졌고, 그 프로세스가 업데이터의 detached 자식이라 예약 작업의
+RestartOnFailure 가 동작하지 않아 장시간 다운됐다. 원인 둘을 각각 막는다:
+
+- **정리 실패는 더 이상 부팅을 죽이지 않는다.** 죽이지 못한 stale CLI 는
+  `subagents/quarantine.json` 에 격리하고 부팅은 계속된다. 격리 pid 가 살아 있는
+  동안 resume 은 fresh 세션으로 강제돼 a511b50b 의 세션 UUID 충돌도 막히고, 다음
+  부팅이 새 예산으로 다시 정리한다(죽었으면 sidecar 와 함께 격리 해제).
+  Windows 에서는 `taskkill /T /F` 트리 킬을 쓴다 — bare kill 은 `.cmd` shim 체인의
+  자식을 남긴다. kill errno(EPERM 등)는 격리 사유에 남긴다.
+- **예약 작업이 있으면 업데이터 인계는 태스크를 경유한다.** `update-handoff.json`
+  (버전·구 pid)을 쓰고 `schtasks /Run` 으로 깨운 뒤 스스로 종료한다. 새 매니저는
+  태스크가 띄우므로 감시 안에서 태어나 — 죽으면 1분 간격으로 다시 뜬다. 구 pid 가
+  죽을 때까지 최대 75초 기다렸다가 락을 정상 회수하고(강제 인수 없음), 안 죽으면
+  표식을 버리고 정상 획득으로 간다(살아 있는 owner 면 빨리 실패 → 태스크가 재시도).
+  `/Run` 실패·태스크 없음·Linux 는 기존 detached 경로 그대로다.
+
+정정: 설치된 `launch-hidden.vbs` 는 이미 대기+종료코드 전파형이라(`Run(...,True)` +
+`Quit rc`) 태스크가 띄운 죽음은 전부터 재시작됐다. 감시 밖이던 것은 업데이터가 직접
+띄운 detached 재기동뿐이다.
+
 ## Troubleshooting
 
 | Error | Meaning | Operator action |
