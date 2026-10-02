@@ -14,11 +14,11 @@
 //
 // 스토어 드라이버가 없는 CLI(hermes)는 AWB 화면에서 만든 세션만 인덱스로 기억한다.
 
-import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
+
+import crossSpawn from 'cross-spawn';
 
 import {
   fitHistoryBytes,
@@ -96,15 +96,55 @@ const EXTERNAL_COMMAND_TIMEOUT_MS = 10_000;
  */
 const HISTORY_BODY_MAX_BYTES = 6 * 1024 * 1024;
 
-const execFileAsync = promisify(execFile);
+/** `defaultExec` 출력 상한 — 예전 execFile `maxBuffer` 와 같은 값이다. */
+const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
 
 async function defaultExec(bin: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync(bin, args, {
-    timeout: EXTERNAL_COMMAND_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
-    windowsHide: true,
+  return new Promise((resolve, reject) => {
+    // cross-spawn 으로 띄운다 — Windows npm shim(`.cmd`, sibling `.exe` 없음)도
+    // 뜬다. bare execFile/spawn 은 CreateProcess 직접 호출이라 `.cmd` 에서
+    // ENOENT 가 나고, 그 실패는 스캐너가 조용히 빈 결과로 접는다(ralf 의 opencode
+    // 기록이 통째로 비던 원인 — Linux 호스트는 진짜 바이너리라 멀쩡했다).
+    const child = crossSpawn(bin, args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    let size = 0;
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      reject(err);
+    };
+    const timer = setTimeout(() => {
+      fail(Object.assign(
+        new Error(`timed out after ${EXTERNAL_COMMAND_TIMEOUT_MS}ms: ${bin} ${args[0] ?? ''}`),
+        { code: 'ETIMEDOUT' },
+      ));
+    }, EXTERNAL_COMMAND_TIMEOUT_MS);
+    timer.unref?.();
+    child.stdout?.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > EXEC_MAX_BUFFER) {
+        fail(Object.assign(new Error(`output exceeded cap: ${bin} ${args[0] ?? ''}`), { code: 'EMAXBUFFER' }));
+        return;
+      }
+      stdout += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+      if (stderr.length > 8000) stderr = stderr.slice(-8000);
+    });
+    child.on('error', (err) => fail(err));
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(Object.assign(new Error(`${bin} exited ${code}: ${stderr.slice(0, 500)}`), { code: 'EEXIT' }));
+    });
   });
-  return stdout;
 }
 
 /**
@@ -120,7 +160,8 @@ async function defaultRunToFile(bin: string, args: string[]): Promise<string> {
   const fh = await open(outPath, 'w', 0o600);
   try {
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(bin, args, { stdio: ['ignore', fh.fd, 'pipe'], windowsHide: true });
+      // cross-spawn — `defaultExec` 와 같은 이유(Windows `.cmd` shim).
+      const child = crossSpawn(bin, args, { stdio: ['ignore', fh.fd, 'pipe'], windowsHide: true });
       let stderr = '';
       child.stderr?.on('data', (chunk) => {
         stderr += String(chunk);
