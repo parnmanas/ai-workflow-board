@@ -119,11 +119,70 @@ export function publishedManifest(manifestPath = join(root, PUBLISHED_MANIFEST))
 }
 
 /**
- * 소비자가 해석하게 될 런타임 의존성 범위. devDependencies 는 발행 tarball 의
- * 소비자에게 설치되지 않으므로 제외한다.
+ * 감사 대상 의존성 블록. 기준은 "발행 tarball 의 소비자 호스트에 실제로 깔리는가".
+ *
+ * `optionalDependencies` 가 여기 있는 이유: optional 은 "없어도 되는" 이 아니라
+ * "해석에 실패해도 설치를 중단하지 않는" 이다. 해석에 성공하면 소비자 호스트에
+ * 그대로 깔리고 그대로 실행된다 — `--omit=optional` 을 준 소비자만 예외다.
+ * 즉 우리 승인 없이 호스트에 들어올 수 있는 코드라는 점에서 `dependencies` 와
+ * 완전히 같은 위험을 갖는다.
+ */
+export const AUDITED_DEPENDENCY_BLOCKS = Object.freeze([
+  'dependencies',
+  'optionalDependencies',
+]);
+
+/**
+ * 감사 대상이 **아니라고 명시적으로 판단한** 블록과 그 사유.
+ *
+ * 여기 없고 AUDITED 에도 없는 `*Dependencies` 블록이 발행 매니페스트에 생기면
+ * 이 게이트는 통과가 아니라 **실패**한다. 새 블록을 조용히 커버리지 밖에 두는
+ * 것이 바로 2026-09-27 에 `optionalDependencies` 로 실제 발생한 사고라서,
+ * 분류는 사람이 한 번 의식적으로 내리도록 강제한다.
+ */
+export const UNAUDITED_DEPENDENCY_BLOCKS = Object.freeze({
+  devDependencies: '발행 tarball 소비자에게 설치되지 않는다',
+});
+
+/**
+ * 발행 매니페스트에서 분류되지 않은 의존성 블록을 골라낸다.
+ *
+ * `peerDependencies` 를 미리 어느 쪽에도 넣지 않은 것은 의도다 — npm 7+ 는 peer
+ * 를 소비자에게 자동 설치하므로 "무시해도 되는 블록"이 아니지만, peer 범위는
+ * 관습적으로 넓어서 상한 검사에 그대로 태우면 거짓 실패가 난다. 실제로 생기는
+ * 날 사람이 판단하게 남겨 두고, 그때까지는 조용히 지나가지 않게만 만든다.
+ */
+export function unclassifiedDependencyBlocks(manifest) {
+  return Object.keys(manifest ?? {})
+    .filter((k) => /Dependencies$/.test(k))
+    .filter(
+      (k) =>
+        !AUDITED_DEPENDENCY_BLOCKS.includes(k) &&
+        !Object.prototype.hasOwnProperty.call(UNAUDITED_DEPENDENCY_BLOCKS, k),
+    );
+}
+
+/**
+ * 감사 대상 블록을 블록별로 유지한 채 돌려준다. `next` 축의 합성 매니페스트가
+ * 소비자와 같은 semantics 로 해석되도록(optional 은 optional 로) 쓰인다.
+ */
+export function declaredBlocks(manifest) {
+  const blocks = {};
+  for (const name of AUDITED_DEPENDENCY_BLOCKS) {
+    const entries = manifest?.[name];
+    if (entries && Object.keys(entries).length > 0) blocks[name] = { ...entries };
+  }
+  return blocks;
+}
+
+/**
+ * 소비자가 해석하게 될 런타임 의존성 범위를 이름→범위 평면 맵으로.
+ *
+ * 범위 **모양** 검사(층 1)는 블록 구분이 필요 없으므로 평탄화한다. 같은 이름이
+ * 양쪽 블록에 있으면 npm 과 같이 optional 쪽이 이긴다(AUDITED 순서가 그 순서다).
  */
 export function declaredRanges(manifest) {
-  return { ...(manifest?.dependencies ?? {}) };
+  return Object.assign({}, ...AUDITED_DEPENDENCY_BLOCKS.map((n) => manifest?.[n] ?? {}));
 }
 
 /**
@@ -307,8 +366,26 @@ async function main() {
 
   // ── 층 1 (항상, 오프라인): 선언 범위의 모양 ──────────────────────────────
   let ranges;
+  let blocks;
   try {
-    ranges = declaredRanges(publishedManifest());
+    const manifest = publishedManifest();
+
+    // 분류되지 않은 의존성 블록은 통과시키지 않는다. 커버리지 밖에 조용히 놓이는
+    // 것이 이 게이트가 막아야 하는 실패 양상 자체다.
+    const unclassified = unclassifiedDependencyBlocks(manifest);
+    if (unclassified.length > 0) {
+      console.error(
+        `FAIL ${PUBLISHED_MANIFEST} 에 분류되지 않은 의존성 블록이 있다: ` +
+          `${unclassified.join(', ')}.\n` +
+          `     소비자 호스트에 깔리는 블록이면 AUDITED_DEPENDENCY_BLOCKS 에, ` +
+          `아니면 사유와 함께 UNAUDITED_DEPENDENCY_BLOCKS 에 추가하라 ` +
+          `(${'scripts/audit-published-deps.mjs'}).`,
+      );
+      process.exit(1);
+    }
+
+    ranges = declaredRanges(manifest);
+    blocks = declaredBlocks(manifest);
   } catch (e) {
     console.error(`FAIL 발행 매니페스트를 읽지 못했다 — ${e.message}`);
     process.exit(1);
@@ -372,7 +449,9 @@ async function main() {
         name: 'awb-published-audit-next',
         version: '0.0.0',
         private: true,
-        dependencies: ranges,
+        // 블록 구분을 유지한다 — optional 을 hard dependency 로 올리면 해석
+        // 실패가 소비자에겐 무해한데 여기선 감사 실패가 되어 축이 어긋난다.
+        ...blocks,
       },
     },
   ];

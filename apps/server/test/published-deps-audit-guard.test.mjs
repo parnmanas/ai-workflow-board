@@ -28,9 +28,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AUDITED_DEPENDENCY_BLOCKS,
   PUBLISHED_MANIFEST,
   PUBLISHED_TREE_INSTALL_SCRIPTS_ALLOWED,
+  UNAUDITED_DEPENDENCY_BLOCKS,
   clauseHasUpperBound,
+  declaredBlocks,
   declaredRanges,
   disallowedInstallScripts,
   driftRows,
@@ -39,6 +42,7 @@ import {
   publishedManifest,
   rangeProblem,
   unboundedRanges,
+  unclassifiedDependencyBlocks,
 } from '../../../scripts/audit-published-deps.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -157,6 +161,91 @@ test('실제 발행 매니페스트의 선언 범위가 전부 상한을 갖는�
     unboundedRanges(ranges).map((b) => `${b.name}: ${b.reason}`),
     [],
     '발행 패키지가 상한 없는 범위를 선언하고 있다 — 호스트가 임의 상위 메이저를 받게 된다',
+  );
+});
+
+test('optionalDependencies 도 감사 대상이다 — 소비자 호스트에 그대로 깔린다', () => {
+  // 2026-09-27 실제 사고: agent-manager 가 `@lydell/node-pty` 를 optionalDependencies
+  // 로 추가했는데 declaredRanges 가 `dependencies` 만 읽어서, 발행 축(`npm i -g`,
+  // lockfile 을 읽지 않는 유일한 경로)에서 그 패키지가 **통째로 보이지 않았다**.
+  // 범위 상한 검사도, next 축 advisory 감사도 건너뛴 상태였고 CI 는 초록이었다.
+  assert.ok(
+    AUDITED_DEPENDENCY_BLOCKS.includes('optionalDependencies'),
+    'optional 은 "없어도 되는" 이 아니라 "해석 실패가 설치를 막지 않는" 이다 — ' +
+      '해석에 성공하면 호스트에 깔리므로 dependencies 와 같은 위험을 갖는다',
+  );
+
+  const ranges = declaredRanges({
+    dependencies: { hard: '^1.0.0' },
+    optionalDependencies: { soft: '*' },
+    devDependencies: { tooling: '*' },
+  });
+  assert.deepEqual(ranges, { hard: '^1.0.0', soft: '*' });
+  assert.deepEqual(
+    unboundedRanges(ranges).map((b) => b.name),
+    ['soft'],
+    'optional 블록의 상한 없는 범위가 상한 검사에 실제로 태워져야 한다',
+  );
+});
+
+test('devDependencies 는 감사 대상에서 제외된 채로 유지된다 (거짓 양성 없음)', () => {
+  // 반대 방향 못 — 커버리지를 넓히다 dev 까지 끌어오면 tooling 의 관습적으로 넓은
+  // 범위 때문에 게이트가 상시 red 가 되고, 그러면 누군가 게이트를 끈다.
+  assert.ok(!AUDITED_DEPENDENCY_BLOCKS.includes('devDependencies'));
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(UNAUDITED_DEPENDENCY_BLOCKS, 'devDependencies'),
+    '제외는 사유와 함께 명시적으로 기록돼 있어야 한다',
+  );
+  assert.deepEqual(declaredRanges({ devDependencies: { tooling: '*' } }), {});
+});
+
+test('declaredBlocks 는 블록 구분을 보존한다 — next 축이 소비자와 같은 semantics 로 해석돼야 한다', () => {
+  // optional 을 hard dependency 로 올려 합성하면, 소비자에겐 무해한 해석 실패가
+  // 감사 실패로 바뀌어 축이 어긋난다(플랫폼 전용 optional 이 정확히 그 경우다).
+  assert.deepEqual(
+    declaredBlocks({
+      dependencies: { hard: '^1.0.0' },
+      optionalDependencies: { soft: '^2.0.0' },
+      devDependencies: { tooling: '*' },
+    }),
+    { dependencies: { hard: '^1.0.0' }, optionalDependencies: { soft: '^2.0.0' } },
+  );
+  // 빈 블록은 아예 싣지 않는다 — npm 에 빈 객체를 넘길 이유가 없다.
+  assert.deepEqual(declaredBlocks({ dependencies: { hard: '^1.0.0' }, optionalDependencies: {} }), {
+    dependencies: { hard: '^1.0.0' },
+  });
+});
+
+test('분류되지 않은 의존성 블록은 조용히 지나가지 않는다', () => {
+  // 이 tripwire 가 없으면 다음에 추가되는 블록(peerDependencies 등)이 2026-09-27 과
+  // 똑같이 커버리지 밖에 조용히 놓인다. 통과가 아니라 실패로 만들어 사람이 한 번
+  // 의식적으로 분류하게 강제하는 것이 요점이다.
+  assert.deepEqual(
+    unclassifiedDependencyBlocks({
+      dependencies: {},
+      optionalDependencies: {},
+      devDependencies: {},
+    }),
+    [],
+    '분류된 블록만 있으면 조용해야 한다',
+  );
+  assert.deepEqual(
+    unclassifiedDependencyBlocks({ dependencies: {}, peerDependencies: { react: '*' } }),
+    ['peerDependencies'],
+    'npm 7+ 는 peer 를 소비자에게 자동 설치한다 — 무시해도 되는 블록이 아니다',
+  );
+  // 의존성 블록이 아닌 키에 반응하면 게이트가 상시 red 가 된다.
+  assert.deepEqual(unclassifiedDependencyBlocks({ name: 'x', scripts: {}, files: [] }), []);
+});
+
+test('실제 발행 매니페스트에 분류되지 않은 의존성 블록이 없다', () => {
+  // 저장소의 현재 상태 단언 — 새 블록이 추가되는 커밋에서 즉시 red 가 된다.
+  const manifest = publishedManifest(path.join(REPO_ROOT, PUBLISHED_MANIFEST));
+  assert.deepEqual(
+    unclassifiedDependencyBlocks(manifest),
+    [],
+    `${PUBLISHED_MANIFEST} 에 감사 분류가 없는 의존성 블록이 있다 — ` +
+      'AUDITED_DEPENDENCY_BLOCKS 또는 UNAUDITED_DEPENDENCY_BLOCKS 에 분류하라',
   );
 });
 

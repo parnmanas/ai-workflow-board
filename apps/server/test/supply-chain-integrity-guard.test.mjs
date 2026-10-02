@@ -225,6 +225,67 @@ test('publish workflow grants the id-token permission provenance requires', () =
   );
 });
 
+// publish 는 **감사받은 ref 에서만** 나가야 한다.
+//
+// (2026-09-28 감사에서 발견.) `on.push.branches` 는 main 한정이지만
+// `workflow_dispatch` 는 임의 ref 로 실행할 수 있고, publish 잡에는 ref 조건이
+// 전혀 없었다. 즉 오래된 브랜치(예: 취약 lockfile 을 든 dormant 감사 브랜치)에서
+// dispatch 하면 의존성 감사가 한 번도 판정하지 않은 트리가 npm 에 publish 되고,
+// `npm i -g awb-agent-manager` 하는 모든 호스트가 그것을 받는다.
+//
+// 이 축이 특히 위험한 이유: 발행물은 lockfile 이 아니라 **선언 범위(`^`)를 설치
+// 시점에 재해석**하므로, lockfile 이 초록이어도 아무것도 보장하지 않는다
+// (scripts/audit-published-deps.mjs 의 `next` 축이 존재하는 이유).
+// 감사는 main 에서만 돌기 때문에 publish 대상 ref 도 main 으로 못박혀 있어야 한다.
+test('publish workflow only publishes from the audited default branch', () => {
+  const yaml = stripYamlComments(fs.readFileSync(PUBLISH_WORKFLOW, 'utf8'));
+
+  // workflow_dispatch 가 있다는 전제 아래에서만 이 가드가 의미를 갖는다.
+  // 없어졌다면(=push 한정) 이 테스트가 스스로 stale 임을 알려야 한다.
+  assert.match(
+    yaml,
+    /^\s*workflow_dispatch:/m,
+    'publish-agent-manager.yml no longer declares `workflow_dispatch` — this guard exists because ' +
+      'a manual dispatch can target an arbitrary ref; re-check whether the ref guard is still needed',
+  );
+
+  // publish 잡의 **job 레벨** `if:` 를 본다. step 별 if 로는 checkout 등이 이미 돌아
+  // 잡 자체를 막지 못하므로, steps: 이전 구간(=job 헤더)에 있어야 한다.
+  const jobStart = yaml.indexOf('\n  publish:');
+  const stepsAt = yaml.indexOf('    steps:', jobStart);
+  assert.ok(
+    jobStart >= 0 && stepsAt > jobStart,
+    'could not locate the `publish` job header in publish-agent-manager.yml — this guard has gone stale',
+  );
+
+  const ifLine = yaml
+    .slice(jobStart, stepsAt)
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.startsWith('if:'));
+
+  assert.ok(
+    ifLine,
+    'the `publish` job in publish-agent-manager.yml has no job-level `if:` guard, so ' +
+      '`workflow_dispatch` from ANY ref can publish an un-audited tree to npm. Add ' +
+      "`if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)`",
+  );
+
+  assert.match(
+    ifLine,
+    /github\.ref\b/,
+    "the `publish` job's `if:` guard must constrain `github.ref` so only the audited branch " +
+      `can publish, got: ${ifLine}`,
+  );
+
+  assert.match(
+    ifLine,
+    /default_branch|refs\/heads\/main/,
+    "the `publish` job's `if:` guard must pin the ref to the default branch (main) — the only " +
+      `branch the dependency audit judges, got: ${ifLine}`,
+  );
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. CI 토큰 blast radius — 모든 워크플로는 permissions 를 명시해야 한다
 // ─────────────────────────────────────────────────────────────────────────────
