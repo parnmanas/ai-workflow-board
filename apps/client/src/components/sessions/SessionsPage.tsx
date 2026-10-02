@@ -20,6 +20,7 @@ import PageHeader from '../PageHeader';
 import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionComposer from './SessionComposer';
+import type { SessionPrompt } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
@@ -541,12 +542,14 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
   const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (prompt: SessionPrompt) => {
+    const images = prompt.images.map(({ base64, mime_type }) => ({ base64, mime_type }));
+    const optimisticText = prompt.text || (images.length ? `[${images.length} image(s)]` : '');
     try {
-      const result = await api.promptHostSession(managerId, cli, sessionId, text);
+      const result = await api.promptHostSession(managerId, cli, sessionId, prompt.text, images);
       setLive(result.live);
       setEvents((prev) => appendLiveEvent(prev, {
-        id: `local:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text }, created_at: new Date().toISOString(),
+        id: `local:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text: optimisticText }, created_at: new Date().toISOString(),
       }));
       // 내가 보낸 프롬프트는 이력을 읽던 중이었어도 따라간다 — 내 발화의 결과를 보려고
       // 보낸 것이므로. 새 항목 추종(근접할 때만)과는 다른 축이다.

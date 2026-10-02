@@ -54,7 +54,7 @@ test('composer: slash popup lists matching commands; Enter picks instead of send
     assert.equal(Boolean(document.querySelector('[role="listbox"]')), false, 'typing arguments keeps the popup closed');
     keydown('Enter', { target: textarea });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.deepEqual(sent, ['/review focus on auth'], 'Enter now sends the slash command verbatim');
+    assert.deepEqual(sent, [{ text: '/review focus on auth', images: [] }], 'Enter now sends the slash command verbatim');
 
     typeInto(textarea, '/co');
     assert.deepEqual(items(), ['compact']);
@@ -79,7 +79,7 @@ test('composer without commands never shows a popup and Enter sends', async () =
     assert.equal(Boolean(document.querySelector('[role="listbox"]')), false, 'no popup without commands');
     keydown('Enter', { target: textarea });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.deepEqual(sent, ['/status']);
+    assert.deepEqual(sent, [{ text: '/status', images: [] }]);
     view.unmount();
   } finally {
     dom.cleanup();
@@ -116,7 +116,7 @@ test('composer: busy Enter queues instead of sending; queue flushes one at a tim
       onCancel() {},
     })); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.deepEqual(sent, ['first question'], 'only the first queued item is flushed on the busy->false edge');
+    assert.deepEqual(sent, [{ text: 'first question', images: [] }], 'only the first queued item is flushed on the busy->false edge');
     assert.equal(document.querySelectorAll('[aria-label="Queued prompts"] li').length, 1, 'the second item is still waiting');
 
     resolveSend();
@@ -132,9 +132,82 @@ test('composer: busy Enter queues instead of sending; queue flushes one at a tim
       onCancel() {},
     })); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.deepEqual(sent, ['first question', 'second question'], 'the second queued item flushes on the next busy->false edge');
+    assert.deepEqual(sent, [{ text: 'first question', images: [] }, { text: 'second question', images: [] }], 'the second queued item flushes on the next busy->false edge');
     assert.equal(Boolean(document.querySelector('[aria-label="Queued prompts"]')), false, '둘 다 전송되고 나면 큐가 비어 있다');
     resolveSend();
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});
+
+test('composer: attach button takes images; text-empty image-only prompt still sends', async () => {
+  const dom = setupDom();
+  // jsdom 의 File 은 Node Blob 이 아니라 URL.createObjectURL 이 던진다 — 썸네일용으로만 스텁한다.
+  const origCreate = URL.createObjectURL;
+  const origRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => `blob:mock-${Math.random().toString(16).slice(2)}`;
+  URL.revokeObjectURL = () => {};
+  // setupDom 은 FileReader 를 전역에 올리지 않는다 — jsdom 구현을 빌려 쓴다.
+  const hadFileReader = 'FileReader' in globalThis;
+  if (!hadFileReader) globalThis.FileReader = window.FileReader;
+  try {
+    const sent = [];
+    const view = mount(h(SessionComposer, { disabled: false, busy: false, placeholder: 'Prompt…', commands: [], onSend: (p) => { sent.push(p); }, onCancel() {} }));
+    const attachBtn = document.querySelector('button[aria-label="Attach images"]');
+    assert.ok(attachBtn, 'paperclip button exists');
+    const input = document.querySelector('input[aria-label="Attach images"]');
+    assert.ok(input);
+    assert.match(input.getAttribute('accept') || '', /image\/png/);
+    assert.match(input.getAttribute('accept') || '', /^(?!.*svg).*$/, 'SVG 는 받지 않는다');
+
+    const sendBtn0 = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    assert.equal(sendBtn0.disabled, true, '빈 텍스트 + 첨부 없음에는 전송이 막힌다');
+
+    // PNG 선택 흉내 — input.files 는 읽기전용이라 defineProperty 로 꽂는다.
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+    const file = new window.File([pngBytes], 'shot.png', { type: 'image/png' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new window.Event('change', { bubbles: true }));
+    const started = Date.now();
+    const sendBtnNow = () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    // 썸네일(읽는 중) → base64 resolve(전송 가능) 순서로 열린다.
+    while (!document.querySelector('[aria-label="Attached images"] img') || sendBtnNow().disabled) {
+      if (Date.now() - started > 5000) throw new Error('attachment never became sendable');
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    }
+    const sendBtn = sendBtnNow();
+    assert.equal(sendBtn.disabled, false, '그림만 있어도 전송이 열린다');
+    click(sendBtn);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].text, '');
+    assert.equal(sent[0].images.length, 1);
+    assert.equal(sent[0].images[0].mime_type, 'image/png');
+    assert.ok(sent[0].images[0].base64.length > 0);
+    assert.equal(document.querySelector('[aria-label="Attached images"]'), null, '전송되면 스트립이 비워진다');
+    view.unmount();
+  } finally {
+    URL.createObjectURL = origCreate;
+    URL.revokeObjectURL = origRevoke;
+    if (!hadFileReader) delete globalThis.FileReader;
+    dom.cleanup();
+  }
+});
+
+test('composer: SVG 는 첨부 단계에서 거절된다', async () => {
+  const dom = setupDom();
+  try {
+    const sent = [];
+    const view = mount(h(SessionComposer, { disabled: false, busy: false, placeholder: 'Prompt…', commands: [], onSend: (p) => { sent.push(p); }, onCancel() {} }));
+    const input = document.querySelector('input[aria-label="Attach images"]');
+    const file = new window.File(['<svg/>'], 'v.svg', { type: 'image/svg+xml' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(document.querySelector('[aria-label="Attached images"]'), null);
+    const sendBtn = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Send');
+    assert.equal(sendBtn.disabled, true);
     view.unmount();
   } finally {
     dom.cleanup();

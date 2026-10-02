@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -203,6 +204,51 @@ test('opencode 기록을 트랜스크립트 이벤트로 매핑한다 (user_prom
   assert.equal(history.events[4].payload.text, 'All green.');
   // id/seq 는 part 의 절대 위치 기준 — 다시 읽어도 같은 이벤트가 같은 id 를 갖는다.
   assert.deepEqual(history.events.map((e) => e.id), ['ses_abc123:1', 'ses_abc123:2', 'ses_abc123:3', 'ses_abc123:4', 'ses_abc123:5']);
+});
+
+test('opencode 기록: file 파트의 이미지는 image 이벤트가 된다 (data URL·파일 경로)', async (t) => {
+  // 붙여넣은 그림은 data URL 로, `@` 로 참조한 그림은 파일 경로로 박힌다(1.18.34 실측).
+  // 둘 다 보관 후 참조만 싣는다 — claude 스캐너의 pushImage 와 같은 통로다.
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const dir = await mkdtemp(join(tmpdir(), 'awb-opencode-filepart-'));
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dir, { recursive: true, force: true })));
+  const shotPath = join(dir, 'shot.png');
+  await writeFile(shotPath, Buffer.from(PNG_B64, 'base64'));
+  await writeFile(join(dir, 'fake.png'), 'just text, not an image');
+  const store = historyStore({
+    session: [{ id: 'ses_abc123', directory: dir, title: 'pics', time_created: 1758500000000, time_updated: 1758500600000 }],
+    count: 5,
+    rows: [
+      partRow('msg_1', 'user', { type: 'text', text: 'see these' }),
+      partRow('msg_1', 'user', { type: 'file', mime: 'image/png', filename: 'pasted', url: `data:image/png;base64,${PNG_B64}` }),
+      partRow('msg_1', 'user', { type: 'file', mime: 'image/png', filename: 'shot', url: `file://${shotPath}` }),
+      partRow('msg_1', 'user', { type: 'file', mime: 'image/svg+xml', filename: 'v', url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=' }),
+      partRow('msg_1', 'user', { type: 'file', mime: 'image/png', filename: 'fake', url: `file://${join(dir, 'fake.png')}` }),
+    ],
+  });
+  const stored = [];
+  store.setImageSink(async (cli, sessionId, base64) => {
+    stored.push({ cli, sessionId, base64 });
+    return { ref: `ref-${stored.length}`, size: base64.length };
+  });
+  const history = await store.readHistory('opencode', 'ses_abc123');
+  // user_prompt + data URL 그림 + 파일 그림. SVG·가짜 PNG 는 조용히 빠진다.
+  assert.deepEqual(history.events.map((e) => e.type), ['user_prompt', 'image', 'image']);
+  assert.deepEqual(stored.map((s) => [s.cli, s.sessionId]), [['opencode', 'ses_abc123'], ['opencode', 'ses_abc123']]);
+  assert.equal(stored[0].base64, PNG_B64, 'data URL 은 쉼표 뒤 base64 그대로 보관한다');
+  assert.equal(history.events[1].payload.mime_type, 'image/png');
+  assert.equal(history.events[1].payload.image_ref, 'ref-1');
+  assert.equal(history.events[2].payload.image_ref, 'ref-2');
+});
+
+test('opencode 기록: 보관 통로가 없으면 file 파트는 건너뛴다', async () => {
+  const store = historyStore({
+    session: [{ id: 'ses_abc123', directory: '/x', title: 't', time_created: 1, time_updated: 2 }],
+    count: 1,
+    rows: [partRow('msg_1', 'user', { type: 'file', mime: 'image/png', filename: 'p', url: 'data:image/png;base64,AAAA' })],
+  });
+  const history = await store.readHistory('opencode', 'ses_abc123');
+  assert.deepEqual(history.events, []);
 });
 
 test('opencode 기록: 창을 넘긴 세션은 앞부분 생략 안내를 달고 seq 는 절대 위치를 유지한다', async () => {

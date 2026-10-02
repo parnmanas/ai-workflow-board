@@ -72,6 +72,13 @@ export interface AgentSessionRequest {
   title?: string;
   turn_id?: string;
   text?: string;
+  /**
+   * prompt — 사용자가 함께 보내는 이미지. base64 바이트를 그대로 싣는다.
+   * ACP `session/prompt` 의 Image 블록으로 변환된다 — opencode 가 `promptCapabilities.image`
+   * 를 광고하는(1.18.34 실측) 네이티브 경로라 MCP 같은 우회가 필요 없다. vision 을 모르는
+   * 모델은 어댑터·모델이 직접 거절/무시한다(실측: "this model doesn't support image input").
+   */
+  images?: { base64?: string; mime_type?: string }[];
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
@@ -532,7 +539,7 @@ export class AgentSessionRunner {
         case 'prompt': {
           if (!sessionId) return;
           const live = await this.#ensureLive(cli, sessionId, request.cwd || '', request.title || '', request);
-          await this.#runPrompt(live, request.turn_id || randomUUID(), request.text || '');
+          await this.#runPrompt(live, request.turn_id || randomUUID(), request.text || '', request.images);
           return;
         }
         case 'permission':
@@ -1341,22 +1348,67 @@ export class AgentSessionRunner {
 
   // ─── 턴 실행 ──────────────────────────────────────────────────────────
 
-  async #runPrompt(live: LiveSession, turnId: string, text: string): Promise<void> {
+  /**
+   * prompt 첨부 이미지의 mime — 미리보기 파이프라인(`local_image`, `image` 이벤트)과 같은
+   * 집합만 받는다. SVG 는 화면에 그릴 수 없어(Blob origin 스크립트 실행) 여기서도 받지 않는다.
+   */
+  #promptImageMime(mime: unknown): string | null {
+    if (typeof mime !== 'string') return null;
+    const m = mime.trim().toLowerCase();
+    if (m === 'image/svg+xml') return null;
+    return /^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(m) ? m : null;
+  }
+
+  async #runPrompt(live: LiveSession, turnId: string, text: string, images?: { base64?: string; mime_type?: string }[] | null): Promise<void> {
     if (live.turn) {
       this.#enqueue(live, [{ type: 'error', payload: { message: 'A turn is already in progress.', code: 'turn_in_progress' }, turn_id: turnId }]);
+      return;
+    }
+    const blocks: { type: string; text?: string; data?: string; mimeType?: string }[] = [{ type: 'text', text }];
+    const validImages: { mimeType: string; data: string }[] = [];
+    for (const image of Array.isArray(images) ? images : []) {
+      const base64 = typeof image?.base64 === 'string' ? image.base64.replace(/\s+/g, '') : '';
+      const mimeType = this.#promptImageMime(image?.mime_type);
+      let size = 0;
+      try {
+        size = Buffer.from(base64, 'base64').length;
+      } catch {
+        size = 0;
+      }
+      if (!base64 || !mimeType || size === 0 || size > MAX_IMAGE_BYTES) {
+        // 한 장이 문제여도 턴 전체를 죽이지 않는다 — 무엇이 빠졌는지만 남긴다.
+        this.#enqueue(live, [{
+          type: 'system',
+          payload: {
+            text: `Skipped an attached image (${!mimeType ? 'unsupported type' : size > MAX_IMAGE_BYTES ? 'over the 8MB cap' : 'empty data'}) — the text was still sent.`,
+            code: 'prompt_image_skipped',
+          },
+          turn_id: turnId,
+        }]);
+        continue;
+      }
+      validImages.push({ mimeType, data: base64 });
+      blocks.push({ type: 'image', data: base64, mimeType });
+    }
+    if (!text.trim() && blocks.length <= 1) {
+      this.#enqueue(live, [{ type: 'error', payload: { message: 'A prompt needs text or at least one image.', code: 'prompt_empty' }, turn_id: turnId }]);
       return;
     }
     live.turn = { turnId, startedAt: Date.now(), sawUsage: false };
     this.#clearIdle(live);
     if (!live.title) {
-      live.title = text.trim().replace(/\s+/g, ' ').slice(0, 80);
+      const titleText = text.trim() || (blocks.length > 1 ? `${blocks.length - 1} image(s)` : '');
+      live.title = titleText.replace(/\s+/g, ' ').slice(0, 80);
       await this.#store.touchAwbSession(live.cli, live.sessionId, { title: live.title }).catch(() => undefined);
     }
     this.#enqueue(live, [{ type: 'turn', payload: { phase: 'started' }, turn_id: turnId }], { status: 'busy', title: live.title, reason: 'turn_started' });
+    // 보낸 이미지는 에코로 그린다 — 받은 이미지와 같은 `image` 파이프라인이라 전사·다시열기·
+    // 이미지 RPC 가 그대로 동작한다(다시열기는 opencode `file` 파트에서 같은 그림을 복원한다).
+    for (const valid of validImages) this.#emitImage(live, { ...valid, uri: '' }, turnId);
     this.#armSilenceWatch(live, turnId);
     try {
       const response = await live.client.prompt(
-        { sessionId: live.sessionId, prompt: [{ type: 'text', text }] },
+        { sessionId: live.sessionId, prompt: blocks },
         { timeoutMs: this.#options.promptTimeoutMs },
       );
       this.#flushBuffers(live, turnId);

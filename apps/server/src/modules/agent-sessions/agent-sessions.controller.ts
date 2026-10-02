@@ -185,7 +185,7 @@ export class AgentSessionsController {
   ) {
     const ws = this.workspaceId(req, res);
     if (!ws) return;
-    return this.run(res, 202, () => this.sessions.prompt(ws, this.userId(req), managerId, cli, sessionId, body?.text));
+    return this.run(res, 202, () => this.sessions.prompt(ws, this.userId(req), managerId, cli, sessionId, body?.text, body?.images));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/permission')

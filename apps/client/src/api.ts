@@ -2176,10 +2176,12 @@ export const api = {
     }
     return resp.blob();
   },
-  promptHostSession: (managerId: string, cli: string, sessionId: string, text: string) =>
+  /** 세션 프롬프트 — 텍스트 + 이미지 첨부. 이미지는 base64 그대로 실어 보내고 서버는 저장하지 않고
+   *  매니저로 흘려보낸다(매니저가 ACP Image 블록으로 변환). 빈 텍스트 + 이미지 1장 이상도 된다. */
+  promptHostSession: (managerId: string, cli: string, sessionId: string, text: string, images?: { base64: string; mime_type: string }[]) =>
     request<{ turn_id: string; live: AgentSessionLiveSnapshot }>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/prompt`,
-      { method: 'POST', body: JSON.stringify({ text }) },
+      { method: 'POST', body: JSON.stringify({ text, ...(images?.length ? { images } : {}) }) },
     ),
   decideHostSessionPermission: (managerId: string, cli: string, sessionId: string, requestId: string, optionId: string | null) =>
     request<AgentSessionLiveSnapshot>(

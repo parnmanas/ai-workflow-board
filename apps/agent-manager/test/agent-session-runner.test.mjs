@@ -237,6 +237,53 @@ test('open(new) → prompt stream → permission relay → turn finished, and th
   assert.equal(server.events(sid).at(-1).state.status, 'closed');
 });
 
+test('prompt with images sends ACP image blocks and echoes them as image events', async (t) => {
+  // 세션에 이미지를 올려 opencode 같은 CLI 가 보게 한다 — 텍스트 전용이던 prompt 에
+  // Image 블록을 덧붙이는 네이티브 경로다(opencode `promptCapabilities.image` 실측).
+  const captureDir = await mkdtemp(join(tmpdir(), 'awb-prompt-capture-'));
+  t.after(() => rm(captureDir, { recursive: true, force: true }));
+  const captureFile = join(captureDir, 'prompt.json');
+  const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_PROMPT_CAPTURE_FILE: captureFile });
+  await runner.handle(request('open', { request_id: 'rpc-img-open', session_id: null, cwd, title: 'image turn' }));
+  const sid = server.rpc('rpc-img-open').result.session_id;
+  // 1x1 PNG 한 장 + SVG 한 장(SVG 는 미리보기 파이프라인에서 받지 않아 빠진다).
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const { createHash } = await import('node:crypto');
+  const ref = createHash('sha256').update(png).digest('hex').slice(0, 32);
+  const turn = runner.handle(request('prompt', {
+    session_id: sid,
+    turn_id: 't-img',
+    text: 'look at this',
+    images: [
+      { base64: png, mime_type: 'image/png' },
+      { base64: png, mime_type: 'image/svg+xml' },
+    ],
+  }));
+  await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request'), 'permission_request row');
+  // 어댑터가 받은 모양 — 텍스트 뒤에 Image 블록 하나(SVG 는 빠진다).
+  const sent = JSON.parse(await readFile(captureFile, 'utf8'));
+  assert.deepEqual(sent.prompt, [
+    { type: 'text', text: 'look at this' },
+    { type: 'image', data: png, mimeType: 'image/png' },
+  ]);
+  // 보낸 그림은 에코로 전사에 남는다 — 받은 이미지와 같은 image 이벤트다.
+  const echo = server.events(sid).find((e) => e.type === 'image' && e.payload.image_ref === ref);
+  assert.ok(echo, 'sent image is echoed as an image event');
+  assert.equal(echo.payload.mime_type, 'image/png');
+  assert.equal(echo.payload.tool_call_id, undefined);
+  assert.ok(server.events(sid).some((e) => e.type === 'system' && e.payload.code === 'prompt_image_skipped'),
+    'SVG 는 무엇이 빠졌는지 남기고 턴은 계속된다');
+  // 에코된 그림은 이미지 RPC 로 바이트까지 돌아온다 — 화면이 그릴 수 있다.
+  await runner.handle(request('image', { request_id: 'rpc-img-bytes', session_id: sid, image_ref: ref }));
+  const got = server.rpc('rpc-img-bytes');
+  assert.equal(got.ok, true);
+  assert.equal(got.result.base64, png);
+  const permission = server.events(sid).find((e) => e.type === 'permission_request');
+  await runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
+  await turn;
+  await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'turn(finished) row');
+});
+
 test('restart kills the process and reopens the SAME session — 새 프로세스, 같은 대화', async (t) => {
   // 살아 있는 세션 프로세스는 **기동 시점의 CLI 상태**를 물고 있다. CLI 를 올려도 그
   // 프로세스가 아는 모델 목록·기능은 옛 바이너리의 것이라, 다시 띄우기 전에는 바뀌지

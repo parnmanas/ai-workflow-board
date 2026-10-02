@@ -194,5 +194,8 @@ export interface AgentSessionEventRecord {
 export const AGENT_SESSION_LIST_LIMIT = 200;
 export const AGENT_SESSION_HISTORY_EVENT_LIMIT = 4000;
 export const AGENT_SESSION_PROMPT_MAX_CHARS = 100_000;
+/** prompt 첨부 이미지 — 장수 상한과 장당 바이트 상한(이미지 파이프라인의 8MB 와 같다). */
+export const AGENT_SESSION_PROMPT_MAX_IMAGES = 5;
+export const AGENT_SESSION_PROMPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 export const AGENT_SESSION_EVENT_BATCH_MAX = 200;
 export const AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS = 256_000;

@@ -14,6 +14,10 @@
 // 실패(미설치·스키마 변경·타임아웃)는 빈 결과로 접는다 — 목록 조회 하나가 세션 화면
 // 전체를 못 쓰게 만들면 안 되고, 세션 화면은 기록이 없어도 열려야 한다(프롬프트는 보낼 수 있다).
 
+import { open } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import {
   boundHistoryPayload,
   type HistoryEvent,
@@ -23,7 +27,65 @@ import {
   toEpochMs,
 } from '../../agent-session-history.js';
 import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
+import { sniffImageMime } from '../../session-local-image.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+
+/**
+ * history 이미지 상한 — 보관 통로(`storeImage` → scratch, 8MB)와 같다. 파일에서 읽을 때는
+ * 상한+1 바이트만 읽어 큰 파일을 통째로 메모리에 올리지 않는다.
+ */
+const HISTORY_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
+/** 미리보기로 그릴 수 있는 이미지 mime — 화면 파이프라인(`local_image` 등)과 같은 집합이다. */
+function previewImageMime(mime: unknown): string | null {
+  if (typeof mime !== 'string') return null;
+  const m = mime.trim().toLowerCase();
+  if (m === 'image/svg+xml') return null;
+  return /^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(m) ? m : null;
+}
+
+/**
+ * `file` 파트의 이미지 바이트를 base64 로 돌려준다. 붙여넣은 그림은 data URL 로 박혀 있고,
+ * `@` 로 참조한 프로젝트 파일은 `file://`·절대·상대(세션 directory 기준) 경로다.
+ * 이미지가 아니면(이름만 이미지인 텍스트 등) null — 매직 바이트까지 본다.
+ */
+async function readFilePartImage(url: string, mime: string, sessionDir: string): Promise<string | null> {
+  const dataMatch = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(url.trim());
+  if (dataMatch) return dataMatch[2].replace(/\s+/g, '');
+  let path = '';
+  if (/^file:/i.test(url)) {
+    try {
+      path = fileURLToPath(url);
+    } catch {
+      return null;
+    }
+  } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    return null; // 원격 URL — 기록 스캔에서 가져오지 않는다.
+  } else if (isAbsolute(url)) {
+    path = url;
+  } else {
+    if (!sessionDir) return null;
+    path = join(sessionDir, url);
+  }
+  let handle;
+  try {
+    handle = await open(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(HISTORY_IMAGE_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    if (bytesRead === 0 || bytesRead > HISTORY_IMAGE_MAX_BYTES) return null;
+    const bytes = buf.subarray(0, bytesRead);
+    if (sniffImageMime(bytes.subarray(0, 16)) !== mime) return null;
+    return bytes.toString('base64');
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 
 /**
  * opencode `step-finish` part → 공용 계약. 모양은 `run --format json` 의 그것과 같다
@@ -130,6 +192,8 @@ export const opencodeSessionStore: CliSessionStoreDriver = {
     );
 
     const events: HistoryEvent[] = [];
+    // `file` 파트의 상대 경로 기준 — `@` 로 참조한 프로젝트 파일용.
+    const sessionDir = typeof session?.directory === 'string' ? session.directory : '';
     for (const row of rows) {
       const part = parseJsonObject(row.part_data);
       const message = parseJsonObject(row.message_data);
@@ -179,8 +243,27 @@ export const opencodeSessionStore: CliSessionStoreDriver = {
           if (usage) push('usage', usageEventPayload(usage));
           break;
         }
+        case 'file': {
+          // 붙여넣은 그림(data URL)이나 `@` 로 참조한 이미지 파일. 이미지 블록 → 보관 후
+          // 참조만 이벤트로 싣는다(claude 스캐너의 pushImage 와 같은 통로). 바이트를 payload 에
+          // 실으면 상한에 걸려 잘리고, 보관 통로가 없으면(테스트·구버전 호출자) 건너뛴다.
+          if (!ctx.storeImage) break;
+          const mime = previewImageMime(part.mime);
+          const url = typeof part.url === 'string' ? part.url : '';
+          if (!mime || !url) break;
+          const base64 = await readFilePartImage(url, mime, sessionDir).catch(() => null);
+          if (!base64) break;
+          const stored = await ctx.storeImage(sessionId, base64).catch(() => null);
+          if (!stored) break;
+          push('image', {
+            image_ref: stored.ref,
+            mime_type: mime,
+            size: stored.size,
+          });
+          break;
+        }
         default:
-          // step-start / file / snapshot … — 트랜스크립트에 보일 것이 없다.
+          // step-start / snapshot … — 트랜스크립트에 보일 것이 없다.
           break;
       }
     }

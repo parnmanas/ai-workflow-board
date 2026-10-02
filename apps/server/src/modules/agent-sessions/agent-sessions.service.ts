@@ -25,6 +25,8 @@ import {
   AGENT_SESSION_EVENT_TYPES,
   AGENT_SESSION_MODE_DEFAULT_KEY,
   AGENT_SESSION_PROMPT_MAX_CHARS,
+  AGENT_SESSION_PROMPT_MAX_IMAGES,
+  AGENT_SESSION_PROMPT_IMAGE_MAX_BYTES,
   AGENT_SESSION_STATUSES,
   agentSessionAcceptsPrompt,
   type AgentSessionAuth,
@@ -1089,12 +1091,36 @@ export class AgentSessionsService implements OnModuleDestroy {
     cli: string,
     sessionId: string,
     textInput: unknown,
+    imagesInput?: unknown,
   ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
     const rec = this.requireHost(workspaceId, managerId, cli);
     this.assertSessionId(sessionId);
     const text = typeof textInput === 'string' ? textInput : '';
-    if (!text.trim()) throw new AgentSessionError(400, 'text_required');
     if (text.length > AGENT_SESSION_PROMPT_MAX_CHARS) throw new AgentSessionError(413, 'text_too_long');
+    // prompt 첨부 이미지 — 미리보기 파이프라인과 같은 집합만 통과시킨다(SVG 제외).
+    // 바이트는 저장하지 않고 이 요청에 실어 매니저로 흘려보낸다.
+    const images: { base64: string; mime_type: string }[] = [];
+    if (imagesInput !== undefined && imagesInput !== null) {
+      if (!Array.isArray(imagesInput)) throw new AgentSessionError(400, 'images_invalid');
+      if (imagesInput.length > AGENT_SESSION_PROMPT_MAX_IMAGES) throw new AgentSessionError(413, 'too_many_images');
+      for (const raw of imagesInput) {
+        const base64 = typeof raw?.base64 === 'string' ? raw.base64.replace(/\s+/g, '') : '';
+        const mime = typeof raw?.mime_type === 'string' ? raw.mime_type.trim().toLowerCase() : '';
+        if (!/^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(mime)) {
+          throw new AgentSessionError(415, 'image_not_supported');
+        }
+        let size = 0;
+        try {
+          size = Buffer.from(base64, 'base64').length;
+        } catch {
+          size = 0;
+        }
+        if (!base64 || size === 0) throw new AgentSessionError(400, 'image_empty');
+        if (size > AGENT_SESSION_PROMPT_IMAGE_MAX_BYTES) throw new AgentSessionError(413, 'image_too_large');
+        images.push({ base64, mime_type: mime });
+      }
+    }
+    if (!text.trim() && images.length === 0) throw new AgentSessionError(400, 'text_required');
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: userId });
     if (!agentSessionAcceptsPrompt(state.status)) {
@@ -1106,7 +1132,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.last_error = null;
     state.last_error_code = null;
     state.updated_at = Date.now();
-    if (!state.title) state.title = text.trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (!state.title) state.title = (text.trim() || (images.length ? `${images.length} image(s)` : '')).replace(/\s+/g, ' ').slice(0, 80);
     const live = this.emitUpdate(state, 'prompt');
     this.emitRequest({
       manager_id: managerId,
@@ -1118,6 +1144,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       title: state.title,
       turn_id: turnId,
       text,
+      ...(images.length ? { images } : {}),
       credential_id: await this.boundCredentialId(workspaceId, managerId, cli),
       // prompt 도 세션을 (재)열 수 있는 경로다 — 기억된 설정과 backend 를 같이 보낸다.
       config_defaults: await this.configDefaultsFor(workspaceId, managerId, cli),

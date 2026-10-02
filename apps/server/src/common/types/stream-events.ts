@@ -986,6 +986,12 @@ export interface AgentSessionRequestPayload {
   title?: string;
   turn_id?: string;
   text?: string;
+  /**
+   * prompt — 사용자가 함께 보내는 이미지. base64 바이트를 그대로 싣는다.
+   * 매니저가 ACP `session/prompt` 의 Image 블록으로 변환한다(opencode `promptCapabilities.image`
+   * 실측). 텍스트와 달리 저장하지 않고 이 요청 한 번에 흘려보낸다.
+   */
+  images?: { base64?: string; mime_type?: string }[];
   permission_request_id?: string;
   option_id?: string | null;
   mode_id?: string;
@@ -993,7 +999,7 @@ export interface AgentSessionRequestPayload {
    *  않고 이 op 으로 따로 받는다 — base64 는 1.33배로 불어나 payload 상한을 넘기고,
    *  그러면 이미지가 `{truncated:true}` 로 바뀌어 조용히 사라진다. */
   image_ref?: string;
-  /** local_image — 에이전트가 답에 적은 이미지 경로. 매니저가 그 장비에서 읽는다(이미지 파일만). */
+  /** local_image — 에이전트가 답에 적은 미리보기 파일 경로. 매니저가 그 장비에서 읽는다(이미지·html·md). */
   image_path?: string;
   /** set_config_option — ACP session config option id 와 값(select 는 value id, boolean 은 true/false). */
   config_id?: string;

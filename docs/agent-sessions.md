@@ -380,6 +380,24 @@ html/md 보고서(`[결과](./report.html)`, `![결과](./notes.md)` — `!` 유
    받아 기존 XSS-safe `renderMarkdown` 으로 카드에 그린다(새 마크다운 파서 없음). 서버는 `text/html`
    응답에 `Content-Security-Policy: sandbox` 를 덧붙여 URL 직접 열기까지 막는다.
 
+## 프롬프트에 이미지 첨부 (사용자 → 에이전트)
+
+세션 컴포저의 📎·붙여넣기로 그림을 함께 보내면 ACP Image 블록으로 에이전트에 간다.
+opencode 가 `promptCapabilities.image` 를 광고하는(1.18.34 실측) 네이티브 경로라 MCP 같은
+우회가 필요 없다 — 채팅의 Claude 전용 vision 블록과 달리 세션은 CLI 분기 없이 전 CLI 에
+같은 모양으로 보낸다. vision 을 모르는 모델은 어댑터·모델이 직접 거절한다(실측: opencode
+비-vision 모델이 "this model doesn't support image input" 으로 답하고 턴은 산다).
+
+1. 화면(`SessionComposer`)이 파일·붙여넣기를 받아 썸네일로 보여 준다(png/jpeg/gif/webp/bmp/avif,
+   SVG 제외, 장당 8MB·최대 5장 — 서버가 최종 판정). 텍스트 없이 그림만 보내도 턴이 열린다.
+2. `POST …/sessions/:sessionId/prompt { text, images: [{ base64, mime_type }] }` —
+   서버는 검증만 하고 저장하지 않은 채 매니저로 흘려보낸다.
+3. 매니저(`#runPrompt`)가 `[{text}, {type:'image', data, mimeType}…]` 로 `session/prompt` 를
+   부른다. 깨진 1장은 턴을 죽이지 않고 `prompt_image_skipped` 로 알린다.
+4. 보낸 그림은 에코로 전사에 남는다 — 받은 이미지와 같은 `image` 이벤트라 다시열기·이미지 RPC 가
+   그대로 동작한다. 다시열기는 opencode `file` 파트(data URL·`file://`·상대경로, 매직 바이트
+   확인)에서 같은 그림을 복원한다.
+
 ## 토큰 사용량 (`usage` 이벤트)
 
 전사의 턴마다 붙는 작은 회색 줄이다. **출처가 두 개**이고, 둘 다 CLI 별 매핑을 거친 뒤

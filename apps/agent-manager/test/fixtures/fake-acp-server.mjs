@@ -5,6 +5,7 @@ const rl = createInterface({ input: process.stdin });
 let nextSession = 1;
 let pendingPrompt = null;
 let lastNewSessionParams = null;
+let lastPromptParams = null;
 // Agent Session 테스트용 — ACP session config options / slash commands / plan / elicitation.
 // 다른 테스트(hermes 등)는 이 필드를 무시한다(추가 필드일 뿐).
 // 실제 어댑터(codex-acp 1.12 / claude-agent-acp 0.79)는 SDK 1.x 스키마의 `id` 키로 보낸다 — `configId` 가 아니다.
@@ -258,6 +259,9 @@ rl.on('line', (line) => {
     case 'test/last-new-session':
       result(message.id, lastNewSessionParams);
       break;
+    case 'test/last-prompt':
+      result(message.id, lastPromptParams);
+      break;
     case 'session/prompt':
       // 업스트림 오류를 조용히 재시도하는 CLI 흉내 — 응답도 알림도 stderr 도 없다
       // (실측: opencode 1.18.32 의 무료 모델 429). 러너의 침묵 감시가 이 상황을 본다.
@@ -303,6 +307,11 @@ rl.on('line', (line) => {
         break;
       }
       pendingPrompt = message.id;
+      // 프롬프트 이미지 블록 테스트가 어댑터가 받은 모양을 단언한다.
+      lastPromptParams = message.params;
+      if (process.env.FAKE_ACP_PROMPT_CAPTURE_FILE) {
+        writeFileSync(process.env.FAKE_ACP_PROMPT_CAPTURE_FILE, JSON.stringify(message.params));
+      }
       if (JSON.stringify(message.params.prompt).includes('CHILD_EVENT_TEST')) {
         send({
           jsonrpc: '2.0',

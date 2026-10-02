@@ -1069,3 +1069,59 @@ test('local image: 경로를 매니저에 묻고 바이트를 그 mime 으로, �
   const empty = await call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions/${SID}/local-image?path=`, { headers: ownerHeaders });
   assert.equal(empty.status, 400);
 });
+
+// prompt 에 이미지를 함께 보내면 바이트가 매니저로 전달된다 — opencode 가 ACP Image 블록으로
+// 받아 보는(1.18.34 `promptCapabilities.image` 실측) 네이티브 경로다. 서버는 저장하지 않는다.
+test('prompt with images forwards bytes to the manager; bad input is rejected with a reason', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const base = `http://localhost:${port}`;
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-prompt-images');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-pi', role: 'admin' });
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-pi', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
+  const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-pi-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4244, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok(heartbeat.status < 300, heartbeat.text);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const ask = (sid, body) => call(
+    `${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/${sid}/prompt`,
+    { method: 'POST', headers: ownerHeaders, body: JSON.stringify(body) },
+  );
+
+  const ok = await ask('sess-pi-1', { text: 'look at this', images: [{ base64: PNG_B64, mime_type: 'image/png' }] });
+  assert.equal(ok.status, 202, ok.text);
+  const req = requests.find((r) => r.op === 'prompt');
+  assert.deepEqual(req.images, [{ base64: PNG_B64, mime_type: 'image/png' }], '바이트가 그대로 매니저에게 간다');
+  assert.equal(req.text, 'look at this');
+
+  const imagesOnly = await ask('sess-pi-2', { text: '  ', images: [{ base64: PNG_B64, mime_type: 'image/jpeg' }] });
+  assert.equal(imagesOnly.status, 202, '텍스트 없이 그림만으로도 턴이 열린다');
+
+  const svg = await ask('sess-pi-3', { text: 'x', images: [{ base64: PNG_B64, mime_type: 'image/svg+xml' }] });
+  assert.equal(svg.status, 415);
+  assert.equal(svg.body.error, 'image_not_supported');
+
+  const empty = await ask('sess-pi-4', { text: '  ' });
+  assert.equal(empty.status, 400);
+
+  const tooMany = await ask('sess-pi-5', {
+    text: 'x',
+    images: Array.from({ length: 6 }, () => ({ base64: PNG_B64, mime_type: 'image/png' })),
+  });
+  assert.equal(tooMany.status, 413);
+});
