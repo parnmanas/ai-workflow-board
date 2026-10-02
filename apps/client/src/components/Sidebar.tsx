@@ -30,9 +30,13 @@ import { useRoomActivity } from '../hooks/useRoomActivity';
 import { sessionActivity } from '../activity';
 import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
-import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
 import { loadSidebarFold, saveSidebarFold } from './sidebarFold';
+
+/** 호스트 세션 목록이 실패했을 때 다시 묻는 간격·횟수 — 매니저가 서버 재시작 뒤 다시 붙는 데 걸리는 시간을 덮는다. */
+const SESSION_LIST_RETRY_MS = 5_000;
+const SESSION_LIST_RETRY_MAX = 6;
 
 interface SidebarProps {
   overlay: boolean;
@@ -152,6 +156,10 @@ export default function Sidebar({
     setVisibleGroupCounts({});
     // 워크스페이스 전환 시 세션 캐시만 초기화 (폴드 상태는 localStorage 유지)
     loadAttemptedRef.current.clear();
+    pendingHostReloadRef.current.clear();
+    lastGoodByCliRef.current = {};
+    for (const retry of Object.values(retryRef.current)) if (retry.timer !== null) window.clearTimeout(retry.timer);
+    retryRef.current = {};
     setHostSessions({});
   }, [wsId]);
 
@@ -295,20 +303,94 @@ export default function Sidebar({
 
   const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
-  const loadHostSessions = React.useCallback(async (host: AgentSessionHost) => {
+  // 호스트 세션 목록 로드. **실패를 "세션 없음" 으로 바꾸지 않는다** — 서버 재시작 직후처럼 매니저가
+  // 아직 다 붙지 않았을 때 목록 요청은 실패(host_offline·timeout)하는데, 예전에는 그 실패를 빈 목록으로
+  // 저장하고 다시 묻지 않아서 그 호스트의 세션이 사이드바에서 사라진 채 남았다(운영 보고 2026-10-02).
+  // 실패한 CLI 는 마지막으로 받은 목록을 유지하고, 잠시 뒤 다시 묻는다(횟수 제한).
+  const lastGoodByCliRef = React.useRef<Record<string, Record<string, AgentSessionSummary[]>>>({});
+  const loadSeqRef = React.useRef<Record<string, number>>({});
+  const retryRef = React.useRef<Record<string, { timer: number | null; attempts: number }>>({});
+  const sessionHostsRef = React.useRef<AgentSessionHost[]>(sessionHosts);
+  sessionHostsRef.current = sessionHosts;
+  const loadHostSessionsRef = React.useRef<(host: AgentSessionHost, fresh?: boolean) => Promise<void>>(async () => {});
+  const loadHostSessions = React.useCallback(async (host: AgentSessionHost, fresh = true) => {
     const { manager_id: managerId } = host;
-    setHostSessions((prev) => ({ ...prev, [managerId]: { groups: prev[managerId]?.groups ?? [], loading: true, loaded: false } }));
+    const seq = (loadSeqRef.current[managerId] ?? 0) + 1;
+    loadSeqRef.current[managerId] = seq;
+    const retry = retryRef.current[managerId] ?? { timer: null, attempts: 0 };
+    retryRef.current[managerId] = retry;
+    if (retry.timer !== null) {
+      window.clearTimeout(retry.timer);
+      retry.timer = null;
+    }
+    // 새 계기(펼침·매니저 재접속·스트림 재연결)는 재시도 횟수를 새로 센다.
+    if (fresh) retry.attempts = 0;
+    setHostSessions((prev) => ({
+      ...prev,
+      [managerId]: { groups: prev[managerId]?.groups ?? [], loading: true, loaded: prev[managerId]?.loaded ?? false },
+    }));
+    const lastGood = lastGoodByCliRef.current[managerId] ?? {};
     const byCliMap: Record<string, AgentSessionSummary[]> = {};
+    const fetched: Record<string, AgentSessionSummary[]> = {};
+    let failed = false;
     await Promise.all(host.clis.map(async (cli) => {
       try {
         const list = await api.listHostSessions(managerId, cli);
-        byCliMap[cli] = Array.isArray(list) ? list : [];
+        byCliMap[cli] = fetched[cli] = Array.isArray(list) ? list : [];
       } catch {
-        byCliMap[cli] = [];
+        failed = true;
+        byCliMap[cli] = lastGood[cli] ?? [];
       }
     }));
+    // 그 사이 더 새 로드가 시작됐으면 그 결과를 기다린다(늦게 온 옛 응답이 덮지 않게).
+    if (loadSeqRef.current[managerId] !== seq) return;
+    lastGoodByCliRef.current[managerId] = { ...lastGood, ...fetched };
     setHostSessions((prev) => ({ ...prev, [managerId]: { groups: groupSessionsByCwd(byCliMap), loading: false, loaded: true } }));
+    if (failed && retry.attempts < SESSION_LIST_RETRY_MAX) {
+      retry.attempts += 1;
+      retry.timer = window.setTimeout(() => {
+        retry.timer = null;
+        const latest = sessionHostsRef.current.find((h) => h.manager_id === managerId);
+        if (latest) void loadHostSessionsRef.current(latest, false);
+        else pendingHostReloadRef.current.add(managerId);
+      }, SESSION_LIST_RETRY_MS);
+    }
   }, []);
+  loadHostSessionsRef.current = loadHostSessions;
+
+  // 다시 물어야 하는데 호스트가 아직 목록에 없는 매니저 — 목록에 나타나는 순간 로드한다.
+  const pendingHostReloadRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    for (const host of sessionHosts) {
+      if (!pendingHostReloadRef.current.delete(host.manager_id)) continue;
+      if (loadAttemptedRef.current.has(host.manager_id)) void loadHostSessions(host);
+    }
+  }, [sessionHosts, loadHostSessions]);
+
+  React.useEffect(() => () => {
+    for (const retry of Object.values(retryRef.current)) if (retry.timer !== null) window.clearTimeout(retry.timer);
+  }, []);
+
+  /** 이미 불러온 적 있는 호스트를 다시 묻는다. 지금 목록에 없으면 나타날 때 묻는다. */
+  const reloadAttemptedHost = React.useCallback((managerId: string) => {
+    if (!loadAttemptedRef.current.has(managerId)) return;
+    const host = sessionHostsRef.current.find((h) => h.manager_id === managerId);
+    if (host) void loadHostSessions(host);
+    else pendingHostReloadRef.current.add(managerId);
+  }, [loadHostSessions]);
+
+  // 이 브라우저의 SSE 가 끊겼다 다시 붙으면(대개 서버 재시작) 그 사이의 매니저 재접속 이벤트를 놓쳤을 수
+  // 있다 — 불러온 적 있는 호스트를 모두 다시 묻는다. 첫 연결(false→true)은 끊김이 아니다.
+  const { isConnected: streamConnected } = useBoardStream();
+  const streamStateRef = React.useRef({ was: false, ever: false });
+  React.useEffect(() => {
+    const st = streamStateRef.current;
+    const reconnected = streamConnected && !st.was && st.ever;
+    st.was = streamConnected;
+    if (streamConnected) st.ever = true;
+    if (!reconnected) return;
+    for (const managerId of loadAttemptedRef.current) reloadAttemptedHost(managerId);
+  }, [streamConnected, reloadAttemptedHost]);
 
   // 라이브 상태 갱신 — 세션 페이지가 받는 것과 같은 driver 전용 SSE. 목록을 다시 묻지 않고
   // 그 자리에서 반영한다. **이미 있는 행은 고치고, 처음 보는 세션은 넣는다** — 방금 만든
@@ -336,14 +418,14 @@ export default function Sidebar({
   }, []));
   // 매니저가 재시작하거나 사라지면(인스턴스 등록/제거) 그 장비의 목록을 다시 묻는다 — 프로세스가 전부
   // 죽었으므로 예전 dot 은 전부 틀린 값이다. 30초 하트비트 갱신(action 'updated')은 무시한다.
+  // 호스트 목록(useAgentSessionsNav)도 같은 이벤트로 다시 받아 오므로, 방금 붙은 매니저가 아직 이
+  // 렌더의 목록에 없을 수 있다 — 그때는 목록에 나타날 때 묻는다(예전에는 여기서 조용히 건너뛰었다).
   useBoardStreamEvent('agent_instance_update', React.useCallback((data: any) => {
     const action = data?.action;
     const managerId = data?.instance?.agent_id;
     if ((action !== 'registered' && action !== 'removed') || typeof managerId !== 'string') return;
-    if (!loadAttemptedRef.current.has(managerId)) return;
-    const host = sessionHosts.find((h) => h.manager_id === managerId);
-    if (host) void loadHostSessions(host);
-  }, [sessionHosts, loadHostSessions]));
+    reloadAttemptedHost(managerId);
+  }, [reloadAttemptedHost]));
 
   // 세션 섹션이 열려 있고 호스트가 확장된 상태면 자동 로드 (첫 시도만)
   React.useEffect(() => {

@@ -43,6 +43,11 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
   → `POST /api/agent/sessions/rpc/:id` 로 왕복한다(fs-browser 와 같은 패턴, 타임아웃 list 20s / history 40s / open 120s).
   라이브 상태(status/mode/driver)만 메모리에 두고, 매니저가 중계한 이벤트를 driver(마지막으로 그 세션을 **연**
   사용자 — history 로 읽은 것도 포함, open/prompt 같은 쓰기뿐 아니라)에게 SSE 로 흘린다. 다른 매니저 키는 남의 RPC 를 풀거나 이벤트를 중계할 수 없다.
+  **서버 재시작 직후**: 매니저는 하트비트(HTTP)와 SSE 를 따로 다시 붙이므로, 호스트가 "연결됨" 인데 스트림은 아직
+  없을 수 있다. 그때 보낸 요청은 SSE 로 가므로 사라진다. 그래서 스트림이 없을 때 보낸 **읽기** RPC(list/history/image/
+  local_image — `open` 은 중복 실행 위험으로 제외)는 그 매니저 스트림이 붙으면(`AgentConnectivityRegistry.onBecameReachable`)
+  같은 request_id 로 다시 보내고 타임아웃도 새로 잰다. 사이드바도 목록 실패를 "세션 없음" 으로 저장하지 않고 마지막
+  목록을 유지한 채 다시 묻는다(`Sidebar.tsx` `loadHostSessions`).
 - **매니저 `agent-session-store.ts`** — CLI 홈 리더. Claude: `projects/*/*.jsonl` (`agent-*.jsonl` 서브에이전트 파일과
   프롬프트 없는 빈 세션 제외, `custom-title` 우선, sidechain 행 제외). Codex: `sessions/**/rollout-*.jsonl`
   (`session_meta` → id/cwd, developer/environment_context 메시지는 제목에서 제외). 기록은 같은 파일을 트랜스크립트

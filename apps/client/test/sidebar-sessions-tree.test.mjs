@@ -19,6 +19,8 @@
 //   ⑤ agent_sessions.use 권한이 없으면 섹션 자체가 없다
 //   ⑥ 3일 넘은 세션은 "+N개 더 보기" 뒤로 접히고 눌러 펴면 드러난다 (d4b34c2c 의 동작)
 //   ⑦ 전부 3일을 넘겨도 가장 최근 1개는 항상 보인다
+//   ⑬ 목록 요청이 실패해도(서버 재시작 직후 매니저가 아직 덜 붙음) 보이던 세션을 지우지 않는다
+//   ⑭ 매니저가 다시 붙으면 — 그 순간 호스트가 아직 목록에 없었어도 — 나타날 때 세션을 다시 묻는다
 //
 // 실행: node --import tsx --test --test-force-exit --test-concurrency=1 test/sidebar-sessions-tree.test.mjs
 import test from 'node:test';
@@ -86,14 +88,17 @@ const DEFAULT_SESSIONS_BY_CLI = {
 };
 
 /** URL 로 라우팅하는 fetch 스텁. 세션 목록은 (호스트, CLI) 별 경로로 들어온다. */
-function installFetchStub({ hosts, sessionsByCli, permissions }) {
+function installFetchStub({ hosts, sessionsByCli, permissions, control = {} }) {
   const previous = globalThis.fetch;
   const json = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
   globalThis.fetch = (url) => {
     const path = String(url);
     const sessionList = /\/agent-sessions\/hosts\/([^/]+)\/([^/]+)\/sessions$/.exec(path);
+    if (sessionList && control.failSessionList) {
+      return Promise.resolve({ ok: false, status: 504, json: async () => ({ error: 'The Runtime Host did not respond in time.' }) });
+    }
     if (sessionList) return json(sessionsByCli[decodeURIComponent(sessionList[2])] ?? []);
-    if (path.endsWith('/agent-sessions/hosts')) return json(hosts);
+    if (path.endsWith('/agent-sessions/hosts')) return json([...hosts]);
     if (path.includes('/auth/me')) {
       return json({
         id: 'u1',
@@ -142,6 +147,7 @@ async function mountSidebar(t, options = {}) {
     hosts = [HOST],
     sessionsByCli = DEFAULT_SESSIONS_BY_CLI,
     permissions = ['agent_sessions.use'],
+    control = {},
   } = options;
 
   const dom = setupDom({ width: 1280 });
@@ -160,7 +166,7 @@ async function mountSidebar(t, options = {}) {
   const { uninstall, FakeEventSource } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
-  const restoreFetch = installFetchStub({ hosts, sessionsByCli, permissions });
+  const restoreFetch = installFetchStub({ hosts, sessionsByCli, permissions, control });
   probe.pathname = null;
   probe.search = null;
 
@@ -220,7 +226,15 @@ async function mountSidebar(t, options = {}) {
     await flush();
   };
 
-  return { view, emitSessionUpdate };
+  /** 매니저 인스턴스 등록/제거 SSE(하트비트가 처음 들어오거나 TTL 로 빠질 때). */
+  const emitInstanceUpdate = async (action, agentId = MANAGER_ID) => {
+    for (const es of FakeEventSource.instances) {
+      es.emit('agent_instance_update', { action, instance: { agent_id: agentId, mode: 'manager' }, timestamp: ago(0) });
+    }
+    await flush();
+  };
+
+  return { view, emitSessionUpdate, emitInstanceUpdate };
 }
 
 const sessionsSection = (view) => view.container.querySelector('section[aria-labelledby="sidebar-sessions-heading"]');
@@ -486,4 +500,43 @@ test('⑫ 이미 있는 세션의 갱신은 행을 갈아끼우지 않고 아는
   // 중복 행이 생기지 않았는지 — 같은 세션이 두 번 그려지면 upsert 가 아니라 append 다.
   const rows = [...tree().querySelectorAll('button[title="awb 리뷰"]')];
   assert.equal(rows.length, 1, `같은 세션이 한 행이어야 한다 (실제 ${rows.length})`);
+});
+
+test('⑬ 목록 요청이 실패해도 보이던 세션을 지우지 않는다 — 실패는 "세션 없음" 이 아니다', async (t) => {
+  const control = { failSessionList: false };
+  const { view, emitInstanceUpdate } = await mountSidebar(t, { control });
+  const tree = () => hostsTree(view);
+  assert.equal(hasRow(tree(), 'awb 리뷰'), true, '전제: 처음엔 목록이 보인다');
+
+  // 서버 재시작 직후: 매니저 하트비트는 들어왔지만 SSE 가 아직 없어 목록 요청이 timeout 난다.
+  control.failSessionList = true;
+  await emitInstanceUpdate('registered');
+
+  assert.equal(hasRow(tree(), 'awb 리뷰'), true, '실패한 재조회가 목록을 비우면 그 호스트 세션이 사라진 채 남는다');
+  assert.equal(hasRow(tree(), 'codex 실험'), true);
+});
+
+test('⑭ 매니저가 다시 붙으면 — 호스트가 아직 목록에 없었어도 — 나타날 때 세션을 다시 묻는다', async (t) => {
+  const hosts = [HOST];
+  const sessionsByCli = { claude: [...DEFAULT_SESSIONS_BY_CLI.claude], codex: [...DEFAULT_SESSIONS_BY_CLI.codex] };
+  const { view, emitInstanceUpdate } = await mountSidebar(t, { hosts, sessionsByCli });
+  const tree = () => hostsTree(view);
+  assert.equal(hasRow(tree(), 'awb 리뷰'), true, '전제: 처음엔 목록이 보인다');
+
+  // 재시작으로 매니저가 빠진다 — 호스트 목록에서 사라진다.
+  hosts.length = 0;
+  await emitInstanceUpdate('removed');
+  assert.equal(hasRow(tree(), HOST_ROW_TITLE), false, '전제: 빠진 호스트는 목록에 없다');
+
+  // 그동안 장비에서 세션이 하나 생겼다. 매니저가 다시 붙는다 — 이벤트가 오는 순간 사이드바의 호스트
+  // 목록은 아직 옛 것(호스트 없음)이다. 예전에는 여기서 조용히 건너뛰어 다시 묻지 않았다.
+  sessionsByCli.claude = [
+    session({ session_id: 's-after-reboot', cli: 'claude', cwd: AWB_CWD, title: '재시작 뒤 세션', updated_at: ago(0) }),
+    ...sessionsByCli.claude,
+  ];
+  hosts.push(HOST);
+  await emitInstanceUpdate('registered');
+
+  assert.equal(hasRow(tree(), HOST_ROW_TITLE), true, '호스트가 돌아온다');
+  assert.equal(hasRow(tree(), '재시작 뒤 세션'), true, '돌아온 호스트의 세션을 다시 물어 새 세션이 보여야 한다');
 });

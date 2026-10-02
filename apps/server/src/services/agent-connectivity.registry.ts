@@ -35,6 +35,7 @@ export class AgentConnectivityRegistry {
   // agentId → number of live sessions currently making it reachable. Entry
   // removed at zero so `.size` tracks the distinct reachable-agent count.
   private readonly reach = new Map<string, number>();
+  private readonly reachableListeners = new Set<(agentId: string) => void>();
 
   constructor(metrics: MemoryMetricsRegistry) {
     // At rest this equals the count of distinct agents with a live delivery
@@ -44,7 +45,30 @@ export class AgentConnectivityRegistry {
 
   private _inc(id: string): void {
     if (!id) return;
-    this.reach.set(id, (this.reach.get(id) ?? 0) + 1);
+    const prev = this.reach.get(id) ?? 0;
+    this.reach.set(id, prev + 1);
+    if (prev === 0) {
+      for (const listener of this.reachableListeners) {
+        try {
+          listener(id);
+        } catch {
+          /* 한 구독자의 실패가 SSE 연결을 막지 않는다 */
+        }
+      }
+    }
+  }
+
+  /**
+   * `agentId` 가 도달 불가 → 가능으로 바뀌는 순간(첫 live 세션이 붙을 때)을 알린다. 해제 함수를 돌려준다.
+   *
+   * 호출 시점은 SSE 핸들러가 Observable 을 돌려주기 **전**이다 — 이 콜백 안에서 곧바로 이벤트를
+   * 쏘면 그 스트림은 아직 구독 전이라 받지 못한다. 재전송은 한 박자 늦춰서 할 것.
+   */
+  onBecameReachable(listener: (agentId: string) => void): () => void {
+    this.reachableListeners.add(listener);
+    return () => {
+      this.reachableListeners.delete(listener);
+    };
   }
 
   private _dec(id: string): void {

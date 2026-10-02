@@ -12,6 +12,7 @@ import type { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { decrypt } from '../../services/encryption.service';
 import { normalizeCredentialFields } from '../../common/credential-fields';
 import { activityEvents } from '../../services/activity.service';
+import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
 import { LogService } from '../../services/log.service';
 import { InstanceRecord, InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { HostModelsService, modelLabelsFromOptions } from '../agent-manager/host-models.service';
@@ -157,6 +158,8 @@ interface PendingRpc {
   created_at: number;
   resolve: (body: RpcResponseBody) => void;
   timer: NodeJS.Timeout;
+  /** 매니저 스트림이 없을 때 보낸 요청 — 스트림이 다시 붙으면 이 payload 로 한 번 더 보낸다. */
+  redeliver?: Omit<AgentSessionRequestPayload, 'issued_at'>;
 }
 
 export interface RpcResponseBody {
@@ -184,6 +187,13 @@ const RPC_ERROR_STATUS: Record<string, number> = {
   too_large: 413,
 };
 const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
+/**
+ * 매니저 스트림이 없는 동안 보낸 요청 중 **다시 보내도 안전한 것**(읽기 전용). `open` 은 빠진다 —
+ * 첫 요청이 실제로는 닿았을 수 있어 두 번 열면 세션 프로세스가 둘이 된다.
+ */
+const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'image', 'local_image']);
+/** 스트림이 붙은 뒤 재전송까지 — SSE 핸들러가 Observable 을 돌려주고 구독되기를 기다린다. */
+const REDELIVER_DELAY_MS = 1_000;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
 const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input']);
 const CONFIG_ID_MAX = 128;
@@ -325,13 +335,42 @@ export class AgentSessionsService implements OnModuleDestroy {
     private readonly registry: InstanceRegistryService,
     private readonly hostModels: HostModelsService,
     private readonly logService: LogService,
+    private readonly connectivity: AgentConnectivityRegistry,
   ) {
     activityEvents.on('agent_instance_update', this.onInstanceUpdate);
+    this.offReachable = this.connectivity.onBecameReachable(this.onManagerReachable);
   }
+
+  private readonly offReachable: () => void;
 
   onModuleDestroy() {
     activityEvents.removeListener('agent_instance_update', this.onInstanceUpdate);
+    this.offReachable();
   }
+
+  /**
+   * 매니저 스트림이 (다시) 붙었다 — 그 사이에 보낸 읽기 요청을 다시 보낸다.
+   *
+   * 서버가 재시작하면 매니저는 하트비트(HTTP)와 SSE 를 **따로** 다시 붙인다. 하트비트가 먼저면
+   * 호스트는 "연결됨" 으로 보이고 화면이 곧바로 세션 목록을 묻는데, 그 요청은 SSE 로만 가므로
+   * 아직 스트림이 없는 매니저에게는 **그냥 사라진다** — 20초 뒤 timeout 이고 사이드바는 그
+   * 호스트를 빈 목록으로 남겼다(실측 2026-10-02 20:55 재시작: rolf 의 list 4건 전부 timeout).
+   * 재전송하며 timeout 도 새로 잰다 — 남은 시간이 아니라 매니저가 실제로 받은 시점부터.
+   */
+  private readonly onManagerReachable = (managerId: string): void => {
+    const timer = setTimeout(() => {
+      for (const [requestId, entry] of this.pending) {
+        if (entry.manager_id !== managerId || !entry.redeliver) continue;
+        const payload = entry.redeliver;
+        entry.redeliver = undefined;
+        clearTimeout(entry.timer);
+        entry.timer = this.armRpcTimer(requestId, entry.op, managerId, payload.cli, RPC_TIMEOUT_MS[entry.op as keyof typeof RPC_TIMEOUT_MS] ?? RPC_TIMEOUT_MS.list);
+        this.logService.info('AgentSession', `rpc ${entry.op} redelivered after the Runtime Host stream reconnected (manager=${managerId.slice(0, 8)} cli=${payload.cli})`);
+        this.emitRequest(payload);
+      }
+    }, REDELIVER_DELAY_MS);
+    timer.unref?.();
+  };
 
   // ─── Hosts ──────────────────────────────────────────────────────────────
 
@@ -764,15 +803,16 @@ export class AgentSessionsService implements OnModuleDestroy {
     const requestId = randomUUID();
     const timeoutMs = RPC_TIMEOUT_MS[op];
     const promise = new Promise<RpcResponseBody>((resolve) => {
-      const timer = setTimeout(() => {
-        if (!this.pending.delete(requestId)) return;
-        this.logService.warn('AgentSession', `rpc ${op} timed out (manager=${managerId.slice(0, 8)} cli=${cli})`);
-        resolve({ ok: false, error: 'The Runtime Host did not respond in time.', code: 'timeout' });
-      }, timeoutMs);
-      timer.unref?.();
+      const timer = this.armRpcTimer(requestId, op, managerId, cli, timeoutMs);
       this.pending.set(requestId, { manager_id: managerId, op, created_at: Date.now(), resolve, timer });
     });
-    this.emitRequest({ manager_id: managerId, workspace_id: '', cli, op, request_id: requestId, driver_user_id: driverUserId, ...args });
+    const request = { manager_id: managerId, workspace_id: '', cli, op, request_id: requestId, driver_user_id: driverUserId, ...args };
+    // 스트림이 없는 매니저에게 보낸 이벤트는 사라진다 — 붙으면 다시 보내도록 표시해 둔다(onManagerReachable).
+    if (REDELIVERABLE_OPS.has(op) && !this.connectivity.isReachable(managerId)) {
+      const entry = this.pending.get(requestId);
+      if (entry) entry.redeliver = request;
+    }
+    this.emitRequest(request);
     return promise.then((body) => {
       if (!body.ok) {
         const status = RPC_ERROR_STATUS[body.code ?? ''] ?? 502;
@@ -780,6 +820,17 @@ export class AgentSessionsService implements OnModuleDestroy {
       }
       return body.result as T;
     });
+  }
+
+  private armRpcTimer(requestId: string, op: string, managerId: string, cli: string, timeoutMs: number): NodeJS.Timeout {
+    const timer = setTimeout(() => {
+      const entry = this.pending.get(requestId);
+      if (!entry || !this.pending.delete(requestId)) return;
+      this.logService.warn('AgentSession', `rpc ${op} timed out (manager=${managerId.slice(0, 8)} cli=${cli})`);
+      entry.resolve({ ok: false, error: 'The Runtime Host did not respond in time.', code: 'timeout' });
+    }, timeoutMs);
+    timer.unref?.();
+    return timer;
   }
 
   /** 매니저 → 서버. request_id 소유 매니저만 풀 수 있다. */

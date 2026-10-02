@@ -24,6 +24,7 @@ test/agent-manager-tool-call-telemetry.test.mjs
 test/agent-manager-update-cli.test.mjs
 test/agent-session-open-failure.test.mjs
 test/agent-session-open-status-race.test.mjs
+test/agent-session-rpc-redeliver.test.mjs
 test/agent-sessions.test.mjs
 test/agent-status-supervisor-eviction.test.mjs
 test/agent-workload-same-second-move.test.mjs

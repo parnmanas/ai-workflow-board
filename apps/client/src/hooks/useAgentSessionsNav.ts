@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
-import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
+import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import type { AgentSessionHost } from '../types';
 
 /**
@@ -61,6 +61,18 @@ export function useAgentSessionsNav(wsId: string | null): AgentSessionsNav {
   useBoardStreamEvent('agent_instance_update', () => {
     if (wsId) void fetchHosts(wsId, generationRef.current);
   });
+
+  // 이 브라우저의 SSE 가 다시 붙으면(대개 서버 재시작) 그 사이의 매니저 등록 이벤트를 놓쳤다 — 다시 받는다.
+  // 첫 연결은 위의 마운트 로드가 이미 했다.
+  const { isConnected } = useBoardStream();
+  const streamStateRef = useRef({ was: false, ever: false });
+  useEffect(() => {
+    const st = streamStateRef.current;
+    const reconnected = isConnected && !st.was && st.ever;
+    st.was = isConnected;
+    if (isConnected) st.ever = true;
+    if (reconnected && wsId) void fetchHosts(wsId, generationRef.current);
+  }, [isConnected, wsId, fetchHosts]);
 
   const reload = useCallback(() => {
     if (wsId) void fetchHosts(wsId, generationRef.current);
