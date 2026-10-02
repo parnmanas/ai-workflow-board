@@ -185,7 +185,7 @@ test('composer: attach button takes images; text-empty image-only prompt still s
     assert.equal(sent[0].images.length, 1);
     assert.equal(sent[0].images[0].mime_type, 'image/png');
     assert.ok(sent[0].images[0].base64.length > 0);
-    assert.equal(document.querySelector('[aria-label="Attached images"]'), null, '전송되면 스트립이 비워진다');
+    assert.equal(Boolean(document.querySelector('[aria-label="Attached images"]')), false, '전송되면 스트립이 비워진다');
     view.unmount();
   } finally {
     URL.createObjectURL = origCreate;
@@ -205,7 +205,7 @@ test('composer: SVG 는 첨부 단계에서 거절된다', async () => {
     Object.defineProperty(input, 'files', { value: [file], configurable: true });
     input.dispatchEvent(new window.Event('change', { bubbles: true }));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    assert.equal(document.querySelector('[aria-label="Attached images"]'), null);
+    assert.equal(Boolean(document.querySelector('[aria-label="Attached images"]')), false, 'SVG 는 첨부되지 않아 스트립이 생기지 않는다');
     const sendBtn = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Send');
     assert.equal(sendBtn.disabled, true);
     view.unmount();
