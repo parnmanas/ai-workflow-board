@@ -2163,6 +2163,19 @@ export const api = {
     }
     return resp.blob();
   },
+  /** 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) — 그 Runtime Host 의 매니저가 읽어 준다.
+   *  `cwd` 는 상대 경로의 기준. 실패하면 서버가 준 사유(message)로 던진다. */
+  getHostSessionLocalImage: async (managerId: string, cli: string, sessionId: string, path: string, cwd: string): Promise<Blob> => {
+    const query = new URLSearchParams({ path, ...(cwd ? { cwd } : {}) });
+    const url = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
+      + `/sessions/${encodeURIComponent(sessionId)}/local-image?${query.toString()}`;
+    const resp = await fetch(`${BASE}${url}`, { headers: getAuthHeaders() });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null);
+      throw new Error(body?.message || body?.error || `image fetch failed (${resp.status})`);
+    }
+    return resp.blob();
+  },
   promptHostSession: (managerId: string, cli: string, sessionId: string, text: string) =>
     request<{ turn_id: string; live: AgentSessionLiveSnapshot }>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/prompt`,

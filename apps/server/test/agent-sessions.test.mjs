@@ -1002,3 +1002,70 @@ test('server restart: reading the session re-claims the driver so the live strea
 
   stream.close();
 });
+
+// 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) — Codex 데스크톱 앱이 자기 장비 파일로
+// 그리는 것을 AWB 는 Runtime Host 매니저에게 `local_image` RPC 로 받아 그린다.
+test('local image: 경로를 매니저에 묻고 바이트를 그 mime 으로, 실패는 사유 있는 상태 코드로 돌려준다', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const base = `http://localhost:${port}`;
+  const ws = await createWorkspace(app, getDataSourceToken, 'agent-sessions-local-image');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-li', role: 'admin' });
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Workspace-Id': ws.id };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-li', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
+  const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-li-1', agent_id: managerId, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
+      cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4243, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok(heartbeat.status < 300, heartbeat.text);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+
+  const SID = '019d5d74-427c-7d13-b1c4-a54e0081374a';
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const path = 'E:/Repository/txiv/emberdelve/Docs/ui facilities/town_forge_weapons.png';
+  // 매니저 응답을 하나 정해 두고 요청을 보낸다 — 응답이 오기 전까지 GET 은 매달려 있다.
+  const ask = async (managerBody, { imagePath = path, cwd = 'E:/Repository/txiv' } = {}) => {
+    const seen = requests.length;
+    const pending = fetch(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions/${SID}/local-image?${new URLSearchParams({ path: imagePath, cwd })}`, { headers: ownerHeaders });
+    await waitFor(() => requests.length > seen, 'local_image request');
+    const req = requests[requests.length - 1];
+    await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...managerBody }) });
+    const res = await pending;
+    return { req, res, bytes: Buffer.from(await res.arrayBuffer()) };
+  };
+
+  const ok = await ask({ ok: true, result: { base64: PNG.toString('base64'), mime_type: 'image/png', path } });
+  assert.deepEqual(
+    { op: ok.req.op, session_id: ok.req.session_id, image_path: ok.req.image_path, cwd: ok.req.cwd, manager: ok.req.manager_id },
+    { op: 'local_image', session_id: SID, image_path: path, cwd: 'E:/Repository/txiv', manager: managerId },
+    '경로(공백 포함)와 cwd 가 그대로 매니저에게 간다',
+  );
+  assert.equal(ok.res.status, 200);
+  assert.equal(ok.res.headers.get('content-type'), 'image/png');
+  assert.equal(ok.res.headers.get('cache-control'), 'no-store', '같은 경로는 다시 그려질 수 있다 — 경로로 캐시하지 않는다');
+  assert.equal(ok.bytes.equals(PNG), true);
+
+  const svg = await ask({ ok: true, result: { base64: Buffer.from('<svg/>').toString('base64'), mime_type: 'image/svg+xml' } });
+  assert.equal(svg.res.headers.get('content-type'), 'application/octet-stream', 'SVG mime 은 그대로 내보내지 않는다(스크립트)');
+
+  const notImage = await ask({ ok: false, error: 'Not an image file', code: 'not_image' });
+  assert.equal(notImage.res.status, 415);
+  assert.match(JSON.parse(notImage.bytes.toString()).message, /Not an image/);
+
+  const outdated = await ask({ ok: false, error: 'Unknown RPC op local_image', code: 'bad_request' });
+  assert.equal(outdated.res.status, 501);
+  assert.equal(JSON.parse(outdated.bytes.toString()).error, 'manager_outdated', '구버전 매니저는 업데이트하라고 알려 준다');
+
+  const empty = await call(`${base}/api/agent-sessions/hosts/${managerId}/codex/sessions/${SID}/local-image?path=`, { headers: ownerHeaders });
+  assert.equal(empty.status, 400);
+});

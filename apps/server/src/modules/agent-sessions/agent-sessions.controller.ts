@@ -1,5 +1,5 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Get, Param, Post, Put, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -98,6 +98,38 @@ export class AgentSessionsController {
       // 참조는 내용 주소처럼 1회성이라 안전하게 캐시된다 — 같은 ref 는 같은 바이트다.
       res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
       return res.end(bytes);
+    } catch (err: any) {
+      const status = typeof err?.status === 'number' ? err.status : 500;
+      return res.status(status).json({ error: err?.code || 'image_failed', message: err?.message || 'Could not read the image.' });
+    }
+  }
+
+  /**
+   * 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`)의 바이트 — Runtime Host 의 매니저가
+   * 그 장비에서 읽어 준다(이미지 파일만). 경로는 `?path=`, 상대 경로의 기준은 `?cwd=`.
+   *
+   * 위 `image` 와 달리 캐시하지 않는다: 같은 경로의 파일은 다시 그려질 수 있다(Codex 앱이 경로로
+   * 캐시해 덮어쓴 스크린샷을 옛 그림으로 보여 준 버그가 있다).
+   */
+  @Get('hosts/:managerId/:cli/sessions/:sessionId/local-image')
+  async localImage(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Query('path') path: string,
+    @Query('cwd') cwd: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const ws = this.workspaceId(req, res);
+    if (!ws) return;
+    try {
+      const image = await this.sessions.readLocalImage(ws, this.userId(req), managerId, cli, sessionId, String(path ?? ''), String(cwd ?? ''));
+      res.setHeader('Content-Type', image.mimeType);
+      res.setHeader('Content-Length', String(image.bytes.length));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(image.bytes);
     } catch (err: any) {
       const status = typeof err?.status === 'number' ? err.status : 500;
       return res.status(status).json({ error: err?.code || 'image_failed', message: err?.message || 'Could not read the image.' });

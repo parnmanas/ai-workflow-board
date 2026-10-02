@@ -3,6 +3,7 @@ import { tokens } from '../../tokens';
 import { renderMarkdown } from '../chat/utils/markdown';
 import { formatReceivedAt, usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
+import { splitMarkdownImages } from './markdownImages';
 
 /**
  * Agent Session 트랜스크립트 렌더러. Chat 의 MessageList 와 달리 말풍선 목록이
@@ -26,6 +27,10 @@ export interface SessionTranscriptProps {
    *  토큰을 쿼리로 노출하는 두 번째 인증 경로를 만들지 않기 위해서다. 안 넘기면 이미지
    *  블록은 "볼 수 없음" 으로 접힌다. */
   loadImage?: (imageRef: string) => Promise<Blob>;
+  /** 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) → 바이트. Runtime Host 매니저가
+   *  그 장비에서 읽어 준다(Codex 데스크톱 앱이 같은 마크다운을 자기 장비 파일로 그리는 것의 원격판).
+   *  안 넘기면 그 자리에 경로만 보인다. */
+  loadLocalImage?: (path: string) => Promise<Blob>;
 }
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -128,8 +133,14 @@ function PromptBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBlock({ text }: { text: string }) {
-  const nodes = useMemo(() => renderMarkdown(text), [text]);
+function AssistantBlock({ text, loadLocalImage }: { text: string; loadLocalImage?: (path: string) => Promise<Blob> }) {
+  // 공통 렌더러는 이미지 문법을 모른다 — 그림 자리만 먼저 떼어 내고 나머지 글은 그대로 그린다.
+  const nodes = useMemo(
+    () => splitMarkdownImages(text).map((seg, i) => (seg.kind === 'text'
+      ? <React.Fragment key={i}>{renderMarkdown(seg.text)}</React.Fragment>
+      : <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} />)),
+    [text, loadLocalImage],
+  );
   return (
     <div
       data-block="assistant"
@@ -660,7 +671,97 @@ function ImageBlock({
   );
 }
 
-export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage }: SessionTranscriptProps) {
+/**
+ * 에이전트 답 속의 `![alt](target)` 한 장. 로컬 경로면 Runtime Host 에서 바이트를 받아 Blob URL 로,
+ * http(s) 면 그대로 그린다.
+ *
+ * 경로를 못 읽으면 **경로와 사유를 그대로 보인다** — 원래 글이 그 자리에 있었으므로, 그림이
+ * 조용히 빠지면 에이전트가 무엇을 보여 주려 했는지조차 사라진다.
+ */
+function MarkdownImage({
+  alt,
+  target,
+  source,
+  loadLocalImage,
+}: {
+  alt: string;
+  target: string;
+  source: 'local' | 'remote';
+  loadLocalImage?: (path: string) => Promise<Blob>;
+}) {
+  const [url, setUrl] = useState<string>(source === 'remote' ? target : '');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (source !== 'local' || !loadLocalImage) return;
+    let revoked = false;
+    let objectUrl = '';
+    setUrl('');
+    setError(null);
+    void (async () => {
+      try {
+        const blob = await loadLocalImage(target);
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      } catch (err: any) {
+        if (!revoked) setError(err?.message || '이미지를 가져오지 못했습니다');
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [source, target, loadLocalImage]);
+
+  const caption = (
+    <span style={{ fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' }} title={target}>
+      {alt ? `${alt} — ` : ''}{target}
+    </span>
+  );
+  if (source === 'local' && !loadLocalImage) {
+    return <div data-block="markdown-image" style={{ whiteSpace: 'normal' }}>🖼 {caption}</div>;
+  }
+  if (error) {
+    return (
+      <div data-block="markdown-image" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
+        이미지를 가져오지 못했습니다 — {error}
+        <div>{caption}</div>
+      </div>
+    );
+  }
+  if (!url) {
+    return (
+      <div data-block="markdown-image" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
+        이미지 불러오는 중… {caption}
+      </div>
+    );
+  }
+  return (
+    <figure data-block="markdown-image" style={{ margin: '6px 0', whiteSpace: 'normal' }}>
+      <a href={url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', maxWidth: '100%' }}>
+        <img
+          src={url}
+          alt={alt || target}
+          referrerPolicy="no-referrer"
+          onError={() => setError('브라우저가 이 이미지를 그리지 못했습니다')}
+          style={{
+            display: 'block',
+            maxWidth: '100%',
+            maxHeight: 520,
+            objectFit: 'contain',
+            borderRadius: tokens.radii.md,
+            border: `1px solid ${tokens.colors.border}`,
+            background: tokens.colors.surface,
+          }}
+        />
+      </a>
+      <figcaption style={{ marginTop: 2 }}>{caption}</figcaption>
+    </figure>
+  );
+}
+
+export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage }: SessionTranscriptProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {blocks.map((block) => {
@@ -668,7 +769,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'prompt':
             return <PromptBlock key={block.key} text={block.text} />;
           case 'assistant':
-            return <AssistantBlock key={block.key} text={block.text} />;
+            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} />;
           case 'reasoning':
             return <ReasoningBlock key={block.key} text={block.text} />;
           case 'tool':

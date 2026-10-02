@@ -579,6 +579,12 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     (imageRef: string) => api.getHostSessionImage(managerId, cli, sessionId, imageRef),
     [managerId, cli, sessionId],
   );
+  // 에이전트가 답에 경로로 적은 이미지(`![alt](E:/…png)`) — 매니저가 그 장비에서 읽어 준다.
+  // 상대 경로의 기준으로 화면이 아는 cwd 를 함께 보낸다(살아 있는 세션이면 매니저가 자기 cwd 를 쓴다).
+  const loadLocalImage = useCallback(
+    (path: string) => api.getHostSessionLocalImage(managerId, cli, sessionId, path, cwd),
+    [managerId, cli, sessionId, cwd],
+  );
 
   const setConfigOption = useCallback(async (configId: string, value: string | boolean) => {
     try {
@@ -831,6 +837,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
             onAnswerElicitation={(elicitationId, action, content) => void answerElicitation(elicitationId, action, content)}
             permissionsEnabled={isWaitingStatus(status) || status === 'busy'}
             loadImage={loadImage}
+            loadLocalImage={loadLocalImage}
           />
           </div>
         )}

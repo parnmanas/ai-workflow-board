@@ -342,6 +342,29 @@ tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된�
    않았다(로그·referrer 로 샌다) — 엔드포인트는 기존 가드(`agent_sessions.use`)를 그대로
    통과하고, Blob URL 은 컴포넌트 unmount 때 revoke 한다.
 
+### 답에 경로로 적은 이미지 (`local_image` RPC)
+
+위 세 출처와 달리 바이트가 **아예 오지 않는** 경우다. Codex 는 그림을 보여 줄 때 답 텍스트에
+`![변경된 대장간 UI](E:/Repository/…/town_forge_weapons.png)` 처럼 **장비의 로컬 경로**를 적고,
+Codex 데스크톱 앱은 그 경로를 자기 장비 파일로 읽어 그린다 — 앱이 곧 에이전트 장비라서다.
+AWB 화면은 다른 장비에 있으므로 경로만으로는 아무것도 못 그리고, 예전에는 문법 그대로 글자로 보였다.
+
+1. 클라이언트 `sessions/markdownImages.ts` 가 assistant 답에서 `![alt](target)` 를 떼어 낸다
+   (공통 `renderMarkdown` 은 이미지 문법을 모른다 — 채팅방은 건드리지 않으려고 세션 전사에서만).
+   코드 펜스·인라인 코드 안은 예시라 건너뛰고, 닫히지 않은(스트리밍 중) 문법은 아직 글이다.
+   에이전트가 실제로 쓰는 모양을 다 받는다 — 드라이브 문자, `\`, 공백(그대로/`%20`/`<…>`),
+   `"title"`, 괄호 든 파일명, `file://`, `/E:/`. http(s) 는 그대로 `<img>`, 그 밖의 스킴은 글로 둔다.
+2. 로컬 경로는 `GET …/sessions/:sessionId/local-image?path=&cwd=` → 서버가 `local_image` RPC
+   (`{image_path, cwd}`)로 매니저에 묻는다. 상대 경로의 기준은 살아 있는 세션의 cwd, 없으면 화면이 아는 cwd.
+3. 매니저(`session-local-image.ts`)는 **이미지 파일만** 읽는다 — 확장자 화이트리스트와 매직 바이트를
+   둘 다 통과해야 하고(이름만 `.png` 인 텍스트는 거절), 8MB 상한. SVG 는 받지 않는다: Blob URL 은
+   AWB origin 을 물려받으므로 새 탭에서 연 SVG 의 스크립트가 AWB origin 으로 돈다. 임의 파일 읽기
+   통로가 아니다. 실패는 코드로 답하고(`not_found` 404 · `not_image` 415 · `too_large` 413 ·
+   `invalid_path` 400) 화면은 그 사유와 경로를 그 자리에 그대로 보인다 — 그림이 조용히 빠지면
+   에이전트가 무엇을 보여 주려 했는지조차 사라진다. 이 op 을 모르는 구버전 매니저는 501 `manager_outdated`.
+4. 응답은 `Cache-Control: no-store` — `image/:ref` 와 달리 내용 주소가 아니다. 같은 경로의 파일은
+   다시 그려질 수 있고, Codex 앱은 경로로 캐시해 덮어쓴 스크린샷을 옛 그림으로 보여 준 버그가 있었다.
+
 ## 토큰 사용량 (`usage` 이벤트)
 
 전사의 턴마다 붙는 작은 회색 줄이다. **출처가 두 개**이고, 둘 다 CLI 별 매핑을 거친 뒤

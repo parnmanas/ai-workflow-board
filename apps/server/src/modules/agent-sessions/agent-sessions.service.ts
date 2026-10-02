@@ -170,7 +170,16 @@ const CWD_MAX = 1024;
 const TITLE_MAX = 200;
 const MAX_PENDING = 200;
 const LIVE_TTL_MS = 24 * 60 * 60_000;
-const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000, image: 30_000 } as const;
+/** 매니저가 돌려준 오류 코드 → HTTP 상태. 목록에 없는 코드는 502(매니저 쪽 실패). */
+const RPC_ERROR_STATUS: Record<string, number> = {
+  timeout: 504,
+  not_found: 404,
+  // local_image — 경로가 이미지 파일이 아니거나(415), 너무 크거나(413), 경로 모양이 틀렸다(400).
+  invalid_path: 400,
+  not_image: 415,
+  too_large: 413,
+};
+const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
 const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set(['starting', 'ready', 'busy', 'awaiting_permission', 'awaiting_input']);
 const CONFIG_ID_MAX = 128;
@@ -739,7 +748,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   private rpc<T>(
     managerId: string,
     cli: string,
-    op: 'list' | 'history' | 'open' | 'image',
+    op: keyof typeof RPC_TIMEOUT_MS,
     args: Partial<AgentSessionRequestPayload>,
     driverUserId: string,
   ): Promise<T> {
@@ -760,7 +769,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.emitRequest({ manager_id: managerId, workspace_id: '', cli, op, request_id: requestId, driver_user_id: driverUserId, ...args });
     return promise.then((body) => {
       if (!body.ok) {
-        const status = body.code === 'timeout' ? 504 : body.code === 'not_found' ? 404 : 502;
+        const status = RPC_ERROR_STATUS[body.code ?? ''] ?? 502;
         throw new AgentSessionError(status, body.code || 'manager_error', body.error || 'Runtime Host reported an error.');
       }
       return body.result as T;
@@ -874,6 +883,45 @@ export class AgentSessionsService implements OnModuleDestroy {
     const base64 = typeof result?.base64 === 'string' ? result.base64 : '';
     if (!base64) throw new AgentSessionError(404, 'image_not_found');
     return Buffer.from(base64, 'base64');
+  }
+
+  /**
+   * 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) — 매니저가 그 장비에서 읽어 준다.
+   *
+   * Codex 데스크톱 앱은 같은 마크다운을 자기 장비의 파일로 그린다. AWB 화면은 다른 장비라
+   * 경로만으로는 아무것도 못 그리므로 매니저에게 바이트를 받는다. 저장하지 않는다.
+   * `cwd` 는 상대 경로의 기준(살아 있는 세션이 있으면 매니저가 그쪽 cwd 를 쓴다).
+   */
+  async readLocalImage(
+    workspaceId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    imagePath: string,
+    cwd: string,
+  ): Promise<{ bytes: Buffer; mimeType: string }> {
+    this.requireHost(workspaceId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const path = String(imagePath ?? '').trim();
+    if (!path || path.length > 4096) throw new AgentSessionError(400, 'image_path_invalid');
+    if (cwd.length > CWD_MAX) throw new AgentSessionError(400, 'cwd_too_long');
+    let result: { base64?: string; mime_type?: string };
+    try {
+      result = await this.rpc(managerId, cli, 'local_image', { session_id: sessionId, image_path: path, cwd }, userId);
+    } catch (err: any) {
+      // 이 op 을 모르는 구버전 매니저는 `Unknown RPC op` 로 답한다 — 원인을 그대로 말해 준다.
+      if (err?.code === 'bad_request') {
+        throw new AgentSessionError(501, 'manager_outdated', 'Update the agent manager on this Runtime Host to show local images.');
+      }
+      throw err;
+    }
+    const base64 = typeof result?.base64 === 'string' ? result.base64 : '';
+    if (!base64) throw new AgentSessionError(404, 'image_not_found');
+    const mimeType = typeof result?.mime_type === 'string' && /^image\/[a-z0-9.+-]+$/.test(result.mime_type) && result.mime_type !== 'image/svg+xml'
+      ? result.mime_type
+      : 'application/octet-stream';
+    return { bytes: Buffer.from(base64, 'base64'), mimeType };
   }
 
   async openSession(

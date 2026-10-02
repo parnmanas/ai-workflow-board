@@ -92,6 +92,12 @@ export const AGENT_SESSION_REQUEST_OPS = [
   // 이벤트는 `{mime_type, size, image_ref}` 만 싣고 바이트는 이 op 으로 따로 받는다 —
   // AWB 가 세션 내용을 저장하지 않는다는 원칙도 그대로 유지된다(바이트는 매니저가 들고 있다).
   'image',
+  // 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…/shot.png)`)의 바이트. { image_path, cwd? }
+  //
+  // Codex 데스크톱 앱은 그 경로를 자기 장비에서 읽어 그린다 — 앱이 곧 에이전트 장비라서다.
+  // AWB 화면은 다른 장비에 있으므로 매니저가 대신 읽어 준다. 이미지 파일만(확장자+매직 바이트,
+  // SVG 제외) 8MB 까지 — 임의 파일 읽기 통로가 아니다. 상대 경로는 세션 cwd 기준.
+  'local_image',
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 

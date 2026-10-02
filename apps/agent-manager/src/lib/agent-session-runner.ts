@@ -25,6 +25,7 @@ import { normalizeCredentialFields } from './credential-fields.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
+import { LocalImageError, readLocalImage } from './session-local-image.js';
 import {
   fetchSessionCredential,
   patchAgentSessionState,
@@ -64,7 +65,7 @@ export interface AgentSessionRequest {
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
    *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image';
+  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -76,6 +77,8 @@ export interface AgentSessionRequest {
   mode_id?: string;
   /** image — 보관된 이미지 참조(이벤트 payload 의 `image_ref`). */
   image_ref?: string;
+  /** local_image — 에이전트가 답에 적은 이미지 경로(`![alt](path)`). 상대 경로는 세션 cwd 기준. */
+  image_path?: string;
   /** set_config_option */
   config_id?: string;
   config_value?: string | boolean;
@@ -620,6 +623,22 @@ export class AgentSessionRunner {
             return;
           }
           await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: true, result: { base64: stored.base64 } });
+          return;
+        }
+        case 'local_image': {
+          // 에이전트가 답에 적은 경로의 이미지(Codex 앱이 `![alt](E:/…png)` 를 그리는 것과 같은 일).
+          // 상대 경로의 기준은 살아 있는 세션의 cwd, 없으면 화면이 아는 cwd 다.
+          const live = sessionId ? this.#live.get(this.#key(cli, sessionId)) : undefined;
+          try {
+            const image = await readLocalImage(String(request.image_path || ''), live?.cwd || request.cwd || '');
+            await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
+              ok: true,
+              result: { base64: image.bytes.toString('base64'), mime_type: image.mimeType, path: image.path },
+            });
+          } catch (err: any) {
+            if (!(err instanceof LocalImageError)) throw err;
+            await postAgentSessionRpcResponse(this.#config, managerId, requestId, { ok: false, error: err.message, code: err.code });
+          }
           return;
         }
         case 'history': {
