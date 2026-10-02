@@ -14,7 +14,7 @@ import { normalizeCredentialFields } from '../../common/credential-fields';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { InstanceRecord, InstanceRegistryService } from '../agent-manager/instance-registry.service';
-import { HostModelsService } from '../agent-manager/host-models.service';
+import { HostModelsService, modelLabelsFromOptions } from '../agent-manager/host-models.service';
 import {
   ACP_SESSION_CLIS,
   AGENT_SESSION_COMMANDS_MAX,
@@ -1498,7 +1498,10 @@ export class AgentSessionsService implements OnModuleDestroy {
       const reportedModels = state.config_options
         .filter((o) => o.category === 'model')
         .flatMap((o) => o.options.map((opt) => opt.value));
-      if (reportedModels.length) this.hostModels.noteObservedModels(state.manager_id, state.cli, reportedModels);
+      // 이름도 함께 넘긴다 — 팀 슬롯·Agent 다이얼로그가 세션과 같은 이름(`Opus 5.5`)으로 그리게.
+      if (reportedModels.length) {
+        this.hostModels.noteObservedModels(state.manager_id, state.cli, reportedModels, modelLabelsFromOptions(state.config_options));
+      }
       // 선택지는 어댑터가 살아 있어야 알 수 있다 — 새 세션 모달이 세션 없이도 고를 수 있게 남긴다(best-effort).
       void this.rememberKnownOptions(state.manager_id, state.cli, state.config_options)
         .catch((err) => this.logService.debug('AgentSession', `known config options cache failed: ${err?.message ?? err}`));

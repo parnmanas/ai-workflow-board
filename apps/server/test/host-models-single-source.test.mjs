@@ -155,7 +155,7 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
     default_config: '{}',
     known_config_options: JSON.stringify([
       { config_id: 'mode', name: 'Mode', category: 'mode', type: 'select', current_value: 'build', options: [{ value: 'build', name: 'Build' }] },
-      { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: REPORTED[0], options: REPORTED.map((value) => ({ value, name: value })) },
+      { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: REPORTED[0], options: REPORTED.map((value) => ({ value, name: value === 'opencode-go/glm-5.3' ? 'GLM 5.3' : value })) },
     ]),
     updated_by: admin.id,
   }));
@@ -184,8 +184,11 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
   // ACP 보고가 앞, 하트비트의 나머지가 뒤. 중복(`opencode/big-pickle`)은 한 번만.
   const expected = ['opencode-go/glm-5.3', 'opencode-go/gpt-6-luna', 'opencode/big-pickle', 'opencode/space-bunny-free'];
 
-  const snapshot = (await json(`${base}/api/agent-manager/hosts/${manager.id}/models`)).models.opencode;
-  assert.deepEqual(snapshot, expected, 'Agent 다이얼로그·Runtime Hosts 가 보는 목록');
+  const view = await json(`${base}/api/agent-manager/hosts/${manager.id}/models`);
+  assert.deepEqual(view.models.opencode, expected, 'Agent 다이얼로그·Runtime Hosts 가 보는 목록');
+  // 이름도 같은 출처에서 온다 — 세션은 어댑터 이름(`GLM 5.3`)을, 팀 슬롯은 id 를 그려 같은 목록이
+  // 다르게 보였다. 이름이 id 와 같은 항목은 싣지 않는다(화면은 id 로 떨어진다).
+  assert.deepEqual(view.labels?.opencode, { 'opencode-go/glm-5.3': 'GLM 5.3' });
 
   const hosts = await json(`${base}/api/orchestration/runtime-hosts?workspace_id=${workspace.id}`);
   const roster = hosts.find((h) => h.manager_agent_id === manager.id)?.available_models.opencode;

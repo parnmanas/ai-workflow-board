@@ -38,6 +38,15 @@ export interface HostModelsView {
   refreshed_at: string | null;
   /** cli → 모델 id. 열거에 실패했거나 모델 개념이 없는 CLI 는 키가 없다. */
   models: Record<string, string[]>;
+  /**
+   * cli → (모델 id → 표시 이름). ACP 어댑터가 보고한 이름(`opus` → `Opus 5.5`)이다. 이름을 아는
+   * id 만 들어 있고, 나머지는 화면이 id 를 그대로 쓴다.
+   *
+   * 왜 필요한가: 세션 화면은 어댑터 선택지를 이름으로 그리는데, 팀 슬롯·Agent 다이얼로그는 이
+   * 목록에서 id 만 받아 `opus`·`default`·`claude-opus-4-8` 로 그렸다. 값은 같은데 전혀 다른 목록처럼
+   * 보였고 `opus` 가 실제로 Opus 5.5 라는 것도 알 수 없었다. 이름도 한 출처에서 내려야 같아진다.
+   */
+  labels: Record<string, Record<string, string>>;
 }
 
 export class HostModelsError extends Error {
@@ -86,6 +95,36 @@ export function modelIdsFromConfigOptions(raw: string | null | undefined): strin
   }
 }
 
+/**
+ * `known_config_options` 에서 model 선택지의 id → 표시 이름. 이름이 id 와 같거나 없으면 넣지 않는다.
+ * 파싱 실패는 빈 맵으로 접는다.
+ */
+export function modelLabelsFromConfigOptions(raw: string | null | undefined): Record<string, string> {
+  if (!raw) return {};
+  try {
+    return modelLabelsFromOptions(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+/** 파싱된 선택지 배열에서 id → 이름. 라이브 세션 상태(config_options)에도 같은 규칙을 쓴다. */
+export function modelLabelsFromOptions(parsed: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!Array.isArray(parsed)) return out;
+  for (const option of parsed) {
+    if (!option || typeof option !== 'object' || (option as any).category !== 'model') continue;
+    for (const choice of (option as any).options ?? []) {
+      const value = choice && typeof choice === 'object' ? (choice as any).value : null;
+      const name = choice && typeof choice === 'object' ? (choice as any).name : null;
+      if (typeof value !== 'string' || !value || typeof name !== 'string') continue;
+      const trimmed = name.trim();
+      if (trimmed && trimmed !== value && !(value in out)) out[value] = trimmed.slice(0, 120);
+    }
+  }
+  return out;
+}
+
 @Injectable()
 export class HostModelsService implements OnModuleInit {
   constructor(
@@ -114,15 +153,20 @@ export class HostModelsService implements OnModuleInit {
     try {
       const rows = await this.cliSettings.find();
       const byKey = new Map<string, string[]>();
+      const labelsByKey = new Map<string, Record<string, string>>();
       for (const row of rows) {
         const models = modelIdsFromConfigOptions(row.known_config_options);
         if (!models.length) continue;
         const key = `${row.manager_id}::${row.cli}`;
         // 같은 host×cli 행이 워크스페이스마다 있다. 가장 많이 아는 행을 쓴다.
         const prev = byKey.get(key);
-        if (!prev || models.length > prev.length) byKey.set(key, models);
+        if (!prev || models.length > prev.length) {
+          byKey.set(key, models);
+          labelsByKey.set(key, modelLabelsFromConfigOptions(row.known_config_options));
+        }
       }
       this.#reported = byKey;
+      this.#reportedLabels = labelsByKey;
       this.#reportedAt = Date.now();
     } catch {
       /* 목록 조회 실패가 화면을 막지는 않는다 — 하트비트 목록만으로 답한다. */
@@ -131,6 +175,7 @@ export class HostModelsService implements OnModuleInit {
 
   /** 영속된 ACP 보고 목록(부팅 시 로드). host×cli → 모델 id. */
   #reported = new Map<string, string[]>();
+  #reportedLabels = new Map<string, Record<string, string>>();
   #reportedAt = 0;
 
   /**
@@ -142,21 +187,37 @@ export class HostModelsService implements OnModuleInit {
    * 가난한 목록을 보여줬다 — "session/chat 다르고 mission 다르다"의 절반이 이것이다.
    * 이제 관측은 이 단일 출처로 흘러들어 모든 화면이 같은 목록을 본다.
    */
-  #observed = new Map<string, { models: string[]; at: number }>();
+  #observed = new Map<string, { models: string[]; labels: Record<string, string>; at: number }>();
 
   private observedKey(managerAgentId: string, cli: string): string {
     return `${managerAgentId}::${cli}`;
   }
 
   /** 라이브 세션이 보고한 목록을 기록한다(같은 host×cli 의 이전 관측을 대체). */
-  noteObservedModels(managerAgentId: string, cli: string, models: readonly string[]): void {
+  noteObservedModels(
+    managerAgentId: string,
+    cli: string,
+    models: readonly string[],
+    labels: Record<string, string> = {},
+  ): void {
     const clean = Array.from(new Set(models.filter((m) => typeof m === 'string' && !!m.trim()).map((m) => m.trim())));
     const key = this.observedKey(managerAgentId, cli);
     if (!clean.length) {
       this.#observed.delete(key);
       return;
     }
-    this.#observed.set(key, { models: clean, at: Date.now() });
+    this.#observed.set(key, { models: clean, labels: { ...labels }, at: Date.now() });
+  }
+
+  /**
+   * 이 host×cli 의 모델 이름(id → 이름). 라이브 관측이 영속본보다 최신이므로 덮어쓴다. 목록(modelsFor)과
+   * 같은 출처라 화면마다 이름이 갈리지 않는다.
+   */
+  labelsFor(managerAgentId: string, cli: string): Record<string, string> {
+    const key = this.observedKey(managerAgentId, cli);
+    const persisted = this.#reportedLabels.get(key) ?? {};
+    const live = this.observedModels(managerAgentId, cli).length ? this.#observed.get(key)?.labels ?? {} : {};
+    return { ...persisted, ...live };
   }
 
   private observedModels(managerAgentId: string, cli: string): string[] {
@@ -279,6 +340,13 @@ export class HostModelsService implements OnModuleInit {
 
   private viewOf(manager: Agent, rec: InstanceRecord | null): HostModelsView {
     const models = this.modelsByCli(manager.id);
+    const labels: Record<string, Record<string, string>> = {};
+    for (const cli of Object.keys(models)) {
+      const forCli = this.labelsFor(manager.id, cli);
+      // 목록에 있는 id 의 이름만 싣는다 — 목록에서 빠진 모델의 이름이 화면에 남지 않게.
+      const picked = Object.fromEntries(models[cli].filter((id) => forCli[id]).map((id) => [id, forCli[id]]));
+      if (Object.keys(picked).length) labels[cli] = picked;
+    }
     return {
       manager_agent_id: manager.id,
       manager_name: manager.name,
@@ -286,6 +354,7 @@ export class HostModelsService implements OnModuleInit {
       instance_id: rec?.instance_id ?? null,
       refreshed_at: rec?.available_models_at ?? null,
       models,
+      labels,
     };
   }
 }

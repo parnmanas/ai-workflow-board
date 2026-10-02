@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useHostModels } from '../../cli/hostModels';
+import { cliModelChoices, useHostModels } from '../../cli/hostModels';
 import { tokens } from '../../tokens';
 import type {
   ClaudeBackendProfile,
@@ -225,7 +225,8 @@ export default function TeamSlotRuntimeFields({
    */
   const modelSelectOptions = [
     { value: '', label: `Default — let ${cli || 'the CLI'} decide (no --model)` },
-    ...modelOptions.map((m) => ({ value: m, label: m })),
+    // 세션과 같은 이름으로 그린다(`opus` → `Opus 5.5`) — 같은 호스트의 같은 목록이 화면마다 달라 보였다.
+    ...cliModelChoices(modelOptions, hostModels.labels, value.model),
     ...(value.model && !modelOptions.includes(value.model)
       ? [{ value: value.model, label: `${value.model} (not listed by this host)` }]
       : []),

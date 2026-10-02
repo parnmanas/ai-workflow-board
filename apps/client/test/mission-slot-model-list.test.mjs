@@ -13,6 +13,8 @@
 //   ③ 저장된 모델이 목록에 없으면 "(not listed by this host)" 로 덧붙여 남긴다 —
 //      목록을 한 곳으로 좁힌 대가로 저장값이 사라지면 안 된다.
 //   ④ 스토어가 비어 있으면 Default 하나만 두고 자유 입력으로 떨어진다.
+//   ⑤ 선택지 이름은 세션 화면과 같다(스토어의 labels — ACP 어댑터 이름). ACP 의 `default` 는
+//      빈 "Default —" 선택지와 같은 뜻이라 빼되, 저장값이면 남긴다.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -81,7 +83,7 @@ function modelOptions(view) {
   return [...select.options].map((o) => o.value);
 }
 
-async function withSlot(t, { storeModels, managerId, slotOverrides = {}, rosterOverrides = {} }) {
+async function withSlot(t, { storeModels, storeLabels, managerId, slotOverrides = {}, rosterOverrides = {} }) {
   const slot = draft(managerId, slotOverrides);
   const rosterHost = host(managerId, rosterOverrides);
   const dom = setupDom({ width: 1280 });
@@ -95,6 +97,7 @@ async function withSlot(t, { storeModels, managerId, slotOverrides = {}, rosterO
     // 방금 재열거한 것으로 둔다 — 훅이 stale 판정으로 refresh 를 보내지 않게.
     refreshed_at: new Date().toISOString(),
     models: storeModels ? { opencode: storeModels } : {},
+    ...(storeLabels ? { labels: { opencode: storeLabels } } : {}),
   });
   api.refreshHostModels = async () => { throw new Error('이 테스트는 refresh 를 기대하지 않는다'); };
 
@@ -147,4 +150,22 @@ test('③ 스토어가 비면 dropdown 을 만들지 않고 자유 입력으로 
     inputs.some((p) => p.includes('default') || p.includes('model list')),
     `자유 입력이 무엇을 비워 두면 되는지 말한다: ${inputs.join(' | ')}`,
   );
+});
+
+test('⑤ 선택지 이름은 세션과 같다 — 어댑터 이름을 그리고, ACP 의 default 는 빈 Default 와 겹쳐 뺀다', async (t) => {
+  const models = ['default', 'opencode/big-pickle', 'opencode-go/glm-5.3'];
+  const view = await withSlot(t, {
+    storeModels: models,
+    storeLabels: { default: 'Default (recommended)', 'opencode-go/glm-5.3': 'GLM 5.3' },
+    managerId: nextManager(),
+  });
+  const select = modelSelect(view);
+  assert.deepEqual([...select.options].map((o) => o.value), ['', 'opencode/big-pickle', 'opencode-go/glm-5.3']);
+  const glm = [...select.options].find((o) => o.value === 'opencode-go/glm-5.3');
+  assert.equal(glm.textContent, 'GLM 5.3', '세션 화면과 같은 이름 — 값(id)은 그대로');
+  const pickle = [...select.options].find((o) => o.value === 'opencode/big-pickle');
+  assert.equal(pickle.textContent, 'opencode/big-pickle', '이름을 모르면 id 로 떨어진다');
+
+  const saved = await withSlot(t, { storeModels: models, managerId: nextManager(), slotOverrides: { model: 'default' } });
+  assert.ok(modelOptions(saved).includes('default'), '저장값이 default 면 편집이 조용히 바꾸지 않도록 남긴다');
 });

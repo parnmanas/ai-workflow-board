@@ -22,6 +22,8 @@ export interface HostModelsView {
   instance_id: string | null;
   refreshed_at: string | null;
   models: Record<string, string[]>;
+  /** cli → (모델 id → 표시 이름). ACP 어댑터가 보고한 이름(`opus` → `Opus 5.5`). 구버전 서버는 없음. */
+  labels?: Record<string, Record<string, string>>;
 }
 
 /** 이보다 오래된 재열거 결과는 화면이 열릴 때 조용히 다시 받는다. */
@@ -124,6 +126,35 @@ export function hostModelsFor(managerAgentId: string | null | undefined, cli: st
   return Array.isArray(list) ? list : [];
 }
 
+/** 이 host×cli 의 모델 이름(id → 이름). 모르면 빈 객체 — 화면은 id 를 그대로 쓴다. */
+export function hostModelLabelsFor(
+  managerAgentId: string | null | undefined,
+  cli: string | null | undefined,
+): Record<string, string> {
+  if (!managerAgentId || !cli) return {};
+  return entries.get(managerAgentId)?.view?.labels?.[cli] ?? {};
+}
+
+/**
+ * CLI 를 직접 띄우는 화면(팀 슬롯·Agent 다이얼로그)의 모델 선택지 — **세션과 같은 이름**으로 그린다.
+ *
+ * 예전에는 id 를 그대로 그려(`opus`·`default`·`claude-opus-4-8`) 세션 화면(`Opus 5.5`·`Default
+ * (recommended)`·`Opus 4.8`)과 같은 목록이 전혀 다르게 보였다. 값(id)은 그대로 `--model` 로 가고
+ * 표시만 이름이다.
+ *
+ * ACP 의 `default` 는 뺀다 — 이 화면들에는 이미 "Default — CLI 가 정하게(no --model)" 빈 선택지가
+ * 있어 같은 뜻이 두 번 보인다. 저장된 값이 `default` 면 남긴다(편집이 값을 조용히 바꾸면 안 된다).
+ */
+export function cliModelChoices(
+  models: readonly string[],
+  labels: Record<string, string>,
+  saved?: string | null,
+): Array<{ value: string; label: string }> {
+  return models
+    .filter((m) => m !== 'default' || saved === 'default')
+    .map((m) => ({ value: m, label: labels[m] ?? m }));
+}
+
 /** 하트비트가 남긴 재열거 시각 기준으로 오래됐는가. 시각이 없으면(구버전 매니저) 오래된 것으로 본다. */
 export function isHostModelsStale(view: HostModelsView | null, now = Date.now()): boolean {
   if (!view) return true;
@@ -150,6 +181,8 @@ export function seedHostModels(managerAgentId: string, models: Record<string, st
 export interface UseHostModelsResult {
   /** 이 host×cli 의 모델 id. 비었으면 자유 입력으로 떨어진다. */
   models: string[];
+  /** 같은 host×cli 의 모델 이름(id → 이름). 세션 화면과 같은 출처다. */
+  labels: Record<string, string>;
   view: HostModelsView | null;
   loading: boolean;
   refreshing: boolean;
@@ -171,6 +204,7 @@ export function useHostModels(
   const e = managerAgentId ? entries.get(managerAgentId) ?? null : null;
   const view = e?.view ?? null;
   const models = hostModelsFor(managerAgentId, cli);
+  const labels = hostModelLabelsFor(managerAgentId, cli);
 
   useEffect(() => {
     if (!auto || !managerAgentId) return;
@@ -200,6 +234,7 @@ export function useHostModels(
 
   return {
     models,
+    labels,
     view,
     loading: !!e?.loading,
     refreshing: !!e?.refreshing,

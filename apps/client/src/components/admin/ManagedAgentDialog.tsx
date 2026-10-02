@@ -6,7 +6,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { Button, Input, Modal, Select } from '../common';
 import DirectoryPicker from './DirectoryPicker';
 // ticket 40110b64 — Runtime Hosts 화면과 같은 모델 리프레시 흐름.
-import { summarizeHostModels, useHostModels } from '../../cli/hostModels';
+import { cliModelChoices, summarizeHostModels, useHostModels } from '../../cli/hostModels';
 import { credentialFallbackCopy } from '../../utils/credentialFallback';
 import {
   reconcileRuntimeProfileSelection,
@@ -259,7 +259,8 @@ export default function ManagedAgentDialog({
   const hasModelList = modelCandidates.length > 0;
   const modelSelectOptions = [
     { value: '', label: 'Default — let the CLI decide (no --model)' },
-    ...modelCandidates.map((m) => ({ value: m, label: m })),
+    // 세션·팀 슬롯과 같은 이름으로 그린다(`opus` → `Opus 5.5`).
+    ...cliModelChoices(modelCandidates, hostModels.labels, model),
     ...(model && !modelCandidates.includes(model) ? [{ value: model, label: `${model} (custom)` }] : []),
   ];
 
