@@ -125,13 +125,13 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   }, [open, managerId, cli]);
 
   // 모델 목록은 모든 화면이 공유하는 스토어에서 온다(src/cli/hostModels.ts) — 오래된/빈
-  // 목록은 열릴 때 재열거된다. ACP 가 보고한 선택지에 호스트가 그 뒤 알게 된 모델을 덧붙인다.
+  // 목록은 열릴 때 재열거된다. 어댑터가 보고한 목록이 있으면 스토어도 그것만 준다(세션 안과 같은 목록).
   const hostModels = useHostModels(open ? managerId : null, cli);
   // 모달에서 고르는 것은 세션의 성격을 정하는 둘뿐이다(그 밖의 설정은 세션 헤더에서 바꾼다).
   const modalOptions = useMemo(
-    () => withHostModelOption(knownOptions, hostModels.models)
+    () => withHostModelOption(knownOptions, hostModels.models, hostModels.labels)
       .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0),
-    [knownOptions, hostModels.models],
+    [knownOptions, hostModels.models, hostModels.labels],
   );
 
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId]);

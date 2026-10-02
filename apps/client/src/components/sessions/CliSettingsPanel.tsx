@@ -70,7 +70,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
   // 동작 대신, 열릴 때 오래된/빈 목록을 훅이 재열거하고 버튼으로도 바로 새로고침한다.
   const hostModels = useHostModels(managerId, cli);
   // 모달과 같은 규약: approval 모드(category 'mode') 와 모델(category 'model') 만 여기서 정한다.
-  const defaultOptions = withHostModelOption(settings?.known_config_options ?? [], hostModels.models)
+  const defaultOptions = withHostModelOption(settings?.known_config_options ?? [], hostModels.models, hostModels.labels)
     .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0);
   const savedDefaults = defaultsOf(settings);
   const dirty = (settings?.credential?.id || '') !== selected

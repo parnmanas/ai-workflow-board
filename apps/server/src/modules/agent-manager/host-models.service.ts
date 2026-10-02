@@ -151,19 +151,18 @@ export class HostModelsService implements OnModuleInit {
   /** 영속된 ACP 보고 목록을 다시 읽는다(부팅·스냅샷 조회 시). 실패는 조용히 접는다. */
   async reloadReportedModels(): Promise<void> {
     try {
-      const rows = await this.cliSettings.find();
+      // 같은 host×cli 행이 워크스페이스마다 있다. **가장 최근에 보고된 행**을 쓴다 — 어댑터를 올린 뒤
+      // 연 세션의 목록이 옛 어댑터의 목록을 이겨야 한다(예전엔 "가장 많이 아는 행" 이라 옛 목록이 남을 수 있었다).
+      const rows = await this.cliSettings.find({ order: { updated_at: 'DESC' } });
       const byKey = new Map<string, string[]>();
       const labelsByKey = new Map<string, Record<string, string>>();
       for (const row of rows) {
         const models = modelIdsFromConfigOptions(row.known_config_options);
         if (!models.length) continue;
         const key = `${row.manager_id}::${row.cli}`;
-        // 같은 host×cli 행이 워크스페이스마다 있다. 가장 많이 아는 행을 쓴다.
-        const prev = byKey.get(key);
-        if (!prev || models.length > prev.length) {
-          byKey.set(key, models);
-          labelsByKey.set(key, modelLabelsFromConfigOptions(row.known_config_options));
-        }
+        if (byKey.has(key)) continue;
+        byKey.set(key, models);
+        labelsByKey.set(key, modelLabelsFromConfigOptions(row.known_config_options));
       }
       this.#reported = byKey;
       this.#reportedLabels = labelsByKey;
@@ -216,8 +215,9 @@ export class HostModelsService implements OnModuleInit {
   labelsFor(managerAgentId: string, cli: string): Record<string, string> {
     const key = this.observedKey(managerAgentId, cli);
     const persisted = this.#reportedLabels.get(key) ?? {};
-    const live = this.observedModels(managerAgentId, cli).length ? this.#observed.get(key)?.labels ?? {} : {};
-    return { ...persisted, ...live };
+    // 목록과 같은 출처에서만 이름을 낸다 — 라이브 관측이 있으면 그 이름만.
+    if (this.observedModels(managerAgentId, cli).length) return this.#observed.get(key)?.labels ?? {};
+    return persisted;
   }
 
   private observedModels(managerAgentId: string, cli: string): string[] {
@@ -231,31 +231,25 @@ export class HostModelsService implements OnModuleInit {
   }
 
   /**
-   * 최종 목록 = **ACP 가 보고한 목록 먼저**, 그 뒤에 하트비트가 아는 나머지.
+   * 최종 목록 = **ACP 어댑터가 보고한 목록이 있으면 그것만**, 없을 때만 하트비트 열거.
    *
-   * 순서까지 한 규칙으로 정하는 이유: 세션 화면은 ACP 목록을 앞에 두고 호스트가 나중에
-   * 알게 된 모델만 뒤에 붙인다(`withModelFallback`). 여기서 하트비트를 앞에 두면 같은
-   * 호스트의 같은 CLI 가 화면마다 **다른 순서**로 보인다 — 내용이 같아도 다른 목록처럼
-   * 읽힌다. 그래서 두 규칙을 하나로 맞췄다.
+   * 합치지 않는 이유(운영 보고 2026-10-02, ragnar): 하트비트 열거는 CLI 바이너리를 문자열
+   * 스캔한 추정이다 — claude 는 alias(`opus`·`fable`…) + 바이너리에서 찾은 id(`claude-sonnet-5-5`
+   * …)를 낸다. 어댑터 보고는 CLI 자신의 모델 선택지(`default`·`sonnet`=Sonnet 5.5·`opus`=Opus 5.5…)다.
+   * 둘을 합치면 **새 세션·팀 슬롯에는 `claude-sonnet-5-5` 가 있고 세션 안에는 없다** — 세션 안
+   * 드롭다운은 어댑터 목록만 받을 수 있으므로(모르는 id 는 거절, 8a73a852) 그쪽을 넓힐 수 없다.
+   * 그래서 반대로 모든 화면이 어댑터 목록 하나를 본다. 어댑터 목록의 값(`sonnet`·`opus`·
+   * `claude-fable-5-1`)은 CLI `--model` 도 그대로 받으므로 팀 슬롯·Agent 에서도 유효하다.
    *
-   * ACP 보고는 두 갈래를 같은 자격으로 본다: 영속된 것(`known_config_options`, 재시작
-   * 후에도 유효)과 지금 살아 있는 세션의 관측(`noteObservedModels`, 더 최신).
+   * 하트비트는 그 host×cli 로 세션을 한 번도 연 적이 없을 때만 쓴다(보고가 없으니 추정이라도).
+   * 보고는 세션이 열릴 때마다 새로 영속되므로, 어댑터를 올린 뒤 세션을 한 번 열면 따라온다.
+   * 우선순위: 지금 살아 있는 세션의 관측(가장 최신) → 영속된 최근 보고 → 하트비트.
    */
   private mergeModels(managerAgentId: string, cli: string, heartbeat: readonly string[]): string[] {
-    const out: string[] = [];
-    const seen = new Set<string>();
-    const push = (m: unknown) => {
-      if (typeof m !== 'string' || !m || seen.has(m)) return;
-      seen.add(m);
-      out.push(m);
-    };
     const live = this.observedModels(managerAgentId, cli);
     const persisted = this.#reported.get(this.observedKey(managerAgentId, cli)) ?? [];
-    // 라이브 관측이 있으면 그것이 더 최신이다 — 앞에 둔다. 영속 목록은 그 뒤를 채운다.
-    for (const m of live) push(m);
-    for (const m of persisted) push(m);
-    for (const m of heartbeat) push(m);
-    return out;
+    const source = live.length ? live : persisted.length ? persisted : heartbeat;
+    return Array.from(new Set(source.filter((m): m is string => typeof m === 'string' && !!m)));
   }
 
   private liveRecord(managerAgentId: string): InstanceRecord | null {
@@ -286,7 +280,7 @@ export class HostModelsService implements OnModuleInit {
   /**
    * 이 host×cli 의 모델 목록 — **모델을 보여주는 모든 화면이 이 값을 본다**
    * (Agent 다이얼로그·팀 슬롯·세션 설정·새 세션·Runtime Hosts·오케스트레이션 로스터).
-   * 하트비트 열거 + 라이브 세션 관측의 합집합이고, 없으면 빈 배열.
+   * ACP 보고(라이브 → 영속)가 있으면 그것, 없으면 하트비트 열거. 둘 다 없으면 빈 배열.
    *
    * 자기만의 합집합을 따로 만들지 말 것 — 그렇게 갈라진 목록이 화면마다 달랐다.
    */

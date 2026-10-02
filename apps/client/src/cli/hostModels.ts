@@ -126,13 +126,15 @@ export function hostModelsFor(managerAgentId: string | null | undefined, cli: st
   return Array.isArray(list) ? list : [];
 }
 
+const NO_LABELS: Record<string, string> = Object.freeze({}) as Record<string, string>;
+
 /** 이 host×cli 의 모델 이름(id → 이름). 모르면 빈 객체 — 화면은 id 를 그대로 쓴다. */
 export function hostModelLabelsFor(
   managerAgentId: string | null | undefined,
   cli: string | null | undefined,
 ): Record<string, string> {
-  if (!managerAgentId || !cli) return {};
-  return entries.get(managerAgentId)?.view?.labels?.[cli] ?? {};
+  if (!managerAgentId || !cli) return NO_LABELS;
+  return entries.get(managerAgentId)?.view?.labels?.[cli] ?? NO_LABELS;
 }
 
 /**
@@ -260,8 +262,10 @@ export function summarizeHostModels(view: HostModelsView | null): string {
 export function withHostModelOption(
   options: AgentSessionConfigOption[],
   models: string[],
+  labels: Record<string, string> = {},
 ): AgentSessionConfigOption[] {
   if (!models.length) return options;
+  const choice = (value: string) => ({ value, name: labels[value] ?? value });
   const idx = options.findIndex((o) => o.category === 'model');
   if (idx === -1) {
     return [
@@ -273,13 +277,13 @@ export function withHostModelOption(
         category: 'model',
         type: 'select',
         current_value: null,
-        options: models.map((value) => ({ value, name: value })),
+        options: models.map(choice),
       },
     ];
   }
   const existing = options[idx];
   const known = new Set(existing.options.map((o) => o.value));
-  const extra = models.filter((m) => !known.has(m)).map((value) => ({ value, name: value }));
+  const extra = models.filter((m) => !known.has(m)).map(choice);
   if (!extra.length) return options;
   return options.map((o, i) => (i === idx ? { ...o, options: [...o.options, ...extra] } : o));
 }

@@ -666,6 +666,8 @@ export class AgentSessionsService implements OnModuleDestroy {
   ): AgentSessionConfigOption[] {
     const models = this.heartbeatModels(managerId, cli);
     if (!models.length) return options;
+    const labels = this.hostModels.labelsFor(managerId, cli);
+    const choice = (value: string) => ({ value, name: labels[value] ?? value });
     const idx = options.findIndex((o) => o.category === 'model');
     if (idx !== -1) {
       // ACP 가 보고한 목록은 그대로 두고(표시 이름·현재값), 호스트가 **그 뒤에** 알게 된
@@ -673,7 +675,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 따라온다. 이전에는 캐시가 있으면 하트비트를 아예 보지 않아 옛 목록에 머물렀다.
       const existing = options[idx];
       const known = new Set(existing.options.map((o) => o.value));
-      const extra = models.filter((m) => !known.has(m)).map((value) => ({ value, name: value }));
+      const extra = models.filter((m) => !known.has(m)).map(choice);
       if (!extra.length) return options;
       return options.map((o, i) => (i === idx ? { ...o, options: [...o.options, ...extra] } : o));
     }
@@ -686,7 +688,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         category: 'model',
         type: 'select',
         current_value: null,
-        options: models.map((value) => ({ value, name: value })),
+        options: models.map(choice),
       },
     ];
   }

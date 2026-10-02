@@ -10,7 +10,9 @@
 //
 // 지금은 HostModelsService 하나가 답하고, 세션이 ACP 로 알게 된 목록은 그 출처로
 // 흘러들어간다(`noteObservedModels`). 이 파일이 고정하는 것:
-//   ① ACP 가 보고한 목록이 앞, 하트비트가 아는 나머지가 뒤 — **순서까지 한 규칙**이다.
+//   ① ACP 어댑터가 보고한 목록이 있으면 **그것만**, 없을 때만 하트비트 열거. 합치지 않는다
+//      (운영 보고 2026-10-02 ragnar: 합집합이라 새 세션·팀 슬롯에는 하트비트 스캔의
+//      `claude-sonnet-5-5` 가 있고 세션 안 드롭다운에는 없었다 — 세션 안은 어댑터 목록만 받을 수 있다).
 //   ② 오케스트레이션 로스터 = HostModelsService 목록 (agent 행에 핀된 모델을 끼워넣지 않는다).
 //   ③ 세션이 관측한 모델은 로스터·스냅샷 **양쪽**에 나타난다.
 //   ④ 어느 화면도 자기만의 합집합을 갖지 않는다 — 세 경로의 결과가 글자 그대로 같다.
@@ -93,18 +95,14 @@ test('한 호스트의 모델 목록은 mission / session / Agent 다이얼로�
   // ③ 살아 있는 세션이 ACP 로 알게 된 모델은 단일 출처로 흘러들어 모든 화면에 보인다.
   const hostModels = app.get((await import('../dist/modules/agent-manager/host-models.service.js')).HostModelsService);
   hostModels.noteObservedModels(manager.id, 'opencode', [
-    'opencode/big-pickle',                 // 이미 아는 것은 중복되지 않는다
+    'opencode/big-pickle',
     'opencode-go/glm-5.3',                 // 세션만 아는 것(provider 를 방금 로그인)
   ]);
 
-  // 규칙: ACP 보고(라이브 관측)가 앞, 하트비트의 나머지가 뒤 — 세션 화면의 순서와 같다.
-  const expected = [
-    'opencode/big-pickle',
-    'opencode-go/glm-5.3',
-    'opencode/muse-spark-1.3-contributor-free',
-    'opencode/nemotron-3-ultra-free',
-  ];
-  assert.deepEqual(await snapshotModels(), expected, 'ACP 보고가 앞, 하트비트 나머지가 뒤 (중복 없이)');
+  // 규칙: ACP 보고가 있으면 그것만 — 세션 안 드롭다운과 같은 목록. 하트비트에만 있는
+  // muse-spark·nemotron 은 세션 안에서 고를 수 없으므로 다른 화면에도 나오지 않는다.
+  const expected = ['opencode/big-pickle', 'opencode-go/glm-5.3'];
+  assert.deepEqual(await snapshotModels(), expected, 'ACP 보고만 — 하트비트 스캔을 덧붙이지 않는다');
   assert.deepEqual(await rosterModels(), expected, 'mission 도 그 관측을 함께 본다');
 
   // ④ 세 경로의 결과가 글자 그대로 같다.
@@ -142,11 +140,27 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
   const token = app.get(AuthService).createSession(admin.id);
   const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
+  // 같은 host×cli 의 **옛** 보고(다른 워크스페이스, 옛 어댑터) — 더 많이 알아도 최신 보고를 이기면 안 된다.
+  const settingsRepo = ds.getRepository('AgentSessionCliSetting');
+  const oldWorkspace = await createWorkspace(app, getDataSourceToken, 'reported-models-old');
+  const oldRow = await settingsRepo.save(settingsRepo.create({
+    workspace_id: oldWorkspace.id,
+    manager_id: manager.id,
+    cli: 'opencode',
+    credential_id: null,
+    default_config: '{}',
+    known_config_options: JSON.stringify([
+      { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: null,
+        options: ['opencode/old-1', 'opencode/old-2', 'opencode/old-3', 'opencode/old-4', 'opencode/old-5'].map((value) => ({ value, name: value })) },
+    ]),
+    updated_by: admin.id,
+  }));
+  await ds.query('UPDATE agent_session_cli_settings SET updated_at = ? WHERE id = ?', ['2026-01-01 00:00:00', oldRow.id]);
+
   // 하트비트는 zen 계열 2개만 열거한다(실측과 같은 모양: 접두사가 다르다).
   const HEARTBEAT = ['opencode/big-pickle', 'opencode/space-bunny-free'];
   // ACP 보고(영속) — 운영 DB 행과 같은 모양의 config option JSON.
   const REPORTED = ['opencode-go/glm-5.3', 'opencode-go/gpt-6-luna', 'opencode/big-pickle'];
-  const settingsRepo = ds.getRepository('AgentSessionCliSetting');
   await settingsRepo.save(settingsRepo.create({
     workspace_id: workspace.id,
     manager_id: manager.id,
@@ -181,8 +195,8 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
     assert.equal(r.status, 200, text);
     return JSON.parse(text);
   };
-  // ACP 보고가 앞, 하트비트의 나머지가 뒤. 중복(`opencode/big-pickle`)은 한 번만.
-  const expected = ['opencode-go/glm-5.3', 'opencode-go/gpt-6-luna', 'opencode/big-pickle', 'opencode/space-bunny-free'];
+  // 가장 최근 ACP 보고만. 하트비트에만 있는 space-bunny-free 와 옛 보고(old-*)는 나오지 않는다.
+  const expected = REPORTED;
 
   const view = await json(`${base}/api/agent-manager/hosts/${manager.id}/models`);
   assert.deepEqual(view.models.opencode, expected, 'Agent 다이얼로그·Runtime Hosts 가 보는 목록');
@@ -203,4 +217,72 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
     .filter((o) => o.category === 'model')
     .flatMap((o) => o.options.map((x) => x.value));
   assert.deepEqual(sessionModels, expected, '세션 화면도 같은 목록·같은 순서');
+});
+
+// ── 실측 재현(2026-10-02, ragnar claude) ──────────────────────────────────────
+// 하트비트(바이너리 스캔) = alias + `claude-sonnet-5-5` 같은 구체 id. 어댑터 보고 = CLI 의 모델
+// 선택지 5개. 합집합이던 동안 새 세션·팀 슬롯에는 `claude-sonnet-5-5` 가 있고 세션 안에는 없었다.
+
+test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이얼로그가 세션 안과 같은 목록을 본다', async (t) => {
+  const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
+  t.after(async () => { await app.close(); });
+  const base = `http://127.0.0.1:${port}`;
+  const { AuthService, getDataSourceToken } = modules;
+  const ds = app.get(getDataSourceToken());
+
+  const workspace = await createWorkspace(app, getDataSourceToken, 'ragnar-claude');
+  const manager = await createAgent(app, getDataSourceToken, null, { name: 'Ragnar', type: 'manager' });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: workspace.id, label: 'ragnar-key' });
+  const admin = await createUser(app, getDataSourceToken, { name: 'admin3', role: 'admin' });
+  const token = app.get(AuthService).createSession(admin.id);
+  const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': workspace.id };
+
+  // 운영 DB 의 ragnar 행 그대로.
+  const ADAPTER = [
+    ['default', 'Default (recommended)'], ['sonnet', 'Sonnet 5.5'], ['claude-fable-5-1', 'Fable 5.1'],
+    ['opus', 'Opus 5.5'], ['haiku', 'Haiku 4.5'],
+  ];
+  const settingsRepo = ds.getRepository('AgentSessionCliSetting');
+  await settingsRepo.save(settingsRepo.create({
+    workspace_id: workspace.id, manager_id: manager.id, cli: 'claude', credential_id: null, default_config: '{}',
+    known_config_options: JSON.stringify([
+      { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: 'sonnet',
+        options: ADAPTER.map(([value, name]) => ({ value, name })) },
+    ]),
+    updated_by: admin.id,
+  }));
+  const resp = await fetch(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST',
+    headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: 'ragnar-instance', agent_id: manager.id, mode: 'manager', hostname: 'aitopatom-0561', plugin_version: 'test',
+      cli: 'mixed', cli_adapters: ['claude'], pid: 1, started_at: new Date().toISOString(),
+      available_models: { claude: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5', 'claude-fable-5-1'] },
+      available_models_at: new Date().toISOString(),
+    }),
+  });
+  assert.equal(resp.status, 201, await resp.text());
+  const hostModels = app.get((await import('../dist/modules/agent-manager/host-models.service.js')).HostModelsService);
+  await hostModels.reloadReportedModels();
+
+  const json = async (url) => {
+    const r = await fetch(url, { headers: userHeaders });
+    const text = await r.text();
+    assert.equal(r.status, 200, text);
+    return JSON.parse(text);
+  };
+  const expected = ADAPTER.map(([value]) => value);
+
+  const view = await json(`${base}/api/agent-manager/hosts/${manager.id}/models`);
+  assert.deepEqual(view.models.claude, expected, '팀 슬롯·Agent 다이얼로그 — 세션 안 드롭다운과 같은 5개');
+  assert.ok(!view.models.claude.includes('claude-sonnet-5-5'), '바이너리 스캔 id 가 새어 들어오면 세션 안과 달라진다');
+  assert.equal(view.labels.claude.sonnet, 'Sonnet 5.5');
+
+  const hosts = await json(`${base}/api/orchestration/runtime-hosts?workspace_id=${workspace.id}`);
+  assert.deepEqual(hosts.find((h) => h.manager_agent_id === manager.id)?.available_models.claude, expected, 'mission 로스터');
+
+  const settings = await json(`${base}/api/agent-sessions/hosts/${manager.id}/claude/settings`);
+  const newSession = settings.known_config_options.find((o) => o.category === 'model').options;
+  assert.deepEqual(newSession.map((o) => o.value), expected, '새 세션 모달 — 덧붙는 하트비트 id 가 없다');
+  assert.deepEqual(newSession.map((o) => o.name), ADAPTER.map(([, name]) => name), '이름도 세션 안과 같다');
 });
