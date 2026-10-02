@@ -41,6 +41,22 @@ export function compactTokens(n: number): string {
  * usage 줄의 조각들. **측정되지 않은 값은 넣지 않는다** — 0 을 찍으면 "0 토큰 썼다"로
  * 읽혀 계측 실패와 구분되지 않는다(운영자가 CLI 별 차이를 오해한 지점이다).
  */
+/**
+ * usage 줄에 붙일 "언제 받은 응답인가". 오늘이면 시각만(`14:03:27`), 다른 날이면 날짜까지
+ * (`10/1 14:03`) — 오래 띄워 둔 세션에서 어느 응답이 언제였는지를 줄 하나로 가늠하게 한다.
+ * 시각을 모르면 ''(빈 칸을 그리지 않는다).
+ */
+export function formatReceivedAt(iso: string, now: Date = new Date()): string {
+  if (!iso) return '';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const time = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  const sameDay =
+    at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate();
+  return sameDay ? `${time}:${pad(at.getSeconds())}` : `${at.getMonth() + 1}/${at.getDate()} ${time}`;
+}
+
 export function usageSummaryParts(block: {
   inputTokens: number;
   outputTokens: number;
@@ -187,6 +203,8 @@ export type TranscriptBlock =
       contextTokens: number;
       contextWindow: number;
       costUsd: number;
+      /** 이 턴의 응답을 받은 시각 — 턴의 마지막 usage 가 도착한 때(ISO). 모르면 ''. */
+      receivedAt: string;
     }
   | { kind: 'turn'; key: string; seq: number; turnId: string; stopReason: string }
   | { kind: 'error'; key: string; seq: number; turnId: string; message: string; code: string | null }
@@ -444,6 +462,8 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           key: ev.id,
           seq: ev.seq,
           turnId,
+          // usage 는 턴이 끝날 때 오므로(누적값의 마지막) 그 시각이 곧 "응답을 받은 때" 다.
+          receivedAt: ev.created_at || '',
           inputTokens: num(p.input_tokens),
           outputTokens: num(p.output_tokens),
           cachedReadTokens: num(p.cached_read_tokens),

@@ -19,6 +19,7 @@ import {
   sessionDisplayTitle,
   shouldAutoConnect,
   compactTokens,
+  formatReceivedAt,
   usageSummaryParts,
 } from '../src/components/sessions/sessionTranscript.logic.ts';
 import {
@@ -577,4 +578,26 @@ test('compactTokens 는 자리수를 읽기 쉽게 줄인다', () => {
   assert.equal(compactTokens(258400), '258k');
   assert.equal(compactTokens(12000), '12k', '소수점 .0 은 붙이지 않는다');
   assert.equal(compactTokens(1_050_000), '1.05M');
+});
+
+// 토큰 줄에 "언제 받은 응답인지" 를 붙인다 — 오래 띄워 둔 세션에서 어느 응답이 언제였는지를 줄 하나로
+// 가늠하게 한다. 시각은 그 턴의 **마지막** usage 가 도착한 때다(usage 는 누적값이라 턴 끝에 마지막이 온다).
+test('usage 블록은 그 턴의 마지막 usage 시각을 받은 시각으로 든다', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('user_prompt', { text: 'q' }),
+    ev('text', { text: 'a' }),
+    ev('usage', { total_tokens: 100 }),
+    ev('usage', { total_tokens: 200 }), // seq 4 → 00:00:04
+  ]);
+  const usage = blocks.find((b) => b.kind === 'usage');
+  assert.equal(usage.receivedAt, '2026-09-17T00:00:04.000Z');
+});
+
+test('formatReceivedAt: 오늘이면 시각만, 다른 날이면 날짜까지, 모르면 빈 문자열', () => {
+  const at = new Date(2026, 9, 2, 14, 3, 27); // 로컬 시각
+  assert.equal(formatReceivedAt(at.toISOString(), new Date(2026, 9, 2, 20, 0, 0)), '14:03:27');
+  assert.equal(formatReceivedAt(at.toISOString(), new Date(2026, 9, 3, 9, 0, 0)), '10/2 14:03');
+  assert.equal(formatReceivedAt(''), '');
+  assert.equal(formatReceivedAt('not-a-date'), '');
 });

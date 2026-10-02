@@ -215,3 +215,24 @@ test('transcript: Decline sends a decline without content, and a dead session lo
     dom.cleanup();
   }
 });
+
+test('transcript: 토큰 줄 끝에 응답을 받은 시각이 붙는다', () => {
+  const dom = setupDom();
+  try {
+    const now = new Date();
+    const at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 5, 7);
+    const blocks = buildTranscript([
+      { id: 'p1', seq: 1, turn_id: 't1', type: 'user_prompt', created_at: at.toISOString(), payload: { text: 'q' } },
+      { id: 'u1', seq: 2, turn_id: 't1', type: 'usage', created_at: at.toISOString(), payload: { input_tokens: 4, output_tokens: 493, cached_read_tokens: 159000, total_tokens: 159497 } },
+    ]);
+    const view = mount(h(SessionTranscript, { blocks, decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {} }));
+    const line = document.querySelector('[data-block="usage"]');
+    assert.ok(line, 'usage 줄이 그려진다');
+    assert.match(line.textContent, /159k tokens/);
+    assert.match(line.textContent, / · 09:05:07$/, '같은 날이면 시각만 붙는다');
+    assert.match(line.getAttribute('title'), /received /, '툴팁에는 전체 날짜·시각');
+    view.unmount();
+  } finally {
+    dom.cleanup();
+  }
+});

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import { renderMarkdown } from '../chat/utils/markdown';
-import { usageSummaryParts } from './sessionTranscript.logic';
+import { formatReceivedAt, usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
 
 /**
@@ -702,6 +702,9 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             // 조각이 하나도 없으면(모두 0) 아무것도 그리지 않는다 — "0 tokens" 는
             // 계측 실패와 구분되지 않는 거짓 정보다.
             if (parts.length === 0) return null;
+            // 언제 받은 응답인지 — 같은 줄 끝에 붙인다(토큰 줄이 곧 턴의 끝이다).
+            const receivedAt = formatReceivedAt(block.receivedAt);
+            const receivedFull = block.receivedAt ? new Date(block.receivedAt).toLocaleString() : '';
             return (
               <div
                 key={block.key}
@@ -710,10 +713,12 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
                   `input ${block.inputTokens.toLocaleString()} · output ${block.outputTokens.toLocaleString()}`
                   + ` · cache read ${block.cachedReadTokens.toLocaleString()} · cache write ${block.cacheWriteTokens.toLocaleString()}`
                   + ` · total ${block.totalTokens.toLocaleString()}`
+                  + (receivedFull ? ` · received ${receivedFull}` : '')
                 }
                 style={{ fontSize: 10.5, color: tokens.colors.textMuted, fontFamily: MONO }}
               >
                 {parts.join(' · ')}
+                {receivedAt && <span data-received-at={block.receivedAt}> · {receivedAt}</span>}
               </div>
             );
           }
