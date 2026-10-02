@@ -128,3 +128,10 @@ test('compareVersions: 못 읽으면 null — "비교 불가" 와 "같다" 를 �
 test.after(async () => {
   await rm(home, { recursive: true, force: true });
 });
+
+test('이 빌드는 acp_adapter_update 를 광고한다 — 화면은 이 플래그가 있을 때만 Update 를 낸다', async () => {
+  const { MANAGER_CAPABILITIES } = await import('../dist/lib/runtime-profiles.js');
+  assert.ok(MANAGER_CAPABILITIES.includes('acp_adapter_update'));
+  // 기존 플래그를 지우면 서버가 "지원 안 함" 으로 보고 디스패치를 거부한다 — 함께 남아 있어야 한다.
+  assert.ok(MANAGER_CAPABILITIES.includes('context_window_clamp'));
+});

@@ -440,8 +440,10 @@ test('전부 최신이면 "전부 업데이트" 를 내놓지 않는다 — 누�
 // 번들본은 의존성 범위에 묶여 새 어댑터를 따라오지 못해 — 운영자가 올릴 방법이 없었다. 이제 어댑터
 // 줄마다 Update(`update_acp_adapter`)가 있고, "전부 업데이트" 도 뒤처진 어댑터를 센다.
 
-const WITH_ADAPTERS = (version, latest, source = 'bundled') => ({
+const WITH_ADAPTERS = (version, latest, source = 'bundled', capabilities = ['acp_adapter_update']) => ({
   ...BASE,
+  plugin_version: '1.6.258',
+  manager_capabilities: capabilities,
   cli_installs: [],
   acp_adapters: [
     { cli: 'claude', package: '@agentclientprotocol/claude-agent-acp', version, source },
@@ -497,4 +499,36 @@ test('"전부 업데이트" 는 뒤처진 어댑터도 센다 — CLI 가 전부
   const all = buttons(view).find((b) => b.textContent.includes('전부 업데이트'));
   assert.ok(all, 'CLI 설치본은 없어도 뒤처진 어댑터가 있으면 버튼이 뜬다');
   assert.match(all.textContent, /\(1\)/);
+});
+
+// 어댑터 업데이트를 **모르는 매니저**에는 버튼을 내지 않는다 (실측 2026-10-02).
+//
+// 화면(서버)이 먼저 배포되고 매니저는 운영자가 따로 올리므로, 한동안은 새 화면 + 옛 매니저 조합이다.
+// 그때 버튼을 내면 누를 때마다 옛 매니저가 `unknown command: update_acp_adapter` 로 거절했다 — 사용자
+// 눈에는 "어댑터 업데이트가 여전히 안 된다". 그래서 매니저가 하트비트 `manager_capabilities` 로
+// `acp_adapter_update` 를 광고할 때만 버튼을 내고, 아니면 무엇을 해야 하는지 말한다.
+test('어댑터 업데이트를 광고하지 않는 매니저에는 Update 대신 "매니저를 먼저 업데이트" 를 보여준다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const old = { ...WITH_ADAPTERS('0.84.0', '0.85.0', 'bundled', ['context_window_clamp']), plugin_version: '1.6.257' };
+  const view = render(t, old, () => {}, new Set(), { onUpdateAdapter: () => {}, onUpdateAll: () => {} });
+  await act(async () => {});
+  assert.equal(Boolean(adapterButton(view)), false, '모르는 명령을 보낼 버튼은 없다');
+  const hint = view.container.querySelector('[data-acp-adapter-unsupported]');
+  assert.ok(hint, '왜 버튼이 없는지 말한다');
+  assert.match(hint.textContent, /1\.6\.257/);
+  assert.match(hint.textContent, /매니저를 먼저 업데이트/);
+  // "전부 업데이트" 도 올릴 수 없는 어댑터를 세지 않는다.
+  assert.equal(buttons(view).some((b) => b.textContent.includes('전부 업데이트')), false);
+});
+
+test('manager_capabilities 를 아예 안 보내는 구버전도 지원 안 함으로 본다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const legacy = WITH_ADAPTERS('0.84.0', '0.85.0');
+  delete legacy.manager_capabilities;
+  const view = render(t, legacy, () => {}, new Set(), { onUpdateAdapter: () => {} });
+  await act(async () => {});
+  assert.equal(Boolean(adapterButton(view)), false);
+  assert.ok(view.container.querySelector('[data-acp-adapter-unsupported]'));
 });

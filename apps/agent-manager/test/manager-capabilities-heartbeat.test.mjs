@@ -46,7 +46,10 @@ test('instance heartbeat publishes manager_capabilities on the wire when passed'
   heartbeat.start();
 
   const payload = await payloadPromise;
-  assert.deepEqual(payload.manager_capabilities, [MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP]);
+  // 이 빌드의 플래그 목록이 **그대로** 실린다 — 플래그가 늘어도(acp_adapter_update 등) 이 단언은
+  // 목록을 다시 적지 않는다. 디스패치 게이트가 기대는 clamp 플래그는 계속 들어 있어야 한다.
+  assert.deepEqual(payload.manager_capabilities, [...MANAGER_CAPABILITIES]);
+  assert.ok(payload.manager_capabilities.includes(MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP));
 });
 
 test('instance heartbeat omits manager_capabilities entirely when not passed (legacy wire shape, not an empty array)', async (t) => {

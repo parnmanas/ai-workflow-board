@@ -3256,8 +3256,17 @@ export function InstalledCliVersions({
   );
 }
 
-/** 이 호스트의 어댑터 중 최신보다 뒤처진 것(최신을 모르면 넣지 않는다 — "모름" ≠ "뒤처짐"). */
+/** 이 매니저가 `update_acp_adapter` 를 아는가. 모르는 매니저에 버튼을 내면 누를 때마다
+ *  `unknown command` 로 거절된다(1.6.257 이하에서 실제로 그랬다). */
+export function canUpdateAcpAdapters(inst: AgentManagerInstance): boolean {
+  return (inst.manager_capabilities ?? []).includes('acp_adapter_update');
+}
+
+/** 이 호스트의 어댑터 중 최신보다 뒤처진 것(최신을 모르면 넣지 않는다 — "모름" ≠ "뒤처짐").
+ *  매니저가 어댑터 업데이트를 지원하지 않으면 비어 있다 — "전부 업데이트" 가 올릴 수 없는 것을
+ *  세면 안 된다. */
 export function behindAcpAdapters(inst: AgentManagerInstance): AcpAdapterReport[] {
+  if (!canUpdateAcpAdapters(inst)) return [];
   return (inst.acp_adapters ?? []).filter((a) => {
     if (a.source !== 'managed' && a.source !== 'bundled') return false;
     const latest = (a.package && inst.acp_adapter_latest_versions?.[a.package]) || null;
@@ -3289,11 +3298,17 @@ function AcpAdapterVersions({
   if (rows.length === 0) return null;
   const latestOf = (pkg: string | null): string | null =>
     (pkg && inst.acp_adapter_latest_versions?.[pkg]) || null;
+  const supported = canUpdateAcpAdapters(inst);
   return (
     <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
       <div style={{ fontSize: 10.5, color: tokens.colors.textMuted }}>
         ACP 어댑터 — 세션의 모델 목록을 정합니다
       </div>
+      {!supported && onUpdate && (
+        <div data-acp-adapter-unsupported style={{ fontSize: 10.5, color: tokens.colors.warning }}>
+          이 매니저(v{inst.plugin_version})는 어댑터 업데이트를 지원하지 않습니다 — 매니저를 먼저 업데이트하세요.
+        </div>
+      )}
       {rows.map((a) => {
         const latest = latestOf(a.package);
         const state = a.version && latest ? cliUpdateState(a.version, latest) : null;
@@ -3332,7 +3347,7 @@ function AcpAdapterVersions({
             >
               ({a.source})
             </span>
-            {updatable && onUpdate && (
+            {updatable && onUpdate && supported && (
               <button
                 onClick={() => onUpdate(a.cli)}
                 disabled={busy || upToDate}

@@ -2319,6 +2319,10 @@ export interface AgentManagerInstance {
   acp_adapters?: AcpAdapterReport[];
   // 위 어댑터 패키지의 npm 최신 버전(패키지명 → 버전). 조회 실패는 키가 없다(= 모름).
   acp_adapter_latest_versions?: Record<string, string>;
+  // 이 매니저 빌드가 지원하는 기능 플래그(하트비트 `manager_capabilities`). 화면은 기능이 있는
+  // 매니저에만 그 기능의 버튼을 낸다 — 예: `acp_adapter_update` 가 없으면 어댑터 Update 를 숨긴다.
+  // 구버전 매니저는 보내지 않는다(= 아무 기능도 광고하지 않음).
+  manager_capabilities?: string[];
   // Self-update fields — manager-mode only (managed by the manager's
   // UpdateChecker). Pre-update managers leave these undefined; the UI's
   // version compare degrades to "no info" in that case.

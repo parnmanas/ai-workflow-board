@@ -404,7 +404,14 @@ export const MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP = 'context_window_clamp';
  *  `manager_capabilities` on every heartbeat (instance-heartbeat.ts). Add new
  *  flags here as future dispatch-gated features land; never remove one this
  *  build still honors, since the server treats absence as "unsupported". */
-export const MANAGER_CAPABILITIES: readonly string[] = [MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP];
+/** 이 빌드는 `update_acp_adapter` 커맨드를 안다(운영자가 ACP 어댑터를 매니저 홈에 올린다).
+ *  화면은 이 플래그를 광고한 매니저에만 어댑터 Update 버튼을 낸다 — 버튼만 보고 눌렀다가 옛 매니저가
+ *  `unknown command` 로 거절하는 일이 실제로 있었다(1.6.257 이하). */
+export const MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE = 'acp_adapter_update';
+export const MANAGER_CAPABILITIES: readonly string[] = [
+  MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP,
+  MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE,
+];
 
 /** 티켓 ee26302d(faa32380 감사 후속) — 이 문턱 미만 context_window 를 가진
  *  Claude backend profile 은 MCP 세션을 'compact' tool profile 로 옵트인해,

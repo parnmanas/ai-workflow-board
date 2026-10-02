@@ -40,6 +40,7 @@ function heartbeatBody(managerId, cliVersions, cliLatestVersions, cliInstalls, a
     ...(cliLatestVersions ? { cli_latest_versions: cliLatestVersions } : {}),
     ...(acp?.adapters ? { acp_adapters: acp.adapters } : {}),
     ...(acp?.latest ? { acp_adapter_latest_versions: acp.latest } : {}),
+    ...(acp?.capabilities ? { manager_capabilities: acp.capabilities } : {}),
     ...(cliInstalls ? { cli_installs: cliInstalls } : {}),
   };
 }
@@ -248,6 +249,7 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
         { cli: 'bogus', package: 'x', version: '1', source: 'not-a-source' },
       ],
       latest: { '@agentclientprotocol/claude-agent-acp': '0.84.0' },
+      capabilities: ['context_window_clamp', 'acp_adapter_update'],
     }),
     201,
   );
@@ -262,6 +264,8 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
     ],
     '알려진 source 만 보존된다',
   );
+  // 화면은 이 플래그가 있을 때만 어댑터 Update 를 낸다 — 목록 응답에 실려야 한다.
+  assert.ok((withAdapters.manager_capabilities ?? []).includes('acp_adapter_update'), 'manager_capabilities 가 화면까지 간다');
   assert.deepEqual(withAdapters.acp_adapter_latest_versions, {
     '@agentclientprotocol/claude-agent-acp': '0.84.0',
   });
