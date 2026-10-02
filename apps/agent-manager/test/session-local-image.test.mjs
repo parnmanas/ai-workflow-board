@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   LOCAL_IMAGE_MAX_BYTES,
@@ -30,13 +30,32 @@ async function scratch(t) {
   return dir;
 }
 
-test('resolveLocalImagePath: 에이전트가 쓰는 경로 모양을 이 장비의 절대 경로로', () => {
-  assert.equal(resolveLocalImagePath('/tmp/a.png', ''), '/tmp/a.png');
-  assert.equal(resolveLocalImagePath('shots/a.png', '/work/repo'), '/work/repo/shots/a.png');
-  assert.equal(resolveLocalImagePath('~/a.png', ''), resolve(homedir(), 'a.png'));
-  assert.equal(resolveLocalImagePath(pathToFileURL('/tmp/x y.png').href, ''), '/tmp/x y.png');
+// 아래 두 테스트는 `platform` 인자(경로 문법 seam)로 OS 를 명시한다 — 러너가 ubuntu 든
+// windows 든 같은 리터럴이 나와야 한다. 호스트 네이티브 갈래(`~`, `file://`)는 세 번째 테스트.
+test('resolveLocalImagePath: POSIX 장비의 경로 모양', () => {
+  assert.equal(resolveLocalImagePath('/tmp/a.png', '', 'linux'), '/tmp/a.png');
+  assert.equal(resolveLocalImagePath('shots/a.png', '/work/repo', 'linux'), '/work/repo/shots/a.png');
   // `/E:/…` 는 Windows 장비에서만 드라이브 경로다 — 다른 OS 에서는 손대지 않는다.
   assert.equal(resolveLocalImagePath('/E:/a.png', '', 'linux'), '/E:/a.png');
+});
+
+// 루트를 가진 입력만 쓴다 — `win32.resolve('/tmp/a.png')` 는 cwd 의 드라이브를 끌어오므로
+// (linux 에서 `\tmp\a.png`, windows 러너에서 `D:\tmp\a.png`) 드라이브 없는 절대 경로로는
+// 리터럴을 단정할 수 없다. `~`/`file://` 도 이 분기에 섞지 않는다(호스트 homedir 모양이 샌다).
+test('resolveLocalImagePath: Windows 장비의 경로 모양 — 드라이브 문자와 `/E:/`', () => {
+  assert.equal(resolveLocalImagePath('C:\\x\\a.png', '', 'win32'), 'C:\\x\\a.png');
+  assert.equal(resolveLocalImagePath('E:/a.png', '', 'win32'), 'E:\\a.png');
+  assert.equal(resolveLocalImagePath('/E:/a.png', '', 'win32'), 'E:\\a.png', 'URL 경로 모양으로 적힌 드라이브 경로');
+  assert.equal(resolveLocalImagePath('//srv/share/a.png', '', 'win32'), '\\\\srv\\share\\a.png', 'UNC 공유');
+  assert.equal(resolveLocalImagePath('shots\\a.png', 'C:\\work\\repo', 'win32'), 'C:\\work\\repo\\shots\\a.png');
+});
+
+test('resolveLocalImagePath: 호스트 네이티브 갈래와 거절', () => {
+  assert.equal(resolveLocalImagePath('~/a.png', ''), resolve(homedir(), 'a.png'));
+  // 공백이 `%20` 으로 적힌 file:// URL — 기대값은 이 장비 모양이라 왕복으로 단정한다.
+  const url = pathToFileURL(resolve(tmpdir(), 'x y.png')).href;
+  assert.match(url, /x%20y\.png$/, '공백은 URL 에서 %20 이다');
+  assert.equal(resolveLocalImagePath(url, ''), fileURLToPath(url));
   assert.throws(() => resolveLocalImagePath('a.png', ''), (e) => e instanceof LocalImageError && e.code === 'invalid_path', 'cwd 를 모르면 상대 경로는 거절');
   assert.throws(() => resolveLocalImagePath('https://x.test/a.png', '/w'), (e) => e.code === 'invalid_path', '원격 URL 은 매니저가 읽지 않는다');
   assert.throws(() => resolveLocalImagePath('', '/w'), (e) => e.code === 'invalid_path');

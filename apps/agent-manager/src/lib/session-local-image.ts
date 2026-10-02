@@ -12,7 +12,7 @@
  */
 import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** 세션 이미지(`MAX_IMAGE_BYTES`)와 같은 상한. 넘으면 이유를 붙여 거절한다. */
@@ -43,8 +43,14 @@ export function sniffImageMime(head: Buffer): string | null {
  * 마크다운에 적힌 경로를 이 장비의 절대 경로로 바꾼다. 에이전트가 쓰는 모양이 제각각이라
  * (Codex 앱도 이 갈래들에서 버그가 났다 — 드라이브 문자, `/E:/`, 공백, `file://`) 하나씩 받는다.
  * 상대 경로는 세션 cwd 기준이고, cwd 를 모르면 거절한다.
+ *
+ * `platform` 은 경로 문법을 고르는 seam 이다 — 기본값이 `process.platform` 이라 운영 동작은
+ * 호스트 네이티브 그대로이고, 테스트가 어느 OS 에서든 Windows 갈래(`/E:/`, 드라이브 문자)를
+ * 단정할 수 있다. 단 `~`(아래 `homedir()`)와 `file://`(`fileURLToPath`)은 이 장비의 모양을
+ * 내므로 호스트 네이티브로 남는다 — 그 두 입력을 `platform` 오버라이드와 섞지 말 것.
  */
 export function resolveLocalImagePath(raw: string, cwd: string, platform: NodeJS.Platform = process.platform): string {
+  const P = platform === 'win32' ? win32 : posix;
   let p = String(raw ?? '').trim();
   if (!p || p.length > 4096 || p.includes('\0')) throw new LocalImageError('invalid_path', 'Invalid image path.');
   if (/^file:/i.test(p)) {
@@ -59,9 +65,9 @@ export function resolveLocalImagePath(raw: string, cwd: string, platform: NodeJS
   // `/E:/foo` — URL 경로 모양으로 적힌 Windows 드라이브 경로.
   if (platform === 'win32' && /^\/[A-Za-z]:[\\/]/.test(p)) p = p.slice(1);
   if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) p = homedir() + p.slice(1);
-  if (isAbsolute(p)) return resolve(p);
+  if (P.isAbsolute(p)) return P.resolve(p);
   if (!cwd) throw new LocalImageError('invalid_path', 'Relative image path but the session working directory is unknown.');
-  return resolve(cwd, p);
+  return P.resolve(cwd, p);
 }
 
 function extensionOf(path: string): string {
