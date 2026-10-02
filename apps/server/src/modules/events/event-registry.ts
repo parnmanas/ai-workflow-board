@@ -1346,6 +1346,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         title: event.title,
         turn_id: event.turn_id,
         text: event.text,
+        images: event.images,
         permission_request_id: event.permission_request_id,
         option_id: event.option_id,
         mode_id: event.mode_id,
