@@ -500,21 +500,27 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
   const turnOf = (b: TranscriptBlock): string => ('turnId' in b ? b.turnId : '');
   const lastIndexOfTurn = new Map<string, number>();
   blocks.forEach((b, i) => lastIndexOfTurn.set(turnOf(b), i));
+  // 창 앞에서 본문이 잘리거나 표시할 본문이 없는 턴도 usage 는 남을 수 있다.
+  // 이 줄을 맨 끝으로 보내면 과거 시각이 최신 응답의 시각처럼 보인다.
+  // seq 는 history/live 간에 다른 번호 공간일 수 있으므로 입력 위치로 배치한다.
+  const eventOrder = new Map(events.map((ev, i) => [ev.id, i]));
+  const orphanUsage = [...usageByTurn.values()]
+    .filter((usage) => !lastIndexOfTurn.has(usage.turnId))
+    .sort((a, b) => eventOrder.get(a.key)! - eventOrder.get(b.key)!);
+  let orphanIndex = 0;
   const out: TranscriptBlock[] = [];
-  const pending = new Map(usageByTurn);
   blocks.forEach((b, i) => {
+    while (orphanIndex < orphanUsage.length && eventOrder.get(orphanUsage[orphanIndex].key)! < eventOrder.get(b.key)!) {
+      out.push(orphanUsage[orphanIndex++]);
+    }
     out.push(b);
     const turn = turnOf(b);
     if (lastIndexOfTurn.get(turn) === i) {
-      const usage = pending.get(turn);
-      if (usage) {
-        out.push(usage);
-        pending.delete(turn);
-      }
+      const usage = usageByTurn.get(turn);
+      if (usage) out.push(usage);
     }
   });
-  // 붙일 자리를 못 찾은 usage(그 턴에 다른 블록이 없는 경우)는 맨 끝에 — 버리지 않는다.
-  for (const usage of pending.values()) out.push(usage);
+  out.push(...orphanUsage.slice(orphanIndex));
   return out;
 }
 
