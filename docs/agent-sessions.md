@@ -540,3 +540,10 @@ CLI 설정 패널과 새 세션 모달의 `model` 선택지는 두 출처를 합
 모든 모델 화면과 같은 `useHostModels()` 훅 / `POST /api/agent-manager/hosts/:id/models/refresh`
 경로다. 세션을 다시 열어야만 목록이 바뀌던 동작은 없어졌다. 자세한 규칙은 `docs/cli-modules.md`
 → "모델 목록".
+
+
+### OpenCode history query size and failures
+
+OpenCode history queries project only transcript fields inside SQLite before `opencode db` serializes them. Tool metadata and attachments that the transcript does not consume must not cross this boundary; tool input/output and text are bounded for display. Message rows contribute only their role. This preserves the native database, image-part handling, tool status, usage and conversation text while avoiding large irrelevant payloads (Ralf: 691 parts, about 80 MB, mostly tool metadata, exceeded the 10-second command limit).
+
+A requested history query that times out, cannot launch OpenCode, or returns invalid JSON reports `history_read_failed` through the existing RPC error path. It must never return a successful empty transcript or a cached title with zero events after a query failure. Listing and optional usage/error diagnostics remain best-effort.

@@ -345,7 +345,8 @@ export class AgentSessionStore {
     let read;
     try {
       read = await bound.driver.readHistory(bound.ctx, sessionId, indexEntry);
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && 'code' in err && err.code === 'history_read_failed') throw err;
       read = null;
     }
     if (!read) return fromIndexOnly;

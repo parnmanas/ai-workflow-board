@@ -1128,3 +1128,14 @@ for (const stage of ['NEW', 'LOAD', 'PROMPT']) {
     assert.equal(server.rpc('cli-title-restart').result.live.title, title);
   });
 }
+
+
+test('history read failures reach the RPC caller instead of returning an empty successful transcript', async (t) => {
+  const { store, server, runner } = await harness(t);
+  store.readHistory = async () => { throw Object.assign(new Error('Unable to read OpenCode session history: database query timed out.'), { code: 'history_read_failed' }); };
+  await runner.handle(request('history', { cli: 'opencode', request_id: 'history-failure', session_id: 'ses_history_failure' }));
+  const response = server.rpc('history-failure');
+  assert.equal(response.ok, false);
+  assert.equal(response.code, 'history_read_failed');
+  assert.match(response.error, /database query timed out/);
+});
