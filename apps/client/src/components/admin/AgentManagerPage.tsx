@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
-import { installedVersionBadge, managerUpdateAction } from './managerUpdateAction';
+import { installedVersionBadge, managerUpdateAction, updateFailureBadge } from './managerUpdateAction';
 import type {
   Agent,
   AgentCredentialEntry,
