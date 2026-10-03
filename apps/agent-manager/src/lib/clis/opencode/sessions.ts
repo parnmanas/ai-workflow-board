@@ -11,8 +11,8 @@
 // 세션(기록 수십 KB 이상)의 history 가 통째로 비어 보이던 원인이 이것이다. 파일
 // 리다이렉트는 같은 조건에서 항상 온전하다.
 //
-// 실패(미설치·스키마 변경·타임아웃)는 빈 결과로 접는다 — 목록 조회 하나가 세션 화면
-// 전체를 못 쓰게 만들면 안 되고, 세션 화면은 기록이 없어도 열려야 한다(프롬프트는 보낼 수 있다).
+// 목록 열거는 실패 시 건너뛴다. 요청한 세션의 기록 조회 실패는 빈 기록으로 숨기지 않고
+// RPC 오류로 전달한다 — 실제 빈 세션과 조회 실패를 구분해야 한다.
 
 import { open } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   boundHistoryPayload,
+  HISTORY_EVENT_PAYLOAD_MAX_CHARS,
   type HistoryEvent,
   isRecord,
   isSyntheticPrompt,
@@ -108,15 +109,44 @@ export function opencodeUsageFromPart(part: Record<string, any> | null): Session
   });
 }
 
-async function query<T>(ctx: CliSessionStoreContext, sql: string): Promise<T[]> {
+async function query<T>(ctx: CliSessionStoreContext, sql: string, options: { history?: boolean } = {}): Promise<T[]> {
   // runToFile 우선 — 위 주석의 파이프 잘림 회피. 없는 옛 호출자(테스트)는 pipe 그대로.
   const run = ctx.runToFile ?? ctx.exec;
   try {
     const parsed = JSON.parse(await run('opencode', ['db', sql, '--format', 'json', '--log-level', 'ERROR']));
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
+    if (!Array.isArray(parsed)) throw new Error('Database output was not a JSON array.');
+    return parsed as T[];
+  } catch (err: any) {
+    if (options.history) {
+      const reason = err?.code === 'ETIMEDOUT' ? 'database query timed out'
+        : err instanceof SyntaxError ? 'database returned incomplete or invalid JSON'
+        : err?.code === 'ENOENT' ? 'OpenCode executable was not found'
+        : 'database query failed';
+      throw Object.assign(new Error(`Unable to read OpenCode session history: ${reason}. Retry after checking OpenCode on the Runtime Host.`), { code: 'history_read_failed' });
+    }
     return [];
   }
+}
+
+/** Bound text before CLI serialization, not after downloading multi-megabyte tool metadata. */
+function historyValue(path: string): string {
+  const value = `json_extract(p.data, '${path}')`;
+  return `CASE WHEN length(${value}) > ${HISTORY_EVENT_PAYLOAD_MAX_CHARS} `
+    + `THEN substr(${value}, 1, ${HISTORY_EVENT_PAYLOAD_MAX_CHARS}) || char(10) || '[truncated for display]' ELSE ${value} END`;
+}
+
+function historyPartProjection(): string {
+  return "CASE json_extract(p.data, '$.type') "
+    + "WHEN 'tool' THEN json_object('type', 'tool', 'tool', json_extract(p.data, '$.tool'), "
+    + "'callID', json_extract(p.data, '$.callID'), 'state', json_patch('{}', json_object("
+    + "'status', json_extract(p.data, '$.state.status'), "
+    + `'input', ${historyValue('$.state.input')}, 'output', ${historyValue('$.state.output')}))) `
+    + "WHEN 'text' THEN json_object('type', 'text', " + `'text', ${historyValue('$.text')}) `
+    + "WHEN 'reasoning' THEN json_object('type', 'reasoning', " + `'text', ${historyValue('$.text')}) `
+    + "WHEN 'step-finish' THEN json_object('type', 'step-finish', 'tokens', json_extract(p.data, '$.tokens'), 'cost', json_extract(p.data, '$.cost')) "
+    // Image bytes are needed by storeImage; keep the existing image path intact.
+    + "WHEN 'file' THEN json_object('type', 'file', 'mime', json_extract(p.data, '$.mime'), 'url', json_extract(p.data, '$.url')) "
+    + "ELSE json_object('type', json_extract(p.data, '$.type')) END";
 }
 
 export const opencodeSessionStore: CliSessionStoreDriver = {
@@ -208,21 +238,24 @@ export const opencodeSessionStore: CliSessionStoreDriver = {
     const [session] = await query<Record<string, unknown>>(
       ctx,
       `SELECT id, directory, title, time_created, time_updated FROM session WHERE id = '${sessionId}' LIMIT 1`,
+      { history: true },
     );
     if (!session && !indexEntry) return null;
 
     // 끝에서부터 historyLimit 건만 읽되 seq 는 절대 위치를 유지한다 — 파일 파서와 같은 규약이라
     // 같은 세션을 다시 읽어도 앞부분이 변하지 않는 한 같은 이벤트가 같은 id 를 갖는다.
-    const [countRow] = await query<Record<string, unknown>>(ctx, `SELECT count(*) AS n FROM part WHERE session_id = '${sessionId}'`);
+    const [countRow] = await query<Record<string, unknown>>(ctx, `SELECT count(*) AS n FROM part WHERE session_id = '${sessionId}'`, { history: true });
     const total = Number(countRow?.n ?? 0) || 0;
     const offset = Math.max(0, total - ctx.historyLimit);
     const rows = await query<Record<string, unknown>>(
       ctx,
-      'SELECT p.id AS part_id, p.message_id AS message_id, p.time_created AS part_time, p.data AS part_data, m.data AS message_data '
+      'SELECT p.id AS part_id, p.message_id AS message_id, p.time_created AS part_time, '
+      + `${historyPartProjection()} AS part_data, json_object('role', json_extract(m.data, '$.role')) AS message_data `
       + 'FROM part p JOIN message m ON m.id = p.message_id '
       + `WHERE p.session_id = '${sessionId}' `
       // id 는 시간순으로 증가하는 ULID 계열이라 같은 ms 에 찍힌 part 의 순서까지 고정해 준다.
       + `ORDER BY p.time_created ASC, p.id ASC LIMIT ${ctx.historyLimit} OFFSET ${offset}`,
+      { history: true },
     );
 
     const events: HistoryEvent[] = [];

@@ -274,14 +274,12 @@ test('opencode 기록: 창을 넘긴 세션은 앞부분 생략 안내를 달고
   assert.deepEqual(history.events.slice(1).map((e) => e.seq), [9, 10]);
 });
 
-test('opencode 기록: 질의가 실패해도 빈 기록으로 접는다 (세션 화면은 열려야 한다)', async () => {
+test('opencode history query failure is reported instead of masquerading as empty history', async () => {
   const exploding = new AgentSessionStore({
     indexPath: join(process.env.AWB_AGENT_MANAGER_HOME, `idx-${Math.random().toString(16).slice(2)}.json`),
     opencodeQuery: async () => { throw new Error('spawn opencode ENOENT'); },
   });
-  const history = await exploding.readHistory('opencode', 'ses_abc123');
-  assert.equal(history.session, null);
-  assert.deepEqual(history.events, []);
+  await assert.rejects(exploding.readHistory('opencode', 'ses_abc123'), { code: 'history_read_failed' });
 });
 
 test('opencode 기록: 세션 id 형식이 아니면 SQL 을 아예 던지지 않는다', async () => {
@@ -377,4 +375,72 @@ test('opencode 질의는 runToFile 을 우선하고, 없으면 exec 로 떨어�
     exec: async () => good,
   });
   assert.equal((await fallback.listSessions('opencode')).length, 1);
+});
+
+
+for (const failure of ['timeout', 'invalid-json', 'invalid-shape']) {
+  test(`OpenCode ${failure} during part retrieval is a history error, even with an AWB index entry`, async () => {
+    const store = storeWith((sql) => {
+      if (sql.includes('FROM session')) return JSON.stringify([row()]);
+      if (sql.includes('count(*)')) return JSON.stringify([{ n: 10 }]);
+      if (failure === 'timeout') throw Object.assign(new Error('private stderr must not leak'), { code: 'ETIMEDOUT' });
+      return failure === 'invalid-json' ? '[{"incomplete":' : '{}';
+    });
+    await store.recordAwbSession({ cli: 'opencode', session_id: 'ses_abc123', cwd: '/work', title: 'Known session' });
+    await assert.rejects(store.readHistory('opencode', 'ses_abc123'), (err) => {
+      assert.equal(err.code, 'history_read_failed');
+      assert.match(err.message, /Unable to read OpenCode session history/);
+      assert.ok(!err.message.includes('private stderr'));
+      if (failure === 'timeout') assert.match(err.message, /timed out/);
+      return true;
+    });
+  });
+}
+
+test('OpenCode history projects display fields in SQLite before transporting bulky tool metadata', async (t) => {
+  const { default: initSqlJs } = await import('sql.js');
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  t.after(() => db.close());
+  db.run('CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)');
+  db.run('CREATE TABLE message (id TEXT, data TEXT)');
+  db.run('CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)');
+  db.run('INSERT INTO session VALUES (?,?,?,?,?)', ['ses_abc123', '/work', 'Big history', 1000, 2000]);
+  db.run('INSERT INTO message VALUES (?,?)', ['msg_a', JSON.stringify({ role: 'assistant', irrelevant: 'm'.repeat(100000) })]);
+  const parts = [
+    { type: 'tool', tool: 'engine', callID: 'call_big', state: { status: 'completed', input: { command: 'inspect' }, output: 'Result preserved', metadata: { image: 'x'.repeat(5000000) } } },
+    { type: 'tool', tool: 'engine', callID: 'call_clipped', state: { status: 'completed', input: { command: 'x'.repeat(70000) }, output: 'y'.repeat(70000) } },
+    { type: 'tool', tool: 'engine', callID: 'call_pending', state: { input: { command: 'wait' } } },
+    { type: 'text', text: 'Conversation preserved' },
+    { type: 'reasoning', text: 'Reasoning preserved' },
+    { type: 'step-finish', tokens: { input: 12, output: 34, cache: { read: 2 } }, cost: 0.25 },
+    { type: 'file', mime: 'image/png', url: 'data:image/png;base64,AAAA' },
+  ];
+  for (const [i, part] of parts.entries()) db.run('INSERT INTO part VALUES (?,?,?,?,?)', [`part_${i}`, 'msg_a', 'ses_abc123', 1000 + i, JSON.stringify(part)]);
+  let transmittedBytes = 0;
+  let projected;
+  const store = storeWith((sql) => {
+    const result = db.exec(sql)[0];
+    const rows = result ? result.values.map((v) => Object.fromEntries(result.columns.map((key, i) => [key, v[i]]))) : [];
+    const body = JSON.stringify(rows);
+    if (sql.includes('FROM part p')) {
+      transmittedBytes = Buffer.byteLength(body);
+      projected = rows.map((r) => JSON.parse(r.part_data));
+      assert.ok(!sql.includes('\n'), 'SQL remains one command-line argument on Windows');
+    }
+    return body;
+  });
+  const history = await store.readHistory('opencode', 'ses_abc123');
+  assert.ok(transmittedBytes < 100000, `metadata should be omitted before CLI output; got ${transmittedBytes} bytes`);
+  const calls = history.events.filter((e) => e.type === 'tool_call');
+  const updates = history.events.filter((e) => e.type === 'tool_update');
+  assert.deepEqual(calls[0].payload.input, { command: 'inspect' });
+  assert.equal(updates[0].payload.output, 'Result preserved');
+  assert.match(calls[1].payload.input, /truncated/);
+  assert.match(updates[1].payload.output, /truncated/);
+  assert.equal(updates.some((e) => e.payload.tool_call_id === 'call_pending'), false, 'absent output/status must not become a completed update');
+  assert.ok(history.events.some((e) => e.type === 'text' && e.payload.text === 'Conversation preserved'));
+  assert.ok(history.events.some((e) => e.type === 'reasoning' && e.payload.text === 'Reasoning preserved'));
+  assert.ok(history.events.some((e) => e.type === 'usage' && e.payload.output_tokens === 34));
+  assert.equal(projected.at(-1).url, 'data:image/png;base64,AAAA', 'image content remains available to the existing image reader');
 });
