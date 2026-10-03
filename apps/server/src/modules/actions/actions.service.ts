@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
@@ -9,7 +9,9 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
 import { User } from '../../entities/User';
@@ -35,12 +37,67 @@ import {
   primaryTargetAgentId,
   serializeTargetAgentIds,
 } from '../../common/action-targets';
-import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
+import { isUuidShapedId, resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
+import {
+  isRuntimeIdentityKey,
+  normalizeRuntimeSpec,
+  runtimeIdentityKey,
+  type RuntimeSpec,
+} from '../../common/runtime-spec';
+import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
   err.status = status;
   return err;
+}
+
+/**
+ * P4c-3b: spec-direct dispatch용 pseudo-Agent. 저장된 스냅샷에서 dispatch가
+ * 읽는 필드만 채운다 — DB 행이 없어도 방 참가자/프롬프트/run 기록이 돈다.
+ * workspace는 Action의 것을 물려받는다 (spec에 workspace 개념이 없어서).
+ */
+/**
+ * P4c-4: dispatch 대상 pseudo — 저장된 spec 스냅샷에서 dispatch 가 읽는
+ * 필드만 들고 있다 (Agent 행 없음).
+ */
+interface DispatchPseudoAgent {
+  id: string;
+  name: string;
+  workspace_id: string;
+}
+function pseudoAgentForSpec(id: string, spec: Record<string, any>, workspaceId: string): DispatchPseudoAgent {
+  const s = spec as any;
+  return {
+    id,
+    name: String(s.label || s.cli || id.slice(0, 11)),
+    workspace_id: workspaceId,
+  };
+}
+
+/**
+ * P4c-3b: spec-direct target 입력 정규화. 배열(또는 JSON 문자열)의 각 원소를
+ * normalizeRuntimeSpec으로 검증한다. 입력 없음/빈 배열 → null (레거시 id
+ * 경로). 원소 하나라도 깨지면 400.
+ */
+function normalizeSpecTargets(input: unknown): RuntimeSpec[] | null {
+  if (input === undefined || input === null) return null;
+  let list: unknown = input;
+  if (typeof list === 'string') {
+    if (!list.trim()) return null;
+    try {
+      list = JSON.parse(list);
+    } catch {
+      throw makeError(400, 'target_runtimes must be a JSON array of runtime specs');
+    }
+  }
+  if (!Array.isArray(list)) throw makeError(400, 'target_runtimes must be an array of runtime specs');
+  if (list.length === 0) return null;
+  try {
+    return list.map((raw, i) => normalizeRuntimeSpec(raw, `target_runtimes[${i}]`));
+  } catch (e: any) {
+    throw makeError(400, e?.message || 'invalid target_runtimes');
+  }
 }
 
 // Names/descriptions that clearly denote an irreversible external operation.
@@ -320,7 +377,7 @@ export class ActionsService {
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
@@ -354,15 +411,20 @@ export class ActionsService {
 
     // 대상은 배열이 정본이고 레거시 단일 필드는 그 첫 원소로 흡수된다
     // (티켓 fc3906c5). 둘 중 어느 쪽으로 들어와도 같은 목록으로 수렴한다.
-    const targetIds = actionTargetAgentIds(input);
-    if (targetIds.length === 0) throw makeError(400, 'target_agent_id is required');
+    // P4c-3b: target_runtimes 입력이 있으면 spec-direct — id 배열 대신 spec을 본다.
+    const specTargets = normalizeSpecTargets((input as any).target_runtimes);
+    let targetIds = actionTargetAgentIds(input);
+    if (!specTargets && targetIds.length === 0) throw makeError(400, 'target_agent_id is required');
 
     // Scope check: the target agent must live in this workspace (or be global —
     // workspace_id null/empty means global). Cross-workspace dispatch would
     // bypass our SSE recipient filter and silently never deliver.
     // fan-out이면 **모든** 대상을 검사한다 — 하나라도 타 워크스페이스면 저장
     // 자체를 거부해서, 절대 전달되지 않을 대상이 설정에 남지 않게 한다.
-    await this._assertTargetAgentsVisible(targetIds, input.workspace_id);
+    // spec-direct 입력은 _resolveSpecTargets 안에서 검증한다.
+    if (!specTargets) {
+      await this._assertTargetAgentsVisible(targetIds, input.workspace_id);
+    }
 
     if (input.board_id) {
       throw makeError(400, 'Board-scoped Actions are no longer supported; create the Action in its Workspace');
@@ -379,6 +441,24 @@ export class ActionsService {
       throw makeError(400, "trigger must be '' (cron/manual) or 'on_ticket_done'");
     }
 
+    // P4c-3b: target_runtimes 입력이 있으면 spec-direct (세 컬럼 모두 스냅샷에서).
+    // 없으면 레거시 id 배열 경로 (행 조회 + 스냅샷 dual-write).
+    // 둘 다 오면 합집합 (spec 키 먼저, id 뒤 — 순서 보존 중복 제거).
+    let targetRuntimes: Array<Record<string, any>>;
+    if (specTargets) {
+      const resolved = await this._resolveSpecTargets(specTargets, input.workspace_id);
+      const seen = new Set(resolved.map((r) => r.key));
+      const extraIds = targetIds.filter((id) => !seen.has(id));
+      if (extraIds.length > 0) await this._assertTargetAgentsVisible(extraIds, input.workspace_id);
+      targetIds = [...resolved.map((r) => r.key), ...extraIds];
+      targetRuntimes = [
+        ...resolved.map((r) => ({ ...r.spec })),
+        ...(await this._snapshotTargetRuntimes(extraIds)),
+      ];
+    } else {
+      targetRuntimes = await this._snapshotTargetRuntimes(targetIds);
+    }
+
     const created = this.actionRepo.create({
       workspace_id: input.workspace_id,
       board_id: null,
@@ -388,6 +468,7 @@ export class ActionsService {
       // 두 컬럼은 항상 함께 쓴다 — 배열이 정본, 단일은 첫 원소 미러.
       target_agent_id: targetIds[0],
       target_agent_ids: serializeTargetAgentIds(targetIds),
+      target_runtimes: targetRuntimes,
       schedule_cron: input.schedule_cron ?? '',
       enabled: input.enabled !== false,
       high_impact: input.high_impact === true,
@@ -415,7 +496,29 @@ export class ActionsService {
     // 오면 그것이 단일 대상 배열로 해석된다. 어느 쪽이든 두 컬럼을 같이 쓴다 —
     // 배열만 갱신하고 단일 미러를 방치하면 레거시 컬럼만 읽는 코드가 지워진
     // 대상을 계속 보게 된다.
-    if (patch.target_agent_ids !== undefined || patch.target_agent_id !== undefined) {
+    // P4c-3b: target_runtimes가 오면 spec-direct가 가장 이긴다.
+    const patchSpecs = normalizeSpecTargets((patch as any).target_runtimes);
+    if (patchSpecs) {
+      const resolved = await this._resolveSpecTargets(patchSpecs, workspaceId);
+      const seen = new Set(resolved.map((r) => r.key));
+      // P4c-3b: id 배열도 함께 오면 합집합 (위 create와 동일).
+      let extraIds: string[] = [];
+      if (patch.target_agent_ids !== undefined || patch.target_agent_id !== undefined) {
+        const sentIds = patch.target_agent_ids !== undefined
+          ? normalizeTargetAgentIds(patch.target_agent_ids)
+          : normalizeTargetAgentIds([patch.target_agent_id]);
+        extraIds = sentIds.filter((id) => !seen.has(id));
+        if (extraIds.length > 0) await this._assertTargetAgentsVisible(extraIds, workspaceId);
+      }
+      const nextIds = [...resolved.map((r) => r.key), ...extraIds];
+      if (nextIds.length === 0) throw makeError(400, 'at least one target agent is required');
+      existing.target_agent_id = nextIds[0];
+      existing.target_agent_ids = serializeTargetAgentIds(nextIds);
+      existing.target_runtimes = [
+        ...resolved.map((r) => ({ ...r.spec })),
+        ...(await this._snapshotTargetRuntimes(extraIds)),
+      ];
+    } else if (patch.target_agent_ids !== undefined || patch.target_agent_id !== undefined) {
       const nextIds = patch.target_agent_ids !== undefined
         ? normalizeTargetAgentIds(patch.target_agent_ids)
         : normalizeTargetAgentIds([patch.target_agent_id]);
@@ -423,6 +526,8 @@ export class ActionsService {
       await this._assertTargetAgentsVisible(nextIds, workspaceId);
       existing.target_agent_id = nextIds[0];
       existing.target_agent_ids = serializeTargetAgentIds(nextIds);
+      // P2c dual-write.
+      existing.target_runtimes = await this._snapshotTargetRuntimes(nextIds);
     }
     if (patch.board_id !== undefined) {
       if ((patch.board_id || null) !== existing.board_id) {
@@ -466,14 +571,78 @@ export class ActionsService {
    * 실행이 사용자 의도와 다른 범위로 돌게 된다. 어느 id가 문제인지 메시지에
    * 담아 UI에서 바로 고칠 수 있게 한다.
    */
+  // P4c-4: Host/링크 해소 + workspace 가시성 (Agent 행 없음).
   private async _assertTargetAgentsVisible(agentIds: string[], workspaceId: string): Promise<void> {
     for (const agentId of agentIds) {
-      const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+      // P4c-4: rt- 슬롯 id 는 팀 member 행으로 존재·workspace를 확인한다.
+      if (isRuntimeIdentityKey(agentId)) {
+        const member = await this.dataSource.getRepository(OrchestrationTeamMember).findOne({
+          where: { agent_id: agentId },
+          select: ['workspace_id'],
+        });
+        if (!member) throw makeError(400, `target agent not found: ${agentId}`);
+        if (!agentIsVisibleInWorkspace(member.workspace_id, workspaceId)) {
+          throw makeError(400, `target agent belongs to a different workspace: ${agentId}`);
+        }
+        continue;
+      }
+      const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
       if (!agent) throw makeError(400, `target agent not found: ${agentId}`);
       if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
         throw makeError(400, `target agent belongs to a different workspace: ${agentId}`);
       }
     }
+  }
+
+  /**
+   * P4c-3b: spec-direct target 해석. 각 spec을 검증 + host 확인하고 identity
+   * key를 매겨 `{ key, spec }` 목록으로 돌려준다 (입력 순서 유지, 중복 제거).
+   */
+  private async _resolveSpecTargets(
+    specs: RuntimeSpec[],
+    workspaceId: string,
+  ): Promise<Array<{ key: string; spec: RuntimeSpec }>> {
+    const seen = new Set<string>();
+    const out: Array<{ key: string; spec: RuntimeSpec }> = [];
+    for (const spec of specs) {
+      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+      const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
+      if (!hostRow) {
+        const link = await this.dataSource.getRepository(ApiKey).findOne({
+          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
+          select: { agent_id: true, host_id: true },
+        });
+        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
+        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
+        if (!linked) throw makeError(400, `target_runtime references an unknown Runtime Host: ${spec.manager_agent_id}`);
+      }
+      const key = runtimeIdentityKey(spec);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ key, spec });
+    }
+    if (out.length === 0) throw makeError(400, 'at least one target agent is required');
+    return out;
+  }
+
+  /**
+   * P2c dual-write helper: 대상 id 목록의 runtime 스냅샷 배열 (targetIds 순서).
+   * 호출 전에 _assertTargetAgentsVisible이 통과했으므로 행은 전부 존재한다.
+   */
+  // P4c-4: uuid 타겟 스냅샷 없음 (Agent 행 없음 — 스냅샷은 spec 입력에서만 온다).
+  // rt- 타겟은 팀 member 행의 spec 스냅샷으로 채운다 — id 만으로 만든 액션도
+  // dispatch 시점에 해소돼야 한다 (옛 dual-write 와 같은 역할).
+  private async _snapshotTargetRuntimes(agentIds: string[]): Promise<Array<Record<string, any>>> {
+    const out: Array<Record<string, any>> = [];
+    for (const id of agentIds) {
+      if (!isRuntimeIdentityKey(id)) continue;
+      const member = await this.dataSource.getRepository(OrchestrationTeamMember).findOne({
+        where: { agent_id: id },
+      });
+      const spec = (member as any)?.spec;
+      if (spec && typeof spec === 'object') out.push({ ...(spec as Record<string, any>) });
+    }
+    return out;
   }
 
   async remove(id: string, workspaceId: string): Promise<void> {
@@ -822,7 +991,7 @@ export class ActionsService {
       return { shouldResume: false, comment: '' };
     }
 
-    return { shouldResume: true, comment: await this._renderBatchSummary(actionName, siblings) };
+    return { shouldResume: true, comment: await this._renderBatchSummary(actionName, siblings, run.action_id) };
   }
 
   /**
@@ -834,7 +1003,7 @@ export class ActionsService {
    * 재시도가 항상 attempt+1로 생성돼 배치·에이전트 안에서 유일하고 단조라,
    * 같은 타임스탬프가 몰려도 판정이 흔들리지 않기 때문이다.
    */
-  private async _renderBatchSummary(actionName: string, siblings: ActionRun[]): Promise<string> {
+  private async _renderBatchSummary(actionName: string, siblings: ActionRun[], actionId?: string): Promise<string> {
     const latestByAgent = new Map<string, ActionRun>();
     for (const r of siblings) {
       const key = r.agent_id || '';
@@ -842,7 +1011,7 @@ export class ActionsService {
       if (!prev || (r.attempt ?? 1) > (prev.attempt ?? 1)) latestByAgent.set(key, r);
     }
     const finals = [...latestByAgent.entries()];
-    const labels = await this._agentLabelMap(finals.map(([agentId]) => agentId));
+    const labels = await this._agentLabelMap(finals.map(([agentId]) => agentId), actionId);
 
     const okCount = finals.filter(([, r]) => r.status === 'succeeded').length;
     const total = finals.length;
@@ -873,15 +1042,48 @@ export class ActionsService {
    * `docs/runbooks/agent-display-name.md` 계약대로 bare name을 쓰지 않는다 —
    * 같은 leaf 이름이 여러 매니저 아래 정당하게 존재하므로 접두사가 없으면
    * 어느 호스트가 실행했는지 구분할 수 없고, 그게 이 티켓의 핵심 요구사항이다.
+   * P4c-4: rt- 타겟은 id 해석이 안 되므로, 아는 경우 액션의 spec 스냅샷에서
+   * `<Host>/<label>` 을 합성한다 (actionId 를 알 때만).
    */
-  private async _agentLabelMap(agentIds: string[]): Promise<Map<string, string>> {
+  private async _agentLabelMap(agentIds: string[], actionId?: string): Promise<Map<string, string>> {
     const ids = agentIds.filter(Boolean);
-    if (ids.length === 0) return new Map();
-    try {
-      return await resolveAgentDisplayNamesByIds(this.agentRepo, ids);
-    } catch {
-      return new Map();
+    const out = new Map<string, string>();
+    if (ids.length === 0) return out;
+    if (actionId) {
+      try {
+        const action = await this.actionRepo.findOne({ where: { id: actionId } });
+        const specs = Array.isArray((action as any)?.target_runtimes)
+          ? (action as any).target_runtimes as Array<Record<string, any>>
+          : [];
+        const hostIds = [...new Set(
+          specs.map((s) => s.manager_agent_id).filter((v): v is string => !!v),
+        )];
+        const hostName = new Map<string, string>();
+        if (hostIds.length > 0) {
+          const hosts = await this.hostRepo.find({ where: { id: In(hostIds) } });
+          for (const h of hosts) if (h.name) hostName.set(h.id, h.name);
+        }
+        for (const s of specs) {
+          let key: string | null = null;
+          try { key = runtimeIdentityKey(s as any); } catch { key = null; }
+          if (!key || !ids.includes(key) || out.has(key)) continue;
+          const leaf = String((s as any).label || (s as any).cli || '').trim() || key.slice(0, 8);
+          const host = (s as any).manager_agent_id
+            ? hostName.get(String((s as any).manager_agent_id))
+            : undefined;
+          out.set(key, host ? `${host}/${leaf}` : leaf);
+        }
+      } catch { /* 스냅샷 해석 실패는 아래 id 해석으로 폴백 */ }
     }
+    const rest = ids.filter((id) => !out.has(id));
+    if (rest.length > 0) {
+      try {
+        for (const [k, v] of await resolveAgentDisplayNamesByIds(this.dataSource, rest)) {
+          out.set(k, v);
+        }
+      } catch { /* id 해석 실패는 호출자의 폴백이 처리 */ }
+    }
+    return out;
   }
 
   /** Post a `note` comment on the source ticket recording a run outcome. */
@@ -1254,12 +1456,28 @@ export class ActionsService {
     // 영영 안 돌아 "한 에이전트가 실패해도 나머지는 정상 완료" 기준을 깬다.
     // 다만 **하나도 남지 않으면** 던진다 — 할 일이 없고, 승인 grant 도 아직
     // 태우지 않은 상태라 fail-fast 가 안전하다.
-    const agents: Agent[] = [];
+    // P4c-3b: rt- targets have no Agent row — synthesize a pseudo-agent from
+    // the stored target_runtimes snapshot (key equality first, tuple fallback).
+    // Missing with neither row nor snapshot stays an isolated failure (same as
+    // a deleted agent).
+    const storedSpecs = Array.isArray(action.target_runtimes) ? action.target_runtimes : [];
+    // P4c-4: 실행 대상은 저장된 spec 스냅샷에서만 해소한다 (Agent 행 없음).
+    // uuid 타겟은 스냅샷에 없으면 missing (예전 deleted-agent 취급과 동일).
+    const agents: DispatchPseudoAgent[] = [];
     const missingTargets: string[] = [];
     for (const agentId of targets) {
-      const found = await this.agentRepo.findOne({ where: { id: agentId } });
-      if (found) agents.push(found);
-      else missingTargets.push(agentId);
+      const spec = (storedSpecs as Array<Record<string, any>>).find((s) => {
+        try {
+          return runtimeIdentityKey(s as any) === agentId;
+        } catch {
+          return false;
+        }
+      });
+      if (spec) {
+        agents.push(pseudoAgentForSpec(agentId, spec, action.workspace_id));
+        continue;
+      }
+      missingTargets.push(agentId);
     }
     if (agents.length === 0) {
       throw makeError(400, `no target agent of this action exists any more: ${missingTargets.join(', ')}`);
@@ -1504,7 +1722,7 @@ export class ActionsService {
    */
   private async _dispatchOne(input: {
     action: Action;
-    agent: Agent;
+    agent: DispatchPseudoAgent;
     args: DispatchActionArgs;
     workspace: Workspace | null;
     board: Board | null;
@@ -1647,12 +1865,25 @@ export class ActionsService {
 
     // Add participants directly (bypassing addParticipants' "caller must be a
     // member" check, which doesn't apply for system-initiated rooms).
+    // P4a: action 스냅샷 배열에서 이 run 대상과 키 일치하는 것을 쓴다
+    // (Agent 행 없음).
     const joinedAt = new Date();
     const rows: ChatRoomParticipant[] = [];
+    // P4c-3b: key equality first (spec-direct saves), tuple match fallback.
+    const storedSpecs = Array.isArray(action.target_runtimes) ? action.target_runtimes : [];
+    const actionSpec = (storedSpecs as Array<Record<string, any>>).find((s) => {
+        try {
+          return runtimeIdentityKey(s as any) === agent.id;
+        } catch {
+          return false;
+        }
+      })
+      ?? null;
     rows.push(this.participantRepo.create({
       room_id: room.id,
       participant_type: 'agent',
       participant_id: agent.id,
+      runtime_spec: actionSpec ? { ...actionSpec } : null,
       last_read_at: joinedAt,
       left_at: null,
     }));

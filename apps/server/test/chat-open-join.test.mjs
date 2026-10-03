@@ -19,7 +19,8 @@ import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
 import { User } from '../dist/entities/User.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js';
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { RoomMembershipService } from '../dist/modules/chat-rooms/room-membership.service.js';
 import { RoomCrudService } from '../dist/modules/chat-rooms/room-crud.service.js';
@@ -105,7 +106,7 @@ describe('chat 방 자유 참여(open_join)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, OrchestrationMission],
+      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, RuntimeHost, ApiKey, OrchestrationMission],
       synchronize: true,
       logging: false,
     });
@@ -115,13 +116,13 @@ describe('chat 방 자유 참여(open_join)', () => {
     const partRepo = dataSource.getRepository(ChatRoomParticipant);
     const msgRepo = dataSource.getRepository(ChatRoomMessage);
     const userRepo = dataSource.getRepository(User);
-    const agentRepo = dataSource.getRepository(Agent);
+    const hostRepo = dataSource.getRepository(RuntimeHost); // P4c-4
 
     // missionRepo 는 mission 방 발화 게이트가 미션의 user_chat_mode 를 읽는 데 쓴다
     // (티켓 9cfd8161). 이 스위트의 방은 대부분 일반 방이라 그 경로를 타지 않지만,
     // 실제 저장소를 넘겨야 mission 방 케이스가 조용히 다른 코드로 새지 않는다.
-    membership = new RoomMembershipService(roomRepo, partRepo, userRepo, agentRepo, dataSource, dataSource.getRepository(OrchestrationMission));
-    crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, noopLog, membership);
+    membership = new RoomMembershipService(roomRepo, partRepo, userRepo, dataSource, dataSource.getRepository(OrchestrationMission)); // P4c-4
+    crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, dataSource, noopLog, membership); // P4c-4
 
     // 실제 membership 을 그대로 쓰되 `emitParticipantAdded` 만 실패시킬 수 있게 감싼다.
     // 프로토타입 체인을 유지해야 나머지 메서드가 실제 구현 그대로 동작한다.
@@ -150,8 +151,7 @@ describe('chat 방 자유 참여(open_join)', () => {
       roomRepo,          // roomRepo
       partRepo,          // participantRepo
       stubMessageRepo,   // messageRepo
-      agentRepo,         // agentRepo
-      empty,             // ticketRepo
+      empty,             // ticketRepo (P4c-4: agentRepo 삭제)
       empty,             // userMentionRepo
       empty,             // attachmentRepo
       // workspaceRepo — 성공 경로는 커밋 뒤 chat_workspace_folder_enabled 를 읽는다.

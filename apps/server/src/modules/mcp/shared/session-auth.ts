@@ -15,6 +15,21 @@ export function getCallerAgent(extra: { sessionId?: string }): McpAgentContext |
   return sessionStore.getAuth(extra.sessionId);
 }
 
+/**
+ * P4c-2b: does this caller hold the stored identity? Matches either the
+ * session agentId (uuid Agents AND host-uuid runtime sessions) or the
+ * session runtimeKey (rt- assignee/orchestrator ids from spec-direct
+ * orchestration). Empty stored ids never match.
+ */
+export function callerHoldsId(
+  caller: Pick<McpAgentContext, 'agentId' | 'runtimeKey'> | undefined,
+  storedId: string | null | undefined,
+): boolean {
+  const id = (storedId || '').trim();
+  if (!id) return false;
+  return caller?.agentId === id || caller?.runtimeKey === id;
+}
+
 export type { McpAgentContext };
 
 /**

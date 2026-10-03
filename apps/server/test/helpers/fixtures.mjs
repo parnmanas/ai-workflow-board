@@ -28,23 +28,27 @@ export function runtimeHostKeyForAgent(agentId) {
  * and reuses it for every agent under that host, matching how a real manager
  * fans one SSE stream out to all its managed agents.
  */
+// P4c-4: Agent 테이블 없음 — synthetic child id → host 매핑은 createAgent 가
+// 채운다. 매핑에 없는 id 면 새 Host + 키를 만들어 매핑한다.
 export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '' } = {}) {
   if (!agentId || runtimeHostKeysByAgent.has(agentId)) return runtimeHostKeysByAgent.get(agentId) ?? null;
   const ds = app.get(getDataSourceToken());
-  const agent = await ds.getRepository('Agent').findOne({ where: { id: agentId } });
-  const hostId = agent?.manager_agent_id;
-  if (!hostId) return null;
-  let key = hostKeysByHost.get(hostId);
-  if (!key) {
-    const minted = await createApiKey(app, getDataSourceToken, hostId, {
-      workspaceId,
-      label: `runtime-host-${hostId.slice(0, 8)}`,
-    });
-    key = minted.raw_key;
-    hostKeysByHost.set(hostId, key);
-  }
-  runtimeHostKeysByAgent.set(agentId, key);
-  return key;
+  const host = await ds.getRepository('RuntimeHost').save(
+    ds.getRepository('RuntimeHost').create({
+      name: `runtime-host-${agentId.slice(0, 8)}`,
+      hostname: 'fixture',
+      workspace_id: workspaceId || null,
+      is_active: 1,
+    }),
+  );
+  const minted = await createApiKey(app, getDataSourceToken, null, {
+    workspaceId,
+    label: `runtime-host-${agentId.slice(0, 8)}`,
+    hostId: host.id,
+  });
+  runtimeHostKeysByAgent.set(agentId, minted.raw_key);
+  hostKeysByHost.set(host.id, minted.raw_key);
+  return minted.raw_key;
 }
 
 // Built-in role slug list mirrored from server-side BUILTIN_ROLES — the
@@ -107,6 +111,11 @@ export async function createUser(
   return row;
 }
 
+// P4c-4: Agent 테이블 없음.
+//  - type === 'manager' → RuntimeHost 행을 만들고 그 id 를 identity 로 돌려준다.
+//  - 그 외 → DB 행 없이 synthetic identity ({id, name, ...}) 를 돌려준다.
+//    hosted 이면 전용 Host 행 + 키도 함께 만들고 매핑한다 (실행 주체는 항상
+//    Host 위에 있으므로). holder id/표시명/display-fallback 판정에 쓴다.
 export async function createAgent(
   app,
   getDataSourceToken,
@@ -114,40 +123,77 @@ export async function createAgent(
   { name = 'agent', rolePrompt, type = 'custom', hosted = true } = {},
 ) {
   const ds = app.get(getDataSourceToken());
-  const repo = ds.getRepository('Agent');
-  const runtimeHost = type !== 'manager' && hosted
-    ? await repo.save(repo.create({
-        name: `runtime-host-${name}-${stamp()}`,
-        description: 'qa Runtime Host',
-        type: 'manager',
-        is_active: 1,
-        is_online: 0,
+  const agentName = `${name}-${stamp()}`;
+  if (type === 'manager') {
+    const host = await ds.getRepository('RuntimeHost').save(
+      ds.getRepository('RuntimeHost').create({
+        name: agentName,
+        hostname: 'fixture',
         workspace_id: null,
-        role_prompt: '',
-      }))
-    : null;
-  const row = await repo.save(
-    repo.create({
-      name: `${name}-${stamp()}`,
-      description: 'qa agent',
-      type,
+        is_active: 1,
+      }),
+    );
+    const hostKey = await createApiKey(app, getDataSourceToken, null, {
+      workspaceId: workspaceId || '',
+      label: `runtime-host-${name}`,
+      hostId: host.id,
+    });
+    runtimeHostKeysByAgent.set(host.id, hostKey.raw_key);
+    hostKeysByHost.set(host.id, hostKey.raw_key);
+    traceEvent('fixture', { kind: 'agent', id: host.id, name: host.name, workspace_id: null });
+    return {
+      id: host.id,
+      name: host.name,
+      description: 'qa Runtime Host',
+      type: 'manager',
       is_active: 1,
       is_online: 0,
-      workspace_id: workspaceId,
-      role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
-      manager_agent_id: runtimeHost?.id ?? null,
-      runtime_config: runtimeHost
-        ? { strategy: 'single', permission_mode: 'strict' }
-        : null,
-    }),
-  );
-  if (runtimeHost) {
-    const hostKey = await createApiKey(app, getDataSourceToken, runtimeHost.id, {
-      workspaceId,
-      label: `runtime-host-${name}`,
-    });
-    runtimeHostKeysByAgent.set(row.id, hostKey.raw_key);
+      workspace_id: null,
+      role_prompt: rolePrompt || '',
+    };
   }
+  const id = randomUUID();
+  let managerAgentId = null;
+  if (hosted) {
+    const host = await ds.getRepository('RuntimeHost').save(
+      ds.getRepository('RuntimeHost').create({
+        name: `runtime-host-${name}-${stamp()}`,
+        hostname: 'fixture',
+        workspace_id: null,
+        is_active: 1,
+      }),
+    );
+    managerAgentId = host.id;
+    const hostKey = await createApiKey(app, getDataSourceToken, null, {
+      workspaceId: workspaceId || '',
+      label: `runtime-host-${name}`,
+      hostId: host.id,
+    });
+    runtimeHostKeysByAgent.set(id, hostKey.raw_key);
+    hostKeysByHost.set(host.id, hostKey.raw_key);
+    // P4c-4: synthetic id → Host DB 링크 (pairing 완료 상태 모델링).
+    // 없으면 resolveCallerIdentityRow 가 이 id 를 해소하지 못해 MCP 호출이
+    // 'Agent not found' 로 떨어진다.
+    await createApiKey(app, getDataSourceToken, id, {
+      workspaceId: workspaceId || '',
+      label: `link-${name}`,
+      hostId: host.id,
+    });
+  }
+  const row = {
+    id,
+    name: agentName,
+    description: 'qa agent',
+    type,
+    is_active: 1,
+    is_online: 0,
+    workspace_id: workspaceId,
+    role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
+    manager_agent_id: managerAgentId,
+    runtime_config: managerAgentId
+      ? { strategy: 'single', permission_mode: 'strict' }
+      : null,
+  };
   traceEvent('fixture', { kind: 'agent', id: row.id, name: row.name, workspace_id: workspaceId });
   return row;
 }
@@ -156,7 +202,7 @@ export async function createApiKey(
   app,
   getDataSourceToken,
   agentId,
-  { workspaceId = '', scope = 'full', label = 'key' } = {},
+  { workspaceId = '', scope = 'full', label = 'key', hostId = null } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('ApiKey');
@@ -173,6 +219,7 @@ export async function createApiKey(
       key: keyHash,
       key_prefix: keyPrefix,
       agent_id: agentId,
+      ...(hostId ? { host_id: hostId } : {}),
       scope,
       is_active: 1,
       workspace_id: workspaceId,

@@ -8,31 +8,37 @@
  * A roster slot — orchestrator or member — is declared as a **runtime spec**
  * (Runtime Host + CLI + model + working folder + folder scope, see
  * common/orchestration-member-spec.ts), not as a reference to an Agent somebody
- * created beforehand. `OrchestrationAgentProvisionerService` turns each spec
- * into the backing Agent identity that dispatch needs, so the `agent_id` /
- * `orchestrator_agent_id` columns this service writes are outputs of the edit
- * rather than inputs to it. Everything downstream of the roster (dispatch, SSE,
- * MCP report-back) is unchanged and still keyed on those ids.
+ * created beforehand. The `agent_id` / `orchestrator_agent_id` columns this
+ * service writes carry the slot's runtime identity key
+ * (`runtimeIdentityKey(spec)`, common/runtime-spec.ts) — outputs of the edit
+ * rather than inputs to it. Dispatch resolves those keys without an Agent row
+ * (tuple match, else auto-provision on first dispatch).
  *
  * Invariants enforced here rather than at the DB level (SQLite + Postgres dual
  * support means we avoid partial/functional constraints):
  *   - every slot has a valid spec whose Runtime Host / credential / profile exist
- *   - (team_id, agent_id) is unique
+ *   - P4c-4: (team_id, agent_id) is NOT unique — slots sharing one spec address
+ *     one shared worker (shared-folder collaboration). Concurrency caps are
+ *     summed per identity, and slots stay distinguishable by role_label.
  *   - a team the operator is trying to disable/delete must not have a live mission
  */
 
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Not } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository, In, Not } from 'typeorm';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
+import { Credential } from '../../entities/Credential';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
-import { MAX_PARALLEL_CEILING, MAX_OPEN_MISSIONS_CEILING, TERMINAL_MISSION_STATUSES } from './orchestration.constants';
+import { CLI_RUNTIME_NONE } from '../../common/cli-runtime-profiles';
+import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
+import { MAX_PARALLEL_CEILING, MAX_OPEN_MISSIONS_CEILING, TERMINAL_MISSION_STATUSES, type OrchestrationCaller } from './orchestration.constants';
 import { orchestrationError } from './orchestration-errors';
-import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 import { visibleScopeWhere } from '../skills/skill-scope';
 import {
   MemberFolderScope,
@@ -42,10 +48,11 @@ import {
   normalizeTeamAgentSpec,
   parseTeamAgentSpec,
 } from '../../common/orchestration-member-spec';
-import {
-  OrchestrationAgentProvisionerService,
-  RuntimeHostView,
-} from './orchestration-agent-provisioner.service';
+import { OrchestrationHostsService, RuntimeHostView } from './orchestration-hosts.service';
+import { InstanceRegistryService, type InstanceRecord } from '../agent-manager/instance-registry.service';
+import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
+import { isUuidShapedId } from '../../utils/agent-name';
+import { runtimeIdentityKey } from '../../common/runtime-spec';
 
 /**
  * A slot's runtime as the UI and the orchestrator read it back: the stored spec
@@ -119,22 +126,29 @@ export class OrchestrationTeamService {
     @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
     @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
     @InjectRepository(OrchestrationMission) private readonly missionRepo: Repository<OrchestrationMission>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
-    private readonly provisioner: OrchestrationAgentProvisionerService,
+    private readonly hosts: OrchestrationHostsService,
     private readonly logService: LogService,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    // @Global 이라 import edge 불필요 (host-models.service 와 같은 패턴).
+    private readonly registry?: InstanceRegistryService,
+    // restart_agent 발사용. AgentManagerModule 을 import 중이라 해결된다.
+    // 테스트 직접 인스턴스화 대비 optional — 호출부에서 null-guard 한다.
+    private readonly commands?: AgentManagerCommandService,
   ) {}
 
   /** Runtime Hosts + their CLI / model / working-folder candidates (team editor). */
   listRuntimeHosts(workspaceId: string): Promise<RuntimeHostView[]> {
     if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
-    return this.provisioner.listRuntimeHosts(workspaceId);
+    return this.hosts.listRuntimeHosts(workspaceId);
   }
 
   /** Re-enumerate one host's per-CLI model lists (slot editor's model dropdown). */
   refreshRuntimeHostModels(managerAgentId: string, workspaceId: string): Promise<RuntimeHostView | null> {
     if (!workspaceId) throw orchestrationError(400, 'workspace_id is required');
-    return this.provisioner.refreshHostModels(managerAgentId, workspaceId);
+    return this.hosts.refreshHostModels(managerAgentId, workspaceId);
   }
 
   /**
@@ -177,47 +191,100 @@ export class OrchestrationTeamService {
     }
   }
 
-  // ── Slot provisioning ─────────────────────────────────────────────────────
+  // ── Slot identity ─────────────────────────────────────────────────────────
 
   /**
-   * Provision (or re-provision) the backing Agent identity for one roster slot.
+   * Resolve one roster slot's spec to its runtime identity key
+   * (`runtimeIdentityKey`, common/runtime-spec.ts). No Agent row is created —
+   * dispatch resolves the key without one (registry tuple match, else
+   * auto-provision on first dispatch).
    *
    * `teamWorkspaceId` must be the TEAM's own workspace_id, never the editing
    * caller's — they differ for a global team (the team is workspace-less while
-   * the editor acts from the owning workspace) and the identity has to be
-   * stamped with the team's scope. Getting this backwards is how a global team
-   * would end up holding a workspace-scoped worker, which `dispatchStep`'s
-   * defensive re-check would then refuse at run time (ticket 1b62b437).
+   * the editor acts from the owning workspace) and the credential-visibility
+   * rule below is scoped to the team's scope.
    *
-   * Note what is NOT validated here any more: the old roster gate rejected
-   * manager identities and cross-workspace agents because the operator picked
-   * the agent by hand. A spec cannot express either mistake — the Runtime Host
-   * is a separate field from the worker, and the provisioner stamps the
-   * workspace itself — so the check moved from "reject bad input" to "construct
-   * only valid identities".
+   * Fails fast on bad references (unknown host / credential / profile) for the
+   * same reason the old provisioner did: a silently-ignored typo surfaces much
+   * later as a mysterious spawn failure on somebody else's machine.
    */
-  private async provisionSlot(args: {
-    spec: TeamAgentSpec;
-    teamWorkspaceId: string | null;
-    teamName: string;
-    label: string;
-    currentAgentId: string | null;
-  }): Promise<Agent> {
-    const result = await this.provisioner.provisionSlot({
-      spec: args.spec,
-      workspaceId: args.teamWorkspaceId,
-      teamName: args.teamName,
-      label: args.label,
-      currentAgentId: args.currentAgentId,
-    });
-    if (result.manager_notice) {
-      this.logService.info(
-        'Orchestration',
-        `roster slot "${args.label}" of team "${args.teamName}": ${result.manager_notice}`,
-        { workspace_id: args.teamWorkspaceId ?? undefined },
-      );
+  private async resolveSlotAgentId(spec: TeamAgentSpec, teamWorkspaceId: string | null): Promise<string> {
+    // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 행 없음).
+    const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
+    if (!host) {
+      const link = await this.dataSource.getRepository(ApiKey).findOne({
+        where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
+        select: { agent_id: true, host_id: true },
+      });
+      const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
+      const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
+      if (!linked) throw orchestrationError(400, `Runtime Host ${spec.manager_agent_id} does not exist`);
     }
-    return result.agent;
+    if (spec.credential_id) {
+      const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id } });
+      if (!cred || (cred.workspace_id !== null && cred.workspace_id !== teamWorkspaceId)) {
+        throw orchestrationError(400, `credential ${spec.credential_id} is not available to this team`);
+      }
+    }
+    if (spec.cli_runtime_profile && spec.cli_runtime_profile !== CLI_RUNTIME_NONE) {
+      const profiles = await globalRuntimeProfiles(this.dataSource);
+      if (!profiles.some((p) => p.id === spec.cli_runtime_profile)) {
+        throw orchestrationError(400, `cli_runtime_profile "${spec.cli_runtime_profile}" does not exist`);
+      }
+    }
+    return runtimeIdentityKey(spec);
+  }
+
+  // ── Manager notification ──────────────────────────────────────────────────
+
+  /**
+   * Re-sync a live Runtime Host after a slot runtime edit (the P4c-4 port of
+   * the old provisioner's `notifyRuntimeChanged`).
+   *
+   * `restart_agent`, not `set_working_dir`: the manager caches the whole launch
+   * context (cli, model, working_dir, runtime_config, cli-home) when it first
+   * spawns an identity, so a single-field command leaves an edited CLI or model
+   * stale indefinitely. `restart_agent` reaps the identity's live sessions and
+   * re-reads the canonical spec, which is the only command that makes every
+   * edited field take effect.
+   *
+   * Notified with the PREVIOUS identity key: a cli/dir/credential edit mints a
+   * new key whose sessions don't exist yet, while the replaced key's sessions
+   * keep running on the old launch context. Best-effort (offline → skip): the
+   * dispatch path auto-spawns on next use, so an unreachable host must not fail
+   * the edit.
+   */
+  private async notifySlotRuntimeChanged(
+    before: TeamAgentSpec | null,
+    previousAgentId: string | null,
+    merged: TeamAgentSpec,
+    teamWorkspaceId: string | null,
+  ): Promise<void> {
+    if (!this.commands) return;
+    if (!previousAgentId) return;
+    if (!hostVisibleFieldsChanged(before, merged)) return;
+    // Rehost 면 묵은 세션이 있는 쪽(이전 host)에, 아니면 슬롯의 host 에.
+    const hostId = before?.manager_agent_id || merged.manager_agent_id;
+    if (!hostId) return;
+    let inst: InstanceRecord | null = null;
+    try {
+      inst = this.commands.resolveLiveManagerInstance(hostId);
+    } catch {
+      inst = null;
+    }
+    if (!inst) return;
+    try {
+      await this.commands.issue(
+        inst,
+        'restart_agent',
+        { agent_id: previousAgentId, workspace_id: teamWorkspaceId ?? undefined },
+        'system:orchestration-roster',
+      );
+    } catch (e: any) {
+      this.logService.warn('Orchestration',
+        `restart_agent dispatch failed for ${String(previousAgentId).slice(0, 11)}`,
+        { workspace_id: teamWorkspaceId ?? undefined, error: e?.message });
+    }
   }
 
   // ── Reads ─────────────────────────────────────────────────────────────────
@@ -241,11 +308,12 @@ export class OrchestrationTeamService {
    * `requireWorkspaceAgent`), so scoping by the caller's own workspace would
    * hide teams they legitimately belong to.
    */
-  async listTeamsForAgent(agentId: string): Promise<TeamView[]> {
-    if (!agentId) return [];
+  async listTeamsForAgent(caller: OrchestrationCaller): Promise<TeamView[]> {
+    const ids = [caller.agentId, caller.runtimeKey].filter((v): v is string => !!v);
+    if (ids.length === 0) return [];
     const [orchTeams, memberRows] = await Promise.all([
-      this.teamRepo.find({ where: { orchestrator_agent_id: agentId }, select: ['id'] }),
-      this.memberRepo.find({ where: { agent_id: agentId }, select: ['team_id'] }),
+      this.teamRepo.find({ where: { orchestrator_agent_id: In(ids) }, select: ['id'] }),
+      this.memberRepo.find({ where: { agent_id: In(ids) }, select: ['team_id'] }),
     ]);
     const teamIds = Array.from(new Set<string>([...orchTeams.map((t) => t.id), ...memberRows.map((m) => m.team_id)]));
     if (teamIds.length === 0) return [];
@@ -308,16 +376,16 @@ export class OrchestrationTeamService {
     return team;
   }
 
-  /** Members of a team, ordered, with the agent row joined in. */
-  async listMembers(teamId: string): Promise<Array<OrchestrationTeamMember & { agent: Agent | null }>> {
+  /** Members of a team, ordered, with the agent row joined in (null for rt- slots). */
+  // P4c-4: agent 자리는 항상 null (Agent 테이블 없음 — 호출자는 spec 으로 해소).
+  async listMembers(teamId: string): Promise<Array<OrchestrationTeamMember & { agent: null }>> {
     const members = await this.memberRepo.find({
       where: { team_id: teamId },
       order: { position: 'ASC', created_at: 'ASC' },
     });
     if (members.length === 0) return [];
-    const agents = await this.agentRepo.find({ where: { id: In(members.map((m) => m.agent_id)) } });
-    const byId = new Map(agents.map((a) => [a.id, a]));
-    return members.map((m) => Object.assign(m, { agent: byId.get(m.agent_id) ?? null }));
+    // P4c-4: Agent 행 없음 — agent 자리는 항상 null (호출자는 spec/display 로 해소).
+    return members.map((m) => Object.assign(m, { agent: null }));
   }
 
   private async projectTeams(teams: OrchestrationTeam[]): Promise<TeamView[]> {
@@ -329,15 +397,9 @@ export class OrchestrationTeamService {
     const agentIds = new Set<string>();
     for (const m of members) agentIds.add(m.agent_id);
     for (const t of teams) if (t.orchestrator_agent_id) agentIds.add(t.orchestrator_agent_id);
-    const agents = agentIds.size
-      ? await this.agentRepo.find({ where: { id: In(Array.from(agentIds)) } })
-      : [];
-    const byId = new Map(agents.map((a) => [a.id, a]));
-    // Agent identity is ALWAYS `<Manager>/<Agent>` on every surface — see
-    // utils/agent-name.ts. Resolving here (once, batched) means the whole
-    // orchestration UI + the orchestrator's own prompt roster read the same
-    // name the AI Agents listing shows.
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: Agent 행 없음 (displayById 가 Host/링크 이름으로 해소한다).
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, Array.from(agentIds));
 
     // One grouped count instead of a per-team query.
     const liveMissions = await this.missionRepo.find({
@@ -356,29 +418,80 @@ export class OrchestrationTeamService {
     };
     for (const m of members) collectHost(parseTeamAgentSpec(m.spec));
     for (const t of teams) collectHost(parseTeamAgentSpec(t.orchestrator_spec));
-    const hosts = hostIds.size
-      ? await this.agentRepo.find({
-          where: { id: In(Array.from(hostIds)) },
-          select: { id: true, name: true, is_online: true } as any,
-        })
+    // P4c-4: Host 행 + api_keys 링크 이름으로 해소한다 (Agent 테이블 없음).
+    const hostIdList = Array.from(hostIds);
+    const hostRows = hostIdList.length
+      ? await this.hostRepo.find({
+        where: { id: In(hostIdList) },
+        select: { id: true, name: true } as any,
+      })
       : [];
-    const hostById = new Map(hosts.map((h) => [h.id, h]));
+    // 링크된 manager uuid → Host 이름 (dual-write 시절 spec 호환).
+    const missingHostIds = hostIdList.filter((id) => !hostRows.some((h) => h.id === id));
+    if (missingHostIds.length > 0) {
+      const links = await this.dataSource.getRepository(ApiKey).find({
+        where: { agent_id: In(missingHostIds) },
+        select: { agent_id: true, host_id: true } as any,
+      });
+      const linkedIds = [...new Set(links.map((l) => l.host_id).filter((x): x is string => !!x))];
+      if (linkedIds.length > 0) {
+        const linkedHosts = await this.hostRepo.find({
+          where: { id: In(linkedIds) },
+          select: { id: true, name: true } as any,
+        });
+        const nameByHost = new Map(linkedHosts.map((h) => [h.id, h.name]));
+        for (const l of links) {
+          const n = l.host_id ? nameByHost.get(l.host_id) : undefined;
+          if (l.agent_id && n) hostRows.push({ id: l.agent_id, name: n } as any);
+        }
+      }
+    }
+    const hostById = new Map<string, { id: string; name: string; is_online?: number }>();
+    for (const h of hostRows) hostById.set(h.id, { id: h.id, name: h.name });
+    // Host 행에는 presence 컬럼이 없다 — 레지스트리 heartbeat 로 보정한다.
+    if (this.registry) {
+      for (const rec of this.registry.list()) {
+        if (rec.mode !== 'manager') continue;
+        for (const id of [rec.agent_id, rec.host_id].filter((v): v is string => !!v)) {
+          const e = hostById.get(id);
+          if (e && e.is_online !== 1) e.is_online = 1;
+        }
+      }
+    }
 
     return teams.map((t) => {
-      const orch = t.orchestrator_agent_id ? byId.get(t.orchestrator_agent_id) ?? null : null;
-      const orchName = orch ? displayById.get(orch.id) ?? orch.name : '';
+      // P4c-4: Agent 행 없음 — 슬롯 표시는 `<Host>/<leaf>` 로 합성한다.
+      // displayById 는 linked uuid 를 Host bare name 으로만 해소하고 rt- 키는
+      // 모른다. spec 의 host + role_label/cli leaf 가 둘 다 있으면 합성해야
+      // 서로 다른 호스트의 동일 스펙 슬롯이 구분된다 (runbook agent-display-name).
+      const orchSpec = parseTeamAgentSpec(t.orchestrator_spec);
+      const orchHost = orchSpec ? hostById.get(orchSpec.manager_agent_id) ?? null : null;
+      const orchResolved = t.orchestrator_agent_id ? displayById.get(t.orchestrator_agent_id) : undefined;
+      const orchHostPart = orchHost?.name
+        ?? (orchResolved && !orchResolved.includes('/') ? orchResolved : undefined);
+      const orchLeaf = orchSpec?.cli ?? '';
+      const orchName = orchHostPart && orchLeaf
+        ? `${orchHostPart}/${orchLeaf}`
+        : (orchResolved ?? (t.orchestrator_agent_id ? orchLeaf || t.orchestrator_agent_id.slice(0, 8) : orchLeaf));
       const teamMembers = members.filter((m) => m.team_id === t.id);
 
       // All slots on this team, so each one can report who it shares a folder
       // with. Built per team (not globally) because sharing a tree only means
       // anything between agents the same orchestrator drives.
+      const slotName = (agentId: string, spec: TeamAgentSpec | null, leaf: string, fallback: string): string => {
+        const host = spec ? hostById.get(spec.manager_agent_id) ?? null : null;
+        const resolved = displayById.get(agentId);
+        const hostPart = host?.name
+          ?? (resolved && !resolved.includes('/') ? resolved : undefined);
+        return hostPart && leaf ? `${hostPart}/${leaf}` : (resolved ?? leaf ?? fallback);
+      };
       const slots: Array<{ name: string; spec: TeamAgentSpec | null }> = [
         { name: orchName || 'orchestrator', spec: parseTeamAgentSpec(t.orchestrator_spec) },
         ...teamMembers.map((m) => {
-          const a = byId.get(m.agent_id) ?? null;
+          const mSpec = parseTeamAgentSpec(m.spec);
           return {
-            name: a ? displayById.get(a.id) ?? a.name : m.role_label || '(unnamed slot)',
-            spec: parseTeamAgentSpec(m.spec),
+            name: slotName(m.agent_id, mSpec, m.role_label || mSpec?.cli || '', '(deleted agent)'),
+            spec: mSpec,
           };
         }),
       ];
@@ -418,21 +531,24 @@ export class OrchestrationTeamService {
         description: t.description,
         orchestrator_agent_id: t.orchestrator_agent_id,
         orchestrator_name: orchName,
-        orchestrator_online: !!orch?.is_online,
+        // P4c-4: Host presence 로 판정 (Agent 행 없음).
+        orchestrator_online: !!hostById.get(parseTeamAgentSpec(t.orchestrator_spec)?.manager_agent_id ?? '')?.is_online,
         orchestrator_runtime: runtimeFor(parseTeamAgentSpec(t.orchestrator_spec), orchName || 'orchestrator'),
         orchestrator_prompt: t.orchestrator_prompt,
         max_parallel_steps: t.max_parallel_steps,
         max_open_missions: t.max_open_missions,
         enabled: t.enabled !== 0,
         members: teamMembers.map((m) => {
-          const a = byId.get(m.agent_id) ?? null;
-          const name = a ? displayById.get(a.id) ?? a.name : '(deleted agent)';
+          // P4c-4: Agent 행 없음 — 이름은 위 slots 와 같은 합성 (Host/링크 + spec leaf).
+          const mSpec = parseTeamAgentSpec(m.spec);
+          const mHost = mSpec ? hostById.get(mSpec.manager_agent_id) ?? null : null;
+          const name = slotName(m.agent_id, mSpec, m.role_label || mSpec?.cli || '', '(deleted agent)');
           return {
             id: m.id,
             agent_id: m.agent_id,
             agent_name: name,
-            agent_type: a?.type ?? '',
-            is_online: !!a?.is_online,
+            agent_type: mSpec?.cli ?? '',
+            is_online: !!mHost?.is_online,
             role_label: m.role_label,
             capabilities: m.capabilities,
             max_concurrent: m.max_concurrent,
@@ -486,17 +602,11 @@ export class OrchestrationTeamService {
     const allowedWorkspaceIds = isGlobal ? normalizeWorkspaceIds(input.allowed_workspace_ids) : null;
     await this.assertWorkspacesExist(allowedWorkspaceIds);
 
-    // Provision the orchestrator identity BEFORE inserting the team: a team row
+    // Resolve the orchestrator identity BEFORE inserting the team: a team row
     // with no orchestrator cannot run a mission, so a half-applied create must
     // leave nothing behind rather than an unusable team the operator has to
     // notice and clean up.
-    const orchestrator = await this.provisionSlot({
-      spec: orchestratorSpec,
-      teamWorkspaceId,
-      teamName: name,
-      label: 'orchestrator',
-      currentAgentId: null,
-    });
+    const orchestratorAgentId = await this.resolveSlotAgentId(orchestratorSpec, teamWorkspaceId);
 
     const team = await this.teamRepo.save(
       this.teamRepo.create({
@@ -505,7 +615,7 @@ export class OrchestrationTeamService {
         allowed_workspace_ids: allowedWorkspaceIds,
         name,
         description: (input.description || '').trim(),
-        orchestrator_agent_id: orchestrator.id,
+        orchestrator_agent_id: orchestratorAgentId,
         orchestrator_spec: orchestratorSpec as unknown as Record<string, any>,
         orchestrator_prompt: (input.orchestrator_prompt || '').trim(),
         max_parallel_steps: clampParallel(input.max_parallel_steps),
@@ -517,7 +627,7 @@ export class OrchestrationTeamService {
     this.logService.info('Orchestration', `team created ${team.id} (${team.name})`, {
       workspace_id: teamWorkspaceId,
       owner_workspace_id: callerWorkspaceId,
-      orchestrator_agent_id: orchestrator.id,
+      orchestrator_agent_id: orchestratorAgentId,
     });
     return this.getTeam(team.id, callerWorkspaceId);
   }
@@ -540,6 +650,7 @@ export class OrchestrationTeamService {
   ): Promise<TeamView> {
     const team = await this.requireTeam(teamId, workspaceId);
     this.assertTeamWritable(team, workspaceId);
+    let orchRuntimeEdited: { before: TeamAgentSpec | null; previousAgentId: string | null; merged?: TeamAgentSpec } | null = null;
 
     if (patch.name !== undefined) {
       const name = String(patch.name).trim();
@@ -555,23 +666,16 @@ export class OrchestrationTeamService {
       // 팀은 이 둘이 다르다(team.workspace_id는 null인데 workspaceId는 편집 중인
       // 소유 workspace다), 그리고 로스터 규칙은 편집자가 아니라 팀의 스코프에
       // 관한 것이다.
-      const merged = this.mergeSpecInput(parseTeamAgentSpec(team.orchestrator_spec), patch.orchestrator, 'orchestrator');
-      const previousAgentId = team.orchestrator_agent_id;
-      const agent = await this.provisionSlot({
-        spec: merged,
-        teamWorkspaceId: team.workspace_id,
-        teamName: team.name,
-        label: 'orchestrator',
-        currentAgentId: previousAgentId,
-      });
-      team.orchestrator_agent_id = agent.id;
+      orchRuntimeEdited = {
+        before: parseTeamAgentSpec(team.orchestrator_spec),
+        previousAgentId: team.orchestrator_agent_id,
+      };
+      const merged = this.mergeSpecInput(orchRuntimeEdited.before, patch.orchestrator, 'orchestrator');
+      // P4c-2b: 구 Agent 행은 정리하지 않는다 — 미션 이력이 참조할 수 있어
+      // 남겨둔다 (P4c-4에서 무참조 행을 일괄 정리).
+      team.orchestrator_agent_id = await this.resolveSlotAgentId(merged, team.workspace_id);
       team.orchestrator_spec = merged as unknown as Record<string, any>;
-      // Retire a replaced identity only after the team row points at the new
-      // one, so a failure between the two leaves a team that still dispatches.
-      if (previousAgentId && previousAgentId !== agent.id) {
-        await this.teamRepo.save(team);
-        await this.provisioner.releaseIdentity(previousAgentId);
-      }
+      orchRuntimeEdited.merged = merged;
     }
     if (patch.enabled !== undefined) team.enabled = patch.enabled ? 1 : 0;
     // 글로벌 팀에만 적용 — 이 파일의 다른 is_global 게이팅 규칙(requireWorkspaceAgent,
@@ -585,6 +689,10 @@ export class OrchestrationTeamService {
     }
 
     await this.teamRepo.save(team);
+    if (orchRuntimeEdited?.merged) {
+      await this.notifySlotRuntimeChanged(
+        orchRuntimeEdited.before, orchRuntimeEdited.previousAgentId, orchRuntimeEdited.merged, team.workspace_id);
+    }
     return this.getTeam(team.id, workspaceId);
   }
 
@@ -600,14 +708,10 @@ export class OrchestrationTeamService {
         `team has ${live} mission(s) still running — cancel or finish them before deleting the team`,
       );
     }
-    const members = await this.memberRepo.find({ where: { team_id: team.id }, select: { id: true, agent_id: true } as any });
     await this.memberRepo.delete({ team_id: team.id });
     await this.teamRepo.delete({ id: team.id });
-    // Rows are gone, so `releaseIdentity` sees zero references and can delete
-    // any identity this team owned. Identities the operator authored are left
-    // alone by the provisioner's origin check.
-    for (const m of members) await this.provisioner.releaseIdentity(m.agent_id);
-    await this.provisioner.releaseIdentity(team.orchestrator_agent_id);
+    // P4c-2b: Agent 행을 정리하지 않는다 — runtime identity는 행이 없고, 구
+    // provisioned 행은 미션 이력이 참조할 수 있다 (P4c-4에서 일괄 정리).
     this.logService.info('Orchestration', `team deleted ${team.id}`, { workspace_id: workspaceId });
   }
 
@@ -618,19 +722,16 @@ export class OrchestrationTeamService {
       /** Runtime spec for the new slot — Runtime Host / CLI / model / working folder. */
       runtime?: unknown;
       /**
-       * Put the ORCHESTRATOR on the roster as an executing member, reusing its
-       * identity and runtime instead of provisioning a new one. `runtime` is
-       * ignored when this is set.
+       * Put the ORCHESTRATOR on the roster as an executing member. `runtime`
+       * is ignored when this is set; the row takes the orchestrator's current
+       * identity and spec.
        *
-       * This exists because a slot now MINTS an identity, so "add the
-       * orchestrator as a member too" — a supported pattern, and the shape of a
-       * rollup mission where the planner also does a step — stopped being
-       * expressible: sending the orchestrator's own spec would produce a second,
-       * separate worker with the same configuration rather than the orchestrator
-       * itself. It is a flag rather than an identity-reuse rule ("same spec ⇒
-       * same worker") on purpose: that rule would also collapse the two members
-       * who deliberately share one working folder into a single worker, which is
-       * the exact case this feature exists to support.
+       * P4c-4: identical specs already address one shared worker, so this is
+       * the same identity the orchestrator's spec would resolve to anyway. The
+       * flag remains the explicit marker for "the orchestrator working as a
+       * member", and the updateMember guard still rejects runtime edits on
+       * such a row so the orchestrator keeps exactly one editing surface
+       * (updateTeam) instead of silently forking on the roster.
        */
       as_orchestrator?: boolean;
       role_label?: string;
@@ -642,49 +743,29 @@ export class OrchestrationTeamService {
     this.assertTeamWritable(team, workspaceId);
 
     let spec: TeamAgentSpec | null;
-    let agent: Agent;
+    let agentId: string;
     if (input.as_orchestrator) {
       if (!team.orchestrator_agent_id) {
         throw orchestrationError(400, `team "${team.name}" has no orchestrator to put on the roster`);
       }
-      const orchestrator = await this.agentRepo.findOne({ where: { id: team.orchestrator_agent_id } });
-      if (!orchestrator) throw orchestrationError(404, "this team's orchestrator agent no longer exists");
-      agent = orchestrator;
+      agentId = team.orchestrator_agent_id;
       spec = parseTeamAgentSpec(team.orchestrator_spec);
     } else {
       spec = this.parseSpecInput(input.runtime, 'runtime');
       // 편집 호출자가 아니라 팀 자신의 workspace를 기준으로 스코핑한다 — updateTeam의
       // orchestrator 교체 분기와 같은 이유.
-      agent = await this.provisionSlot({
-        spec,
-        teamWorkspaceId: team.workspace_id,
-        teamName: team.name,
-        label: (input.role_label || '').trim() || spec.cli,
-        currentAgentId: null,
-      });
+      agentId = await this.resolveSlotAgentId(spec, team.workspace_id);
     }
 
-    // Belt-and-braces: a team-owned identity is minted fresh per slot so it
-    // cannot already be on the roster, but a slot re-provisioned onto an
-    // operator-authored agent still could be, and `(team_id, agent_id)` has to
-    // stay unique for the concurrency accounting in `dispatchReadySteps`.
-    const existing = await this.memberRepo.findOne({ where: { team_id: team.id, agent_id: agent.id } });
-    if (existing) {
-      // Only release an identity we just minted. The `as_orchestrator` path
-      // adopted an existing one — deleting it would take the team's
-      // orchestrator with it. (`releaseIdentity` would refuse anyway, since the
-      // team row still references it, but not relying on that keeps the
-      // intent local.)
-      if (!input.as_orchestrator) await this.provisioner.releaseIdentity(agent.id);
-      throw orchestrationError(409, `${agent.name} is already a member of this team`);
-    }
-
+    // P4c-3b: 같은 runtime identity를 두 슬롯이 공유할 수 있다 (shared 폴더
+    // 협업). agent_id 중복을 거부하지 않는다 — 동시성 상한은 identity 단위로
+    // 합쳐서 본다 (runner capByAgent). 이름 충돌은 role_label이 구분한다.
     const count = await this.memberRepo.count({ where: { team_id: team.id } });
     await this.memberRepo.save(
       this.memberRepo.create({
         team_id: team.id,
         workspace_id: team.workspace_id,
-        agent_id: agent.id,
+        agent_id: agentId,
         spec: (spec as unknown as Record<string, any>) ?? null,
         role_label: (input.role_label || '').trim(),
         capabilities: (input.capabilities || '').trim(),
@@ -720,7 +801,6 @@ export class OrchestrationTeamService {
       member.position = Math.max(0, Math.floor(Number(patch.position)));
     }
 
-    let replacedAgentId: string | null = null;
     if (patch.runtime !== undefined && member.agent_id === team.orchestrator_agent_id) {
       // This row is the orchestrator sitting on its own roster (`as_orchestrator`).
       // Re-provisioning from here would silently split it into a second worker
@@ -732,32 +812,21 @@ export class OrchestrationTeamService {
       );
     }
     if (patch.runtime !== undefined) {
-      const merged = this.mergeSpecInput(parseTeamAgentSpec(member.spec), patch.runtime, 'runtime');
-      const agent = await this.provisionSlot({
-        spec: merged,
-        teamWorkspaceId: team.workspace_id,
-        teamName: team.name,
-        label: member.role_label || merged.cli,
-        currentAgentId: member.agent_id,
-      });
-      if (agent.id !== member.agent_id) {
-        // Re-provisioning onto a different identity (host change, or a spec edit
-        // on a back-filled operator-owned agent we must not mutate). Guard the
-        // roster's `(team_id, agent_id)` uniqueness before committing.
-        const clash = await this.memberRepo.findOne({ where: { team_id: team.id, agent_id: agent.id } });
-        if (clash) {
-          await this.provisioner.releaseIdentity(agent.id, { excludeMemberIds: [member.id] });
-          throw orchestrationError(409, `${agent.name} is already a member of this team`);
-        }
-        replacedAgentId = member.agent_id;
-        member.agent_id = agent.id;
-      }
+      const before = parseTeamAgentSpec(member.spec);
+      const previousAgentId = member.agent_id;
+      const merged = this.mergeSpecInput(before, patch.runtime, 'runtime');
+      // P4c-3b: identity가 바뀌어도 중복 검사는 하지 않는다 (addMember와 동일 이유).
+      member.agent_id = await this.resolveSlotAgentId(merged, team.workspace_id);
       member.spec = merged as unknown as Record<string, any>;
+      await this.memberRepo.save(member);
+      // 슬롯이 가리키던 worker(교체 전 키)의 살아있는 세션을 새 스펙으로
+      // 갈아태운다. cli/dir 가 바뀌면 키도 바뀌어 새 worker 는 깨끗이 뜨지만,
+      // 묵은 키의 세션은 예전 launch context 로 계속 돌기 때문이다.
+      await this.notifySlotRuntimeChanged(before, previousAgentId, merged, team.workspace_id);
+      return this.getTeam(team.id, workspaceId);
     }
 
     await this.memberRepo.save(member);
-    // Only after the row points at the new identity — see updateTeam.
-    if (replacedAgentId) await this.provisioner.releaseIdentity(replacedAgentId);
     return this.getTeam(team.id, workspaceId);
   }
 
@@ -767,7 +836,7 @@ export class OrchestrationTeamService {
     const member = await this.memberRepo.findOne({ where: { id: memberId, team_id: team.id } });
     if (!member) throw orchestrationError(404, 'team member not found');
     await this.memberRepo.delete({ id: member.id });
-    await this.provisioner.releaseIdentity(member.agent_id);
+    // P4c-2b: Agent 행을 정리하지 않는다 (deleteTeam과 동일).
     return this.getTeam(team.id, workspaceId);
   }
 
@@ -783,6 +852,25 @@ function clampConcurrent(value: any): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return 1;
   return Math.min(MAX_PARALLEL_CEILING, Math.max(1, Math.floor(n)));
+}
+
+/**
+ * The spawn-relevant slice of a slot spec (old provisioner's
+ * `spawnRelevantFields`, ported from the Agent row to the spec): cli, model,
+ * working_dir, credential, cli_runtime_profile, runtime_config. folder_scope
+ * is deliberately excluded — it changes where a STEP runs (a per-dispatch
+ * decision), not how the identity is spawned.
+ */
+function hostVisibleFieldsChanged(before: TeamAgentSpec | null, merged: TeamAgentSpec): boolean {
+  const pick = (s: TeamAgentSpec | null) => [
+    s?.cli ?? '',
+    s?.model ?? '',
+    s?.working_dir ?? '',
+    s?.credential_id ?? '',
+    s?.cli_runtime_profile ?? '',
+    JSON.stringify(s?.runtime_config ?? null),
+  ].join('\u0000');
+  return pick(before) !== pick(merged);
 }
 
 /** 하한은 1이 아니라 0이다 — OrchestrationTeam.max_open_missions 참고: 0은 "에이전트가

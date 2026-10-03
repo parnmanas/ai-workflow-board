@@ -52,9 +52,9 @@ import { Credential } from '../../entities/Credential';
 import { Resource } from '../../entities/Resource';
 import { Ticket } from '../../entities/Ticket';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { Workspace } from '../../entities/Workspace';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
-import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
 import { sinceBoundaryParam } from '../../common/created-at-since-param';
 import { ActivityService } from '../../services/activity.service';
@@ -490,10 +490,14 @@ export class ClaimVerificationService implements OnModuleInit, OnModuleDestroy {
     // segment in the UI so a missing name just shows the slug.
     try {
       if ((assignment as any).agent_id) {
-        const agent = await this.dataSource.getRepository(Agent).findOne({
-          where: { id: (assignment as any).agent_id },
-        });
+        // P4c-4: Host/링크 이름으로 해소한다 (Agent 행 없음).
+        const agent = await resolveCallerIdentityRow(this.dataSource, (assignment as any).agent_id);
         if (agent?.name) return agent.name;
+      }
+      // P4c-4: spec-direct holder — 스냅샷 라벨.
+      const spec = (assignment as any).runtime_spec as any;
+      if (spec && typeof spec.label === 'string' && spec.label.trim()) {
+        return spec.label.trim();
       }
       if ((assignment as any).user_id) {
         const user = await this.dataSource.getRepository(User).findOne({

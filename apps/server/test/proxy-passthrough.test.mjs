@@ -70,27 +70,16 @@ test('SSE stream delivers role_prompt and ticket_prompt at top level for agent_t
   };
   t.after(closeApp);
 
-  // ─── Runtime Host + managed Agent ──────────────────────────
+  // ─── Runtime Host ──────────────────────────────────────────
+  // P4c-4: single-recipient 이벤트는 scope.agent_id === 연결 identity 에게만
+  // 배달된다 (managed fan-out 집합 제거). 트리거는 Host identity 로 주소가
+  // 지정된 형태가 유일한 배달 가능 형태다.
   const ws = await createWorkspace(app, getDataSourceToken, 'runtime-host-passthrough');
   const runtimeHost = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host',
     type: 'manager',
   });
-  const agent = await createAgent(app, getDataSourceToken, ws.id, {
-    name: 'managed-agent',
-    type: 'hermes',
-  });
-  const dataSource = app.get(getDataSourceToken());
-  await dataSource.getRepository('Agent').update(
-    { id: agent.id },
-    {
-      manager_agent_id: runtimeHost.id,
-      runtime_config: {
-        strategy: 'single',
-        permission_mode: 'approve',
-      },
-    },
-  );
+  const agent = runtimeHost;
   const apiKey = await createApiKey(app, getDataSourceToken, runtimeHost.id, {
     workspaceId: ws.id,
     label: 'runtime-host',

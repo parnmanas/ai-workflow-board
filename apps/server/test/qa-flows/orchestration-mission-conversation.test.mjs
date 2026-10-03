@@ -585,7 +585,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
 
   // ── 6. step room 은 사람 참여 대상이 아니다 ───────────────────────────────
   step('step 방에는 사람이 참여자로 들어가지 않는다');
-  await runner.submitPlan(created.id, lead.id, {
+  await runner.submitPlan(created.id, { agentId: lead.id }, { // P4c-4: OrchestrationCaller 객체
     summary: 'one step',
     steps: [
       {

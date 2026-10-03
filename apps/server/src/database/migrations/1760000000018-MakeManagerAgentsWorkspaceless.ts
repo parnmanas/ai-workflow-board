@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 
 /**
  * Backfill: make every existing `type='manager'` Agent row workspace-less.
@@ -29,7 +28,9 @@ export class MakeManagerAgentsWorkspaceless1760000000018 implements MigrationInt
   name = 'MakeManagerAgentsWorkspaceless1760000000018';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    const agentRepo = queryRunner.manager.getRepository(Agent);
+    // P4c-4: agents 테이블 없음 — 대상 자체가 존재하지 않는다.
+    if (!(await queryRunner.hasTable('agents'))) return;
+    const agentRepo = queryRunner.manager.getRepository('agents');
 
     // Load every manager-type Agent and rewrite the ones still pinned to a
     // workspace. Filtering in memory keeps this portable — some drivers

@@ -178,12 +178,8 @@ export default function Sidebar({
       // 평평한 items 가 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
       title: 'Work',
       items: [
-        {
-          key: 'agents',
-          path: `${workspaceBase}/agents`,
-          label: 'AI Agents',
-          icon: 'A',
-        },
+        // P4c-4: AI Agents 표면 제거 (Agent 테이블 삭제) — 실행 주체는
+        // Sessions/Runtime Hosts 에서 본다.
         // Terminal(Runtime Host 셸) — 기본 admin 전용 권한이라 없는 사용자에게는 행 자체를
         // 그리지 않는다(눌러도 403 인 행을 남겨 두지 않는다).
         ...(canUseTerminals

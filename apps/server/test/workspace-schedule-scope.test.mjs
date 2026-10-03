@@ -27,7 +27,9 @@ describe('Workspace Schedule board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const scheduleRepo = dataSource.getRepository(WorkspaceSchedule);
-    service = new WorkspaceScheduleService(scheduleRepo, {}, {}, {}, {}, noopLog, {}, noQuiesce);
+    const agentRepo = { findOne: async () => ({ id: 'agent-1', workspace_id: null }) };
+    // P4c-4: hostRepo 주입 자리 (agentRepo 다음).
+    service = new WorkspaceScheduleService(scheduleRepo, {}, {}, agentRepo, {}, {}, noopLog, {}, noQuiesce);
   });
 
   after(async () => {

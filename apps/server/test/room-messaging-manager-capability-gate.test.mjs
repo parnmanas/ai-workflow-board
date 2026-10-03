@@ -147,8 +147,20 @@ function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE]
     async findOne() { return dmRoom; },
     async update() {},
   };
+  // P4c-4: DM 상대의 cli/cli_runtime_profile 은 참가자 스냅샷 runtime_spec 이
+  // 정본이다 (id 문자열 — 해석은 메시징 서비스가 한다). manager_agent_id 는
+  // agent id 와 같게 둬서 listForAgent 조회가 걸리게 한다.
   const participantRepo = {
-    async findOne() { return { room_id: 'room-1', participant_type: 'agent', participant_id: agent.id, left_at: null }; },
+    async findOne() {
+      return {
+        room_id: 'room-1', participant_type: 'agent', participant_id: agent.id, left_at: null,
+        runtime_spec: {
+          cli: agent.type, cli_runtime_profile: agent.cli_runtime_profile ?? null,
+          credential_id: agent.credential_id ?? null, role_prompt: agent.role_prompt ?? '',
+          label: agent.id, manager_agent_id: agent.id,
+        },
+      };
+    },
   };
   const workspaceRepo = { async findOne() { return workspace; } };
   const messageRepo = {
@@ -184,13 +196,9 @@ function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE]
     async getRoomAgentMemberIds() { return [agent.id]; },
   };
   const mentionService = { parseMentions: () => [] };
-  const agentRepo = {
-    async findOne() { return agent; },
-    async find() { return [agent]; }, // resolveAgentDisplayMap's manager-name lookup (unused: agent has no manager_agent_id here)
-  };
   const connectivity = { isReachable: () => true };
   return new RoomMessagingService(
-    roomRepo, participantRepo, messageRepo, agentRepo, {}, {}, {},
+    roomRepo, participantRepo, messageRepo, {}, {}, {},
     workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
     instanceRegistry,
   );
@@ -359,19 +367,17 @@ function makeGroupSvc({ agents, workspace, instanceRegistry, profiles = [VLLM_PR
     async resolveMissionChatPolicy() { return null; },
     async getRoomMemberIds() { return new Set(['user-1', ...agentMemberIds]); },
     async getRoomAgentMemberIds() { return agentMemberIds; },
+    async getRoomAgentRuntimeSpecs() { return specs; },
   };
   const mentionService = { parseMentions: () => [] };
-  const agentRepo = {
-    async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
-    // 느슨한 stub(room-messaging-chat-runtime-profile.test.mjs의 makeGroupSvc와
-    // 동일): fixture의 agents가 이미 테스트 대상 id만 담고 있으므로 type만
-    // 필터링해도 실제 TypeORM의 `id IN (:...) AND type = 'claude'`와 같은
-    // 결과가 나온다.
-    async find({ where }) { return agents.filter((a) => a.type === (where.type ?? a.type)); },
-  };
+  // P4c-4: broadcast 해석은 참가자 스냅샷 runtime 맵이 정본이다 (Agent 행 없음).
+  const specs = Object.fromEntries(agents.map((a) => [a.id, {
+    cli: a.type, cli_runtime_profile: a.cli_runtime_profile ?? null,
+    credential_id: a.credential_id ?? null, manager_agent_id: a.id,
+  }]));
   const connectivity = { isReachable: () => true };
   return new RoomMessagingService(
-    roomRepo, participantRepo, messageRepo, agentRepo, {}, {}, {},
+    roomRepo, participantRepo, messageRepo, {}, {}, {},
     workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
     instanceRegistry,
   );

@@ -26,18 +26,24 @@ import {
   createAgent,
   createTicket,
 } from '../helpers/fixtures.mjs';
+import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 
 process.env.PORT = process.env.QA_ON_DONE_HOOK_PORT || '0';
 
-async function createAction(ds, fields) {
+// P4c-4: dispatch 는 target_runtimes 스냅샷에서만 해소한다 — 직접 심는 행에도
+// spec + 키를 함께 둔다 (target_agent_id 단독 행은 missing 취급).
+async function createAction(ds, fields, spec = null) {
   const repo = ds.getRepository('Action');
+  const key = spec ? runtimeIdentityKey(spec) : null;
   return repo.save(repo.create({
     workspace_id: fields.workspace_id,
     board_id: fields.board_id ?? null,
     name: fields.name,
     description: '',
     prompt: fields.prompt ?? '',
-    target_agent_id: fields.target_agent_id,
+    target_agent_id: key ?? fields.target_agent_id,
+    target_agent_ids: key ? JSON.stringify([key]) : undefined,
+    target_runtimes: spec ? [spec] : undefined,
     schedule_cron: '',
     trigger: fields.trigger ?? '',
     trigger_label: fields.trigger_label ?? '',
@@ -94,6 +100,12 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
     name: 'Done', position: 1, workspaceId: ws.id, isTerminal: true, kind: 'terminal', roleRouting: [],
   });
   const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'hook-target' });
+  // P4c-4: hook dispatch 용 spec (아래 모든 createAction 에 전달).
+  const HOOK_SPEC = {
+    manager_agent_id: agent.manager_agent_id, cli: 'claude', model: null,
+    working_dir: '/srv/hook', credential_id: null, label: 'hook-target', role_prompt: '',
+    runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  };
 
   const newTicket = (title, labels) =>
     createTicket(app, modules.getDataSourceToken, {
@@ -111,7 +123,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
     workspace_id: ws.id, name: 'S1 hook', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's1',
     prompt: 'Finished ticket {{ticket.id}} titled "{{ticket.title}}" on board {{ticket.board_id}}.',
-  });
+  }, HOOK_SPEC);
   const t1 = await newTicket('S1 feature ticket', ['s1']);
   await moveToDone(ds, activityService, t1.id, done.id);
   const s1Runs = await waitForRuns(ds, a1.id, 1);
@@ -131,7 +143,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const a2 = await createAction(ds, {
     workspace_id: ws.id, name: 'S2 disabled', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's2', enabled: false, prompt: 'should not run',
-  });
+  }, HOOK_SPEC);
   const t2 = await newTicket('S2 ticket', ['s2']);
   await moveToDone(ds, activityService, t2.id, done.id);
   await new Promise((r) => setTimeout(r, 400));
@@ -142,7 +154,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const a3 = await createAction(ds, {
     workspace_id: ws.id, name: 'S3 hook', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's3', prompt: 'should not run',
-  });
+  }, HOOK_SPEC);
   const t3 = await newTicket('S3 hook-origin ticket', ['s3', 'no-on-done-hook']);
   await moveToDone(ds, activityService, t3.id, done.id);
   await new Promise((r) => setTimeout(r, 400));
@@ -153,7 +165,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const a4 = await createAction(ds, {
     workspace_id: ws.id, name: 'S4 explicit', target_agent_id: agent.id,
     trigger: '', prompt: 'explicit binding for {{ticket.title}}',
-  });
+  }, HOOK_SPEC);
   const t4 = await newTicket('S4 ticket', []);
   await ds.getRepository('Ticket').update(t4.id, { on_done_action_ids: JSON.stringify([a4.id]) });
   await moveToDone(ds, activityService, t4.id, done.id);
@@ -172,7 +184,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const a5 = await createAction(ds, {
     workspace_id: ws.id, name: 'S5 manual (unbound)', target_agent_id: agent.id,
     trigger: '', prompt: 'should never run from a Done event',
-  });
+  }, HOOK_SPEC);
   // Default on_done_action_ids is '[]' (empty binding) and no label, so neither
   // method (a) nor method (b) can pick this ticket up.
   const t5 = await newTicket('S5 unrelated ticket', []);
@@ -204,7 +216,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   const mkOrdered = (n) => createAction(ds, {
     workspace_id: ws.id, name: `S6 ordered ${n}`, target_agent_id: agent.id,
     trigger: '', prompt: `ordered ${n}`,
-  });
+  }, HOOK_SPEC);
   const o1 = await mkOrdered(1);
   const o2 = await mkOrdered(2);
   const o3 = await mkOrdered(3);

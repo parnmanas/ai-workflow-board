@@ -2,8 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Agent } from '../../entities/Agent';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { isRuntimeIdentityKey } from '../../common/runtime-spec';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Ticket } from '../../entities/Ticket';
@@ -54,8 +55,13 @@ export class AllocationService {
   }
 
   async getAllocatedTickets(agentId: string, workspaceId: string): Promise<{ error: string } | AllocatedTicketRow[]> {
-    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
-    if (!agent) return { error: 'Agent not found' };
+    // P4c-4: Host/링크 해소 (Agent 행 없음). rt- 호출자의 작업은 push dispatch 로
+    // 오므로 poll 목록이 비어도 된다.
+    if (isRuntimeIdentityKey(agentId)) return [];
+    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
+    if (!agent) {
+      return { error: 'Agent not found' };
+    }
     if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       return { error: 'Agent does not belong to the requested workspace' };
     }

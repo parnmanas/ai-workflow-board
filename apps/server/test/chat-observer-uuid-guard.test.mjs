@@ -84,14 +84,28 @@ function makeService(calls) {
     { room_id: ROOM_QA, sender_type: 'system', sender_id: 'system', content: 'QA dispatch', created_at: new Date() },
   ];
   const userRepo = pgUuidRepo([{ id: USER_UUID, name: 'Alice', email: 'a@x' }], calls.user);
-  const agentRepo = pgUuidRepo([{ id: AGENT_UUID, name: 'BuildBot', manager_agent_id: null }], calls.agent);
-  // ctor: (roomRepo, participantRepo, messageRepo, userRepo, agentRepo, logService, membership)
+  // P4c-4: agent 표시는 RuntimeHost(+ApiKey 링크) 해소다. pg uuid 재현 +
+  // 호출 기록은 host repo fake 가 맡는다.
+  const hostRepo = {
+    async find({ where } = {}) {
+      const v = where?.id;
+      const ids = Array.isArray(v?.value) ? v.value : (typeof v === 'string' ? [v] : []);
+      calls.agent.push([...ids]);
+      for (const id of ids) {
+        if (!UUID_RE.test(String(id))) throw new Error(`invalid input syntax for type uuid: "${id}"`);
+      }
+      return [{ id: AGENT_UUID, name: 'BuildBot' }].filter((r) => ids.includes(r.id));
+    },
+  };
+  const keyRepo = { async find() { return []; } };
+  const scope = { getRepository: (e) => (e?.name === 'RuntimeHost' ? hostRepo : keyRepo) };
+  // ctor: (roomRepo, participantRepo, messageRepo, userRepo, dataSource, logService, membership)
   return new RoomCrudService(
     repoWithRows(rooms),
     repoWithRows(participants),
     repoWithRows(messages),
     userRepo,
-    agentRepo,
+    scope,
     null,
     null,
   );

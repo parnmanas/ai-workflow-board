@@ -17,12 +17,12 @@ import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
-import { Agent } from '../../entities/Agent';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { repairTruncatedMediaForRead } from '../mcp/shared/ticket-helpers';
-import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { orchestrationError } from './orchestration-errors';
@@ -49,6 +49,7 @@ import {
   UserChatMode,
   normalizeUserChatMode,
   openJoinForUserChatMode,
+  type OrchestrationCaller,
 } from './orchestration.constants';
 import {
   CheckoutMode,
@@ -349,7 +350,6 @@ export class OrchestrationMissionService {
     @InjectRepository(OrchestrationEvent) private readonly eventRepo: Repository<OrchestrationEvent>,
     @InjectRepository(OrchestrationTeam) private readonly teamRepo: Repository<OrchestrationTeam>,
     @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
@@ -383,10 +383,11 @@ export class OrchestrationMissionService {
    * replay. Uses the repository API rather than raw SQL because parameter
    * placeholders differ between the sql.js and Postgres backends.
    */
-  async listOpenStepsForAgent(agentId: string): Promise<Array<Record<string, any>>> {
-    if (!agentId) return [];
+  async listOpenStepsForAgent(caller: OrchestrationCaller): Promise<Array<Record<string, any>>> {
+    const ids = [caller.agentId, caller.runtimeKey].filter((v): v is string => !!v);
+    if (ids.length === 0) return [];
     const steps = await this.stepRepo.find({
-      where: { assignee_agent_id: agentId, status: In(['dispatched', 'running']) },
+      where: { assignee_agent_id: In(ids), status: In(['dispatched', 'running']) },
       order: { dispatched_at: 'ASC' },
       take: 50,
     });
@@ -759,11 +760,11 @@ export class OrchestrationMissionService {
    * what's still open); pass status to widen it.
    */
   async listMissionsForAgent(
-    agentId: string,
+    caller: OrchestrationCaller,
     opts?: { status?: string; limit?: number },
   ): Promise<MissionListItem[]> {
-    if (!agentId) return [];
-    const teamIds = await this.teamIdsForAgent(agentId);
+    if (!caller.agentId && !caller.runtimeKey) return [];
+    const teamIds = await this.teamIdsForAgent(caller);
     if (teamIds.length === 0) return [];
 
     // 'all' (list_orchestration_missions' include_finished:true) means no status
@@ -788,11 +789,12 @@ export class OrchestrationMissionService {
     return this.projectMissionList(missions);
   }
 
-  /** team_ids where `agentId` is the orchestrator or a roster member. */
-  private async teamIdsForAgent(agentId: string): Promise<string[]> {
+  /** team_ids where the caller is the orchestrator or a roster member (either identity). */
+  private async teamIdsForAgent(caller: OrchestrationCaller): Promise<string[]> {
+    const ids = [caller.agentId, caller.runtimeKey].filter((v): v is string => !!v);
     const [orchTeams, memberRows] = await Promise.all([
-      this.teamRepo.find({ where: { orchestrator_agent_id: agentId }, select: ['id'] }),
-      this.memberRepo.find({ where: { agent_id: agentId }, select: ['team_id'] }),
+      this.teamRepo.find({ where: { orchestrator_agent_id: In(ids) }, select: ['id'] }),
+      this.memberRepo.find({ where: { agent_id: In(ids) }, select: ['team_id'] }),
     ]);
     return Array.from(new Set<string>([...orchTeams.map((t) => t.id), ...memberRows.map((m) => m.team_id)]));
   }
@@ -819,9 +821,8 @@ export class OrchestrationMissionService {
     const teams = await this.teamRepo.find({ where: { id: In(missions.map((m) => m.team_id)) } });
     const teamById = new Map(teams.map((t) => [t.id, t]));
     const orchIds = missions.map((m) => m.orchestrator_agent_id).filter((v): v is string => !!v);
-    const agents = orchIds.length ? await this.agentRepo.find({ where: { id: In(orchIds) } }) : [];
-    const agentById = new Map(agents.map((a) => [a.id, a]));
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, orchIds);
 
     return missions.map((m) => ({
       id: m.id,
@@ -859,9 +860,34 @@ export class OrchestrationMissionService {
     const agentIds = new Set<string>();
     if (mission.orchestrator_agent_id) agentIds.add(mission.orchestrator_agent_id);
     for (const s of steps) if (s.assignee_agent_id) agentIds.add(s.assignee_agent_id);
-    const agents = agentIds.size ? await this.agentRepo.find({ where: { id: In(Array.from(agentIds)) } }) : [];
-    const agentById = new Map(agents.map((a) => [a.id, a]));
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, Array.from(agentIds));
+    // P4c-4: 팀 투영과 같은 `<Host>/<leaf>` 합성 (runbook agent-display-name).
+    // orchestrator/step assignee 는 rt- 키라 displayById 에 없으므로, 팀·스텝의
+    // spec 스냅샷 속 host + cli leaf 로 합성한다.
+    const orchSpecRec = (team as any)?.orchestrator_spec as Record<string, any> | null;
+    const slotHostIds = new Set<string>();
+    if (orchSpecRec?.manager_agent_id) slotHostIds.add(String(orchSpecRec.manager_agent_id));
+    for (const s of steps) {
+      const aSpec = (s as any)?.assignee_spec as Record<string, any> | null;
+      if (aSpec?.manager_agent_id) slotHostIds.add(String(aSpec.manager_agent_id));
+    }
+    const slotHostName = new Map<string, string>();
+    if (slotHostIds.size > 0) {
+      const hostRows = await this.dataSource.getRepository(RuntimeHost).find({
+        where: { id: In(Array.from(slotHostIds)) },
+        select: { id: true, name: true },
+      });
+      for (const h of hostRows) if (h.name) slotHostName.set(h.id, h.name);
+    }
+    const composeSlot = (agentId: string | null | undefined, spec: Record<string, any> | null | undefined, leaf: string): string => {
+      const hostPart = (spec?.manager_agent_id ? slotHostName.get(String(spec.manager_agent_id)) : undefined)
+        ?? (agentId ? displayById.get(agentId) : undefined);
+      const cleanHost = hostPart && !hostPart.includes('/') ? hostPart : undefined;
+      if (cleanHost && leaf) return `${cleanHost}/${leaf}`;
+      if (agentId) return displayById.get(agentId) ?? (leaf || agentId.slice(0, 8));
+      return leaf;
+    };
 
     const events = await this.eventRepo.find({
       where: { mission_id: mission.id },
@@ -885,9 +911,9 @@ export class OrchestrationMissionService {
       title: mission.title,
       status: mission.status,
       orchestrator_agent_id: mission.orchestrator_agent_id,
-      orchestrator_name: mission.orchestrator_agent_id
-        ? displayById.get(mission.orchestrator_agent_id) ?? ''
-        : '',
+      orchestrator_name: composeSlot(
+        mission.orchestrator_agent_id, orchSpecRec, String(orchSpecRec?.cli ?? ''),
+      ),
       plan_version: mission.plan_version,
       counts: countSteps(steps),
       // 상세 화면은 step 카드마다 `activity` 를 따로 갖지만, 이 요약은 `MissionDetail`
@@ -937,7 +963,7 @@ export class OrchestrationMissionService {
       confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
       user_chat_mode: normalizeUserChatMode(mission.user_chat_mode),
       steps: steps.map((s) => {
-        const a = s.assignee_agent_id ? agentById.get(s.assignee_agent_id) ?? null : null;
+        const a = null;
         return {
           id: s.id,
           step_key: s.step_key,
@@ -946,8 +972,12 @@ export class OrchestrationMissionService {
           acceptance_criteria: s.acceptance_criteria,
           depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
           assignee_agent_id: s.assignee_agent_id,
-          assignee_name: a ? displayById.get(a.id) ?? a.name : (s.assignee_agent_id ? '(deleted agent)' : ''),
-          assignee_online: !!a?.is_online,
+          assignee_name: composeSlot(
+            s.assignee_agent_id,
+            (s as any)?.assignee_spec as Record<string, any> | null,
+            String(((s as any)?.assignee_spec as Record<string, any> | null)?.cli ?? ''),
+          ),
+          assignee_online: false,
           status: s.status,
           position: s.position,
           plan_version: s.plan_version,
@@ -1123,8 +1153,8 @@ export class OrchestrationMissionService {
     const agentIds = Array.from(
       new Set(page.filter((r) => r.sender_type === 'agent' && r.sender_id).map((r) => r.sender_id)),
     );
-    const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     // 페이지에 실린 메시지들의 첨부 메타(바이트 제외). 채팅 히스토리와 같은 조인이지만
     // 참여자 게이트 없이 — 이 경로 자체가 orchestration 권한으로 게이트된다.
@@ -1234,8 +1264,8 @@ export class OrchestrationMissionService {
     const agentIds = Array.from(
       new Set(rows.filter((r) => r.uploaded_by_type === 'agent' && r.uploaded_by_id).map((r) => r.uploaded_by_id)),
     );
-    const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     const items: MissionEvidenceItem[] = rows.map((r) => {
       const step = stepByRoom.get(r.room_id ?? '') ?? null;
@@ -1302,9 +1332,31 @@ export class OrchestrationMissionService {
     const steps = await this.listSteps(mission.id);
     const progress = computeMissionProgress(mission.graph_spec, steps);
     const agentIds = Array.from(new Set(steps.map((s) => s.assignee_agent_id).filter((v): v is string => !!v)));
-    const agents = agentIds.length ? await this.agentRepo.find({ where: { id: In(agentIds) } }) : [];
-    const agentById = new Map(agents.map((a) => [a.id, a]));
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
+    // getMissionDetail 과 같은 `<Host>/<leaf>` 합성 (오케스트레이터 브리프 프롬프트도 runbook 대상이다).
+    const slotHostIds = new Set<string>();
+    for (const s of steps) {
+      const aSpec = (s as any)?.assignee_spec as Record<string, any> | null;
+      if (aSpec?.manager_agent_id) slotHostIds.add(String(aSpec.manager_agent_id));
+    }
+    const slotHostName = new Map<string, string>();
+    if (slotHostIds.size > 0) {
+      const hostRows = await this.dataSource.getRepository(RuntimeHost).find({
+        where: { id: In(Array.from(slotHostIds)) },
+        select: { id: true, name: true },
+      });
+      for (const h of hostRows) if (h.name) slotHostName.set(h.id, h.name);
+    }
+    const composeAssignee = (s: OrchestrationStep): string => {
+      const aSpec = (s as any)?.assignee_spec as Record<string, any> | null;
+      const leaf = String(aSpec?.cli ?? '');
+      const hostPart = (aSpec?.manager_agent_id ? slotHostName.get(String(aSpec.manager_agent_id)) : undefined)
+        ?? (s.assignee_agent_id ? displayById.get(s.assignee_agent_id) : undefined);
+      const cleanHost = hostPart && !hostPart.includes('/') ? hostPart : undefined;
+      if (cleanHost && leaf) return `${cleanHost}/${leaf}`;
+      return s.assignee_agent_id ? displayById.get(s.assignee_agent_id) ?? '' : '';
+    };
 
     const events = await this.eventRepo.find({
       where: { mission_id: mission.id },
@@ -1365,7 +1417,7 @@ export class OrchestrationMissionService {
         status: s.status,
         depends_on: Array.isArray(s.depends_on) ? s.depends_on : [],
         assignee_agent_id: s.assignee_agent_id,
-        assignee_name: s.assignee_agent_id ? displayById.get(s.assignee_agent_id) ?? '' : '',
+        assignee_name: composeAssignee(s),
         attempt: s.attempt,
         max_attempts: s.max_attempts,
         visit: s.visit ?? 0,
@@ -1408,7 +1460,7 @@ export class OrchestrationMissionService {
     // utils/agent-name.ts and docs/runbooks/agent-display-name.md.
     let actorName = input.actor_name || '';
     if (input.actor_type === 'agent' && input.actor_id) {
-      actorName = (await resolveAgentDisplayName(this.agentRepo, input.actor_id)) || actorName;
+      actorName = (await resolveAgentDisplayName(this.dataSource, input.actor_id)) || actorName;
     }
     const row = {
       mission_id: mission.id,

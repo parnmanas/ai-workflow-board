@@ -269,11 +269,13 @@ export default function ChatFirstHome() {
     // workspace 의 assistant_agent_id 는 light list(getWorkspaces — board_count 만,
     // 티켓 미포함)에서 읽어 랜딩 hot-path 에 무거운 보드/티켓 payload 를 끌어오지 않는다.
     // agents 는 workspace-scoped(getAgents) — 적격성(활성·비매니저) 대조에 쓴다.
-    Promise.all([api.getWorkspaces(), api.getAgents(wsId)])
-      .then(([workspaces, agents]) => {
+    // P4c-4: 어시스턴트 후보는 Host 카탈로그다 (Agent 목록 없음).
+    Promise.all([api.getWorkspaces(), api.listOrchestrationRuntimeHosts(wsId).catch(() => [] as any[])])
+      .then(([workspaces, hosts]) => {
         if (cancelled) return;
         const ws = Array.isArray(workspaces) ? workspaces.find((w: any) => w.id === wsId) : null;
-        setResolution(resolveAssistant(ws, agents as any, wsId));
+        const candidates = (hosts as any[]).map((h: any) => ({ id: h.manager_agent_id, name: h.manager_name, is_active: 1, type: 'runtime-host' }));
+        setResolution(resolveAssistant(ws, candidates as any, wsId));
       })
       .catch((err: any) => {
         if (cancelled) return;

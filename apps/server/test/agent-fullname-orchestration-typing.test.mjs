@@ -1,10 +1,9 @@
-// Regression: the `<Manager>/<Agent>` display contract on the surfaces added
-// after ticket 51b1519d — Orchestration mode and the two typing indicators.
+// Regression: the display contract on the surfaces added after ticket
+// 51b1519d — Orchestration mode and the two typing indicators.
 //
-// The rule (docs/runbooks/agent-display-name.md):
-// EVERY user-visible agent name renders as `<Manager>/<Agent>`, resolved
-// through utils/agent-name.ts on the server or utils/agentName.ts on the
-// client. Never a bare `agent.name`, never a raw agent id.
+// The rule (docs/runbooks/agent-display-name.md, P4c-4 amendment): surfaces
+// with spec context render `<Host>/<leaf>`; id-only resolutions render the
+// Host bare name. Never a bare leaf, never a raw agent id.
 //
 // What broke before this test existed:
 //   1. Orchestration team/mission projections read `agent.name` directly, so
@@ -65,13 +64,14 @@ const orchestrator = await createAgent(app, getDataSourceToken, ws.id, { name: '
 const memberA = await createAgent(app, getDataSourceToken, ws.id, { name: 'Coder', type: 'hermes', hosted: false });
 const memberB = await createAgent(app, getDataSourceToken, ws.id, { name: 'Coder', type: 'hermes', hosted: false });
 
-const agentRepo = ds.getRepository('Agent');
-await agentRepo.update({ id: orchestrator.id }, { manager_agent_id: mgrA.id });
-await agentRepo.update({ id: memberA.id }, { manager_agent_id: mgrA.id });
-await agentRepo.update({ id: memberB.id }, { manager_agent_id: mgrB.id });
+// P4c-4: managed→manager 연결은 api_keys 페어링 링크다 (Agent 행 없음).
+// 링크된 uuid 는 Host bare name 으로 해소된다.
+for (const [agentId, hostId] of [[orchestrator.id, mgrA.id], [memberA.id, mgrA.id], [memberB.id, mgrB.id]]) {
+  await createApiKey(app, getDataSourceToken, agentId, { workspaceId: ws.id, hostId, label: 'display-link' });
+}
 
-const MEMBER_A_DISPLAY = `${mgrA.name}/${memberA.name}`;
-const MEMBER_B_DISPLAY = `${mgrB.name}/${memberB.name}`;
+const MEMBER_A_DISPLAY = mgrA.name;
+const MEMBER_B_DISPLAY = mgrB.name;
 
 // ─── 1. The slot picker feed ─────────────────────────────────────────────────
 // A roster slot names a Runtime Host, so the feed the pickers read is the host
@@ -111,7 +111,7 @@ const SLOT_SPEC = (managerId, extra = {}) => ({
   ...extra,
 });
 
-test('team view: orchestrator_name and member agent_name are <Manager>/<Agent>', async () => {
+test('team view: orchestrator_name and member agent_name are <Host>/<leaf>', async () => {
   const team = await teams.createTeam({
     workspace_id: ws.id,
     name: 'fullname-team',
@@ -141,7 +141,7 @@ test('team view: orchestrator_name and member agent_name are <Manager>/<Agent>',
 });
 
 // ─── 3. Mission timeline + step assignee ─────────────────────────────────────
-test('mission: recordEvent canonicalizes an agent actor_name, and assignee_name is prefixed', async () => {
+test('mission: recordEvent resolves an agent actor_name to the Host display, assignee covered', async () => {
   const teamList = await teams.listTeams(ws.id);
   const team = teamList.find((t) => t.name === 'fullname-team');
 
@@ -177,7 +177,7 @@ test('mission: recordEvent canonicalizes an agent actor_name, and assignee_name 
   const agentRow = rows.find((r) => r.message === 'hello');
   const sysRow = rows.find((r) => r.message === 'system says');
   assert.equal(agentRow.actor_name, MEMBER_A_DISPLAY,
-    `agent actor_name must be stored canonical, got "${agentRow.actor_name}"`);
+    `agent actor_name must be stored as the Host display, got "${agentRow.actor_name}"`);
   assert.equal(sysRow.actor_name, 'OrchestrationReaper',
     'non-agent actor label must survive verbatim');
 
@@ -211,7 +211,7 @@ test('mission: recordEvent canonicalizes an agent actor_name, and assignee_name 
 // ─── 4. Ticket typing indicator (agent_typing SSE) ───────────────────────────
 // This frame used to carry `actor_name: <agent uuid>`, so TicketPanel rendered
 // "e9d0e8bc-… is typing". Drive set_typing through the real /mcp transport.
-test('agent_typing SSE: actor_name is <Manager>/<Agent>, never the raw agent id', async () => {
+test('agent_typing SSE: actor_name is the Host display, never the raw agent id', async () => {
   const ticket = await createTicket(app, getDataSourceToken, {
     columnId: columns.todo.id,
     workspaceId: ws.id,
@@ -242,7 +242,7 @@ test('agent_typing SSE: actor_name is <Manager>/<Agent>, never the raw agent id'
   assert.equal(frame.data.actor_name, MEMBER_A_DISPLAY,
     `agent_typing.actor_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.actor_name}"`);
   assert.notEqual(frame.data.actor_name, memberA.id, 'actor_name must never be the raw agent id');
-  assert.ok(String(frame.data.actor_name).includes('/'), 'actor_name must carry the manager prefix');
+  assert.ok(!String(frame.data.actor_name).includes('/'), 'actor_name is the bare Host display');
 
   await client.callTool('set_typing', { agent_id: memberA.id, ticket_id: ticket.id, is_typing: false });
 });
@@ -299,8 +299,8 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
   );
   assert.equal(frame.data.agent_name, MEMBER_A_DISPLAY,
     `chat_room_typing.agent_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.agent_name}"`);
-  assert.ok(String(frame.data.agent_name).includes('/'),
-    'the chat typing label must carry the manager prefix, not the manager name alone');
+  assert.ok(!String(frame.data.agent_name).includes('/'),
+    'the chat typing label is the bare Host display');
   assert.equal(frame.data.agent_id, memberA.id,
     'the frame must be keyed by the ANSWERING agent — the client clears the indicator by this id');
 });
@@ -355,8 +355,8 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
   );
   assert.equal(frame.data.agent_name, MEMBER_A_DISPLAY,
     `chat_room_session_status.agent_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.agent_name}"`);
-  assert.ok(String(frame.data.agent_name).includes('/'),
-    'the session-status label must carry the manager prefix, not a bare name');
+  assert.ok(!String(frame.data.agent_name).includes('/'),
+    'the session-status label is the bare Host display');
   assert.equal(frame.data.agent_id, memberA.id,
     'the frame must be keyed by the ANSWERING agent, not the manager');
   assert.equal(frame.data.keep_alive_until_ms, keepAliveUntilMs,

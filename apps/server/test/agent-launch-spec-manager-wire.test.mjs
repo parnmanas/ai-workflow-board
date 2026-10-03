@@ -112,6 +112,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
     body: JSON.stringify({
       instance_id: 'launch-spec-wire',
       agent_id: manager.id,
+      host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
       workspace_id: workspace.id,
       mode: 'manager',
       hostname: 'test-host',

@@ -70,6 +70,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
   await heartbeat(port, key, {
     instance_id: 'list-for-agent-old',
     agent_id: manager.id,
+    host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
     agent_ids: [target.id],
     workspace_id: workspace.id,
     mode: 'manager',
@@ -106,6 +107,7 @@ test('listForAgent(targetAgentId) finds a manager supervising it only through ag
   await heartbeat(port, key, {
     instance_id: 'list-for-agent-old',
     agent_id: manager.id,
+    host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
     agent_ids: [target.id],
     workspace_id: workspace.id,
     mode: 'manager',

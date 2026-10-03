@@ -50,7 +50,7 @@ process.env.NODE_ENV = 'test';
 // 둘 다 초기화한다 — callerCanAccessWorkspace()가 ctx.dataSource(=primary)에서
 // 실제 Agent row를 조회하므로 두 DataSource 모두 필요하다.
 const { AppDataSource, AppOntologyDataSource, initDb } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
-const { Agent } = await import('file://' + path.join(DIST_ROOT, 'entities/Agent.js'));
+/* P4c-4: Agent 엔티티 삭제 — makeAgent 는 RuntimeHost 행을 만든다. */
 const { Ticket } = await import('file://' + path.join(DIST_ROOT, 'entities/Ticket.js'));
 const { TicketRoleAssignment } = await import('file://' + path.join(DIST_ROOT, 'entities/TicketRoleAssignment.js'));
 const { WorkspaceRole } = await import('file://' + path.join(DIST_ROOT, 'entities/WorkspaceRole.js'));
@@ -69,12 +69,14 @@ const RESOURCE_ID = 'gs-resource-1';
 const FOLDER_PATH = '';
 const CONF_GRAPH_ID = 'gs-conf-graph'; // 'confidence_min' describe가 만들고, 'cross-workspace' describe가 재사용(정의 순서상 뒤에 실행됨)
 
-// mcp-tool-authz.test.mjs와 같은 패턴 — 실제 Agent row + sessionStore 등록으로
+// mcp-tool-authz.test.mjs와 같은 패턴 — 실제 Host row + sessionStore 등록으로
 // 진짜 caller 신원을 만든다(빈 extra={}는 getCallerAgent를 undefined로
 // 만들어 callerCanAccessWorkspace가 항상 deny하므로 더는 쓸 수 없다).
+// P4c-4: Agent 행 없음 — RuntimeHost 행이 정체성이다.
 async function makeAgent(workspaceId) {
-  const repo = AppDataSource.getRepository(Agent);
-  return repo.save(repo.create({ name: `agent-${randomUUID().slice(0, 8)}`, type: 'claude', workspace_id: workspaceId }));
+  const { RuntimeHost } = await import('file://' + path.join(DIST_ROOT, 'entities/RuntimeHost.js'));
+  const repo = AppDataSource.getRepository(RuntimeHost);
+  return repo.save(repo.create({ name: `host-${randomUUID().slice(0, 8)}`, hostname: 'ontology-test', workspace_id: workspaceId }));
 }
 function registerSession(sessionId, auth) {
   const transport = { close: async () => {} };

@@ -1,6 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ApiKey } from '../../entities/ApiKey';
 import { Credential } from '../../entities/Credential';
@@ -13,6 +13,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { AgentManagerController } from './agent-manager.controller';
+import { RuntimeSpecController } from './runtime-spec.controller';
 import { InstanceRegistryModule } from './instance-registry.module';
 import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
@@ -49,9 +50,9 @@ import { SkillsModule } from '../skills/skills.module';
     SkillsModule,
     // AgentSessionCliSetting: HostModelsService 가 ACP 가 보고한 모델 목록(영속)을 읽는다 —
     // 모델 목록의 단일 출처가 재시작 후에도 같은 답을 하게 하는 데 필요하다.
-    TypeOrmModule.forFeature([Agent, AgentSessionCliSetting, ApiKey, Credential, Ticket, Resource, Workspace]),
+    TypeOrmModule.forFeature([RuntimeHost, AgentSessionCliSetting, ApiKey, Credential, Ticket, Resource, Workspace]),
   ],
-  controllers: [AgentManagerController, HostModelsController],
+  controllers: [AgentManagerController, HostModelsController, RuntimeSpecController],
   providers: [
     PairingService,
     CommandLedgerService,

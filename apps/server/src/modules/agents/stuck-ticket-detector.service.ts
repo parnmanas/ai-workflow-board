@@ -39,8 +39,8 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, LessThan, MoreThanOrEqual } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { Comment } from '../../entities/Comment';
@@ -616,10 +616,10 @@ export class StuckTicketDetectorService implements OnModuleInit, OnModuleDestroy
       // BacklogPromotionService.tryPromote): "board=… role=… holder=… focus_ticket_id=…".
       const holderId = /holder=(\S+)/.exec(row.new_value || '')?.[1] || '';
       const focusTicketId = /focus_ticket_id=(\S+)/.exec(row.new_value || '')?.[1] || '';
+      // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
       let holderName = holderId;
       if (holderId) {
-        const agent = await this.dataSource.getRepository(Agent)
-          .findOne({ where: { id: holderId }, select: ['id', 'name'] });
+        const agent = await resolveCallerIdentityRow(this.dataSource, holderId);
         if (agent?.name) holderName = agent.name;
       }
       return ` · 사유: ${holderName || '담당자'}의 focus window 포화 (점유 티켓 ${focusTicketId || '미상'}) — 대기 정상, 조치 불필요일 수 있음`;

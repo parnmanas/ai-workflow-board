@@ -9,7 +9,6 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
 import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
@@ -23,6 +22,7 @@ import { ReviewDriftState } from '../../../entities/ReviewDriftState';
 import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../shared/review-approval-guard';
 import { evaluateMergeGate } from '../shared/merge-gate';
 import { getCallerAgent } from '../shared/session-auth';
+import { resolveCallerIdentityRow } from '../shared/authz';
 import { resolveAgentDisplayName } from '../../../utils/agent-name';
 import { evaluateConsensusMoveGate } from '../../../services/consensus.service';
 import type { ToolContext } from './context';
@@ -314,8 +314,8 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         // Expired lock — silent override; sweep may not have run yet
       }
 
-      const agentRepo = dataSource.getRepository(Agent);
-      const agent = await agentRepo.findOne({ where: { id: agent_id } });
+      // P4: Agent 행 또는 Host 행 — 둘 다 claim 주체로 인정한다.
+      const agent = await resolveCallerIdentityRow(dataSource, agent_id);
       if (!agent) return err('Agent not found');
 
       const previousOwner = ticket.locked_by_agent_id;
@@ -332,7 +332,7 @@ export function registerTicketWorkflowTools(server: McpServer, ctx: ToolContext)
         throw e;
       }
 
-      const actorDisplay = (await resolveAgentDisplayName(agentRepo, agent.id)) || agent.name;
+      const actorDisplay = (await resolveAgentDisplayName(dataSource, agent.id)) || agent.name;
       await activityService.logActivity({
         entity_type: 'ticket',
         entity_id: ticket_id,

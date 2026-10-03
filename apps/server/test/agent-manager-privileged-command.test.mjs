@@ -69,6 +69,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
       body: JSON.stringify({
         instance_id: INSTANCE_ID,
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
         mode: 'manager',
         hostname: 'privileged-host',
         plugin_version: 'test',

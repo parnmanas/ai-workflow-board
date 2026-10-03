@@ -266,6 +266,9 @@ export const EVENT_TYPES: EventDefinition[] = [
             ? event.max_concurrent_tickets_per_agent
             : undefined,
         skill_snapshot: event.skill_snapshot ?? null,
+        // P2 additive: assignee RuntimeSpec 스냅샷. 없으면 null (omit이 아니라
+        // null — agent_trigger 쪽은 trigger emit이 항상 채우므로).
+        runtime: event.runtime ?? null,
       };
       return {
         payload,
@@ -351,6 +354,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         // alongside the server-side gate.
         max_concurrent_tickets_per_agent: p.max_concurrent_tickets_per_agent,
         skill_snapshot: p.skill_snapshot ?? null,
+        // P2 additive: assignee RuntimeSpec 스냅샷. 매니저는 당분간 agent_id를
+        // 읽고 P3에서 이쪽으로 전환한다. 없으면 null.
+        runtime: p.runtime ?? null,
         timestamp: env.timestamp,
       };
     },
@@ -455,6 +461,9 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: ChatRequestPayload = {
         agent_id: event.agent_id,
+        // P2b additive: 대상 agent의 RuntimeSpec 스냅샷. 없으면 생략해서 wire
+        // shape를 byte-for-byte 유지한다 (cli_runtime_profile 관례와 동일).
+        runtime: event.runtime ?? undefined,
         user_id: event.user_id,
         message_id: typeof event.message_id === 'string' ? event.message_id : undefined,
         ticket_id: event.ticket_id || null,
@@ -546,6 +555,11 @@ export const EVENT_TYPES: EventDefinition[] = [
           Array.isArray(event.dispatch_agent_ids) && event.dispatch_agent_ids.length > 0
             ? event.dispatch_agent_ids
             : undefined,
+        // P4c-2b: 스냅샷 보유 멤버의 runtime 맵 (위와 같은 조건부 생략 관례).
+        // 매니저의 rt- 멤버 해석 + fan-out host-affinity가 읽는다.
+        agent_member_runtimes: event.agent_member_runtimes && Object.keys(event.agent_member_runtimes).length > 0
+          ? event.agent_member_runtimes
+          : undefined,
         // ticket 25db3cc6 / fe297886: forward the run-workspace provisioning
         // hint untouched. RoomMessagingService.sendMessage stamps it ONLY on a
         // QA/security run-dispatch send; the agent-manager reads p.run_provision
@@ -705,6 +719,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         comment_id: event.comment_id,
         workspace_id: event.workspace_id,
         agent_id: event.agent_id,
+        // P4c-4: spec-direct 멘션 스냅샷 (없으면 생략).
+        runtime: event.runtime ?? undefined,
         actor_id: event.actor_id || '',
         actor_type: event.actor_type || 'user',
         actor_name: event.actor_name || '',
@@ -740,7 +756,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       if (identity.type !== 'agent') return false;
       return env.scope.agent_id === identity.agentId;
     },
-    flatten: (env) => {
+      flatten: (env) => {
       const p = env.payload as CommentMentionPayload;
       return {
         board_id: '__mention__',
@@ -753,6 +769,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         // Flat fields consumed by Runtime Hosts:
         comment_id: p.comment_id,
         agent_id: p.agent_id,
+        // P4c-4: spec-direct 멘션 스냅샷 (매니저 해소용).
+        runtime: (p as any).runtime ?? null,
         actor_id: p.actor_id,
         actor_type: p.actor_type,
         content: p.content,

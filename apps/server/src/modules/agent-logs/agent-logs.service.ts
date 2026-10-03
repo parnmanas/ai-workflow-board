@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { Repository } from 'typeorm';
 import { AgentErrorLog } from '../../entities/AgentErrorLog';
-import { Agent } from '../../entities/Agent';
-import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 
 const MAX_ENTRIES_PER_UPLOAD = 500;
 const MAX_LIST_LIMIT = 500;
@@ -37,7 +37,7 @@ interface ListOpts {
 export class AgentLogsService {
   constructor(
     @InjectRepository(AgentErrorLog) private readonly repo: Repository<AgentErrorLog>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   async ingestEntries(
@@ -89,17 +89,9 @@ export class AgentLogsService {
 
     await this.repo.insert(rows);
 
-    // Monotonic update of Agent.last_error_upload_at — only advance if greater
-    if (maxOccurredAt) {
-      const agent = await this.agentRepo.findOne({ where: { id: agentId } });
-      if (agent) {
-        const current = agent.last_error_upload_at ? new Date(agent.last_error_upload_at) : null;
-        if (!current || maxOccurredAt > current) {
-          agent.last_error_upload_at = maxOccurredAt;
-          await this.agentRepo.save(agent);
-        }
-      }
-    }
+    // P4c-4: Agent.last_error_upload_at monotonic 마킹 제거 (Agent 테이블 없음 —
+    // 에러 로그 행 자체가 소스다).
+    void maxOccurredAt;
 
     const uploadedAt = new Date();
     return {
@@ -124,11 +116,9 @@ export class AgentLogsService {
 
     // Join agent names in one query, then format with Manager/Agent prefix
     // so the log table shows the same identity the rest of the UI does.
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
     const agentIds = Array.from(new Set(rows.map(r => r.agent_id)));
-    const agents = agentIds.length > 0
-      ? await this.agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
-      : [];
-    const agentNameMap = await resolveAgentDisplayMap(this.agentRepo, agents);
+    const agentNameMap = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     return rows.map(r => ({
       id: r.id,
@@ -168,11 +158,9 @@ export class AgentLogsService {
       .groupBy('log.agent_id')
       .getRawMany();
 
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
     const agentIds = raw.map(r => r.agent_id);
-    const agents = agentIds.length > 0
-      ? await this.agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
-      : [];
-    const nameMap = await resolveAgentDisplayMap(this.agentRepo, agents);
+    const nameMap = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     return raw.map(r => ({
       agent_id: r.agent_id,

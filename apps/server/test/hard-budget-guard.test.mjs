@@ -38,7 +38,6 @@ const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { Subagent } = await import('file://' + path.join(DIST, 'entities', 'Subagent.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
 const { Workspace } = await import('file://' + path.join(DIST, 'entities', 'Workspace.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const {
@@ -57,7 +56,7 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const deps = { dataSource: ds, activityService, logger: logStub };
 
 const boardRepo = ds.getRepository(Board);
@@ -66,7 +65,6 @@ const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
 const activityRepo = ds.getRepository(ActivityLog);
 const subagentRepo = ds.getRepository(Subagent);
-const agentRepo = ds.getRepository(Agent);
 const wsRepo = ds.getRepository(Workspace);
 
 async function makeBoard(hardBudgetConfig) {

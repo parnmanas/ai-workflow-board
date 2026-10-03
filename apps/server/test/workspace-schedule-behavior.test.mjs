@@ -119,13 +119,7 @@ function makeParticipantRepo() {
   };
 }
 
-function makeAgentRepo(agents) {
-  return {
-    async findOne({ where }) {
-      return agents.find((a) => a.id === where.id) || null;
-    },
-  };
-}
+/* P4c-4: makeAgentRepo 삭제 — svcWith 가 Host fake 를 직접 만든다. */
 
 function makeMessaging() {
   return {
@@ -137,13 +131,16 @@ function makeMessaging() {
   };
 }
 
+// P4c-3b 이후 _dispatch 는 uuid 가 아니면 Agent 조회를 건너뛰고 rt- 키도
+// 아니면 거부한다 — fixture id 는 uuid 모양이어야 한다.
+const AGENT_UUID = '22222222-2222-2222-2222-222222222222';
 function makeSchedule(over = {}) {
   return {
     id: 'sch-1',
     workspace_id: 'ws-1',
     board_id: null,
     name: 'nightly-task',
-    target_agent_id: 'agent-1',
+    target_agent_id: AGENT_UUID,
     task_prompt: 'do the thing',
     cron: null,
     interval_ms: 30 * MIN,
@@ -157,14 +154,22 @@ function makeSchedule(over = {}) {
   };
 }
 
-function svcWith(rows, agents = [{ id: 'agent-1', workspace_id: 'ws-1', name: 'Bot' }]) {
+function svcWith(rows, agents = [{ id: AGENT_UUID, workspace_id: 'ws-1', name: 'Bot' }]) {
   const scheduleRepo = makeScheduleRepo(rows);
   const roomRepo = makeRoomRepo();
   const participantRepo = makeParticipantRepo();
-  const agentRepo = makeAgentRepo(agents);
+  // P4c-4: (schedule, room, participant, host, dataSource, messaging, log, board,
+  // quiesce, action). 타겟 해소는 Host 행이다.
+  const hostRepo = {
+    async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
+    async find() { return []; },
+  };
+  const dataSource = {
+    getRepository: (entity) => (entity?.name === 'RuntimeHost' ? hostRepo : { async findOne() { return null; }, async find() { return []; } }),
+  };
   const messaging = makeMessaging();
-  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, agentRepo, messaging, noopLog, {}, noQuiesce);
-  return { svc, scheduleRepo, roomRepo, participantRepo, agentRepo, messaging };
+  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, hostRepo, dataSource, messaging, noopLog, {}, noQuiesce);
+  return { svc, scheduleRepo, roomRepo, participantRepo, messaging };
 }
 
 test('due schedule opens a room, seats agent + system, sends task_prompt, advances next_run_at', async () => {
@@ -184,7 +189,7 @@ test('due schedule opens a room, seats agent + system, sends task_prompt, advanc
   assert.equal(roomRepo.created[0].board_id, undefined, 'legacy Board ownership is not propagated');
   // agent + synthetic 'system' user seated
   const types = participantRepo.created.map((p) => `${p.participant_type}:${p.participant_id}`).sort();
-  assert.deepEqual(types, ['agent:agent-1', 'user:system']);
+  assert.deepEqual(types, [`agent:${AGENT_UUID}`, 'user:system']);
   // task_prompt sent from a 'user'/'system' sender (the spawn-triggering shape)
   assert.equal(messaging.calls.length, 1, 'sendMessage called once');
   assert.equal(messaging.calls[0].content, 'do the thing');

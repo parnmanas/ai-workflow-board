@@ -19,6 +19,16 @@ export const MISSION_STATUSES = [
 ] as const;
 export type MissionStatus = (typeof MISSION_STATUSES)[number];
 
+/**
+ * P4c-2b: orchestrator/member 호출자 신원. agentId는 uuid Agent 행 또는
+ * host-uuid runtime 세션이고, runtimeKey는 spec-direct 슬롯의 `rt-` 신원이다.
+ * 게이트는 callerHoldsId(mcp/shared/session-auth)로 둘 다 본다.
+ */
+export interface OrchestrationCaller {
+  agentId: string;
+  runtimeKey?: string;
+}
+
 export const TERMINAL_MISSION_STATUSES: readonly MissionStatus[] = ['completed', 'failed', 'cancelled'];
 
 export function isTerminalMissionStatus(s: string): boolean {

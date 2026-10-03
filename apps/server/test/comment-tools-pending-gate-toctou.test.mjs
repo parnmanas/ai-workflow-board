@@ -28,7 +28,7 @@ import test from 'node:test';
 import { registerCommentTools } from '../dist/modules/mcp/tools/comment-tools.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 
 function harness({ ticket, comments = [], agents = [], findOneImpl = null, liveTicketState = null }) {
   const handlers = new Map();
@@ -108,7 +108,7 @@ function harness({ ticket, comments = [], agents = [], findOneImpl = null, liveT
     getRepository(entity) {
       if (entity === Ticket) return ticketRepo;
       if (entity === Comment) return commentRepo;
-      if (entity === Agent) return agentRepo;
+      if (entity === RuntimeHost) return agentRepo; // P4c-4: rows are identity-lookup stand-ins
       return { async findOne() { return null; }, create(v) { return v; }, async save(v) { return v; }, async findBy() { return []; } };
     },
     async transaction(run) {

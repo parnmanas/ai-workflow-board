@@ -4,9 +4,10 @@ import { DataSource, EntityManager, Repository, In, IsNull } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
-import { Agent } from '../../entities/Agent';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { activityEvents } from '../../services/activity.service';
+import { normalizeRuntimeSpec, runtimeIdentityKey, runtimeSpecFromAgentRow } from '../../common/runtime-spec';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { LogService } from '../../services/log.service';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
@@ -106,9 +107,6 @@ export class RoomMembershipService {
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
 
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
-
     @InjectDataSource() private readonly dataSource: DataSource,
 
     // 새 의존성은 **맨 뒤에** 붙인다 — 이 서비스를 위치 인자로 만드는 테스트가 있어
@@ -134,17 +132,16 @@ export class RoomMembershipService {
    * 조용히 제거한다(user 참가자·비-manager agent 는 그대로 통과). manager 가 없으면
    * 입력 배열을 그대로 반환(추가 질의 없음). RoomCrudService 도 이 헬퍼를 공유한다.
    */
-  async filterOutManagerParticipants(
-    participants: { participant_type: string; participant_id: string }[],
-  ): Promise<{ participant_type: string; participant_id: string }[]> {
+  async filterOutManagerParticipants<T extends { participant_type: string; participant_id: string }>(
+    participants: T[],
+  ): Promise<T[]> {
     const agentIds = [...new Set(
       participants.filter(p => p.participant_type === 'agent').map(p => p.participant_id).filter(Boolean),
     )];
-    if (agentIds.length === 0) return participants;
-    const managers = await this.agentRepo.find({ where: { id: In(agentIds), type: 'manager' }, select: ['id'] });
-    if (managers.length === 0) return participants;
-    const managerSet = new Set(managers.map(a => a.id));
-    return participants.filter(p => !(p.participant_type === 'agent' && managerSet.has(p.participant_id)));
+    // P4c-4: Agent 테이블 없음 — manager 행 자체가 존재하지 않으므로
+    // 필터할 것이 없다 (Host uuid 는 참가자로 허용된다).
+    void agentIds;
+    return participants;
   }
 
   /**
@@ -181,7 +178,7 @@ export class RoomMembershipService {
     roomId: string,
     workspaceId: string,
     caller: { type: 'user' | 'agent'; id: string } | string,
-    newParticipants: { participant_type: string; participant_id: string }[],
+    newParticipants: { participant_type: string; participant_id: string; runtime?: unknown }[],
   ): Promise<void> {
     // Back-compat: existing controller call site passes a bare userId string;
     // the new MCP path passes a typed caller. Normalize here so both work.
@@ -214,8 +211,38 @@ export class RoomMembershipService {
       throw makeError(400, 'Cannot add participants to a system-managed room');
     }
 
+    // P4c-3b: runtime만 들고 id가 빈 항목은 서버가 identity 키를 매긴다
+    // (클라이언트가 키를 계산할 수 없어서 — 브라우저에 sync sha256이 없다).
+    const keyed = newParticipants.map((p) => {
+      if (
+        (p.participant_id || '').trim() ||
+        p.participant_type !== 'agent' ||
+        p.runtime === undefined ||
+        p.runtime === null
+      ) {
+        return p;
+      }
+      try {
+        const spec = normalizeRuntimeSpec(p.runtime, 'participant.runtime');
+        return { ...p, participant_id: runtimeIdentityKey(spec), runtime: { ...spec } };
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid participant.runtime');
+      }
+    });
     // Manager(type='manager')는 chat 참가자가 될 수 없다 (ticket 941c72d3) — 조용히 제거.
-    const requested = dedupeParticipants(await this.filterOutManagerParticipants(newParticipants));
+    const requested = dedupeParticipants(await this.filterOutManagerParticipants(keyed));
+
+    // P4c-4: 직접 든 spec(directSpecs)만 스냅샷으로 기록한다 (Agent 행 없음).
+
+    const directSpecs = new Map<string, Record<string, any>>();
+    for (const p of requested) {
+      if (p.participant_type !== 'agent' || p.runtime === undefined || p.runtime === null) continue;
+      try {
+        directSpecs.set(p.participant_id, { ...normalizeRuntimeSpec(p.runtime, 'participant.runtime') });
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid participant.runtime');
+      }
+    }
 
     // 중복 제거·cap 검사·insert·승격을 한 트랜잭션에 묶는다. 나눠 놓으면 동시 요청이
     // 같은 "없음"을 읽고 둘 다 넣어 cap 을 넘기거나 중복 active 행을 만든다.
@@ -276,6 +303,11 @@ export class RoomMembershipService {
           room_id: roomId,
           participant_type: p.participant_type,
           participant_id: p.participant_id,
+          // P2b dual-write: user 참가자는 null.
+          // P4c-3b: 직접 든 spec이 있으면 그게 정본이다.
+          runtime_spec: p.participant_type === 'agent'
+            ? directSpecs.get(p.participant_id) ?? null
+            : null,
           last_read_at: joinedAt,
           left_at: null,
         }),
@@ -534,6 +566,30 @@ export class RoomMembershipService {
   }
 
   /**
+   * P4c-2b: active agent 참가자 중 runtime_spec 스냅샷이 있는 행의
+   * `{ participant_id: spec }` 맵. chat_room_message broadcast의
+   * `agent_member_runtimes`에 실려 매니저의 rt- 멤버 해석에 쓰인다.
+   * 스냅샷 없는 행은 키 자체가 없다 (wire 보존).
+   */
+  async getRoomAgentRuntimeSpecs(roomId: string): Promise<Record<string, Record<string, any>>> {
+    const rows = await this.participantRepo
+      .createQueryBuilder('p')
+      .select(['p.participant_id', 'p.runtime_spec'])
+      .where('p.room_id = :roomId', { roomId })
+      .andWhere("p.participant_type = 'agent'")
+      .andWhere('p.left_at IS NULL')
+      .getMany();
+    const out: Record<string, Record<string, any>> = {};
+    for (const r of rows) {
+      const spec = (r as any).runtime_spec;
+      if (spec && typeof spec === 'object' && !Array.isArray(spec)) {
+        out[r.participant_id] = { ...spec };
+      }
+    }
+    return out;
+  }
+
+  /**
    * Helper: Returns a Set of active agent participant IDs for a room.
    * Used to allow agent proxies to receive chat_room_message via SSE.
    */
@@ -744,12 +800,11 @@ export class RoomMembershipService {
       return participantId === 'system' ? 'System' : 'Unknown';
     }
     const userRepo = em ? em.getRepository(User) : this.userRepo;
-    const agentRepo = em ? em.getRepository(Agent) : this.agentRepo;
     if (participantType === 'user') {
       const user = await userRepo.findOne({ where: { id: participantId } });
       return user ? (user.name || user.email) : 'Unknown User';
     } else if (participantType === 'agent') {
-      const display = await resolveAgentDisplayName(agentRepo, participantId);
+      const display = await resolveAgentDisplayName(em ?? this.dataSource, participantId);
       return display ?? 'Unknown Agent';
     }
     return 'Unknown';

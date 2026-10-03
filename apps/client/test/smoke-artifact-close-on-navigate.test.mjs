@@ -2,8 +2,9 @@
 //
 // 아티팩트에서 "보드에서 열기"(TicketArtifact) 같은 링크를 누르면 목적지가 그
 // 아티팩트를 대체하므로 패널은 접혀야 한다 — 열린 채로 두면 방금 떠나온 내용이
-// 본문을 덮은 채 남는다. 세 컨테이너(Ticket/Board/Agent) 모두 같은 규약을 따르므로
-// 각각 실마운트해 (a) 실제로 navigate 하고 (b) 패널이 닫히는지 함께 고정한다.
+// 본문을 덮은 채 남는다. 두 컨테이너(Ticket/Board)는 같은 규약을 따르므로 각각
+// 실마운트해 (a) 실제로 navigate 하고 (b) 패널이 닫히는지 함께 고정한다.
+// (P4c-4: Agent 컨테이너 삭제 — Agent 표면 없음.)
 //
 // 실행:  node --import tsx --test apps/client/test/smoke-artifact-close-on-navigate.test.mjs
 import test from 'node:test';
@@ -16,7 +17,6 @@ import { ArtifactPanelProvider, useArtifactPanel } from '../src/contexts/Artifac
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
 import TicketArtifact from '../src/components/TicketArtifact.tsx';
 import BoardArtifact from '../src/components/BoardArtifact.tsx';
-import AgentArtifact from '../src/components/AgentArtifact.tsx';
 import { api } from '../src/api.ts';
 
 const h = React.createElement;
@@ -139,28 +139,3 @@ test('BoardArtifact 티켓 링크 — 그 티켓으로 이동하고 패널이 �
   }
 });
 
-test('AgentArtifact 상세 보기 — 에이전트 상세로 이동하고 패널이 닫힌다', async () => {
-  const { dom, uninstall } = setupEnv();
-  const orig = api.getAgent;
-  api.getAgent = async () => ({ id: 'a1', name: '샘플 에이전트', workspace_id: 'w1' });
-  try {
-    const view = renderArtifact(h(AgentArtifact, { agentId: 'a1' }), '샘플 에이전트');
-    await flush();
-    assert.match(view.container.textContent, /OPEN/);
-
-    await act(async () => { clickButton(view, '상세 보기'); });
-    await flush();
-
-    assert.match(
-      view.container.querySelector('[data-testid="loc"]').textContent,
-      /^\/ws\/w1\/agents\/a1$/,
-      '에이전트 상세로 이동한다',
-    );
-    assert.match(view.container.textContent, /CLOSED/, '이동 후 패널이 닫힌다');
-    view.unmount();
-  } finally {
-    api.getAgent = orig;
-    uninstall();
-    dom.cleanup();
-  }
-});

@@ -31,6 +31,7 @@ function heartbeatBody(managerId, availableModels) {
   return {
     instance_id: INSTANCE_ID,
     agent_id: managerId,
+    host_id: managerId, // P4c-4: heartbeat 정체성은 Host
     mode: 'manager',
     hostname: 'refresh-models-host',
     plugin_version: 'test',

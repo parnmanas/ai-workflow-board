@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
-import { Agent } from '../../entities/Agent';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { IsNull, Repository, DataSource } from 'typeorm';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { AgentSkillAssignment } from '../../entities/AgentSkillAssignment';
 import { Skill } from '../../entities/Skill';
@@ -21,7 +21,7 @@ export class SkillsService {
     @InjectRepository(SkillVersion) private readonly versions: Repository<SkillVersion>,
     @InjectRepository(AgentSkillAssignment) private readonly assignments: Repository<AgentSkillAssignment>,
     @InjectRepository(SkillProposal) private readonly proposals: Repository<SkillProposal>,
-    @InjectRepository(Agent) private readonly agents: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -197,7 +197,8 @@ export class SkillsService {
       where: { id: String(body.skill_version_id), skill_id: skillId },
     });
     if (!version) throw httpError(404, 'skill_version_not_found', 'Skill version not found');
-    const agent = await this.agents.findOne({ where: { id: String(body.agent_id) } });
+    // P4c-4: Host/링크 해소 (Agent 행 없음).
+    const agent = await resolveCallerIdentityRow(this.dataSource, String(body.agent_id));
     if (!agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       throw httpError(404, 'agent_not_in_workspace', 'Agent does not belong to this workspace');
     }

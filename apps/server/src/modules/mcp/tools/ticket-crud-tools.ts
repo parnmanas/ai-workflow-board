@@ -11,7 +11,6 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
 import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Resource } from '../../../entities/Resource';
@@ -35,6 +34,7 @@ import {
   validateNextTicketId,
 } from '../shared/ticket-helpers';
 import { getCallerAgent, HUMAN_ONLY_UNPEND_MESSAGE } from '../shared/session-auth';
+import { resolveCallerIdentityRow } from '../shared/authz';
 import { isTerminalColumn, deriveRootTicketStatus, TicketArchivedError } from '../shared/archive-helpers';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
@@ -123,8 +123,12 @@ const HandoffSpecInputSchema = z.object({ hops: z.array(HandoffHopInputSchema) }
  */
 const RoleAssignmentInputSchema = z.object({
   role_slug: z.string().describe('Workspace role slug (e.g. "assignee", "reporter", "reviewer", "planner", or any custom slug)'),
-  agent_id: z.string().optional().describe('Agent ID holding the role (mutually exclusive with user_id)'),
-  user_id: z.string().optional().describe('User ID holding the role (mutually exclusive with agent_id)'),
+  agent_id: z.string().optional().describe('Agent ID holding the role (mutually exclusive with user_id / runtime)'),
+  user_id: z.string().optional().describe('User ID holding the role (mutually exclusive with agent_id / runtime)'),
+  // P4c-2b: spec-direct holder — RuntimeSpec object (manager_agent_id, cli,
+  // model, working_dir, ...). No Agent row needed; dispatch resolves it.
+  // Mutually exclusive with agent_id / user_id.
+  runtime: z.record(z.string(), z.any()).optional().describe('RuntimeSpec declaring execution without an Agent row (mutually exclusive with agent_id / user_id)'),
 });
 
 /**
@@ -163,11 +167,12 @@ async function applyRoleAssignments(
 
   // Group holders by slug (first-seen order) so repeated same-slug entries
   // become a multi-holder set rather than clobbering each other.
-  const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null }>>();
+  // P4c-2b: runtime entries ride along untouched — setHolders normalizes them.
+  const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null; runtime?: unknown }>>();
   for (const a of assignments) {
     const slug = (a.role_slug || '').trim();
     if (!slug) continue;
-    const holder = { agent_id: a.agent_id || null, user_id: a.user_id || null };
+    const holder = { agent_id: a.agent_id || null, user_id: a.user_id || null, runtime: (a as any).runtime };
     const list = bySlug.get(slug);
     if (list) list.push(holder);
     else bySlug.set(slug, [holder]);
@@ -1058,8 +1063,8 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       status: z.string().optional().describe('Filter by ticket status (optional, e.g. "todo", "in_progress", "done"). For root tickets, "in_progress" matches the actual active-kind column placement, not the legacy status column.'),
     },
     async ({ agent_id, workspace_id, status }) => {
-      const agentRepo = dataSource.getRepository(Agent);
-      const agent = await agentRepo.findOne({ where: { id: agent_id } });
+      // P4: Agent 행 또는 Host 행 — 둘 다 조회 주체로 인정한다.
+      const agent = await resolveCallerIdentityRow(dataSource, agent_id);
       if (!agent) return err('Agent not found');
 
       if (!agentIsVisibleInWorkspace(agent.workspace_id, workspace_id)) {

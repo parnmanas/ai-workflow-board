@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Ticket } from '../entities/Ticket';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
+import { holderAssigneeId } from '../common/runtime-spec';
 
 export type MentionType = 'user' | 'agent' | 'role';
 
@@ -116,7 +117,10 @@ export class MentionService {
     });
     const out: Array<{ type: 'agent' | 'user'; id: string }> = [];
     for (const a of assignments) {
+      // P4c-4: spec-direct holder도 agent 멘션 대상이다 (rt- 키).
+      const rtId = !a.agent_id && !a.user_id ? holderAssigneeId(a) : null;
       if (a.agent_id) out.push({ type: 'agent', id: a.agent_id });
+      else if (rtId) out.push({ type: 'agent', id: rtId });
       else if (a.user_id) out.push({ type: 'user', id: a.user_id });
     }
     return out;

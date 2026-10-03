@@ -21,7 +21,8 @@ import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js'; // P4c-4
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { OutreachInboundItem } from '../dist/entities/OutreachInboundItem.js';
 import { OutreachChannelService } from '../dist/modules/outreach/outreach-channel.service.js';
@@ -46,7 +47,7 @@ describe('Outreach channels — workspace scope contract', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, Agent, OutreachChannel, OutreachInboundItem],
+      entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, RuntimeHost, ApiKey, OutreachChannel, OutreachInboundItem], // P4c-4
       synchronize: true,
       logging: false,
     });
@@ -56,17 +57,32 @@ describe('Outreach channels — workspace scope contract', () => {
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     const credentialRepo = dataSource.getRepository(Credential);
     const boardRepo = dataSource.getRepository(Board);
-    const agentRepo = dataSource.getRepository(Agent);
     // pollingService is only used for computeNextPoll() here (a pure
     // date computation) — its own repo/ingest deps are never exercised.
     const pollingService = new OutreachPollingService(channelRepo, credentialRepo, {}, noopLog, noQuiesce);
-    const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, boardRepo, agentRepo, pollingService);
+    // P4c-4: (channel, item, credential, board, dataSource, polling) — agentRepo 없음.
+    const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, boardRepo, dataSource, pollingService);
     controller = new OutreachController(channelService);
   });
 
   after(async () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
+
+  // P4c-4: classifier 정체성은 Host 행 + api_keys 링크다.
+  // uuid agent id 를 돌려준다 — 호출부는 예전처럼 `.id` 로 쓴다.
+  async function makeHostAgent(workspaceId, name) {
+    const { randomUUID } = await import('node:crypto');
+    const hostRepo = dataSource.getRepository(RuntimeHost);
+    const host = await hostRepo.save(hostRepo.create({ name: `host-${name}`, hostname: 'outreach-test', workspace_id: workspaceId }));
+    const agentId = randomUUID();
+    const keyRepo = dataSource.getRepository(ApiKey);
+    await keyRepo.save(keyRepo.create({
+      name: `link-${name}`, key: `hash-${name}`, key_prefix: 't***',
+      agent_id: agentId, host_id: host.id, scope: 'full', workspace_id: workspaceId,
+    }));
+    return { id: agentId };
+  }
 
   it('rejects creating a channel with a credential from a DIFFERENT workspace', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
@@ -117,8 +133,7 @@ describe('Outreach channels — workspace scope contract', () => {
     const wsRepo = dataSource.getRepository(Workspace);
     const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-agent-a' }));
     const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-agent-b' }));
-    const agentRepo = dataSource.getRepository(Agent);
-    const agentB = await agentRepo.save(agentRepo.create({ name: 'agent-b', workspace_id: wsB.id }));
+    const agentB = await makeHostAgent(wsB.id, 'agent-b');
 
     const res = response();
     await controller.create({
@@ -131,8 +146,7 @@ describe('Outreach channels — workspace scope contract', () => {
   it('accepts a classifier_agent_id belonging to the SAME workspace', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
     const ws = await wsRepo.save(wsRepo.create({ name: 'ws-agent-same' }));
-    const agentRepo = dataSource.getRepository(Agent);
-    const agent = await agentRepo.save(agentRepo.create({ name: 'agent-same', workspace_id: ws.id }));
+    const agent = await makeHostAgent(ws.id, 'agent-same');
 
     const res = response();
     await controller.create({
@@ -145,8 +159,7 @@ describe('Outreach channels — workspace scope contract', () => {
   it('allows a GLOBAL agent (workspace_id=null) as classifier_agent_id for any workspace channel', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
     const ws = await wsRepo.save(wsRepo.create({ name: 'ws-agent-global' }));
-    const agentRepo = dataSource.getRepository(Agent);
-    const globalAgent = await agentRepo.save(agentRepo.create({ name: 'global-agent', workspace_id: null }));
+    const globalAgent = await makeHostAgent(null, 'global-agent');
 
     const res = response();
     await controller.create({

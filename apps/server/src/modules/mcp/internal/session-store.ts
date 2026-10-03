@@ -31,6 +31,12 @@ export interface McpAgentContext {
   workspaceId?: string;
   scope?: string;
   source: 'db' | 'env' | 'dev-mode';
+  // P4c-2b: runtime-tuple identity (`rt-<hex16>`) for host-bound keys that
+  // carry no Agent row. agentId for such sessions is the HOST uuid (stable,
+  // uuid-shaped so Postgres uuid-column lookups degrade to null instead of
+  // throwing); runtimeKey is what orchestration gates compare against stored
+  // rt- assignee/orchestrator ids.
+  runtimeKey?: string;
   // Role + ticket context the plugin's subagent-manager pins per spawn via
   // X-AWB-Subagent-Role / X-AWB-Subagent-Ticket-Id headers. Lets server-side
   // tools (add_comment, etc.) attribute work to the role the subagent is

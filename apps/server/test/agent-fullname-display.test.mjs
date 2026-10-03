@@ -1,6 +1,12 @@
 // Regression: the ticket detail panel's **Activity** and **User (pending)**
-// tabs must render an agent as its canonical `<Manager>/<Agent>` display —
-// never the bare leaf name (ticket 51b1519d).
+// tabs must render an agent as its canonical display — never a bare leaf name
+// or raw id (ticket 51b1519d).
+//
+// P4c-4: the Agent table is dropped, so a linked legacy uuid resolves to its
+// **Host's bare name** (the Host IS the execution identity — unambiguous, not
+// a leaf). The read-vs-write distinction below is unchanged: Activity
+// re-resolves on READ via the companion actor_id, pending_set_by is stamped
+// at WRITE (no id to re-resolve).
 //
 // Two denormalized snapshot fields feed those tabs, and each is fixed on a
 // different side because they have different shapes:
@@ -52,16 +58,14 @@ const managed = await createAgent(app, getDataSourceToken, ws.id, {
   type: 'hermes',
   hosted: false,
 });
-await ds.getRepository('Agent').update(
-  { id: managed.id },
-  {
-    manager_agent_id: manager.id,
-    runtime_config: { strategy: 'single', permission_mode: 'strict' },
-  },
-);
+// P4c-4: managed→manager 연결은 api_keys 페어링 링크다 (Agent 행 없음).
+await createApiKey(app, getDataSourceToken, managed.id, {
+  workspaceId: ws.id, hostId: manager.id, label: 'managed-link',
+});
 const user = await createUser(app, getDataSourceToken, { name: 'Human' });
 
-const MANAGED_DISPLAY = `${manager.name}/${managed.name}`;
+// P4c-4: linked uuid 는 Host bare name 으로 해소된다 (runbook agent-display-name P4c-4 단서).
+const MANAGED_DISPLAY = manager.name;
 
 const ticket = await createTicket(app, getDataSourceToken, {
   columnId: columns.todo.id,
@@ -71,7 +75,7 @@ const ticket = await createTicket(app, getDataSourceToken, {
 });
 
 // ─── Activity tab (READ-side resolution) ─────────────────────────────────────
-test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', async () => {
+test('Activity tab: actor_name re-resolves to the Host bare name from actor_id', async () => {
   const activityService = app.get(ActivityService);
 
   // Rows deliberately written with WRONG/bare actor_name to prove the read side
@@ -94,19 +98,20 @@ test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', 
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
     field_changed: 'user', actor_id: user.id, actor_name: user.name,
   });
-  // Already-canonical agent row: must stay identical (idempotent).
+  // Stale prefixed row: the read projection re-resolves via actor_id, so the
+  // old `<Manager>/<Agent>` text reads back as the current Host name.
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
-    field_changed: 'already-full', actor_id: managed.id, actor_name: MANAGED_DISPLAY,
+    field_changed: 'already-full', actor_id: managed.id, actor_name: 'Mgr/Coder',
   });
 
   const rows = await activityService.getTicketActivity(ticket.id);
   const byField = new Map(rows.map(r => [r.field_changed, r]));
 
-  // managed agent → manager-prefixed display
+  // linked managed id → its Host's bare name (unambiguous: no leaf on screen)
   assert.equal(byField.get('managed')?.actor_name, MANAGED_DISPLAY,
     `managed actor must read back as "${MANAGED_DISPLAY}", got "${byField.get('managed')?.actor_name}"`);
-  assert.ok(byField.get('managed')?.actor_name.includes('/'), 'managed display must carry the manager prefix');
+  assert.ok(!byField.get('managed')?.actor_name.includes('/'), 'linked display is the bare Host name, not a prefixed pair');
 
   // Runtime Host (no parent host) → bare name, no prefix
   assert.equal(byField.get('runtime-host')?.actor_name, manager.name,
@@ -120,9 +125,9 @@ test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', 
   assert.equal(byField.get('user')?.actor_name, user.name,
     'user actor_id (not an agent) must not be clobbered');
 
-  // idempotent on already-canonical rows
+  // stale prefixed text is re-resolved to the current canonical display
   assert.equal(byField.get('already-full')?.actor_name, MANAGED_DISPLAY,
-    'already-canonical row must be unchanged');
+    'stale prefixed row must read back as the current Host display');
 
   // The persisted (fallback) row is STILL bare — proves this is a READ-side
   // projection, not a write mutation.
@@ -134,8 +139,9 @@ test('Activity tab: actor_name re-resolves to <Manager>/<Agent> from actor_id', 
 });
 
 // ─── User (pending) tab (WRITE-side stamp), end-to-end via /mcp ──────────────
-test('User tab: pend_ticket stamps pending_set_by as <Manager>/<Agent>', async () => {
-  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, label: 'pend' });
+test('User tab: pend_ticket stamps pending_set_by as the Host bare name', async () => {
+  // P4c-4: 호출자 키 자체가 host 바인딩이다 (단일 행 — 해소가 결정적이다).
+  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, hostId: manager.id, label: 'pend' });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
@@ -150,7 +156,7 @@ test('User tab: pend_ticket stamps pending_set_by as <Manager>/<Agent>', async (
   assert.ok(result && !result.isError, `pend_ticket must succeed, got ${JSON.stringify(result)}`);
   assert.equal(result.pending_set_by, MANAGED_DISPLAY,
     `returned pending_set_by must be "${MANAGED_DISPLAY}", got "${result.pending_set_by}"`);
-  assert.ok(String(result.pending_set_by).includes('/'), 'pending_set_by must carry the manager prefix');
+  assert.ok(!String(result.pending_set_by).includes('/'), 'pending_set_by is the bare Host display');
 
   const stored = await ds.getRepository('Ticket').findOne({ where: { id: pendTicket.id } });
   assert.equal(stored.pending_set_by, MANAGED_DISPLAY, 'persisted pending_set_by must be canonical too');
@@ -164,8 +170,8 @@ test('User tab: pend_ticket stamps pending_set_by as <Manager>/<Agent>', async (
 // the real /mcp transport so the API-key → caller.agentId → Manager/Agent chain
 // is what the assertion covers, and assert BOTH the returned ticket and the
 // persisted row carry the canonical name.
-test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/<Agent>', async () => {
-  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, label: 'upd-pend' });
+test('User tab: update_ticket pending toggle stamps pending_set_by as the Host bare name', async () => {
+  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, hostId: manager.id, label: 'upd-pend' });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
@@ -185,7 +191,7 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/
   // Returned ticket (loadTicketFull) must already reflect the canonical stamp.
   assert.equal(result.pending_set_by, MANAGED_DISPLAY,
     `returned pending_set_by must be "${MANAGED_DISPLAY}", got "${result.pending_set_by}"`);
-  assert.ok(String(result.pending_set_by).includes('/'), 'returned pending_set_by must carry the manager prefix');
+  assert.ok(!String(result.pending_set_by).includes('/'), 'returned pending_set_by is the bare Host display');
 
   const stored = await ds.getRepository('Ticket').findOne({ where: { id: updTicket.id } });
   assert.equal(stored.pending_user_action, true, 'ticket must be parked via update_ticket');
@@ -199,7 +205,7 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as <Manager>/
 // sees the bare leaf until it refetches. logActivity emits 'activity', the
 // event-registry board_update.map projects actor_id→canonical, and the frame
 // lands on the SSE wire. Drive it truly end-to-end through /api/events/stream.
-test('Realtime board_update SSE: actor_name is canonical <Manager>/<Agent>', async () => {
+test('Realtime board_update SSE: actor_name is the canonical Host display', async () => {
   const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'sse-sub' });
   // No boardId → the board_update filter (`!id.boardId || …`) delivers all.
   const sse = await openSseStream(port, key.raw_key, {});
@@ -220,8 +226,8 @@ test('Realtime board_update SSE: actor_name is canonical <Manager>/<Agent>', asy
   );
   assert.equal(frame.data.actor_name, MANAGED_DISPLAY,
     `realtime board_update.actor_name must be canonical "${MANAGED_DISPLAY}", got "${frame.data.actor_name}"`);
-  assert.ok(String(frame.data.actor_name).includes('/'),
-    'realtime actor_name must carry the manager prefix');
+  assert.ok(!String(frame.data.actor_name).includes('/'),
+    'realtime actor_name is the bare Host display');
 
   // Non-agent actor (system label, no actor_id) must ride the wire verbatim —
   // the projection only touches ids that resolve to an Agent row.

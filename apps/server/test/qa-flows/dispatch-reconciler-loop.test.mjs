@@ -306,7 +306,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     }
     assert.ok(agent.manager_agent_id, 'fixture agent에 실제 런타임 호스트가 연결되어야 한다');
     const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
-      workspaceId: ws.id, label: 'mgr-suppression',
+      workspaceId: ws.id, label: 'mgr-suppression', hostId: agent.manager_agent_id, // P4c-4: suppressed ack 는 Host 키 필요
     })).raw_key;
     const post = (bodyObj) => fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
       method: 'POST',
@@ -378,7 +378,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
     const ticket = await mkTicket('immediate suppression correlation');
     assert.ok(agent.manager_agent_id, 'fixture agent에 실제 런타임 호스트가 연결되어야 한다');
     const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
-      workspaceId: ws.id, label: 'mgr-immediate-suppression',
+      workspaceId: ws.id, label: 'mgr-immediate-suppression', hostId: agent.manager_agent_id, // P4c-4: suppressed ack 는 Host 키 필요
     })).raw_key;
 
     let resolveAck;
@@ -435,7 +435,7 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
       role: 'assignee',
     });
     const managerKey = (await createApiKey(app, getDataSourceToken, agent.manager_agent_id, {
-      workspaceId: ws.id, label: 'mgr-mention-suppression',
+      workspaceId: ws.id, label: 'mgr-mention-suppression', hostId: agent.manager_agent_id, // P4c-4: suppressed ack 는 Host 키 필요
     })).raw_key;
     const response = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
       method: 'POST',

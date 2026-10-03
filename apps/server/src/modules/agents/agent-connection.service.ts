@@ -1,7 +1,6 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 
@@ -16,7 +15,6 @@ export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
   private lockSweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     private readonly logService: LogService,
   ) {}
@@ -66,17 +64,9 @@ export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
    * Offline detection for truly disconnected agents is still handled by the
    * 30s sweepOfflineAgents interval using the same OFFLINE_THRESHOLD_MS.
    */
+  // P4c-4: Agent 테이블 없음 — no-op (presence 는 heartbeat/레지스트리).
   async markOffline(agentId: string): Promise<void> {
-    const threshold = new Date(Date.now() - OFFLINE_THRESHOLD_MS);
-    await this.agentRepo
-      .createQueryBuilder()
-      .update(Agent)
-      .set({ is_online: 0 })
-      .where(
-        'id = :id AND (last_seen_at IS NULL OR last_seen_at < :threshold)',
-        { id: agentId, threshold },
-      )
-      .execute();
+    void agentId;
   }
 
   /**
@@ -84,15 +74,10 @@ export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
    * Handles NULL last_seen_at safely (IS NOT NULL guard).
    * Returns count of agents marked offline.
    */
+  // P4c-4: Agent 테이블 없음 — no-op.
   async sweepOfflineAgents(thresholdMs: number): Promise<number> {
-    const threshold = new Date(Date.now() - thresholdMs);
-    const result = await this.agentRepo
-      .createQueryBuilder()
-      .update(Agent)
-      .set({ is_online: 0 })
-      .where('is_online = 1 AND last_seen_at IS NOT NULL AND last_seen_at < :threshold', { threshold })
-      .execute();
-    return result.affected ?? 0;
+    void thresholdMs;
+    return 0;
   }
 
   /**

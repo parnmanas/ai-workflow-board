@@ -26,7 +26,6 @@ import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../../entities/ChatRoomMessage';
 import { User } from '../../../entities/User';
-import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
 import { UserMention } from '../../../entities/UserMention';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
@@ -272,7 +271,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
 
   const activityService = new ActivityService(
     dataSource.getRepository(ActivityLog),
-    dataSource.getRepository(Agent),
+    dataSource,
     logService,
   );
   const apiKeyService = new ApiKeyService(dataSource.getRepository(ApiKey));
@@ -286,7 +285,6 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     dataSource.getRepository(ChatRoom),
     dataSource.getRepository(ChatRoomParticipant),
     dataSource.getRepository(User),
-    dataSource.getRepository(Agent),
     dataSource,
     // 발화 게이트가 미션의 `user_chat_mode` 를 읽는다(티켓 9cfd8161). standalone MCP 도
     // 같은 판정을 받아야 하므로 여기서도 넘긴다 — 빠지면 MCP 경로만 옵션을 무시한다.
@@ -299,7 +297,6 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     dataSource.getRepository(ChatRoom),
     dataSource.getRepository(ChatRoomParticipant),
     dataSource.getRepository(ChatRoomMessage),
-    dataSource.getRepository(Agent),
     dataSource.getRepository(Ticket),
     dataSource.getRepository(UserMention),
     dataSource.getRepository(TicketAttachment),

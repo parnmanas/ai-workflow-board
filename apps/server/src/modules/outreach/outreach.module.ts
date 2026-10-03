@@ -7,7 +7,6 @@ import { Credential } from '../../entities/Credential';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
-import { Agent } from '../../entities/Agent';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
@@ -28,7 +27,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([OutreachChannel, OutreachInboundItem, OutreachOutboundPost, Credential, Board, BoardColumn, Ticket, Agent, ChatRoom, ChatRoomParticipant]),
+    TypeOrmModule.forFeature([OutreachChannel, OutreachInboundItem, OutreachOutboundPost, Credential, Board, BoardColumn, Ticket, ChatRoom, ChatRoomParticipant]),
     // TicketRoleAssignmentService (board default_role_assignments backfill on
     // auto-created tickets) is NOT @Global — must import explicitly.
     WorkspaceRolesModule,

@@ -42,7 +42,7 @@ import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
@@ -53,7 +53,8 @@ import { OrchestrationMissionService, countSteps } from './orchestration-mission
 import { OrchestrationTeamService } from './orchestration-team.service';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { orchestrationError } from './orchestration-errors';
-import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
+import { isUuidShapedId, resolveAgentDisplayNamesByIds, resolveAgentDisplayName } from '../../utils/agent-name';
+import { isRuntimeIdentityKey } from '../../common/runtime-spec';
 import {
   CONFIRM_FEEDBACK_MAX,
   CONFIRM_VERDICTS,
@@ -79,6 +80,7 @@ import {
   openJoinForUserChatMode,
   postActionApplies,
   validatePlan,
+  type OrchestrationCaller,
 } from './orchestration.constants';
 import {
   ConfirmFeedbackContext,
@@ -115,6 +117,7 @@ import {
   TeamAgentSpec,
   parseTeamAgentSpec,
 } from '../../common/orchestration-member-spec';
+import { callerHoldsId } from '../mcp/shared/session-auth';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 
 /** Synthetic sender the dispatch messages are attributed to, mirroring QA/Actions. */
@@ -125,6 +128,8 @@ export interface ActorRef {
   type: 'user' | 'agent' | 'system';
   id: string;
   name: string;
+  /** P4c-2b: spec-direct orchestrator의 rt- 신원 (reopen 게이트용). */
+  runtimeKey?: string;
 }
 
 /**
@@ -152,7 +157,7 @@ export class OrchestrationRunnerService {
     @InjectRepository(OrchestrationTeamMember) private readonly memberRepo: Repository<OrchestrationTeamMember>,
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+
     @InjectRepository(Action) private readonly actionRepo: Repository<Action>,
     @InjectRepository(ActionRun) private readonly actionRunRepo: Repository<ActionRun>,
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -210,8 +215,16 @@ export class OrchestrationRunnerService {
       if (team.enabled === 0) throw orchestrationError(409, `team "${team.name}" is disabled`);
       if (!team.orchestrator_agent_id) throw orchestrationError(400, `team "${team.name}" has no orchestrator agent`);
 
-      const orchestrator = await this.agentRepo.findOne({ where: { id: team.orchestrator_agent_id } });
-      if (!orchestrator) throw orchestrationError(400, 'orchestrator agent no longer exists');
+      // P4c-4: orchestrator 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
+      const orchestratorId = team.orchestrator_agent_id;
+      const orchestratorSpec = parseTeamAgentSpec(team.orchestrator_spec);
+      const orchestratorName = await resolveAgentDisplayName(this.dataSource, orchestratorId);
+      if (!orchestratorName && !isRuntimeIdentityKey(orchestratorId)) {
+        throw orchestrationError(400, 'orchestrator agent no longer exists');
+      }
+      const orchestratorLabel = orchestratorName
+        ?? orchestratorSpec?.cli
+        ?? orchestratorId.slice(0, 11);
 
       const roster = await this.buildRoster(team.id);
       if (roster.length === 0) {
@@ -246,10 +259,18 @@ export class OrchestrationRunnerService {
           open_join: openJoinForUserChatMode(normalizeUserChatMode(mission.user_chat_mode)),
         }),
       );
-      await this.addRoomParticipants(room.id, orchestrator.id, missionHumanOwner(mission));
+      await this.addRoomParticipants(
+        room.id,
+        orchestratorId,
+        missionHumanOwner(mission),
+        team.orchestrator_spec ?? null,
+      );
 
       mission.room_id = room.id;
-      mission.orchestrator_agent_id = orchestrator.id;
+      mission.orchestrator_agent_id = orchestratorId;
+      // P1 dual-write: Spec 직dispatch용 스냅샷. dispatch는 당분간 agent_id를
+      // 읽고, P2에서 이쪽으로 전환한다.
+      mission.orchestrator_spec = team.orchestrator_spec ?? null;
       mission.status = 'planning';
       mission.started_at = new Date();
       await this.missionRepo.save(mission);
@@ -278,13 +299,13 @@ export class OrchestrationRunnerService {
 
       await this.missions.recordEvent(mission, {
         type: 'mission_started',
-        message: `Mission briefed to orchestrator ${await this.agentName(orchestrator.id)} (${roster.length} member(s) available)`,
+        message: `Mission briefed to orchestrator ${orchestratorLabel} (${roster.length} member(s) available)`,
         actor_type: actor.type,
         actor_id: actor.id,
         actor_name: actor.name,
-        data: { room_id: room.id, orchestrator_agent_id: orchestrator.id },
+        data: { room_id: room.id, orchestrator_agent_id: orchestratorId },
       });
-      this.logService.info('Orchestration', `mission ${mission.id} started → orchestrator ${orchestrator.id}`, {
+      this.logService.info('Orchestration', `mission ${mission.id} started → orchestrator ${orchestratorId}`, {
         workspace_id: mission.workspace_id,
         room_id: room.id,
       });
@@ -409,7 +430,7 @@ export class OrchestrationRunnerService {
   ): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
       const mission = await this.missions.requireMission(missionId, workspaceId);
-      if (actor.type === 'agent') this.requireOrchestrator(mission, actor.id);
+      if (actor.type === 'agent') this.requireOrchestrator(mission, { agentId: actor.id, runtimeKey: actor.runtimeKey });
       if (!(TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(
           409,
@@ -447,8 +468,11 @@ export class OrchestrationRunnerService {
       if (!team.orchestrator_agent_id) {
         throw orchestrationError(409, `team "${team.name}" has no orchestrator agent to reopen this mission with`);
       }
-      const orchestrator = await this.agentRepo.findOne({ where: { id: team.orchestrator_agent_id } });
-      if (!orchestrator) throw orchestrationError(409, 'orchestrator agent no longer exists');
+      // P4c-4: orchestrator 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
+      if (!isRuntimeIdentityKey(team.orchestrator_agent_id)) {
+        const orchestratorName = await resolveAgentDisplayName(this.dataSource, team.orchestrator_agent_id);
+        if (!orchestratorName) throw orchestrationError(409, 'orchestrator agent no longer exists');
+      }
 
       mission.status = 'running';
       mission.finished_at = null;
@@ -498,12 +522,12 @@ export class OrchestrationRunnerService {
    */
   async completeMission(
     missionId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     input: { status: 'completed' | 'failed'; summary: string },
   ): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
       const mission = await this.missions.requireMission(missionId);
-      this.requireOrchestrator(mission, callerAgentId);
+      this.requireOrchestrator(mission, caller);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is already ${mission.status}`);
       }
@@ -557,7 +581,7 @@ export class OrchestrationRunnerService {
             ? `Mission completed by ${orchestratorName}`
             : `Mission failed: ${mission.result_summary.slice(0, 300)}`,
         actor_type: 'agent',
-        actor_id: callerAgentId,
+        actor_id: caller.agentId,
         actor_name: orchestratorName,
         data: { counts: countSteps(await this.missions.listSteps(mission.id)) },
       });
@@ -583,12 +607,12 @@ export class OrchestrationRunnerService {
    */
   async updateCriteria(
     missionId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     updates: Array<{ key: string; met: boolean; note?: string }>,
   ): Promise<OrchestrationMission> {
     return this.withMissionLock(missionId, async () => {
       const mission = await this.missions.requireMission(missionId);
-      this.requireOrchestrator(mission, callerAgentId);
+      this.requireOrchestrator(mission, caller);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is ${mission.status}`);
       }
@@ -624,13 +648,13 @@ export class OrchestrationRunnerService {
       mission.completion_criteria = revalidated.criteria;
       await this.missionRepo.save(mission);
 
-      const orchestratorName = await this.agentName(callerAgentId);
+      const orchestratorName = await this.agentName(caller.agentId);
       const met = revalidated.criteria.filter((c) => c.met).length;
       await this.missions.recordEvent(mission, {
         type: 'criteria_updated',
         message: `${orchestratorName} updated completion criteria (${changed.join(', ')}) — ${met}/${revalidated.criteria.length} met`,
         actor_type: 'agent',
-        actor_id: callerAgentId,
+        actor_id: caller.agentId,
         actor_name: orchestratorName,
         data: { changed, criteria: revalidated.criteria },
       });
@@ -846,7 +870,7 @@ export class OrchestrationRunnerService {
    */
   async submitPlan(
     missionId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     input: {
       summary?: string;
       steps: PlanStepInput[];
@@ -863,7 +887,7 @@ export class OrchestrationRunnerService {
   }> {
     return this.withMissionLock(missionId, async () => {
       const mission = await this.missions.requireMission(missionId);
-      this.requireOrchestrator(mission, callerAgentId);
+      this.requireOrchestrator(mission, caller);
       if (mission.status !== 'planning' && mission.status !== 'running') {
         throw orchestrationError(
           409,
@@ -996,6 +1020,11 @@ export class OrchestrationRunnerService {
       const created: string[] = [];
       const updated: string[] = [];
       const toSave: OrchestrationStep[] = [];
+      // P1 dual-write: assignee 스펙 스냅샷용 member spec 맵 (raw 복사).
+      const specByAgent = new Map(
+        (await this.memberRepo.find({ where: { team_id: mission.team_id } }))
+          .map((m) => [m.agent_id, m.spec ?? null] as const),
+      );
 
       validated.steps.forEach((s, index) => {
         const key = String(s.step_key).trim();
@@ -1017,6 +1046,7 @@ export class OrchestrationRunnerService {
               acceptance_criteria: String(s.acceptance_criteria ?? '').trim(),
               depends_on: depends,
               assignee_agent_id: (s.assignee_agent_id || '').trim() || null,
+              assignee_spec: specByAgent.get((s.assignee_agent_id || '').trim()) ?? null,
               status: 'pending',
               position: index,
               plan_version: nextVersion,
@@ -1048,7 +1078,10 @@ export class OrchestrationRunnerService {
             found.acceptance_criteria = String(s.acceptance_criteria ?? '').trim();
             found.depends_on = depends;
             const assignee = (s.assignee_agent_id || '').trim();
-            if (assignee) found.assignee_agent_id = assignee;
+            if (assignee) {
+              found.assignee_agent_id = assignee;
+              found.assignee_spec = specByAgent.get(assignee) ?? null;
+            }
             found.plan_version = nextVersion;
             updated.push(key);
           }
@@ -1076,7 +1109,7 @@ export class OrchestrationRunnerService {
           `${created.length} new step(s), ${updated.length} revised` +
           (input.summary ? ` — ${String(input.summary).slice(0, 200)}` : ''),
         actor_type: 'agent',
-        actor_id: callerAgentId,
+        actor_id: caller.agentId,
         actor_name: orchestratorName,
         data: {
           plan_version: nextVersion,
@@ -1144,7 +1177,7 @@ export class OrchestrationRunnerService {
    */
   async patchGraph(
     missionId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     patch: GraphPatchInput,
   ): Promise<{
     mission: OrchestrationMission;
@@ -1154,7 +1187,7 @@ export class OrchestrationRunnerService {
   }> {
     return this.withMissionLock(missionId, async () => {
       const mission = await this.missions.requireMission(missionId);
-      this.requireOrchestrator(mission, callerAgentId);
+      this.requireOrchestrator(mission, caller);
       if (mission.status !== 'planning' && mission.status !== 'running') {
         throw orchestrationError(
           409,
@@ -1204,7 +1237,7 @@ export class OrchestrationRunnerService {
           `Graph r${mission.graph_revision} patched by ${orchestratorName}: ` +
           `${summary.slice(0, 400)}${summary.length > 400 ? '…' : ''}`,
         actor_type: 'agent',
-        actor_id: callerAgentId,
+        actor_id: caller.agentId,
         actor_name: orchestratorName,
         data: {
           graph_revision: mission.graph_revision,
@@ -1232,7 +1265,7 @@ export class OrchestrationRunnerService {
    */
   async updateStep(
     stepId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     input: {
       action: 'retry' | 'reassign' | 'amend' | 'skip' | 'cancel' | 'set_retry_budget';
       assignee_agent_id?: string;
@@ -1253,7 +1286,7 @@ export class OrchestrationRunnerService {
     const step = await this.missions.requireStep(stepId);
     return this.withMissionLock(step.mission_id, async () => {
       const mission = await this.missions.requireMission(step.mission_id);
-      this.requireOrchestrator(mission, callerAgentId);
+      this.requireOrchestrator(mission, caller);
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(409, `mission is ${mission.status}.${REOPEN_MISSION_HINT}`);
       }
@@ -1312,7 +1345,7 @@ export class OrchestrationRunnerService {
               `${before} → ${requested} (used ${fresh.attempt}) by ${orchestratorName}` +
               `${input.reason ? `: ${input.reason}` : ''}`,
             actor_type: 'agent',
-            actor_id: callerAgentId,
+            actor_id: caller.agentId,
             actor_name: orchestratorName,
             data: { before, after: requested, attempt: fresh.attempt },
           });
@@ -1342,7 +1375,7 @@ export class OrchestrationRunnerService {
             step_key: fresh.step_key,
             message: `Step "${fresh.title}" ${fresh.status} by ${orchestratorName}${input.reason ? `: ${input.reason}` : ''}`,
             actor_type: 'agent',
-            actor_id: callerAgentId,
+            actor_id: caller.agentId,
             actor_name: orchestratorName,
           });
           break;
@@ -1359,7 +1392,10 @@ export class OrchestrationRunnerService {
           if (input.acceptance_criteria !== undefined) {
             fresh.acceptance_criteria = String(input.acceptance_criteria).trim();
           }
-          if (input.assignee_agent_id) fresh.assignee_agent_id = input.assignee_agent_id;
+          if (input.assignee_agent_id) {
+            fresh.assignee_agent_id = input.assignee_agent_id;
+            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id);
+          }
           await this.stepRepo.save(fresh);
           await this.missions.recordEvent(mission, {
             type: 'note',
@@ -1367,7 +1403,7 @@ export class OrchestrationRunnerService {
             step_key: fresh.step_key,
             message: `Step "${fresh.title}" amended by ${orchestratorName}`,
             actor_type: 'agent',
-            actor_id: callerAgentId,
+            actor_id: caller.agentId,
             actor_name: orchestratorName,
           });
           break;
@@ -1378,6 +1414,7 @@ export class OrchestrationRunnerService {
             throw orchestrationError(409, `step "${fresh.step_key}" is in flight — cannot reassign mid-execution`);
           }
           fresh.assignee_agent_id = input.assignee_agent_id;
+          fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id);
           if (isTerminalStepStatus(fresh.status)) fresh.status = 'pending';
           // 재배정은 needs_recovery 를 벗어나는 명시적 조치다 — 사유를 남겨두면
           // UI 가 이미 처리된 복구 요청을 계속 띄운다.
@@ -1389,7 +1426,7 @@ export class OrchestrationRunnerService {
             step_key: fresh.step_key,
             message: `Step "${fresh.title}" reassigned to ${await this.agentName(input.assignee_agent_id)} by ${orchestratorName}`,
             actor_type: 'agent',
-            actor_id: callerAgentId,
+            actor_id: caller.agentId,
             actor_name: orchestratorName,
           });
           break;
@@ -1417,7 +1454,10 @@ export class OrchestrationRunnerService {
           if (input.acceptance_criteria !== undefined) {
             fresh.acceptance_criteria = String(input.acceptance_criteria).trim();
           }
-          if (input.assignee_agent_id) fresh.assignee_agent_id = input.assignee_agent_id;
+          if (input.assignee_agent_id) {
+            fresh.assignee_agent_id = input.assignee_agent_id;
+            fresh.assignee_spec = await this.assigneeSpecSnapshot(mission.team_id, input.assignee_agent_id);
+          }
           fresh.status = 'pending';
           fresh.finished_at = null;
           fresh.started_at = null;
@@ -1435,7 +1475,7 @@ export class OrchestrationRunnerService {
               `${priorStatus ? `, was ${priorStatus}` : ''}) by ${orchestratorName}` +
               `${input.reason ? `: ${input.reason}` : ''}`,
             actor_type: 'agent',
-            actor_id: callerAgentId,
+            actor_id: caller.agentId,
             actor_name: orchestratorName,
           });
           break;
@@ -1527,7 +1567,7 @@ export class OrchestrationRunnerService {
   /** Non-terminal heartbeat from a member. Flips `dispatched` → `running`. */
   async reportProgress(
     stepId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     message: string,
     leaseToken?: string,
     checkpoint?: Record<string, any> | null,
@@ -1536,11 +1576,11 @@ export class OrchestrationRunnerService {
     return this.withMissionLock(step.mission_id, async () => {
       const fresh = await this.missions.requireStep(stepId);
       const mission = await this.missions.requireMission(fresh.mission_id);
-      this.requireStepActor(fresh, mission, callerAgentId);
+      this.requireStepActor(fresh, mission, caller);
       if (isTerminalStepStatus(fresh.status)) {
         throw orchestrationError(409, `step "${fresh.step_key}" is already ${fresh.status}`);
       }
-      await this.requireFreshLease(mission, fresh, callerAgentId, leaseToken, 'progress report');
+      await this.requireFreshLease(mission, fresh, caller.agentId, leaseToken, 'progress report');
       if (fresh.status === 'dispatched') {
         fresh.status = 'running';
       }
@@ -1566,7 +1606,7 @@ export class OrchestrationRunnerService {
           step_key: fresh.step_key,
           message: `"${fresh.title}" reconnected — the assignee answered before the grace window expired`,
           actor_type: 'agent',
-          actor_id: callerAgentId,
+          actor_id: caller.agentId,
         });
       }
       if (checkpoint !== undefined && checkpoint !== null) {
@@ -1576,7 +1616,7 @@ export class OrchestrationRunnerService {
           step_key: fresh.step_key,
           message: `Checkpoint saved for "${fresh.title}" — a new attempt would resume from here`,
           actor_type: 'agent',
-          actor_id: callerAgentId,
+          actor_id: caller.agentId,
           data: { checkpoint },
         });
       }
@@ -1584,10 +1624,10 @@ export class OrchestrationRunnerService {
         type: 'step_progress',
         step_id: fresh.id,
         step_key: fresh.step_key,
-        message: `${await this.agentName(callerAgentId)} on "${fresh.title}": ${String(message || '').slice(0, 500)}`,
+        message: `${await this.agentName(caller.agentId)} on "${fresh.title}": ${String(message || '').slice(0, 500)}`,
         actor_type: 'agent',
-        actor_id: callerAgentId,
-        actor_name: await this.agentName(callerAgentId),
+        actor_id: caller.agentId,
+        actor_name: await this.agentName(caller.agentId),
       });
       return fresh;
     });
@@ -1600,7 +1640,7 @@ export class OrchestrationRunnerService {
    */
   async reportStep(
     stepId: string,
-    callerAgentId: string,
+    caller: OrchestrationCaller,
     input: {
       status: 'done' | 'failed' | 'blocked';
       summary: string;
@@ -1620,7 +1660,7 @@ export class OrchestrationRunnerService {
     return this.withMissionLock(found.mission_id, async () => {
       const step = await this.missions.requireStep(stepId);
       const mission = await this.missions.requireMission(step.mission_id);
-      this.requireStepActor(step, mission, callerAgentId);
+      this.requireStepActor(step, mission, caller);
 
       if ((TERMINAL_MISSION_STATUSES as readonly string[]).includes(mission.status)) {
         throw orchestrationError(
@@ -1639,7 +1679,7 @@ export class OrchestrationRunnerService {
       // Lease fencing(티켓 4d065f82) — 아래 visit 가드보다 **먼저** 본다. visit 은
       // 재시도로 바뀌지 않으므로 재시도로 밀려난 attempt 는 visit 만으로는 걸러지지
       // 않는다. 두 가드는 서로 다른 축(재시도 / loop 재진입)을 막으므로 둘 다 남긴다.
-      await this.requireFreshLease(mission, step, callerAgentId, input.lease_token, 'result report');
+      await this.requireFreshLease(mission, step, caller.agentId, input.lease_token, 'result report');
       // 중복 실행 통제(티켓 1ca9e49b) — loop 재진입이 만드는 유일한 새 위험:
       // 같은 step_id가 iteration 2로 다시 디스패치된 뒤, iteration 1의 subagent가
       // 뒤늦게 보고하면 status가 terminal이 아니라 위 가드를 그대로 통과해
@@ -1676,7 +1716,7 @@ export class OrchestrationRunnerService {
         }
       }
 
-      const actorName = await this.agentName(callerAgentId);
+      const actorName = await this.agentName(caller.agentId);
       const reportedStatus = input.status;
       step.status = input.status;
       step.result_summary = (input.summary || '').slice(0, SUMMARY_MAX);
@@ -1694,7 +1734,7 @@ export class OrchestrationRunnerService {
           `${actorName} reported "${step.title}" as ${input.status}` +
           (step.result_summary ? `: ${step.result_summary.slice(0, 300)}` : ''),
         actor_type: 'agent',
-        actor_id: callerAgentId,
+        actor_id: caller.agentId,
         actor_name: actorName,
         data: { artifacts: step.artifacts ?? [], verdict: step.verdict || null, visit: step.visit ?? 0 },
       });
@@ -2245,7 +2285,11 @@ export class OrchestrationRunnerService {
 
     const byKey = new Map(steps.map((s) => [s.step_key, s]));
     const members = await this.memberRepo.find({ where: { team_id: mission.team_id } });
-    const capByAgent = new Map(members.map((m) => [m.agent_id, m.max_concurrent]));
+    // P4c-3b: 같은 identity를 여러 슬롯이 공유할 수 있어 상한은 max로 합친다.
+    const capByAgent = new Map<string, number>();
+    for (const m of members) {
+      capByAgent.set(m.agent_id, Math.max(capByAgent.get(m.agent_id) ?? 0, m.max_concurrent));
+    }
 
     // Live per-agent load, counted across THIS mission only. Cross-mission load
     // is intentionally not counted here: a member's real ceiling is enforced by
@@ -2428,22 +2472,27 @@ export class OrchestrationRunnerService {
     opts?: { recovery?: boolean },
   ): Promise<void> {
     const agentId = step.assignee_agent_id!;
-    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
-    if (!agent) throw orchestrationError(400, `assignee agent ${agentId} no longer exists`);
-    // 방어적 재검사(티켓 1b62b437): 스텝이 미션 workspace 밖 에이전트에게 디스패치되지
-    // 않도록 지금까지 막아온 유일한 장치는 addMember 시점의 로스터 게이트
-    // (requireWorkspaceAgent)뿐이었다 — 그 외엔 아무 검사도 없다. 그 게이트의 보장이
-    // stale해지는 경로는 두 가지다: (1) 글로벌 팀의 member가 가입 후
-    // move_agent_to_workspace로 어느 workspace로 옮겨지거나, (2) workspace 종속
-    // 팀의 member가 같은 방식으로 다른 workspace로 옮겨지는 경우(글로벌 팀 이전부터
-    // 있던 버그 — 티켓 참고). 둘 다 멤버십 행이 그대로 남고 지금까지는 재검증이
-    // 없었다. 이걸 못 잡으면 workspace B의 에이전트에게 workspace A 미션으로 지어진
-    // room — 그 objective, context, 선행 스텝 결과까지 — 을 조용히 넘겨주게 된다.
-    if (agent.workspace_id && agent.workspace_id !== mission.workspace_id) {
+    // P4c-2b: rt- assignee는 Agent 행이 없다 — step 스냅샷 → member spec 순으로
+    // 해소한다. uuid assignee는 기존 경로 그대로.
+    // P4c-4: assignee 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
+    // step 스냅샷 → member spec 순으로 해소한다.
+    const agentName = await resolveAgentDisplayName(this.dataSource, agentId);
+    if (!agentName && !isRuntimeIdentityKey(agentId)) {
+      throw orchestrationError(400, `assignee agent ${agentId} no longer exists`);
+    }
+    const memberRowForAgent = await this.memberRepo.findOne({
+      where: { team_id: mission.team_id, agent_id: agentId },
+    });
+    const agentSpec = step.assignee_spec ?? memberRowForAgent?.spec ?? null;
+    const agentLabel = agentName
+      ?? (agentSpec as any)?.label
+      ?? parseTeamAgentSpec(memberRowForAgent?.spec)?.cli
+      ?? agentId.slice(0, 11);
+    // P4c-4: Agent 행 없음 — workspace 소속 검사는 member 행 스냅샷으로만 한다.
+    if (memberRowForAgent && memberRowForAgent.workspace_id && memberRowForAgent.workspace_id !== mission.workspace_id) {
       throw orchestrationError(
         400,
-        `assignee agent ${agent.name} no longer belongs to this mission's workspace (moved to a different ` +
-          `workspace after joining the team) — refusing to dispatch`,
+        `assignee slot ${agentLabel} no longer belongs to this mission's workspace — refusing to dispatch`,
       );
     }
 
@@ -2471,23 +2520,30 @@ export class OrchestrationRunnerService {
         orchestration_step_id: step.id,
       }),
     );
-    await this.addRoomParticipants(room.id, agentId);
+    await this.addRoomParticipants(
+      room.id,
+      agentId,
+      null,
+      (agentSpec && typeof agentSpec === 'object' ? { ...agentSpec } : null),
+    );
 
     const depKeys = Array.isArray(step.depends_on) ? step.depends_on : [];
     const depSteps = allSteps.filter((s) => depKeys.includes(s.step_key));
     const depAgentIds = Array.from(
       new Set(depSteps.map((s) => s.assignee_agent_id).filter((v): v is string => !!v)),
     );
-    const depAgents = depAgentIds.length ? await this.agentRepo.find({ where: { id: In(depAgentIds) } }) : [];
-    const depAgentById = new Map(depAgents.map((a) => [a.id, a]));
-    const depDisplayById = await resolveAgentDisplayMap(this.agentRepo, depAgents);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const depDisplayById = await resolveAgentDisplayNamesByIds(this.dataSource, depAgentIds);
     const dependencies: DependencyContext[] = depSteps
       .filter((s) => (DEPENDENCY_SATISFYING_STATUSES as readonly string[]).includes(s.status))
       .map((s) => ({
         step_key: s.step_key,
         title: s.title,
         status: s.status,
-        assignee_name: s.assignee_agent_id ? depDisplayById.get(s.assignee_agent_id) ?? '' : '',
+        assignee_name: s.assignee_agent_id
+          ? depDisplayById.get(s.assignee_agent_id)
+            ?? ((s.assignee_spec as any)?.label || '')
+          : '',
         result_summary: s.result_summary,
         artifacts: Array.isArray(s.artifacts) ? s.artifacts : [],
       }));
@@ -2546,8 +2602,12 @@ export class OrchestrationRunnerService {
     //     의도적으로 무시하며(프롬프트가 이를 명시한다), 공유 폴더의 체크아웃
     //     준비는 운영자의 몫이다 — 애초에 "이미 준비된 트리를 공유한다"가
     //     shared를 고르는 이유다.
+    // P4c-4: 같은 identity 를 공유하는 슬롯이 둘일 수 있어 findOne 이 어느
+    // 쌍둥이를 돌려줄지 모른다 — position 순으로 먼저 온 행을 "자기"로 보고
+    // mate 에서 뺀다 (결정적이어야 work order 가 매번 같은 이름을 부른다).
     const memberRow = await this.memberRepo.findOne({
       where: { team_id: mission.team_id, agent_id: agentId },
+      order: { position: 'ASC', created_at: 'ASC' },
     });
     // 스펙이 없는 레거시 member 행은 이 기능 도입 전과 동일하게 동작해야 한다 →
     // isolated. `parseTeamAgentSpec`이 깨진 스펙도 null로 낮추므로, 읽기 실패가
@@ -2595,7 +2655,7 @@ export class OrchestrationRunnerService {
             // 이 트리를 같이 쓰는 같은 팀의 다른 슬롯들. 프롬프트가 이름을 불러
             // 주지 않으면 담당자는 자기 폴더가 사유지라고 가정하고 서로의 파일을
             // 덮어쓴다 — 공유는 알려줘야 협업이 되고, 모르면 사고가 된다.
-            shared_with: await this.folderMates(mission.team_id, slotSpec, agentId),
+            shared_with: await this.folderMates(mission.team_id, slotSpec, agentId, memberRow?.id ?? null),
           }
         : null,
       graphNode: graphNode
@@ -2623,7 +2683,8 @@ export class OrchestrationRunnerService {
       step_id: step.id,
       step_key: step.step_key,
       message:
-        `Step "${step.title}" dispatched to ${await this.agentName(agent.id)} ` +
+        // P4c-4: assignee 라벨은 위에서 해소한 agentLabel 을 쓴다.
+        `Step "${step.title}" dispatched to ${agentLabel} ` +
         `(attempt ${step.attempt}/${step.max_attempts}` +
         (graphNode && graphNode.max_visits > 1 ? `, iteration ${step.visit}/${graphNode.max_visits}` : '') +
         `)`,
@@ -2984,9 +3045,6 @@ export class OrchestrationRunnerService {
         step.lease_stale_since = now;
         await this.stepRepo.save(step);
 
-        const assignee = step.assignee_agent_id
-          ? await this.agentRepo.findOne({ where: { id: step.assignee_agent_id } })
-          : null;
         const assigneeName = await this.agentName(step.assignee_agent_id);
         await this.missions.recordEvent(mission, {
           type: 'step_lease_stale',
@@ -2994,11 +3052,11 @@ export class OrchestrationRunnerService {
           step_key: step.step_key,
           message:
             `"${step.title}" went silent for ${Math.round(silentMs / 60_000)}m — asking ${assigneeName} to ` +
-            `reconnect (assignee is ${assignee?.is_online ? 'online' : 'offline'}). ` +
+            `reconnect. ` +
             `A new attempt is dispatched if there is no answer within the grace window.`,
           actor_type: 'system',
           data: {
-            assignee_online: !!assignee?.is_online,
+            assignee_online: false,
             silent_ms: silentMs,
             grace_ms: graceMs,
             attempt: step.attempt,
@@ -3234,11 +3292,12 @@ export class OrchestrationRunnerService {
 
   // ── Small helpers ─────────────────────────────────────────────────────────
 
-  private requireOrchestrator(mission: OrchestrationMission, callerAgentId: string): void {
-    if (!callerAgentId) {
+  private requireOrchestrator(mission: OrchestrationMission, caller: OrchestrationCaller): void {
+    if (!caller.agentId && !caller.runtimeKey) {
       throw orchestrationError(401, 'this tool requires an authenticated agent session');
     }
-    if (mission.orchestrator_agent_id !== callerAgentId) {
+    // P4c-2b: uuid agent holds AND rt- spec holds both pass.
+    if (!callerHoldsId(caller, mission.orchestrator_agent_id)) {
       throw orchestrationError(
         403,
         `only the mission's orchestrator may do this. You are not the orchestrator of mission ${mission.id}.`,
@@ -3247,12 +3306,12 @@ export class OrchestrationRunnerService {
   }
 
   /** A step report may come from its assignee, or from the orchestrator closing it out. */
-  private requireStepActor(step: OrchestrationStep, mission: OrchestrationMission, callerAgentId: string): void {
-    if (!callerAgentId) {
+  private requireStepActor(step: OrchestrationStep, mission: OrchestrationMission, caller: OrchestrationCaller): void {
+    if (!caller.agentId && !caller.runtimeKey) {
       throw orchestrationError(401, 'this tool requires an authenticated agent session');
     }
-    if (step.assignee_agent_id === callerAgentId) return;
-    if (mission.orchestrator_agent_id === callerAgentId) return;
+    if (callerHoldsId(caller, step.assignee_agent_id)) return;
+    if (callerHoldsId(caller, mission.orchestrator_agent_id)) return;
     throw orchestrationError(
       403,
       `step "${step.step_key}" is assigned to another agent — you cannot report on it`,
@@ -3267,37 +3326,73 @@ export class OrchestrationRunnerService {
    */
   private async agentName(agentId: string | null | undefined): Promise<string> {
     if (!agentId) return '';
-    return (await resolveAgentDisplayName(this.agentRepo, agentId)) ?? '';
+    return (await resolveAgentDisplayName(this.dataSource, agentId)) ?? '';
   }
 
   private async buildRoster(teamId: string): Promise<RosterEntry[]> {
     const members = await this.teams.listMembers(teamId);
-    const present = members.filter((m) => m.agent);
+    // P4c-2b: Agent 행이 없는 rt- 슬롯도 로스터에 포함된다 — spec이 있으면 된다.
+    const specsAll = new Map(members.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]));
+    const present = members.filter((m) => m.agent || specsAll.get(m.agent_id));
     // The roster is what the orchestrator reads in its brief prompt, so it must
     // carry the same full name the operator sees in the UI — otherwise two
     // managers running an agent with the same short name are indistinguishable
     // to the orchestrator when it assigns steps.
-    const displayById = await resolveAgentDisplayMap(
-      this.agentRepo,
-      present.map((m) => m.agent!),
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const displayById = await resolveAgentDisplayNamesByIds(
+      this.dataSource,
+      present.map((m) => m.agent_id),
     );
-    const specs = new Map(present.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]));
+    const specs = specsAll;
     const hostIds = Array.from(
       new Set(Array.from(specs.values()).filter((sp): sp is NonNullable<typeof sp> => !!sp).map((sp) => sp.manager_agent_id)),
     );
-    const hostNameById = new Map(
-      (hostIds.length ? await this.agentRepo.find({ where: { id: In(hostIds) }, select: { id: true, name: true } as any }) : [])
-        .map((h) => [h.id, h.name]),
-    );
+    // P4c-4: Host 이름 + presence 는 Host 카탈로그에서 해소한다.
+    // (Agent 테이블 없음 — presence 는 heartbeat 레지스트리 기준이다.)
+    const hostNameById = new Map<string, string>();
+    const hostOnline = new Set<string>();
+    if (hostIds.length > 0) {
+      const hostRows = await this.dataSource.getRepository(RuntimeHost).find({
+        where: { id: In(hostIds) },
+        select: { id: true, name: true } as any,
+      });
+      for (const h of hostRows) {
+        if ((h as any).name) hostNameById.set(h.id, (h as any).name);
+      }
+      try {
+        const team = await this.teamRepo.findOne({ where: { id: teamId }, select: { id: true, workspace_id: true } as any });
+        const views = await this.teams.listRuntimeHosts((team as any)?.workspace_id ?? '');
+        for (const v of views) {
+          if (v.is_online) {
+            hostOnline.add(v.manager_agent_id);
+            if (v.legacy_agent_id) hostOnline.add(v.legacy_agent_id);
+          }
+        }
+      } catch {
+        // best-effort — presence 없이도 로스터는 나간다.
+      }
+    }
     return present.map((m) => {
       const spec = specs.get(m.agent_id) ?? null;
+      // P4c-4: displayById 는 linked uuid 를 Host bare name 으로만 해소하고
+      // rt- 키는 모른다 — spec 의 host + role_label/cli leaf 로 합성한다
+      // (runbook agent-display-name: 로스터 프롬프트도 구분 가능해야 한다).
+      const hostPart = (spec ? hostNameById.get(spec.manager_agent_id) : undefined)
+        ?? (() => {
+          const resolved = displayById.get(m.agent_id);
+          return resolved && !resolved.includes('/') ? resolved : undefined;
+        })();
+      const leaf = m.role_label || spec?.cli || '';
+      const agent_name = hostPart && leaf
+        ? `${hostPart}/${leaf}`
+        : (displayById.get(m.agent_id) ?? leaf ?? m.agent_id.slice(0, 11));
       return {
         agent_id: m.agent_id,
-        agent_name: displayById.get(m.agent_id) ?? m.agent!.name,
+        agent_name,
         role_label: m.role_label,
         capabilities: m.capabilities,
         max_concurrent: m.max_concurrent,
-        is_online: !!m.agent!.is_online,
+        is_online: spec ? hostOnline.has(spec.manager_agent_id) : false,
         // Where this member physically runs. The orchestrator plans better with
         // it than without: two members in one folder on one host can hand work
         // over through the filesystem, while members on different machines need
@@ -3313,17 +3408,33 @@ export class OrchestrationRunnerService {
               folder_scope: spec.folder_scope,
               folder_mates: present
                 .filter((other) => {
-                  if (other.agent_id === m.agent_id) return false;
+                  // P4c-4: 같은 identity 를 공유하는 슬롯이 둘일 수 있다 —
+                  // 자기는 행 id 로 제외한다 (agent_id 로 하면 쌍둥이를 못 본다).
+                  if (other.id === m.id) return false;
                   const os = specs.get(other.agent_id);
                   return !!os
                     && os.manager_agent_id === spec.manager_agent_id
                     && os.working_dir === spec.working_dir;
                 })
-                .map((other) => displayById.get(other.agent_id) ?? other.agent!.name),
+                .map((other) => displayById.get(other.agent_id) ?? (other.role_label || other.agent_id.slice(0, 11))),
             }
           : null,
       };
     });
+  }
+
+  /**
+   * P1 dual-write helper: member 슬롯의 raw spec 스냅샷. 복사본을 돌려준다 —
+   * step 행에 박히는 시점 이후의 로스터 편집이 과거 스냅샷을 오염시키지 않게.
+   * 멤버가 없으면 null (dispatch는 당분간 agent_id를 읽으므로 무해).
+   */
+  private async assigneeSpecSnapshot(teamId: string, agentId: string): Promise<Record<string, any> | null> {
+    const id = (agentId || '').trim();
+    if (!id) return null;
+    const row = await this.memberRepo.findOne({ where: { team_id: teamId, agent_id: id } });
+    const spec = row?.spec;
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
+    return { ...(spec as Record<string, any>) };
   }
 
   /**
@@ -3336,19 +3447,42 @@ export class OrchestrationRunnerService {
     teamId: string,
     spec: TeamAgentSpec,
     selfAgentId: string,
+    selfMemberId: string | null = null,
   ): Promise<string[]> {
     const members = await this.memberRepo.find({ where: { team_id: teamId } });
     const mates = members.filter((m) => {
-      if (m.agent_id === selfAgentId) return false;
+      // P4c-4: 쌍둥이 슬롯은 agent_id 가 같아 id 로는 자기를 가릴 수 없다 —
+      // 호출자가 먼저 온 행(position ASC)을 자기라고 지목한다. legacy 호출
+      // (selfMemberId null)은 예전처럼 agent_id 로 제외한다.
+      if (selfMemberId ? m.id === selfMemberId : m.agent_id === selfAgentId) return false;
       const other = parseTeamAgentSpec(m.spec);
       return !!other
         && other.manager_agent_id === spec.manager_agent_id
         && other.working_dir === spec.working_dir;
     });
     if (mates.length === 0) return [];
-    const agents = await this.agentRepo.find({ where: { id: In(mates.map((m) => m.agent_id)) } });
-    const displayById = await resolveAgentDisplayMap(this.agentRepo, agents);
-    return mates.map((m) => displayById.get(m.agent_id) ?? m.agent_id.slice(0, 8));
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음). rt- 키는 display
+    // 맵이 모르므로 팀 화면과 같은 합성 (`<host>/<role|cli>`)으로 떨어진다 —
+    // work order 가 부르는 이름과 로스터가 보여주는 이름이 같아야 한다.
+    const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, mates.map((m) => m.agent_id));
+    const hostIds = Array.from(new Set(mates.map((m) => parseTeamAgentSpec(m.spec)?.manager_agent_id).filter((v): v is string => !!v)));
+    const hostNameById = new Map<string, string>();
+    if (hostIds.length > 0) {
+      const rows = await this.dataSource.getRepository(RuntimeHost).find({
+        where: { id: In(hostIds) },
+        select: { id: true, name: true } as any,
+      });
+      for (const h of rows) if ((h as any)?.name) hostNameById.set(h.id, (h as any).name);
+    }
+    return mates.map((m) => {
+      const hit = displayById.get(m.agent_id);
+      if (hit) return hit;
+      const ms = parseTeamAgentSpec(m.spec);
+      const leaf = m.role_label || ms?.cli || '';
+      const hostPart = (ms ? hostNameById.get(ms.manager_agent_id) : undefined) ?? undefined;
+      if (hostPart && leaf) return `${hostPart}/${leaf}`;
+      return leaf || m.agent_id.slice(0, 11);
+    });
   }
 
   /**
@@ -3374,6 +3508,7 @@ export class OrchestrationRunnerService {
     roomId: string,
     agentId: string,
     humanParticipantId?: string | null,
+    runtimeSpec?: Record<string, any> | null,
   ): Promise<void> {
     const joinedAt = new Date();
     const rows = [
@@ -3381,6 +3516,8 @@ export class OrchestrationRunnerService {
         room_id: roomId,
         participant_type: 'agent',
         participant_id: agentId,
+        // P4c-2b: rt- 멤버 해석용 스냅샷 (매니저 broadcast 맵이 읽는다).
+        runtime_spec: runtimeSpec ?? null,
         last_read_at: joinedAt,
         left_at: null,
       }),

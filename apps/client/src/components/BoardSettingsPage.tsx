@@ -19,6 +19,7 @@ import EnvironmentConfigEditor from './EnvironmentConfigEditor';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError } from './QaPhasesEditor';
 import { QaPhase } from '../types';
 import { formatAgentDisplayName } from '../utils/agentName';
+import DeclareRuntimeSection from './runtime/DeclareRuntimeSection';
 import { effortEditorClis, useCliCatalog } from '../cli/catalog';
 import { tokens } from '../tokens';
 import { Button, Input, HeaderAction } from './common';
@@ -78,12 +79,18 @@ export default function BoardSettingsPage() {
   // manager_name 을 보존해야 같은 agent 이름이 여러 manager/머신에 중복 존재할 때
   // picker/목록이 <manager>/<agent> 로 식별 가능하게 렌더된다 (ticket d95821b2).
   const [agents, setAgents] = useState<Array<{ id: string; name: string; manager_name?: string }>>([]);
+  // P4b: runtime 선언 → 매칭용 full 행 (manager 포함).
+  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   useEffect(() => {
     let cancelled = false;
-    api.getAgents(wsId)
+    Promise.resolve([] as any[])
       // Agent Manager(type='manager')는 기본 역할 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
-      .then((rows) => { if (!cancelled) setAgents((rows || []).filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name }))); })
-      .catch(() => { if (!cancelled) setAgents([]); });
+      .then((rows) => {
+        if (cancelled) return;
+        setAgents((rows || []).filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+        setAgentsFull((rows || []) as any[]);
+      })
+      .catch(() => { if (!cancelled) { setAgents([]); setAgentsFull([]); } });
     return () => { cancelled = true; };
   }, [wsId]);
 
@@ -308,6 +315,8 @@ export default function BoardSettingsPage() {
           board={board}
           workspaceRoles={workspaceRoles}
           agents={agents}
+          agentsFull={agentsFull}
+          workspaceId={wsId ?? board.workspace_id}
           onSave={async (next) => {
             try {
               await api.updateBoard(board.id, { default_role_assignments: next });
@@ -891,11 +900,12 @@ type SelfImprovementMode = NonNullable<Board['self_improvement_mode']>;
 // from this map, so a new ticket lands on the loop without a human wiring roles
 // each time (the single most-repeated manual step in the board activity logs).
 // Priority at create time: explicit holder > board default > unassigned.
-type DefaultHolder = { agent_id?: string; user_id?: string };
+type DefaultHolder = { agent_id?: string; user_id?: string; runtime?: Record<string, any> };
 type DefaultHolderMap = Record<string, DefaultHolder[]>;
 
-// Parse the stored JSON map, keeping BOTH agent_id and user_id holders so a
-// user_id set via MCP/REST survives an agent-only edit here.
+// Parse the stored JSON map, keeping agent_id / user_id / runtime holders so
+// entries set via MCP/REST (including P4c-3b runtime holders) survive an edit
+// here. Runtime entries ride through opaquely — the server validates on save.
 function parseDefaultHolderMap(raw: string | null | undefined): DefaultHolderMap {
   if (!raw) return {};
   try {
@@ -909,8 +919,10 @@ function parseDefaultHolderMap(raw: string | null | undefined): DefaultHolderMap
         if (!h || typeof h !== 'object') continue;
         const a = String((h as any).agent_id || '').trim();
         const u = String((h as any).user_id || '').trim();
-        if (a) list.push({ agent_id: a });
-        else if (u) list.push({ user_id: u });
+        const r = (h as any).runtime;
+        if (a && !u) list.push({ agent_id: a });
+        else if (u && !a) list.push({ user_id: u });
+        else if (!a && !u && r && typeof r === 'object') list.push({ runtime: r });
       }
       if (list.length) out[slug] = list;
     }
@@ -924,10 +936,70 @@ interface DefaultRoleHoldersEditorProps {
   board: BoardWithCards;
   workspaceRoles: Array<{ id: string; slug: string; name: string; is_builtin: boolean; position: number }>;
   agents: Array<{ id: string; name: string; manager_name?: string }>;
+  /** P4b: runtime 선언 → 매칭용 full 행. */
+  agentsFull: Array<any>;
+  workspaceId: string;
   onSave(next: DefaultHolderMap | null): Promise<void>;
 }
 
-function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: DefaultRoleHoldersEditorProps) {
+/**
+ * P4c-3b: role 선택 + runtime 선언 → 매칭되면 agent holder, 새로우면 runtime
+ * holder로 draft에 추가한다.
+ */
+function RuntimeDefaultSection({
+  roles,
+  agentsFull,
+  workspaceId,
+  onAddAgent,
+  onAddRuntime,
+}: {
+  roles: Array<{ slug: string; name: string }>;
+  agentsFull: Array<any>;
+  workspaceId: string;
+  onAddAgent(slug: string, id: string): void;
+  onAddRuntime(slug: string, spec: Record<string, any>): void;
+}) {
+  const [slug, setSlug] = useState(roles.some((r) => r.slug === 'assignee') ? 'assignee' : (roles[0]?.slug ?? ''));
+  useEffect(() => {
+    if (!roles.some((r) => r.slug === slug) && roles.length > 0) setSlug(roles[0].slug);
+  }, [roles, slug]);
+  if (roles.length === 0) return null;
+  return (
+    <div style={{ marginTop: 4 }}>
+      <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4, textTransform: 'uppercase', fontWeight: 600 }}>
+        Runtime으로 추가할 역할
+      </label>
+      <select
+        value={slug}
+        onChange={(e) => setSlug(e.target.value)}
+        style={{
+          background: tokens.colors.surface,
+          border: `1px solid ${tokens.colors.border}`,
+          borderRadius: tokens.radii.md,
+          padding: '6px 8px',
+          color: tokens.colors.textStrong,
+          fontSize: 12,
+          fontFamily: 'inherit',
+          marginBottom: 8,
+        }}
+      >
+        {roles.map((r) => (
+          <option key={r.slug} value={r.slug}>{r.name} ({r.slug})</option>
+        ))}
+      </select>
+      <DeclareRuntimeSection
+        workspaceId={workspaceId}
+        agentsFull={agentsFull}
+        onResolved={(id, created, spec) => {
+          if (created && spec) onAddRuntime(slug, spec);
+          else if (id) onAddAgent(slug, id);
+        }}
+      />
+    </div>
+  );
+}
+
+function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, agentsFull, workspaceId, onSave }: DefaultRoleHoldersEditorProps) {
   const [draft, setDraft] = useState<DefaultHolderMap>(() => parseDefaultHolderMap(board.default_role_assignments));
   const [busy, setBusy] = useState(false);
 
@@ -941,6 +1013,13 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: Def
   const agentName = (id: string) => {
     const a = agents.find((a) => a.id === id);
     return a ? formatAgentDisplayName(a) : id;
+  };
+  // P4c-3b: runtime holder chip 라벨.
+  const holderLabel = (h: DefaultHolder) => {
+    if (h.agent_id) return agentName(h.agent_id);
+    if (h.user_id) return `user:${h.user_id}`;
+    const label = ((h.runtime as any)?.label || '').trim();
+    return label || 'runtime';
   };
 
   const addAgent = (slug: string, agentId: string) => {
@@ -1016,7 +1095,7 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: Def
                 )}
                 {holders.map((h, i) => (
                   <span key={`${role.slug}-${i}`} style={chipStyle}>
-                    {h.agent_id ? agentName(h.agent_id) : `user:${h.user_id}`}
+                    {holderLabel(h)}
                     <button
                       type="button"
                       onClick={() => removeHolder(role.slug, i)}
@@ -1056,6 +1135,19 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, onSave }: Def
           <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>No workspace roles found.</div>
         )}
       </div>
+
+      {/* P4c-3b: runtime 선언 → 매칭되면 agent id, 새로우면 runtime holder로 추가. */}
+      <RuntimeDefaultSection
+        roles={roles}
+        agentsFull={agentsFull}
+        workspaceId={workspaceId}
+        onAddAgent={(slug, id) => addAgent(slug, id)}
+        onAddRuntime={(slug, spec) => setDraft((prev) => {
+          const list = prev[slug] ? [...prev[slug]] : [];
+          list.push({ runtime: spec });
+          return { ...prev, [slug]: list };
+        })}
+      />
 
       <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <Button

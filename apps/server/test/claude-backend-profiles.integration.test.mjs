@@ -28,7 +28,7 @@ let workspace;
 let owner;
 let member;
 let board;
-let agent;
+/* P4c-4: agent fixture 삭제 (Agent 행 없음). */
 let ticket;
 let profileA;
 let profileB;
@@ -95,19 +95,7 @@ before(async () => {
   board = await ds.getRepository('Board').save(ds.getRepository('Board').create({
     workspace_id: workspace.id, name: 'Profiles board',
   }));
-  // PATCH /agents/:id 는 cli_runtime_profile 검증을 통과한 뒤 runtime host /
-  // runtime_config 도 재검증한다. 프로필 핀이 실제로 저장되는 경로를 보려면
-  // 이 에이전트가 그 검증까지 통과해야 하므로 manager 와 최소 config 를 준다.
-  const profilesManager = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
-    name: 'Profiles manager', type: 'manager', workspace_id: null,
-  }));
-  agent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
-    workspace_id: workspace.id,
-    name: 'Profiles agent',
-    type: 'claude',
-    manager_agent_id: profilesManager.id,
-    runtime_config: { strategy: 'single', permission_mode: 'trusted' },
-  }));
+  // P4c-4: Agent 행 없음 — PATCH /agents/:id 표면 삭제. 핀 경로는 board/ticket 으로만 본다.
   // 루트 티켓은 컬럼에 놓여 있어야 한다 — PATCH /tickets/:id 의 후속 처리가
   // 컬럼을 전제하므로, 컬럼 없는 티켓으로는 프로필 핀 저장 경로를 볼 수 없다.
   const column = await ds.getRepository('BoardColumn').save(ds.getRepository('BoardColumn').create({
@@ -172,10 +160,9 @@ describe('Claude backend profile integration', () => {
   // 예전에는 워크스페이스 allow-set 이 Board/Agent/run 핀의 권위였고, 비워두면
   // 전역에 존재하는 프로필이라도 거부됐다. 이제 권위는 전역 목록 하나뿐이므로
   // (a) 전역에 없는 id 는 여전히 400 이고 (b) 전역에 있으면 배정 없이도 통과한다.
-  it('전역 목록이 Board/Agent/run 핀의 유일한 권위다', async () => {
+  it('전역 목록이 Board/run 핀의 유일한 권위다 (P4c-4: Agent 핀 표면 삭제)', async () => {
     for (const [pathName, body] of [
       [`/boards/${board.id}`, { cli_runtime_profile: 'legacy-profile' }],
-      [`/agents/${agent.id}`, { cli_runtime_profile: 'legacy-profile' }],
       [`/tickets/${ticket.id}`, { cli_runtime_profile: 'legacy-profile' }],
     ]) {
       const denied = await apiRequest(baseUrl, pathName, {
@@ -186,14 +173,13 @@ describe('Claude backend profile integration', () => {
     }
 
     // profileB 는 어떤 워크스페이스에도 배정된 적이 없다 — 예전 계약이라면 400.
-    for (const pathName of [`/boards/${board.id}`, `/agents/${agent.id}`, `/tickets/${ticket.id}`]) {
+    for (const pathName of [`/boards/${board.id}`, `/tickets/${ticket.id}`]) {
       const accepted = await apiRequest(baseUrl, pathName, {
         token: adminToken, method: 'PATCH', body: { cli_runtime_profile: profileB.id },
       });
       assert.equal(accepted.status, 200, `${pathName}: ${JSON.stringify(accepted.data)}`);
     }
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
-    assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
 
     const { globalRuntimeProfiles } = await import('../dist/common/claude-backend-registry.js');
@@ -201,7 +187,7 @@ describe('Claude backend profile integration', () => {
     assert.ok(ids.includes(profileA.id) && ids.includes(profileB.id));
 
     // 뒤 테스트에 영향이 없도록 핀을 되돌린다.
-    for (const pathName of [`/boards/${board.id}`, `/agents/${agent.id}`, `/tickets/${ticket.id}`]) {
+    for (const pathName of [`/boards/${board.id}`, `/tickets/${ticket.id}`]) {
       await apiRequest(baseUrl, pathName, {
         token: adminToken, method: 'PATCH', body: { cli_runtime_profile: null },
       });
@@ -308,7 +294,6 @@ describe('Claude backend profile integration', () => {
 
   it('blocks referenced deletion, then replaces every selector/default reference transactionally', async () => {
     await ds.getRepository('Board').update({ id: board.id }, { cli_runtime_profile: profileA.id });
-    await ds.getRepository('Agent').update({ id: agent.id }, { cli_runtime_profile: profileA.id });
     await ds.getRepository('Ticket').update({ id: ticket.id }, { cli_runtime_profile: profileA.id });
     await apiRequest(baseUrl, '/admin/claude-backend-profiles/default', {
       token: adminToken, method: 'PATCH', body: { profile_id: profileA.id },
@@ -328,7 +313,6 @@ describe('Claude backend profile integration', () => {
     assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
     assert.equal(await ds.getRepository('ClaudeBackendProfile').countBy({ id: profileA.id }), 0);
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
-    assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
@@ -346,7 +330,6 @@ describe('Claude backend profile integration', () => {
     });
     assert.equal(detached.status, 200, JSON.stringify(detached.data));
     assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, null);
-    assert.equal((await ds.getRepository('Agent').findOneByOrFail({ id: agent.id })).cli_runtime_profile, null);
     assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, null);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
@@ -420,12 +403,10 @@ describe('Claude backend profile integration', () => {
     assert.equal(created.status, 201, JSON.stringify(created.data));
     const operatorProfile = created.data;
 
-    // 운영자 프로필을 board / agent / ticket 에 각각 핀으로 걸어둔다.
+    // 운영자 프로필을 board / ticket 에 각각 핀으로 걸어둔다 (P4c-4: Agent 핀 없음).
     const boardRepo = ds.getRepository('Board');
-    const agentRepo = ds.getRepository('Agent');
     const ticketRepo = ds.getRepository('Ticket');
     await boardRepo.update({ id: board.id }, { cli_runtime_profile: operatorProfile.id });
-    await agentRepo.update({ id: agent.id }, { cli_runtime_profile: operatorProfile.id });
     await ticketRepo.update({ id: ticket.id }, { cli_runtime_profile: operatorProfile.id });
 
     const profileRepo = ds.getRepository('ClaudeBackendProfile');
@@ -445,136 +426,13 @@ describe('Claude backend profile integration', () => {
     );
     // 핀이 살아 있어야 dangling selector 가 생기지 않는다.
     assert.equal((await boardRepo.findOneByOrFail({ id: board.id })).cli_runtime_profile, operatorProfile.id);
-    assert.equal((await agentRepo.findOneByOrFail({ id: agent.id })).cli_runtime_profile, operatorProfile.id);
     assert.equal((await ticketRepo.findOneByOrFail({ id: ticket.id })).cli_runtime_profile, operatorProfile.id);
 
     // 뒤 테스트에 영향이 없도록 핀을 되돌린다.
-    for (const [repo, id] of [[boardRepo, board.id], [agentRepo, agent.id], [ticketRepo, ticket.id]]) {
+    for (const [repo, id] of [[boardRepo, board.id], [ticketRepo, ticket.id]]) {
       await repo.update({ id }, { cli_runtime_profile: null });
     }
   });
 
-  it('validates and persists cli_runtime_profile on POST /agents (create), mirroring PATCH', async () => {
-    const response = await createProfile(adminToken, 'profile-create-agent', 'Profile Create Agent');
-    assert.equal(response.status, 201, JSON.stringify(response.data));
-    const createProfileRow = response.data;
-
-    const wsRepo = ds.getRepository('Workspace');
-    const createWorkspace = await wsRepo.save(wsRepo.create({ name: 'Create-agent profile workspace' }));
-    await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: createWorkspace.id });
-    const managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
-      name: 'Create-agent manager', type: 'manager',
-    }));
-    const runtime_config = { strategy: 'single', permission_mode: 'trusted' };
-
-    const rejected = await apiRequest(baseUrl, '/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'bad-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config, cli_runtime_profile: randomUUID(),
-      },
-    });
-    assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
-    assert.equal(await ds.getRepository('Agent').countBy({ name: 'bad-profile-agent' }), 0);
-
-    const created = await apiRequest(baseUrl, '/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'good-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config, cli_runtime_profile: createProfileRow.id,
-      },
-    });
-    assert.equal(created.status, 201, JSON.stringify(created.data));
-    assert.equal(created.data.cli_runtime_profile, createProfileRow.id);
-
-    const withNone = await apiRequest(baseUrl, '/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'none-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config, cli_runtime_profile: 'none',
-      },
-    });
-    assert.equal(withNone.status, 201, JSON.stringify(withNone.data));
-    assert.equal(withNone.data.cli_runtime_profile, 'none');
-
-    const inherited = await apiRequest(baseUrl, '/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'inherit-profile-agent', type: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config,
-      },
-    });
-    assert.equal(inherited.status, 201, JSON.stringify(inherited.data));
-    assert.equal(inherited.data.cli_runtime_profile, null);
-  });
-
-  it('validates and persists cli_runtime_profile on POST /admin/agent-manager/agents (create) — the actual "Create managed agent" UI endpoint', async () => {
-    const response = await createProfile(adminToken, 'profile-create-managed-agent', 'Profile Create Managed Agent');
-    assert.equal(response.status, 201, JSON.stringify(response.data));
-    const createProfileRow = response.data;
-
-    const wsRepo = ds.getRepository('Workspace');
-    const createWorkspace = await wsRepo.save(wsRepo.create({ name: 'Create-managed-agent profile workspace' }));
-    await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: createWorkspace.id });
-    const managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
-      name: 'Create-managed-agent manager', type: 'manager',
-    }));
-    const runtime_config = { strategy: 'single', permission_mode: 'trusted' };
-
-    const rejected = await apiRequest(baseUrl, '/admin/agent-manager/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'bad-profile-managed-agent', cli: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config, cli_runtime_profile: randomUUID(),
-      },
-    });
-    assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
-    assert.equal(await ds.getRepository('Agent').countBy({ name: 'bad-profile-managed-agent' }), 0);
-
-    const created = await apiRequest(baseUrl, '/admin/agent-manager/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'good-profile-managed-agent', cli: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config, cli_runtime_profile: createProfileRow.id,
-      },
-    });
-    assert.equal(created.status, 201, JSON.stringify(created.data));
-    assert.equal(created.data.cli_runtime_profile, createProfileRow.id);
-
-    const withNone = await apiRequest(baseUrl, '/admin/agent-manager/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'none-profile-managed-agent', cli: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config, cli_runtime_profile: 'none',
-      },
-    });
-    assert.equal(withNone.status, 201, JSON.stringify(withNone.data));
-    assert.equal(withNone.data.cli_runtime_profile, 'none');
-
-    const inherited = await apiRequest(baseUrl, '/admin/agent-manager/agents', {
-      token: adminToken,
-      workspaceId: createWorkspace.id,
-      method: 'POST',
-      body: {
-        name: 'inherit-profile-managed-agent', cli: 'claude', manager_agent_id: managerAgent.id,
-        runtime_config,
-      },
-    });
-    assert.equal(inherited.status, 201, JSON.stringify(inherited.data));
-    assert.equal(inherited.data.cli_runtime_profile, null);
-  });
+  // P4c-4: POST /agents + POST /admin/agent-manager/agents 삭제 — 생성 시 핀 테스트 제거.
 });

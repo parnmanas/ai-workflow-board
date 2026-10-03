@@ -27,6 +27,14 @@ export interface SubscriberIdentity {
    * mentions destined for the managed agents it spawns.
    */
   managedAgentIds?: Set<string>;
+  /**
+   * P4c-2b: 이 SSE 연결의 Runtime Host id (ApiKey.host_id, P0 dual-write).
+   * 구 키에는 없어 undefined — 그 경우 host-affinity 분기는 조용히 스킵된다.
+   * chat_room_message의 rt- 멤버 해석에 쓴다: broadcast의
+   * agent_member_runtimes 맵에서 spec.manager_agent_id가 이 hostId(또는
+   * legacy agentId)와 일치하는 멤버가 있으면 그 매니저에게 배달한다.
+   */
+  hostId?: string;
 }
 
 /**

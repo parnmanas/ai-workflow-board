@@ -80,11 +80,8 @@
  *
  * Deliberately NOT tiered here (left to their existing per-file logic):
  * update_workspace (a workspace-bound non-full-scope caller is intentionally
- * allowed — see workspace-tools.ts's callerCanAccessWorkspace usage) and
- * move_agent_to_workspace (only gated when dry_run=false; a static per-name
- * tier can't express that without misgating the dry-run preview). Both are
- * existing, known tool names, so both resolve via the KNOWN_EXISTING_TOOLS
- * branch (null — unchanged) exactly like before this fix.
+ * allowed — see workspace-tools.ts's callerCanAccessWorkspace usage).
+ * (P4c-3b: move_agent_to_workspace no longer exists, so its carve-out is gone.)
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -108,9 +105,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // requireFullScopeCaller), so 'full' here never conflicts with existing
   // behavior.
   delete_user: 'full',
-  create_agent: 'full',
-  update_agent: 'full',
-  delete_agent: 'full',
+  // P4c-3b: create_agent / update_agent / delete_agent no longer exist.
   delete_workspace: 'full',
 
   // Same file family, but their own logic deliberately allows a
@@ -274,17 +269,17 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'attach_qa_artifact', 'attach_security_artifact',
   'batch_operations', 'check_review_drift', 'claim_ticket', 'clear_current_task',
   'complete_action_run', 'complete_comment_summary', 'complete_qa_run', 'complete_security_run',
-  'correct_confirmed_ticket_duplicate', 'create_agent', 'create_api_key', 'create_benchmark_run',
+  'correct_confirmed_ticket_duplicate', 'create_api_key', 'create_benchmark_run',
   'create_board', 'create_channel', 'create_chat_room', 'create_child_ticket', 'create_column',
   'create_qa_scenario', 'create_qa_schedule', 'create_remote_improvement_ticket',
   'create_security_profile', 'create_security_schedule', 'create_ticket', 'create_user',
   'create_workspace', 'create_workspace_schedule', 'decide_ticket_duplicate', 'delete_action',
-  'delete_agent', 'delete_api_key', 'delete_board', 'delete_channel',
+  'delete_api_key', 'delete_board', 'delete_channel',
   'delete_chat_message_attachment', 'delete_child_ticket', 'delete_column', 'delete_function',
   'delete_prompt_template', 'delete_qa_scenario', 'delete_qa_schedule', 'delete_resource',
   'delete_security_profile', 'delete_security_schedule', 'delete_ticket',
   'delete_ticket_attachment', 'delete_user', 'delete_workspace', 'delete_workspace_schedule',
-  'embed_resources', 'execute_function', 'fetch_github_info', 'get_action', 'get_agent',
+  'embed_resources', 'execute_function', 'fetch_github_info', 'get_action',
   'get_allocated_tickets', 'get_api_key', 'get_benchmark_leaderboard', 'get_board',
   'get_board_summary', 'get_chat_room_messages', 'get_feature', 'get_function',
   'get_handoff_pipeline', 'get_latest_artifact', 'get_my_tickets', 'get_qa_batch', 'get_qa_run',
@@ -292,14 +287,14 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'get_security_batch', 'get_security_profile', 'get_security_run', 'get_security_schedule',
   'get_ticket', 'get_ticket_activity', 'get_ticket_attachment', 'get_user', 'get_workspace',
   'get_workspace_schedule', 'handoff_to_agent', 'list_action_runs', 'list_actions',
-  'list_agents', 'list_api_keys', 'list_archived_tickets', 'list_board_lessons', 'list_boards',
+  'list_api_keys', 'list_archived_tickets', 'list_board_lessons', 'list_boards',
   'list_channels', 'list_chat_rooms', 'list_claude_backend_profiles', 'list_features',
   'list_function_runs', 'list_functions', 'list_prompt_templates', 'list_qa_runs',
   'list_qa_scenarios', 'list_qa_schedules', 'list_repo_branches', 'list_resources',
   'list_security_profiles', 'list_security_runs', 'list_security_schedules',
   'list_ticket_attachments', 'list_ticket_prerequisites', 'list_users', 'list_workspaces',
-  'list_workspace_schedules', 'move_agent_to_workspace', 'move_board_to_workspace',
-  'move_ticket', 'move_ticket_to_board', 'pend_ticket', 'ping', 'propose_feature_chain',
+  'list_workspace_schedules', 'move_board_to_workspace',
+  'move_ticket', 'move_ticket_to_board', 'pend_ticket', 'propose_feature_chain',
   'propose_move', 'propose_skill_change', 'qa_run_heartbeat', 'record_agreement',
   'record_decision', 'record_outreach_classification', 'record_qa_step',
   'record_security_finding', 'refresh_security_checklist', 'register_build_artifact',
@@ -311,7 +306,7 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'search_resources', 'send_chat_room_message', 'set_chat_room_name', 'set_current_task',
   'set_qa_phase', 'set_typing', 'start_qa_batch', 'start_qa_run', 'start_security_batch',
   'start_security_run', 'submit_benchmark_score', 'submit_feature_request', 'subscribe_events',
-  'sync_github_resource', 'unarchive_ticket', 'unpend_ticket', 'update_agent',
+  'sync_github_resource', 'unarchive_ticket', 'unpend_ticket',
   'update_api_key', 'update_board', 'update_board_lesson', 'update_channel',
   'update_child_ticket', 'update_claude_backend_profile', 'update_column',
   'update_qa_scenario', 'update_qa_schedule', 'update_security_profile',

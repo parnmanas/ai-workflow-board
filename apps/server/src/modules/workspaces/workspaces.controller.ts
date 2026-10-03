@@ -9,7 +9,9 @@ import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { User } from '../../entities/User';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
@@ -45,7 +47,6 @@ export class WorkspacesController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly rebacService: ReBACService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly workspaceRolesService: WorkspaceRolesService,
@@ -310,8 +311,9 @@ export class WorkspacesController {
       } else if (typeof assistant_agent_id !== 'string') {
         return res.status(400).json({ error: 'assistant_agent_id must be an agent id string or null' });
       } else {
-        const agent = await this.agentRepo.findOne({ where: { id: assistant_agent_id } });
-        if (!agent || agent.is_active !== 1 || agent.type === 'manager' || !agentIsVisibleInWorkspace(agent.workspace_id, id)) {
+        // P4c-4: Host/링크 해소 (Agent 행 없음, active/type 검사 없음).
+        const agent = await resolveCallerIdentityRow(this.dataSource, assistant_agent_id);
+        if (!agent || !agentIsVisibleInWorkspace(agent.workspace_id, id)) {
           return res.status(400).json({ error: 'assistant_agent_id must reference an active agent in this workspace' });
         }
         ws.assistant_agent_id = agent.id;
@@ -482,34 +484,20 @@ export class WorkspacesController {
   ) {
     await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
-    const [members, owners, agents] = await Promise.all([
+    // P4c-4: Agent 행 없음 — 멘션 후보의 agent 섹션은 Host 목록으로 채운다.
+    const [members, owners, hosts] = await Promise.all([
       this.rebacService.listSubjects({ type: 'workspace', id }, 'member'),
       this.rebacService.listSubjects({ type: 'workspace', id }, 'owner'),
-      this.agentRepo.find({
-        where: agentWorkspaceWhere(id).map((scope) => ({ ...scope, is_active: 1 })),
-        order: { name: 'ASC' },
-      }),
+      this.dataSource.getRepository(RuntimeHost).find({ order: { name: 'ASC' } }),
     ]);
+    const agents = hosts.map((h) => ({
+      id: h.id,
+      name: h.name,
+      manager_agent_id: null as string | null,
+    }));
 
-    // ST-7: enrich agents with manager_name so the client autocompleter
-    // can render managed agents as <ManagerName>/<AgentName>. Single
-    // batched lookup keyed off distinct manager_agent_ids — no extra
-    // round-trip when the workspace has no managed agents.
-    const managerIds = Array.from(
-      new Set(agents.map((a) => a.manager_agent_id).filter((x): x is string => !!x)),
-    );
-    const managerNameById = new Map<string, string>();
-    if (managerIds.length > 0) {
-      const managers = await this.agentRepo.find({
-        where: { id: In(managerIds) },
-        select: { id: true, name: true } as any,
-      });
-      for (const m of managers) managerNameById.set(m.id, m.name);
-    }
-    const formatAgent = (a: Agent): string => {
-      const mgr = a.manager_agent_id ? managerNameById.get(a.manager_agent_id) : '';
-      return mgr ? `${mgr}/${a.name}` : a.name;
-    };
+    // P4c-4: agent 섹션은 Host 목록이다 — Host 자체가 정체성이라 prefix 불필요.
+    const formatAgent = (a: { name: string }): string => a.name;
 
     const allUserIds = [...new Set([
       ...members.filter(s => s.type === 'user').map(s => s.id),
@@ -575,9 +563,9 @@ export class WorkspacesController {
       agents: agents.map((a) => ({
         id: a.id,
         name: a.name,
-        avatar_url: a.avatar_url,
-        manager_agent_id: a.manager_agent_id ?? null,
-        manager_name: a.manager_agent_id ? managerNameById.get(a.manager_agent_id) || null : null,
+        avatar_url: null,
+        manager_agent_id: null,
+        manager_name: null,
       })),
       role_shortcuts: roleShortcuts,
     });

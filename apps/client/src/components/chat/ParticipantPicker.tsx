@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { api } from '../../api';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { api, getActiveWorkspaceId } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { tokens } from '../../tokens';
 import type { ChatRoomDetail } from '../../types';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import { loadAddPeopleCandidates } from './utils/participantFlow';
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 
 // ─── Participant type for picker ──────────────────────────────────────────────
 
@@ -51,15 +52,15 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
     // 후보 로드(users/agents fetch → 기존 참여자·본인·Agent Manager 제외 → set)는
     // participantFlow.loadAddPeopleCandidates 에 있고, 회귀 테스트가 같은 코드를 구동한다
     // (apps/client/test/chat-participants.test.mjs). 여기선 api·세터만 주입한다.
+    // P4c-4: Agent 목록 없음 — 후보는 사용자 + 아래 runtime 선언이다.
     loadAddPeopleCandidates({
       getUsers: () => api.getUsers(),
-      getAgents: () => api.getAgents(),
+      getAgents: async () => [],
       existingParticipantIds,
       currentUserId: currentUser?.id,
       formatAgentName: formatAgentDisplayName,
       setParticipants,
     });
-
     // Focus search on open
     setTimeout(() => searchRef.current?.focus(), 50);
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -90,6 +91,12 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
 
   function removeSelected(id: string) {
     setSelectedParticipants((prev) => prev.filter((p) => p.id !== id));
+    setPendingSpecs((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   }
 
   const isAddMode = !!addToRoomId;
@@ -98,6 +105,9 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
   const isGroup = !isAddMode && selectedParticipants.length > 1;
   const canCreate = selectedParticipants.length > 0 && !creating;
 
+  // P4c-3b: spec-direct 초대 — 임시 id 매핑 (서버가 identity 키 매김).
+  const [pendingSpecs, setPendingSpecs] = useState<Record<string, Record<string, any>>>({});
+
   async function handleCreate() {
     if (!canCreate) return;
     setCreating(true);
@@ -105,7 +115,8 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
     try {
       const apiParticipants = selectedParticipants.map((p) => ({
         participant_type: p.type,
-        participant_id: p.id,
+        participant_id: p.id.startsWith('pending:') ? '' : p.id,
+        ...(pendingSpecs[p.id] ? { runtime: pendingSpecs[p.id] } : {}),
       }));
       if (isAddMode && addToRoomId) {
         await api.addChatRoomParticipants(addToRoomId, apiParticipants);
@@ -296,6 +307,22 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
             {isDM ? 'Direct message' : `Group · ${selectedParticipants.length} selected`}
           </div>
         )}
+
+        {/* P4b: runtime 선언 → Agent 매칭/생성 후 선택에 추가. */}
+        <div style={{ padding: '0 16px 8px', flexShrink: 0 }}>
+          <DeclareRuntimeSection
+            workspaceId={getActiveWorkspaceId() || ''}
+            onResolved={(_id, _created, spec) => {
+              // P4c-4: 항상 새 spec — 임시 칩 + 저장 시 runtime 동봉 (서버가 키 매김).
+              if (!spec) { setError(null); return; }
+              const tempId = `pending:${Date.now().toString(36)}`;
+              setPendingSpecs((prev) => ({ ...prev, [tempId]: spec }));
+              const label = (spec.label || '').trim() || 'runtime';
+              setSelectedParticipants((prev) => [...prev, { id: tempId, name: label, type: 'agent' as const }]);
+              setError(null);
+            }}
+          />
+        </div>
 
         {/* Participant list */}
         <div style={{ overflowY: 'auto', maxHeight: 280, flex: 1 }}>

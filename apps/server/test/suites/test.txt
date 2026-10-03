@@ -13,7 +13,6 @@ test/active-tasks-ui-liveness-parity.test.mjs
 test/activity-actor-uuid-guard.test.mjs
 test/agent-chain-depth.test.mjs
 test/agent-comment-pingpong.test.mjs
-test/agent-dashboard-fleet-fields.test.mjs
 test/agent-error-logs-hermes.test.mjs
 test/agent-fullname-display.test.mjs
 test/agent-fullname-orchestration-typing.test.mjs
@@ -28,8 +27,6 @@ test/agent-session-rpc-redeliver.test.mjs
 test/agent-sessions.test.mjs
 test/agent-status-supervisor-eviction.test.mjs
 test/agent-workload-same-second-move.test.mjs
-test/agents-leak.test.mjs
-test/agents-subagents-active-live-strand.test.mjs
 test/allocation-staleness-clock.test.mjs
 test/api-keys-leak.test.mjs
 test/archive-exclusion-guard.test.mjs
@@ -255,7 +252,6 @@ test/stuck-ticket-detector-same-second-lifecycle.test.mjs
 test/subagent-appendlocks-eviction.test.mjs
 test/suite-manifest-sort.test.mjs
 test/supervisor-liveness-redispatch.test.mjs
-test/supervisor-offline-skip-audit.test.mjs
 test/supervisor-output-liveness-decision.test.mjs
 test/supervisor-output-liveness.test.mjs
 test/supervisor-stale-ttl-guard.test.mjs

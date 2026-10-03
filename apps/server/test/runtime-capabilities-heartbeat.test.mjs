@@ -75,6 +75,7 @@ test('Runtime Host heartbeat stores structured runtime health and capabilities',
       body: JSON.stringify({
         instance_id: 'runtime-host-test',
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
         workspace_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',
@@ -140,6 +141,7 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
       body: JSON.stringify({
         instance_id: 'runtime-host-test-profiles',
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
         workspace_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',
@@ -217,6 +219,7 @@ test('Runtime Host heartbeat carries permission_tiers through, all-or-nothing', 
       body: JSON.stringify({
         instance_id: 'runtime-host-test-tiers',
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
         workspace_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',

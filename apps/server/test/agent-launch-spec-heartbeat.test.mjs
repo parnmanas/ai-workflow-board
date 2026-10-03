@@ -39,6 +39,7 @@ function heartbeat(port, key, manager, workspace, instanceId, extra) {
     body: JSON.stringify({
       instance_id: instanceId,
       agent_id: manager.id,
+      host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
       workspace_id: workspace.id,
       mode: 'manager',
       hostname: 'test-host',

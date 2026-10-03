@@ -192,9 +192,10 @@ async function stage(t, { label } = {}) {
      * 이지만 컴파일 후에는 평범한 프로퍼티라 그대로 읽어 넘길 수 있다.
      */
     secondServerRunner: (notifyOverride) =>
+      // P4c-4: agentRepo 인자 삭제.
       new services.OrchestrationRunnerService(
         runner.missionRepo, runner.stepRepo, runner.teamRepo, runner.memberRepo,
-        runner.roomRepo, runner.participantRepo, runner.agentRepo, runner.actionRepo,
+        runner.roomRepo, runner.participantRepo, runner.actionRepo,
         runner.actionRunRepo, runner.dataSource, runner.messaging, runner.missions,
         runner.teams, runner.actionsService, runner.logService,
         notifyOverride ?? runner.confirmNotify,

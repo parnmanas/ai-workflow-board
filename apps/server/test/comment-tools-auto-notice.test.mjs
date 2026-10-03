@@ -40,7 +40,7 @@ const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.
 const { DataSource } = await import('typeorm');
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
+const { RuntimeHost } = await import('file://' + path.join(DIST, 'entities', 'RuntimeHost.js')); // P4c-4
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { registerCommentTools } = await import('file://' + path.join(DIST, 'modules', 'mcp', 'tools', 'comment-tools.js'));
@@ -50,13 +50,13 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const mentionServiceStub = { parseMentions: () => [] };
 
 const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
 const activityRepo = ds.getRepository(ActivityLog);
-const agentRepo = ds.getRepository(Agent);
+const agentRepo = ds.getRepository(RuntimeHost); // P4c-4: manager-tier = Host 행
 
 function registerTools(ctxOverrides = {}) {
   const handlers = new Map();
@@ -78,11 +78,14 @@ async function makeTicket(overrides = {}) {
 }
 /** agent-manager가 fire-and-forget 자동 알림에 사용하는 페어링 발급 신원이다. */
 async function makeManagerAgent(name = 'Manager') {
-  return agentRepo.save(agentRepo.create({ name, type: 'manager' }));
+  return agentRepo.save(agentRepo.create({ name, hostname: 'auto-notice-test' }));
 }
 /** auto_notice를 활성화할 권한이 없는 일반 디스패치 agent다. */
+// P4c-4: 일반 agent 는 Host 행이 없어 manager-tier 가 아니다 — id 만 쓴다 (행 없음).
+const { randomUUID } = await import('node:crypto');
 async function makeRegularAgent(name = 'Assignee', type = 'claude') {
-  return agentRepo.save(agentRepo.create({ name, type }));
+  void name; void type;
+  return { id: randomUUID(), name };
 }
 function parse(res) {
   return JSON.parse(res.content[0].text);

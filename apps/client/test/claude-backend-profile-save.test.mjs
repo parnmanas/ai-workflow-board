@@ -359,9 +359,8 @@ test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화�
   assert.match(boardSettings, /Inherit global default/, '상속 대상은 전역 기본값이어야 합니다.');
 
   // 해석 체인에서 사라진 단계를 다시 약속하는 셀렉트가 없어야 한다.
+  // (ManagedAgentDialog 는 P4c-3b, AgentsPage 는 P4c-4 에서 삭제 — 검사 대상에서 제외.)
   for (const [label, source] of [
-    ['AgentsPage', await read('AgentsPage.tsx')],
-    ['ManagedAgentDialog', await read('admin/ManagedAgentDialog.tsx')],
     ['TicketPanel', await read('TicketPanel.tsx')],
   ]) {
     assert.equal(

@@ -51,6 +51,12 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
 
   const ws = await createWorkspace(app, getDataSourceToken, 'actions');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer' });
+  // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
+  const RUNTIME_SPEC = {
+    manager_agent_id: agent.manager_agent_id, cli: 'claude', model: null,
+    working_dir: '/srv/e2e', credential_id: null, label: 'e2e-deployer', role_prompt: '',
+    runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  };
 
   // ── 신규 Action 등록 ──────────────────────────────────────────────
   step('Register a new Action');
@@ -58,7 +64,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     workspace_id: ws.id,
     name: 'Deploy prod',
     prompt: 'Deploy {{workspace.name}} to production.',
-    target_agent_id: agent.id,
+    target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(created.id, 'new Action must persist with an id');
   assert.equal(created.name, 'Deploy prod');
@@ -198,7 +204,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     workspace_id: ws.id,
     name: 'Disabled deploy',
     prompt: 'x',
-    target_agent_id: agent.id,
+    target_runtimes: [RUNTIME_SPEC],
     enabled: false,
   });
   // …and a *different* board's board-scoped Action must NOT count either.
@@ -208,7 +214,7 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
       board_id: board.id,
       name: 'Legacy board deploy',
       prompt: 'x',
-      target_agent_id: agent.id,
+      target_runtimes: [RUNTIME_SPEC],
     }),
     /Board-scoped Actions are no longer supported/,
   );

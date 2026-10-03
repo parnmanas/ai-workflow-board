@@ -14,7 +14,6 @@ import { tokens } from './tokens';
 const Board = lazy(() => import('./components/Board'));
 const AdminPage = lazy(() => import('./components/admin/AdminPage'));
 const ChatPage = lazy(() => import('./components/ChatPage'));
-const AgentsPage = lazy(() => import('./components/AgentsPage'));
 const BoardSettingsPage = lazy(() => import('./components/BoardSettingsPage'));
 const BoardArchivePage = lazy(() => import('./components/BoardArchivePage'));
 const BoardFeaturesPage = lazy(() => import('./components/BoardFeaturesPage'));
@@ -27,7 +26,6 @@ const WorkspaceManagementPage = lazy(() => import('./components/WorkspaceManagem
 const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
-const AgentDetailPage = lazy(() => import('./components/AgentDetailPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 // Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 기본 랜딩.
 const SessionsPage = lazy(() => import('./components/sessions/SessionsPage'));
@@ -198,8 +196,9 @@ function AppContent() {
           <Route element={<AppLayout />}>
             {/* Legacy redirects */}
             <Route index element={<WorkspaceDefaultRedirect />} />
-            <Route path="agents" element={<WorkspacedRedirect to="agents" />} />
-            <Route path="dashboard" element={<WorkspacedRedirect to="agents" />} />
+            {/* P4c-4: agents 표면 제거 — 세션으로 보낸다. */}
+            <Route path="agents" element={<WorkspacedRedirect to="sessions" />} />
+            <Route path="dashboard" element={<WorkspacedRedirect to="sessions" />} />
             <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
             <Route path="sessions" element={<WorkspacedRedirect to="sessions" />} />
             <Route path="terminals" element={<WorkspacedRedirect to="terminals" />} />
@@ -232,8 +231,7 @@ function AppContent() {
               <Route path="chat" element={<ChatPage />} />
               <Route path="chat/:roomId" element={<ChatPage />} />
               <Route path="users" element={<Navigate to="settings/members" replace />} />
-              <Route path="agents" element={<AgentsPage />} />
-              <Route path="agents/:agentId" element={<AgentDetailPage />} />
+              {/* P4c-4: agents 표면 제거 (Agent 테이블 삭제). */}
               <Route path="channels" element={<Navigate to="settings/channels" replace />} />
               <Route path="api-keys" element={<Navigate to="settings/api-keys" replace />} />
               <Route path="catalog" element={<LegacyCatalogRedirect />} />

@@ -3,14 +3,16 @@ import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, G
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
 import { Observable, Subject, filter, map, finalize, of, merge, interval, takeUntil } from 'rxjs';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { Repository, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { pickBaseRepoResourceId } from '../../common/base-repo-binding';
@@ -118,7 +120,9 @@ export class EventsController implements OnModuleDestroy {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectRepository(ApiKey) private readonly apiKeyRepo: Repository<ApiKey>,
     private readonly authService: AuthService,
     private readonly apiKeyService: ApiKeyService,
     private readonly logService: LogService,
@@ -154,7 +158,7 @@ export class EventsController implements OnModuleDestroy {
       resolveActorDisplayName: async (actorId) => {
         if (!actorId) return null;
         try {
-          return await resolveAgentDisplayName(this.agentRepo, actorId);
+          return await resolveAgentDisplayName(this.dataSource, actorId);
         } catch (err) {
           this.logService.warn(
             'SSE',
@@ -339,8 +343,13 @@ export class EventsController implements OnModuleDestroy {
         if (keyResult.valid && keyResult.apiKey) {
           authIdentity = {
             type: 'agent',
-            name: keyResult.apiKey.agent?.name || keyResult.apiKey.name || 'agent',
-            agentId: keyResult.apiKey.agent_id ?? undefined,
+            name: keyResult.apiKey.name || 'agent',
+            // P4c-4: host-only 키는 agent 바인딩이 없다 — Host id 를 agentId
+            // 자리에 넣어 legacy uuid 스코프 비교가 null 추락하지 않게 한다.
+            // host-affinity 분기는 아래 hostId 로 탄다.
+            agentId: keyResult.apiKey.agent_id ?? keyResult.apiKey.host_id ?? undefined,
+            // P4c-2b: host-affinity 분기용. 구 키에는 host_id가 없어 undefined.
+            hostId: keyResult.apiKey.host_id ?? undefined,
           };
         }
       } catch {
@@ -351,13 +360,27 @@ export class EventsController implements OnModuleDestroy {
     if (!authIdentity) {
       throw new UnauthorizedException('Invalid or expired session/API key');
     }
+    // P4c-4: SSE agent 정체성은 RuntimeHost 행만 본다 (Agent 테이블 없음).
+    // fanoutHostId: 이 연결이 배달받을 legacy holder 집합의 주인 Host.
+    let fanoutHostId: string | null = null;
     if (authIdentity.type === 'agent') {
-      const runtimeHost = authIdentity.agentId
-        ? await this.agentRepo.findOne({ where: { id: authIdentity.agentId } })
+      const hostRow = authIdentity.agentId
+        ? await this.hostRepo.findOne({ where: { id: authIdentity.agentId } })
         : null;
-      if (!runtimeHost || runtimeHost.type !== 'manager') {
+      let linked: { id: string } | null = null;
+      if (!hostRow && authIdentity.agentId) {
+        const link = await this.apiKeyRepo.findOne({
+          where: { agent_id: authIdentity.agentId },
+          select: { agent_id: true, host_id: true },
+        }).catch(() => null);
+        if (link?.host_id) {
+          linked = await this.hostRepo.findOne({ where: { id: link.host_id } });
+        }
+      }
+      if (!hostRow && !linked) {
         throw new UnauthorizedException('Runtime Host credentials are required');
       }
+      fanoutHostId = hostRow?.id ?? linked?.id ?? null;
     }
 
     this.clientCount++;
@@ -374,18 +397,24 @@ export class EventsController implements OnModuleDestroy {
     // step 7) and event-stream.ts (#reconnect). Without that pairing the
     // server silently drops chat_request / agent_trigger / comment_mention
     // events for any agent created after the manager's current SSE connect.
-    let managedAgentIds: Set<string> | undefined;
-    if (authIdentity.type === 'agent' && authIdentity.agentId) {
+    // P4c-4: managed-agent fan-out 집합은 api_keys 페어링 링크에서 복원한다
+    // (Agent 자식 행 없음 — 예전 manager_agent_id 행 스캔 대신).
+    // 연결당 1회 조회라 이벤트 핫 패스는 그대로 O(1) 이다. rt- 멤버는 기존
+    // host-affinity 분기로 배달된다.
+    let managedAgentIds: Set<string> | undefined = undefined;
+    if (fanoutHostId) {
       try {
-        const owned = await this.agentRepo.find({
-          where: { manager_agent_id: authIdentity.agentId },
-          select: ['id'],
+        const links = await this.apiKeyRepo.find({
+          where: { host_id: fanoutHostId },
+          select: { agent_id: true },
         });
-        if (owned.length > 0) {
-          managedAgentIds = new Set(owned.map((a) => a.id));
-        }
-      } catch (err) {
-        this.logService.warn('SSE', `managedAgentIds lookup failed for agent ${authIdentity.agentId.slice(0, 8)}: ${err}`);
+        const ids = links
+          .map((l) => l.agent_id)
+          .filter((id): id is string => !!id && id !== fanoutHostId);
+        if (ids.length > 0) managedAgentIds = new Set(ids);
+      } catch {
+        // 조회 실패는 직접 주소 배달로 축소 (fail-closed, 연결은 유지).
+        managedAgentIds = undefined;
       }
     }
 
@@ -508,6 +537,26 @@ export class EventsController implements OnModuleDestroy {
           //      agent_member_ids array — for multi-managed-agent rooms it
           //      can spawn one chat session per matching agent.
           let effectiveIdentity = identity;
+          // P4c-2b: single-recipient 이벤트의 rt- 타깃. payload.runtime의
+          // spec.manager_agent_id가 이 연결의 hostId/legacy agentId와 일치하면
+          // 그 매니저에게 배달한다 (managedAgentIds에는 rt 키가 없다).
+          if (
+            identity.type === 'agent' &&
+            typeof event.scope.agent_id === 'string' &&
+            event.scope.agent_id.startsWith('rt-') &&
+            (identity.hostId || identity.agentId)
+          ) {
+            const runtime = (event.payload as any)?.runtime;
+            const owner = runtime && typeof runtime === 'object'
+              ? String((runtime as Record<string, any>).manager_agent_id || '')
+              : '';
+            if (
+              owner &&
+              (owner === identity.hostId || owner === identity.agentId)
+            ) {
+              effectiveIdentity = { ...identity, agentId: event.scope.agent_id };
+            }
+          }
           if (
             identity.type === 'agent' &&
             identity.managedAgentIds
@@ -520,6 +569,32 @@ export class EventsController implements OnModuleDestroy {
             } else if (event.scope.agent_member_ids instanceof Set) {
               for (const memberId of event.scope.agent_member_ids) {
                 if (identity.managedAgentIds.has(memberId)) {
+                  effectiveIdentity = { ...identity, agentId: memberId };
+                  break;
+                }
+              }
+            }
+          }
+          // P4c-2b: rt- 멤버 host-affinity. broadcast의 agent_member_runtimes
+          // 맵에서 spec.manager_agent_id가 이 연결의 hostId/legacy agentId와
+          // 일치하는 멤버가 있으면 그 매니저에게 배달하고 effectiveIdentity를
+          // 그 rt 키로 둔다. 매니저는 wire의 같은 맵에서 spec을 읽어 해소한다.
+          // 기존 managedAgentIds 분기와 OR — 둘 중 하나만 맞으면 된다.
+          if (
+            identity.type === 'agent' &&
+            (identity.hostId || identity.agentId) &&
+            event.scope.agent_member_ids instanceof Set
+          ) {
+            const runtimes = (event.payload as any)?.agent_member_runtimes;
+            if (runtimes && typeof runtimes === 'object' && !Array.isArray(runtimes)) {
+              const selfIds = new Set(
+                [identity.hostId, identity.agentId].filter((v): v is string => !!v),
+              );
+              for (const memberId of event.scope.agent_member_ids) {
+                if (typeof memberId !== 'string' || !memberId.startsWith('rt-')) continue;
+                const spec = (runtimes as Record<string, any>)[memberId];
+                const owner = spec && typeof spec === 'object' ? String(spec.manager_agent_id || '') : '';
+                if (owner && selfIds.has(owner)) {
                   effectiveIdentity = { ...identity, agentId: memberId };
                   break;
                 }
@@ -577,15 +652,15 @@ export class EventsController implements OnModuleDestroy {
       let nameById = new Map<string, string>();
       let cwdById = new Map<string, string>();
       try {
-        const rows = lookupIds.length > 0
-          ? await this.agentRepo.find({
-              where: { id: In(lookupIds) },
-              select: ['id', 'name', 'working_dir'],
-            })
+        // P4c-4: Host 행에서 이름 조회 (Agent 테이블 없음).
+        const hostRows = lookupIds.length > 0
+          ? await this.hostRepo.find({
+            where: { id: In(lookupIds) },
+            select: ['id', 'name'],
+          })
           : [];
-        for (const r of rows) {
-          nameById.set(r.id, r.name);
-          if (r.working_dir) cwdById.set(r.id, r.working_dir);
+        for (const h of hostRows) {
+          if (!nameById.has(h.id)) nameById.set(h.id, h.name);
         }
       } catch (err) {
         this.logService.warn('SSE', `Manager-row name/cwd lookup failed: ${err}`);

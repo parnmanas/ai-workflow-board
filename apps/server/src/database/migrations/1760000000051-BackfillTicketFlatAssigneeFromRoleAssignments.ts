@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
@@ -49,7 +48,6 @@ export class BackfillTicketFlatAssigneeFromRoleAssignments1760000000051 implemen
   public async up(queryRunner: QueryRunner): Promise<void> {
     const manager = queryRunner.manager;
     const ticketRepo = manager.getRepository(Ticket);
-    const agentRepo = manager.getRepository(Agent);
     const userRepo = manager.getRepository(User);
     const roleRepo = manager.getRepository(WorkspaceRole);
     const assignRepo = manager.getRepository(TicketRoleAssignment);
@@ -71,17 +69,10 @@ export class BackfillTicketFlatAssigneeFromRoleAssignments1760000000051 implemen
     }
     if (builtinSlugByRoleId.size === 0) return;
 
-    // Canonical <Manager>/<Agent> display, resolved once per agent (matches
-    // resolveAgentDisplayName / the runtime write-back).
-    const agents = await agentRepo.find();
-    const agentById = new Map<string, Agent>();
-    for (const a of agents) agentById.set(a.id, a);
+    // P4c-4: agents 테이블 없음 — 모든 agent holder 는 orphan 취급
+    // (id 미러, 이름 blank).
     const displayForAgent = (agentId: string): { id: string; name: string } | null => {
-      const a = agentById.get(agentId);
-      if (!a) return { id: agentId, name: '' }; // orphan holder — mirror id, blank name
-      if (!a.manager_agent_id) return { id: a.id, name: a.name };
-      const mgr = agentById.get(a.manager_agent_id);
-      return { id: a.id, name: mgr ? `${mgr.name}/${a.name}` : a.name };
+      return { id: agentId, name: '' }; // orphan holder — mirror id, blank name
     };
 
     const users = await userRepo.find();

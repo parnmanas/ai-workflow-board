@@ -1,7 +1,8 @@
 import { Injectable, type OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import { CommandLedgerService } from './command-ledger.service';
@@ -128,7 +129,8 @@ export function modelLabelsFromOptions(parsed: unknown): Record<string, string> 
 @Injectable()
 export class HostModelsService implements OnModuleInit {
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectRepository(ApiKey) private readonly apiKeyRepo: Repository<ApiKey>,
     @InjectRepository(AgentSessionCliSetting) private readonly cliSettings: Repository<AgentSessionCliSetting>,
     private readonly registry: InstanceRegistryService,
     private readonly commands: AgentManagerCommandService,
@@ -255,18 +257,29 @@ export class HostModelsService implements OnModuleInit {
   private liveRecord(managerAgentId: string): InstanceRecord | null {
     let best: InstanceRecord | null = null;
     for (const rec of this.registry.list()) {
-      if (rec.mode !== 'manager' || rec.agent_id !== managerAgentId) continue;
+      if (rec.mode !== 'manager') continue;
+      // P4: view 키가 host id 일 수 있다 — agent 바인딩과 host 바인딩 둘 다 본다.
+      if (rec.agent_id !== managerAgentId && rec.host_id !== managerAgentId) continue;
       if (!best || rec.last_seen_at > best.last_seen_at) best = rec;
     }
     return best;
   }
 
-  private async requireManager(managerAgentId: string): Promise<Agent> {
+  // P4c-4: RuntimeHost 행 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+  private async requireManager(managerAgentId: string): Promise<Pick<RuntimeHost, 'id' | 'name'>> {
     const id = (managerAgentId || '').trim();
     if (!id) throw new HostModelsError(400, 'manager_agent_id is required');
-    const manager = await this.agentRepo.findOne({ where: { id } });
-    if (!manager || manager.type !== 'manager') throw new HostModelsError(404, 'Runtime Host not found');
-    return manager;
+    const direct = await this.hostRepo.findOne({ where: { id } });
+    if (direct) return direct;
+    const link = await this.apiKeyRepo.findOne({
+      where: { agent_id: id },
+      select: { agent_id: true, host_id: true },
+    });
+    if (link?.host_id) {
+      const host = await this.hostRepo.findOne({ where: { id: link.host_id } });
+      if (host) return host;
+    }
+    throw new HostModelsError(404, 'Runtime Host not found');
   }
 
   /** 최신 하트비트 기준 목록. 오프라인이면 빈 목록(마지막 값이 아니라 — 레지스트리 TTL 이 지운다). */
@@ -332,7 +345,7 @@ export class HostModelsService implements OnModuleInit {
     }
   }
 
-  private viewOf(manager: Agent, rec: InstanceRecord | null): HostModelsView {
+  private viewOf(manager: Pick<RuntimeHost, 'id' | 'name'>, rec: InstanceRecord | null): HostModelsView {
     const models = this.modelsByCli(manager.id);
     const labels: Record<string, Record<string, string>> = {};
     for (const cli of Object.keys(models)) {

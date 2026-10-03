@@ -55,7 +55,6 @@ test/qa-flows/halt-policy-role-backfill.test.mjs
 test/qa-flows/inflight-strand-replay-any-source.test.mjs
 test/qa-flows/inflight-strand-replay.test.mjs
 test/qa-flows/large-data.test.mjs
-test/qa-flows/manager-agent-noop.test.mjs
 test/qa-flows/mcp-agent-roundtrip.test.mjs
 test/qa-flows/mcp-schema-version.test.mjs
 test/qa-flows/mcp-tool-profile-cache.test.mjs
@@ -64,7 +63,6 @@ test/qa-flows/merge-gate.test.mjs
 test/qa-flows/multi-agent-concurrency.test.mjs
 test/qa-flows/multi-holder-fanout.test.mjs
 test/qa-flows/multi-user-chat.test.mjs
-test/qa-flows/never-started-agent-dispatch.test.mjs
 test/qa-flows/on-ticket-done-hook.test.mjs
 test/qa-flows/orchestration-confirm-node.test.mjs
 test/qa-flows/orchestration-confirm-notify.test.mjs
@@ -124,7 +122,6 @@ test/qa-flows/workflow-health-long-term-usage.test.mjs
 test/qa-flows/workflow-state-cap.test.mjs
 test/qa-flows/workspace-assistant-agent.test.mjs
 test/qa-flows/workspace-config-audit.test.mjs
-test/qa-flows/workspace-move-agent.test.mjs
 test/qa-flows/workspace-move-board.test.mjs
 test/qa-flows/workspace-schedule-e2e.test.mjs
 test/qa-flows/workspace-schedule-mcp.test.mjs

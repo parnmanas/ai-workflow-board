@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 import { Workspace } from '../../entities/Workspace';
 
 /**
@@ -35,9 +34,13 @@ export class BackfillOrphanAgentWorkspace1760000000001 implements MigrationInter
   name = 'BackfillOrphanAgentWorkspace1760000000001';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // P4c-4: agents 테이블 없음 — 이 백필의 대상 자체가 존재하지 않는다.
+    if (!(await queryRunner.hasTable('agents'))) return;
     const manager = queryRunner.manager;
-    const agentRepo = manager.getRepository(Agent);
     const wsRepo = manager.getRepository(Workspace);
+    // 문자열 기반 조회 — Agent 엔티티는 P4c-4 로 삭제됐고 이 본문은 위 가드로
+    // 실행되지 않는다 (이미 적용된 DB 에서는 스킵).
+    const agentRepo = manager.getRepository('agents');
 
     // ── Idempotency check ──
     // Load all agents and filter in memory to cover both '' and NULL shapes

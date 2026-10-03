@@ -11,7 +11,6 @@
 
 import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
-import { Agent } from '../../../entities/Agent';
 import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Comment } from '../../../entities/Comment';
@@ -28,7 +27,9 @@ import { parseHandoffSpec } from '../../../common/handoff-spec-config';
 import { User } from '../../../entities/User';
 import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { safeJsonParse, withArtifactRef } from './helpers';
-import { formatAgentDisplayName, projectTicketAttachment } from './ticket-helpers';
+import { projectTicketAttachment } from './ticket-helpers';
+import { resolveAgentDisplayNamesByIds } from '../../../utils/agent-name';
+import { holderAssigneeId } from '../../../common/runtime-spec';
 import { listPrerequisitesFull } from '../../tickets/ticket-prerequisites.service';
 import { isDuplicateDecisionPending } from '../../tickets/ticket-duplicate-pending';
 
@@ -598,35 +599,42 @@ async function hydrateRoleAssignments(scope: RepoScope, root: any): Promise<void
   const roleIds = [...new Set(rows.map(r => r.role_id))];
   const agentIds = [...new Set(rows.map(r => r.agent_id).filter((x): x is string => !!x))];
   const userIds = [...new Set(rows.map(r => r.user_id).filter((x): x is string => !!x))];
-  const [roles, agents, users] = await Promise.all([
+  const [roles, users] = await Promise.all([
     scope.getRepository(WorkspaceRole).find({ where: { id: In(roleIds) } }),
-    agentIds.length
-      ? scope.getRepository(Agent).find({ where: { id: In(agentIds) } })
-      : Promise.resolve([] as Agent[]),
     userIds.length
       ? scope.getRepository(User).find({ where: { id: In(userIds) } })
       : Promise.resolve([] as User[]),
   ]);
   const roleMap = new Map(roles.map(r => [r.id, r]));
-  const agentMap = new Map(agents.map(a => [a.id, a]));
   const userMap = new Map(users.map(u => [u.id, u]));
-  // Pre-resolve manager-display once per agent so the tree-walk below stays
-  // O(rows) without re-querying the manager table per assignment.
-  const displayByAgentId = new Map<string, string>();
-  for (const a of agents) {
-    displayByAgentId.set(a.id, await formatAgentDisplayName(scope, a));
-  }
+  // P4c-4: uuid holder 표시는 Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+  const displayByAgentId = await resolveAgentDisplayNamesByIds(scope, agentIds);
 
   const byTicket = new Map<string, any[]>();
   for (const r of rows) {
     const role = roleMap.get(r.role_id);
     if (!role) continue;
     let holder: any = null;
-    if (r.agent_id && agentMap.has(r.agent_id)) {
-      holder = { type: 'agent', id: r.agent_id, name: displayByAgentId.get(r.agent_id) || agentMap.get(r.agent_id)!.name };
+    if (r.agent_id && displayByAgentId.has(r.agent_id)) {
+      holder = { type: 'agent', id: r.agent_id, name: displayByAgentId.get(r.agent_id) };
+    } else if (r.agent_id) {
+      holder = { type: 'agent', id: r.agent_id, name: r.agent_id.slice(0, 8) };
     } else if (r.user_id && userMap.has(r.user_id)) {
       const u = userMap.get(r.user_id)!;
       holder = { type: 'user', id: u.id, name: u.name || u.email };
+    }
+    // P4c-4: spec-direct holder — 스냅샷 라벨 (기존에 누락되던 경로).
+    if (!holder && !r.agent_id && !r.user_id) {
+      const rtId = holderAssigneeId(r as any);
+      const spec = (r as any).runtime_spec as Record<string, any> | null;
+      if (rtId && spec && typeof spec === 'object') {
+        holder = {
+          type: 'agent',
+          id: rtId,
+          name: (String(spec.label || '').trim() || rtId.slice(0, 11)),
+          runtime: { ...spec },
+        };
+      }
     }
     const entry = { role_id: role.id, slug: role.slug, holder, position: role.position };
     const list = byTicket.get(r.ticket_id) || [];

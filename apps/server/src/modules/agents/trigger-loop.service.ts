@@ -8,7 +8,6 @@ import { Ticket } from '../../entities/Ticket';
 import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
-import { Agent } from '../../entities/Agent';
 import { PromptTemplate } from '../../entities/PromptTemplate';
 import { canUseCatalogItem } from '../../common/catalog-scope';
 import { Resource } from '../../entities/Resource';
@@ -43,6 +42,9 @@ import { lastHumanUnpendAt, countWindowDispatches, countWindowDispatchesBySource
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
+import { holderAssigneeId, runtimeSpecFromAgentRow, specMatchesAgent, isRuntimeIdentityKey } from '../../common/runtime-spec';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
@@ -701,7 +703,8 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
     const seen = new Set<string>();
     const agentIds: string[] = [];
     for (const r of rows) {
-      const a = r.agent_id;
+      // P4c-2b: spec-direct holder는 holder_key에서 rt 키를 읽는다.
+      const a = r.agent_id || holderAssigneeId(r);
       if (a && !seen.has(a)) {
         seen.add(a);
         agentIds.push(a);
@@ -720,14 +723,10 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
    * manager 가 하나도 없으면 입력 배열을 그대로 돌려준다(추가 질의 없음).
    */
   private async _excludeManagerAgents(agentIds: string[]): Promise<string[]> {
-    if (agentIds.length === 0) return agentIds;
-    const managers = await this.dataSource.getRepository(Agent).find({
-      where: { id: In(agentIds), type: 'manager' },
-      select: ['id'],
-    });
-    if (managers.length === 0) return agentIds;
-    const managerSet = new Set(managers.map(a => a.id));
-    return agentIds.filter(a => !managerSet.has(a));
+    // P4c-4: Agent 테이블 제거 — manager 행이 없으므로 제외할 것이 없다.
+    // (941c72d3 규칙은 Host/board 레벨에서 유지된다: Host uuid 는 dispatch
+    // 튜플에 cli/working_dir 이 없어 스냅샷 없이는 발화되지 않는다.)
+    return agentIds;
   }
 
   /**
@@ -1414,8 +1413,9 @@ export class TriggerLoopService implements OnModuleInit, OnModuleDestroy {
       throw Object.assign(new Error(`Invalid role: ${role}`), { status: 400 });
     }
 
-    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: targetAgentId } });
-    if (!agent) {
+    // P4c-4: 수동 트리거 대상은 rt- 키 또는 Host uuid 다 (Agent 행 없음).
+    const manualTarget = await resolveCallerIdentityRow(this.dataSource, targetAgentId);
+    if (!manualTarget && !isRuntimeIdentityKey(targetAgentId)) {
       throw Object.assign(new Error(`Target agent ${targetAgentId} not found`), { status: 404 });
     }
 
@@ -2476,47 +2476,9 @@ candidate's branch or move the ticket.
       : null;
     const effectiveWorkspaceId = dispatchBoard?.workspace_id || ticket.workspace_id || '';
 
-    // Agent Manager(type='manager') 드롭 게이트 (ticket 941c72d3). Manager 는 절대
-    // 작업하지 않는다 — holder-resolution(_resolveRoleHolders) 에서 대부분 걸러
-    // 지지만, 수동 트리거(emitManualTrigger)나 legacy 배정 경로로 manager id 가
-    // 이 최종 chokepoint 까지 올 수 있으므로 여기서도 명시적으로 드롭한다. 다른
-    // 드롭 게이트와 동일하게 info 로그 + audit row(action='agent_trigger_dropped_manager')
-    // 를 남겨 "manager 는 왜 안 깨어나나" 를 grep 할 수 있게 한다.
-    {
-      const targetAgent = await this.dataSource.getRepository(Agent).findOne({
-        where: { id: agentId },
-        select: ['id', 'type'],
-      });
-      if (targetAgent?.type === 'manager') {
-        this.logService.info('MCP', 'agent_trigger dropped (manager agent)', {
-          ticket_id: ticket.id, agent_id: agentId, role, source: triggerSource,
-        });
-        try {
-          const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-          await activityLogRepo.save(activityLogRepo.create({
-            entity_type: 'ticket',
-            entity_id: ticket.id,
-            ticket_id: ticket.id,
-            actor_id: 'system',
-            actor_name: 'TriggerLoopService',
-            action: 'agent_trigger_dropped_manager',
-            new_value: `agent=${agentId} type=manager`,
-            role,
-            trigger_source: triggerSource,
-          }));
-        } catch (e) {
-          this.logService.warn('MCP', 'manager-drop audit write failed (drop still applied)', {
-            err: String(e), ticket_id: ticket.id,
-          });
-        }
-        if (triggerSource === 'comment_summary') {
-          throw Object.assign(new Error('Manager agents cannot run comment summaries'), {
-            status: 503, code: 'SUMMARY_DISPATCH_MANAGER_AGENT',
-          });
-        }
-        return '';
-      }
-    }
+    // P4c-4: manager 행 드롭 게이트 제거 (Agent 테이블 없음 — 행이 없으므로
+    // 941c72d3 대상 자체가 존재하지 않는다. Host uuid holder 는 아래 스냅샷
+    // 해소가 없으면 발화되지 않는다.)
 
     // Instance-wide quiesce gate (ticket 0f638509 — live pull import). Set
     // while/after a migration import so this destination never dispatches
@@ -2891,11 +2853,31 @@ candidate's branch or move the ticket.
     // skipped — neither side is a hard requirement. Plugin sees the joined
     // text in the same `role_prompt` field on the wire, so no plugin change
     // is needed for v0.34's prepend semantics.
-    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
+    // P4c-4: Agent 행이 없으므로 role_prompt agent 레이어는 스냅샷에서만
+    // 온다 (아래 assignmentSpec). legacy uuid holder 는 빈 레이어로 발화된다.
+    const agent = null;
     const workspaceRole = await this.dataSource.getRepository(WorkspaceRole).findOne({
       where: { workspace_id: effectiveWorkspaceId, slug: role },
     });
-    const rolePrompt = [workspaceRole?.role_prompt, agent?.role_prompt]
+    // P4a: assignment 스냅샷 우선. 스냅샷이 있으면 role_prompt·runtime 원본이
+    // 스냅샷이고 agent 행은 폴백이다. stale(배정 후 Agent 편집)도 스냅샷을
+    // 쓴다 — 스냅샷이 정본이며, 불일치는 warn으로 남겨 P4c 전수정에 쓴다.
+    let assignmentSpec: Record<string, any> | null = null;
+    try {
+      if (workspaceRole) {
+        // P4c-4: rt- holder 행은 agent_id가 null이라 holder_key로도 찾는다.
+        const rows = await this.dataSource.getRepository(TicketRoleAssignment).find({
+          where: { ticket_id: ticket.id, role_id: workspaceRole.id },
+        });
+        const assignment = rows.find((r) => holderAssigneeId(r) === agentId) ?? null;
+        assignmentSpec = assignment?.runtime_spec ?? null;
+      }
+    } catch {
+      // best-effort — 실패하면 아래 agent 폴백 그대로.
+    }
+    // P4c-4: Agent 행 없음 — 스냅샷이 role_prompt 의 유일한 원천이다.
+    const agentPromptLayer = (assignmentSpec?.role_prompt as string | undefined) || undefined;
+    const rolePrompt = [workspaceRole?.role_prompt, agentPromptLayer]
       .filter((s): s is string => !!s && s.trim().length > 0)
       .join('\n\n');
 
@@ -3103,23 +3085,32 @@ candidate's branch or move the ticket.
     // Claude backend profiles must be invisible to every other CLI. In
     // particular, a board default must not alter Codex/Antigravity spawn
     // model/cwd or make their dispatch depend on a Claude credential.
-    if (agent && cliDescriptor(agent.type)?.sessions.backend_profile) {
-      runtimeProfile = await resolveClaudeBackendProfileForDispatch(
-        this.dataSource,
-        [
-          { source: 'run', value: ticket.cli_runtime_profile },
-          { source: 'agent', value: agent.cli_runtime_profile },
-          { source: 'board', value: runtimeBoard?.cli_runtime_profile },
-        ],
-      );
-      if (runtimeProfile?.credential_required && runtimeProfile.credential_ref !== agent.credential_id) {
-        throw new Error(
-          `Claude backend profile "${runtimeProfile.id}" requires credential ${runtimeProfile.credential_ref}; ` +
-          `agent ${agent.id} must select that credential before dispatch`,
+    // P4c-4: Agent 행 없음 — spec holder 의 backend profile 은 assignment
+    // 스냅샷의 cli_runtime_profile id 에서 해소한다 (run + board 소스와 함께).
+    {
+      const specCli = String((assignmentSpec as any)?.cli || '');
+      if (specCli && cliDescriptor(specCli)?.sessions.backend_profile) {
+        const specProfile = await resolveClaudeBackendProfileForDispatch(
+          this.dataSource,
+          [
+            { source: 'run', value: ticket.cli_runtime_profile },
+            { source: 'agent', value: (assignmentSpec as any)?.cli_runtime_profile ?? null },
+            { source: 'board', value: runtimeBoard?.cli_runtime_profile },
+          ],
         );
-      }
-      if (await this._checkManagerCapabilityGate(ticket, agentId, role, triggerSource, runtimeProfile)) {
-        return '';
+        if (specProfile) {
+          runtimeProfile = specProfile;
+          if (specProfile.credential_required
+            && specProfile.credential_ref !== ((assignmentSpec as any)?.credential_id ?? null)) {
+            throw new Error(
+              `Claude backend profile "${specProfile.id}" requires credential ${specProfile.credential_ref}; ` +
+              `agent ${agentId} must select that credential before dispatch`,
+            );
+          }
+          if (await this._checkManagerCapabilityGate(ticket, agentId, role, triggerSource, specProfile)) {
+            return '';
+          }
+        }
       }
     }
 
@@ -3390,6 +3381,11 @@ candidate's branch or move the ticket.
       trigger_id: triggerId,
       ticket_id: ticket.id,
       agent_id: agentId,
+      // P4a: assignment 스냅샷 우선, agent 행 폴백. 매니저는 당분간 agent_id를
+      // 읽고 P4c에서 runtime 정본으로 전환한다.
+      runtime: assignmentSpec
+        ? { ...assignmentSpec }
+        : agent ? { ...runtimeSpecFromAgentRow(agent) } : null,
       role,
       trigger_source: triggerSource,
       current_column_id: col?.id || '',

@@ -29,7 +29,8 @@ import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
 import { User } from '../dist/entities/User.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js';
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { RoomMembershipService } from '../dist/modules/chat-rooms/room-membership.service.js';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
@@ -135,7 +136,7 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, OrchestrationMission],
+      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, RuntimeHost, ApiKey, OrchestrationMission],
       synchronize: true,
       logging: false,
     });
@@ -146,10 +147,11 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     const partRepo = dataSource.getRepository(ChatRoomParticipant);
     const msgRepo = dataSource.getRepository(ChatRoomMessage);
     const userRepo = dataSource.getRepository(User);
-    const agentRepo = dataSource.getRepository(Agent);
+    const hostRepo = dataSource.getRepository(RuntimeHost); // P4c-4
 
+    // P4c-4: agentRepo 인자 삭제.
     membership = new RoomMembershipService(
-      roomRepo, partRepo, userRepo, agentRepo, dataSource,
+      roomRepo, partRepo, userRepo, dataSource,
       dataSource.getRepository(OrchestrationMission),
     );
     // getMessages 가 실제로 쓰는 것은 messageRepo · attachmentRepo · membership 셋이다.
@@ -162,8 +164,7 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
       roomRepo,                                   // roomRepo
       partRepo,                                   // participantRepo
       msgRepo,                                    // messageRepo
-      agentRepo,                                  // agentRepo
-      empty,                                      // ticketRepo
+      empty,                                      // ticketRepo (P4c-4: agentRepo 삭제)
       empty,                                      // userMentionRepo
       { async find() { return []; } },            // attachmentRepo
       { async findOne() { return null; } },       // workspaceRepo
@@ -191,10 +192,10 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     await userRepo.save([
       userRepo.create({ id: ALICE, name: 'Alice', email: 'alice@example.com' }),
     ]);
-    await agentRepo.save([
-      agentRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
-      agentRepo.create({ id: OUTSIDER_BOT, name: 'Outsider bot', type: 'claude', workspace_id: WS }),
-      agentRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
+    await hostRepo.save([
+      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
+      hostRepo.create({ id: OUTSIDER_BOT, name: 'Outsider bot', type: 'claude', workspace_id: WS }),
+      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
     ]);
   });
 
@@ -308,7 +309,6 @@ describe('get_chat_room_messages 워크스페이스 경계 (티켓 5a95315f)', (
     ]);
 
     const res = await mcpRead(room.id, BOT, WS);
-
     assert.equal(res.isError, false);
     assert.equal(res.payload.room_id, room.id);
     assert.equal(res.payload.count, 3);

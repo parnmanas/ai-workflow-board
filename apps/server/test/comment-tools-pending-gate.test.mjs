@@ -34,7 +34,7 @@ const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.
 const { DataSource } = await import('typeorm');
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
+const { RuntimeHost } = await import('file://' + path.join(DIST, 'entities', 'RuntimeHost.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { registerCommentTools } = await import('file://' + path.join(DIST, 'modules', 'mcp', 'tools', 'comment-tools.js'));
@@ -43,12 +43,12 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const mentionServiceStub = { parseMentions: () => [] };
 
 const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
-const agentRepo = ds.getRepository(Agent);
+const agentRepo = ds.getRepository(RuntimeHost); // P4c-4: handoff 대상 해소는 Host 행이다
 
 function registerTools() {
   const handlers = new Map();
@@ -68,7 +68,7 @@ async function makeTicket(overrides = {}) {
   }));
 }
 async function makeAgent(overrides = {}) {
-  return agentRepo.save(agentRepo.create({ name: 'Agent', ...overrides }));
+  return agentRepo.save(agentRepo.create({ name: 'Host', hostname: 'test-host', ...overrides }));
 }
 function parse(res) {
   return JSON.parse(res.content[0].text);

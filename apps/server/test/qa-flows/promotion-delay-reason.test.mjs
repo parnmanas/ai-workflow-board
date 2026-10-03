@@ -60,6 +60,8 @@ test('StuckTicketDetector promotion-delay alert surfaces the skip reason', async
   step('Seed workspace + alert room + holder agent');
   const ws = await createWorkspace(app, getDataSourceToken, 'promo-delay-reason');
   const bobAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'bob' });
+  // P4c-4: focus 점유자 표시는 Host 이름이다 — leaf 와 일치시켜 기존 단언을 유지한다.
+  await ds.getRepository('RuntimeHost').update({ id: bobAgent.manager_agent_id }, { name: bobAgent.name });
 
   const roomRepo = ds.getRepository('ChatRoom');
   const messageRepo = ds.getRepository('ChatRoomMessage');

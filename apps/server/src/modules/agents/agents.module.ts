@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
 import { Ticket } from '../../entities/Ticket';
 import { Subagent } from '../../entities/Subagent';
 import { SubagentLogLine } from '../../entities/SubagentLogLine';
@@ -9,7 +10,6 @@ import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { CiRedAlert } from '../../entities/CiRedAlert';
 import { DispatchIntent } from '../../entities/DispatchIntent';
 import { ChildRun } from '../../entities/ChildRun';
-import { AgentsController } from './agents.controller';
 import { FsBrowserController } from './fs-browser.controller';
 import { SubagentMonitorController } from './subagent-monitor.controller';
 import { AgentConnectionService } from './agent-connection.service';
@@ -55,7 +55,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([Agent, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, CiRedAlert, DispatchIntent, ChildRun, TicketCompletionVerification]),
+    TypeOrmModule.forFeature([RuntimeHost, ApiKey, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, CiRedAlert, DispatchIntent, ChildRun, TicketCompletionVerification]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
     // StuckTicketDetectorService uses to post in-process alerts via
@@ -74,7 +74,7 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
     WorkspaceRolesModule,
   ],
   controllers: [
-    AgentsController,
+    // P4c-4: AgentsController (Agent-row CRUD) removed with the Agent table.
     FsBrowserController,
     SubagentMonitorController,
     ChildRunsController,

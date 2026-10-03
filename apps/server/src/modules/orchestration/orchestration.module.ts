@@ -8,7 +8,8 @@ import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
 import { Action } from '../../entities/Action';
 import { ActionRun } from '../../entities/ActionRun';
 import { Workspace } from '../../entities/Workspace';
@@ -21,7 +22,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { OrchestrationController } from './orchestration.controller';
 import { OrchestrationTeamService } from './orchestration-team.service';
-import { OrchestrationAgentProvisionerService } from './orchestration-agent-provisioner.service';
+import { OrchestrationHostsService } from './orchestration-hosts.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
@@ -31,9 +32,10 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
  * Orchestration mode — a Team led by one orchestrator plans a Mission at runtime
  * and delegates its Steps to members.
  *
- * A roster slot is declared as Runtime Host + CLI + model + working folder;
- * OrchestrationAgentProvisionerService materializes the Agent identity each slot
- * needs, so no Agent has to exist before a team can be built.
+ * A roster slot is declared as Runtime Host + CLI + model + working folder and
+ * addressed by its runtime identity key — no Agent row is created per slot.
+ * OrchestrationHostsService serves the Runtime Host catalogue the team editor
+ * reads.
  *
  * Exports the three services the MCP module needs: the runner (plan intake,
  * step reports, mission completion), the mission service (the orchestrator's
@@ -50,7 +52,10 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
       ChatRoom,
       ChatRoomParticipant,
       ChatRoomMessage,
-      Agent,
+      // P4c-4: Agent 제거됨.
+      RuntimeHost,
+      // P4: manager Agent 행 ↔ RuntimeHost 링크 (api_keys agent_id/host_id 쌍).
+      ApiKey,
       Action,
       ActionRun,
       Workspace,
@@ -73,9 +78,9 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
   controllers: [OrchestrationController],
   providers: [
     OrchestrationTeamService,
-    // Owns the Agent identity behind each roster slot — the team editor writes
-    // a runtime spec, this turns it into something dispatch can address.
-    OrchestrationAgentProvisionerService,
+    // Runtime Host catalogue for the team editor (read-only; slots no longer
+    // mint Agent rows — see OrchestrationHostsService).
+    OrchestrationHostsService,
     OrchestrationMissionService,
     // confirm 게이트 대기 알림(티켓 a78cb566). 의존하는 UserChannelDispatcherService 와
     // ReBACService 는 이미 import 중인 SharedServicesModule 이 export 한다 —

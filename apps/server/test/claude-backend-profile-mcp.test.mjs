@@ -32,9 +32,10 @@ before(async () => {
   ds = new DataSource(buildDataSourceOptions());
   await ds.initialize();
 
-  managerAgent = await ds.getRepository('Agent').save(ds.getRepository('Agent').create({
+  // P4c-4: registry 접근 자격은 Host 행이다.
+  managerAgent = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({
     name: 'Profile manager',
-    type: 'manager',
+    hostname: 'profile-test',
     workspace_id: null,
   }));
   workspace = await ds.getRepository('Workspace').save(ds.getRepository('Workspace').create({
@@ -58,10 +59,10 @@ describe('Claude backend profile MCP operations', () => {
       null,
     );
 
-    const ordinary = await ds.getRepository('Agent').save(
-      ds.getRepository('Agent').create({
+    const ordinary = await ds.getRepository('RuntimeHost').save(
+      ds.getRepository('RuntimeHost').create({
         name: 'Ordinary profile operator',
-        type: 'claude',
+        hostname: 'profile-test',
         workspace_id: workspace.id,
       }),
     );

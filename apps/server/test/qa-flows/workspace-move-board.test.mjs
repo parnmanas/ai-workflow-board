@@ -123,10 +123,10 @@ test('board cross-workspace move: re-stamp + carry/remap + atomicity', async (t)
   // dest must not have received the copied template yet.
   assert.equal(await tplRepo.findOne({ where: { workspace_id: destWs.id, name: scene.tpl.name } }), null,
     'no template copied during preview');
-  // companion agent (assignee) → reported as a warn, not a blocker.
+  // P4c-4: companion-agent 표면 retired — blockers/items 에 agent 항목 없음.
   assert.equal(preview.blockers.length, 0, 'no blockers without carry_agents');
-  assert.ok(preview.items.some((i) => i.entity === 'agent' && i.kind === 'warn'),
-    'companion agent reported as warn');
+  assert.ok(!preview.items.some((i) => i.entity === 'agent'),
+    'no companion-agent items (surface retired)');
 
   // ── (a)+(b) commit ──────────────────────────────────────────────────────
   step('commit moves board + deps to dest workspace');
@@ -165,76 +165,9 @@ test('board cross-workspace move: re-stamp + carry/remap + atomicity', async (t)
   // source template still intact (non-destructive)
   assert.ok(await tplRepo.findOne({ where: { id: scene.tpl.id } }), 'source template left intact');
 
-  // ── (d) atomic block: carry_agents that also works elsewhere → no-op ─────
-  step('a blocked commit applies nothing (atomicity)');
-  const scene2 = await buildScene(app, getDataSourceToken, sourceWs, 'blk');
-  // give scene2's agent a role on ANOTHER board's ticket so carry is unsafe.
-  const otherBoard = await createBoard(app, getDataSourceToken, sourceWs.id, { name: 'other' });
-  const otherCol = await createColumn(app, getDataSourceToken, otherBoard.id, {
-    name: 'Todo', position: 0, workspaceId: sourceWs.id, kind: 'intake',
-  });
-  const otherTicket = await createTicket(app, getDataSourceToken, {
-    columnId: otherCol.id, workspaceId: sourceWs.id, title: 'other-ticket', assigneeId: scene2.agent.id,
-  });
-
-  const destWs2 = await createWorkspace(app, getDataSourceToken, 'move-dst2');
-  // preview surfaces the blocker but never throws.
-  const blockedPreview = await mover.previewBoardMove(scene2.board.id, destWs2.id, { carry_agents: true });
-  assert.ok(blockedPreview.blockers.length > 0, 'blocker surfaced in preview');
-
-  // ── (ticket 9efa643b) structured blocker: code + refs + remedies ─────────
-  step('companion blocker is structured with inline remedies');
-  const compBlocker = blockedPreview.blockers.find((b) => b.code === 'companion_agent_outside_roles');
-  assert.ok(compBlocker, 'companion_agent_outside_roles blocker present');
-  assert.equal(compBlocker.agent_id, scene2.agent.id, 'blocker names the offending agent');
-  assert.ok(compBlocker.ticket_ids.includes(otherTicket.id), 'blocker lists the outside ticket');
-  assert.ok(typeof compBlocker.message === 'string' && compBlocker.message.length > 0, 'string fallback message present');
-  const remedyActions = compBlocker.remedies.map((r) => r.action);
-  assert.ok(remedyActions.includes('drop_companion_agent'), 'drop_companion_agent remedy offered');
-  assert.ok(remedyActions.includes('unassign_from_tickets'), 'unassign_from_tickets remedy offered');
-  assert.equal(compBlocker.remedies.find((r) => r.action === 'drop_companion_agent').kind, 'repreview',
-    'drop_companion_agent is a write-free repreview remedy');
-
-  await assert.rejects(
-    () => mover.commitBoardMove(scene2.board.id, destWs2.id, { carry_agents: true }),
-    (e) => e instanceof WorkspaceMoveBlockedError,
-    'blocked commit throws WorkspaceMoveBlockedError',
-  );
-  // nothing applied — board still in source ws, agent untouched.
-  assert.equal((await boardRepo.findOne({ where: { id: scene2.board.id } })).workspace_id, sourceWs.id,
-    'blocked commit left the board in source ws');
-  assert.equal((await ds.getRepository('Agent').findOne({ where: { id: scene2.agent.id } })).workspace_id, sourceWs.id,
-    'blocked commit left the agent in source ws');
-  assert.equal(await tplRepo.findOne({ where: { workspace_id: destWs2.id, name: scene2.tpl.name } }), null,
-    'blocked commit copied no template (rolled back)');
-
-  // ── (ticket 9efa643b) drop_companion_agent: exclude clears the blocker ────
-  step('exclude_agent_ids drops the agent from carry → blocker gone, no write');
-  const excludedPreview = await mover.previewBoardMove(scene2.board.id, destWs2.id, {
-    carry_agents: true, exclude_agent_ids: [scene2.agent.id],
-  });
-  assert.equal(excludedPreview.blockers.length, 0, 'excluding the agent clears the companion blocker');
-  assert.ok(excludedPreview.items.some((i) => i.entity === 'agent' && i.kind === 'warn'),
-    'excluded agent is reported as a warn (board moves without it)');
-  // preview is still write-free — agent untouched.
-  assert.equal((await ds.getRepository('Agent').findOne({ where: { id: scene2.agent.id } })).workspace_id, sourceWs.id,
-    'exclude preview wrote nothing');
-
-  // ── (ticket 9efa643b) unassign_from_tickets remedy executor ──────────────
-  step('runMoveRemedy(unassign_from_tickets) detaches the agent, clearing the blocker');
-  const assignRepo2 = ds.getRepository('TicketRoleAssignment');
-  const ticketRepo2 = ds.getRepository('Ticket');
-  const res = await mover.runMoveRemedy('unassign_from_tickets', {
-    agent_id: scene2.agent.id, ticket_ids: [otherTicket.id],
-  });
-  assert.ok(res.ok && res.affected > 0, 'remedy reports rows affected');
-  assert.equal(await assignRepo2.findOne({ where: { ticket_id: otherTicket.id, agent_id: scene2.agent.id } }), null,
-    'role assignment on the outside ticket removed');
-  assert.equal((await ticketRepo2.findOne({ where: { id: otherTicket.id } })).assignee_id, '',
-    'denormalized assignee_id blanked on the outside ticket');
-  // now carry is safe — no companion blocker on re-preview.
-  const afterRemedy = await mover.previewBoardMove(scene2.board.id, destWs2.id, { carry_agents: true });
-  assert.equal(afterRemedy.blockers.length, 0, 'blocker gone after the agent no longer holds outside roles');
+  // P4c-4: companion-agent carry/blocker/remedy retired (Agent 테이블 없음) —
+  // carry_agents/exclude/unassign 경로는 handleCompanionAgents no-op 과 함께 삭제됐다.
+  // 원자성 자체는 위 commit assertions 에서 커버한다.
 });
 
 test.after(() => exitAfterTests(0));

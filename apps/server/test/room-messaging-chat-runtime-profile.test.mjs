@@ -82,13 +82,29 @@ function makeDataSource(profiles = [LOCAL_PROFILE]) {
 
 function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
+  // P4c-4: DM 상대의 cli/cli_runtime_profile 은 참가자 스냅샷 runtime_spec 이
+  // 정본이다 (Agent 행 없음). id → 객체 해석은 profiles 목록으로 흉내낸다
+  // (선언 시점에 검증된 값을 스냅샷이 들고 있다는 전제).
+  const profileById = Object.fromEntries(profiles.map((pr) => [pr.id, pr]));
+  const specProfile = agent.cli_runtime_profile
+    ? (profileById[agent.cli_runtime_profile] ?? { id: agent.cli_runtime_profile })
+    : null;
   const dmRoom = { id: 'room-1', type: 'dm', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
   const roomRepo = {
     async findOne() { return dmRoom; },
     async update() {},
   };
   const participantRepo = {
-    async findOne() { return { room_id: 'room-1', participant_type: 'agent', participant_id: agent.id, left_at: null }; },
+    async findOne() {
+      return {
+        room_id: 'room-1', participant_type: 'agent', participant_id: agent.id, left_at: null,
+        runtime_spec: {
+          cli: agent.type, cli_runtime_profile: specProfile?.id ?? null,
+          credential_id: agent.credential_id ?? null, role_prompt: agent.role_prompt ?? '',
+          label: agent.id, manager_agent_id: 'host-1',
+        },
+      };
+    },
   };
   const workspaceRepo = { async findOne() { return workspace; } };
   const messageRepo = {
@@ -117,6 +133,8 @@ function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
     async resolveMissionChatPolicy() { return null; },
     async getRoomMemberIds() { return ['user-1', agent.id]; },
     async getRoomAgentMemberIds() { return [agent.id]; },
+    // P4c-2b: sendMessage broadcast 가 스냅샷 보유 멤버의 runtime 맵을 읽는다.
+    async getRoomAgentRuntimeSpecs() { return {}; },
   };
   const mentionService = { parseMentions: () => [] }; // plain text, no @[...] tokens
   const agentRepo = { async findOne() { return agent; } };
@@ -125,8 +143,10 @@ function makeSvc({ agent, workspace, profiles = [LOCAL_PROFILE] }) {
   // synchronous boolean pre-filter. Must stub true so it no-ops instead of
   // throwing — irrelevant to what this file actually tests.
   const connectivity = { isReachable: () => true };
+  // P4c-4: (room, participant, message, ticket, userMention, attachment,
+  // workspace, dataSource, log, membership, mention, connectivity) — agentRepo 없음.
   const svc = new RoomMessagingService(
-    roomRepo, participantRepo, messageRepo, agentRepo, {}, {}, {},
+    roomRepo, participantRepo, messageRepo, {}, {}, {},
     workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
   );
   return svc;
@@ -251,8 +271,14 @@ function captureRoomMessageEmit() {
   };
 }
 
-function makeGroupSvc({ agents, workspace, onAgentFind, profiles = [LOCAL_PROFILE] }) {
+function makeGroupSvc({ agents, workspace, onSpecRead, profiles = [LOCAL_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
+  // P4c-4: broadcast 해석은 참가자 스냅샷 runtime 맵을 읽는다 (Agent 행 없음).
+  // spec 의 cli_runtime_profile 은 id 문자열 — 해석은 레지스트리가 한다.
+  const specs = Object.fromEntries(agents.map((a) => [a.id, {
+    cli: a.type, cli_runtime_profile: a.cli_runtime_profile ?? null,
+    credential_id: a.credential_id ?? null, manager_agent_id: 'host-1',
+  }]));
   const groupRoom = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null };
   const roomRepo = {
     async findOne() { return groupRoom; },
@@ -291,21 +317,14 @@ function makeGroupSvc({ agents, workspace, onAgentFind, profiles = [LOCAL_PROFIL
     async resolveMissionChatPolicy() { return null; },
     async getRoomMemberIds() { return new Set(['user-1', ...agentMemberIds]); },
     async getRoomAgentMemberIds() { return agentMemberIds; },
+    // P4c-2b: sendMessage broadcast 가 스냅샷 보유 멤버의 runtime 맵을 읽는다.
+    async getRoomAgentRuntimeSpecs() { onSpecRead?.(); return specs; },
   };
   const mentionService = { parseMentions: () => [] }; // 평문 텍스트, @[...] 토큰 없음
-  const agentRepo = {
-    async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
-    // 느슨한 stub: 실제 TypeORM은 서버단에서 `id IN (:...ids) AND type =
-    // 'claude'`로 필터링한다 — 이 fixture의 `agents` 목록은 이미 테스트
-    // 대상 id만 담고 있으므로 `type`만 필터링해도 동일한 결과가 나온다.
-    async find({ where }) {
-      onAgentFind?.();
-      return agents.filter((a) => a.type === (where.type ?? a.type));
-    },
-  };
   const connectivity = { isReachable: () => true };
+  // P4c-4: agentRepo 없음 — 위 specs 맵이 정본이다.
   const svc = new RoomMessagingService(
-    roomRepo, participantRepo, messageRepo, agentRepo, {}, {}, {},
+    roomRepo, participantRepo, messageRepo, {}, {}, {},
     workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
   );
   return svc;
@@ -345,13 +364,13 @@ test('Group room broadcast: cli_runtime_profiles is omitted entirely when no mem
   }
 });
 
-test('Group room broadcast: a progress heartbeat never triggers profile resolution (cli_runtime_profiles absent, agentRepo.find not called)', async () => {
+test('Group room broadcast: a progress heartbeat never triggers profile resolution (cli_runtime_profiles absent, spec map not read)', async () => {
   const claudeAgent = { id: 'agent-1', type: 'claude', role_prompt: '', cli_runtime_profile: 'local-anthropic', credential_id: null };
-  // onAgentFind는 isRealMessage 게이트가 progress row에 대해 단순히 빈
+  // onSpecRead 는 isRealMessage 게이트가 progress row에 대해 단순히 빈
   // 맵으로 해석되는 게 아니라 resolution 자체를 완전히 건너뛴다는 것을
   // 증명한다.
   let findCalls = 0;
-  const svc = makeGroupSvc({ agents: [claudeAgent], workspace: optedOutWs, onAgentFind: () => { findCalls += 1; } });
+  const svc = makeGroupSvc({ agents: [claudeAgent], workspace: optedOutWs, onSpecRead: () => { findCalls += 1; } });
   const capture = captureRoomMessageEmit();
   try {
     await svc.sendMessage('room-1', 'ws-1', 'agent', 'manager-1', 'Manager', 'tool call narration', undefined, undefined, 'progress');

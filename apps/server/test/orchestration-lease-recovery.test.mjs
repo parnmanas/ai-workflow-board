@@ -109,7 +109,7 @@ function makeStep(overrides = {}) {
     instructions: '',
     acceptance_criteria: '',
     depends_on: null,
-    assignee_agent_id: 'agent-member',
+    assignee_agent_id: 'rt-aaaaaaaaaaaaaaaa',
     status: 'dispatched',
     position: 0,
     plan_version: 1,
@@ -186,6 +186,8 @@ function makeRunner({ mission, steps }) {
     },
   };
 
+  // P4c-4: agentRepo 삭제 — teamRepo, memberRepo, roomRepo, participantRepo,
+  // actionRepo, actionRunRepo 순.
   const runner = new OrchestrationRunnerService(
     missionRepo,
     stepRepo,
@@ -193,7 +195,6 @@ function makeRunner({ mission, steps }) {
     makeRepo([]),
     roomRepo,
     makeRepo([]),
-    agentRepo,
     makeRepo([]),
     makeRepo([]),
     inert,
@@ -219,7 +220,7 @@ test('재디스패치로 밀려난 attempt 의 지각 보고는 lease 토큰으�
 
   await assert.rejects(
     () =>
-      runner.reportStep(step.id, 'agent-member', {
+      runner.reportStep(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, {
         status: 'done',
         summary: '지각 보고: 이미 재시도로 밀려난 attempt 1 의 결과',
         lease_token: 'lease-attempt-1',
@@ -253,7 +254,7 @@ test('lease 토큰을 생략한 보고도 거부된다 — 누락으로 가드�
   const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
 
   await assert.rejects(
-    () => runner.reportStep(step.id, 'agent-member', { status: 'done', summary: '토큰 없는 보고' }),
+    () => runner.reportStep(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, { status: 'done', summary: '토큰 없는 보고' }),
     (e) => {
       assert.match(String(e.message), /requires the lease token/i);
       assert.equal(e.status, 409);
@@ -269,7 +270,7 @@ test('현재 lease 를 들고 온 보고는 정상 처리된다', async () => {
   const step = makeStep({ attempt: 2, lease_token: 'lease-attempt-2' });
   const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
 
-  const result = await runner.reportStep(step.id, 'agent-member', {
+  const result = await runner.reportStep(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, {
     status: 'done',
     summary: '정상 완료',
     lease_token: 'lease-attempt-2',
@@ -286,7 +287,7 @@ test('progress heartbeat 도 같은 lease 로 fencing 된다', async () => {
   const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
 
   await assert.rejects(
-    () => runner.reportProgress(step.id, 'agent-member', '아직 작업 중', 'lease-attempt-1'),
+    () => runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '아직 작업 중', 'lease-attempt-1'),
     (e) => e.status === 409,
     '밀려난 attempt 의 heartbeat 는 거부돼야 한다 — 안 그러면 죽은 attempt 가 새 attempt 의 시계를 되돌린다',
   );
@@ -301,10 +302,10 @@ test('토큰이 없는 legacy step 은 토큰 없는 보고를 그대로 받아�
   const step = makeStep({ lease_token: '' });
   const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
 
-  await runner.reportProgress(step.id, 'agent-member', '살아있음');
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '살아있음');
   assert.equal(stepRepo.rows[0].status, 'running');
 
-  const result = await runner.reportStep(step.id, 'agent-member', { status: 'done', summary: 'legacy 완료' });
+  const result = await runner.reportStep(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, { status: 'done', summary: 'legacy 완료' });
   assert.equal(result.reported_status, 'done');
 });
 
@@ -315,13 +316,13 @@ test('progress 보고는 매 호출마다 last_heartbeat_at 을 갱신한다', a
   const step = makeStep();
   const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
 
-  await runner.reportProgress(step.id, 'agent-member', '1차', 'lease-attempt-1');
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '1차', 'lease-attempt-1');
   const first = stepRepo.rows[0].last_heartbeat_at;
   const startedAt = stepRepo.rows[0].started_at;
   assert.ok(first instanceof Date, '최초 heartbeat 가 기록돼야 한다');
 
   await new Promise((r) => setTimeout(r, 5));
-  await runner.reportProgress(step.id, 'agent-member', '2차', 'lease-attempt-1');
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '2차', 'lease-attempt-1');
   const second = stepRepo.rows[0].last_heartbeat_at;
 
   assert.ok(
@@ -532,11 +533,11 @@ test('needs_recovery step 은 명시적 retry 로만 벗어나고 사유가 지�
     recovery_reason: '비멱등 작업이라 자동 재실행하지 않음',
     attempt: 1,
     max_attempts: 3,
-    assignee_agent_id: 'agent-member',
+    assignee_agent_id: 'rt-aaaaaaaaaaaaaaaa',
   });
   const { runner, stepRepo } = makeRunner({ mission, steps: [step] });
 
-  await runner.updateStep(step.id, 'agent-orch', { action: 'retry' });
+  await runner.updateStep(step.id, { agentId: 'agent-orch' }, { action: 'retry' });
 
   const after = stepRepo.rows[0];
   assert.notEqual(after.status, 'needs_recovery', '명시적 retry 는 복구 상태를 벗어나야 한다');
@@ -613,7 +614,7 @@ test('유예 안에 heartbeat 가 돌아오면 lease 가 되살아난다', async
   const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
 
   // 작업자가 재연결 요청을 읽고 응답했다.
-  await runner.reportProgress(step.id, 'agent-member', '아직 살아있음', 'lease-attempt-1');
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '아직 살아있음', 'lease-attempt-1');
 
   assert.equal(stepRepo.rows[0].lease_stale_since, null, 'heartbeat 는 유예를 해제해야 한다');
   assert.ok(
@@ -708,7 +709,7 @@ test('progress 의 checkpoint 는 영속화되고 이후 호출이 없다고 지
   const step = makeStep();
   const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [step] });
 
-  await runner.reportProgress(step.id, 'agent-member', '1단계 끝', 'lease-attempt-1', {
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '1단계 끝', 'lease-attempt-1', {
     stage: 'migrated',
     processed: 120,
   });
@@ -717,7 +718,7 @@ test('progress 의 checkpoint 는 영속화되고 이후 호출이 없다고 지
   assert.ok(recorded.some((e) => e.type === 'step_checkpoint'), '각 저장 시점이 append-only 로 남아야 한다');
 
   // checkpoint 없는 heartbeat 가 기존 값을 날리면 재개 근거가 사라진다.
-  await runner.reportProgress(step.id, 'agent-member', '계속 진행 중', 'lease-attempt-1');
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '계속 진행 중', 'lease-attempt-1');
   assert.deepEqual(
     stepRepo.rows[0].checkpoint,
     { stage: 'migrated', processed: 120 },
@@ -725,7 +726,7 @@ test('progress 의 checkpoint 는 영속화되고 이후 호출이 없다고 지
   );
 
   // 새 값은 덮어쓴다(last-writer-wins).
-  await runner.reportProgress(step.id, 'agent-member', '2단계 끝', 'lease-attempt-1', { stage: 'verified' });
+  await runner.reportProgress(step.id, { agentId: 'rt-aaaaaaaaaaaaaaaa' }, '2단계 끝', 'lease-attempt-1', { stage: 'verified' });
   assert.deepEqual(stepRepo.rows[0].checkpoint, { stage: 'verified' });
 });
 
@@ -776,7 +777,7 @@ test('상류를 retry 하면 자동 차단됐던 하류가 다시 실행 가능�
   });
   const { runner, recorded, stepRepo } = makeRunner({ mission, steps: [upstream, downstream] });
 
-  await runner.updateStep(upstream.id, 'agent-orch', { action: 'retry' });
+  await runner.updateStep(upstream.id, { agentId: 'agent-orch' }, { action: 'retry' });
 
   const after = stepRepo.rows.find((s) => s.id === 's-down');
   assert.notEqual(
@@ -804,7 +805,7 @@ test('작업자가 스스로 보고한 blocked 는 상류가 복구돼도 건드
   });
   const { runner, stepRepo } = makeRunner({ mission, steps: [upstream, selfBlocked] });
 
-  await runner.updateStep(upstream.id, 'agent-orch', { action: 'retry' });
+  await runner.updateStep(upstream.id, { agentId: 'agent-orch' }, { action: 'retry' });
 
   const after = stepRepo.rows.find((s) => s.id === 's-down');
   assert.equal(after.status, 'blocked', '작업자가 선언한 차단을 엔진이 임의로 풀면 안 된다');

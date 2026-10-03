@@ -1564,6 +1564,17 @@ async function runRuntime(
     // `refresh_available_models` 커맨드가 같은 열거를 다시 돌려 통째로 교체한다.
     availableModels = await gatherAvailableModels();
     availableModelsAt = new Date().toISOString();
+    // P4 (manager identity → RuntimeHost): pairing-time Host id 를 하트비트에
+    // 동봉 — 서버가 runtime_hosts 에서 정체성을 host-first 로 해소한다.
+    // agent.json(host_id) → loadAgentInfo. 구버전 페어링 파일에는 없어 null.
+    const hostIdForHeartbeat = (() => {
+      try {
+        const info = loadAgentInfo();
+        return typeof info?.host_id === 'string' && info.host_id ? info.host_id : null;
+      } catch {
+        return null;
+      }
+    })();
     instanceHeartbeat._real = new InstanceHeartbeat(config, agentId, {
       mode: 'manager',
       version,
@@ -1769,8 +1780,8 @@ async function runRuntime(
           }
         }
         return out;
-      },
-    });
+      }
+    }, hostIdForHeartbeat);
     instanceHeartbeat._real.start();
     // 최신 CLI 버전 조회는 npm 레지스트리 왕복이라 부팅을 막지 않는다 — 하트비트를
     // 먼저 띄우고 뒤따라 채운다(첫 tick 은 필드 없이 나가고, 조회가 끝나면 다음

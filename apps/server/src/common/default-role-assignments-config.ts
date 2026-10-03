@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from './runtime-spec';
 
 /**
  * Board-level default role holders (ticket d94a1b87).
@@ -30,16 +31,28 @@ import { z } from 'zod';
  * this module only owns the JSON shape (like routing_config's dynamic keys).
  */
 
-/** A single default holder — at most one of agent_id / user_id may be set. */
+/**
+ * A single default holder — at most one of agent_id / user_id / runtime may
+ * be set. `runtime` is a RuntimeSpec declaring execution without an Agent row
+ * (P4c-3b); shape-checked here, normalized in `normalize()` (dropped when the
+ * shape is bad so one typoed entry cannot poison the whole board config —
+ * write-path `validateBoardDefaults` rejects it loudly instead).
+ */
 const HolderSchema = z
   .object({
     agent_id: z.string().optional(),
     user_id: z.string().optional(),
+    runtime: z.record(z.string(), z.any()).optional(),
   })
   .strict()
   .refine(
-    (h) => !((h.agent_id || '').trim() && (h.user_id || '').trim()),
-    { message: 'a default holder may set at most one of agent_id / user_id' },
+    (h) => {
+      const set = (h.agent_id || '').trim() ? 1 : 0;
+      const setU = (h.user_id || '').trim() ? 1 : 0;
+      const setR = h.runtime !== undefined && h.runtime !== null ? 1 : 0;
+      return set + setU + setR <= 1;
+    },
+    { message: 'a default holder may set at most one of agent_id / user_id / runtime' },
   );
 
 /**
@@ -53,7 +66,7 @@ export const DefaultRoleAssignmentsSchema = z.record(
   z.array(HolderSchema),
 );
 
-export type DefaultRoleHolder = { agent_id?: string; user_id?: string };
+export type DefaultRoleHolder = { agent_id?: string; user_id?: string; runtime?: Record<string, any> };
 export type DefaultRoleAssignments = Record<string, DefaultRoleHolder[]>;
 
 /**
@@ -74,7 +87,23 @@ function normalize(raw: unknown): DefaultRoleAssignments {
       if (!h || typeof h !== 'object') continue;
       const agent_id = String((h as any).agent_id || '').trim();
       const user_id = String((h as any).user_id || '').trim();
-      if (agent_id && user_id) continue; // illegal — mutually exclusive
+      const runtimeRaw = (h as any).runtime;
+      const hasRuntime = runtimeRaw !== undefined && runtimeRaw !== null;
+      if ((agent_id ? 1 : 0) + (user_id ? 1 : 0) + (hasRuntime ? 1 : 0) > 1) continue; // illegal
+      if (hasRuntime) {
+        // P4c-3b: normalize the spec now; a bad shape drops just this entry on
+        // the lenient read path (write path rejects loudly instead).
+        try {
+          const spec = normalizeRuntimeSpec(runtimeRaw, 'default.runtime');
+          const key = `runtime:${runtimeIdentityKey(spec)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          holders.push({ runtime: { ...spec } });
+        } catch {
+          continue;
+        }
+        continue;
+      }
       const key = agent_id ? `agent:${agent_id}` : user_id ? `user:${user_id}` : '';
       if (!key || seen.has(key)) continue; // skip vacant + duplicate holders
       seen.add(key);

@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { Ticket } from '../entities/Ticket';
-import { Agent } from '../entities/Agent';
+import { RuntimeHost } from '../entities/RuntimeHost';
+import { ApiKey } from '../entities/ApiKey';
 import { BoardColumn } from '../entities/BoardColumn';
 import { Board } from '../entities/Board';
 import { Workspace } from '../entities/Workspace';
@@ -11,6 +12,9 @@ import { CliRuntimeProfile } from './cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from './claude-backend-registry';
 import { mergeEnvironmentConfig, resolveEnvironmentConfig, ResolvedEnvironmentConfig } from './environment-config';
 import { resolveBoardWorktreeMode, DEFAULT_WORKTREE_MODE, WorktreeMode } from './worktree-config';
+import { holderAssigneeId, isRuntimeIdentityKey, type RuntimeSpec } from './runtime-spec';
+import { isUuidShapedId } from '../utils/agent-name';
+import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
 
 export interface MentionDispatchExtras {
   harness_config: HarnessConfig | null;
@@ -18,6 +22,16 @@ export interface MentionDispatchExtras {
   cli_runtime_profile: CliRuntimeProfile | null;
   environment_config: ResolvedEnvironmentConfig | null;
   worktree_mode: WorktreeMode;
+}
+
+/**
+ * P4c-4: dispatch 부가값 계산에 필요한 최소 실행자 모양. Agent 행 대신
+ * Host/spec pseudo 를 넘긴다 (type '' = 알 수 없음 → backend profile 미적용).
+ */
+export interface DispatchAgentLike {
+  type: string | null;
+  cli_runtime_profile: string | null;
+  credential_id: string | null;
 }
 
 const EMPTY_EXTRAS: MentionDispatchExtras = {
@@ -58,7 +72,7 @@ const EMPTY_EXTRAS: MentionDispatchExtras = {
 export async function resolveMentionDispatchExtras(
   dataSource: DataSource,
   ticket: Pick<Ticket, 'column_id' | 'workspace_id' | 'effort_preset' | 'cli_runtime_profile'>,
-  agent: Pick<Agent, 'type' | 'cli_runtime_profile' | 'credential_id'>,
+  agent: DispatchAgentLike,
 ): Promise<MentionDispatchExtras> {
   let extras = EMPTY_EXTRAS;
   try {
@@ -115,6 +129,87 @@ export async function resolveMentionDispatchExtras(
     throw error;
   }
   return { ...extras, cli_runtime_profile: runtimeProfile };
+}
+
+/**
+ * P4c-4: mention 대상 해소 (uuid Agent 행 / rt- spec-direct 공통).
+ * 반환이 null이면 호출자는 조용히 skip한다 (기존 `if (!agent) continue`와 동일).
+ * rt 대상은 ticket assignment 행의 스냅샷에서 해소되며, extras 계산에는
+ * spec 값을 pseudo-agent 형태로 넘긴다 (같은 ticket > agent > board 우선순위).
+ */
+export interface MentionTarget {
+  agentId: string;
+  displayName: string;
+  rolePrompt: string;
+  extras: MentionDispatchExtras;
+  runtime: RuntimeSpec | null;
+}
+
+export async function resolveMentionTarget(
+  dataSource: DataSource,
+  ticket: Pick<Ticket, 'id' | 'column_id' | 'workspace_id' | 'effort_preset' | 'cli_runtime_profile'> & { id: string },
+  memberId: string,
+): Promise<MentionTarget | null> {
+  if (isUuidShapedId(memberId)) {
+    // P4c-4: Agent 행 없음 — Host 직접 조회 후 api_keys 페어링 링크.
+    const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: memberId } });
+    let displayName: string | null = host?.name ?? null;
+    if (!displayName) {
+      const link = await dataSource.getRepository(ApiKey).findOne({
+        where: { agent_id: memberId },
+        select: { agent_id: true, host_id: true },
+      });
+      if (link?.host_id) {
+        const linked = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: link.host_id } });
+        displayName = linked?.name ?? null;
+      }
+    }
+    if (!displayName) return null;
+    // P2 시절 agent 홀더 스냅샷이 assignment 행에 남아 있으면 실행 정체성으로
+    // 쓴다 (테이블은 다르므로 drop 후에도 살아 있다).
+    const holderRows = await dataSource.getRepository(TicketRoleAssignment).find({
+      where: { ticket_id: ticket.id },
+    });
+    const holderRow = holderRows.find((r) => r.agent_id === memberId) ?? null;
+    const holderSpec = (holderRow?.runtime_spec ?? null) as RuntimeSpec | null;
+    const runtime = holderSpec && typeof holderSpec === 'object' ? { ...holderSpec } : null;
+    const extras = await resolveMentionDispatchExtras(dataSource, ticket, runtime
+      ? {
+        type: (runtime as any).cli ?? '',
+        cli_runtime_profile: (runtime as any).cli_runtime_profile ?? null,
+        credential_id: (runtime as any).credential_id ?? null,
+      }
+      : {
+        type: '',
+        cli_runtime_profile: null,
+        credential_id: null,
+      });
+    return {
+      agentId: memberId,
+      displayName,
+      rolePrompt: (runtime as any)?.role_prompt || '',
+      extras,
+      runtime,
+    };
+  }
+  if (!isRuntimeIdentityKey(memberId)) return null;
+  const rows = await dataSource.getRepository(TicketRoleAssignment).find({ where: { ticket_id: ticket.id } });
+  const row = rows.find((r) => holderAssigneeId(r) === memberId) ?? null;
+  const spec = (row?.runtime_spec ?? null) as RuntimeSpec | null;
+  if (!spec || typeof spec !== 'object') return null;
+  const extras = await resolveMentionDispatchExtras(dataSource, ticket, {
+    type: spec.cli,
+    cli_runtime_profile: spec.cli_runtime_profile ?? null,
+    credential_id: spec.credential_id ?? null,
+  });
+  const id: string = memberId;
+  return {
+    agentId: id,
+    displayName: (spec.label || '').trim() || id.slice(0, 11),
+    rolePrompt: spec.role_prompt || '',
+    extras,
+    runtime: { ...spec },
+  };
 }
 
 async function resolveBoardForColumn(

@@ -4,7 +4,7 @@ import { Feature } from '../../entities/Feature';
 import { Ticket } from '../../entities/Ticket';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { FeaturesController } from './features.controller';
@@ -27,7 +27,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Feature, Ticket, Board, BoardColumn, Agent, ChatRoom, ChatRoomParticipant]),
+    TypeOrmModule.forFeature([Feature, Ticket, Board, BoardColumn, RuntimeHost, ChatRoom, ChatRoomParticipant]),
     ChatRoomsModule,
     WorkspaceRolesModule,
     AgentsModule,

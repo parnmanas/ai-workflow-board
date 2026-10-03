@@ -45,6 +45,12 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   });
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer' });
+  // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
+  const RUNTIME_SPEC = {
+    manager_agent_id: agent.manager_agent_id, cli: 'claude', model: null,
+    working_dir: '/srv/e2e', credential_id: null, label: 'e2e-deployer', role_prompt: '',
+    runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  };
   const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
   // Source ticket lives in an ACTIVE column routed to the assignee role so the
   // resume (dispatchCurrentColumn) has a holder to wake (mirrors
@@ -71,7 +77,7 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
     workspace_id: ws.id,
     name: 'Reindex search',
     prompt: 'reindex {{workspace.name}}',
-    target_agent_id: agent.id,
+    target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!action.isError, 'save_action succeeds');
 

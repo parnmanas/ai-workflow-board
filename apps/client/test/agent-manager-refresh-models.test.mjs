@@ -21,9 +21,8 @@ import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import { resetHostModelsStore, refreshHostModels } from '../src/cli/hostModels.ts';
 
 const { InstanceDetail } = await import('../src/components/admin/AgentManagerPage.tsx');
-const { default: ManagedAgentDialog } = await import(
-  '../src/components/admin/ManagedAgentDialog.tsx'
-);
+// P4c-3b: ManagedAgentDialog 삭제 — Agent 다이얼로그 경유 갱신 테스트는 함께 제거.
+// 스토어 동작(응답 전 스냅샷 유지·응답 후 반영)은 Runtime Hosts 화면 테스트가 커버한다.
 
 const INSTANCE_ID = 'inst-refresh-1';
 const MANAGER_AGENT_ID = 'mgr-refresh-1';
@@ -163,62 +162,6 @@ test('Runtime Hosts 화면의 "Refresh models" 는 그 호스트로 갱신을 �
     view.container.textContent.includes('claude=3, codex=1'),
     `토스트에 CLI 별 모델 수 요약이 보여야 한다 — 실제: ${view.container.textContent}`,
   );
-});
-
-test('Agent 다이얼로그: 갱신 응답 전에는 드롭다운이 바뀌지 않고, 응답 이후 새 모델이 나타난다 (폴링 없음)', async (t) => {
-  const dom = setupDom();
-  t.after(() => dom.cleanup());
-  resetHostModelsStore();
-
-  const stub = refreshStub(t, {
-    before: { claude: ['opus'] },
-    after: { claude: ['opus', 'sonnet', 'haiku-4-5'], codex: ['gpt-5-codex'] },
-  });
-  stubApi(t, {
-    listCredentials: async () => [],
-    listClaudeBackendProfiles: async () => ({ profiles: [] }),
-    listAgentManagerInstances: async () => [instanceRow({ availableModels: { claude: ['opus'] } })],
-  });
-
-  const view = mountWithToasts(
-    t,
-    React.createElement(ManagedAgentDialog, {
-      isOpen: true,
-      onClose() {},
-      managerAgentId: MANAGER_AGENT_ID,
-      managerInstanceId: INSTANCE_ID,
-      mode: 'edit',
-      agent: {
-        id: 'agent-1',
-        name: 'Claude 작업자',
-        type: 'claude',
-        workspace_id: 'workspace-1',
-        working_dir: '/workspace',
-        runtime_config: { strategy: 'single', permission_mode: 'trusted' },
-      },
-      onSubmitted() {},
-    }),
-  );
-  await act(async () => {});
-  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
-
-  const optionLabels = () =>
-    [...view.container.querySelectorAll('option')].map((o) => o.textContent.trim());
-
-  assert.ok(stub.state.getCalls >= 1, '열리면 공유 스토어가 호스트 스냅샷을 읽는다');
-  assert.equal(stub.state.refreshCalls.length, 0, '목록이 있고 방금 재열거된 스냅샷이면 자동 갱신은 돌지 않는다');
-  assert.ok(optionLabels().includes('opus'), '갱신 전에는 스냅샷 목록만 보인다');
-  assert.equal(optionLabels().includes('haiku-4-5'), false);
-
-  const button = findButton(view.container, '모델 목록 새로고침');
-  assert.ok(button, '모델 필드 옆에 새로고침 버튼이 있어야 한다');
-  await act(async () => { click(button); });
-  await act(async () => {});
-  assert.deepEqual(stub.state.refreshCalls, [MANAGER_AGENT_ID]);
-  assert.equal(optionLabels().includes('haiku-4-5'), false, '응답 전에는 드롭다운이 바뀌면 안 된다');
-
-  await stub.release();
-  assert.ok(optionLabels().includes('haiku-4-5'), '응답 이후 재열거된 모델이 매니저 재시작 없이 드롭다운에 나타난다');
 });
 
 test('같은 호스트를 여러 화면이 동시에 갱신해도 요청은 한 번이다 (in-flight 공유)', async (t) => {

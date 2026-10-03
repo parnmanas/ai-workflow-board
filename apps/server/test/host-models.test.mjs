@@ -35,7 +35,7 @@ test('host models: read from heartbeat, refresh waits for the command ack, auth 
       method: 'POST',
       headers: managerHeaders,
       body: JSON.stringify({
-        instance_id: INSTANCE_ID, agent_id: manager.id, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
+        instance_id: INSTANCE_ID, agent_id: manager.id, host_id: manager.id, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
         cli: 'mixed', cli_adapters: ['claude', 'opencode'], pid: 1, started_at: new Date().toISOString(),
         available_models, available_models_at,
       }),

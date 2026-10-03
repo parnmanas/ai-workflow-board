@@ -40,7 +40,7 @@ function makeService({ schedule, action, dispatchImpl, saved = [] }) {
   const actions = { dispatch: dispatchImpl ?? (async () => { throw new Error('dispatch not stubbed'); }) };
 
   const svc = new WorkspaceScheduleService(
-    scheduleRepo, roomRepo, participantRepo, agentRepo, messaging, logStub,
+    scheduleRepo, roomRepo, participantRepo, agentRepo, /* hostRepo (P4c-4) */ {}, messaging, logStub,
     /* boardRepo */ {}, notQuiesced, actionRepo, actions,
   );
   return { svc, saved };
@@ -96,7 +96,7 @@ function makeCreator(action) {
   const savedRows = [];
   const svc = new WorkspaceScheduleService(
     { save: async (s) => { savedRows.push(s); return s; }, create: (d) => ({ ...d }), findOne: async () => null, find: async () => [] },
-    {}, {}, {}, {}, logStub,
+    {}, {}, {}, /* hostRepo (P4c-4) */ {}, {}, logStub,
     /* boardRepo */ {}, notQuiesced,
     { findOne: async ({ where }) => (action && action.id === where.id ? action : null) },
     {},

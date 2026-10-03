@@ -82,11 +82,11 @@ const noopRepo = makeRepo([]);
 const logService = { info() {}, warn() {}, error() {}, debug() {} };
 
 function makeService({ missions, steps = [], events = [] }) {
+  // P4c-4: (mission, step, event, team, member, dataSource, log) — agentRepo 없음.
   return new OrchestrationMissionService(
     makeRepo(missions),
     makeRepo(steps),
     makeRepo(events),
-    noopRepo,
     noopRepo,
     noopRepo,
     {},

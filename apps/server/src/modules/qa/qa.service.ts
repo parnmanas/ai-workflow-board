@@ -1,12 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { In, Repository, DataSource } from 'typeorm';
 import { QaScenario, QaScenarioStep, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import { QaRun, QaRunStatus } from '../../entities/QaRun';
-import { Agent } from '../../entities/Agent';
+import { ApiKey } from '../../entities/ApiKey';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
   normalizeWorkspaceFolder,
   normalizeCheckoutMode,
@@ -87,7 +90,14 @@ export interface CreateScenarioInput {
   name: string;
   description?: string;
   steps?: any;
-  target_agent_id: string;
+  /** P4c-3b: target_agent_id / target_runtime 중 하나 필수 (service resolveTarget). */
+  target_agent_id?: string;
+  /**
+   * P4c-3b: spec-direct target. Present → normalized, identity-keyed, and
+   * authoritative (target_agent_id is set to the identity key). Absent →
+   * legacy agent path (row looked up, snapshot dual-written).
+   */
+  target_runtime?: unknown;
   qa_driver?: string;
   qa_driver_config?: Record<string, any> | null;
   enabled?: boolean;
@@ -124,7 +134,8 @@ export class QaService {
   constructor(
     @InjectRepository(QaScenario) private readonly scenarioRepo: Repository<QaScenario>,
     @InjectRepository(QaRun) private readonly runRepo: Repository<QaRun>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly runService: QaRunService,
   ) {}
@@ -182,16 +193,50 @@ export class QaService {
     return findOrFail(this.scenarioRepo, { where: { id } }, 'QA scenario not found');
   }
 
+  /**
+   * P4c-3b: target resolution shared by create/update. Returns the stored
+   * id + snapshot for EITHER input shape. Spec shape needs no Agent row —
+   * dispatch resolves the identity key without one.
+   */
+  private async resolveTarget(
+    workspaceId: string,
+    targetAgentId: string | undefined,
+    targetRuntime: unknown,
+  ): Promise<{ target_agent_id: string; target_runtime: Record<string, any> | null }> {
+    if (targetRuntime !== undefined && targetRuntime !== null) {
+      let spec;
+      try {
+        spec = normalizeRuntimeSpec(targetRuntime, 'target_runtime');
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid target_runtime');
+      }
+      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+      const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
+      if (!hostRow) {
+        const link = await this.dataSource.getRepository(ApiKey).findOne({
+          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
+          select: { agent_id: true, host_id: true },
+        });
+        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
+        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
+        if (!linked) throw makeError(400, 'target_runtime references an unknown Runtime Host');
+      }
+      return { target_agent_id: runtimeIdentityKey(spec), target_runtime: { ...spec } };
+    }
+    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음, 스냅샷 없음).
+    if (!targetAgentId) throw makeError(400, 'target_agent_id is required');
+    const agent = await resolveCallerIdentityRow(this.dataSource, targetAgentId);
+    if (!agent) throw makeError(400, 'target agent not found');
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
+      throw makeError(400, 'target agent belongs to a different workspace');
+    }
+    return { target_agent_id: targetAgentId, target_runtime: null };
+  }
+
   async create(input: CreateScenarioInput): Promise<QaScenario> {
     if (!input.workspace_id) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    if (!input.target_agent_id) throw makeError(400, 'target_agent_id is required');
-
-    const agent = await this.agentRepo.findOne({ where: { id: input.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, input.workspace_id)) {
-      throw makeError(400, 'target agent belongs to a different workspace');
-    }
+    const target = await this.resolveTarget(input.workspace_id, input.target_agent_id, input.target_runtime);
 
     if (input.board_id) {
       throw makeError(400, 'Board-scoped QA scenarios are no longer supported; create the scenario in its Workspace');
@@ -203,7 +248,8 @@ export class QaService {
       name: input.name.trim(),
       description: input.description ?? '',
       steps: normalizeSteps(input.steps),
-      target_agent_id: input.target_agent_id,
+      target_agent_id: target.target_agent_id,
+      target_runtime: target.target_runtime,
       qa_driver: input.qa_driver ?? '',
       qa_driver_config: input.qa_driver_config ?? null,
       enabled: input.enabled !== false,
@@ -236,13 +282,15 @@ export class QaService {
     }
     if (patch.description !== undefined) existing.description = patch.description ?? '';
     if (patch.steps !== undefined) existing.steps = normalizeSteps(patch.steps);
-    if (patch.target_agent_id !== undefined) {
-      const agent = await this.agentRepo.findOne({ where: { id: patch.target_agent_id } });
-      if (!agent) throw makeError(400, 'target agent not found');
-      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-        throw makeError(400, 'target agent belongs to a different workspace');
-      }
-      existing.target_agent_id = patch.target_agent_id;
+    if (patch.target_agent_id !== undefined || patch.target_runtime !== undefined) {
+      // P4c-3b: spec present → spec path (sets both columns); id-only → legacy.
+      const target = await this.resolveTarget(
+        workspaceId,
+        patch.target_agent_id !== undefined ? patch.target_agent_id : existing.target_agent_id,
+        patch.target_runtime,
+      );
+      existing.target_agent_id = target.target_agent_id;
+      existing.target_runtime = target.target_runtime;
     }
     if (patch.board_id !== undefined) {
       if ((patch.board_id || null) !== existing.board_id) {

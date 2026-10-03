@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Action, Agent, Board, BoardColumn, Ticket, WorkflowFunction, Workspace, WorkspaceSchedule } from '../../entities';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
+import { Action, Board, BoardColumn, Ticket, WorkflowFunction, Workspace, WorkspaceSchedule } from '../../entities';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
   ARTIFACT_REF_TYPES, ArtifactRefType, UUID_RE, formatArtifactRef, formatUnavailableArtifact,
 } from '../../common/artifact-ref';
@@ -22,7 +23,7 @@ export interface ResolvedArtifactRef {
 export class ArtifactRefsService {
   constructor(
     @InjectRepository(Ticket) private readonly tickets: Repository<Ticket>,
-    @InjectRepository(Agent) private readonly agents: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(Board) private readonly boards: Repository<Board>,
     @InjectRepository(BoardColumn) private readonly columns: Repository<BoardColumn>,
     @InjectRepository(Action) private readonly actions: Repository<Action>,
@@ -100,10 +101,12 @@ export class ArtifactRefsService {
         }
       }
     } else if (ref.type === 'agent') {
-      entity = await this.agents.findOne({ where: { id: ref.id } });
-      entityWorkspace = entity?.workspace_id ?? workspaceId;
-      label = entity?.name || '';
-      deepLink = entity ? `/ws/${workspaceId}/agents/${entity.id}` : null;
+      // P4c-4: Host/링크 해소 (Agent 테이블 없음, agents UI 제거 — 딥링크 없음).
+      const identity = await resolveCallerIdentityRow(this.dataSource, ref.id);
+      entity = identity as any;
+      entityWorkspace = identity?.workspace_id ?? workspaceId;
+      label = identity?.name || '';
+      deepLink = null;
     } else if (ref.type === 'board') {
       entity = await this.boards.findOne({ where: { id: ref.id } });
       entityWorkspace = entity?.workspace_id ?? null;

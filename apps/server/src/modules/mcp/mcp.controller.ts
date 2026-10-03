@@ -467,6 +467,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               workspaceId: mcpAuthInfo.workspaceId,
               scope: mcpAuthInfo.scope,
               source: mcpAuthInfo.source,
+              runtimeKey: mcpAuthInfo.runtimeKey,
               subagentRole: subagentRoleHeader,
               subagentTicketId: subagentTicketIdHeader,
               subagentTriggerSource: subagentTriggerSourceHeader,

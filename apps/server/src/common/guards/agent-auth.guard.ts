@@ -44,14 +44,23 @@ export class AgentAuthGuard implements CanActivate {
         // full-scope to honour the documented "workspace-less manager keys that
         // legitimately operate across the instance" invariant the IDOR fix
         // (AgentApiController scope guards) already assumes.
-        const isManagerKey = apiKey.agent?.type === 'manager';
+        // P0: host 바인딩 키(host_id stamped)도 manager 키와 동등하게
+        // full-scope. redeem이 양쪽을 함께 찍어주므로(dual-write) 둘 중
+        // 하나만 있어도 통과 — P4에서 agent 바인딩이 제거되면 host_id만 남는다.
+        // P4c-4: manager 판정은 host 바인딩만 본다 (Agent 테이블 없음).
+        const isManagerKey = !!apiKey.host_id;
         // Inject workspace_id from the API key record for workspace-scoped queries
         request.currentWorkspaceId = isManagerKey ? null : apiKey.workspace_id || null;
-        // Also expose the resolved ApiKey row + agent id so downstream
-        // controllers (e.g. fs-browser response receiver) can identify
-        // WHICH agent is calling without a second lookup.
+        // Also expose the resolved ApiKey row + caller identity so
+        // downstream controllers (e.g. fs-browser response receiver) can
+        // identify WHICH host/agent is calling without a second lookup.
+        // P4 (manager identity → RuntimeHost): caller identity falls back
+        // to the host binding when the key has no agent binding (redeem이
+        // 더 이상 manager Agent 행을 만들지 않는 과도기/미래 상태).
+        // agent 바인딩이 있으면 값이 전과 완전히 동일하므로 기존 동작 불변.
         request.apiKey = apiKey;
-        request.currentAgentId = apiKey.agent_id || null;
+        request.currentAgentId = apiKey.agent_id || apiKey.host_id || null;
+        request.currentHostId = apiKey.host_id || null;
         return true;
       }
     } catch {

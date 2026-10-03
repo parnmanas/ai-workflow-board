@@ -10,6 +10,7 @@ import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { SecurityProfile } from '../dist/entities/SecurityProfile.js';
 import { SecurityRun } from '../dist/entities/SecurityRun.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js'; // P4c-4
 import { SecurityProfileService } from '../dist/modules/security/security-profile.service.js';
 
 describe('Security Profile board-scope cleanup', () => {
@@ -19,15 +20,18 @@ describe('Security Profile board-scope cleanup', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [SecurityProfile, SecurityRun],
+      entities: [SecurityProfile, SecurityRun, RuntimeHost],
       synchronize: true,
       logging: false,
     });
     await dataSource.initialize();
     const profileRepo = dataSource.getRepository(SecurityProfile);
     const runRepo = dataSource.getRepository(SecurityRun);
-    const agentRepo = { findOne: async () => ({ id: 'agent-1', workspace_id: null }) };
-    service = new SecurityProfileService(profileRepo, runRepo, agentRepo, {}, {});
+    // P4c-4: 타겟 해소는 Host 행이다 ('agent-1' id 로 직접 심는다).
+    const hostRepo = dataSource.getRepository(RuntimeHost);
+    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'sec-host', hostname: 'sec', workspace_id: null }));
+    // P4c-4: (profile, run, dataSource, host, board, runService).
+    service = new SecurityProfileService(profileRepo, runRepo, dataSource, hostRepo, {}, {});
   });
 
   after(async () => {

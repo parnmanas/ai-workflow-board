@@ -16,7 +16,6 @@ import { DEFAULT_BOARD_ROUTING } from '../../db';
 import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
 import { PromptTemplate } from '../../entities/PromptTemplate';
 import { canUseCatalogItem } from '../../common/catalog-scope';
-import { Agent } from '../../entities/Agent';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
@@ -26,7 +25,7 @@ import { Comment } from '../../entities/Comment';
 import { buildArchiveCursor, parseArchiveCursor } from '../mcp/shared/archive-helpers';
 import { writeRoutingConfigThrough } from './routing-config.helper';
 import { AgentWorkloadService } from '../agents/agent-workload.service';
-import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEffortPresetsInput, serializeEffortPresets } from '../../common/effort-presets';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
@@ -324,12 +323,9 @@ export class BoardsController {
     const roles = await roleRepo.find({ where: { workspace_id: board.workspace_id } });
     const roleById = new Map(roles.map(r => [r.id, r]));
 
-    const agentRepo = this.dataSource.getRepository(Agent);
+    // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
     const agentIds = Array.from(new Set(pairs.map(p => p.agent_id)));
-    const agents = agentIds.length > 0
-      ? await agentRepo.createQueryBuilder('a').where('a.id IN (:...ids)', { ids: agentIds }).getMany()
-      : [];
-    const displayNameByAgentId = await resolveAgentDisplayMap(agentRepo, agents);
+    const displayNameByAgentId = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     // Per-agent FOCUS collapse (ticket 3fb0005d). Compute focus per AGENT,
     // not per (agent, role) pair: a single agent holding multiple roles on

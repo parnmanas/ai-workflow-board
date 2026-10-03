@@ -8,7 +8,8 @@ import {
 import { registerCommentTools } from '../dist/modules/mcp/tools/comment-tools.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js'; // P4c-4
+import { TicketRoleAssignment } from '../dist/entities/TicketRoleAssignment.js'; // P4c-4
 import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { activityEvents } from '../dist/services/activity.service.js';
 
@@ -98,7 +99,22 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0,
       return { affected: 0 };
     },
   };
-  const agentRepo = { async findOne() { return { id: 'reviewer', name: 'Reviewer', workspace_id: ticket.workspace_id, role_prompt: '' }; } };
+  // P4c-4: 멘션 타겟은 uuid 로 해소된다 (Host 행). role shortcut → uuid 매핑은
+  // resolveMentions 스텁이 맡는다 (프로덕션의 mention-service 역할).
+  const REVIEWER_UUID = '99999999-9999-4999-8999-999999999999';
+  const agentRepo = {
+    async findOne({ where } = {}) {
+      return where?.id === REVIEWER_UUID
+        ? { id: REVIEWER_UUID, name: 'Reviewer', workspace_id: ticket.workspace_id }
+        : null;
+    },
+    async find({ where } = {}) {
+      const op = where?.id;
+      const ids = op && typeof op === 'object' && 'value' in op ? op.value : [op];
+      return (Array.isArray(ids) ? ids : [ids]).filter((id) => id === REVIEWER_UUID)
+        .map((id) => ({ id, name: 'Reviewer', workspace_id: ticket.workspace_id }));
+    },
+  };
   // Terminal-pend-gate column lookup (ticket ec498050) — only wired when a
   // test passes `column`; every other test's ticket has no column_id, so the
   // loader short-circuits to null (fail-open) without ever calling this.
@@ -107,7 +123,8 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0,
     getRepository(entity) {
       if (entity === Ticket) return ticketRepo;
       if (entity === Comment) return commentRepo;
-      if (entity === Agent) return agentRepo;
+      if (entity === RuntimeHost) return agentRepo; // P4c-4: identity-lookup stand-in
+      if (entity === TicketRoleAssignment) return { async find() { return []; } };
       if (entity === BoardColumn) return columnRepo;
       return { async findOne() { return null; }, create(v) { return v; }, async save(v) { return v; }, async findBy() { return []; } };
     },
@@ -123,7 +140,7 @@ function registeredAddCommentHarness({ ticket, recent = [], concurrentReads = 0,
     activityService: { async logActivity() { counters.activities++; } },
     mentionService: {
       parseMentions(content) { return content.includes('@[role:reviewer') ? [{}] : []; },
-      async resolveMentions() { counters.mentionResolves++; return [{ type: 'agent', id: 'reviewer', roleShortcut: 'reviewer' }]; },
+      async resolveMentions() { counters.mentionResolves++; return [{ type: 'agent', id: REVIEWER_UUID, roleShortcut: 'reviewer' }]; },
     },
     logger: { info() {}, warn() {}, error() {} },
     ticketRoleAssignmentService: null,

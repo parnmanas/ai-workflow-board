@@ -68,7 +68,7 @@ export class OrchestrationTeam {
    *
    * Like a member's `agent_id`, this is now DERIVED from `orchestrator_spec`
    * below — the operator declares Runtime Host / CLI / model / folder and
-   * OrchestrationAgentProvisionerService writes the resulting identity here.
+   * The slot's runtime identity key (runtimeIdentityKey of `orchestrator_spec`).
    */
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestrator_agent_id: string | null;

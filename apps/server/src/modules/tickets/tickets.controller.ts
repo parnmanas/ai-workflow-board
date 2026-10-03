@@ -8,8 +8,12 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Board } from '../../entities/Board';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
 import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
-import { Agent } from '../../entities/Agent';
-import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/agent-workspace-scope';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
+import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { resolveAgentDisplayName } from '../../utils/agent-name';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { recordCommentMentionDispatch } from '../../common/mention-dispatch-correlation';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
@@ -58,7 +62,7 @@ import { findOrFail } from '../../common/find-or-fail';
 import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
-import { resolveMentionDispatchExtras } from '../../common/mention-dispatch-profile';
+import { resolveMentionDispatchExtras, resolveMentionTarget } from '../../common/mention-dispatch-profile';
 import { TicketDuplicateService } from './ticket-duplicate.service';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
@@ -75,7 +79,6 @@ export class TicketsController {
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(CommentSummaryRun) private readonly commentSummaryRepo: Repository<CommentSummaryRun>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectRepository(UserMention) private readonly mentionRepo: Repository<UserMention>,
     @InjectRepository(TicketReadState) private readonly readStateRepo: Repository<TicketReadState>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
@@ -129,18 +132,11 @@ export class TicketsController {
 
     const existing = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
     if (existing?.status === 'pending' || existing?.status === 'completing') return res.status(200).json(existing);
-    const agents = await this.agentRepo.find({
-      where: agentWorkspaceWhere(ticket.workspace_id).map((scope) => ({ ...scope, is_active: 1 })) as any,
-      order: { name: 'ASC' },
-    });
-    const usableAgents = agents.filter(a => a.type !== 'manager' && !!a.is_online).sort((a, b) => {
-      const aBusyHere = a.id === ticket.assignee_id ? 1 : 0;
-      const bBusyHere = b.id === ticket.assignee_id ? 1 : 0;
-      return aBusyHere - bBusyHere || a.name.localeCompare(b.name);
-    });
-    if (!usableAgents.length) {
+    // P4c-4: 요약 실행자는 티켓의 assignee holder 다 (Agent 행 없음).
+    const summaryAgentId = (ticket.assignee_id || '').trim();
+    if (!summaryAgentId) {
       return res.status(409).json({
-        error: 'No online non-manager agent is available to summarize comments',
+        error: 'No assignee is available to summarize comments',
         error_code: 'SUMMARY_AGENT_UNAVAILABLE',
       });
     }
@@ -148,7 +144,7 @@ export class TicketsController {
     const run = existing || this.commentSummaryRepo.create({
       ticket_id: id,
       workspace_id: ticket.workspace_id,
-      agent_id: usableAgents[0].id,
+      agent_id: summaryAgentId,
       status: 'pending',
       source_comment_count: comments.length,
       source_comment_ids: JSON.stringify(comments.map(comment => comment.id)),
@@ -162,7 +158,7 @@ export class TicketsController {
       if (existing) {
         const claimed = await this.commentSummaryRepo.update(
           { id: existing.id, status: existing.status },
-          { agent_id: usableAgents[0].id, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', error_code: '', dispatch_trigger_id: '', completed_at: null },
+          { agent_id: summaryAgentId, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', error_code: '', dispatch_trigger_id: '', completed_at: null },
         );
         saved = (await this.commentSummaryRepo.findOne({ where: { id: existing.id } }))!;
         if (!claimed.affected) return res.status(200).json(saved);
@@ -403,7 +399,7 @@ export class TicketsController {
   private async _applyRoleAssignments(
     ticketId: string,
     workspaceId: string,
-    assignments: Array<{ role_slug?: string; agent_id?: string; user_id?: string }>,
+    assignments: Array<{ role_slug?: string; agent_id?: string; user_id?: string; runtime?: unknown }>,
   ): Promise<void> {
     if (!workspaceId) {
       throw new Error('Cannot apply role_assignments — ticket has no workspace_id');
@@ -412,11 +408,12 @@ export class TicketsController {
 
     // Group by slug (first-seen order) so repeated same-slug entries become a
     // multi-holder set instead of clobbering each other.
-    const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null }>>();
+    // P4c-2b: runtime entries ride along untouched — setHolders normalizes them.
+    const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null; runtime?: unknown }>>();
     for (const a of assignments) {
       const slug = (a?.role_slug || '').trim();
       if (!slug) continue;
-      const holder = { agent_id: a?.agent_id || null, user_id: a?.user_id || null };
+      const holder = { agent_id: a?.agent_id || null, user_id: a?.user_id || null, runtime: a?.runtime };
       const list = bySlug.get(slug);
       if (list) list.push(holder);
       else bySlug.set(slug, [holder]);
@@ -452,7 +449,7 @@ export class TicketsController {
     const { title, description = '', priority = 'medium', status = 'todo', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [] } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
 
-    // Backfill name↔id from the Agent table (see root `create` above).
+    // Backfill name↔id from Host/link resolution (see root `create` above).
     const assigneeResolved = await resolveAgentIdAndName(this.dataSource, assignee_id, assignee);
     const reporterResolved = await resolveAgentIdAndName(this.dataSource, reporter_id, reporter);
     let resolvedAssigneeId = assigneeResolved.id;
@@ -768,7 +765,7 @@ export class TicketsController {
     if (priority !== undefined) ticket.priority = priority;
     if (status !== undefined) ticket.status = status;
     // Same name↔id backfill rule as the create path: when the caller flips
-    // only one side of the pair, look the other up in the Agent table so
+    // only one side of the pair, look the other up via Host/link resolution so
     // TicketCard / activity log don't see a half-stale row. Empty strings
     // are passed for the omitted side so the helper actually does a DB
     // lookup — pre-filling from the existing row makes both helper args
@@ -964,10 +961,13 @@ export class TicketsController {
       });
     }
     if (reviewer_id !== undefined && reviewer_id !== oldReviewerId) {
-      const reviewerAgent = reviewer_id ? await this.agentRepo.findOne({ where: { id: reviewer_id } }) : null;
+      // P4c-4: Host/링크 이름으로 해소한다 (Agent 행 없음).
+      const reviewerName = reviewer_id
+        ? (await resolveAgentDisplayName(this.dataSource, reviewer_id)) ?? reviewer_id
+        : '';
       await this.activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'reviewer', old_value: oldReviewerId || '', new_value: reviewerAgent?.name || reviewer_id || '',
+        field_changed: 'reviewer', old_value: oldReviewerId || '', new_value: reviewerName || reviewer_id || '',
         ticket_id: ticket.parent_id || ticket.id,
         actor_id: actorId, actor_name: actorName,
       });
@@ -1525,7 +1525,29 @@ export class TicketsController {
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
     const agent_id: string | null = body?.agent_id || null;
     const user_id: string | null = body?.user_id || null;
-    if (agent_id && user_id) {
+    // P4c-4: spec-direct holder. 셋 중 하나만.
+    let runtime: Record<string, any> | null = null;
+    if (body?.runtime !== undefined && body?.runtime !== null) {
+      if (agent_id || user_id) {
+        return res.status(400).json({ error: 'cannot set more than one of agent_id, user_id, runtime' });
+      }
+      try {
+        runtime = { ...normalizeRuntimeSpec(body.runtime, 'runtime') };
+      } catch (e: any) {
+        return res.status(400).json({ error: e?.message || 'invalid runtime' });
+      }
+      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+      const hostRow = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: (runtime as any).manager_agent_id } });
+      if (!hostRow) {
+        const link = await this.dataSource.getRepository(ApiKey).findOne({
+          where: [{ agent_id: (runtime as any).manager_agent_id }, { host_id: (runtime as any).manager_agent_id }],
+          select: { agent_id: true, host_id: true },
+        });
+        const hostId = link?.host_id ?? (link?.agent_id ? (runtime as any).manager_agent_id : null);
+        const linked = hostId ? await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: hostId } }) : null;
+        if (!linked) return res.status(400).json({ error: 'runtime references an unknown Runtime Host' });
+      }
+    } else if (agent_id && user_id) {
       return res.status(400).json({ error: 'cannot set both agent_id and user_id' });
     }
 
@@ -1538,26 +1560,20 @@ export class TicketsController {
 
     // Validate the holder exists. Skipping this would let a typo silently
     // pin a dead id onto the ticket.
+    // P4c-4: Agent 행 대신 Host/링크 해소 — executable holder 는 agent uuid
+    // (legacy) 또는 Host uuid 다. manager 행 타입 검사는 행이 없으므로 생략
+    // (manager identity 는 holder 가 될 수 없다는 941c72d3 규칙은 Host id 가
+    // role holder 로 들어오는 것을 막지 않는다 — Host 는 실행 위치이지
+    // supervisor 행이 아니다).
     let agentName = '';
     let userName = '';
     if (agent_id) {
-      const a = await this.agentRepo.findOne({ where: { id: agent_id } });
-      if (!a) return res.status(404).json({ error: 'Agent not found' });
-      if (!agentIsVisibleInWorkspace(a.workspace_id, ticket.workspace_id)) {
+      const holder = await resolveCallerIdentityRow(this.dataSource, agent_id);
+      if (!holder) return res.status(404).json({ error: 'Agent not found' });
+      if (!agentIsVisibleInWorkspace(holder.workspace_id, ticket.workspace_id)) {
         return res.status(400).json({ error: 'Agent belongs to a different workspace' });
       }
-      // Agent Manager(type='manager')는 절대 작업하지 않는다 (ticket 941c72d3) —
-      // supervisor 로서 agent 를 spawn/stop 할 뿐 role holder 가 될 수 없다. 직접
-      // 지정 시도는 명시적으로 거부한다(기존 holder 는 건드리지 않음).
-      if (a.type === 'manager') {
-        return res.status(400).json({ error: 'manager_cannot_hold_role', message: 'Agent Manager(type=manager)는 역할 담당자로 지정할 수 없습니다.' });
-      }
-      // Canonical `<Manager>/<Agent>` for subagents — matches what the MCP
-      // create/update path writes via `resolveAgentIdAndName`. Without this
-      // the legacy `ticket.assignee` text column stores the bare leaf name
-      // ("AWB") while role_assignments stores the canonical form, so
-      // TicketCard renders the wrong label until someone re-saves.
-      agentName = await formatAgentDisplayName(this.dataSource, a);
+      agentName = holder.name;
     }
     if (user_id) {
       const u = await this.dataSource.getRepository(User).findOne({ where: { id: user_id } });
@@ -1566,7 +1582,7 @@ export class TicketsController {
     }
 
     try {
-      await this.ticketRoleAssignments.setHolder(id, roleId, { agent_id, user_id });
+      await this.ticketRoleAssignments.setHolder(id, roleId, { agent_id, user_id, runtime: runtime ?? undefined });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update role' });
     }
@@ -1575,6 +1591,7 @@ export class TicketsController {
     // columns (`assignee`, `reporter`) get the holder's name when an agent
     // or user fills the slot, blank when cleared. There's no historical
     // `reviewer` name column, only `reviewer_id`.
+    // P4c-4: runtime holder는 id에 키 + 이름에 라벨을 미러링한다.
     const legacyMap: Record<string, { id: 'assignee_id' | 'reporter_id' | 'reviewer_id'; name?: 'assignee' | 'reporter' }> = {
       assignee: { id: 'assignee_id', name: 'assignee' },
       reporter: { id: 'reporter_id', name: 'reporter' },
@@ -1584,9 +1601,11 @@ export class TicketsController {
     let beforeId = '';
     if (mirror) {
       beforeId = (ticket as any)[mirror.id] || '';
-      const newId = agent_id || user_id || '';
+      const runtimeId = runtime ? runtimeIdentityKey(runtime as any) : '';
+      const runtimeLabel = runtime ? String((runtime as any).label || '').trim() || runtimeId.slice(0, 11) : '';
+      const newId = agent_id || user_id || runtimeId;
       const update: any = { [mirror.id]: newId };
-      if (mirror.name) update[mirror.name] = agentName || userName || '';
+      if (mirror.name) update[mirror.name] = agentName || userName || runtimeLabel;
       await this.ticketRepo.update(id, update);
     }
 
@@ -1595,7 +1614,7 @@ export class TicketsController {
       entity_type: 'ticket', entity_id: id, action: 'updated',
       field_changed: mirror ? role.slug : `role:${role.slug}`,
       old_value: beforeId,
-      new_value: agentName || userName || '',
+      new_value: agentName || userName || (runtime ? String((runtime as any).label || '').trim() : '') || '',
       ticket_id: ticket.parent_id || ticket.id,
       actor_id: currentUser?.id,
       actor_name: currentUser?.name || currentUser?.email,
@@ -2501,33 +2520,29 @@ export class TicketsController {
     for (const m of resolved) {
       if (m.type === 'agent') {
         if (quiescedForMentions) continue;
-        const agent = await this.agentRepo.findOne({ where: { id: m.id } });
-        if (!agent) continue;
-        // Scope safety: an agent in a different workspace should never receive this mention.
-        if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
+        // P4c-4: REST comment 멘션도 spec-direct 해소.
+        const target = await resolveMentionTarget(this.dataSource, ticket, m.id);
+        if (!target) continue;
 
-        // 티켓 71532b4f: comment-tools.ts(MCP add_comment 등)와 동일한 dispatch
-        // 부가값 — 누락 시 이 mention으로 깨운 세션이 agent에 핀된
-        // backend/harness/effort를 조용히 무시한다.
-        const extras = await resolveMentionDispatchExtras(this.dataSource, ticket, agent);
+        const { extras } = target;
         const dispatchTriggerId = m.roleShortcut
           ? await recordCommentMentionDispatch(this.dataSource, {
               ticketId: ticket.id, workspaceId: ticket.workspace_id,
-              agentId: agent.id, role: m.roleShortcut,
+              agentId: target.agentId, role: m.roleShortcut,
             })
           : '';
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
           workspace_id: ticket.workspace_id,
-          agent_id: agent.id,
+          agent_id: target.agentId,
           actor_id: actor.id,
           actor_type: 'user',
           actor_name: actor.name,
           content: comment.content,
           dispatch_trigger_id: dispatchTriggerId,
           dispatch_role: m.roleShortcut || '',
-          role_prompt: agent.role_prompt || '',
+          role_prompt: target.rolePrompt,
           mention_source: m.roleShortcut ? 'role' : 'direct',
           role_shortcut: m.roleShortcut,
           timestamp: ts,
@@ -2537,8 +2552,9 @@ export class TicketsController {
           effort_preset: extras.effort_preset,
           environment_config: extras.environment_config,
           worktree_mode: extras.worktree_mode,
+          ...(target.runtime ? { runtime: target.runtime } : {}),
         });
-        this.logService.info('Mentions', `Agent @-mention routed: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
+        this.logService.info('Mentions', `Agent @-mention routed: ${target.displayName} (${target.agentId}) on ticket ${ticket.id}`);
       } else {
         // User mention — persist + emit for badge sync
         const row = await this.mentionRepo.save(this.mentionRepo.create({

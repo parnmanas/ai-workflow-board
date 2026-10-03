@@ -22,6 +22,8 @@ export interface McpAuthInfo {
   scope?: string;
   workspaceId?: string;
   source: 'db' | 'env' | 'dev-mode';
+  /** P4c-2b: parsed from `runtime-provisioned:<rtKey>` key names (else undefined). */
+  runtimeKey?: string;
 }
 
 interface EnvKeyEntry {
@@ -72,12 +74,26 @@ export async function authenticateMcpRequest(
       const dbResult = await apiKeyService.validateApiKey(token);
       if (dbResult.valid && dbResult.apiKey) {
         const ak = dbResult.apiKey;
+        // P4c-2b: runtime-tuple keys (host-bound, no Agent row). agentId is
+        // the HOST uuid — stable across rotations and uuid-shaped, so every
+        // Postgres uuid-column lookup against it degrades to null instead of
+        // throwing. Workspace scoping rides the key row's workspace_id (set
+        // per scope at provision), so authz needs no agent lookup. The rtKey
+        // (parsed from the provisioned name) is what orchestration gates
+        // compare against stored rt- assignee/orchestrator ids.
+        let runtimeKey: string | undefined;
+        if (!ak.agent_id && ak.host_id) {
+          // P4c-4: `runtime:<label>:<key>` (label may contain spaces, never colons).
+          const m = /^runtime:.*:(rt-[0-9a-f]{16})$/.exec(ak.name || '');
+          runtimeKey = m ? m[1] : undefined;
+        }
         return {
           // ak.key is now a SHA-256 hash, not the raw key — use the stored
           // display prefix for the hint.
           keyHint: ak.key_prefix || 'awb_***',
-          agentName: ak.agent?.name,
-          agentId: ak.agent_id ?? undefined,
+          agentName: ak.host_id ? ak.name : undefined,
+          agentId: ak.agent_id ?? ak.host_id ?? undefined,
+          runtimeKey,
           keyId: ak.id,
           scope: ak.scope,
           workspaceId: ak.workspace_id || undefined,

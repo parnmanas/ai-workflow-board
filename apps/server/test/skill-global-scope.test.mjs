@@ -50,7 +50,8 @@ const taps = app.get(SkillTapService);
 
 const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'skill-scope' });
 const other = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'skill-scope-other' });
-const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'skilled', type: 'hermes', hosted: false });
+// P4c-4: hosted (Host 행 + api_keys 링크) — 그래야 assign 의 정체성 해소가 된다.
+const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'skilled', type: 'hermes' });
 
 const stamp = Date.now();
 

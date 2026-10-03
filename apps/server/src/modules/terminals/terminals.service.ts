@@ -2,7 +2,7 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { In, Repository } from 'typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { InstanceRecord, InstanceRegistryService } from '../agent-manager/instance-registry.service';
@@ -152,7 +152,7 @@ export class TerminalsService implements OnModuleDestroy {
   };
 
   constructor(
-    @InjectRepository(Agent) private readonly agents: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hosts: Repository<RuntimeHost>,
     private readonly registry: InstanceRegistryService,
     private readonly logService: LogService,
   ) {
@@ -193,8 +193,10 @@ export class TerminalsService implements OnModuleDestroy {
     const ids = Array.from(new Set(records.map((r) => r.agent_id)));
     const names = new Map<string, string>();
     if (ids.length) {
-      for (const a of await this.agents.find({ where: { id: In(ids) } })) {
-        if (a.name) names.set(a.id, a.name);
+      // P4c-4: Host 이름으로 해소한다 (Agent 테이블 없음).
+      const hostRows = await this.hosts.find({ where: { id: In(ids) } });
+      for (const h of hostRows) {
+        if (h.name && !names.has(h.id)) names.set(h.id, h.name);
       }
     }
     const byManager = new Map<string, TerminalHost>();
@@ -239,9 +241,10 @@ export class TerminalsService implements OnModuleDestroy {
     return rec;
   }
 
+  // P4c-4: Host 이름으로 해소한다 (Agent 테이블 없음).
   private async managerName(managerId: string, fallback: string): Promise<string> {
-    const agent = await this.agents.findOne({ where: { id: managerId } });
-    return agent?.name || fallback;
+    const host = await this.hosts.findOne({ where: { id: managerId } });
+    return host?.name || fallback;
   }
 
   // ─── RPC (서버 → 매니저) ────────────────────────────────────────────────

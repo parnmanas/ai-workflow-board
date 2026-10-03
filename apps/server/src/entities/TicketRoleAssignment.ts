@@ -64,6 +64,15 @@ export class TicketRoleAssignment {
   @Column({ type: 'varchar', default: '' })
   holder_key: string;
 
+  /**
+   * Snapshot of the agent holder's runtime at assignment time (P2 dual-write).
+   * `runtimeSpecFromAgentRow()`가 배정 시점에 복사 — 이후 Agent 편집이 과거
+   * 배정을 오염시키지 않는다. user 홀더는 null. P4에서 dispatch가 이쪽을
+   * 읽으면 `agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  runtime_spec: Record<string, any> | null;
+
   @CreateDateColumn()
   created_at: Date;
 

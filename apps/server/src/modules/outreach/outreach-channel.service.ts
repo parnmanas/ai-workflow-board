@@ -7,13 +7,13 @@
  * QaScheduleService.update documents).
  */
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { OutreachChannel, OutreachChannelKind, OutreachPublishPolicy, OutreachDeployPostMode } from '../../entities/OutreachChannel';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { Credential } from '../../entities/Credential';
 import { Board } from '../../entities/Board';
-import { Agent } from '../../entities/Agent';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { isValidCron } from '../qa/qa-cron';
@@ -76,7 +76,7 @@ export class OutreachChannelService {
     @InjectRepository(OutreachInboundItem) private readonly itemRepo: Repository<OutreachInboundItem>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly pollingService: OutreachPollingService,
   ) {}
 
@@ -252,9 +252,10 @@ export class OutreachChannelService {
    *  SecurityProfile.target_agent_id (and 15+ other call sites) already
    *  standardize on: a workspace-scoped agent must match, but a global
    *  agent (workspace_id null/'') is visible everywhere. */
+  // P4c-4: Host/링크 해소 (Agent 행 없음).
   private async _assertAgentScope(agentId: string | null, workspaceId: string): Promise<string | null> {
     if (!agentId) return null;
-    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
     if (!agent) throw makeError(400, 'classifier_agent_id not found');
     if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       throw makeError(400, 'classifier_agent_id must belong to this workspace');

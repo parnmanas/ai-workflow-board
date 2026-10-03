@@ -45,6 +45,7 @@ test('Manager heartbeat with manager_capabilities stores it verbatim on the inst
       body: JSON.stringify({
         instance_id: 'manager-capabilities-test',
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
         workspace_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',
@@ -100,6 +101,7 @@ test('Manager heartbeat WITHOUT manager_capabilities leaves the field undefined 
       body: JSON.stringify({
         instance_id: 'manager-capabilities-absent-test',
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
         workspace_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',

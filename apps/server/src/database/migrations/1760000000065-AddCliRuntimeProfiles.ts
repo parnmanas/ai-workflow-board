@@ -11,13 +11,14 @@ export class AddCliRuntimeProfiles1760000000065 implements MigrationInterface {
     if (!(await queryRunner.hasColumn('boards', 'cli_runtime_profile'))) {
       await queryRunner.addColumn('boards', new TableColumn({ name: 'cli_runtime_profile', type: 'varchar', isNullable: true }));
     }
-    if (!(await queryRunner.hasColumn('agents', 'cli_runtime_profile'))) {
+    // P4c-4: agents 테이블 없음 — 스킵한다.
+    if ((await queryRunner.hasTable('agents')) && !(await queryRunner.hasColumn('agents', 'cli_runtime_profile'))) {
       await queryRunner.addColumn('agents', new TableColumn({ name: 'cli_runtime_profile', type: 'varchar', isNullable: true }));
     }
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {
-    if (await queryRunner.hasColumn('agents', 'cli_runtime_profile')) {
+    if ((await queryRunner.hasTable('agents')) && (await queryRunner.hasColumn('agents', 'cli_runtime_profile'))) {
       await queryRunner.dropColumn('agents', 'cli_runtime_profile');
     }
     if (await queryRunner.hasColumn('boards', 'cli_runtime_profile')) {

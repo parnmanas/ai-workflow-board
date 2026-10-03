@@ -203,6 +203,14 @@ export class OrchestrationMission {
   @Column({ type: 'varchar', nullable: true, default: null })
   orchestrator_agent_id: string | null;
 
+  /**
+   * Snapshot of team.orchestrator_spec taken at start (P1). Dual-write와 함께
+   * 쌓이는 Spec 직dispatch용 스냅샷 — P2에서 dispatch가 이쪽을 읽으면
+   * orchestrator_agent_id는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  orchestrator_spec: Record<string, any> | null;
+
   /** ChatRoom hosting the orchestrator conversation for this mission. */
   @Column({ type: 'varchar', nullable: true, default: null })
   room_id: string | null;

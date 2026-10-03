@@ -9,7 +9,6 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';

@@ -46,6 +46,7 @@ function buildController(EventsController) {
 
   return new EventsController(
     noopRepo(), noopRepo(), noopRepo(), noopRepo(), noopRepo(),
+    /* hostRepo (P4c-4) */ noopRepo(), /* apiKeyRepo (P4c-4) */ noopRepo(),
     authService, apiKeyService, logService, instanceRegistry, connectivity, metrics,
   );
 }

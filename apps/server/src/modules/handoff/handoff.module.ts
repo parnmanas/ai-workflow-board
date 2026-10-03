@@ -5,7 +5,6 @@ import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { Agent } from '../../entities/Agent';
 import { HandoffService } from './handoff.service';
 import { HandoffController } from './handoff.controller';
 import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
@@ -30,7 +29,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Ticket, Board, BoardColumn, Comment, TicketAttachment, Agent]),
+    TypeOrmModule.forFeature([Ticket, Board, BoardColumn, Comment, TicketAttachment]),
     WorkspaceRolesModule,
     AgentsModule,
     SharedServicesModule,

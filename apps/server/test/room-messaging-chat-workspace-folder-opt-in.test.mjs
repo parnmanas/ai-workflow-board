@@ -95,8 +95,9 @@ function makeSvc({ room, workspace }) {
   // 결과이며, 표시 이름(display-name) 해석은 이 경우 그냥 sender 이름으로
   // degrade되므로, 실제 Agent row가 없어도 된다.
   const agentRepo = { async findOne() { return null; } };
+  // P4c-4: agentRepo 없음 (4번째 인자 삭제 — ticket/userMention/attachment 순).
   const svc = new RoomMessagingService(
-    roomRepo, {}, messageRepo, agentRepo, {}, {}, {},
+    roomRepo, {}, messageRepo, {}, {}, {},
     // dataSource (티켓 7d8ea7c9): _resolveChatRuntimeProfile 전용이며, 이 파일의
     // 시나리오는 전부 group room(@mention 없음, DM 아님)이라 도달하지 않는다.
     workspaceRepo, {}, noopLog, membership, mentionService, {}, undefined,

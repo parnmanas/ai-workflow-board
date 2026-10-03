@@ -85,6 +85,8 @@ class Prompt {
 interface RedeemResponse {
   api_key: string;
   agent_id: string;
+  /** P4c-2b: P0 redeem이 함께 돌려주는 Runtime Host id. 구 서버에는 없어 optional. */
+  host_id?: string;
   workspace_id: string;
 }
 
@@ -198,11 +200,14 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
   const issued = await redeem(url, token, instanceId);
 
   // ST-7: cli omitted from config — per-agent now.
+  // P4c-2b: host_id도 함께 저장 (SSE fan-out host-affinity + 관측용).
+  // 구 서버 redeem에는 없어 undefined — 읽는 쪽은 null-tolerant.
   const configBody = {
     url,
     apiKey: issued.api_key,
     workspace_id: issued.workspace_id,
     agent_id: issued.agent_id,
+    host_id: issued.host_id ?? null,
   };
   writeConfigJson(targetPath, configBody);
 
@@ -216,6 +221,7 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
     agent_id: issued.agent_id,
     agent_name: 'manager',
     agent_type: 'manager',
+    host_id: issued.host_id ?? null,
     key_hint: maskKey(issued.api_key),
     scope: 'full',
     connected_at: new Date().toISOString(),

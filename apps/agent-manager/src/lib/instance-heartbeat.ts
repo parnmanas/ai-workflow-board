@@ -298,6 +298,10 @@ export interface AgentSessionHeartbeatEntry {
 export interface InstanceHeartbeatPayload {
   instance_id: string;
   agent_id: string | null;
+  // P4 (manager identity → RuntimeHost): pairing-time Host id. 서버는 이
+  // 필드(없으면 키의 host_id 바인딩)로 runtime_hosts 에서 정체성을 먼저
+  // 해소하고, Agent 행은 best-effort 로만 읽는다.
+  host_id?: string | null;
   workspace_id: string | null;
   mode: InstanceMode;
   hostname: string;
@@ -391,6 +395,7 @@ export interface InstanceHeartbeatPayload {
 export class InstanceHeartbeat {
   #config: AwbConfig;
   #agentId: string | null;
+  #hostId: string | null;
   #payloadFactory: () => Promise<InstanceHeartbeatPayload>;
   #instanceId: string;
   #startedAt: string;
@@ -399,9 +404,10 @@ export class InstanceHeartbeat {
   /** 첫 성공 POST 에서 한 번만 불리는 콜백 (ticket 23753dc7). */
   #onFirstPostSuccess: (() => void) | null = null;
 
-  constructor(config: AwbConfig, agentId: string | null, meta: InstanceMeta) {
+  constructor(config: AwbConfig, agentId: string | null, meta: InstanceMeta, hostId: string | null = null) {
     this.#config = config;
     this.#agentId = agentId;
+    this.#hostId = typeof hostId === 'string' && hostId ? hostId : null;
     this.#onFirstPostSuccess = meta?.onFirstPostSuccess ?? null;
     this.#instanceId = randomUUID();
     this.#startedAt = new Date().toISOString();
@@ -626,6 +632,7 @@ export class InstanceHeartbeat {
       return {
         instance_id: this.#instanceId,
         agent_id: this.#agentId,
+        ...(this.#hostId ? { host_id: this.#hostId } : {}),
         workspace_id: (config?.workspace_id as string) || null,
         mode: meta?.mode === 'manager' ? 'manager' : 'manager',
         hostname: hostname() || 'unknown',

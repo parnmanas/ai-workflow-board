@@ -27,8 +27,8 @@
  *     defect ticket + the re-blocked follow-up (bespoke shape → resolveRejectHandoffRefs).
  *   ARTIFACT (ARTIFACT_ACTION_TOOLS, F2-4 ⓒ) — build/deploy result cards, independent
  *     of the ticket_refs channel (see the bucket's own doc comment below).
- *   AGENT (AGENT_ACTION_TOOLS, F-3 ticket 3ca88253) — get_agent → agent-status card.
  *   BOARD (BOARD_ACTION_TOOLS, F-3 ticket 3ca88253) — get_board_summary → board card.
+ *   (AGENT bucket removed in P4c-4 with get_agent itself — Agent table dropped.)
  *   EXCLUDE (TICKET_TOOL_EXCLUSIONS) — reads, ticket deletes (404 deep-link),
  *     ticket-attachment I/O, the assistant's own send_chat_room_message, the
  *     current-task focus seat, remote improvement tickets (off-instance → 404), and
@@ -87,15 +87,6 @@ export const ARTIFACT_ACTION_TOOLS: Record<string, string> = {
   register_build_artifact: 'build',
   report_build_failure: 'build',
   report_deployment: 'deploy',
-};
-/**
- * F-3 (ticket 3ca88253) — agent-status 카드 캡처면. 채팅에서 "이 agent 뭐하고 있어"
- * 류 질문에 답할 때 모델이 get_agent(단건 조회)를 호출하면 그 결과를 카드로 캡처한다.
- * list_agents(다건 조회)는 캡처하지 않는다 — "특정 agent" 상태 카드이지 전체 목록
- * 나열용이 아니라서 캡처하면 노이즈만 늘어난다(read 로 그대로 둠).
- */
-export const AGENT_ACTION_TOOLS: Record<string, string> = {
-  get_agent: 'status',
 };
 /**
  * F-3 (ticket 3ca88253) — board 현황 카드 캡처면. get_board_summary 는 서버 설명대로
@@ -358,47 +349,7 @@ export function chunkArtifactRefs(refs: ArtifactRef[], size: number): ArtifactRe
   return out;
 }
 
-// ─── F-3 (ticket 3ca88253): agent-status ref capture ──────────────────────
-// Deliberately minimal — unlike TicketRef (create/existing/batch/reject) an agent
-// card has exactly one shape: capture the id (+ best-effort name) from a get_agent
-// result. The client re-fetches full AgentDetail on open, so the ref itself stays
-// tiny (mirrors ticket_refs carrying only {ticket_id,title}, not the whole ticket).
-export interface AgentRef {
-  agent_id: string;
-  name?: string;
-}
-export interface AgentToolContext {
-  /** bare tool name — kept for parity with the other *ToolContext shapes even
-   *  though AGENT_ACTION_TOOLS currently has a single member. */
-  tool: string;
-}
-export function trackedAgentTool(name: unknown): AgentToolContext | null {
-  if (typeof name !== 'string') return null;
-  const bare = bareToolName(name);
-  if (!AGENT_ACTION_TOOLS[bare]) return null;
-  return { tool: bare };
-}
-/** get_agent returns the raw Agent entity ({id,name,...}) directly as the result —
- *  no nesting, no input fallback needed (unlike ticket refs, whose id sometimes
- *  only lives in the input). Fail-closed: no id, no card. */
-export function resolveAgentRef(_ctx: AgentToolContext, result: any, isError: boolean): AgentRef | null {
-  if (isError) return null;
-  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
-  if (!obj || typeof obj.id !== 'string' || !obj.id) return null;
-  const ref: AgentRef = { agent_id: obj.id };
-  if (typeof obj.name === 'string' && obj.name) ref.name = obj.name;
-  return ref;
-}
-export function chunkAgentRefs(refs: AgentRef[], size: number): AgentRef[][] {
-  if (!Array.isArray(refs) || refs.length === 0) return [];
-  if (!Number.isFinite(size) || size <= 0) return [refs.slice()];
-  const out: AgentRef[][] = [];
-  for (let i = 0; i < refs.length; i += size) out.push(refs.slice(i, i + size));
-  return out;
-}
-export function formatAgentRefsContent(refs: AgentRef[]): string {
-  return refs.map((r) => `🧑‍💻 Agent: ${r.name || r.agent_id}`).join('\n');
-}
+// ─── F-3 agent-status ref capture removed in P4c-4 with get_agent itself. ──
 
 // ─── F-3 (ticket 3ca88253): board-summary ref capture ─────────────────────
 // Same minimal shape as AgentRef: capture the board id (+ name) only. The client
@@ -603,8 +554,9 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // 자기 턴에서 읽고 쓰는 것이고, 채팅에 카드로 띄울 티켓 참조가 없다.
   request_privileged_command: 'non-ticket',
   get_privileged_command_result: 'non-ticket',
-  // read (59) — get_agent 및 get_board_summary 는 F-3(ticket 3ca88253)로 AGENT_ACTION_TOOLS
-  // / BOARD_ACTION_TOOLS 로 이관됨(EXCLUDE 아님). list_agents/get_board 는 여전히 read.
+  // read — get_board_summary 는 F-3(ticket 3ca88253)로 BOARD_ACTION_TOOLS 로
+  // 이관됨(EXCLUDE 아님). get_agent/list_agents 는 P4c-4 로 서버에서 삭제됨.
+  // get_board 는 여전히 read.
   fetch_github_info: 'read', get_action: 'read',
   get_allocated_tickets: 'read', get_api_key: 'read', get_benchmark_leaderboard: 'read',
   get_board: 'read', get_chat_room_messages: 'read',
@@ -616,7 +568,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_security_schedule: 'read', get_ticket: 'read', get_ticket_activity: 'read',
   get_ticket_attachment: 'read', get_user: 'read', get_workspace: 'read',
   get_workspace_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
-  list_agents: 'read', list_api_keys: 'read', list_archived_tickets: 'read',
+  list_api_keys: 'read', list_archived_tickets: 'read',
   list_board_lessons: 'read', list_boards: 'read', list_channels: 'read',
   list_chat_rooms: 'read', list_claude_backend_profiles: 'read',
   list_features: 'read', list_function_runs: 'read',
@@ -625,7 +577,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   list_repo_branches: 'read', list_resources: 'read', list_security_profiles: 'read',
   list_security_runs: 'read', list_security_schedules: 'read', list_ticket_attachments: 'read',
   list_ticket_prerequisites: 'read', list_users: 'read', list_workspace_schedules: 'read',
-  list_workspaces: 'read', ping: 'read', search_actions: 'read', search_chat_messages: 'read',
+  list_workspaces: 'read', search_actions: 'read', search_chat_messages: 'read',
   search_github: 'read', search_resources: 'read', subscribe_events: 'read', whoami: 'read',
   // ticket d35b7b7d (Ontology Graph 6/7) — five pure-query graph_ tools, same
   // posture as search_resources above: read-only lookups over a domain
@@ -682,14 +634,14 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
   complete_action_run: 'non-ticket', complete_comment_summary: 'non-ticket',
   complete_qa_run: 'non-ticket',
-  complete_security_run: 'non-ticket', create_agent: 'non-ticket',
+  complete_security_run: 'non-ticket',
   create_api_key: 'non-ticket', create_benchmark_run: 'non-ticket', create_board: 'non-ticket',
   create_channel: 'non-ticket', create_chat_room: 'non-ticket', create_column: 'non-ticket',
   create_qa_scenario: 'non-ticket', create_qa_schedule: 'non-ticket',
   create_security_profile: 'non-ticket', create_security_schedule: 'non-ticket',
   create_user: 'non-ticket', create_workspace: 'non-ticket',
   create_workspace_schedule: 'non-ticket', delete_action: 'non-ticket',
-  delete_agent: 'non-ticket', delete_api_key: 'non-ticket', delete_board: 'non-ticket',
+  delete_api_key: 'non-ticket', delete_board: 'non-ticket',
   delete_channel: 'non-ticket', delete_chat_message_attachment: 'non-ticket',
   delete_column: 'non-ticket', delete_prompt_template: 'non-ticket',
   delete_function: 'non-ticket',
@@ -703,7 +655,6 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // background build) but never touches a ticket row.
   graph_status: 'non-ticket',
   graph_refresh: 'non-ticket',
-  move_agent_to_workspace: 'non-ticket',
   move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   propose_skill_change: 'non-ticket',
   qa_run_heartbeat: 'non-ticket', record_outreach_classification: 'non-ticket',
@@ -719,7 +670,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
   start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',
   submit_feature_request: 'non-ticket', sync_github_resource: 'non-ticket',
-  update_agent: 'non-ticket', update_api_key: 'non-ticket', update_board: 'non-ticket',
+  update_api_key: 'non-ticket', update_board: 'non-ticket',
   update_claude_backend_profile: 'non-ticket',
   update_board_lesson: 'non-ticket', update_channel: 'non-ticket', update_column: 'non-ticket',
   update_qa_scenario: 'non-ticket', update_qa_schedule: 'non-ticket',
@@ -738,7 +689,6 @@ export function classifiedToolNames(): Set<string> {
     BATCH_TICKET_TOOL,
     REJECT_HANDOFF_TOOL,
     ...Object.keys(ARTIFACT_ACTION_TOOLS),
-    ...Object.keys(AGENT_ACTION_TOOLS),
     ...Object.keys(BOARD_ACTION_TOOLS),
     ...Object.keys(TICKET_TOOL_EXCLUSIONS),
   ]);

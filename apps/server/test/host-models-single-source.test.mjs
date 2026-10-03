@@ -43,20 +43,15 @@ test('한 호스트의 모델 목록은 mission / session / Agent 다이얼로�
   const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
   const managerHeaders = { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' };
 
-  // 이 호스트에 이미 살고 있는 agent 행 — 예전 로스터는 이 `model` 을 목록에 끼워넣었다.
-  const agentRepo = app.get(getDataSourceToken()).getRepository('Agent');
-  await agentRepo.save(agentRepo.create({
-    name: 'oc-worker', description: 'pinned model row', type: 'opencode', is_active: 1, is_online: 0,
-    workspace_id: workspace.id, role_prompt: '', manager_agent_id: manager.id,
-    working_dir: '/srv/work', model: 'opencode/pinned-by-an-agent-row',
-  }));
+  // P4c-4: Agent 행 자체가 없다 — 끼워넣을 agent 행 model 이 존재할 수 없고,
+  // 아래 ② 단언(목록에 없음)은 구조적으로 보장된다.
 
   const heartbeat = async () => {
     const resp = await fetch(`${base}/api/agent/instance-heartbeat`, {
       method: 'POST',
       headers: managerHeaders,
       body: JSON.stringify({
-        instance_id: INSTANCE_ID, agent_id: manager.id, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+        instance_id: INSTANCE_ID, agent_id: manager.id, host_id: manager.id, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
         cli: 'mixed', cli_adapters: ['opencode'], pid: 1, started_at: new Date().toISOString(),
         available_models: { opencode: OPENCODE_MODELS },
         available_models_at: new Date().toISOString(),
@@ -178,7 +173,7 @@ test('세션이 예전에 보고해 영속된 ACP 모델 목록도 mission/Agent
     method: 'POST',
     headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      instance_id: 'reported-models-instance', agent_id: manager.id, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
+      instance_id: 'reported-models-instance', agent_id: manager.id, host_id: manager.id, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
       cli: 'mixed', cli_adapters: ['opencode'], pid: 1, started_at: new Date().toISOString(),
       available_models: { opencode: HEARTBEAT }, available_models_at: new Date().toISOString(),
     }),
@@ -255,7 +250,7 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
     method: 'POST',
     headers: { 'X-Agent-Key': managerKey.raw_key, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      instance_id: 'ragnar-instance', agent_id: manager.id, mode: 'manager', hostname: 'aitopatom-0561', plugin_version: 'test',
+      instance_id: 'ragnar-instance', agent_id: manager.id, host_id: manager.id, mode: 'manager', hostname: 'aitopatom-0561', plugin_version: 'test',
       cli: 'mixed', cli_adapters: ['claude'], pid: 1, started_at: new Date().toISOString(),
       available_models: { claude: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5', 'claude-fable-5-1'] },
       available_models_at: new Date().toISOString(),

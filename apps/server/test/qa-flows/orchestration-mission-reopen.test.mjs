@@ -242,7 +242,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   assert.match(JSON.stringify(zombie), /already cancelled/i, 'terminal step 가드가 막는다');
 
   logStep('운영자 REST 입구 — 경계와 인증');
-  await runner.completeMission(cancelled.id, lead.id, { status: 'failed', summary: '접는다' });
+  await runner.completeMission(cancelled.id, { agentId: lead.id }, { status: 'failed', summary: '접는다' });
   const restReopen = await fetch(`${base}/api/orchestration/missions/${cancelled.id}/reopen`, {
     method: 'POST',
     headers: H,
@@ -252,7 +252,7 @@ test('종료된 미션을 대화로 되살려 이어서 진행한다', async (t)
   assert.equal(restReopen.status, 201);
   assert.equal((await restReopen.json()).status, 'running');
 
-  await runner.completeMission(cancelled.id, lead.id, { status: 'failed', summary: '다시 접는다' });
+  await runner.completeMission(cancelled.id, { agentId: lead.id }, { status: 'failed', summary: '다시 접는다' });
   const wrongWs = await fetch(`${base}/api/orchestration/missions/${cancelled.id}/reopen`, {
     method: 'POST',
     headers: { ...H, 'X-Workspace-Id': other.id },

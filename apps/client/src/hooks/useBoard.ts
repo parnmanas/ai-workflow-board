@@ -44,7 +44,7 @@ export function useBoard(boardId: string = '') {
       const wsId = (boardData as any)?.workspace_id || '';
       const [usersData, agentsData, channelsData, rolesData, focusData] = await Promise.all([
         api.getUsers(wsId || undefined).catch(() => []),
-        api.getAgents(wsId || undefined).catch(() => []),
+        Promise.resolve([] as any[]), // P4c-4: Agent 목록 제거 — 이름은 서버 payload 에서 온다.
         api.getChannels(wsId || undefined).catch(() => []),
         wsId ? api.listWorkspaceRoles(wsId).catch(() => []) : Promise.resolve([] as any[]),
         api.getBoardFocusTickets(boardId).catch(() => ({ focus_tickets: [] })),

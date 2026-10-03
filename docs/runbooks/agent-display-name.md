@@ -5,6 +5,13 @@
 ## The rule
 
 An agent's identity in the UI is **always** `<ManagerName>/<AgentName>`.
+(P4c-3b: spec-direct runtime slots — `rt-` identities with no Agent row —
+render as their spec `label`, falling back to `cli`/folder leaf. They never
+go through the formatters below; the snapshot label travels with the row.)
+
+An agent with no manager (a Runtime Host / manager identity itself, or a
+historical / non-executable identity) renders as its **bare name, with no
+prefix**.
 An agent with no manager (a Runtime Host / manager identity itself, or a
 historical / non-executable identity) renders as its **bare name, with no
 prefix**. Nothing else is ever acceptable — not a bare leaf name for a managed
@@ -13,6 +20,18 @@ agent, not a raw agent UUID, not a hand-rolled `${a.manager_name}/${a.name}`.
 Two managers can each host an agent called `coder`. Without the prefix the
 operator cannot tell them apart, and neither can an orchestrator reading its own
 roster prompt.
+
+(P4c-4: the `Agent` table is dropped, so the server can no longer resolve a
+managed uuid to a leaf name — the leaf lives only in denormalized snapshots
+(ticket holders, chat participants) and `rt-` spec labels, never in a row the
+read-side resolvers (`hostNameById` in `apps/server/src/utils/agent-name.ts`)
+can join to. A linked legacy uuid therefore resolves to its **Host's bare
+name** — the Host IS the execution identity, so this is unambiguous, not a
+bare leaf: there is no leaf on screen to confuse. `rt-` slots render their spec
+`label` (P4c-3b rule, unchanged). Snapshot-carried `{ name, manager_name }`
+pairs (ticket holders, session dashboards) still render `<Manager>/<Agent>`
+via the client `agentIdentityLabel`/`formatAgentDisplayName` helpers —
+that contract is unchanged where the data exists.)
 
 ## The two formatters — never inline the format
 

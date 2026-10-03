@@ -71,9 +71,7 @@ test('supervisor liveness reclaim: live strand protected, killed strand reclaime
   const user = await createUser(app, getDataSourceToken, { name: 'driver' });
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'worker' });
-  // Online gate: the supervisor skips agents whose DB last_seen_at is older than
-  // 90 s. Fixtures leave it null — bump it so the tick considers this agent.
-  await ds.getRepository('Agent').update(agent.id, { last_seen_at: new Date() });
+  // P4c-4: last_seen 게이트 없음 — _tick 은 holder 집합을 직접 돈다.
 
   const ticket = await createTicket(app, getDataSourceToken, {
     columnId: columns.inProgress.id, workspaceId: ws.id,

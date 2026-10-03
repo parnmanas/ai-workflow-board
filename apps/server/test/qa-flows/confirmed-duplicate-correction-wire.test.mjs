@@ -21,11 +21,14 @@ test('MCP duplicate correction emits exactly one selected-role wire trigger and 
   const { ws, columns } = await setupKanbanScene(app, modules.getDataSourceToken, {
     workspaceName: 'duplicate-correction-wire', envRepo: true, maxConcurrent: 5,
   });
-  const assignee = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'worker' });
+  // P4c-4: wire trigger 는 scope.agent_id === SSE identity 에게만 배달된다.
+  // VA 가 host 키로 연결하므로 assignee/reviewer 는 Host identity 다
+  // (레거시 uuid holder 앞으로는 wire 가 닿지 않는다).
+  const assignee = await createAgent(app, modules.getDataSourceToken, null, { name: 'worker-host', type: 'manager' });
   const assigneeKey = await createApiKey(app, modules.getDataSourceToken, assignee.id, { workspaceId: ws.id });
   const operator = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'operator' });
   const operatorKey = await createApiKey(app, modules.getDataSourceToken, operator.id, { workspaceId: ws.id });
-  const reviewer = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'reviewer' });
+  const reviewer = await createAgent(app, modules.getDataSourceToken, null, { name: 'reviewer-host', type: 'manager' });
   const reviewerKey = await createApiKey(app, modules.getDataSourceToken, reviewer.id, { workspaceId: ws.id });
   const va = new VirtualAgent({ name: 'worker', agentId: assignee.id, apiKey: assigneeKey.raw_key, port });
   const reviewerVa = new VirtualAgent({ name: 'reviewer', agentId: reviewer.id, apiKey: reviewerKey.raw_key, port });

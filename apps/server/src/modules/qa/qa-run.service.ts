@@ -10,7 +10,6 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { Resource } from '../../entities/Resource';
-import { Agent } from '../../entities/Agent';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
@@ -22,6 +21,9 @@ import { Deployment } from '../../entities/Deployment';
 import { findLatestDeployment } from '../../common/deployment-options';
 import { Board } from '../../entities/Board';
 import { enforceRunBudget, RunBudgetExceededError } from '../../common/run-budget-guard';
+import { isRuntimeIdentityKey } from '../../common/runtime-spec';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
+import { isUuidShapedId } from '../../utils/agent-name';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -140,7 +142,6 @@ export class QaRunService {
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -178,8 +179,11 @@ export class QaRunService {
     if (!scenario.target_agent_id) throw makeError(400, 'QA scenario has no target agent set');
     if (scenario.enabled === false) throw makeError(400, 'QA scenario is disabled');
 
-    const agent = await this.agentRepo.findOne({ where: { id: scenario.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
+    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음). rt- 는 스냅샷이 해소.
+    const agent = await resolveCallerIdentityRow(this.dataSource, scenario.target_agent_id);
+    if (!agent && !isRuntimeIdentityKey(scenario.target_agent_id)) {
+      throw makeError(400, 'target agent not found');
+    }
     const boardId = String(args.boardId ?? scenario.on_failure_ticket?.board_id ?? '').trim() || null;
     if (boardId) {
       await findOrFail(
@@ -251,12 +255,18 @@ export class QaRunService {
 
     // Add the QA agent as a participant. A synthetic 'system' user carries the
     // first message (no real triggering user in scope), exactly like Actions.
+    // P4a: scenario 스냅샷 우선, agent 행 폴백.
+    // P4c-3b: rt- targets resolve via the snapshot (no Agent row).
     const joinedAt = new Date();
     await this.participantRepo.save([
       this.participantRepo.create({
         room_id: room.id,
         participant_type: 'agent',
-        participant_id: agent.id,
+        participant_id: scenario.target_agent_id,
+        // P4c-4: scenario 스냅샷만 기록한다 (Agent 행 없음).
+        runtime_spec: scenario.target_runtime
+          ? { ...scenario.target_runtime }
+          : null,
         last_read_at: joinedAt,
         left_at: null,
       }),
@@ -324,7 +334,7 @@ export class QaRunService {
       throw makeError(e?.status ?? 502, reason);
     }
 
-    this.logService.info('QA', `started qa run ${runId} scenario ${scenario.id} → agent ${agent.id} room ${room.id}`);
+    this.logService.info('QA', `started qa run ${runId} scenario ${scenario.id} → agent ${scenario.target_agent_id} room ${room.id}`);
 
     // Live QA task push (ticket 09ed8def): a QA run just went 'running' and was
     // dispatched, so tell AgentStatusService to add a kind:'qa' entry to the
@@ -337,7 +347,7 @@ export class QaRunService {
     activityEvents.emit('qa_task_changed', {
       active: true,
       run_id: runId,
-      agent_id: agent.id,
+      agent_id: scenario.target_agent_id,
       scenario_name: scenario.name,
       started_at: (run.started_at ?? now).toISOString(),
     });

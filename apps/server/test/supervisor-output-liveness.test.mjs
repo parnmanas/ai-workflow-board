@@ -28,16 +28,21 @@ function readSrc(relParts) {
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {}, log() {} };
 const HOUR_AGO_ISO = () => new Date(Date.now() - 60 * 60 * 1000).toISOString();
-const KEY = 'A:t1:assignee';
+// P4c-4: holder id 는 uuid 형태여야 _tick 의 집합에 든다.
+const HOLDER_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+const KEY = `${HOLDER_ID}:t1:assignee`;
 
 // Fake DataSource that answers the exact getRepository(Entity) calls _tick /
 // _emit / _flagCircuitOpen make. Branches on the entity class .name so we don't
 // have to import the entities.
-function fakeDataSource({ workspace = null, stuckIds = [], activitySink } = {}) {
+function fakeDataSource({ workspace = null, stuckIds = [], activitySink, holderIds = [HOLDER_ID] } = {}) {
   return {
     getRepository(entity) {
       const name = entity?.name || '';
       if (name === 'Workspace') return { async findOne() { return workspace; } };
+      if (name === 'TicketRoleAssignment') {
+        return { async find() { return holderIds.map((agent_id) => ({ agent_id })); } };
+      }
       if (name === 'StuckTicketAlert') {
         return {
           createQueryBuilder() {
@@ -55,14 +60,12 @@ function fakeDataSource({ workspace = null, stuckIds = [], activitySink } = {}) 
 }
 
 async function makeSupervisor(SupervisorClass, RegistryClass, { allocRow, outputAtFor, stuckIds = [], ttlMs = 6 * 60 * 60_000, workspace = null }) {
-  const agentRepo = {
-    async find() {
-      return [{ id: 'A', last_seen_at: new Date(), workspace_id: 'ws1' }];
-    },
-  };
   const activitySink = [];
   const dataSource = fakeDataSource({ workspace, stuckIds, activitySink });
-  const allocationService = { async getAllocatedTickets() { return [allocRow]; } };
+  const allocationService = {
+    async getAllocatedWorkspaceIds() { return ['ws1']; },
+    async getAllocatedTickets() { return [allocRow]; },
+  };
   const emitted = [];
   const triggerLoop = {
     async emitAgentTrigger(ticket, agentId, role, _source, _by, opts) {
@@ -82,8 +85,9 @@ async function makeSupervisor(SupervisorClass, RegistryClass, { allocRow, output
     // original semantics: the force-escalation gate still turns on hasRecentOutput.
     hasLiveRoleStrand: () => false,
   };
+  // P4c-4: no agentRepo (no Agent table).
   const service = new SupervisorClass(
-    agentRepo, dataSource, allocationService, triggerLoop, agentStatus, noopLog, new RegistryClass(),
+    dataSource, allocationService, triggerLoop, agentStatus, noopLog, new RegistryClass(),
   );
   return { service, emitted, activitySink };
 }
@@ -228,7 +232,7 @@ test('AgentStatusService.recordOutputLiveness round-trips and is keyed by (agent
   // connectivity + instanceRegistry (ticket 1f750878) — inert fakes so
   // isReachable() falls back to status.is_online (identical to the pre-1f750878
   // _emit behavior these output-liveness assertions were written against).
-  const service = new AgentStatusService(agentRepo, dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
+  const service = new AgentStatusService(dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
 
   assert.equal(service.getOutputLivenessAt('a', 't', 'assignee'), undefined, 'unknown strand → undefined');
   const before = Date.now();

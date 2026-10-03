@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 
 const EXECUTABLE_RUNTIMES = new Set([
   'claude',
@@ -15,7 +14,9 @@ export class BackfillAgentRuntimeConfig1760000000067 implements MigrationInterfa
   name = 'BackfillAgentRuntimeConfig1760000000067';
 
   async up(queryRunner: QueryRunner): Promise<void> {
-    const agents = queryRunner.manager.getRepository(Agent);
+    // P4c-4: agents 테이블 없음 — 이 백필의 대상 자체가 존재하지 않는다.
+    if (!(await queryRunner.hasTable('agents'))) return;
+    const agents = queryRunner.manager.getRepository('agents');
     const rows = await agents.find();
     const runtimeHostIds = new Set(
       rows

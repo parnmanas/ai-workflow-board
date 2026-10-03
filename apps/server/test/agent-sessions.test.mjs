@@ -56,12 +56,12 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
   const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-rolf-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-rolf-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude', 'codex', 'pi'], acp_session_clis: ['claude', 'codex'], pid: 4242,
       started_at: new Date().toISOString(),
     }),
@@ -304,10 +304,10 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
   await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instance_id: 'inst-rolf-2', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test', cli: 'claude', cli_adapters: ['claude', 'codex'], acp_session_clis: ['claude', 'codex'], pid: 1, started_at: new Date().toISOString() }),
+    body: JSON.stringify({ instance_id: 'inst-rolf-2', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test', cli: 'claude', cli_adapters: ['claude', 'codex'], acp_session_clis: ['claude', 'codex'], pid: 1, started_at: new Date().toISOString() }),
   });
   const stranger = await createAgent(app, getDataSourceToken, ws.id, { name: 'stranger', type: 'claude' });
   const strangerKey = runtimeHostKeyForAgent(stranger.id);
@@ -337,8 +337,10 @@ test('cli settings: candidates by provider prefix, validation, host listing, req
   assert.equal(mismatch.body.error, 'credential_provider_mismatch');
   const foreign = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: foreignCred.id }) });
   assert.equal(foreign.status, 404);
-  const unknownHost = await call(`${base}/api/agent-sessions/hosts/${agent.id}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
-  assert.equal(unknownHost.status, 404, 'a non-manager agent id is not a host');
+  // P4c-4: 링크된 id 는 Host 로 해소되므로, 404 케이스는 아무데도 없는 id 다.
+  const { randomUUID } = await import('node:crypto');
+  const unknownHost = await call(`${base}/api/agent-sessions/hosts/${randomUUID()}/claude/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
+  assert.equal(unknownHost.status, 404, 'an unknown id is not a host');
   const hermesPut = await call(`${base}/api/agent-sessions/hosts/${managerId}/hermes/settings`, { method: 'PUT', headers, body: JSON.stringify({ credential_id: claudeToken.id }) });
   assert.equal(hermesPut.status, 409);
 
@@ -421,12 +423,12 @@ test('ghost in-flight state is reconciled with the manager answer and cleared wh
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-ghost', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
   const heartbeat = (instanceId) => call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: instanceId, agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4242, started_at: new Date().toISOString(),
     }),
   });
@@ -546,12 +548,12 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-interactive', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
   const heartbeat = (instanceId) => call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: instanceId, agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: instanceId, agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'codex', cli_adapters: ['codex', 'claude'], acp_session_clis: ['codex', 'claude'], pid: 4242, started_at: new Date().toISOString(),
     }),
   });
@@ -689,7 +691,7 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const heartbeatWith = (agentSessions) => call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-interactive-2', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-interactive-2', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'codex', cli_adapters: ['codex', 'claude'], acp_session_clis: ['codex', 'claude'], pid: 4242, started_at: new Date().toISOString(),
       ...(agentSessions !== undefined ? { agent_sessions: agentSessions } : {}),
     }),
@@ -831,14 +833,14 @@ test('세션 CLI 설정: 세션을 연 적 없는 호스트×CLI 도 하트비�
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
 
   // 매니저가 CLI별 모델 목록을 보고한다. 세션은 아직 한 번도 연 적이 없다.
   await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST',
     headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      instance_id: 'inst-models', agent_id: managerId, mode: 'manager', hostname: 'rolf',
+      instance_id: 'inst-models', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf',
       plugin_version: 'test', cli: 'mixed', cli_adapters: ['claude', 'opencode'],
       acp_session_clis: ['claude', 'opencode'], pid: 1, started_at: new Date().toISOString(),
       available_models: { claude: ['opus', 'sonnet'], opencode: ['opencode/big-pickle'] },
@@ -904,7 +906,7 @@ test('세션 CLI 설정: ACP 캐시가 있어도 하트비트가 더 아는 모�
     method: 'POST',
     headers: { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      instance_id: 'inst-union', agent_id: managerId, mode: 'manager', hostname: 'ralf',
+      instance_id: 'inst-union', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf',
       plugin_version: 'test', cli: 'mixed', cli_adapters: ['opencode'], acp_session_clis: ['opencode'],
       pid: 1, started_at: new Date().toISOString(),
       available_models: { opencode: ['opencode/big-pickle', 'opencode-go/glm-5.3'] },
@@ -943,12 +945,12 @@ test('server restart: reading the session re-claims the driver so the live strea
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-redriver', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
   assert.ok((await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-redriver', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-redriver', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4243, started_at: new Date().toISOString(),
     }),
   })).status < 300, 'manager registered');
@@ -1028,7 +1030,7 @@ test('local image: 경로를 매니저에 묻고 바이트를 그 mime 으로, �
   const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-li-1', agent_id: managerId, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
+      instance_id: 'inst-li-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
       cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 4243, started_at: new Date().toISOString(),
     }),
   });
@@ -1095,7 +1097,7 @@ test('prompt with images forwards bytes to the manager; bad input is rejected wi
   const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-pi-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-pi-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4244, started_at: new Date().toISOString(),
     }),
   });

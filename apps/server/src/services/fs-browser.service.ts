@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Agent } from '../entities/Agent';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { resolveCallerIdentityRow } from '../modules/mcp/shared/authz';
 import { activityEvents } from './activity.service';
 import { LogService } from './log.service';
 
@@ -123,7 +123,7 @@ export class FsBrowserService {
   private readonly pending = new Map<string, PendingRequest>();
 
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
 
@@ -132,9 +132,10 @@ export class FsBrowserService {
     op: FsOp,
     args: { path?: string; offset?: number; limit?: number; name?: string },
   ): Promise<FsPluginResponse> {
-    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+    // P4c-4: Host/링크 해소 (Agent 행 없음, online 비트 없음 — 라우팅
+    // 실패는 아래 reverse-RPC 타임아웃이 그대로 돌려준다).
+    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
     if (!agent) throw new Error('Agent not found');
-    if (!agent.is_online) throw new Error('Agent offline');
 
     if (this.pending.size >= MAX_PENDING) {
       throw new Error('Too many in-flight fs requests; try again shortly');

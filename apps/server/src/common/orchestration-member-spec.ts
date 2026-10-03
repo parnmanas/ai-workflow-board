@@ -6,7 +6,8 @@
  * and it hid the only axis that actually matters when you spread a mission over
  * several machines: **which host, which CLI, which model, which folder**. A team
  * slot is now declared by exactly that tuple, and AWB provisions the backing
- * Agent identity itself (see OrchestrationAgentProvisionerService).
+ * Agent identity itself — slots are addressed by runtime identity key (see
+ * common/runtime-spec.ts runtimeIdentityKey); no Agent row is created.
  *
  * Why a backing Agent row still exists: every execution contract downstream of
  * the team is keyed on an Agent identity — the `agent_trigger` / `chat_room_message`

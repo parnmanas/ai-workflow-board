@@ -23,6 +23,7 @@ import { HardBudgetConfigSchema, serializeHardBudgetConfig } from '../../../comm
 import { ClonePolicySchema, serializeClonePolicy } from '../../../common/clone-policy';
 import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
+import { resolveCallerDisplayName } from '../shared/ticket-helpers';
 import { callerCanAccessWorkspace, requireWorkspaceScopedFullAccess } from '../shared/authz';
 import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
 import type { ToolContext } from './context';
@@ -264,7 +265,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
               old_value: String(oldVal),
               new_value: String(newVal),
               actor_id: caller?.agentId || '',
-              actor_name: caller?.agentName || '',
+              // P4c-4: agent_id 키 세션은 agentName 이 비어 있다 — Host/링크로 해소한다.
+              actor_name: await resolveCallerDisplayName(dataSource, caller),
               trigger_source: 'mcp',
             }));
           }

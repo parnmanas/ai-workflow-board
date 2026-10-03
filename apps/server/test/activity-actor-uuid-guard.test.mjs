@@ -41,10 +41,13 @@ function fakeAgentRepo(captured) {
   };
 }
 
+// P4c-4: scope 는 getRepository 를 가진 DataSource/EntityManager 다 (Agent repo 직접 전달 불가).
+const asScope = (repo) => ({ getRepository: () => repo });
+
 test('resolveAgentDisplayNamesByIds filters non-UUID actor ids before the Agent.id IN query', async () => {
   const captured = [];
   const repo = fakeAgentRepo(captured);
-  const map = await resolveAgentDisplayNamesByIds(repo, [
+  const map = await resolveAgentDisplayNamesByIds(asScope(repo), [
     'system', 'auto-advance', 'manual by Parn', '', null, undefined, AGENT_UUID,
   ]);
 
@@ -62,7 +65,7 @@ test('resolveAgentDisplayNamesByIds filters non-UUID actor ids before the Agent.
 test('all-non-uuid ids → empty map, no DB query at all (no throw)', async () => {
   const captured = [];
   const repo = fakeAgentRepo(captured);
-  const map = await resolveAgentDisplayNamesByIds(repo, ['system', '', 'auto-advance']);
+  const map = await resolveAgentDisplayNamesByIds(asScope(repo), ['system', '', 'auto-advance']);
   assert.equal(map.size, 0, 'no agents to resolve');
   assert.equal(captured.length, 0, 'short-circuits before hitting the DB when nothing is uuid-shaped');
 });
@@ -85,7 +88,21 @@ function pgLikeSingleAgentRepo(calls) {
       }
       return id === AGENT_UUID ? { id, name: 'Bob', manager_agent_id: null } : null;
     },
-    async find() { return []; },
+    // P4c-4: 단일 조회도 hostNameById 의 find(In) 경로를 탄다 — 같은 pg 엄격함으로 답한다.
+    // ApiKey 조회는 where 배열(OR 분기)이라 분기마다 agent_id/host_id 를 꺼낸다.
+    async find(opts) {
+      const unwrap = (v) => (v && typeof v === 'object' && 'value' in v ? v.value : v);
+      const wheres = Array.isArray(opts?.where) ? opts.where : [opts?.where];
+      const ids = wheres.flatMap((w) => [unwrap(w?.id), unwrap(w?.agent_id), unwrap(w?.host_id)]
+        .flatMap((v) => (Array.isArray(v) ? v : [v]))
+        .filter((v) => v !== undefined));
+      for (const id of ids) {
+        if (!UUID_SHAPE.test(String(id ?? ''))) {
+          throw new Error(`invalid input syntax for type uuid: "${id}"`);
+        }
+      }
+      return ids.filter((id) => id === AGENT_UUID).map((id) => ({ id, name: 'Bob' }));
+    },
   };
 }
 
@@ -96,20 +113,34 @@ test('resolveAgentDisplayName 은 비-uuid actor id 를 쿼리 전에 걸러낸�
   // 티켓에 실측으로 기록된 세 sentinel. 전부 쿼리 없이 null 이어야 한다.
   for (const sentinel of ['system', 'auto-advance', 'test-user']) {
     assert.equal(
-      await resolveAgentDisplayName(repo, sentinel), null,
+      await resolveAgentDisplayName(asScope(repo), sentinel), null,
       `'${sentinel}' 는 Agent 가 아니므로 null 이어야 한다`,
     );
   }
   // 'manual by …' 류 라벨과 빈 값도 같은 취급.
-  assert.equal(await resolveAgentDisplayName(repo, 'manual by Parn'), null);
-  assert.equal(await resolveAgentDisplayName(repo, ''), null);
+  assert.equal(await resolveAgentDisplayName(asScope(repo), 'manual by Parn'), null);
+  assert.equal(await resolveAgentDisplayName(asScope(repo), ''), null);
 
   assert.deepEqual(calls, [], 'findOne 이 한 번도 호출되지 않았다 (가드가 쿼리 앞에 선다)');
 });
 
 test('resolveAgentDisplayName 의 실제 agent uuid 는 그대로 조회된다 (가드가 공허하지 않다)', async () => {
   const calls = [];
+  const lookedUp = [];
   const repo = pgLikeSingleAgentRepo(calls);
-  assert.equal(await resolveAgentDisplayName(repo, AGENT_UUID), 'Bob');
-  assert.deepEqual(calls, [AGENT_UUID], 'uuid 모양 id 는 가드를 통과해 조회된다');
+  // P4c-4: 단일 조회도 find(In) 경로다 — findOne 호출이 아니라 find 도달로 단언한다.
+  const tracking = new Proxy(repo, {
+    get(t, prop) {
+      if (prop === 'find') {
+        return async (opts) => {
+          lookedUp.push(opts);
+          return t.find(opts);
+        };
+      }
+      const v = t[prop];
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+  });
+  assert.equal(await resolveAgentDisplayName({ getRepository: () => tracking }, AGENT_UUID), 'Bob');
+  assert.ok(lookedUp.length > 0, 'uuid 모양 id 는 가드를 통과해 조회된다');
 });

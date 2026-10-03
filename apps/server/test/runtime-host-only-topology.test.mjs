@@ -38,17 +38,9 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
     type: 'claude',
     hosted: false,
   });
-  const dataSource = app.get(getDataSourceToken());
-  await dataSource.getRepository('Agent').update(
-    { id: hosted.id },
-    {
-      manager_agent_id: manager.id,
-      runtime_config: {
-        strategy: 'single',
-        permission_mode: 'approve',
-      },
-    },
-  );
+  // P4c-4: Agent 테이블 없음 — hosted 정체성은 synthetic id 그 자체다.
+  // 매니저 heartbeat 의 agent_ids 에 실리면 감독 대상으로 잡힌다.
+  void hosted;
 
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
     workspaceId: workspace.id,
@@ -94,6 +86,7 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
       body: JSON.stringify({
         instance_id: 'runtime-host',
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
         mode: 'manager',
         hostname: 'host',
         plugin_version: 'test',
@@ -125,7 +118,8 @@ test('only Runtime Hosts can advertise execution presence or receive dispatch st
   const spawn = await app
     .get(AgentManagerCommandService)
     .issueSpawnAgent(detached.id, 'test');
-  assert.deepEqual(spawn, { ok: false, reason: 'runtime_host_required' });
+  // P4c-4: Host 바인딩 없는 synthetic identity 는 Host/link 해소 자체가 안 된다.
+  assert.deepEqual(spawn, { ok: false, reason: 'agent_not_found' });
 
   const admin = await createUser(app, getDataSourceToken, {
     name: 'runtime-admin',

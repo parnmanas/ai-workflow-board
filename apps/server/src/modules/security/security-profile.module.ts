@@ -8,7 +8,7 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -34,7 +34,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SecurityProfile, SecurityRun, SecurityRunBatch, SecuritySchedule, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, Agent, Board, BoardColumn, Ticket, Comment, Resource]),
+    TypeOrmModule.forFeature([SecurityProfile, SecurityRun, SecurityRunBatch, SecuritySchedule, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Board, BoardColumn, Ticket, Comment, Resource]),
     ChatRoomsModule,
     WorkspaceRolesModule,
     SharedServicesModule,

@@ -36,7 +36,7 @@ const { buildDataSourceOptions } = await import(modPath('db.js'));
 const { DataSource } = await import('typeorm');
 const { Ticket } = await import(modPath('entities', 'Ticket.js'));
 const { Comment } = await import(modPath('entities', 'Comment.js'));
-const { Agent } = await import(modPath('entities', 'Agent.js'));
+const { RuntimeHost } = await import(modPath('entities', 'RuntimeHost.js')); // P4c-4
 const { ActivityLog } = await import(modPath('entities', 'ActivityLog.js'));
 const { ActivityService, activityEvents } = await import(modPath('services', 'activity.service.js'));
 const { registerCommentTools } = await import(modPath('modules', 'mcp', 'tools', 'comment-tools.js'));
@@ -45,9 +45,9 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const ticketRepo = ds.getRepository(Ticket);
-const agentRepo = ds.getRepository(Agent);
+const agentRepo = ds.getRepository(RuntimeHost); // P4c-4: 멘션 타겟 해소는 Host 행이다
 
 after(async () => {
   await ds.destroy();
@@ -58,7 +58,7 @@ async function makeTicket(overrides = {}) {
   return ticketRepo.save(ticketRepo.create({ title: 'T', workspace_id: 'w1', pending_user_action: false, ...overrides }));
 }
 async function makeAgent(overrides = {}) {
-  return agentRepo.save(agentRepo.create({ name: 'Mentioned Agent', workspace_id: 'w1', type: 'subagent', ...overrides }));
+  return agentRepo.save(agentRepo.create({ name: 'Mentioned Host', hostname: 'mention-test', workspace_id: 'w1', ...overrides }));
 }
 function parse(res) {
   return JSON.parse(res.content[0].text);

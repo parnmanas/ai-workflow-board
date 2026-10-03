@@ -39,8 +39,8 @@ export class OrchestrationTeamMember {
   /**
    * The backing Agent identity this slot dispatches to. Since the roster became
    * spec-declared it is an OUTPUT, not an input: the operator picks Runtime Host
-   * / CLI / model / working folder and OrchestrationAgentProvisionerService
-   * creates (or updates) the Agent row, writing its id back here. Everything
+   * / CLI / model / working folder. The runtime identity key
+   * (runtimeIdentityKey of `spec`) is written back here. Everything
    * downstream — SSE scope, MCP api key, ChatRoomParticipant, dispatch — keeps
    * reading this exact field, which is why the refactor needed no changes there.
    */

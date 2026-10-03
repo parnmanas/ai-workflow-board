@@ -97,7 +97,8 @@ export class BackfillGlobalClaudeBackendProfiles1760000000066 implements Migrati
       // 옮겨야 원래 payload 를 계속 가리킨다.
       for (const [legacyId, globalId] of idMap) {
         if (legacyId === globalId) continue;
-        for (const table of ['boards', 'agents', 'tickets']) {
+        // P4c-4: agents 테이블 없음 (핀도 DropAgentTable 과 함께 소멸).
+        for (const table of ['boards', 'tickets']) {
           await queryRunner.manager.createQueryBuilder()
             .update(table)
             .set({ cli_runtime_profile: globalId })

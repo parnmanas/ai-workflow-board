@@ -43,6 +43,14 @@ export class QaScenario {
   @Column({ type: 'varchar' })
   target_agent_id: string;
 
+  /**
+   * Snapshot of the target's runtime at save time (P2c dual-write).
+   * `target_agent_id`와 항상 함께 쓴다. P4에서 dispatch가 이쪽을 읽으면
+   * `target_agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  target_runtime: Record<string, any> | null;
+
   // Which driver/MCP set validates the feature, e.g. 'browser', 'game-client',
   // 'http-api'. Free-text so new drivers don't require a schema change.
   @Column({ type: 'varchar', default: '' })

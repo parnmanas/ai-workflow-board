@@ -7,7 +7,6 @@ import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from 
 import { base64ToBlob, formatBytes, isImageMime, isVideoMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';
-import AgentRefCard from './AgentRefCard';
 import BoardRefCard from './BoardRefCard';
 import TicketUnpendActionCard from './TicketUnpendActionCard';
 
@@ -367,18 +366,8 @@ export default function MessageList({ messages, participantCount, participants =
                 ))}
               </div>
             )}
-            {/* F-3 (ticket 3ca88253): agent 상태 카드. 다른 refs 채널과 독립적으로
-             *  방출되므로 별도 블록으로 렌더한다. */}
-            {Array.isArray(msg.metadata?.agent_refs) && msg.metadata!.agent_refs!.length > 0 && (
-              <div
-                data-agent-refs=""
-                style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}
-              >
-                {msg.metadata!.agent_refs!.map((ref, idx) => (
-                  <AgentRefCard key={`${ref.agent_id}:${idx}`} id={ref.agent_id} name={ref.name} />
-                ))}
-              </div>
-            )}
+            {/* P4c-4: agent_refs 채널 제거 (get_agent 삭제로 방출 중단) — 구 메시지
+             *  호환용으로 블록 자체를 렌더하지 않는다. */}
             {/* F-3 (ticket 3ca88253): 보드 현황 카드. 다른 refs 채널과 독립적으로
              *  방출되므로 별도 블록으로 렌더한다. */}
             {Array.isArray(msg.metadata?.board_refs) && msg.metadata!.board_refs!.length > 0 && (

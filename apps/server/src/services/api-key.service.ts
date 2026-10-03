@@ -31,6 +31,7 @@ export class ApiKeyService {
   async createApiKey(params: {
     name: string;
     agent_id?: string | null;
+    host_id?: string | null;
     scope?: string;
     expires_at?: Date | null;
     workspace_id?: string;
@@ -43,6 +44,7 @@ export class ApiKeyService {
       key: this.hashKey(rawKey),
       key_prefix: this.maskKey(rawKey),
       agent_id: params.agent_id ?? null,
+      host_id: params.host_id ?? null,
       scope: params.scope || 'full',
       expires_at: params.expires_at ?? null,
       workspace_id: params.workspace_id || '',
@@ -57,10 +59,10 @@ export class ApiKeyService {
 
   async listApiKeys(workspaceId?: string) {
     const where = workspaceId ? { workspace_id: workspaceId } : {};
+    // P4c-4: Agent relation 삭제 — join 없음 (표시는 agent_id/host_id 스칼라).
     const keys = await this.repo.find({
       where,
       order: { created_at: 'DESC' },
-      relations: ['agent'],
     });
     return keys.map(({ key, ...rest }) => ({
       ...rest,
@@ -69,7 +71,7 @@ export class ApiKeyService {
   }
 
   async getApiKey(id: string) {
-    const found = await this.repo.findOne({ where: { id }, relations: ['agent'] });
+    const found = await this.repo.findOne({ where: { id } });
     if (!found) return null;
     const { key, ...rest } = found;
     return { ...rest, key_masked: rest.key_prefix || '' };
@@ -131,6 +133,26 @@ export class ApiKeyService {
     return result.affected ?? 0;
   }
 
+  /**
+   * P4c-2a: hard-delete provisioning-path rows for one runtime identity.
+   * Mirrors deleteApiKeysByAgentAndNamePrefix (same unbounded-growth reason —
+   * every rotation mints a row) but keyed by host_id instead of agent_id.
+   * Matches by key SUFFIX (`%:<key>`) because the display label in the
+   * middle may change between rotations (P4c-4).
+   */
+  async deleteApiKeysByHostAndNamePrefix(hostId: string, key: string, workspaceId?: string): Promise<number> {
+    const query = this.repo
+      .createQueryBuilder()
+      .delete()
+      .where('host_id = :host_id AND name LIKE :suffix', {
+        host_id: hostId,
+        suffix: `%:${key}`,
+      });
+    if (workspaceId !== undefined) query.andWhere('workspace_id = :workspace_id', { workspace_id: workspaceId });
+    const result = await query.execute();
+    return result.affected ?? 0;
+  }
+
   async deleteApiKey(id: string): Promise<boolean> {
     const result = await this.repo.delete(id);
     return (result.affected ?? 0) > 0;
@@ -142,6 +164,7 @@ export class ApiKeyService {
     is_active?: number;
     expires_at?: Date | null;
     agent_id?: string | null;
+    host_id?: string | null;
   }) {
     const found = await this.repo.findOne({ where: { id } });
     if (!found) return null;
@@ -151,6 +174,7 @@ export class ApiKeyService {
     if (updates.is_active !== undefined) found.is_active = updates.is_active;
     if (updates.expires_at !== undefined) found.expires_at = updates.expires_at;
     if (updates.agent_id !== undefined) found.agent_id = updates.agent_id;
+    if (updates.host_id !== undefined) found.host_id = updates.host_id;
 
     const saved = await this.repo.save(found);
     const { key, ...rest } = saved;
@@ -159,9 +183,9 @@ export class ApiKeyService {
 
   async validateApiKey(rawKey: string): Promise<{ valid: boolean; reason?: string; apiKey?: ApiKey }> {
     // Look up by hash of the presented key — the raw key is never stored.
+    // P4c-4: agent relation 제거 (Agent 테이블 없음).
     const found = await this.repo.findOne({
       where: { key: this.hashKey(rawKey) },
-      relations: ['agent'],
     });
 
     if (!found) return { valid: false, reason: 'Key not found' };

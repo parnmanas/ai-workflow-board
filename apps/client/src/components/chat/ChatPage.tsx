@@ -730,7 +730,8 @@ export default function ChatPage() {
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
-    api.getAgentDashboard(workspaceId).then((agents) => { if (!cancelled) setDashboardAgents(agents); }).catch(() => { if (!cancelled) setDashboardAgents([]); });
+    // P4c-4: Agent 대시보드 제거 — 빈 목록 (DM 상대 task unknown).
+    setDashboardAgents([]);
     return () => { cancelled = true; };
   }, [workspaceId]);
 

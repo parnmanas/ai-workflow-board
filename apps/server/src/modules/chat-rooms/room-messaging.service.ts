@@ -4,7 +4,6 @@ import { Repository, IsNull, In, DataSource } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
-import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
@@ -26,6 +25,8 @@ import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability, checkManagerCapabilityForDispatch } from '../../common/manager-capability-gate';
+import { isRuntimeIdentityKey } from '../../common/runtime-spec';
+import { resolveMentionTarget } from '../../common/mention-dispatch-profile';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 
 const CONTENT_MAX = 10000;
@@ -225,8 +226,6 @@ export class RoomMessagingService {
     @InjectRepository(ChatRoomMessage)
     private readonly messageRepo: Repository<ChatRoomMessage>,
 
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
 
     @InjectRepository(Ticket)
     private readonly ticketRepo: Repository<Ticket>,
@@ -519,7 +518,7 @@ export class RoomMessagingService {
     // bare and prefixed names. Centralizing here keeps every entry point
     // (REST, agent-api ack, MCP send_chat_room_message, Actions) consistent.
     if (senderType === 'agent') {
-      const display = await resolveAgentDisplayName(this.agentRepo, senderId);
+      const display = await resolveAgentDisplayName(this.dataSource, senderId);
       if (display) senderName = display;
     }
 
@@ -729,10 +728,16 @@ export class RoomMessagingService {
     // 노출되어야 하고, 배제되는 건 "이 턴에 dispatch 후보가 될 자격"뿐이다.
     let cliRuntimeProfiles: Record<string, CliRuntimeProfile> | undefined;
     let broadcastAgentMemberIds = agentMemberIds;
+    // P4c-2b: 스냅샷 보유 agent 참가자의 runtime 맵 (비어 있으면 생략) — profile
+    // 해소가 먼저 읽는다.
+    const agentMemberRuntimes = isRealMessage && agentMemberIds.size > 0
+      ? await this.membership.getRoomAgentRuntimeSpecs(roomId)
+      : {};
     if (isRealMessage && agentMemberIds.size > 0) {
       const { profiles, incompatibleAgentIds } = await this._resolveChatRuntimeProfilesForMembers(
         Array.from(agentMemberIds),
         workspaceId,
+        agentMemberRuntimes,
       );
       if (Object.keys(profiles).length > 0) cliRuntimeProfiles = profiles;
       if (incompatibleAgentIds.length > 0) {
@@ -748,6 +753,17 @@ export class RoomMessagingService {
     // Progress rows are excluded from the lookback inside _computeAgentChainDepth
     // so a chatty tool-narration burst never inflates the chain.
     const agentChainDepth = await this._computeAgentChainDepth(roomId);
+
+    // ticket 9e2fc33d: capability 비호환으로 agent_member_ids 에서 빠진 멤버는
+    // runtime 맵에서도 함께 뺀다 — 맵에 남으면 구버전 매니저가 자기 멤버 spec 을
+    // 읽고 profile 없이 dispatch 를 강행한다 (map-없음 폴백 회귀).
+    let broadcastMemberRuntimes = agentMemberRuntimes;
+    if (broadcastAgentMemberIds !== agentMemberIds) {
+      broadcastMemberRuntimes = Object.fromEntries(
+        Object.entries(agentMemberRuntimes).filter(([id]) => broadcastAgentMemberIds.has(id)),
+      );
+    }
+    const hasMemberRuntimes = Object.keys(broadcastMemberRuntimes).length > 0;
 
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
@@ -771,6 +787,8 @@ export class RoomMessagingService {
       ...(explicitDispatchAgentIds.length > 0
         ? { dispatch_agent_ids: explicitDispatchAgentIds }
         : {}),
+      // P4c-2b: 조건부 동봉 — 스냅샷 없는 방은 키 자체가 없다.
+      ...(hasMemberRuntimes ? { agent_member_runtimes: broadcastMemberRuntimes } : {}),
       // ticket e6d32e9d: signal Action Run rooms so the agent-manager gives the
       // subagent "do the work directly" instructions instead of the chat
       // "create a ticket" rule. True whenever the room carries an action_id.
@@ -879,6 +897,10 @@ export class RoomMessagingService {
 
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
+    // P4c-2b: system alert 방도 스냅샷 보유 멤버의 runtime 맵을 동봉한다.
+    const sysMemberRuntimes = agentMemberIds.size > 0
+      ? await this.membership.getRoomAgentRuntimeSpecs(roomId)
+      : {};
 
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
@@ -900,6 +922,8 @@ export class RoomMessagingService {
       agent_chain_depth: 0,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+      // P4c-2b: 조건부 동봉 (위 main emit과 동일).
+      ...(Object.keys(sysMemberRuntimes).length > 0 ? { agent_member_runtimes: sysMemberRuntimes } : {}),
       // ticket e6d32e9d: keep the Action-room signal consistent across both
       // chat_room_message emits. A system alert posted into an Action room
       // still carries the action_id so any responder gets the right prompt.
@@ -1234,21 +1258,6 @@ export class RoomMessagingService {
    * silently handed to the wire — skip (with a warn log) instead of
    * dispatching a chat turn agent-manager cannot actually honor.
    */
-  private async _resolveChatRuntimeProfile(
-    agent: Agent,
-    workspaceId: string,
-  ): Promise<CliRuntimeProfile | null> {
-    if (!cliDescriptor(agent.type)?.sessions.backend_profile) return null;
-    try {
-      return await this._resolveChatRuntimeProfileCore(agent);
-    } catch (err) {
-      this.logService.error('ChatRooms', 'Claude backend profile 해석 실패로 채팅 디스패치를 중단합니다', {
-        err: String(err), agent_id: agent.id,
-      });
-      throw err;
-    }
-  }
-
   /**
    * chat_room_message broadcast(ticket 7d8ea7c9 review round 1)를 위한
    * _resolveChatRuntimeProfile의 배치 버전. 그룹방은 모든 멤버에게
@@ -1275,63 +1284,122 @@ export class RoomMessagingService {
    * (_checkManagerCapability)가 dispatch 자체를 거부하는 것과 동일한 효과를
    * 팬아웃 구조에 맞게 낸다. 다른 멤버는 영향받지 않고 정상 응답한다.
    */
+  // P4c-4: 멤버별 backend profile 은 참가자 스냅샷의 cli/cli_runtime_profile/
+  // credential_id 에서 읽는다 (Agent 행 없음). claude 계열 CLI 에 backend 가
+  // 있는 멤버만 대상이다.
+  /**
+   * DM/chat_request 단건 경로의 backend profile 해석 (티켓 7d8ea7c9, P4c-4).
+   * 참가자 스냅샷 spec 의 cli_runtime_profile(id 문자열)을 레지스트리에서
+   * 해석해 매니저가 파싱 가능한 객체로 돌려준다 — id 문자열을 그대로 보내면
+   * 매니저 parseRuntimeProfile 이 drop 한다 ("expected an object").
+   *  - spec 없음/값 없음, backend_profile 을 모르는 CLI → { profile: null }
+   *    (전송 생략, 디스패치는 진행)
+   *  - id 미해석/credential 불일치 → { profile: null } + warn (생략, 진행)
+   *  - capability 비호환 → { blocked: systemMessage } (전송 중단)
+   *  - 레지스트리 행 파싱 실패(zod throw) → throw (전송 중단, 기존 계약 유지)
+   */
+  private async _resolveDmBackendProfile(
+    spec: Record<string, any> | null | undefined,
+    _roomId: string,
+    _workspaceId: string,
+  ): Promise<{ profile: CliRuntimeProfile | null; blocked: string | null }> {
+    const raw = (spec?.cli_runtime_profile ?? null) as string | null;
+    if (!raw) return { profile: null, blocked: null };
+    if (!cliDescriptor(String(spec?.cli || ''))?.sessions.backend_profile) {
+      return { profile: null, blocked: null };
+    }
+    let profile: CliRuntimeProfile | null;
+    try {
+      profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, [
+        { source: 'agent', value: raw },
+      ]);
+    } catch (err) {
+      // 해석 실패를 profile 미지정으로 축약하지 않는다 — 디스패치를 중단하고
+      // 원인을 기록한다 (티켓 7d8ea7c9 기존 계약 유지).
+      this.logService.error('ChatRooms', 'DM backend profile 해석 실패로 디스패치를 중단합니다', {
+        err: String(err), profile_id: raw,
+      });
+      throw err;
+    }
+    if (!profile) {
+      this.logService.warn(
+        'ChatRooms',
+        `DM 대상의 backend profile "${raw}" 을(를) 해석할 수 없어 프로필 없이 전달합니다`,
+      );
+      return { profile: null, blocked: null };
+    }
+    if (profile.credential_required && profile.credential_ref !== (spec?.credential_id ?? null)) {
+      this.logService.warn(
+        'ChatRooms',
+        `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
+          'but the member does not have it selected — dispatching without a runtime profile',
+      );
+      return { profile: null, blocked: null };
+    }
+    const capability = requiredManagerCapability(profile);
+    if (capability) {
+      const instances = this.instanceRegistry?.listForAgent(String(spec?.manager_agent_id || '')) ?? [];
+      const verdict = evaluateManagerCapability(instances, capability);
+      if (!verdict.ok) {
+        this.logService.warn('ChatRooms', 'DM suppressed (manager capability mismatch)', {
+          profile_id: profile.id, reason: verdict.reason, detail: verdict.detail,
+        });
+        return {
+          profile: null,
+          blocked: `⚠️ DM을 전달할 수 없습니다 — ${verdict.detail} ` +
+            '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.',
+        };
+      }
+    }
+    return { profile, blocked: null };
+  }
+
   private async _resolveChatRuntimeProfilesForMembers(
     agentIds: string[],
     workspaceId: string,
+    specs: Record<string, Record<string, any>>,
   ): Promise<{ profiles: Record<string, CliRuntimeProfile>; incompatibleAgentIds: string[] }> {
     const profiles: Record<string, CliRuntimeProfile> = {};
     const incompatibleAgentIds: string[] = [];
     if (agentIds.length === 0) return { profiles, incompatibleAgentIds };
-    const agents = await this.agentRepo.find({ where: { id: In(agentIds), type: 'claude' } });
-    if (agents.length === 0) return { profiles, incompatibleAgentIds };
-    for (const agent of agents) {
+    void workspaceId;
+    for (const id of agentIds) {
+      const spec = specs[id];
+      if (!spec || typeof spec !== 'object') continue;
+      if (!cliDescriptor(String(spec.cli || ''))?.sessions.backend_profile) continue;
       try {
-        const profile = await this._resolveChatRuntimeProfileCore(agent);
+        const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, [
+          { source: 'agent', value: (spec.cli_runtime_profile as string | null) ?? null },
+        ]);
         if (!profile) continue;
-        const instances = this.instanceRegistry?.listForAgent(agent.id) ?? [];
-        const verdict = checkManagerCapabilityForDispatch(profile, instances);
-        if (!verdict.ok) {
-          incompatibleAgentIds.push(agent.id);
+        if (profile.credential_required && profile.credential_ref !== (spec.credential_id ?? null)) {
           this.logService.warn(
             'ChatRooms',
-            'chat_room_message broadcast profile dropped (manager capability mismatch)',
-            { agent_id: agent.id, profile_id: profile.id, reason: verdict.reason, detail: verdict.detail },
+            `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
+              `but member ${id} does not have it selected — dispatching without a runtime profile`,
           );
           continue;
         }
-        profiles[agent.id] = profile;
+        const instances = this.instanceRegistry?.listForAgent(String(spec.manager_agent_id || '')) ?? [];
+        const verdict = checkManagerCapabilityForDispatch(profile, instances);
+        if (!verdict.ok) {
+          incompatibleAgentIds.push(id);
+          this.logService.warn(
+            'ChatRooms',
+            'chat_room_message broadcast profile dropped (manager capability mismatch)',
+            { agent_id: id, profile_id: profile.id, reason: verdict.reason, detail: verdict.detail },
+          );
+          continue;
+        }
+        profiles[id] = profile;
       } catch (err) {
-        incompatibleAgentIds.push(agent.id);
+        incompatibleAgentIds.push(id);
         this.logService.error('ChatRooms', 'Claude backend profile 해석 실패로 그룹 채팅 대상에서 제외합니다', {
-          err: String(err), agent_id: agent.id,
+          err: String(err), agent_id: id,
         });
       }
     }
     return { profiles, incompatibleAgentIds };
-  }
-
-  /** 단일 agent 경로(_resolveChatRuntimeProfile)와 배치 경로
-   *  (_resolveChatRuntimeProfilesForMembers) 둘 다가 공유하는 resolve+
-   *  credential-check 코어 — credential 불일치 warn / null 반환 규칙을
-   *  바꿀 때 두 곳을 따로 고치지 않도록 한 곳에 모았다. 호출자가 이미
-   *  agent.type === 'claude'를 확인하고 `workspace`를 가져온 상태여야
-   *  한다. */
-  private async _resolveChatRuntimeProfileCore(
-    agent: Agent,
-  ): Promise<CliRuntimeProfile | null> {
-    const profile = await resolveClaudeBackendProfileForDispatch(this.dataSource, [
-      { source: 'agent', value: agent.cli_runtime_profile },
-    ]);
-    if (!profile) return null;
-    if (profile.credential_required && profile.credential_ref !== agent.credential_id) {
-      this.logService.warn(
-        'ChatRooms',
-        `Claude backend profile "${profile.id}" requires credential ${profile.credential_ref} ` +
-          `but agent ${agent.id} does not have it selected — dispatching without a runtime profile`,
-      );
-      return null;
-    }
-    return profile;
   }
 
   /**
@@ -1388,26 +1456,98 @@ export class RoomMessagingService {
 
     for (const m of resolved) {
       if (m.type === 'agent') {
-        const agent = await this.agentRepo.findOne({ where: { id: m.id } });
-        if (!agent) continue;
-        // Agent Manager(type='manager')는 절대 chat 대상이 아니다 (ticket 941c72d3) —
-        // 작업하지 않으므로 @멘션을 받아도 chat_request 를 emit 하지 않는다.
-        if (agent.type === 'manager') continue;
-        // Workspace-scope safety: never cross-post a mention into the wrong workspace.
-        if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) continue;
-
-        const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
-        const capabilityError = await this._checkManagerCapability(agent, cliRuntimeProfile);
-        if (capabilityError) {
-          await this.sendSystemMessage(roomId, workspaceId, capabilityError);
+        // P4c-4: spec-direct (rt-) 멘션 — Agent 행 없이 스냅샷으로 dispatch.
+        // 티켓 방은 assignment 스냅샷, 티켓 없는 방은 참가자 행 스냅샷.
+        if (isRuntimeIdentityKey(m.id)) {
+          let rtRuntime: Record<string, any> | null = null;
+          let rtName = m.id.slice(0, 11);
+          let rtRolePrompt = '';
+          let rtProfile: CliRuntimeProfile | null = null;
+          const fromTicket = ticket
+            ? await resolveMentionTarget(this.dataSource, ticket, m.id)
+            : null;
+          if (fromTicket?.runtime) {
+            rtRuntime = { ...fromTicket.runtime };
+            rtName = fromTicket.displayName;
+            rtRolePrompt = fromTicket.rolePrompt;
+            rtProfile = fromTicket.extras.cli_runtime_profile ?? null;
+          } else if (!ticket) {
+            const part = await this.participantRepo.findOne({
+              where: { room_id: roomId, participant_type: 'agent', participant_id: m.id },
+            });
+            const spec = (part as any)?.runtime_spec as Record<string, any> | null;
+            if (spec && typeof spec === 'object') {
+              rtRuntime = { ...spec };
+              rtName = (String(spec.label || '').trim() || m.id.slice(0, 11));
+              rtRolePrompt = (spec.role_prompt as string | undefined) || '';
+              rtProfile = (spec.cli_runtime_profile ?? null) as CliRuntimeProfile | null;
+            }
+          }
+          if (!rtRuntime) continue;
+          const rtCapability = requiredManagerCapability(rtProfile);
+          if (rtCapability) {
+            const rtInstances = this.instanceRegistry?.listForAgent(String((rtRuntime as any).manager_agent_id || '')) ?? [];
+            const rtVerdict = evaluateManagerCapability(rtInstances, rtCapability);
+            if (!rtVerdict.ok) {
+              await this.sendSystemMessage(roomId, workspaceId,
+                `⚠️ **${rtName}**에게 dispatch할 수 없습니다 — ${rtVerdict.detail} ` +
+                '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.');
+              continue;
+            }
+          }
+          activityEvents.emit('chat_request', {
+            agent_id: m.id,
+            runtime: rtRuntime,
+            user_id: senderId,
+            message_id: savedMessage.id,
+            ticket_id: ticket?.id ?? null,
+            role_prompt: rtRolePrompt,
+            new_message: content,
+            history: [],
+            timestamp: ts,
+            mention_depth: 1,
+            room_id: roomId,
+            ...(runProvision ? { run_provision: runProvision } : {}),
+            ...(rtProfile ? { cli_runtime_profile: rtProfile } : {}),
+          });
+          dispatched.add(m.id);
+          this.logService.info(
+            'ChatRooms',
+            `@mention routed to runtime ${rtName} (${m.id}) in room ${roomId}`,
+          );
           continue;
         }
+        // P4c-4: uuid 멘션도 resolveMentionTarget 으로 해소한다 (Host/링크 +
+        // assignment 스냅샷, Agent 행 없음). 해소 불가면 스킵.
+        const legacy = ticket ? await resolveMentionTarget(this.dataSource, ticket, m.id) : null;
+        if (!legacy) continue;
+        // Workspace-scope safety: resolveMentionTarget 은 ticket 스코프
+        // assignment 또는 workspace-less Host/링크에서 해소하므로, ticket 방의
+        // 멘션은 구조적으로 같은 티켓/방 경계 안에 있다. ticket 없는 방의 uuid
+        // 멘션은 위에서 null 로 스킵된다.
+        const cliRuntimeProfile = legacy.extras.cli_runtime_profile ?? null;
+        if (cliRuntimeProfile) {
+          const legacyCapability = requiredManagerCapability(cliRuntimeProfile);
+          if (legacyCapability) {
+            const legacyInstances = this.instanceRegistry?.listForAgent(
+              String((legacy.runtime as any)?.manager_agent_id || ''),
+            ) ?? [];
+            const legacyVerdict = evaluateManagerCapability(legacyInstances, legacyCapability);
+            if (!legacyVerdict.ok) {
+              await this.sendSystemMessage(roomId, workspaceId,
+                `⚠️ **${legacy.displayName}**에게 dispatch할 수 없습니다 — ${legacyVerdict.detail} ` +
+                '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.');
+              continue;
+            }
+          }
+        }
         activityEvents.emit('chat_request', {
-          agent_id: agent.id,
+          agent_id: legacy.agentId,
+          ...(legacy.runtime ? { runtime: { ...legacy.runtime } } : {}),
           user_id: senderId,
           message_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
-          role_prompt: agent.role_prompt || '',
+          role_prompt: legacy.rolePrompt,
           new_message: content,
           history: [],
           timestamp: ts,
@@ -1422,15 +1562,13 @@ export class RoomMessagingService {
           ...(cliRuntimeProfile ? { cli_runtime_profile: cliRuntimeProfile } : {}),
         });
 
-        dispatched.add(agent.id);
+        dispatched.add(legacy.agentId);
         this.logService.info(
           'ChatRooms',
-          `@mention routed to agent ${agent.name} (${agent.id}) in room ${roomId}`,
+          `@mention routed to agent ${legacy.displayName} (${legacy.agentId}) in room ${roomId}`,
         );
-        // Never-started / offline agent (ticket bfdd80b7): the chat_request
-        // above evaporates at zero subscribers with no user signal. Flag it so
-        // AgentAutostartService attempts a spawn and posts a room system message.
-        this._flagUnreachableAgent(agent, roomId, workspaceId);
+        // Never-started / offline agent (ticket bfdd80b7) — autostart 피드백.
+        this._flagUnreachableAgent({ id: legacy.agentId, name: legacy.displayName }, roomId, workspaceId);
       } else {
         // User mention — persist + emit user_mention for sidebar badge sync.
         const row = await this.userMentionRepo.save(this.userMentionRepo.create({
@@ -1502,28 +1640,63 @@ export class RoomMessagingService {
     });
     if (!otherParticipant) return; // DM is user-to-user, not user-to-agent
 
-    // Resolve the agent entity for role_prompt
-    const agent = await this.agentRepo.findOne({ where: { id: otherParticipant.participant_id } });
-    if (!agent) return;
-    // Agent Manager(type='manager')는 절대 chat 대상이 아니다 (ticket 941c72d3) —
-    // 방에 남아있는 manager 참가자에게도 DM auto-route 를 하지 않는다.
-    if (agent.type === 'manager') return;
+    // P4c-4: spec-direct (rt-) DM 상대 — Agent 행 없이 참가자 스냅샷으로 route.
+    if (isRuntimeIdentityKey(otherParticipant.participant_id)) {
+      const rtSpec = (otherParticipant as any).runtime_spec as Record<string, any> | null ?? null;
+      if (!rtSpec || typeof rtSpec !== 'object') return;
+      const { profile: rtProfile, blocked: rtBlocked } = await this._resolveDmBackendProfile(
+        rtSpec, roomId, workspaceId,
+      );
+      if (rtBlocked) {
+        await this.sendSystemMessage(roomId, workspaceId, rtBlocked);
+        return;
+      }
+      const rtName = ((rtSpec.label || '').trim() || otherParticipant.participant_id.slice(0, 11)) as string;
+      activityEvents.emit('chat_request', {
+        agent_id: otherParticipant.participant_id,
+        runtime: { ...rtSpec },
+        user_id: senderId,
+        message_id: savedMessage.id,
+        ticket_id: null,
+        role_prompt: (rtSpec.role_prompt as string | undefined) || '',
+        new_message: content,
+        history: [],
+        timestamp: savedMessage.created_at.toISOString(),
+        mention_depth: 1,
+        room_id: roomId,
+        ...(runProvision ? { run_provision: runProvision } : {}),
+        ...(rtProfile ? { cli_runtime_profile: rtProfile } : {}),
+      });
+      alreadyDispatched.add(otherParticipant.participant_id);
+      this.logService.info('ChatRooms', `DM auto-routed to runtime ${rtName} (${otherParticipant.participant_id}) in room ${roomId}`);
+      return;
+    }
+
+    // P4c-4: 참가자 스냅샷이 정본이다 (Agent 행 없음). uuid 참가자는 Host/링크로
+    // 이름만 해소한다.
+    const participantSpec = (otherParticipant as any).runtime_spec as Record<string, any> | null ?? null;
+    const dmName = await resolveAgentDisplayName(this.dataSource, otherParticipant.participant_id)
+      ?? (participantSpec && String((participantSpec as any).label || '').trim())
+      ?? otherParticipant.participant_id.slice(0, 8);
+    if (!participantSpec && !dmName) return;
 
     // Dedup: skip if @mention already dispatched to this agent
-    if (alreadyDispatched.has(agent.id)) return;
+    if (alreadyDispatched.has(otherParticipant.participant_id)) return;
 
-    const cliRuntimeProfile = await this._resolveChatRuntimeProfile(agent, workspaceId);
-    const capabilityError = await this._checkManagerCapability(agent, cliRuntimeProfile);
-    if (capabilityError) {
-      await this.sendSystemMessage(roomId, workspaceId, capabilityError);
+    const { profile: cliRuntimeProfile, blocked: dmBlocked } = await this._resolveDmBackendProfile(
+      participantSpec, roomId, workspaceId,
+    );
+    if (dmBlocked) {
+      await this.sendSystemMessage(roomId, workspaceId, dmBlocked);
       return;
     }
     activityEvents.emit('chat_request', {
-      agent_id: agent.id,
+      agent_id: otherParticipant.participant_id,
+      ...(participantSpec ? { runtime: { ...participantSpec } } : {}),
       user_id: senderId,
       message_id: savedMessage.id,
       ticket_id: null,
-      role_prompt: agent.role_prompt || '',
+      role_prompt: (participantSpec?.role_prompt as string | undefined) || '',
       new_message: content,
       history: [],
       timestamp: savedMessage.created_at.toISOString(),
@@ -1533,12 +1706,12 @@ export class RoomMessagingService {
       ...(runProvision ? { run_provision: runProvision } : {}),
       ...(cliRuntimeProfile ? { cli_runtime_profile: cliRuntimeProfile } : {}),
     });
-    alreadyDispatched.add(agent.id);
+    alreadyDispatched.add(otherParticipant.participant_id);
 
-    this.logService.info('ChatRooms', `DM auto-routed to agent ${agent.name} (${agent.id}) in room ${roomId}`);
+    this.logService.info('ChatRooms', `DM auto-routed to agent ${dmName} (${otherParticipant.participant_id}) in room ${roomId}`);
     // Never-started / offline agent (ticket bfdd80b7) — same flag as the
     // @mention path so a DM to a not-started agent gets feedback + auto-start.
-    this._flagUnreachableAgent(agent, roomId, workspaceId);
+    this._flagUnreachableAgent({ id: otherParticipant.participant_id, name: dmName }, roomId, workspaceId);
   }
 
   /**
@@ -1550,7 +1723,7 @@ export class RoomMessagingService {
    * pre-filter here; the hub is the authority, so a false pre-filter is a no-op
    * there (it finds the agent reachable and does nothing).
    */
-  private _flagUnreachableAgent(agent: Agent, roomId: string, workspaceId: string): void {
+  private _flagUnreachableAgent(agent: { id: string; name: string }, roomId: string, workspaceId: string): void {
     // Reachable only through a live Runtime Host delivery session. A persisted
     // heartbeat bit alone does not authorize execution.
     if (this.connectivity.isReachable(agent.id)) return;
@@ -1562,44 +1735,6 @@ export class RoomMessagingService {
       source: 'chat',
     };
     activityEvents.emit(AGENT_AUTOSTART_REQUESTED, evt);
-  }
-
-  /**
-   * Manager dispatch-capability gate (ticket c3b767c6) — the chat-side twin of
-   * TriggerLoopService._checkManagerCapabilityGate. This is the path the
-   * source incident actually hit: a resolved profile with `context_window`
-   * set silently got no clamp from a stale manager on a separate host, which
-   * requested the CLI's fixed default output budget and reproduced the same
-   * vLLM context-overflow hang+500 the profile fix was meant to prevent —
-   * with no signal in the room beyond a chat message that never got a reply.
-   *
-   * Unlike the credential mismatch a few lines above this method's call
-   * sites (which safely drops the profile and dispatches WITHOUT it — falling
-   * back to the default Anthropic endpoint is a fine substitute when a
-   * credential is missing), a capability mismatch must NOT fall back to
-   * dropping the profile: the configured backend is the only one this agent
-   * can reach, so silently switching away from it is worse than failing
-   * clearly. Returns a Korean, room-postable explanation when incompatible;
-   * null when the dispatch may proceed (including whenever `profile` needs
-   * nothing an old manager could get wrong, or the registry has no live
-   * telemetry to prove an incompatibility — see evaluateManagerCapability).
-   */
-  private async _checkManagerCapability(agent: Agent, profile: CliRuntimeProfile | null): Promise<string | null> {
-    const capability = requiredManagerCapability(profile);
-    if (!capability) return null;
-    const instances = this.instanceRegistry?.listForAgent(agent.id) ?? [];
-    const verdict = evaluateManagerCapability(instances, capability);
-    if (verdict.ok) return null;
-
-    const displayMap = await resolveAgentDisplayMap(this.agentRepo, [agent]);
-    const displayName = displayMap.get(agent.id) ?? agent.name;
-    this.logService.warn('ChatRooms', 'chat_request dropped (manager capability mismatch)', {
-      agent_id: agent.id, capability, profile_id: profile?.id, reason: verdict.reason, detail: verdict.detail,
-    });
-    return (
-      `⚠️ **${displayName}**에게 dispatch할 수 없습니다 — ${verdict.detail} ` +
-      '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.'
-    );
   }
 
 }

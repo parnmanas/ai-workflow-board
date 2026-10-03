@@ -60,7 +60,7 @@ async function setup(t) {
   await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-race-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-race-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 99,
       started_at: new Date().toISOString(),
     }),

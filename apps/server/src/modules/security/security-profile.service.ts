@@ -1,12 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { In, Repository, DataSource } from 'typeorm';
 import { SecurityProfile, SecurityChecklistItem, SecurityScopeMode, SecurityOnFailureTicketConfig, SecuritySeverity } from '../../entities/SecurityProfile';
 import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
-import { Agent } from '../../entities/Agent';
+import { ApiKey } from '../../entities/ApiKey';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
   normalizeWorkspaceFolder,
   normalizeCheckoutMode,
@@ -100,7 +103,10 @@ export interface CreateProfileInput {
   name: string;
   description?: string;
   checklist?: any;
-  target_agent_id: string;
+  /** P4c-3b: target_agent_id / target_runtime 중 하나 필수 (service resolveTarget). */
+  target_agent_id?: string;
+  /** P4c-3b: spec-direct target (service resolveTarget이 처리). */
+  target_runtime?: unknown;
   target_resource_id?: string | null;
   scan_driver?: string;
   scan_driver_config?: Record<string, any> | null;
@@ -128,7 +134,8 @@ export class SecurityProfileService {
   constructor(
     @InjectRepository(SecurityProfile) private readonly profileRepo: Repository<SecurityProfile>,
     @InjectRepository(SecurityRun) private readonly runRepo: Repository<SecurityRun>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly runService: SecurityRunService,
   ) {}
@@ -187,16 +194,49 @@ export class SecurityProfileService {
     return findOrFail(this.profileRepo, { where: { id } }, 'security profile not found');
   }
 
+  /**
+   * P4c-3b: QA resolveTarget과 동일한 shape — spec-direct면 identity 키 +
+   * 스냅샷, 아니면 레거시 행 경로.
+   */
+  private async resolveTarget(
+    workspaceId: string,
+    targetAgentId: string | undefined,
+    targetRuntime: unknown,
+  ): Promise<{ target_agent_id: string; target_runtime: Record<string, any> | null }> {
+    if (targetRuntime !== undefined && targetRuntime !== null) {
+      let spec;
+      try {
+        spec = normalizeRuntimeSpec(targetRuntime, 'target_runtime');
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid target_runtime');
+      }
+      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+      const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
+      if (!hostRow) {
+        const link = await this.dataSource.getRepository(ApiKey).findOne({
+          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
+          select: { agent_id: true, host_id: true },
+        });
+        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
+        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
+        if (!linked) throw makeError(400, 'target_runtime references an unknown Runtime Host');
+      }
+      return { target_agent_id: runtimeIdentityKey(spec), target_runtime: { ...spec } };
+    }
+    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음, 스냅샷 없음).
+    if (!targetAgentId) throw makeError(400, 'target_agent_id is required');
+    const agent = await resolveCallerIdentityRow(this.dataSource, targetAgentId);
+    if (!agent) throw makeError(400, 'target agent not found');
+    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
+      throw makeError(400, 'target agent belongs to a different workspace');
+    }
+    return { target_agent_id: targetAgentId, target_runtime: null };
+  }
+
   async create(input: CreateProfileInput): Promise<SecurityProfile> {
     if (!input.workspace_id) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    if (!input.target_agent_id) throw makeError(400, 'target_agent_id is required');
-
-    const agent = await this.agentRepo.findOne({ where: { id: input.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, input.workspace_id)) {
-      throw makeError(400, 'target agent belongs to a different workspace');
-    }
+    const target = await this.resolveTarget(input.workspace_id, input.target_agent_id, input.target_runtime);
 
     if (input.board_id) {
       throw makeError(400, 'Board-scoped Security profiles are no longer supported; create the profile in its Workspace');
@@ -208,7 +248,8 @@ export class SecurityProfileService {
       name: input.name.trim(),
       description: input.description ?? '',
       checklist: normalizeChecklist(input.checklist),
-      target_agent_id: input.target_agent_id,
+      target_agent_id: target.target_agent_id,
+      target_runtime: target.target_runtime,
       target_resource_id: input.target_resource_id || null,
       scan_driver: input.scan_driver ?? 'code-review',
       scan_driver_config: input.scan_driver_config ?? null,
@@ -240,13 +281,14 @@ export class SecurityProfileService {
     }
     if (patch.description !== undefined) existing.description = patch.description ?? '';
     if (patch.checklist !== undefined) existing.checklist = normalizeChecklist(patch.checklist);
-    if (patch.target_agent_id !== undefined) {
-      const agent = await this.agentRepo.findOne({ where: { id: patch.target_agent_id } });
-      if (!agent) throw makeError(400, 'target agent not found');
-      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-        throw makeError(400, 'target agent belongs to a different workspace');
-      }
-      existing.target_agent_id = patch.target_agent_id;
+    if (patch.target_agent_id !== undefined || (patch as any).target_runtime !== undefined) {
+      const target = await this.resolveTarget(
+        workspaceId,
+        patch.target_agent_id !== undefined ? patch.target_agent_id : existing.target_agent_id,
+        (patch as any).target_runtime,
+      );
+      existing.target_agent_id = target.target_agent_id;
+      existing.target_runtime = target.target_runtime;
     }
     if (patch.board_id !== undefined) {
       if ((patch.board_id || null) !== existing.board_id) {

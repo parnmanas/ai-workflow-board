@@ -21,7 +21,8 @@ import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
 import { User } from '../dist/entities/User.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js'; // P4c-4
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { OrchestrationStep } from '../dist/entities/OrchestrationStep.js';
 import { OrchestrationEvent } from '../dist/entities/OrchestrationEvent.js';
@@ -150,7 +151,7 @@ before(async () => {
   dataSource = new DataSource({
     type: 'sqljs',
     entities: [
-      ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent,
+      ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, RuntimeHost, ApiKey,
       OrchestrationMission, OrchestrationStep, OrchestrationEvent,
       OrchestrationTeam, OrchestrationTeamMember,
     ],
@@ -163,7 +164,7 @@ before(async () => {
   const partRepo = dataSource.getRepository(ChatRoomParticipant);
   const msgRepo = dataSource.getRepository(ChatRoomMessage);
   const userRepo = dataSource.getRepository(User);
-  const agentRepo = dataSource.getRepository(Agent);
+  const hostRepo = dataSource.getRepository(RuntimeHost); // P4c-4
   const missionRepo = dataSource.getRepository(OrchestrationMission);
 
   // 권한 축을 실제 users 행으로 만든다 — 게이트가 세션 스냅샷이 아니라 users 를 직접
@@ -174,14 +175,14 @@ before(async () => {
   await userRepo.save(userRepo.create({
     id: PLAIN, email: 'plain@x', name: 'Plain', password: 'x', role: 'user', permissions: '[]',
   }));
-  await agentRepo.save(agentRepo.create({ id: AGENT, name: 'Orchestrator', workspace_id: WS }));
+  await hostRepo.save(hostRepo.create({ id: AGENT, name: 'Orchestrator', hostname: 'orch-host', workspace_id: WS }));
 
-  membership = new RoomMembershipService(roomRepo, partRepo, userRepo, agentRepo, dataSource, missionRepo);
+  membership = new RoomMembershipService(roomRepo, partRepo, userRepo, dataSource, missionRepo); // P4c-4
 
   const empty = {};
   messaging = new RoomMessagingService(
-    roomRepo, partRepo, msgRepo, agentRepo,
-    empty, empty, empty,
+    roomRepo, partRepo, msgRepo,
+    empty, empty, empty, // P4c-4: agentRepo 삭제
     { async findOne() { return null; } },
     dataSource, noopLog, membership,
     { parseMentions: () => [], async resolveMentions() { return []; } },
@@ -194,8 +195,7 @@ before(async () => {
     dataSource.getRepository(OrchestrationEvent),
     dataSource.getRepository(OrchestrationTeam),
     dataSource.getRepository(OrchestrationTeamMember),
-    agentRepo,
-    dataSource,
+    dataSource, // P4c-4: agentRepo 인자 삭제
     noopLog,
   );
 });

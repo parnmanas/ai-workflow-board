@@ -31,7 +31,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
   const load = useCallback(async () => {
     const [keysData, agentsData] = await Promise.all([
       api.getApiKeys(workspaceId),
-      api.getAgents(workspaceId),
+      Promise.resolve([] as any[]),
     ]);
     setKeys(keysData);
     setAgents(agentsData);

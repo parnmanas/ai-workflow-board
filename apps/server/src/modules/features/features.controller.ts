@@ -83,6 +83,7 @@ export class FeaturesController {
         title: body.title,
         requirement: body.requirement,
         planner_agent_id: body.planner_agent_id,
+        planner_runtime: body.planner_runtime,
         source_chat_room_id: body.source_chat_room_id,
         created_by: user?.name || 'User',
         // A user has no agent id; planning must target an explicit planner agent.

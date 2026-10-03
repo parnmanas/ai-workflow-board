@@ -56,7 +56,9 @@ test('terminal-column ticket create/move keeps status consistent with the column
   const { ws, board, columns } = await setupKanbanScene(app, modules.getDataSourceToken, {
     workspaceName: 'terminal-status', envRepo: true,
   });
-  const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'assignee' });
+  // P4c-4: 시나리오 8 의 VA 가 wire trigger 를 받으려면 holder 가 Host identity 다
+  // (레거시 uuid 앞으로는 wire 가 닿지 않는다).
+  const agent = await createAgent(app, modules.getDataSourceToken, null, { name: 'assignee-host', type: 'manager' });
   const key = await createApiKey(app, modules.getDataSourceToken, agent.id, { workspaceId: ws.id });
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => mcp.close());

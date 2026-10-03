@@ -7,6 +7,7 @@ import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from '../com
 import { relativeTime } from '../../utils/time';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError, formatDuration } from '../QaPhasesEditor';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 import { canOpenTicketOnBoard, ticketBoardPath } from '../../utils/ticketBoardLink';
 import {
   WorkspaceFolderOptions,
@@ -48,6 +49,8 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
 
   const [scenarios, setScenarios] = useState<QaScenarioListItem[]>([]);
   const [agents, setAgents] = useState<QaAgent[]>([]);
+  // P4b: runtime 선언 → Agent 매칭용 full 행 (표시용 agents 와 별도 보관).
+  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   const [selected, setSelected] = useState<QaScenario | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [editing, setEditing] = useState<QaScenario | 'new' | null>(null);
@@ -66,16 +69,18 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
   const [deployments, setDeployments] = useState<Deployment[]>([]);
 
   const load = useCallback(async () => {
-    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]); return; }
+    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]); setAgentsFull([]); return; }
     try {
       const [list, agentList, scheduleList, deploymentList] = await Promise.all([
         api.listQaScenarios(effectiveWorkspaceId),
-        api.getAgents(effectiveWorkspaceId).catch(() => []),
+        Promise.resolve([]),
         api.listQaSchedules(effectiveWorkspaceId).catch(() => []),
         api.listDeployments(effectiveWorkspaceId).catch(() => []),
       ]);
       setScenarios(list);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+      // P4b: runtime 선언 → 매칭용 full 행 보관.
+      setAgentsFull((agentList || []) as any[]);
       setSchedules(scheduleList || []);
       setDeployments(deploymentList || []);
     } catch (err: any) {
@@ -97,9 +102,13 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
 
   // manager_name 을 포함한 full name(Manager/Agent)으로 표시. 목록에 없는
   // agent(삭제됨 등)는 id 앞 8자리 fallback 으로 둔다.
-  const agentName = useCallback((id: string) => {
+  // P4c-3b: rt- target은 시나리오의 target_runtime 라벨로 표시한다.
+  const agentName = useCallback((id: string, spec?: any) => {
     const a = agents.find((x) => x.id === id);
-    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+    if (a) return formatAgentDisplayName(a);
+    const label = (spec?.label || '').trim();
+    if (label) return label;
+    return id.slice(0, 8);
   }, [agents]);
 
   const handleRun = async (s: QaScenario) => {
@@ -217,6 +226,7 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
           scenario={editing === 'new' ? null : editing}
           workspaceId={effectiveWorkspaceId}
           agents={agents}
+          agentsFull={agentsFull}
           onClose={() => setEditing(null)}
           onSaved={async (saved) => {
             setEditing(null);
@@ -556,7 +566,7 @@ function ScheduleRow({ s, scenarioCount, onEdit, onToggle, onRunNow, onDelete }:
 
 interface ScenarioTableProps {
   scenarios: QaScenarioListItem[];
-  agentName: (id: string) => string;
+  agentName: (id: string, spec?: any) => string;
   running: string | null;
   selectedIds: Set<string>;
   onToggleSelect: (id: string) => void;
@@ -629,7 +639,7 @@ function ScenarioTable({ scenarios, agentName, running, selectedIds, onToggleSel
 
 interface ScenarioRowProps {
   s: QaScenarioListItem;
-  agentName: (id: string) => string;
+  agentName: (id: string, spec?: any) => string;
   running: boolean;
   selected: boolean;
   onToggleSelect: () => void;
@@ -663,7 +673,7 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
       <td style={TD}>
         {s.qa_driver ? <Badge variant="info" size="sm">{s.qa_driver}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id)}</td>
+      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id, (s as any).target_runtime)}</td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>never run</span>}
       </td>
@@ -690,7 +700,7 @@ function ScenarioRow({ s, agentName, running, selected, onToggleSelect, onOpen, 
 interface ScenarioDetailProps {
   scenario: QaScenario;
   workspaceId: string;
-  agentName: (id: string) => string;
+  agentName: (id: string, spec?: any) => string;
   onBack: () => void;
   onRun: () => void;
   running: boolean;
@@ -745,7 +755,7 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.colors.textPrimary }}>{scenario.name}</div>
           <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
             {scenario.qa_driver && <Badge variant="info" size="sm">{scenario.qa_driver}</Badge>}
-            <Badge variant="neutral" size="sm">agent: {agentName(scenario.target_agent_id)}</Badge>
+            <Badge variant="neutral" size="sm">agent: {agentName(scenario.target_agent_id, (scenario as any).target_runtime)}</Badge>
           </div>
         </div>
         <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>
@@ -1111,15 +1121,20 @@ interface ScenarioEditorProps {
   scenario: QaScenario | null;
   workspaceId: string;
   agents: QaAgent[];
+  /** P4b: runtime 선언 → 매칭용 full 행. */
+  agentsFull: Array<any>;
   onClose: () => void;
   onSaved: (s: QaScenario) => void;
 }
 
-function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: ScenarioEditorProps) {
+function ScenarioEditor({ scenario, workspaceId, agents, agentsFull, onClose, onSaved }: ScenarioEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(scenario?.name ?? '');
   const [description, setDescription] = useState(scenario?.description ?? '');
   const [targetAgentId, setTargetAgentId] = useState(scenario?.target_agent_id ?? (agents[0]?.id ?? ''));
+  // P4c-3b: spec-direct target (DeclareRuntimeSection에서 새 spec이 오면 세팅).
+  // select를 직접 고르면 초기화된다 (agent 경로).
+  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>(null);
   const [qaDriver, setQaDriver] = useState(scenario?.qa_driver ?? 'browser');
   // Deployment-awareness target environment (ticket 8ce72b18).
   const [targetEnvironment, setTargetEnvironment] = useState(scenario?.target_environment ?? '');
@@ -1170,7 +1185,7 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
-    if (!targetAgentId) { showToast('Target agent is required', 'error'); return; }
+    if (!targetAgentId && !pendingSpec) { showToast('Target agent is required', 'error'); return; }
     let steps: any; let config: any;
     try { steps = stepsText.trim() ? JSON.parse(stepsText) : []; } catch { showToast('Steps must be valid JSON array', 'error'); return; }
     try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast('Driver config must be valid JSON', 'error'); return; }
@@ -1207,9 +1222,13 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
     setSaving(true);
     try {
       let saved: QaScenario;
+      // P4c-3b: pendingSpec이 있으면 spec-direct 저장 (서버가 identity 키 매김).
+      const targetPayload = pendingSpec
+        ? { target_agent_id: undefined, target_runtime: pendingSpec }
+        : { target_agent_id: targetAgentId, target_runtime: undefined };
       if (scenario) {
         saved = await api.updateQaScenario(scenario.id, {
-          workspace_id: workspaceId, name, description, target_agent_id: targetAgentId,
+          workspace_id: workspaceId, name, description, ...targetPayload,
           qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
           target_environment: targetEnvironment.trim(),
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
@@ -1217,7 +1236,7 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
       } else {
         saved = await api.createQaScenario({
           workspace_id: workspaceId, name, description,
-          target_agent_id: targetAgentId, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
+          ...targetPayload, qa_driver: qaDriver, qa_driver_config: config, steps, tags, enabled,
           target_environment: targetEnvironment.trim(),
           on_failure_ticket: onFailureTicket, qa_phases: qaPhasesPayload, ...wfPayload,
         });
@@ -1259,7 +1278,20 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
           placeholder="— select —"
           value={targetAgentId}
           options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-          onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
+          onChange={(e) => { setTargetAgentId((e.target as HTMLSelectElement).value); setPendingSpec(null); }}
+        />
+        {/* P4c-3b: runtime 선언 → 매칭되면 agent id, 새로우면 spec-direct 저장. */}
+        <DeclareRuntimeSection
+          workspaceId={workspaceId}
+          agentsFull={agentsFull}
+          onResolved={(id, created, spec) => {
+            setTargetAgentId(id);
+            setPendingSpec(created ? spec : null);
+            showToast(
+              created ? 'Runtime spec으로 저장됩니다 (Agent 행 없음)' : '기존 Agent와 매칭되었습니다',
+              'success',
+            );
+          }}
         />
         <Input label="QA driver (browser / game-client / http-api)" value={qaDriver} onChange={(e) => setQaDriver((e.target as HTMLInputElement).value)} />
         <div>

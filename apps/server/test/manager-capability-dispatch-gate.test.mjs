@@ -27,7 +27,8 @@ function code(relPath) {
 
 const SRC_PATH = 'modules/agents/trigger-loop.service.ts';
 const EMIT_MARKER = "activityEvents.emit('agent_trigger'";
-const RESOLVE_PROFILE_MARKER = 'runtimeProfile = await resolveClaudeBackendProfileForDispatch(';
+// P4c-4: spec 스냅샷의 cli_runtime_profile id 에서 해소한다 (Agent 행 없음).
+const RESOLVE_PROFILE_MARKER = 'const specProfile = await resolveClaudeBackendProfileForDispatch(';
 const CAPABILITY_GATE_CALL_RE = /await this\._checkManagerCapabilityGate\(/g;
 
 test('_checkManagerCapabilityGate helper exists and centralizes the drop-action logic', () => {
@@ -72,10 +73,11 @@ test('_checkManagerCapabilityGate special-cases comment_summary the same way eve
   assert.match(body, /status: 503/, 'must throw with the same 503 shape the sibling gates use');
 });
 
-test('_checkManagerCapabilityGate is scoped to backend-profile CLIs only (nested inside the same `cliDescriptor(agent.type)?.sessions.backend_profile` block as profile resolution)', () => {
+test('_checkManagerCapabilityGate is scoped to backend-profile CLIs only (nested inside the same `cliDescriptor(specCli)?.sessions.backend_profile` block as profile resolution)', () => {
   const src = code(SRC_PATH);
   // 게이트는 cli-catalog.ts 의 `sessions.backend_profile`(오늘은 claude 뿐)로 판정한다.
-  const claudeBlockMatch = src.match(/if \(agent && cliDescriptor\(agent\.type\)\?\.sessions\.backend_profile\) \{[\s\S]*?\n    \}/);
+  // P4c-4: 판정 대상은 assignment 스냅샷의 cli 다 (Agent 행 없음).
+  const claudeBlockMatch = src.match(/if \(specCli && cliDescriptor\(specCli\)\?\.sessions\.backend_profile\) \{[\s\S]*?\n    \}/);
   assert.ok(claudeBlockMatch, 'could not isolate the cliDescriptor(...).sessions.backend_profile block');
   assert.match(claudeBlockMatch[0], /_checkManagerCapabilityGate\(/, 'the gate call must live inside the claude-only block — non-Claude CLIs never resolve a runtimeProfile and must not be gated by it');
 });

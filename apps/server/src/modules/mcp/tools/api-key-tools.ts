@@ -13,8 +13,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { resolveCallerWorkspaceId } from '../shared/authz';
-import { Agent } from '../../../entities/Agent';
+import { resolveCallerWorkspaceId, resolveCallerIdentityRow } from '../shared/authz';
 import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
 import type { ToolContext } from './context';
 
@@ -35,8 +34,9 @@ async function agentIdVisibleInWorkspace(
   agentId: string,
   workspaceId: string,
 ): Promise<boolean> {
-  const agent = await ctx.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
-  return !!agent && agentIsVisibleInWorkspace(agent.workspace_id, workspaceId);
+  // P4: Agent 행 또는 Host 행 — 둘 다 identity 로 인정한다.
+  const row = await resolveCallerIdentityRow(ctx.dataSource, agentId);
+  return !!row && agentIsVisibleInWorkspace(row.workspace_id, workspaceId);
 }
 
 const SCOPE_RANK: Record<string, number> = { read: 0, write: 1, full: 2 };

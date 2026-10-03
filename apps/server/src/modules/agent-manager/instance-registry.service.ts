@@ -148,6 +148,10 @@ export interface AgentLaunchSpecEntry {
 export interface InstanceRecord {
   instance_id: string;
   agent_id: string;
+  // P4 (manager identity → RuntimeHost): 하트비트를 보낸 Runtime Host.
+  // redeem dual-write 이후 키/바디에 stamped 되어 온다. null = 구버전
+  // 매니저/키 (host 바인딩 없음, agent 행으로만 식별).
+  host_id?: string | null;
   workspace_id: string | null;
   mode: 'manager';
   hostname: string;
@@ -485,7 +489,8 @@ export class InstanceRegistryService implements OnModuleDestroy {
    *    routing every capability check through the zero-instance fail-open
    *    branch (ticket c3b767c6 review — the exact defect this fixes). */
   listForAgent(agentId: string): InstanceRecord[] {
-    return this.list().filter((i) => i.agent_id === agentId || i.agent_ids?.includes(agentId));
+    // P4: spec.manager_agent_id 가 Host id 일 수 있다 — host 바인딩도 본다.
+    return this.list().filter((i) => i.agent_id === agentId || i.host_id === agentId || i.agent_ids?.includes(agentId));
   }
 
   get(instanceId: string): InstanceRecord | null {

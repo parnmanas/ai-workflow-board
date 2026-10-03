@@ -25,7 +25,9 @@ function makeScenario() {
     name: 'INV-VIS',
     workspace_id: 'ws-1',
     board_id: null,
-    target_agent_id: 'agent-1',
+    // uuid-shaped: P4c-3b 이후 startQaRun 은 uuid 가 아니면 Agent 조회를
+    // 건너뛰고 rt- 키도 아니면 400 으로 거부한다.
+    target_agent_id: '11111111-1111-1111-1111-111111111111',
     enabled: true,
     max_runs: 20,
     steps: [],
@@ -45,7 +47,16 @@ function makeScenario() {
 }
 
 // dataSource: buildRunProvision degrades repo -> null on any throw.
-const dataSource = { getRepository: () => ({ findOne: async () => { throw new Error('no repo'); } }) };
+// P4c-4: 시나리오 target 해소를 위해 Host 행만 답하고 나머지는 throw
+// (fail-open 경로가 그대로 타도록).
+const dataSource = {
+  getRepository: (entity) => {
+    if (entity?.name === 'RuntimeHost') {
+      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', workspace_id: 'ws-1' }; }, async find() { return []; } };
+    }
+    return { findOne: async () => { throw new Error('no repo'); } };
+  },
+};
 
 function makeRunRepo() {
   return {
@@ -60,7 +71,7 @@ function makeSvc(sendMessageImpl) {
   const runRepo = makeRunRepo();
   const captured = { calls: [] };
   const scenarioRepo = { async findOne() { return makeScenario(); }, async update() {} };
-  const agentRepo = { async findOne() { return { id: 'agent-1', name: 'GC-Agent', type: 'agent' }; } };
+  // P4c-4: agentRepo 인자 삭제 (target agent 는 스펙 해소).
   const roomRepo = { create: identity, async save(r) { return { ...r, id: 'room-1' }; } };
   const participantRepo = { create: identity, async save() {} };
   const empty = {};
@@ -79,7 +90,6 @@ function makeSvc(sendMessageImpl) {
     empty,          // messageRepo
     empty,          // attachmentRepo
     empty,          // resourceRepo
-    agentRepo,      // agentRepo
     dataSource,     // dataSource
     messaging,      // messaging
     noopLog,        // logService

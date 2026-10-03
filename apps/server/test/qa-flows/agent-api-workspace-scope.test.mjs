@@ -79,8 +79,9 @@ test('agent-api enforces workspace scoping on the legacy /api/agent surface', as
     name: 'mgr', type: 'manager',
   });
   // Scoped to wsB on the row, but owned by a manager → guard resolves full-scope.
+  // P4c-4: manager 판정은 host 바인딩만 본다 — agent_id 만으로는 부족하다.
   const keyManager = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: wsB.id, label: 'mgr',
+    workspaceId: wsB.id, label: 'mgr', hostId: manager.id,
   });
   const mgrCross = await getTicket(port, ticket.id, keyManager.raw_key);
   assert.equal(mgrCross.status, 200, 'manager key must reach across workspaces');

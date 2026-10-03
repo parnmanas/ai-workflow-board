@@ -41,7 +41,7 @@ process.env.NODE_ENV = 'test';
 
 const { buildDataSourceOptions } = await import(modPath('db.js'));
 const { ActivityLog } = await import(modPath('entities', 'ActivityLog.js'));
-const { Agent } = await import(modPath('entities', 'Agent.js'));
+/* P4c-4: Agent 엔티티 삭제 — import 제거 (바인딩 미사용). */
 const { ApiKey } = await import(modPath('entities', 'ApiKey.js'));
 const { Workspace } = await import(modPath('entities', 'Workspace.js'));
 const { Ticket } = await import(modPath('entities', 'Ticket.js'));
@@ -57,7 +57,7 @@ await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const activityLogRepo = ds.getRepository(ActivityLog);
-const activityService = new ActivityService(activityLogRepo, ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(activityLogRepo, ds, logStub);
 const apiKeyService = new ApiKeyService(ds.getRepository(ApiKey));
 const guard = new MigrationExportGuard(apiKeyService, activityService);
 const noDeployment = { getLatest: async () => null };

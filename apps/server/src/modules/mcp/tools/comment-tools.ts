@@ -14,7 +14,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { In } from 'typeorm';
-import { Agent } from '../../../entities/Agent';
 import { Comment, CommentType, COMMENT_TYPES } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
 import { User } from '../../../entities/User';
@@ -23,6 +22,8 @@ import { Resource } from '../../../entities/Resource';
 import { activityEvents } from '../../../services/activity.service';
 import { ok, err, MENTION_SYNTAX_DOC, sanitizeHarnessMarkers } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
+import { resolveCallerIdentityRow } from '../shared/authz';
+import { RuntimeHost } from '../../../entities/RuntimeHost';
 import { TicketArchivedError, isTerminalColumn } from '../shared/archive-helpers';
 import { detectDeferralToTerminal, formatDeferralTerminalWarning } from '../shared/deferral-terminal-guard';
 import { findColumnByName } from '../shared/ticket-helpers';
@@ -42,7 +43,7 @@ import { enforceAutoResponseBudget } from '../../../common/hard-budget-guard';
 import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
 import { lockTicketCommentWrites } from '../../../common/ticket-comment-write-lock';
 import { tiedCreatedAtWhere } from '../../../common/created-at-since-param';
-import { resolveMentionDispatchExtras } from '../../../common/mention-dispatch-profile';
+import { resolveMentionDispatchExtras, resolveMentionTarget, type DispatchAgentLike } from '../../../common/mention-dispatch-profile';
 
 function isUniqueConstraintError(error: unknown): boolean {
   const value = error as { code?: string; errno?: number; message?: string } | null;
@@ -242,7 +243,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       let authorName = author || '';
       if (!authorName) {
         if (resolvedAuthorType === 'agent') {
-          const display = await resolveAgentDisplayName(dataSource.getRepository(Agent), resolvedAuthorId);
+          const display = await resolveAgentDisplayName(dataSource, resolvedAuthorId);
           authorName = display || caller?.agentName || `Agent #${resolvedAuthorId}`;
         } else {
           // Postgres 에서 `User.id` 는 real uuid 컬럼이라(`entities/User.ts` 의
@@ -665,30 +666,26 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           for (const m of resolved) {
             if (m.type === 'agent') {
               if (quiescedForMentions) continue;
-              const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
-              if (!agent) continue;
-              // Same workspace-scope safety as the REST path.
-              if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
-              // 티켓 71532b4f: agent_trigger와 동일한 dispatch 부가값 — 이걸 안 실으면
-              // 이 mention으로 깨운 세션이 agent에 핀된 backend/harness/effort를 조용히
-              // 무시하고 CLI 기본값으로 돈다.
-              const extras = await resolveMentionDispatchExtras(dataSource, ticket, agent);
+              // P4c-4: uuid 행 / rt- spec 공통 해소 (workspace 검사 포함).
+              const target = await resolveMentionTarget(dataSource, ticket, m.id);
+              if (!target) continue;
+              const { extras } = target;
               const dispatchTriggerId = m.roleShortcut
                 ? await recordCommentMentionDispatch(dataSource, {
                     ticketId: ticket.id, workspaceId: ticket.workspace_id,
-                    agentId: agent.id, role: m.roleShortcut,
+                    agentId: target.agentId, role: m.roleShortcut,
                   })
                 : '';
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id,
                 comment_id: comment.id,
                 workspace_id: ticket.workspace_id,
-                agent_id: agent.id,
+                agent_id: target.agentId,
                 actor_id: resolvedAuthorId,
                 actor_type: resolvedAuthorType,
                 actor_name: authorName,
                 content,
-                role_prompt: agent.role_prompt || '',
+                role_prompt: target.rolePrompt,
                 dispatch_trigger_id: dispatchTriggerId,
                 dispatch_role: m.roleShortcut || '',
                 mention_source: m.roleShortcut ? 'role' : 'direct',
@@ -700,8 +697,10 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 effort_preset: extras.effort_preset,
                 environment_config: extras.environment_config,
                 worktree_mode: extras.worktree_mode,
+                // P4c-4: rt- 멘션의 spec (매니저 해소 + fan-out host-affinity용).
+                ...(target.runtime ? { runtime: target.runtime } : {}),
               });
-              logger.info('Mentions', `Agent @-mention routed via MCP add_comment: ${agent.name} (${agent.id}) on ticket ${ticket.id}`);
+              logger.info('Mentions', `Agent @-mention routed via MCP add_comment: ${target.displayName} (${target.agentId}) on ticket ${ticket.id}`);
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
                 user_id: m.id,
@@ -765,7 +764,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     let authorName = requestedName || '';
     if (!authorName) {
       if (authorType === 'agent') {
-        const display = await resolveAgentDisplayName(dataSource.getRepository(Agent), authorId);
+        const display = await resolveAgentDisplayName(dataSource, authorId);
         authorName = display || caller?.agentName || `Agent #${authorId}`;
       } else {
         // 비-uuid id 를 real uuid 컬럼에 던지지 않는다 — add_comment 쪽 같은
@@ -804,8 +803,9 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
     // 요청의 author_id는 호환성을 위해 호출자가 지정할 수 있으므로 권한 근거로
     // 삼지 않는다. 인증 세션의 agentId가 저장 author와 일치하는 경우에만 조회한다.
     if (authorType !== 'agent' || !caller?.agentId || caller.agentId !== authorId) return false;
-    const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
-    return agent?.type === 'manager';
+    // P4c-4: host-keyed 매니저 세션 (agentId = Host uuid, Agent 행 없음).
+    const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: caller.agentId } });
+    return !!host;
   }
 
   // ─── Helper: 저장 직전 pending_user_action 재확인 (ticket be934f61 패턴,
@@ -926,23 +926,21 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           for (const m of resolvedRefs) {
             if (m.type === 'agent') {
               if (quiescedForMentions) continue;
-              const agent = await dataSource.getRepository(Agent).findOne({ where: { id: m.id } });
-              if (!agent) continue;
-              if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) continue;
-              // 티켓 71532b4f: add_comment와 동일한 dispatch 부가값 — 누락 시 이 mention으로
-              // 깨운 세션이 agent에 핀된 backend/harness/effort를 조용히 무시한다.
-              const extras = await resolveMentionDispatchExtras(dataSource, ticket, agent);
+              // P4c-4: ask_question 멘션도 spec-direct 해소.
+              const target = await resolveMentionTarget(dataSource, ticket, m.id);
+              if (!target) continue;
+              const { extras } = target;
               const dispatchTriggerId = m.roleShortcut
                 ? await recordCommentMentionDispatch(dataSource, {
                     ticketId: ticket.id, workspaceId: ticket.workspace_id,
-                    agentId: agent.id, role: m.roleShortcut,
+                    agentId: target.agentId, role: m.roleShortcut,
                   })
                 : '';
               activityEvents.emit('comment_mention', {
                 ticket_id: ticket.id, comment_id: comment.id, workspace_id: ticket.workspace_id,
-                agent_id: agent.id,
+                agent_id: target.agentId,
                 actor_id: resolved.authorId, actor_type: resolved.authorType, actor_name: resolved.authorName,
-                content, role_prompt: agent.role_prompt || '',
+                content, role_prompt: target.rolePrompt,
                 mention_source: m.roleShortcut ? 'role' : 'direct', role_shortcut: m.roleShortcut,
                 dispatch_trigger_id: dispatchTriggerId, dispatch_role: m.roleShortcut || '',
                 timestamp: ts,
@@ -952,6 +950,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
                 effort_preset: extras.effort_preset,
                 environment_config: extras.environment_config,
                 worktree_mode: extras.worktree_mode,
+                ...(target.runtime ? { runtime: target.runtime } : {}),
               });
             } else {
               const row = await userMentionRepo.save(userMentionRepo.create({
@@ -1480,9 +1479,15 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       if (!ticket) return err('Ticket not found');
       if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
 
-      const agentRepo = dataSource.getRepository(Agent);
-      const targetAgent = await agentRepo.findOne({ where: { id: target_agent_id } });
+      // P4: Agent 행 또는 Host 행 — 둘 다 handoff 대상이다. dispatch 부가값
+      // (extras/role_prompt)은 Agent 행에서, Host 면 빈 pseudo 로 읽는다.
+      const targetAgent = await resolveCallerIdentityRow(dataSource, target_agent_id);
       if (!targetAgent) return err('target_agent_id refers to an unknown agent');
+      // P4c-4: Agent 행이 없으므로 dispatch 부가값은 빈 pseudo 로 둔다.
+      // 실행 정체성은 assignment 스냅샷이 들고 있다 (syncBuiltinTrio 아래 참조).
+      const dispatchAgent: DispatchAgentLike =
+        { type: '', cli_runtime_profile: null, credential_id: null };
+      const targetRolePrompt = '';
       // Cross-workspace handoff would silently leak ticket context to an
       // agent whose API key lives in a different workspace boundary; refuse.
       if (!agentIsVisibleInWorkspace(targetAgent.workspace_id, ticket.workspace_id)) {
@@ -1527,7 +1532,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // the UI uses. Falling back to the bare name keeps the write safe if the
       // manager row was deleted (dangling FK).
       const targetAgentDisplay =
-        (await resolveAgentDisplayName(agentRepo, targetAgent.id)) || targetAgent.name;
+        (await resolveAgentDisplayName(dataSource, target_agent_id)) || targetAgent.name;
 
       // 1. Save handoff comment first so the activity dispatch + mention
       //    event reference an existing comment row.
@@ -1624,17 +1629,17 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
         // 티켓 71532b4f: add_comment/ask_question과 동일한 dispatch 부가값 — 누락 시
         // 이 handoff mention으로 깨운 세션이 targetAgent에 핀된 backend/harness/effort를
         // 조용히 무시한다.
-        const extras = await resolveMentionDispatchExtras(dataSource, ticket, targetAgent);
+        const extras = await resolveMentionDispatchExtras(dataSource, ticket, dispatchAgent);
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
           workspace_id: ticket.workspace_id,
-          agent_id: targetAgent.id,
+          agent_id: target_agent_id,
           actor_id: resolved.authorId,
           actor_type: resolved.authorType,
           actor_name: resolved.authorName,
           content,
-          role_prompt: targetAgent.role_prompt || '',
+          role_prompt: targetRolePrompt,
           mention_source: 'direct',
           timestamp: ts,
           agent_chain_depth: agentChainDepth,
@@ -1645,7 +1650,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
           worktree_mode: extras.worktree_mode,
         });
       }
-      logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgent.name} (${targetAgent.id}) by ${resolved.authorName}`);
+      logger.info('Handoff', `Ticket ${ticket.id} handed to agent ${targetAgentDisplay} (${target_agent_id}) by ${resolved.authorName}`);
 
       return ok({ comment, ticket: { id: ticket.id, assignee_id: ticket.assignee_id, assignee: ticket.assignee } });
     }

@@ -87,7 +87,11 @@ test('BacklogPromotion workflow-state cap: parked tickets count, WAIT-only turns
   assert.ok(assigneeRole, 'createWorkspace should seed assignee role');
   assert.ok(reporterRole, 'createWorkspace should seed reporter role');
 
-  const alice = await createAgent(app, getDataSourceToken, ws.id, { name: 'alice' });
+  // P4c-4: hosted:false — cap 역학만 본다. 링크된 holder 는 dispatch 가 깊이
+  // 진행되면서 fire-and-forget 이벤트 핸들러가 순차 저장과 sql.js 단일 커넥션에서
+  // 충돌한다 (PG 풀에선 무관 — AGENTS.md sql.js 직렬화 주의). dispatch 도달은
+  // comment-trigger/duplicate-correction E2E 가 host holder 로 커버한다.
+  const alice = await createAgent(app, getDataSourceToken, ws.id, { name: 'alice', hosted: false });
   await createApiKey(app, getDataSourceToken, alice.id, { workspaceId: ws.id, label: 'alice' });
 
   const boardRepo = ds.getRepository('Board');

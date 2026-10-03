@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
-import { formatAgentDisplayName } from '../../utils/agentName';
 import type { Action, ActionRun, ChatRoomMessageItem } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -11,13 +10,7 @@ import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
 import type { MentionParticipant } from '../chat/utils/markdown';
 import { WorkspaceFolderOptions, initWorkspaceFolderState, buildWorkspaceFolderPayload, type WorkspaceFolderFormState } from './WorkspaceFolderOptions';
-
-interface AgentOption {
-  id: string;
-  name: string;
-  /** Required for the `<Manager>/<Agent>` render — see utils/agentName.ts. */
-  manager_name?: string | null;
-}
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 
 /**
  * 이 Action 의 대상 에이전트 목록 (티켓 fc3906c5).
@@ -112,7 +105,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
 
   const [actions, setActions] = useState<Action[]>([]);
-  const [agents, setAgents] = useState<AgentOption[]>([]);
+  // P4c-4: Agent 목록 없음 — 대상은 runtime spec 으로만 선언한다.
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Action | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -127,6 +120,8 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const [formPrompt, setFormPrompt] = useState('');
   // 대상은 배열이다 (티켓 fc3906c5) — 한 Action 을 여러 에이전트가 각자 실행한다.
   const [formAgentIds, setFormAgentIds] = useState<string[]>([]);
+  // P4c-3b: spec-direct 대상 (DeclareRuntimeSection에서 추가, 저장 시 동봉).
+  const [pendingSpecs, setPendingSpecs] = useState<Array<Record<string, any>>>([]);
   const [formEnabled, setFormEnabled] = useState(true);
   const [formMaxRuns, setFormMaxRuns] = useState(10);
   const [formTrigger, setFormTrigger] = useState('');
@@ -142,12 +137,8 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     }
     setLoading(true);
     try {
-      const [list, agentList] = await Promise.all([
-        api.listActions(effectiveWorkspaceId),
-        api.getAgents(effectiveWorkspaceId).catch(() => [] as any[]),
-      ]);
+      const list = await api.listActions(effectiveWorkspaceId);
       setActions(list);
-      setAgents((agentList as any[]).map((a) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
     } catch (err: any) {
       showToast(err?.message || 'Failed to load actions', 'error');
     } finally {
@@ -180,7 +171,8 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormName('');
     setFormDescription('');
     setFormPrompt('');
-    setFormAgentIds(agents[0] ? [agents[0].id] : []);
+    setFormAgentIds([]);
+    setPendingSpecs([]);
     setFormEnabled(true);
     setFormMaxRuns(10);
     setFormTrigger('');
@@ -196,6 +188,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
     setFormDescription(a.description);
     setFormPrompt(a.prompt);
     setFormAgentIds(actionTargets(a));
+    setPendingSpecs([]);
     setFormEnabled(a.enabled);
     setFormMaxRuns(a.max_runs);
     setFormTrigger(a.trigger || '');
@@ -214,7 +207,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   const handleSave = async () => {
     const errs: { name?: string; agent?: string } = {};
     if (!formName.trim()) errs.name = 'Name is required';
-    if (formAgentIds.length === 0) errs.agent = '대상 에이전트를 1개 이상 선택하세요';
+    if (formAgentIds.length === 0 && pendingSpecs.length === 0) errs.agent = '대상 에이전트를 1개 이상 선택하세요';
     setFormErrors(errs);
     if (errs.name || errs.agent) return;
     setSaving(true);
@@ -233,6 +226,8 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           description: formDescription,
           prompt: formPrompt,
           target_agent_ids: formAgentIds,
+          // P4c-3b: spec-direct 대상 동봉 (서버가 합집합한다).
+          ...(pendingSpecs.length > 0 ? { target_runtimes: pendingSpecs } : {}),
           ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
@@ -247,6 +242,8 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
           description: formDescription,
           prompt: formPrompt,
           target_agent_ids: formAgentIds,
+          // P4c-3b: spec-direct 대상 동봉 (서버가 합집합한다).
+          ...(pendingSpecs.length > 0 ? { target_runtimes: pendingSpecs } : {}),
           ...triggerPayload,
           enabled: formEnabled,
           max_runs: formMaxRuns,
@@ -302,20 +299,16 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
   };
 
   // `<Manager>/<Agent>` — never the bare name, so two managers running an
-  // agent with the same short name stay distinguishable.
+  // P4c-4: Agent 목록 없음 — id 앞자리로 표시한다.
   const agentName = (id: string): string => {
-    // 대상이 아예 없는 Action(설정 이상)에서 빈 문자열이 그대로 렌더돼
-    // "Target: " 만 남는 것을 막는다.
     if (!id) return '(대상 없음)';
-    const a = agents.find((x) => x.id === id);
-    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+    return id.slice(0, 8);
   };
 
   if (selected) {
     return (
       <ActionDetail
         action={selected}
-        agents={agents}
         workspaceId={effectiveWorkspaceId}
         onBack={() => setSelected(null)}
         onEdit={() => startEdit(selected)}
@@ -454,6 +447,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               여러 개를 고르면 실행 1회가 대상마다 독립적인 run 을 만들어 각자의 방에서 병렬로 돕니다.
               한 대상이 실패해도 나머지는 그대로 진행됩니다.
             </div>
+            {/* P4c-4: Agent 체크박스 제거 — 대상은 아래 runtime 선언으로만 추가한다. */}
             <div
               data-testid="action-target-agents"
               style={{
@@ -465,41 +459,50 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
                 padding: '6px 8px',
               }}
             >
-              {agents.length === 0 && (
+              {formAgentIds.length === 0 && pendingSpecs.length === 0 && (
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, padding: '6px 2px' }}>
-                  이 워크스페이스에 선택 가능한 에이전트가 없습니다.
+                  아래 runtime 선언으로 실행 대상을 추가하세요.
                 </div>
               )}
-              {agents.map((a) => {
-                const checked = formAgentIds.includes(a.id);
-                return (
-                  <label
-                    key={a.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '5px 2px',
-                      fontSize: 13,
-                      color: tokens.colors.textStrong,
-                      cursor: 'pointer',
-                    }}
+              {formAgentIds.map((id) => (
+                <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 2px', fontSize: 13, color: tokens.colors.textStrong }}>
+                  <span>{id.slice(0, 8)} (legacy id)</span>
+                  <button
+                    type="button"
+                    onClick={() => setFormAgentIds((prev) => prev.filter((x) => x !== id))}
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: tokens.colors.danger, fontSize: 11 }}
                   >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => setFormAgentIds((prev) => (
-                        prev.includes(a.id) ? prev.filter((id) => id !== a.id) : [...prev, a.id]
-                      ))}
-                    />
-                    {/* `<Manager>/<Agent>` — bare name 은 계약 위반이다(utils/agentName.ts). */}
-                    <span>{formatAgentDisplayName(a)}</span>
-                  </label>
-                );
-              })}
+                    제거
+                  </button>
+                </div>
+              ))}
             </div>
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 6 }}>
-              선택됨: {formAgentIds.length}개
+              선택됨: {formAgentIds.length}개{pendingSpecs.length > 0 ? ` + runtime ${pendingSpecs.length}개` : ''}
+              {pendingSpecs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setPendingSpecs([])}
+                  style={{ marginLeft: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: tokens.colors.danger, fontSize: 11 }}
+                >
+                  runtime 초기화
+                </button>
+              )}
+            </div>
+            {/* P4c-4: runtime 선언 → spec 보관 후 저장 시 동봉. */}
+            <div style={{ marginTop: 8 }}>
+              <DeclareRuntimeSection
+                workspaceId={effectiveWorkspaceId}
+                onResolved={(_id, _created, spec) => {
+                  if (spec) {
+                    setPendingSpecs((prev) => {
+                      if (prev.some((s) => JSON.stringify(s) === JSON.stringify(spec))) return prev;
+                      return [...prev, spec];
+                    });
+                    showToast('Runtime spec이 대상에 추가됩니다 (저장 시 반영)', 'success');
+                  }
+                }}
+              />
             </div>
           </div>
           <div>
@@ -610,7 +613,6 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
 
 interface ActionDetailProps {
   action: Action;
-  agents: AgentOption[];
   workspaceId: string;
   onBack: () => void;
   onEdit: () => void;
@@ -619,7 +621,7 @@ interface ActionDetailProps {
   running: boolean;
 }
 
-function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, onRun, running }: ActionDetailProps) {
+function ActionDetail({ action, workspaceId, onBack, onEdit, onDelete, onRun, running }: ActionDetailProps) {
   const { user } = useAuth();
   const [runs, setRuns] = useState<ActionRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -729,8 +731,7 @@ function ActionDetail({ action, agents, workspaceId, onBack, onEdit, onDelete, o
   // 접두사가 반드시 있어야 한다.
   const agentName = (id: string): string => {
     if (!id) return '(에이전트 기록 없음)';
-    const a = agents.find((x) => x.id === id);
-    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+    return id.slice(0, 8);
   };
 
   const targetLabels = actionTargets(action).map(agentName);

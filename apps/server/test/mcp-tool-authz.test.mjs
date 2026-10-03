@@ -10,7 +10,7 @@
 //   Medium) workflow-function-tools.ts의 scopeAllowed()가
 //       `!caller?.workspaceId || ...` 형태의 fail-open이라 워크스페이스가
 //       없는(바인딩되지 않은) 호출자를 무조건 통과시켰다.
-//   후속) agent-tools.ts(create/update/delete_agent, move_agent_to_workspace)와
+//   후속) agent-tools.ts의 쓰기 툴들(삭제됨 — P4c-3b)과
 //       workspace-tools.ts(update/delete_workspace)도 동일한 패턴(호출자 검증
 //       없음, 또는 문서만 "Admin-gated"라고 주장할 뿐 실제 게이트가 없음).
 //
@@ -27,7 +27,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { User } from '../dist/entities/User.js';
 import { ApiKey } from '../dist/entities/ApiKey.js';
 
@@ -56,22 +56,18 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   let dataSource;
   let apiKeyService;
   let tools; // name -> { handler }
-  let managerAgent; // update_agent's runtime_host_required gate needs a real manager-type Agent
+  // P4c-4: update_agent/move_agent 삭제 — manager 픽스처 불필요.
 
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Agent, User, ApiKey],
+      entities: [RuntimeHost, User, ApiKey],
       synchronize: true,
       logging: false,
     });
     await dataSource.initialize();
     apiKeyService = new ApiKeyService(dataSource.getRepository(ApiKey));
-    managerAgent = await dataSource.getRepository(Agent).save(dataSource.getRepository(Agent).create({
-      name: 'authz-test-manager',
-      type: 'manager',
-      workspace_id: '',
-    }));
+    // P4c-4: Agent 행 없음 — 정체성은 아래 makeAgent 의 Host 행이다.
 
     tools = {};
     const fakeServer = {
@@ -114,24 +110,14 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
 
   // ─── Test fixtures: two workspace-scoped agents + one full-scope agent ───
 
+  // P4c-4: 정체성은 RuntimeHost 행이다 (Agent 테이블 없음).
   async function makeAgent(workspaceId) {
-    const repo = dataSource.getRepository(Agent);
-    const agent = await repo.save(repo.create({
-      name: `agent-${randomUUID().slice(0, 8)}`,
-      type: 'claude',
+    const repo = dataSource.getRepository(RuntimeHost);
+    return repo.save(repo.create({
+      name: `host-${randomUUID().slice(0, 8)}`,
+      hostname: 'authz-test',
       workspace_id: workspaceId ?? '',
-      // update_agent re-validates runtime_config against the agent's type on
-      // EVERY call (agent-tools.ts, after the cli_runtime_profile block),
-      // even one that never touches these fields — a fixture missing
-      // manager_agent_id fails closed with runtime_host_required before a
-      // successful call ever reaches agentRepo.save(). Every test in this
-      // file so far only asserted update_agent REJECTIONS, which return at
-      // the earlier authz gate and never reach that validation — harmless to
-      // set unconditionally here.
-      manager_agent_id: managerAgent.id,
-      runtime_config: { strategy: 'single', permission_mode: 'strict' },
     }));
-    return agent;
   }
 
   function registerSession(sessionId, auth) {
@@ -391,76 +377,30 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, undefined);
   });
 
-  // ─── agent-tools.ts: create/update/delete_agent, move_agent_to_workspace ───
+  // ─── agent-tools.ts: writes removed (P4c-3b) ───
+  // create_agent / update_agent / delete_agent / move_agent_to_workspace no
+  // longer exist — execution is declared as RuntimeSpec, not Agent rows. What
+  // remains to pin is that the names are GONE from the registry (so no stale
+  // snapshot or future re-registration can silently revive them).
 
-  it('rejects create_agent / update_agent / delete_agent from a non-full-scope caller', async () => {
-    const caller = await makeAgent('workspace-a');
-    const victim = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'write',
-      source: 'db',
-    });
-
-    const createResult = await tools.create_agent.handler(
-      { name: 'sneaky', workspace_id: null, type: 'claude', manager_agent_id: 'whatever' },
-      { sessionId },
-    );
-    assert.equal(createResult.isError, true);
-
-    const updateResult = await tools.update_agent.handler(
-      { agent_id: victim.id, workspace_id: null },
-      { sessionId },
-    );
-    assert.equal(updateResult.isError, true);
-
-    const deleteResult = await tools.delete_agent.handler({ agent_id: victim.id }, { sessionId });
-    assert.equal(deleteResult.isError, true);
-    cleanup();
-
-    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
-    assert.ok(stillThere, 'victim agent must not have been reassigned or deleted');
+  it('does not register agent tools any more (P4c-4: table dropped)', async () => {
+    for (const name of ['create_agent', 'update_agent', 'delete_agent', 'move_agent_to_workspace', 'list_agents', 'get_agent', 'ping']) {
+      assert.equal(tools[name], undefined, `${name} must not be registered`);
+    }
+    // Unclassified names deny outright — except delete_agent, which still
+    // matches the generic destructive-name fallback ('caller' tier). That
+    // fallback is name-based, not registration-based, and stays as is.
+    for (const name of ['create_agent', 'update_agent', 'move_agent_to_workspace', 'list_agents', 'get_agent', 'ping']) {
+      assert.equal(resolveAuthzTier(name), 'deny', `${name} must resolve to deny, not a stale tier`);
+    }
+    assert.equal(resolveAuthzTier('delete_agent'), 'caller');
   });
 
-  it('allows delete_agent from a DB-backed, full-scope, agent-bound caller', async () => {
-    const caller = await makeAgent('workspace-a');
-    const victim = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
 
-    const result = await tools.delete_agent.handler({ agent_id: victim.id }, { sessionId });
-    cleanup();
 
-    assert.equal(result.isError, undefined);
-    const gone = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
-    assert.equal(gone, null);
-  });
 
-  it('gates the committing move_agent_to_workspace call (dry_run=false) — the "Admin-gated" docstring is now enforced', async () => {
-    const caller = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'read',
-      source: 'db',
-    });
 
-    const commitResult = await tools.move_agent_to_workspace.handler(
-      { agent_id: caller.id, target_workspace_id: 'workspace-b', dry_run: false },
-      { sessionId },
-    );
-    cleanup();
 
-    assert.equal(commitResult.isError, true);
-  });
 
   // ─── workspace-tools.ts: update/delete_workspace ───
 
@@ -506,91 +446,13 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   // check went uncaught. These add the cross-tenant destructive paths, plus
   // the sessionless user-tools gate and foreign agent_id linking. ───
 
-  it('rejects update_agent / delete_agent from a workspace-A full-scope caller targeting a workspace-B agent', async () => {
-    const caller = await makeAgent('workspace-a');
-    const victim = await makeAgent('workspace-b');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
 
-    const updateResult = await tools.update_agent.handler(
-      { agent_id: victim.id, name: 'renamed-by-outsider' },
-      { sessionId },
-    );
-    assert.equal(updateResult.isError, true);
 
-    const deleteResult = await tools.delete_agent.handler({ agent_id: victim.id }, { sessionId });
-    assert.equal(deleteResult.isError, true);
-    cleanup();
 
-    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
-    assert.ok(stillThere, 'workspace-B victim agent must survive a workspace-A full-scope caller');
-    assert.equal(stillThere.name, victim.name);
-  });
 
-  it('rejects create_agent into a foreign workspace from a workspace-A full-scope caller', async () => {
-    const caller = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
 
-    const result = await tools.create_agent.handler(
-      { name: 'planted-in-b', workspace_id: 'workspace-b', type: 'claude', manager_agent_id: 'whatever' },
-      { sessionId },
-    );
-    cleanup();
 
-    assert.equal(result.isError, true);
-  });
 
-  it('rejects the committing move_agent_to_workspace call from a workspace-A full-scope caller moving a workspace-B agent', async () => {
-    const caller = await makeAgent('workspace-a');
-    const victim = await makeAgent('workspace-b');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.move_agent_to_workspace.handler(
-      { agent_id: victim.id, target_workspace_id: 'workspace-c', dry_run: false },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(result.isError, true);
-    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
-    assert.equal(stillThere.workspace_id, 'workspace-b');
-  });
-
-  it('rejects the committing move_agent_to_workspace call when the DESTINATION is foreign, even for the caller\'s own agent', async () => {
-    const caller = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.move_agent_to_workspace.handler(
-      { agent_id: caller.id, target_workspace_id: 'workspace-b', dry_run: false },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(result.isError, true);
-  });
 
   it('rejects delete_workspace of workspace B from a workspace-A full-scope caller', async () => {
     const caller = await makeAgent('workspace-a');
@@ -608,79 +470,8 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, true);
   });
 
-  it('allows a genuinely global full-scope Agent to update/delete an agent in any workspace (explicit escape hatch)', async () => {
-    const globalAgent = await makeAgent(''); // '' normalizes to null (global)
-    const victim = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: globalAgent.id,
-      scope: 'full',
-      source: 'db',
-    });
 
-    const result = await tools.delete_agent.handler({ agent_id: victim.id }, { sessionId });
-    cleanup();
 
-    assert.equal(result.isError, undefined);
-    const gone = await dataSource.getRepository(Agent).findOne({ where: { id: victim.id } });
-    assert.equal(gone, null);
-  });
-
-  // ─── Ticket 9b7a5bb7: the two tests above only ever registered a session
-  // WITHOUT caller.workspaceId, so callerCanAccessWorkspace's null-target
-  // branch was reached via its `!caller.workspaceId` fallback — never via a
-  // caller whose ApiKey/session carries a non-null workspaceId even though
-  // the underlying Agent is genuinely global. That second shape is exactly
-  // what the ticket reported (a global agent's own key still had a
-  // workspace_id stamped on it from issuance context) and used to be
-  // rejected unconditionally, because `caller.workspaceId && caller.workspaceId
-  // === targetWorkspaceId` short-circuited to false before the Agent-row
-  // lookup ever ran. These pin down both the fix (accept) and that it does
-  // not overshoot into a privilege escalation (still reject a merely
-  // workspace-bound full-scope caller from touching a global target). ───
-
-  it('allows a genuinely global full-scope Agent to update_agent on itself even when its own session carries a stale non-null workspaceId', async () => {
-    const globalAgent = await makeAgent(''); // '' normalizes to null (global)
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: globalAgent.id,
-      workspaceId: 'workspace-a', // stale/contextual — must not short-circuit the null-target check
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.update_agent.handler(
-      { agent_id: globalAgent.id, name: 'renamed-global-self' },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(result.isError, undefined);
-    const updated = await dataSource.getRepository(Agent).findOne({ where: { id: globalAgent.id } });
-    assert.equal(updated.name, 'renamed-global-self');
-  });
-
-  it('still rejects update_agent on a global target from a workspace-bound full-scope caller whose own Agent is not actually global', async () => {
-    const caller = await makeAgent('workspace-a');
-    const globalVictim = await makeAgent('');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: caller.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.update_agent.handler(
-      { agent_id: globalVictim.id, name: 'renamed-by-workspace-bound-caller' },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(result.isError, true);
-    const stillThere = await dataSource.getRepository(Agent).findOne({ where: { id: globalVictim.id } });
-    assert.notEqual(stillThere.name, 'renamed-by-workspace-bound-caller');
-  });
 
   // ─── DoD (b): sessionless / unresolvable-session create_user / update_user ───
 
@@ -800,7 +591,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Agent],
+      entities: [RuntimeHost],
       synchronize: true,
       logging: false,
     });
@@ -811,11 +602,12 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
+  // P4c-4: 정체성은 RuntimeHost 행이다 (Agent 테이블 없음).
   async function makeAgent(workspaceId) {
-    const repo = dataSource.getRepository(Agent);
+    const repo = dataSource.getRepository(RuntimeHost);
     return repo.save(repo.create({
-      name: `agent-${randomUUID().slice(0, 8)}`,
-      type: 'claude',
+      name: `host-${randomUUID().slice(0, 8)}`,
+      hostname: 'authz-test',
       workspace_id: workspaceId ?? '',
     }));
   }
@@ -841,9 +633,6 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
 
   it('maps the d6b56237 role/credential/cascade tools to their verified tier', () => {
     assert.equal(resolveAuthzTier('delete_user'), 'full');
-    assert.equal(resolveAuthzTier('create_agent'), 'full');
-    assert.equal(resolveAuthzTier('update_agent'), 'full');
-    assert.equal(resolveAuthzTier('delete_agent'), 'full');
     assert.equal(resolveAuthzTier('delete_workspace'), 'full');
     assert.equal(resolveAuthzTier('create_user'), 'caller');
     assert.equal(resolveAuthzTier('update_user'), 'caller');
@@ -906,14 +695,13 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.ok(KNOWN_EXISTING_TOOLS.has('create_ticket'));
   });
 
-  it('leaves update_workspace and move_agent_to_workspace to their own nuanced per-file logic', () => {
+  it('leaves update_workspace to its own nuanced per-file logic', () => {
     // update_workspace intentionally allows a workspace-bound NON-full-scope
-    // caller; move_agent_to_workspace only gates when dry_run=false. A
-    // static per-name tier would misgate both, so neither is in the table —
-    // and neither matches the delete_* / revoke_* fallback pattern, so
-    // neither is touched by the fallback either.
+    // caller. A static per-name tier would misgate it, so it is not in the
+    // table — and it matches neither the delete_* / revoke_* fallback pattern
+    // nor the unknown-name deny, so the fallback leaves it alone either.
+    // (move_agent_to_workspace no longer exists — see the removal test above.)
     assert.equal(resolveAuthzTier('update_workspace'), null);
-    assert.equal(resolveAuthzTier('move_agent_to_workspace'), null);
   });
 
   // ─── installToolAuthzGate: end-to-end wrapping behavior ───
@@ -953,7 +741,10 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
 
   it('rejects a "full"-tiered tool call from a non-full-scope caller even when the handler has no check of its own', async () => {
     const { fakeServer, tools } = makeGatedFakeServer();
-    fakeServer.tool('delete_agent', 'test', {}, async () => (
+    // NOTE: was delete_agent before P4c-3b — but delete_agent was never
+    // 'full'-tiered (generic destructive-name 'caller' fallback, then and
+    // now), so delete_user (table-pinned 'full') carries the intent.
+    fakeServer.tool('delete_user', 'test', {}, async () => (
       { content: [{ type: 'text', text: '{"success":true}' }] }
     ));
 
@@ -962,7 +753,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const cleanup = registerSession(sessionId, {
       agentId: agent.id, workspaceId: 'workspace-a', scope: 'write', source: 'db',
     });
-    const result = await tools.delete_agent.handler({ agent_id: 'x' }, { sessionId });
+    const result = await tools.delete_user.handler({ user_id: 'x' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, true);

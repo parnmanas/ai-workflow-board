@@ -80,6 +80,14 @@ export class OrchestrationStep {
   @Column({ type: 'varchar', nullable: true, default: null })
   assignee_agent_id: string | null;
 
+  /**
+   * Snapshot of the member's `spec` at (re)assignment time (P1). Mission의
+   * orchestrator_spec과 같은 dual-write — P2에서 dispatch가 이쪽을 읽으면
+   * assignee_agent_id는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  assignee_spec: Record<string, any> | null;
+
   @Column({ type: 'varchar', default: 'pending' })
   status: string;
 

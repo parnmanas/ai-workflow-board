@@ -52,7 +52,7 @@ export default function SkillsPage() {
         // "why isn't the built-in applying" has no answer in the UI.
         api.listSkills(currentWorkspaceId, true),
         api.listSkillProposals(currentWorkspaceId),
-        api.getAgents(currentWorkspaceId),
+        Promise.resolve([] as any[]),
       ]);
       setSkills(skillRows);
       setProposals(proposalRows);

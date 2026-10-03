@@ -62,14 +62,16 @@ async function makeStatus(agentRows = []) {
   const dataSource = { getRepository: () => ({ async findOne() { return null; } }) };
   // connectivity + instanceRegistry (ticket 1f750878) — inert fakes, same as
   // the other AgentStatusService unit tests.
-  return new AgentStatusService(agentRepo, dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
+  return new AgentStatusService(dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
 }
 
-function seedTask(service, agentId, ticketId, role, claimedAt, isOnline = true) {
+function seedTask(service, agentId, ticketId, role, claimedAt, isOnline = true, lastSeenAt = null) {
   service.state.set(agentId, {
     agent_id: agentId,
     is_online: isOnline,
-    last_seen_at: new Date(),
+    // P4c-4: _sweep 는 인메모리 상태만 본다 (DB last_seen 병합 없음) —
+    // 오프라인 시나리오는 lastSeenAt 으로 직접 심는다.
+    last_seen_at: lastSeenAt ?? new Date(),
     active_tasks: new Map([[ticketId, { ticket_id: ticketId, ticket_title: 't', claimed_at: claimedAt, role }]]),
   });
 }
@@ -162,7 +164,7 @@ test('_sweep still evicts a task once BOTH claimed_at and output-liveness are st
 test('_sweep: an offline agent still drops every task regardless of output-liveness', async () => {
   const longAgo = AGO(10 * 60_000); // > OFFLINE_THRESHOLD_MS (90s)
   const s = await makeStatus([{ id: 'A', last_seen_at: longAgo, is_online: 1 }]);
-  seedTask(s, 'A', 't1', 'assignee', new Date()); // fresh claimed_at
+  seedTask(s, 'A', 't1', 'assignee', new Date(), true, longAgo); // fresh claimed_at, stale presence
   s.recordOutputLiveness('A', 't1', 'assignee'); // fresh output too
 
   await s._sweep();

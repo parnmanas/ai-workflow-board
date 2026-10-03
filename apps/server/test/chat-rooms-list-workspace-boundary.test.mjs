@@ -31,7 +31,8 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js';
 import { registerChatTools } from '../dist/modules/mcp/tools/chat-tools.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 
@@ -101,7 +102,7 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [ChatRoom, ChatRoomParticipant, Agent],
+      entities: [ChatRoom, ChatRoomParticipant, RuntimeHost, ApiKey],
       synchronize: true,
       logging: false,
     });
@@ -124,10 +125,10 @@ describe('list_chat_rooms 워크스페이스 경계 (티켓 ced48818)', () => {
     listTool = tools['list_chat_rooms'];
     assert.ok(listTool, 'list_chat_rooms 핸들러가 등록되지 않았다');
 
-    const agentRepo = dataSource.getRepository(Agent);
-    await agentRepo.save([
-      agentRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
-      agentRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
+    const hostRepo = dataSource.getRepository(RuntimeHost); // P4c-4
+    await hostRepo.save([
+      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
+      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
     ]);
   });
 

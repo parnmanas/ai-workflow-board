@@ -3228,6 +3228,12 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
  */
 export interface OrchestrationRuntimeHost {
   manager_agent_id: string;
+  /**
+   * P4: dual-write 시절 manager Agent 행 uuid 별칭. 기존 슬롯의
+   * spec.manager_agent_id 가 이 값이면 같은 Host 로 본다
+   * (matchHost() — 직접 비교하지 말 것). 이력 rewrite 때 제거.
+   */
+  legacy_agent_id?: string | null;
   manager_name: string;
   hostname: string;
   is_online: boolean;

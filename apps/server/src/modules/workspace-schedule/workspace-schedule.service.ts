@@ -1,12 +1,16 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { IsNull, LessThanOrEqual, Repository, DataSource } from 'typeorm';
 import { WorkspaceSchedule } from '../../entities/WorkspaceSchedule';
 import { Action } from '../../entities/Action';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
-import { Agent } from '../../entities/Agent';
+import { ApiKey } from '../../entities/ApiKey';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey, runtimeSpecFromAgentRow } from '../../common/runtime-spec';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -39,6 +43,8 @@ export interface CreateWorkspaceScheduleInput {
   name: string;
   /** 인라인 프롬프트 형태에서만. Action 형태에서는 Action 이 대상을 정한다. */
   targetAgentId?: string;
+  /** P4c-3b: spec-direct target. 있으면 정규화 + identity 키가 target이 된다. */
+  targetRuntime?: unknown;
   /** 인라인 프롬프트 형태. `actionId` 와 정확히 택일. */
   taskPrompt?: string;
   /** Action 형태 — 등록된 Action 을 실행한다. `taskPrompt` 와 정확히 택일. */
@@ -102,7 +108,8 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(WorkspaceSchedule) private readonly scheduleRepo: Repository<WorkspaceSchedule>,
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
@@ -155,17 +162,19 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateWorkspaceScheduleInput): Promise<WorkspaceSchedule> {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    const target = await this._validateTarget(input.workspaceId, input.targetAgentId, input.taskPrompt, input.actionId);
+    const target = await this._validateTarget(input.workspaceId, input.targetAgentId, input.taskPrompt, input.actionId, input.targetRuntime);
     await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const { cron, intervalMs } = this._validateCadence(input.cron, input.intervalMs);
     const enabled = input.enabled !== false;
 
+    // P4c-4: spec-direct 스냅샷만 기록한다 (Agent 행 없음).
     const draft = this.scheduleRepo.create({
       workspace_id: input.workspaceId,
       board_id: null,
       name: input.name.trim(),
       target_agent_id: target.targetAgentId,
+      target_runtime: target.targetRuntime ?? null,
       task_prompt: target.taskPrompt,
       action_id: target.actionId,
       cron,
@@ -193,14 +202,22 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     }
     // 대상(무엇을 할지)은 셋이 서로 배타적이라 한 덩어리로 다시 검증한다 — 하나만
     // 패치해서 "프롬프트도 있고 action_id 도 있는" 상태로 빠지는 경로를 막는다.
-    if (patch.targetAgentId !== undefined || patch.taskPrompt !== undefined || patch.actionId !== undefined) {
+    if (patch.targetAgentId !== undefined || patch.taskPrompt !== undefined || patch.actionId !== undefined || patch.targetRuntime !== undefined) {
       const target = await this._validateTarget(
         schedule.workspace_id,
         patch.targetAgentId !== undefined ? patch.targetAgentId : schedule.target_agent_id,
         patch.taskPrompt !== undefined ? patch.taskPrompt : schedule.task_prompt,
         patch.actionId !== undefined ? patch.actionId : schedule.action_id,
+        patch.targetRuntime !== undefined ? patch.targetRuntime : undefined,
       );
       schedule.target_agent_id = target.targetAgentId;
+      // P4c-3b: spec-direct면 스냅샷이 정본. 아니면 행 조회.
+      if (target.targetRuntime !== undefined) {
+        schedule.target_runtime = target.targetRuntime;
+      } else {
+        // P4c-4: uuid 타겟 스냅샷 없음 (Agent 행 없음).
+        schedule.target_runtime = null;
+      }
       schedule.task_prompt = target.taskPrompt;
       schedule.action_id = target.actionId;
     }
@@ -366,10 +383,13 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
 
   private async _dispatch(schedule: WorkspaceSchedule): Promise<DispatchResult> {
     if (schedule.action_id) return this._dispatchAction(schedule);
-    const agent = await this.agentRepo.findOne({ where: { id: schedule.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
+    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음). rt- 는 스냅샷이 해소.
+    const agent = await resolveCallerIdentityRow(this.dataSource, schedule.target_agent_id);
+    if (!agent && !isRuntimeIdentityKey(schedule.target_agent_id)) {
+      throw makeError(400, 'target agent not found');
+    }
     // Workspace-scope safety: never dispatch into an agent outside this workspace.
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, schedule.workspace_id)) {
+    if (agent && !agentIsVisibleInWorkspace(agent.workspace_id, schedule.workspace_id)) {
       throw makeError(400, 'target agent belongs to a different workspace');
     }
 
@@ -387,7 +407,11 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       this.participantRepo.create({
         room_id: room.id,
         participant_type: 'agent',
-        participant_id: agent.id,
+        participant_id: schedule.target_agent_id,
+        // P4c-4: schedule 스냅샷만 기록한다 (Agent 행 없음).
+        runtime_spec: schedule.target_runtime
+          ? { ...schedule.target_runtime }
+          : null,
         last_read_at: joinedAt,
         left_at: null,
       }),
@@ -413,8 +437,8 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       this.logService.warn('WorkspaceScheduler', `sendMessage failed for schedule ${schedule.id}: ${e?.message || e}`);
     }
 
-    this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → agent ${agent.id} room ${room.id}`);
-    return { schedule_id: schedule.id, room_id: room.id, agent_id: agent.id };
+    this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → agent ${schedule.target_agent_id} room ${room.id}`);
+    return { schedule_id: schedule.id, room_id: room.id, agent_id: schedule.target_agent_id };
   }
 
   private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
@@ -436,7 +460,8 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     targetAgentId: string | undefined,
     taskPrompt: string | undefined,
     actionId: string | null | undefined,
-  ): Promise<{ targetAgentId: string; taskPrompt: string; actionId: string | null }> {
+    targetRuntime?: unknown,
+  ): Promise<{ targetAgentId: string; taskPrompt: string; actionId: string | null; targetRuntime?: Record<string, any> | null }> {
     const agent = (targetAgentId || '').trim();
     const prompt = (taskPrompt || '').trim();
     const action = (actionId || '').trim();
@@ -444,7 +469,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (action) {
       if (prompt) throw makeError(400, 'set exactly one of task_prompt or action_id, not both');
       // 워크스페이스 밖의 Action 을 예약하지 못하게 한다 — 스케줄은 자기 워크스페이스
-      // 안에서만 무언가를 일으킬 수 있다.
+      // 안에서만 무언가를 일으킨다.
       const row = await this.actionRepo.findOne({ where: { id: action } });
       if (!row) throw makeError(400, `action not found: ${action}`);
       if (row.workspace_id !== workspaceId) throw makeError(400, 'action belongs to a different workspace');
@@ -454,6 +479,27 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (!prompt) throw makeError(400, 'one of task_prompt or action_id is required');
+    // P4c-3b: spec-direct면 정규화 + identity 키가 target이 된다.
+    if (targetRuntime !== undefined && targetRuntime !== null) {
+      let spec;
+      try {
+        spec = normalizeRuntimeSpec(targetRuntime, 'target_runtime');
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid target_runtime');
+      }
+      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+      const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
+      if (!hostRow) {
+        const link = await this.dataSource.getRepository(ApiKey).findOne({
+          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
+          select: { agent_id: true, host_id: true },
+        });
+        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
+        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
+        if (!linked) throw makeError(400, 'target_runtime references an unknown Runtime Host');
+      }
+      return { targetAgentId: runtimeIdentityKey(spec), taskPrompt: prompt, actionId: null, targetRuntime: { ...spec } };
+    }
     if (!agent) throw makeError(400, 'target_agent_id is required');
     return { targetAgentId: agent, taskPrompt: prompt, actionId: null };
   }

@@ -15,6 +15,8 @@ export interface AgentInfo {
   agent_id: string | null;
   agent_name?: string;
   workspace_id?: string;
+  /** P4c-2b: pairing-time Runtime Host id (null on pre-P0 servers). */
+  host_id?: string | null;
   _note?: string;
   [key: string]: unknown;
 }

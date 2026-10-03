@@ -17,7 +17,8 @@ import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
 import { User } from '../dist/entities/User.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js';
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { RoomMembershipService } from '../dist/modules/chat-rooms/room-membership.service.js';
 import { RoomCrudService } from '../dist/modules/chat-rooms/room-crud.service.js';
@@ -113,7 +114,7 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, OrchestrationMission],
+      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, RuntimeHost, ApiKey, OrchestrationMission],
       synchronize: true,
       logging: false,
     });
@@ -134,24 +135,26 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     const partRepo = dataSource.getRepository(ChatRoomParticipant);
     const msgRepo = dataSource.getRepository(ChatRoomMessage);
     const userRepo = dataSource.getRepository(User);
-    const agentRepo = dataSource.getRepository(Agent);
+    const hostRepo = dataSource.getRepository(RuntimeHost);
 
+    // P4c-4: (room, participant, user, dataSource, mission, log?).
     membership = new RoomMembershipService(
-      roomRepo, partRepo, userRepo, agentRepo, dataSource,
+      roomRepo, partRepo, userRepo, dataSource,
       dataSource.getRepository(OrchestrationMission),
       capturingLog,
     );
-    crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, capturingLog, membership);
+    // P4c-4: (room, participant, message, user, dataSource, log, membership).
+    crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, dataSource, capturingLog, membership);
 
     // 요구사항 7(초대된 뒤 실제로 대화가 되는가)은 참여자 행만 봐서는 검증되지 않는다 —
     // 발화 게이트가 그 행을 실제로 통과시키는지 봐야 한다. 그래서 진짜 메시지 경로를
     // 구성한다. 이 스위트가 쓰지 않는 의존성(티켓/멘션/첨부)만 빈 객체로 둔다.
     const empty = {};
+    // P4c-4: agentRepo 인자 삭제.
     messaging = new RoomMessagingService(
       roomRepo,          // roomRepo
       partRepo,          // participantRepo
       msgRepo,           // messageRepo
-      agentRepo,         // agentRepo
       empty,             // ticketRepo
       empty,             // userMentionRepo
       empty,             // attachmentRepo
@@ -172,11 +175,12 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
       userRepo.create({ id: CAROL, name: 'Carol', email: 'carol@example.com' }),
       userRepo.create({ id: OUTSIDER, name: 'Outsider', email: 'out@example.com' }),
     ]);
-    await agentRepo.save([
-      agentRepo.create({ id: BOT, name: 'Bot', type: 'claude' }),
-      agentRepo.create({ id: HELPER, name: 'Helper', type: 'claude' }),
-      // Agent Manager 는 chat 참가자가 될 수 없다 (티켓 941c72d3).
-      agentRepo.create({ id: MANAGER, name: 'Mgr', type: 'manager' }),
+    // P4c-4: agent 정체성은 RuntimeHost 행이다 — 같은 id 로 심으면 이름 해소가 된다.
+    // Host uuid 는 chat 참가자로 허용된다 (941c72d3 manager 제외는 Agent 테이블과 함께 사라짐).
+    await hostRepo.save([
+      hostRepo.create({ id: BOT, name: 'Bot', hostname: 'bot-host' }),
+      hostRepo.create({ id: HELPER, name: 'Helper', hostname: 'helper-host' }),
+      hostRepo.create({ id: MANAGER, name: 'Mgr', hostname: 'mgr-host' }),
     ]);
   });
 
@@ -343,7 +347,9 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     assert.equal((await activeRows(room.id, BOB)).length, 1);
   });
 
-  it('Agent Manager 만 초대하면 조용히 걸러지고 승격도 일어나지 않는다', async () => {
+  // P4c-4: Host uuid 는 chat 참가자로 허용된다 — 941c72d3 manager 제외는
+  // Agent 테이블과 함께 사라졌다 (filterOutManagerParticipants no-op).
+  it('Runtime Host 초대도 일반 참가자처럼 들어오고 승격을 일으킨다', async () => {
     const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
 
     const events = captureRoomUpdates();
@@ -353,18 +359,18 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
       events.stop();
     }
 
-    assert.equal((await activeRows(room.id, MANAGER)).length, 0, 'manager 는 chat 참가자가 될 수 없다');
+    assert.equal((await activeRows(room.id, MANAGER)).length, 1, 'Host 는 chat 참가자가 될 수 있다');
     const after = await roomOf(room.id);
-    assert.equal(after.type, 'dm', '실제로 추가된 사람이 없으면 승격도 없다');
-    assert.equal(events.length, 0);
+    assert.equal(after.type, 'group', '사람이 늘면 승격한다');
+    assert.ok(events.length > 0, '승격 이벤트가 난다');
   });
 
-  it('manager 와 일반 대상을 함께 초대하면 일반 대상만 들어간다', async () => {
+  it('Host 와 일반 대상을 함께 초대하면 둘 다 들어간다', async () => {
     const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
 
     await invite(room.id, ALICE, [asAgent(MANAGER), asAgent(HELPER)]);
 
-    assert.equal((await activeRows(room.id, MANAGER)).length, 0);
+    assert.equal((await activeRows(room.id, MANAGER)).length, 1);
     assert.equal((await activeRows(room.id, HELPER)).length, 1);
     assert.equal((await roomOf(room.id)).type, 'group');
   });
@@ -488,9 +494,10 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
     // 'agent' < 'user' 로 뒤집힌다.
     const TWIN = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
     const userRepo = dataSource.getRepository(User);
-    const agentRepo = dataSource.getRepository(Agent);
+    // P4c-4: agent 쪽 이름은 Host 행에서 해소된다.
+    const hostRepo = dataSource.getRepository(RuntimeHost);
     await userRepo.save(userRepo.create({ id: TWIN, name: 'Twin User', email: 'twin@example.com' }));
-    await agentRepo.save(agentRepo.create({ id: TWIN, name: 'Twin Agent', type: 'claude' }));
+    await hostRepo.save(hostRepo.create({ id: TWIN, name: 'Twin Agent', hostname: 'twin-host' }));
 
     const room = await seedRoom({ name: '' }, [
       { type: 'user', id: TWIN },   // 먼저 삽입

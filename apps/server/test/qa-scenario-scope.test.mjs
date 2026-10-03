@@ -9,6 +9,7 @@ import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { QaScenario } from '../dist/entities/QaScenario.js';
 import { QaRun } from '../dist/entities/QaRun.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { QaService } from '../dist/modules/qa/qa.service.js';
 
 describe('QA Scenario board-scope cleanup', () => {
@@ -18,15 +19,18 @@ describe('QA Scenario board-scope cleanup', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [QaScenario, QaRun],
+      entities: [QaScenario, QaRun, RuntimeHost],
       synchronize: true,
       logging: false,
     });
     await dataSource.initialize();
     const scenarioRepo = dataSource.getRepository(QaScenario);
     const runRepo = dataSource.getRepository(QaRun);
-    const agentRepo = { findOne: async () => ({ id: 'agent-1', workspace_id: null }) };
-    service = new QaService(scenarioRepo, runRepo, agentRepo, {}, {});
+    // P4c-4: 타겟 해소는 Host 행이다 ('agent-1' id 로 직접 심는다).
+    const hostRepo = dataSource.getRepository(RuntimeHost);
+    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'qa-host', hostname: 'qa', workspace_id: null }));
+    // P4c-4: (scenario, run, dataSource, host, board, runService).
+    service = new QaService(scenarioRepo, runRepo, dataSource, hostRepo, {}, {});
   });
 
   after(async () => {

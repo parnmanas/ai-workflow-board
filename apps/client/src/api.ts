@@ -58,16 +58,12 @@ import type {
   AgentManagerCommandKind,
   AgentManagerCommandOutcome,
   AgentManagerCommandResult,
-  ManagedAgentCreateBody,
   Agent,
   TicketAttachmentMeta,
   TicketPrerequisiteRow,
   UserNotificationChannel,
   BoardWithCards,
   BoardMovePreview,
-  AgentMovePreview,
-  AgentApiKeyPolicy,
-  AgentCrossRefPolicy,
   BenchmarkRunDetail,
   HarnessConfig,
   EffortPresetsConfig,
@@ -342,7 +338,7 @@ export const api = {
   setTicketRoleAssignment: (
     ticketId: string,
     roleId: string,
-    holder: { agent_id?: string | null; user_id?: string | null },
+    holder: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> },
   ) =>
     request<{ assignments: TicketRoleAssignmentRow[] }>(
       `/tickets/${ticketId}/role-assignments/${roleId}`,
@@ -764,63 +760,9 @@ export const api = {
   // workspaceId overrides the ambient X-Workspace-Id header for this one call —
   // see getChannels above for why callers reacting to a workspaceId prop change
   // need this instead of relying on the ambient header.
-  // Note: this endpoint HIDES the identities AWB provisions for Orchestration
-  // team slots. Every caller here is a picker ("who should own this ticket /
-  // join this room?") where they are never the right answer — dispatching to
-  // one directly would run work outside the mission that owns it. The
-  // management surfaces see them: `/agents/dashboard` is unfiltered, and
-  // `getAgentsAll` opts in below.
-  getAgents: (workspaceId?: string) => {
-    const init: RequestInit = {};
-    if (workspaceId) init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    return request<any[]>('/agents', init);
-  },
-  /**
-   * Cross-workspace agent listing for the admin surfaces. `includeOrchestration`
-   * adds the team-slot identities the plain listing hides — the Runtime Host's
-   * managed-agent panel wants them, because they really are running on that host
-   * and an operator debugging it needs to see them.
-   */
-  getAgentsAll: (opts?: { includeOrchestration?: boolean }) =>
-    request<any[]>(`/agents?scope=all${opts?.includeOrchestration ? '&include_orchestration=1' : ''}`),
-  // Phase 3 Plan 03-02: dashboard snapshot with current_task + bool-coerced is_online
-  getAgentDashboard: (workspaceId: string): Promise<DashboardAgent[]> =>
-    request<DashboardAgent[]>(`/agents/dashboard?workspace_id=${encodeURIComponent(workspaceId)}`),
-  // Phase 3 Plan 03-02: extended :id endpoint (role_prompt + redacted flag per D-44)
-  getAgent: (id: string): Promise<AgentDetail> =>
-    request<AgentDetail>(`/agents/${encodeURIComponent(id)}`),
-  // Cross-workspace agent move (ticket 868ead64). dry_run=true (default)
-  // returns the AgentMovePreview report without writing; dry_run=false commits
-  // atomically. Admin-only on the server. A blocked commit rejects with 409.
-  moveAgent: (
-    agentId: string,
-    targetWorkspaceId: string,
-    opts?: { dryRun?: boolean; apiKeyPolicy?: AgentApiKeyPolicy; crossRefPolicy?: AgentCrossRefPolicy },
-  ) =>
-    request<AgentMovePreview>(`/agents/${encodeURIComponent(agentId)}/move-to-workspace`, {
-      method: 'POST',
-      body: JSON.stringify({
-        target_workspace_id: targetWorkspaceId,
-        dry_run: opts?.dryRun !== false,
-        api_key_policy: opts?.apiKeyPolicy ?? 'migrate',
-        cross_ref_policy: opts?.crossRefPolicy ?? 'block',
-      }),
-    }),
-  // ticket 9efa643b — execute a structured move-blocker remedy inline from the
-  // agent-move preview. Same executor as moveBoardRemedy, scoped to the agent
-  // route. The UI re-previews afterward so the resolved blocker disappears.
-  moveAgentRemedy: (agentId: string, action: string, params: Record<string, any>) =>
-    request<{ ok: boolean; action: string; affected: number }>(
-      `/agents/${encodeURIComponent(agentId)}/move-to-workspace/remedy`,
-      { method: 'POST', body: JSON.stringify({ action, params }) },
-    ),
-  // Phase 3 Plan 03-02: actor-scoped activity for the detail modal
-  getAgentActivity: (agentId: string, opts?: { limit?: number }): Promise<ActivityRow[]> => {
-    const limit = opts?.limit ?? 50;
-    return request<ActivityRow[]>(
-      `/agents/${encodeURIComponent(agentId)}/activity?limit=${limit}`,
-    );
-  },
+  // P4c-4: Agent listing/detail/activity endpoints removed server-side
+  // (Agent 테이블 삭제). 실행 주체는 runtime-hosts 카탈로그에서 고른다
+  // (listOrchestrationRuntimeHosts) — 아래 DeclareRuntimeSection 경로.
   // ─── Agent file browser (v0.31.0) ─────────────────────────
   // Each call forwards through to the agent's plugin over SSE and awaits the
   // reverse-HTTP response. Agent offline → 503. Path outside scope → 403.
@@ -862,18 +804,7 @@ export const api = {
   // which now pulls from the per-tab active workspace. The caller can still
   // pass `workspaceId` explicitly to override (e.g., admin tools acting on a
   // workspace other than the one the tab is currently viewing).
-  createAgent: (data: { name: string; description?: string; type?: string; workspaceId?: string }) => {
-    const { workspaceId, ...body } = data;
-    const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
-    if (workspaceId) {
-      init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    }
-    return request<any>('/agents', init);
-  },
-  updateAgent: (id: string, data: Record<string, any>) =>
-    request<any>(`/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteAgent: (id: string) =>
-    request<any>(`/agents/${id}`, { method: 'DELETE' }),
+  // P4c-3b: agent write endpoints removed server-side (POST/PATCH/DELETE /agents).
 
   // ─── Channels ──────────────────────────────────────────
   // workspaceId overrides the ambient X-Workspace-Id header for this one call
@@ -1150,6 +1081,8 @@ export const api = {
     target_agent_id?: string;
     /** 대상 에이전트 전체 — 트리거 1회가 각각에 대해 독립 run 을 만든다. */
     target_agent_ids?: string[];
+    /** P4c-3b: spec-direct 대상 (서버가 id 배열과 합집합한다). */
+    target_runtimes?: Array<Record<string, any>>;
     schedule_cron?: string;
     trigger?: string;
     trigger_label?: string;
@@ -1170,6 +1103,8 @@ export const api = {
       target_agent_id?: string;
       /** 대상 전체 교체 — 배열이 오면 단일 필드보다 우선한다 (티켓 fc3906c5). */
       target_agent_ids?: string[];
+      /** P4c-3b: spec-direct 대상 (서버가 id 배열과 합집합한다). */
+      target_runtimes?: Array<Record<string, any>>;
       schedule_cron?: string;
       trigger?: string;
       trigger_label?: string;
@@ -1243,6 +1178,8 @@ export const api = {
     title: string;
     requirement: string;
     planner_agent_id?: string;
+    /** P4c-3b: spec-direct planner. */
+    planner_runtime?: Record<string, any>;
     source_chat_room_id?: string;
     auto_plan?: boolean;
   }) => request<Feature>('/features', { method: 'POST', body: JSON.stringify(data) }),
@@ -1264,7 +1201,9 @@ export const api = {
     name: string;
     description?: string;
     steps?: QaScenario['steps'];
-    target_agent_id: string;
+    target_agent_id?: string;
+    /** P4c-3b: spec-direct target. */
+    target_runtime?: Record<string, any>;
     qa_driver?: string;
     qa_driver_config?: Record<string, any> | null;
     enabled?: boolean;
@@ -1288,6 +1227,8 @@ export const api = {
       description?: string;
       steps?: QaScenario['steps'];
       target_agent_id?: string;
+      /** P4c-3b: spec-direct target. */
+      target_runtime?: Record<string, any>;
       qa_driver?: string;
       qa_driver_config?: Record<string, any> | null;
       enabled?: boolean;
@@ -1392,6 +1333,8 @@ export const api = {
     workspace_id: string;
     name: string;
     target_agent_id?: string;
+    /** P4c-3b: spec-direct target. */
+    target_runtime?: Record<string, any>;
     task_prompt?: string;
     /** 등록된 Action 실행 (task_prompt 와 택일). */
     action_id?: string | null;
@@ -1405,6 +1348,8 @@ export const api = {
       workspace_id: string;
       name?: string;
       target_agent_id?: string;
+      /** P4c-3b: spec-direct target. */
+      target_runtime?: Record<string, any>;
       task_prompt?: string;
       /** 등록된 Action 실행 (task_prompt 와 택일). null 로 보내면 프롬프트 형태로 되돌린다. */
       action_id?: string | null;
@@ -1437,7 +1382,9 @@ export const api = {
     name: string;
     description?: string;
     checklist?: SecurityProfile['checklist'];
-    target_agent_id: string;
+    target_agent_id?: string;
+    /** P4c-3b: spec-direct target. */
+    target_runtime?: Record<string, any>;
     target_resource_id?: string | null;
     scan_driver?: string;
     scan_driver_config?: Record<string, any> | null;
@@ -1459,6 +1406,8 @@ export const api = {
       description?: string;
       checklist?: SecurityProfile['checklist'];
       target_agent_id?: string;
+      /** P4c-3b: spec-direct target. */
+      target_runtime?: Record<string, any>;
       target_resource_id?: string | null;
       scan_driver?: string;
       scan_driver_config?: Record<string, any> | null;
@@ -1690,6 +1639,12 @@ export const api = {
   /** 호스트에 재열거를 시키고 ack 까지 기다린 뒤 갱신된 목록을 받는다(서버가 기다린다 — 폴링 없음). */
   refreshHostModels: (managerAgentId: string) =>
     request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models/refresh`, { method: 'POST' }),
+  /** RuntimeSpec live 검증 — RuntimeSpecEditor의 저장 전 체크. 저장하지 않는다. */
+  validateRuntimeSpec: (workspace_id: string | null, spec: Record<string, any>) =>
+    request<{ ok: boolean; spec?: Record<string, any>; error?: string }>('/runtime-specs/validate', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id, spec }),
+    }),
   listAgentManagerInstances: (workspaceId?: string) => {
     const qs = new URLSearchParams();
     if (workspaceId) qs.set('workspace_id', workspaceId);
@@ -1798,13 +1753,7 @@ export const api = {
   // Optional `workspaceId` lets callers (e.g. the workspace AI Agents page)
   // pin the request to the URL's wsId rather than relying on the per-tab
   // active workspace — same defensive override as createAgent.
-  createManagedAgent: (body: ManagedAgentCreateBody, workspaceId?: string) => {
-    const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
-    if (workspaceId) {
-      init.headers = { ...getAuthHeaders(), 'X-Workspace-Id': workspaceId };
-    }
-    return request<Agent>('/admin/agent-manager/agents', init);
-  },
+  // P4c-3b: managed-agent creation removed server-side (spec-direct instead).
 
   // Cross-workspace manager picker source — the workspace AI Agents tab
   // uses this to populate the required Runtime Host dropdown so an Agent
@@ -1815,15 +1764,7 @@ export const api = {
       '/admin/agent-manager/managers',
     ),
 
-  // Re-home an existing managed agent into a different workspace. Used by
-  // the Agent Manager runtime section's per-row workspace picker so pre-existing
-  // agents created against a global manager can be relocated to the
-  // workspace they actually belong to without recreating them.
-  setManagedAgentWorkspace: (agentId: string, workspaceId: string | null) =>
-    request<Agent>(`/admin/agent-manager/agents/${encodeURIComponent(agentId)}/workspace`, {
-      method: 'PATCH',
-      body: JSON.stringify({ workspace_id: workspaceId }),
-    }),
+  // P4c-4: managed-agent workspace move endpoint removed server-side.
 
   // ─── Admin Logs ────────────────────────────────────────
   // Governed, immutable skill catalog and bounded Hermes ChildRuns.
@@ -2281,7 +2222,7 @@ export const api = {
   // `existing` flag mattered to MCP callers; for the REST/UI flow same-member
   // rooms are no longer deduped, so the envelope is just legacy noise.)
   createChatRoom: async (
-    participants: { participant_type: string; participant_id: string }[],
+    participants: { participant_type: string; participant_id: string; runtime?: Record<string, any> }[],
     name?: string,
   ): Promise<ChatRoomDetail> => {
     const result = await request<{ room: ChatRoomDetail; existing: boolean }>('/chat-rooms', {
@@ -2405,7 +2346,7 @@ export const api = {
       body: JSON.stringify({ open_join: openJoin }),
     }),
 
-  addChatRoomParticipants: (roomId: string, participants: { participant_type: string; participant_id: string }[]) =>
+  addChatRoomParticipants: (roomId: string, participants: { participant_type: string; participant_id: string; runtime?: Record<string, any> }[]) =>
     request<void>(`/chat-rooms/${roomId}/participants`, {
       method: 'POST',
       body: JSON.stringify({ participants }),
@@ -2828,7 +2769,7 @@ export const api = {
 // ─── Ticket role assignment types ─────────────────────────
 export interface TicketRoleAssignmentRow {
   role: { id: string; slug: string; name: string; position: number; is_builtin: boolean };
-  holder: { type: 'agent' | 'user'; id: string; name: string } | null;
+  holder: { type: 'agent' | 'user'; id: string; name: string; runtime?: Record<string, any> } | null;
 }
 
 // ─── 다중담당자·합의 뷰 타입 (T6) ─────────────────────────

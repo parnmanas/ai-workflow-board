@@ -2,24 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [agentsPageSource, agentManagerPageSource] = await Promise.all([
-  readFile(new URL('../src/components/AgentsPage.tsx', import.meta.url), 'utf8'),
+const [agentManagerPageSource] = await Promise.all([
   readFile(new URL('../src/components/admin/AgentManagerPage.tsx', import.meta.url), 'utf8'),
 ]);
+// P4c-4: AgentsPage 삭제 — 첫 테스트(AI Agents 레이아웃)도 함께 제거.
 
-test('AI Agents propagates its available height into the Mainframe', () => {
-  assert.match(
-    agentsPageSource,
-    /flexDirection:\s*'column',\s*height:\s*'100%',\s*minHeight:\s*0,\s*overflow:\s*'hidden'/,
-  );
-  // 바깥 컨테이너는 스크롤을 잠근다. 안쪽 master/detail 이 **각자** 스크롤하므로,
-  // 여기를 'auto' 로 열면 Mainframe 안쪽 스크롤과 바깥 스크롤이 겹쳐 두 번
-  // 스크롤된다. 컨테이너는 남은 높이를 그대로 받는다(flex:1, minHeight:0).
-  assert.match(
-    agentsPageSource,
-    /id=\{RUNTIME_ANCHOR_ID\}[\s\S]*?flex:\s*1,\s*minHeight:\s*0,[\s\S]*?overflow:\s*'hidden'/,
-  );
-});
 
 test('desktop Mainframe keeps page and detail overflow outside the Agents list', () => {
   assert.match(

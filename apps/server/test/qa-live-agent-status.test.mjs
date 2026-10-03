@@ -47,12 +47,7 @@ const readSrc = (relParts) => fs.readFileSync(path.join(SRC, ...relParts), 'utf8
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 const noopLog = { info() {}, warn() {}, error() {}, debug() {}, log() {} };
 
-function makeService(StatusClass, RegistryClass, { agentRows = [], qaRuns = [], scenarios = [] } = {}) {
-  const agentRepo = {
-    async find() { return agentRows.slice(); },
-    async findOne({ where }) { return agentRows.find((a) => a.id === where.id) || null; },
-    async update() {},
-  };
+function makeService(StatusClass, RegistryClass, { qaRuns = [], scenarios = [] } = {}) {
   // dataSource.getRepository routes by entity name — only _seedQaTasks touches it
   // (QaRun then QaScenario), and only when onModuleInit runs.
   const dataSource = {
@@ -67,7 +62,8 @@ function makeService(StatusClass, RegistryClass, { agentRows = [], qaRuns = [], 
   // connectivity + instanceRegistry (ticket 1f750878) — inert fakes so
   // isReachable() falls back to status.is_online (unchanged _emit lifecycle for
   // these QA-task assertions, which don't exercise reachability).
-  const service = new StatusClass(agentRepo, dataSource, noopLog, registry, { isReachable: () => false }, { list: () => [] });
+  // P4c-4: (dataSource, logService, metrics, connectivity, instanceRegistry).
+  const service = new StatusClass(dataSource, noopLog, registry, { isReachable: () => false }, { list: () => [] });
   return { service, registry };
 }
 
@@ -193,12 +189,11 @@ test('static: AgentStatusService consumes qa_task_changed and merges QA into _em
 });
 
 test('static: client trusts SSE active_tasks wholesale (no QA re-attach append)', () => {
-  const page = fs.readFileSync(path.join(CLIENT_SRC, 'components', 'AgentsPage.tsx'), 'utf8');
-  const modal = fs.readFileSync(path.join(CLIENT_SRC, 'components', 'AgentDetailModal.tsx'), 'utf8');
-  // AgentsPage must forward payload.active_tasks (it previously dropped it).
-  assert.match(page, /active_tasks:\s*payload\.active_tasks/, 'AgentsPage handler must forward payload.active_tasks');
-  // Neither surface may re-append preserved kind:'qa' entries — that append can
+  // P4c-4: AgentsPage/AgentDetailModal 삭제 — 후계 표면은 AgentManagerPage 다.
+  const page = fs.readFileSync(path.join(CLIENT_SRC, 'components', 'admin', 'AgentManagerPage.tsx'), 'utf8');
+  // must forward payload.active_tasks (it previously dropped it).
+  assert.match(page, /if \(agent\.active_tasks\?\.length\) return agent\.active_tasks/, 'AgentManagerPage must forward payload.active_tasks');
+  // must not re-append preserved kind:'qa' entries — that append can
   // never let SSE remove a completed QA run.
-  assert.doesNotMatch(page, /filter\(\(t\)\s*=>\s*t\.kind === 'qa'\)/, 'AgentsPage must not re-attach kind:qa (wholesale trust)');
-  assert.doesNotMatch(modal, /filter\(\(t\)\s*=>\s*t\.kind === 'qa'\)/, 'AgentDetailModal must not re-attach kind:qa (wholesale trust)');
+  assert.doesNotMatch(page, /filter\(\(t\)\s*=>\s*t\.kind === 'qa'\)/, 'AgentManagerPage must not re-attach kind:qa (wholesale trust)');
 });

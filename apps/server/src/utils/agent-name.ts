@@ -17,8 +17,9 @@
 //   - resolveAgentDisplayMap(repo, agents) — batched (id → display) for
 //     list endpoints; one extra `agents` query for every distinct manager.
 
-import { In, Repository } from 'typeorm';
-import { Agent } from '../entities/Agent';
+import { In, type DataSource, type EntityManager } from 'typeorm';
+import { RuntimeHost } from '../entities/RuntimeHost';
+import { ApiKey } from '../entities/ApiKey';
 
 const SEPARATOR = '/';
 
@@ -62,46 +63,75 @@ export function formatAgentDisplayName(agent: AgentDisplayInput | null | undefin
   return mgr ? `${mgr}${SEPARATOR}${name}` : name;
 }
 
-export async function resolveAgentDisplayMap(
-  agentRepo: Repository<Agent>,
-  agents: Array<Pick<Agent, 'id' | 'name' | 'manager_agent_id'>>,
+export type IdentityScope = Pick<DataSource, 'getRepository'> | Pick<EntityManager, 'getRepository'>;
+
+/**
+ * P4c-4: Agent 테이블 제거 이후의 표시명 해소. uuid id → RuntimeHost 행 이름,
+ * 없으면 api_keys 페어링 링크의 Host 이름, 둘 다 없으면 맵에서 빠진다
+ * (호출자는 저장된 denormalized 이름으로 폴백). `<Manager>/<Agent>` prefix 는
+ * Host 자체가 정체성이므로 더 이상 붙이지 않는다.
+ */
+async function hostNameById(
+  scope: IdentityScope,
+  ids: string[],
 ): Promise<Map<string, string>> {
-  const managerIds = Array.from(new Set(
-    agents.map(a => a.manager_agent_id).filter((id): id is string => !!id),
-  ));
-  const managerNameById = new Map<string, string>();
-  if (managerIds.length > 0) {
-    const managers = await agentRepo.find({
-      where: { id: In(managerIds) } as any,
-      select: { id: true, name: true } as any,
-    });
-    for (const m of managers) managerNameById.set(m.id, m.name);
+  const out = new Map<string, string>();
+  const distinct = Array.from(new Set(ids.filter(isUuidShapedId)));
+  if (distinct.length === 0) return out;
+  const [hosts, keys] = await Promise.all([
+    scope.getRepository(RuntimeHost).find({
+      where: { id: In(distinct) },
+      select: { id: true, name: true },
+    }),
+    scope.getRepository(ApiKey).find({
+      where: [{ agent_id: In(distinct) }, { host_id: In(distinct) }],
+      select: { agent_id: true, host_id: true },
+    }),
+  ]);
+  const hostName = new Map(hosts.map((h) => [h.id, h.name]));
+  for (const h of hosts) {
+    if (h.name) out.set(h.id, h.name);
   }
+  if (keys.length > 0) {
+    const linkedHostIds = [...new Set(keys.map((k) => k.host_id).filter((x): x is string => !!x))];
+    if (linkedHostIds.length > 0) {
+      const linked = await scope.getRepository(RuntimeHost).find({
+        where: { id: In(linkedHostIds) },
+        select: { id: true, name: true },
+      });
+      for (const h of linked) hostName.set(h.id, h.name);
+    }
+    for (const k of keys) {
+      if (k.agent_id && k.host_id && !out.has(k.agent_id)) {
+        const n = hostName.get(k.host_id);
+        if (n) out.set(k.agent_id, n);
+      }
+    }
+  }
+  return out;
+}
+
+export async function resolveAgentDisplayMap(
+  scope: IdentityScope,
+  agents: Array<{ id: string; name?: string | null }>,
+): Promise<Map<string, string>> {
+  const names = await hostNameById(scope, agents.map((a) => a.id));
   const out = new Map<string, string>();
   for (const a of agents) {
-    out.set(a.id, formatAgentDisplayName({
-      name: a.name,
-      manager_name: a.manager_agent_id ? managerNameById.get(a.manager_agent_id) ?? null : null,
-    }));
+    out.set(a.id, names.get(a.id) ?? ((a.name || '').trim() || a.id.slice(0, 8)));
   }
   return out;
 }
 
 export async function resolveAgentDisplayName(
-  agentRepo: Repository<Agent>,
+  scope: IdentityScope,
   agentId: string,
 ): Promise<string | null> {
-  // 비-uuid actor id 는 정의상 Agent 가 아니다 — 같은 UUID_RE 가드를 배치 형제
-  // resolveAgentDisplayNamesByIds 가 이미 쓰고 있고, 단일 id 경로만 남아 있었다.
-  // Postgres 에서 Agent.id 는 real uuid 라 'system'/'auto-advance' 로 findOne 하면
-  // `invalid input syntax for type uuid` 로 **throw** 해 호출자를 끌고 내려간다:
-  // board_update SSE 매핑이 그 throw 를 먹고 프레임을 통째로 유실했다.
-  // sqlite 에서는 어차피 매칭되는 행이 없어 null 이었으므로 동작 보존이다.
+  // 비-uuid actor id 는 정의상 조회 대상이 아니다 (기존 UUID_RE 가드 유지 —
+  // Postgres uuid 컬럼 throw 방지).
   if (!isUuidShapedId(agentId)) return null;
-  const agent = await agentRepo.findOne({ where: { id: agentId } });
-  if (!agent) return null;
-  const map = await resolveAgentDisplayMap(agentRepo, [agent]);
-  return map.get(agent.id) ?? agent.name;
+  const names = await hostNameById(scope, [agentId]);
+  return names.get(agentId) ?? null;
 }
 
 /**
@@ -115,17 +145,10 @@ export async function resolveAgentDisplayName(
  * `actor_name` without a backfill on the high-churn activity_logs table.
  */
 export async function resolveAgentDisplayNamesByIds(
-  agentRepo: Repository<Agent>,
+  scope: IdentityScope,
   ids: Array<string | null | undefined>,
 ): Promise<Map<string, string>> {
-  // Keep only UUID-shaped ids — a non-uuid actor id (system label, deleted
-  // row) can never be an Agent.id, and passing it to `Agent.id IN (...)` throws
-  // on Postgres (uuid column). See UUID_RE note above.
-  const distinct = Array.from(new Set(ids.filter(isUuidShapedId)));
-  if (distinct.length === 0) return new Map();
-  const agents = await agentRepo.find({
-    where: { id: In(distinct) } as any,
-    select: { id: true, name: true, manager_agent_id: true } as any,
-  });
-  return resolveAgentDisplayMap(agentRepo, agents);
+  // Keep only UUID-shaped ids — a non-uuid actor id (system label, rt- key)
+  // is simply ABSENT from the map. See UUID_RE note above.
+  return hostNameById(scope, Array.from(new Set(ids.filter((x): x is string => !!x))));
 }

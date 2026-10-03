@@ -95,12 +95,13 @@ test('CLI auto-login normalizes captured fields before the required-field check'
   );
 });
 
-test('the manager-facing credential read heals damaged rows and logs the repair', () => {
-  const src = read('modules/agent-manager/agent-manager.controller.ts');
-  assert.match(src, /fields = normalizeCredentialFields\(raw\)/);
+test('the manager-facing credential read heals damaged rows (P4c-4: sessions service)', () => {
+  // P4c-4: 세션 credential 제공이 agent-sessions.service.ts getSessionCredential 로
+  // 옮겼다 — 구 agent-manager 경로의 치유 읽기는 함께 이동했다.
+  const src = read('modules/agent-sessions/agent-sessions.service.ts');
   assert.match(
     src,
-    /had whitespace inside/,
-    'a healed credential must be logged so the operator knows to re-save it at rest',
+    /fields: normalizeCredentialFields\(fields\)/,
+    'getSessionCredential must normalize before handing fields to the manager',
   );
 });

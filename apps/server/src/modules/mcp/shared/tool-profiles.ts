@@ -64,7 +64,7 @@ export type ToolProfile = 'full' | 'compact';
  */
 export const COMPACT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'whoami',
-  'ping',
+  // P4c-4: 'ping' 삭제 (Agent 테이블과 함께 제거됨).
   'get_ticket',
   'get_my_tickets',
   'get_allocated_tickets',

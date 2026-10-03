@@ -15,9 +15,12 @@ export class CreateAgentErrorLogs1760000000005 implements MigrationInterface {
       // dev (sql.js) uses synchronize:true; entity + column auto-created
       return;
     }
-    await queryRunner.query(
-      'ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_error_upload_at TIMESTAMP NULL'
-    );
+    // P4c-4: agents 테이블 없음 — 가드 후 추가한다.
+    if (await queryRunner.hasTable('agents')) {
+      await queryRunner.query(
+        'ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_error_upload_at TIMESTAMP NULL'
+      );
+    }
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS agent_error_logs (
         id UUID PRIMARY KEY,

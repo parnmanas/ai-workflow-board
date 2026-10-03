@@ -7,6 +7,7 @@ import { tokens } from '../tokens';
 import { Button, Input, Select, Modal, Card, Badge, ConfirmDialog } from './common';
 import { relativeTime } from '../utils/time';
 import { formatAgentDisplayName } from '../utils/agentName';
+import DeclareRuntimeSection from './runtime/DeclareRuntimeSection';
 
 /**
  * Workspace Schedule editor (ticket 1927ed4a). Mirrors the QA Schedules editor
@@ -52,6 +53,8 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
   const { showToast } = useToast();
   const [schedules, setSchedules] = useState<WorkspaceSchedule[]>([]);
   const [agents, setAgents] = useState<ScheduleAgent[]>([]);
+  // P4b: runtime 선언 → 매칭용 full 행.
+  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   // Action 형태 스케줄이 고를 대상. 크론이 Action 에서 이리로 옮겨 왔다.
   const [actions, setActions] = useState<Action[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,11 +67,12 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
     try {
       const [scheduleList, agentList, actionList] = await Promise.all([
         api.listWorkspaceSchedules(workspaceId).catch(() => []),
-        api.getAgents(workspaceId).catch(() => []),
+        Promise.resolve([]),
         api.listActions(workspaceId).catch(() => []),
       ]);
       setSchedules(scheduleList || []);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+      setAgentsFull((agentList || []) as any[]);
       setActions(actionList || []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load workspace schedules', 'error');
@@ -194,6 +198,7 @@ export default function WorkspaceSchedulesEditor({ workspaceId }: WorkspaceSched
           schedule={editing === 'new' ? null : editing}
           workspaceId={workspaceId}
           agents={agents}
+          agentsFull={agentsFull}
           actions={actions}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await load(); }}
@@ -278,18 +283,22 @@ interface ScheduleEditorProps {
   schedule: WorkspaceSchedule | null;
   workspaceId: string;
   agents: ScheduleAgent[];
+  /** P4b: runtime 선언 → 매칭용 full 행. */
+  agentsFull: Array<any>;
   actions: Action[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function ScheduleEditor({ schedule, workspaceId, agents, actions, onClose, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ schedule, workspaceId, agents, agentsFull, actions, onClose, onSaved }: ScheduleEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(schedule?.name ?? '');
   // 무엇을 할지 — 프롬프트를 직접 쓰거나, 등록된 Action 을 고른다. 서버가 택일을 강제한다.
   const [targetKind, setTargetKind] = useState<'prompt' | 'action'>(schedule?.action_id ? 'action' : 'prompt');
   const [actionId, setActionId] = useState(schedule?.action_id ?? '');
   const [targetAgentId, setTargetAgentId] = useState(schedule?.target_agent_id ?? '');
+  // P4c-3b: spec-direct target.
+  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>(null);
   const [taskPrompt, setTaskPrompt] = useState(schedule?.task_prompt ?? '');
   // Cadence: edit either as an interval (value + unit) or a cron expr.
   const [cadenceKind, setCadenceKind] = useState<'interval' | 'cron'>(schedule?.cron ? 'cron' : 'interval');
@@ -317,7 +326,7 @@ function ScheduleEditor({ schedule, workspaceId, agents, actions, onClose, onSav
     if (targetKind === 'action') {
       if (!actionId) { showToast('실행할 Action 을 선택하세요', 'error'); return; }
     } else {
-      if (!targetAgentId) { showToast('대상 에이전트를 선택하세요', 'error'); return; }
+      if (!targetAgentId && !pendingSpec) { showToast('대상 에이전트를 선택하세요', 'error'); return; }
       if (!taskPrompt.trim()) { showToast('작업 프롬프트를 입력하세요', 'error'); return; }
     }
     if (cadenceKind === 'cron') {
@@ -331,7 +340,9 @@ function ScheduleEditor({ schedule, workspaceId, agents, actions, onClose, onSav
       name: name.trim(),
       // 고르지 않은 쪽은 빈 값/ null 로 보내 서버의 택일 검증을 통과시킨다 —
       // 종류를 바꿨을 때 옛 값이 남아 있으면 "둘 다 설정됨" 으로 거부된다.
+      // P4c-3b: pendingSpec이 있으면 spec-direct 저장.
       target_agent_id: targetKind === 'action' ? '' : targetAgentId,
+      target_runtime: targetKind === 'action' ? undefined : (pendingSpec ?? undefined),
       task_prompt: targetKind === 'action' ? '' : taskPrompt.trim(),
       action_id: targetKind === 'action' ? actionId : null,
       enabled,
@@ -413,7 +424,20 @@ function ScheduleEditor({ schedule, workspaceId, agents, actions, onClose, onSav
               placeholder="— 에이전트 선택 —"
               value={targetAgentId}
               options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-              onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
+              onChange={(e) => { setTargetAgentId((e.target as HTMLSelectElement).value); setPendingSpec(null); }}
+            />
+            {/* P4c-3b: runtime 선언 → 매칭되면 id, 새로우면 spec-direct 저장. */}
+            <DeclareRuntimeSection
+              workspaceId={workspaceId}
+              agentsFull={agentsFull}
+              onResolved={(id, created, spec) => {
+                setTargetAgentId(id);
+                setPendingSpec(created ? spec : null);
+                showToast(
+                  created ? 'Runtime spec으로 저장됩니다 (Agent 행 없음)' : '기존 Agent와 매칭되었습니다',
+                  'success',
+                );
+              }}
             />
 
             <div>

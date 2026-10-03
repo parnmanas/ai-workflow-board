@@ -7,7 +7,7 @@
 
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 import { In } from 'typeorm';
-import { Agent } from '../../../entities/Agent';
+import { resolveCallerIdentityRow } from './authz';
 import { Board } from '../../../entities/Board';
 import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
@@ -70,16 +70,14 @@ export interface AgentResolveLogger {
  * entry points (root + child × create + update) and the REST controller all
  * agree, which is what kills the same-name disambiguation problem in B3.
  */
+// P4c-4: Agent 행 없음 — 이름 그대로 둔다 (Host/링크 해소는 호출자가
+// resolveCallerIdentityRow 로 한다).
 export async function formatAgentDisplayName(
   scope: RepoScope,
-  agent: Agent,
+  agent: { name: string },
 ): Promise<string> {
-  if (!agent.manager_agent_id) return agent.name;
-  const manager = await scope.getRepository(Agent)
-    .findOne({ where: { id: agent.manager_agent_id } })
-    .catch(() => null);
-  if (!manager) return agent.name;
-  return `${manager.name}/${agent.name}`;
+  void scope;
+  return agent.name;
 }
 
 /**
@@ -102,10 +100,10 @@ export async function resolveCallerDisplayName(
   caller: { agentId?: string; agentName?: string } | null | undefined,
 ): Promise<string> {
   if (caller?.agentId) {
-    const agent = await scope.getRepository(Agent)
-      .findOne({ where: { id: caller.agentId } })
+    // P4c-4: Host/legacy 이름으로 표시한다 (Agent 행 없음).
+    const row = await resolveCallerIdentityRow(scope, caller.agentId)
       .catch(() => null);
-    if (agent) return formatAgentDisplayName(scope, agent);
+    if (row) return row.name;
   }
   return caller?.agentName || '';
 }
@@ -120,27 +118,18 @@ export async function resolveCallerDisplayName(
  * wrong agent type. We log a warn on the name path and throw on multi-match
  * — callers must migrate to ID-based lookup.
  */
+// P4c-4: Agent 테이블 없음 — name-only 경로는 폐기, id passthrough 만 남는다.
 export async function resolveAgentId(
   scope: RepoScope,
   id: string,
   name: string,
   logger?: AgentResolveLogger,
 ): Promise<string> {
+  void scope;
+  void logger;
   if (id) return id;
   if (!name) return '';
-  const agents = await scope.getRepository(Agent)
-    .find({ where: { name } })
-    .catch(() => [] as Agent[]);
-  if (agents.length === 0) return '';
-  if (agents.length > 1) {
-    const ids = agents.map(a => a.id).join(', ');
-    throw new Error(
-      `Agent name "${name}" matches ${agents.length} agents (ids: ${ids}). ` +
-      `Pass *_id directly — name-based lookup is ambiguous.`,
-    );
-  }
-  logger?.warn?.('MCP', 'Deprecated name-based agent lookup', { name, agent_id: agents[0].id });
-  return agents[0].id;
+  return '';
 }
 
 /**
@@ -170,30 +159,16 @@ export async function resolveAgentIdAndName(
   name: string,
   logger?: AgentResolveLogger,
 ): Promise<{ id: string; name: string }> {
+  // P4c-4: Agent 테이블 없음 — id 는 Host/링크 해소, name-only 경로는 폐기
+  // (호출자가 *_id 로 직접 지정해야 한다).
+  void logger;
   if (!id && !name) return { id: '', name: '' };
-  const agentRepo = scope.getRepository(Agent);
   if (id) {
-    // Always look the id up so we can build the canonical Manager/Agent
-    // display, even when the caller pre-filled `name`. Falling back to the
-    // caller's name on miss preserves user-id assignees.
-    const agent = await agentRepo.findOne({ where: { id } }).catch(() => null);
-    if (!agent) return { id, name: name || '' };
-    const display = await formatAgentDisplayName(scope, agent);
-    return { id: agent.id, name: display };
+    const hostRow = await resolveCallerIdentityRow(scope, id).catch(() => null);
+    if (hostRow) return { id, name: hostRow.name };
+    return { id, name: name || '' };
   }
-  // Name-only: deprecated path.
-  const agents = await agentRepo.find({ where: { name } }).catch(() => [] as Agent[]);
-  if (agents.length === 0) return { id: '', name };
-  if (agents.length > 1) {
-    const ids = agents.map(a => a.id).join(', ');
-    throw new Error(
-      `Agent name "${name}" matches ${agents.length} agents (ids: ${ids}). ` +
-      `Pass *_id directly — name-based lookup is ambiguous.`,
-    );
-  }
-  logger?.warn?.('MCP', 'Deprecated name-based agent lookup', { name, agent_id: agents[0].id });
-  const display = await formatAgentDisplayName(scope, agents[0]);
-  return { id: agents[0].id, name: display };
+  return { id: '', name };
 }
 
 /**

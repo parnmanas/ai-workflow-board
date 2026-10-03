@@ -68,6 +68,14 @@ export class Feature {
   @Column({ type: 'varchar', default: '' })
   planner_agent_id: string;
 
+  /**
+   * Snapshot of the planner's runtime at intake time (P2c dual-write).
+   * `planner_agent_id`와 항상 함께 쓴다. P4에서 dispatch가 이쪽을 읽으면
+   * `planner_agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  planner_runtime: Record<string, any> | null;
+
   // The structured chain proposal the planner submits. null until `proposed`.
   @Column({ type: 'simple-json', nullable: true, default: null })
   proposal: FeatureChainProposal | null;

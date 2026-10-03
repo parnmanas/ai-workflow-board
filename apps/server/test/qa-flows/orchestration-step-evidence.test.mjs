@@ -90,7 +90,12 @@ test('담당 agent 가 올린 스크린샷·녹화가 step 세션과 미션 증�
   await runner.startMission(mission.id, ws.id, HUMAN);
 
   const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label: 'lead' });
-  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { workspaceId: ws.id, label: 'worker' });
+  // P4c-4: worker 는 rt- 슬롯 identity — 증거 업로드(chat tools)는 runtime-tuple
+  // 키(`runtime:<label>:<rt-key>`, host 바인딩)로 인증한다.
+  const workerHostId = squad.team.members.find((m) => m.agent_id === worker.id)?.runtime?.manager_agent_id;
+  const workerKeyRow = await createApiKey(app, getDataSourceToken, null, { workspaceId: ws.id, label: 'worker-tuple', hostId: workerHostId });
+  await ds.getRepository('ApiKey').update({ id: workerKeyRow.id }, { name: `runtime:builder:${worker.id}` });
+  const workerKey = workerKeyRow;
   const leadMcp = new McpClient({ baseUrl: base, apiKey: leadKey.raw_key });
   const workerMcp = new McpClient({ baseUrl: base, apiKey: workerKey.raw_key });
   t.after(() => {

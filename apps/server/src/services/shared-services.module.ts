@@ -7,7 +7,6 @@ import { Channel } from '../entities/Channel';
 import { Comment } from '../entities/Comment';
 import { Ticket } from '../entities/Ticket';
 import { User } from '../entities/User';
-import { Agent } from '../entities/Agent';
 import { BoardColumn } from '../entities/BoardColumn';
 import { RelationTuple } from '../entities/RelationTuple';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
@@ -57,7 +56,7 @@ import {
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      ActivityLog, AgentErrorLog, ApiKey, Agent, Channel, Comment, Ticket, User, BoardColumn,
+      ActivityLog, AgentErrorLog, ApiKey, Channel, Comment, Ticket, User, BoardColumn,
       RelationTuple, WorkspaceRole, TicketRoleAssignment, UserChannel, SystemSetting,
     ]),
   ],

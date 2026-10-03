@@ -157,6 +157,7 @@ async function startHttp() {
               workspaceId: mcpAuthInfo.workspaceId,
               scope: mcpAuthInfo.scope,
               source: mcpAuthInfo.source,
+              runtimeKey: mcpAuthInfo.runtimeKey,
             });
             const who = mcpAuthInfo.agentName || mcpAuthInfo.keyHint || 'anonymous';
             mcpLog(`New session: ${id} by [${who}]  (active: ${sessionStore.size})`);

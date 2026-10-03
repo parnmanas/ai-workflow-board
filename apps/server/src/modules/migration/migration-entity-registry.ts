@@ -2,16 +2,16 @@
  * 마이그레이션 테이블 순서 레지스트리 (ticket 0f638509).
  *
  * FK 위상 순서 — 부모가 자식보다 먼저 와야 삽입 시 FK 위반이 나지 않는다.
- * 전체 79개 엔티티를 전수 조사한 결과, 실제 DB 레벨 FK 제약은 정확히
- * 11개(9개 엔티티)뿐이고 나머지는 앱이 관례로 지키는 평문 id 컬럼(FK
- * 미강제)이다 — 그래서 이 순서는 그 11개 제약만 정확히 지키면 되고, 나머지
- * 63개는 "대략 의존 방향"으로만 배치했다(정확도가 필요 없음 — sqlite/dev는
- * 기본적으로 FK 자체를 강제하지 않고, Postgres도 이 63개엔 제약이 없다).
+ * 전체 78개 엔티티를 전수 조사한 결과, 실제 DB 레벨 FK 제약은 정확히
+ * 10개뿐이고 나머지는 앱이 관례로 지키는 평문 id 컬럼(FK
+ * 미강제)이다 — 그래서 이 순서는 그 10개 제약만 정확히 지키면 되고, 나머지
+ * 62개는 "대략 의존 방향"으로만 배치했다(정확도가 필요 없음 — sqlite/dev는
+ * 기본적으로 FK 자체를 강제하지 않고, Postgres도 이 62개엔 제약이 없다).
  *
- * 실제 FK 11개:
+ * 실제 FK 10개 (P4c-4: ApiKey.agent_id → Agent 실FK가 Agent 테이블과 함께 제거됨):
  *   Board.workspace_id → Workspace
  *   BoardColumn.board_id → Board
- *   ApiKey.agent_id → Agent (nullable)
+ *   (ApiKey.agent_id 는 평문 varchar audit 컬럼으로 남고, host_id 가 유일한 바인딩이다)
  *   ChatRoomParticipant.room_id → ChatRoom
  *   Ticket.column_id → BoardColumn (nullable)
  *   Ticket.parent_id → Ticket (self, nullable) — ★ 아래 특별 처리 참고
@@ -84,8 +84,11 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'PromptTemplate',
 
   // Workspace/Credential에 의존
-  'Agent',
-  'ApiKey', // FK: Agent
+  // P4c-4: Agent 테이블 삭제 — 해당 항목 제거. ApiKey.agent_id 실FK도 함께 제거됨.
+  // (주의: 이 배열 본문 안의 주석에 따옴표로 감싼 엔티티명을 쓰지 말 것 —
+  // completeness 테스트가 본문의 모든 따옴표 문자열을 등록명으로 파싱한다.)
+  'RuntimeHost',
+  'ApiKey',
   'AgentErrorLog', 'AgentUsageDailyRollup',
 
   // Board 계열

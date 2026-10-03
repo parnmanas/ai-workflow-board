@@ -34,10 +34,6 @@ import {
   resolveArtifactRef,
   chunkArtifactRefs,
   formatArtifactRefsContent,
-  trackedAgentTool,
-  resolveAgentRef,
-  chunkAgentRefs,
-  formatAgentRefsContent,
   trackedBoardTool,
   resolveBoardRef,
   chunkBoardRefs,
@@ -46,8 +42,6 @@ import {
   type TicketRef,
   type ArtifactToolContext,
   type ArtifactRef,
-  type AgentToolContext,
-  type AgentRef,
   type BoardToolContext,
   type BoardRef,
 } from './ticket-ref-capture.js';
@@ -185,11 +179,9 @@ export class ChatSessionManager
   // pending/captured 이중 맵 — 티켓 ref 와 독립적으로 누적돼 flush 시 artifact_refs 로 방출.
   #pendingArtifactTools = new Map<number, Map<string, ArtifactToolContext>>();
   #capturedArtifactRefs = new Map<number, ArtifactRef[]>();
-  // F-3 (ticket 3ca88253): agent-status / board-summary 카드 캡처. 동일한 pid 키
+  // F-3 (ticket 3ca88253): board-summary 카드 캡처. 동일한 pid 키
   // pending/captured 이중 맵 패턴 — 다른 ref 채널과 독립적으로 누적돼 flush 시
-  // agent_refs / board_refs 로 방출.
-  #pendingAgentTools = new Map<number, Map<string, AgentToolContext>>();
-  #capturedAgentRefs = new Map<number, AgentRef[]>();
+  // board_refs 로 방출. (agent-status 채널은 P4c-4 로 get_agent 와 함께 제거.)
   #pendingBoardTools = new Map<number, Map<string, BoardToolContext>>();
   #capturedBoardRefs = new Map<number, BoardRef[]>();
 
@@ -1058,19 +1050,8 @@ export class ChatSessionManager
       apend.set(block.id, actx);
       return;
     }
-    // F-3 (ticket 3ca88253): 결과물 tool 도 아니면 agent-status / board-summary tool
-    // 인지 확인해 별도 추적. 세 채널 모두 tool 이름으로 배타 분기되므로(동일 tool 이
-    // 두 맵에 동시에 들어갈 수 없음) 순차 체크로 충분하다.
-    const agctx = trackedAgentTool(block?.name);
-    if (agctx) {
-      let agpend = this.#pendingAgentTools.get(pid);
-      if (!agpend) {
-        agpend = new Map();
-        this.#pendingAgentTools.set(pid, agpend);
-      }
-      agpend.set(block.id, agctx);
-      return;
-    }
+    // F-3 (ticket 3ca88253): 결과물 tool 도 아니면 board-summary tool 인지
+    // 확인해 별도 추적. (agent-status 채널은 P4c-4 로 제거.)
     const bctx = trackedBoardTool(block?.name, block?.input);
     if (!bctx) return;
     let bpend = this.#pendingBoardTools.get(pid);
@@ -1114,7 +1095,6 @@ export class ChatSessionManager
       // no-op if useId isn't in ITS pending map, so calling all three is safe: a
       // given tool_use_id can only ever be pending in at most one of them).
       this.#consumeArtifactToolResult(pid, useId, result, isError);
-      this.#consumeAgentToolResult(pid, useId, result, isError);
       this.#consumeBoardToolResult(pid, useId, result, isError);
       return;
     }
@@ -1168,26 +1148,6 @@ export class ChatSessionManager
     this.#capturedArtifactRefs.set(pid, refs);
   }
 
-  /** F-3 (ticket 3ca88253): get_agent tool_result 를 소비해 AgentRef 로 캡처한다.
-   *  pending agent 맵에 매칭될 때만 방출(fail-closed). */
-  #consumeAgentToolResult(pid: number, useId: string | undefined, result: any, isError: boolean): void {
-    const agpend = this.#pendingAgentTools.get(pid);
-    const agctx = agpend && useId ? agpend.get(useId) : undefined;
-    if (!agctx || !agpend || !useId) return; // not a tracked agent tool
-    agpend.delete(useId);
-    const ref = resolveAgentRef(agctx, result, isError);
-    if (ref) this.#pushCapturedAgentRef(pid, ref);
-  }
-
-  /** Append a captured agent ref, collapsing duplicate agent_id so asking about the
-   *  same agent twice in one turn renders one card. */
-  #pushCapturedAgentRef(pid: number, ref: AgentRef): void {
-    const refs = this.#capturedAgentRefs.get(pid) ?? [];
-    if (refs.some((r) => r.agent_id === ref.agent_id)) return;
-    refs.push(ref);
-    this.#capturedAgentRefs.set(pid, refs);
-  }
-
   /** F-3 (ticket 3ca88253): get_board_summary tool_result 를 소비해 BoardRef 로
    *  캡처한다. pending board 맵에 매칭될 때만 방출(fail-closed). */
   #consumeBoardToolResult(pid: number, useId: string | undefined, result: any, isError: boolean): void {
@@ -1222,21 +1182,17 @@ export class ChatSessionManager
   #flushTicketRefs(sess: SessionRecord): void {
     const refs = this.#capturedTicketRefs.get(sess.pid);
     const artifactRefs = this.#capturedArtifactRefs.get(sess.pid);
-    const agentRefs = this.#capturedAgentRefs.get(sess.pid);
     const boardRefs = this.#capturedBoardRefs.get(sess.pid);
     this.#capturedTicketRefs.delete(sess.pid);
     this.#pendingTicketTools.delete(sess.pid);
     this.#capturedArtifactRefs.delete(sess.pid);
     this.#pendingArtifactTools.delete(sess.pid);
-    this.#capturedAgentRefs.delete(sess.pid);
-    this.#pendingAgentTools.delete(sess.pid);
     this.#capturedBoardRefs.delete(sess.pid);
     this.#pendingBoardTools.delete(sess.pid);
     const hasTicket = !!refs && refs.length > 0;
     const hasArtifact = !!artifactRefs && artifactRefs.length > 0;
-    const hasAgent = !!agentRefs && agentRefs.length > 0;
     const hasBoard = !!boardRefs && boardRefs.length > 0;
-    if (!hasTicket && !hasArtifact && !hasAgent && !hasBoard) return;
+    if (!hasTicket && !hasArtifact && !hasBoard) return;
     const roomId: string | undefined = sess.roomId;
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
@@ -1267,12 +1223,6 @@ export class ChatSessionManager
       for (const chunk of chunkArtifactRefs(artifactRefs!, TICKET_REFS_PER_MESSAGE)) {
         const content = formatArtifactRefsContent(chunk);
         void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { artifact_refs: chunk } });
-      }
-    }
-    if (hasAgent) {
-      for (const chunk of chunkAgentRefs(agentRefs!, AGENT_BOARD_REFS_PER_MESSAGE)) {
-        const content = formatAgentRefsContent(chunk);
-        void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { agent_refs: chunk } });
       }
     }
     if (hasBoard) {

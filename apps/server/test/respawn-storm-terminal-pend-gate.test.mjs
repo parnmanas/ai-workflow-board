@@ -34,7 +34,7 @@ const { Board } = await import('file://' + path.join(DIST, 'entities', 'Board.js
 const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'BoardColumn.js'));
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
+/* P4c-4: Agent 엔티티 삭제 — import 제거. */
 const { Subagent } = await import('file://' + path.join(DIST, 'entities', 'Subagent.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { RespawnStormDetectorService } = await import('file://' + path.join(DIST, 'modules', 'agents', 'respawn-storm-detector.service.js'));
@@ -43,7 +43,7 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const messagingStub = {}; // notify:false below — sendSystemMessage must never be called
 
 const boardRepo = ds.getRepository(Board);

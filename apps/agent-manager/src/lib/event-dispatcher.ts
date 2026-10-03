@@ -23,8 +23,9 @@ import {
   postChatRoomMessage,
   postDispatchAck,
   provisionManagedAgentApiKey,
+  provisionRuntimeApiKey,
 } from './rest.js';
-import { readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
+import { ensureCliHomeDir, readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
 import { recordEvent } from './event-log-recorder.js';
 import type { AwbConfig } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
@@ -138,6 +139,123 @@ export function parseHarnessConfig(raw: unknown): HarnessSpec | null {
     if (list.length > 0) out.fallback_models = list;
   }
   return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * P3a: `agent_trigger` / `chat_request` 에 동봉되는 RuntimeSpec 스냅샷의
+ * 매니저 측 읽기 계약. 서버(`apps/server/src/common/runtime-spec.ts`)가
+ * 쓰는 모양과 키 단위로 일치해야 한다 — 어긋나면 여기서 null로 낮춰 기존
+ * agent_id 경로로 폴백한다 (wire break 금지).
+ *
+ * P3a에서는 파싱+관측만 한다 (spawn 경로는 그대로 agent_id). P4에서 서버가
+ * Agent 행을 끊으면 이 파서가 spawn 컨텍스트의 정본이 된다.
+ */
+export interface TriggerRuntimeSpec {
+  manager_agent_id: string;
+  cli: string;
+  model: string | null;
+  working_dir: string;
+  folder_scope: string;
+  credential_id: string | null;
+  cli_runtime_profile: string | null;
+  runtime_config: unknown;
+  label: string;
+  role_prompt: string;
+}
+
+/**
+ * Defensive parse of the `runtime` field on a trigger/chat event (P3a).
+ * Object 또는 JSON 문자열을 받아 required 3키(manager_agent_id, cli,
+ * working_dir)가 문자열이면 정규화 객체, 아니면 null — malformed 는 절대
+ * dispatch를 막지 않는다 (harness_config/effort_preset 파서와 동일 자세).
+ */
+export function parseTriggerRuntime(raw: unknown): TriggerRuntimeSpec | null {
+  let obj: any = raw;
+  if (obj === null || obj === undefined) return null;
+  if (typeof obj === 'string') {
+    if (!obj.trim()) return null;
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      log('parseTriggerRuntime: not an object or JSON string — dropping');
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    log('parseTriggerRuntime: expected an object — dropping');
+    return null;
+  }
+  const managerAgentId = typeof obj.manager_agent_id === 'string' ? obj.manager_agent_id.trim() : '';
+  const cli = typeof obj.cli === 'string' ? obj.cli.trim().toLowerCase() : '';
+  const workingDir = typeof obj.working_dir === 'string' ? obj.working_dir.trim() : '';
+  if (!managerAgentId || !cli || !workingDir) {
+    log(
+      'parseTriggerRuntime: missing required field(s) ' +
+        `(manager_agent_id=${!!managerAgentId} cli=${!!cli} working_dir=${!!workingDir}) — dropping`,
+    );
+    return null;
+  }
+  const strOrNull = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  return {
+    manager_agent_id: managerAgentId,
+    cli,
+    model: strOrNull(obj.model),
+    working_dir: workingDir,
+    folder_scope: str(obj.folder_scope) || 'shared',
+    credential_id: strOrNull(obj.credential_id),
+    cli_runtime_profile: strOrNull(obj.cli_runtime_profile),
+    runtime_config: obj.runtime_config ?? null,
+    label: str(obj.label),
+    role_prompt: str(obj.role_prompt),
+  };
+}
+
+/**
+ * P4c-2a: stable on-disk identity for a runtime tuple. `rt-` + sha256 hex16 of
+ * `cli\0working_dir\0credential_id` — model is a spawn flag (not identity),
+ * label/role_prompt are display/prompt (not identity). Same tuple → same key
+ * across restarts, so keys + cli-homes are reused, not re-minted. The server
+ * validates the `rt-[0-9a-f]{16}` shape on provision.
+ */
+export function runtimeIdentityKey(
+  spec: Pick<TriggerRuntimeSpec, 'cli' | 'working_dir' | 'credential_id'>,
+): string {
+  const norm = (v: string | null | undefined) => (v || '').trim();
+  const digest = createHash('sha256')
+    .update(`${norm(spec.cli).toLowerCase()}\0${norm(spec.working_dir)}\0${norm(spec.credential_id)}`, 'utf8')
+    .digest('hex')
+    .slice(0, 16);
+  return `rt-${digest}`;
+}
+
+/**
+ * P4c-1: tuple match between a registry entry and a server runtime snapshot.
+ * 4키 (cli, working_dir, model, credential_id) — manager는 암묵적 self이므로
+ * spec.manager_agent_id는 비교하지 않는다 (서버 id 공간과 매니저가 아는
+ * agent_id가 P4c-2까지 다르기 때문). 네 키가 모두 같으면 같은 실행 위치다.
+ */
+export function matchRuntimeContextEntry(
+  entry: { cli?: string | null; working_dir?: string | null; model?: string | null; credential_id?: string | null },
+  spec: Pick<TriggerRuntimeSpec, 'cli' | 'working_dir' | 'model' | 'credential_id'>,
+): boolean {
+  const norm = (v: string | null | undefined) => (v || '').trim();
+  return (
+    norm(entry.cli).toLowerCase() === norm(spec.cli).toLowerCase() &&
+    norm(entry.working_dir) === norm(spec.working_dir) &&
+    norm(entry.model) === norm(spec.model) &&
+    norm(entry.credential_id) === norm(spec.credential_id)
+  );
+}
+
+/**
+ * P4c-1: registry 스캔 — 첫 일치 반환. 순수 함수라 단위 테스트 가능.
+ */
+export function findRuntimeContextEntry<T extends { cli?: string | null; working_dir?: string | null; model?: string | null; credential_id?: string | null }>(
+  entries: readonly T[],
+  spec: Pick<TriggerRuntimeSpec, 'cli' | 'working_dir' | 'model' | 'credential_id'>,
+): T | undefined {
+  return entries.find((e) => matchRuntimeContextEntry(e, spec));
 }
 
 /** Required fields of RuntimeProfileSpec (cli-adapters/base.ts) — NOT
@@ -1671,6 +1789,109 @@ export class EventDispatcher {
     };
   }
 
+  /**
+   * P4c-1: runtime 스냅샷 → 실행 컨텍스트. 레지스트리를 튜플로 스캔해 일치하는
+   * 항목의 key/mcp/cli-home을 빌리되, spawn 플래그(cli/model/runtime_config)는
+   * 스냅샷이 이긴다 (서버 P4a와 같은 "스냅샷 정본" 규칙).
+   *
+   * 일치 항목이 없으면 undefined — 호출자는 기존 agent_id 경로 그대로 가고,
+   * miss 리포트는 그쪽에서 기존대로 난다. 새 인프라(키 발급 등) 없음: P4b
+   * 흐름이 만드는 Agent 행은 전부 레지스트리에 있으므로 과도기 커버는 완전하다.
+   * P4c-3에서 Agent 생성이 사라질 때 runtime-key 발급이 함께 들어간다.
+   */
+  async #resolveRuntimeContext(
+    spec: TriggerRuntimeSpec | null,
+    workspaceId: string | undefined | null,
+  ): Promise<AgentExecutionContext | undefined> {
+    if (!spec || !this.#managedAgentContexts) return undefined;
+    const entry = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec);
+    if (entry) {
+      const ctx: AgentExecutionContext = {
+        agent_id: entry.agent_id,
+        workspace_id: entry.workspace_id,
+        api_key: entry.api_key,
+        cwd: entry.working_dir,
+        mcp_config_path: entry.mcp_config_path,
+        cli: spec.cli,
+        cli_home_dir: entry.cli_home_dir,
+        extra_env: entry.extra_env,
+        credential_provider: entry.credential_provider ?? null,
+        credential_id: entry.credential_id ?? null,
+        model: spec.model ?? entry.model ?? null,
+        runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? entry.runtime_config ?? null,
+      };
+      if (!ctx.api_key || !ctx.cwd || !ctx.mcp_config_path) return undefined;
+      return this.#scopeAgentContext(ctx, workspaceId);
+    }
+    // P4c-2a: tuple miss → self-heal by provisioning a runtime identity instead
+    // of reporting a miss. No Agent row needed: the key + cli-home are keyed by
+    // the stable runtimeIdentityKey, the server binds the key to this host
+    // (host_id from our own pairing-time key), and MCP attribution degrades to
+    // the `runtime:<key>` synthetic identity (P4c-4 reworks display).
+    return this.#provisionRuntimeContext(spec, workspaceId);
+  }
+
+  /**
+   * P4c-2a: build an execution context for a runtime tuple with no registry
+   * entry. Guarded: absolute working_dir + non-empty cli required, provision
+   * failure degrades to undefined (caller keeps the legacy miss path).
+   *
+   * Credential posture is operator-fallback: per-agent credential files are
+   * only prepared by the spawn_agent path (which owns adapter-specific
+   * bootstrap), so a fresh runtime tuple runs on the operator's login until
+   * an operator provisions a credential for it. Logged, never silent.
+   */
+  async #provisionRuntimeContext(
+    spec: TriggerRuntimeSpec,
+    workspaceId: string | undefined | null,
+  ): Promise<AgentExecutionContext | undefined> {
+    const dir = (spec.working_dir || '').trim();
+    const cli = (spec.cli || '').trim().toLowerCase();
+    const absolute = dir.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\');
+    if (!absolute || !cli) {
+      log(`Runtime provision refused: need absolute working_dir + cli (dir='${dir.slice(0, 80)}' cli='${cli}')`);
+      return undefined;
+    }
+    const scope = String(workspaceId || '').trim();
+    if (!scope) {
+      log('Runtime provision refused: no workspace scope for key issuance');
+      return undefined;
+    }
+    const key = runtimeIdentityKey(spec);
+    try {
+      let apiKey = await readApiKey(key, scope);
+      if (!apiKey) {
+        const issued = await provisionRuntimeApiKey(this.#config, key, scope, spec.label || spec.cli);
+        if (!issued?.raw_key) throw new Error('server refused runtime key issuance');
+        apiKey = issued.raw_key;
+        await writeApiKey(key, apiKey, scope);
+      }
+      const mcpConfigPath = await writeMcpConfig(key, this.#config.url, apiKey, scope);
+      const cliHomeDir = await ensureCliHomeDir(key);
+      log(
+        `Runtime provisioned: key=${key} cli=${cli} model=${spec.model || '(default)'} ` +
+          `dir=${dir} scope=${scope.slice(0, 8)} (operator credential fallback)`,
+      );
+      return {
+        agent_id: key,
+        workspace_id: scope,
+        api_key: apiKey,
+        cwd: dir,
+        mcp_config_path: mcpConfigPath,
+        cli,
+        cli_home_dir: cliHomeDir,
+        extra_env: undefined,
+        credential_provider: null,
+        credential_id: spec.credential_id ?? null,
+        model: spec.model ?? null,
+        runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? null,
+      };
+    } catch (e: any) {
+      log(`Runtime provision failed: ${e?.message ?? e} (key=${key}) — falling back to legacy miss path`);
+      return undefined;
+    }
+  }
+
   async #scopeAgentContext(
     context: AgentExecutionContext | undefined,
     workspaceId: string | undefined | null,
@@ -2398,7 +2619,31 @@ export class EventDispatcher {
     // than the manager's defaults.
     const selfAgentId = loadAgentInfo()?.agent_id || '';
     const eventAgentId = ev.actor_name || ev.agent_id || '';
+    // P3a 관측: 서버가 동봉한 runtime 스냅샷을 파싱만 한다. spawn 경로는
+    // 그대로 agent_id — P4에서 정본으로 승격한다. 파싱 실패는 조용히 폴백.
+    const triggerRuntime = parseTriggerRuntime((ev as any).runtime);
+    if (triggerRuntime && typeof ev.ticket_id === 'string' && ev.ticket_id) {
+      log(
+        `Trigger runtime snapshot: ticket=${ev.ticket_id.slice(0, 8)} ` +
+          `cli=${triggerRuntime.cli} model=${triggerRuntime.model || '(default)'} ` +
+          `dir=${triggerRuntime.working_dir}`,
+      );
+    }
     let agentContext = this.#resolveAgentContext(eventAgentId);
+    // P4c-1: runtime 스냅샷 튜플 매칭 우선 — 일치하면 spec이 이긴다.
+    // 없으면 위 agent_id 경로 그대로 (동작 불변).
+    if (triggerRuntime) {
+      const rtCtx = await this.#resolveRuntimeContext(triggerRuntime, ev.workspace_id);
+      if (rtCtx) {
+        if (!agentContext || rtCtx.agent_id !== agentContext.agent_id) {
+          log(
+            `Trigger context from runtime snapshot: ticket=${String(ev.ticket_id || '').slice(0, 8)} ` +
+              `agent=${rtCtx.agent_id.slice(0, 8)} (event target=${String(eventAgentId).slice(0, 8) || '_'})`,
+          );
+        }
+        agentContext = rtCtx;
+      }
+    }
     agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
     const envConfig = parseEnvironmentConfig(ev.environment_config);
     if (
@@ -3734,7 +3979,29 @@ export class EventDispatcher {
     // chat_request envelope-native: fields under ev.payload.* (asymmetric vs
     // agent_trigger which is flatten-on-emit).
     const payload = ev.payload || {};
+    // P3a 관측: trigger 경로와 동일 — 파싱만 하고 spawn은 그대로 agent_id.
+    const chatRuntime = parseTriggerRuntime(payload.runtime);
+    if (chatRuntime && typeof payload.room_id === 'string' && payload.room_id) {
+      log(
+        `Chat runtime snapshot: room=${payload.room_id.slice(0, 8)} ` +
+          `cli=${chatRuntime.cli} model=${chatRuntime.model || '(default)'} ` +
+          `dir=${chatRuntime.working_dir}`,
+      );
+    }
     let agentContext = this.#resolveAgentContext(payload.agent_id || '');
+    // P4c-1: trigger 경로와 동일 — runtime 스냅샷 튜플 매칭 우선.
+    if (chatRuntime) {
+      const rtCtx = await this.#resolveRuntimeContext(chatRuntime, payload.workspace_id);
+      if (rtCtx) {
+        if (!agentContext || rtCtx.agent_id !== agentContext.agent_id) {
+          log(
+            `Chat context from runtime snapshot: room=${String(payload.room_id || '').slice(0, 8)} ` +
+              `agent=${rtCtx.agent_id.slice(0, 8)}`,
+          );
+        }
+        agentContext = rtCtx;
+      }
+    }
     agentContext = await this.#scopeAgentContext(agentContext, payload.workspace_id);
 
     // ticket c0c0b1e4 (리뷰 지적 #1): a registered-but-not-bootstrapped miss must
@@ -4010,6 +4277,20 @@ export class EventDispatcher {
     const commentId = ev.comment_id || ev.field_changed || '';
     const agentId = ev.agent_id || ev.actor_name || '';
     let agentContext = this.#resolveAgentContext(agentId);
+    // P4c-4: spec-direct 멘션 — broadcast 스냅샷으로 해소 (튜플 매칭 → auto-provision).
+    if (!agentContext) {
+      const mentionRuntime = parseTriggerRuntime((ev as any).runtime);
+      if (mentionRuntime) {
+        const rtCtx = await this.#resolveRuntimeContext(mentionRuntime, ev.workspace_id);
+        if (rtCtx) {
+          log(
+            `Comment mention context from runtime snapshot: ticket=${String(ticketId).slice(0, 8)} ` +
+              `agent=${rtCtx.agent_id.slice(0, 8)}`,
+          );
+          agentContext = rtCtx;
+        }
+      }
+    }
     agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
 
     // ticket c0c0b1e4 (handleChatRequest 리뷰 지적 #1과 동일 구조): fallback
@@ -4595,6 +4876,31 @@ export class EventDispatcher {
     // hosted by this same manager — is still eligible.
     const senderAgentId = p.sender_type === 'agent' ? p.sender_id || '' : '';
     let agentContext = this.#resolveAgentContextFromMembers(memberIds, senderAgentId);
+    // P4c-2b: rt- 멤버는 broadcast의 agent_member_runtimes 맵에서 spec을 읽어
+    // 해소한다 (튜플 매칭 → 없으면 auto-provision). 기존 agent 멤버 경로가
+    // 먼저이므로 동작은 가산적(additive)이다.
+    if (!agentContext) {
+      const rtSpecs = (p.agent_member_runtimes && typeof p.agent_member_runtimes === 'object' && !Array.isArray(p.agent_member_runtimes))
+        ? (p.agent_member_runtimes as Record<string, unknown>)
+        : null;
+      if (rtSpecs) {
+        for (const id of memberIds) {
+          if (typeof id !== 'string' || !id.startsWith('rt-')) continue;
+          if (senderAgentId && id === senderAgentId) continue;
+          const spec = parseTriggerRuntime((rtSpecs as Record<string, unknown>)[id]);
+          if (!spec) continue;
+          const rtCtx = await this.#resolveRuntimeContext(spec, p.workspace_id);
+          if (rtCtx) {
+            log(
+              `Chat room member from runtime snapshot: room=${String(p.room_id || '').slice(0, 8)} ` +
+                `key=${id.slice(0, 11)} cli=${spec.cli}`,
+            );
+            agentContext = rtCtx;
+            break;
+          }
+        }
+      }
+    }
     agentContext = await this.#scopeAgentContext(agentContext, p.workspace_id);
 
     // Two early-exit cases for agent-sent messages — both still record into

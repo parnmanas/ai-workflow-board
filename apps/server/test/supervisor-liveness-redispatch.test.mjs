@@ -37,11 +37,16 @@ const ago = (ms) => new Date(Date.now() - ms).toISOString();
 const KEY = 'A:t1:assignee';
 
 // ── Fakes ────────────────────────────────────────────────────────────────
-function fakeDataSource({ workspace = null, stuckIds = [], activitySink, lockReleaseSink } = {}) {
+// P4c-4: _tick 은 Agent 테이블 대신 TicketRoleAssignment holder 집합을 돈다.
+const HOLDER_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+function fakeDataSource({ workspace = null, stuckIds = [], activitySink, lockReleaseSink, holderIds = [HOLDER_ID] } = {}) {
   return {
     getRepository(entity) {
       const name = entity?.name || '';
       if (name === 'Workspace') return { async findOne() { return workspace; } };
+      if (name === 'TicketRoleAssignment') {
+        return { async find() { return holderIds.map((agent_id) => ({ agent_id })); } };
+      }
       if (name === 'StuckTicketAlert') {
         return {
           createQueryBuilder() {
@@ -87,9 +92,6 @@ async function makeSupervisor({
 } = {}) {
   const { TicketSupervisorService } = await loadDist(['modules', 'agents', 'ticket-supervisor.service.js']);
   const { MemoryMetricsRegistry } = await loadDist(['services', 'memory-metrics.registry.js']);
-  const agentRepo = {
-    async find() { return [{ id: 'A', last_seen_at: new Date(), workspace_id: 'ws1' }]; },
-  };
   const activitySink = [];
   const lockReleaseSink = [];
   const dataSource = fakeDataSource({
@@ -98,7 +100,10 @@ async function makeSupervisor({
     activitySink,
     lockReleaseSink,
   });
-  const allocationService = { async getAllocatedTickets() { return [allocRow]; } };
+  const allocationService = {
+    async getAllocatedWorkspaceIds() { return ['ws1']; },
+    async getAllocatedTickets() { return [allocRow]; },
+  };
   const emitted = [];
   const emitOrder = [];
   const triggerLoop = {
@@ -122,8 +127,10 @@ async function makeSupervisor({
       return !liveStrand;
     },
   };
+  // P4c-4: (dataSource, allocationService, triggerLoop, agentStatus,
+  // logService, metrics) — no agentRepo (no Agent table).
   const service = new TicketSupervisorService(
-    agentRepo, dataSource, allocationService, triggerLoop, agentStatus, noopLog, new MemoryMetricsRegistry(),
+    dataSource, allocationService, triggerLoop, agentStatus, noopLog, new MemoryMetricsRegistry(),
   );
   return { service, emitted, activitySink, reclaimed, lockReleaseSink, emitOrder };
 }
@@ -244,11 +251,11 @@ test('DoD: a DEAD/absent strand under a 4 h stale window is re-dispatched within
   // Slot reclaim (ticket 1fcba693): the dead strand's current_task ghost and
   // its stale claim are reclaimed BEFORE the nudge, so active-count/claim are
   // correct at re-dispatch (not a sweep later).
-  assert.deepEqual(reclaimed, [{ agentId: 'A', ticketId: 't1' }], 'reclaimStaleStrand called once for the dead seat');
+  assert.deepEqual(reclaimed, [{ agentId: HOLDER_ID, ticketId: 't1' }], 'reclaimStaleStrand called once for the dead seat');
   assert.equal(emitOrder[0], 'reclaim', 'reclaim happens BEFORE emit');
   assert.equal(emitOrder[1], 'emit');
   assert.equal(lockReleaseSink.length, 1, 'the stale claim/lock is released once');
-  assert.equal(lockReleaseSink[0].params.agentId, 'A', 'lock release is scoped to the dead agent');
+  assert.equal(lockReleaseSink[0].params.agentId, HOLDER_ID, 'lock release is scoped to the dead agent');
   assert.deepEqual(lockReleaseSink[0].set, { locked_by_agent_id: null, locked_at: null }, 'lock columns cleared');
 
   // Exactly once: a second tick inside the resend cooldown must NOT re-emit

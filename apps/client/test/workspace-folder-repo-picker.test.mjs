@@ -82,6 +82,27 @@ function optionLabels(select) {
   return [...select.options].map((o) => o.textContent);
 }
 
+/** DeclareRuntimeSection 에 Host/CLI/dir 을 채워 Resolve 한다 (P4c-4 대상 선언). */
+async function declareRuntime(container) {
+  const toggle = [...container.querySelectorAll('label')]
+    .find((l) => l.textContent.includes('Runtime으로 지정'));
+  assert.ok(toggle, 'runtime 선언 토글이 없다');
+  click(toggle.querySelector('input[type="checkbox"]'));
+  await flush();
+  const selects = [...container.querySelectorAll('select')];
+  const hostSelect = selects.find((s) => [...s.options].some((o) => o.value === 'host-1'));
+  const cliSelect = selects.find((s) => [...s.options].some((o) => o.value === 'claude'));
+  const dirInput = [...container.querySelectorAll('input')].find((i) =>
+    i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+  assert.ok(hostSelect && cliSelect && dirInput, 'runtime 선언 입력(Host/CLI/dir)이 없다');
+  change(hostSelect, 'host-1');
+  change(cliSelect, 'claude');
+  typeInto(dirInput, '/wt/repo-test');
+  const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('Resolve'));
+  assert.ok(resolveBtn, 'Resolve 버튼이 없다');
+  click(resolveBtn);
+}
+
 /** 화면별 api 스텁을 설치하고 테스트 종료 시 원복한다. */
 function stubApi(t, stubs) {
   const originals = {};
@@ -105,6 +126,12 @@ async function renderActions(t, {
     getAgents: async () => AGENTS,
     listResources,
     listRepoBranches,
+    // P4c-4: 신규 Action 저장에는 실행 대상이 필수 — runtime 선언 스텁.
+    listOrchestrationRuntimeHosts: async () => [{ manager_agent_id: 'host-1', manager_name: 'host-one' }],
+    validateRuntimeSpec: async (_ws, spec) => ({
+      ok: true,
+      spec: { manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: spec.working_dir, credential_id: null, label: '', role_prompt: '' },
+    }),
     createAction: async (payload) => { created.push(payload); return { ...payload, id: 'new-action' }; },
     updateAction: async (id, payload) => { updated.push({ id, payload }); return { ...payload, id }; },
   });
@@ -148,11 +175,16 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 repo 와 �
   assert.deepEqual(optionLabels(branch), ['— 저장소 기본 브랜치 (main) —', 'main', 'release']);
   change(branch, 'release');
 
+  // P4c-4: 대상 없는 저장은 검증에 막힌다 — runtime 1개를 선언한다.
+  await declareRuntime(container);
+  await flush();
+
   click(button(container, 'Create Action'));
   await flush();
 
   assert.equal(created.length, 1);
   assert.deepEqual(created[0].repo_ref, { resource_id: 'repo-game', branch: 'release' });
+  assert.equal(created[0].target_runtimes.length, 1, '선언한 runtime 이 함께 저장돼야 한다');
   // 사용자가 UUID 를 친 적이 없다 — 어떤 자유 텍스트 입력에도 resource id 가 남지 않는다.
   assert.equal(
     Boolean(container.querySelector('input[aria-label="resource_id 직접 입력"]')),

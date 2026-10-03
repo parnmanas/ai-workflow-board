@@ -1,8 +1,9 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { In, IsNull, Like, Repository } from 'typeorm';
-import { Agent } from '../../entities/Agent';
+import { In, IsNull, Like, Repository, DataSource } from 'typeorm';
+import { ApiKey } from '../../entities/ApiKey';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
@@ -330,7 +331,8 @@ export class AgentSessionsService implements OnModuleDestroy {
   };
 
   constructor(
-    @InjectRepository(Agent) private readonly agents: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @InjectRepository(RuntimeHost) private readonly hosts: Repository<RuntimeHost>,
     @InjectRepository(AgentSessionCliSetting) private readonly settings: Repository<AgentSessionCliSetting>,
     @InjectRepository(Credential) private readonly credentials: Repository<Credential>,
     @InjectRepository(ClaudeBackendProfile) private readonly backendProfiles: Repository<ClaudeBackendProfile>,
@@ -387,8 +389,10 @@ export class AgentSessionsService implements OnModuleDestroy {
     const ids = Array.from(new Set(records.map((r) => r.agent_id)));
     const names = new Map<string, string>();
     if (ids.length) {
-      for (const a of await this.agents.find({ where: { id: In(ids) } })) {
-        if (a.name) names.set(a.id, a.name);
+      // P4c-4: Host 이름으로 해소한다 (Agent 테이블 없음).
+      const hostRows = await this.hosts.find({ where: { id: In(ids) } });
+      for (const h of hostRows) {
+        if (h.name && !names.has(h.id)) names.set(h.id, h.name);
       }
     }
     const settingsByHost = await this.cliSettingsMap(workspaceId, ids);
@@ -437,8 +441,9 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   private async managerName(managerId: string, fallback: string): Promise<string> {
-    const agent = await this.agents.findOne({ where: { id: managerId } });
-    return agent?.name || fallback;
+    // P4c-4: Host 이름으로 해소한다 (Agent 테이블 없음).
+    const host = await this.hosts.findOne({ where: { id: managerId } });
+    return host?.name || fallback;
   }
 
   // ─── CLI 설정 (credential 바인딩) ──────────────────────────────────────
@@ -580,10 +585,20 @@ export class AgentSessionsService implements OnModuleDestroy {
     return out;
   }
 
-  private async requireManagerAgent(managerId: string): Promise<Agent> {
-    const agent = await this.agents.findOne({ where: { id: managerId } });
-    if (!agent || agent.type !== 'manager') throw new AgentSessionError(404, 'host_unknown', 'No Runtime Host with this id.');
-    return agent;
+  // P4c-4: RuntimeHost 행이 세션 Host 다 (Agent 테이블 없음).
+  private async requireManagerAgent(managerId: string): Promise<{ id: string; name: string }> {
+    const host = await this.hosts.findOne({ where: { id: managerId } });
+    if (host) return { id: host.id, name: host.name };
+    // api_keys 페어링 링크 경유 (dual-write 시절 manager uuid 호환).
+    const link = await this.dataSource.getRepository(ApiKey).findOne({
+      where: { agent_id: managerId },
+      select: { agent_id: true, host_id: true },
+    });
+    if (link?.host_id) {
+      const linked = await this.hosts.findOne({ where: { id: link.host_id } });
+      if (linked) return { id: linked.id, name: linked.name };
+    }
+    throw new AgentSessionError(404, 'host_unknown', 'No Runtime Host with this id.');
   }
 
   async getCliSettings(workspaceId: string, managerId: string, cli: string): Promise<AgentSessionCliSettings> {

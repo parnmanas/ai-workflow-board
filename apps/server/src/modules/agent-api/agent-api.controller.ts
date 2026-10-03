@@ -8,9 +8,10 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
-import { Agent } from '../../entities/Agent';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { ApiKey } from '../../entities/ApiKey';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
@@ -83,7 +84,8 @@ export class AgentApiController {
     if (!triggerId.startsWith('mention:') || !agentId || ![0, 1].includes(attempt)) {
       return res.status(400).json({ error: 'invalid mention audit run' });
     }
-    const agent = await this.dataSource.getRepository(Agent).findOne({ where: { id: agentId } });
+    // P4c-4: Agent 행 대신 Host/링크 해소.
+    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
     if (!workspaceId || !agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
       return res.status(400).json({ error: 'agent does not belong to ticket workspace' });
     }
@@ -1202,86 +1204,48 @@ export class AgentApiController {
    */
   @Post('ping')
   async ping(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    // P4c-4: presence ping — agent_id 자리는 Host id 다 (Agent 행 없음).
+    // Host 행을 보장 + last_seen 갱신 후 ok. 구 Agent 바인딩 ping 은 404
+    // (재페어링 안내) — Agent 행 재생성은 하지 않는다.
     const { agent_id } = body || {};
     if (!agent_id) return res.status(400).json({ error: 'agent_id is required' });
-    const agentRepo = this.dataSource.getRepository(Agent);
-    let agent = await agentRepo.findOne({ where: { id: agent_id } });
-
-    // Repair ApiKey.agent_id when it was nulled out by an earlier
-    // `ON DELETE SET NULL` FK firing during an Agent-row deletion window
-    // (pre-sync chaos, manual cleanup, etc.). Without this repair the SSE
-    // auth path reads apiKey.agent_id = null → identity.agentId = undefined
-    // → every per-agent SSE filter (`scope.agent_id === identity.agentId`)
-    // rejects and update_manager / restart_manager / chat_request /
-    // comment_mention silently never reach the manager. Symptom: server
-    // returns 200 on dispatch and emits the event, but no SSE subscriber
-    // matches so it falls into the void.
-    const apiKeyRow = (req as any).apiKey;
-    if (apiKeyRow && agent && !apiKeyRow.agent_id) {
-      try {
-        const apiKeyRepo = this.dataSource.getRepository(ApiKey);
-        await apiKeyRepo.update({ id: apiKeyRow.id }, { agent_id: agent.id });
-        apiKeyRow.agent_id = agent.id;
-        this.logService.warn(
-          'AgentApi',
-          `Re-linked ApiKey id=${apiKeyRow.id.slice(0, 8)} agent_id=${agent.id.slice(0, 8)} (was NULL — ON DELETE SET NULL aftermath)`,
-          { api_key_id: apiKeyRow.id, agent_id: agent.id, via: 'ping repair' },
-        );
-      } catch (err: any) {
-        this.logService.error(
-          'AgentApi',
-          `Ping apiKey repair failed for api_key=${apiKeyRow.id.slice(0, 8)}: ${err?.message ?? String(err)}`,
-          { err: err?.message ?? String(err), api_key_id: apiKeyRow.id },
-        );
-      }
-    }
-    // Self-heal mirror of instance-heartbeat (agent-manager.controller.ts:163).
-    // A manager whose Agent row was deleted out from under it would otherwise
-    // 404 on every 30s ping AND never appear searchable in the AI Agents
-    // page until the operator manually re-pairs. Recreate from the API key's
-    // linked agent metadata so the manager rejoins the system on the next
-    // tick — workspace_id=null per the workspace-less invariant for managers,
-    // arbitrary name preserved from the API key so the operator can still
-    // identify it from the admin UI's instance list.
-    if (!agent) {
+    const hostRepo = this.dataSource.getRepository(RuntimeHost);
+    let host = await hostRepo.findOne({ where: { id: agent_id } });
+    if (!host) {
       const apiKey = (req as any).apiKey;
-      const linkedAgent = apiKey?.agent;
-      if (linkedAgent && linkedAgent.id === agent_id) {
+      const keyHostId = typeof apiKey?.host_id === 'string' && apiKey.host_id ? apiKey.host_id : null;
+      if (keyHostId && agent_id === keyHostId) {
         try {
-          const recreated = agentRepo.create({
-            id: agent_id,
-            name: linkedAgent.name || `awb-agent-manager`,
-            description:
-              linkedAgent.description ||
-              'awb-agent-manager — recreated from ping (Agent row was missing)',
-            type: linkedAgent.type === 'manager' ? 'manager' : (linkedAgent.type || 'manager'),
+          host = await hostRepo.save(hostRepo.create({
+            id: keyHostId,
+            name: 'awb-agent-manager',
+            hostname: 'unknown',
+            workspace_id: apiKey?.workspace_id ?? null,
             is_active: 1,
-            workspace_id: linkedAgent.type === 'manager' ? null : linkedAgent.workspace_id ?? null,
-            roles: linkedAgent.roles || '[]',
-          });
-          await agentRepo.save(recreated);
+          }));
           this.logService.warn(
             'AgentApi',
-            `Recreated missing Agent row id=${agent_id.slice(0, 8)} type=${recreated.type} from ping self-heal`,
-            { agent_id, via: 'ping self-heal' },
+            `Recreated missing RuntimeHost id=${keyHostId.slice(0, 8)} from ping self-heal`,
+            { host_id: keyHostId, via: 'ping self-heal' },
           );
-          agent = recreated;
         } catch (err: any) {
           this.logService.error(
             'AgentApi',
-            `Ping self-heal save failed for agent_id=${agent_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
-            { err: err?.message ?? String(err), agent_id, stack: err?.stack },
+            `Ping host self-heal save failed for host_id=${keyHostId.slice(0, 8)}: ${err?.message ?? String(err)}`,
+            { err: err?.message ?? String(err), host_id: keyHostId, stack: err?.stack },
           );
           return res.status(500).json({ error: 'Ping self-heal failed', detail: err?.message ?? String(err) });
         }
       } else {
-        return res.status(404).json({ error: 'Agent not found' });
+        return res.status(404).json({
+          error: 'Agent not found — re-pair this Runtime Host (Agent identities were removed in P4c-4)',
+        });
       }
     }
     const now = new Date();
-    const patch: Partial<Agent> = { last_seen_at: now, is_online: 1 };
-    if (!agent.connected_at) patch.connected_at = now;
-    await agentRepo.update({ id: agent_id }, patch);
+    try {
+      await hostRepo.update({ id: host!.id }, { last_seen_at: now });
+    } catch { /* best-effort */ }
     return res.json({ status: 'ok', agent_id, last_seen_at: now.toISOString() });
   }
 
@@ -1294,7 +1258,7 @@ export class AgentApiController {
     // indicator label matches the rest of the chat UI even when the
     // subagent posts a bare name (or no name at all).
     const resolvedName =
-      (await resolveAgentDisplayName(this.dataSource.getRepository(Agent), agent_id))
+      (await resolveAgentDisplayName(this.dataSource, agent_id))
       || agent_name
       || 'Agent';
     const memberIds = await this.membership.getRoomMemberIds(roomId);
@@ -1319,7 +1283,7 @@ export class AgentApiController {
     // Same display-name resolution as setChatRoomTyping — the badge must be
     // attributed to the responding agent's resolved `<Manager>/<Agent>` name.
     const resolvedName =
-      (await resolveAgentDisplayName(this.dataSource.getRepository(Agent), agent_id)) || 'Agent';
+      (await resolveAgentDisplayName(this.dataSource, agent_id)) || 'Agent';
     const memberIds = await this.membership.getRoomMemberIds(roomId);
     const agentMemberIds = await this.membership.getRoomAgentMemberIds(roomId);
     const resolvedKeepAliveUntilMs = typeof keep_alive_until_ms === 'number' ? keep_alive_until_ms : null;
@@ -1369,7 +1333,7 @@ export class AgentApiController {
     if (!room) return res.status(404).json({ error: 'Room not found' });
 
     const agentName = await resolveAgentDisplayName(
-      this.dataSource.getRepository(Agent),
+      this.dataSource,
       agent_id,
     ) || 'Agent';
 

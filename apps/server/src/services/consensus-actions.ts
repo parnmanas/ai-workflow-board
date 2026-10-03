@@ -20,7 +20,7 @@ import { In } from 'typeorm';
 import { Ticket } from '../entities/Ticket';
 import { BoardColumn } from '../entities/BoardColumn';
 import { Comment, CommentType } from '../entities/Comment';
-import { Agent } from '../entities/Agent';
+import { resolveAgentDisplayNamesByIds } from '../utils/agent-name';
 import { User } from '../entities/User';
 import {
   buildConsensusMetadata,
@@ -106,12 +106,13 @@ export async function resolvePartyNames(
 ): Promise<Record<string, string>> {
   const agentIds = [...new Set(parties.filter((p) => p.type === 'agent').map((p) => p.id))];
   const userIds = [...new Set(parties.filter((p) => p.type === 'user').map((p) => p.id))];
-  const [agents, users] = await Promise.all([
-    agentIds.length ? dataSource.getRepository(Agent).find({ where: { id: In(agentIds) } }) : Promise.resolve([] as Agent[]),
+  // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+  const [agentNames, users] = await Promise.all([
+    agentIds.length ? resolveAgentDisplayNamesByIds(dataSource, agentIds) : Promise.resolve(new Map<string, string>()),
     userIds.length ? dataSource.getRepository(User).find({ where: { id: In(userIds) } }) : Promise.resolve([] as User[]),
   ]);
   const out: Record<string, string> = {};
-  for (const a of agents) out[`agent:${a.id}`] = a.name;
+  for (const [id, name] of agentNames) out[`agent:${id}`] = name;
   for (const u of users) out[`user:${u.id}`] = u.name || u.email;
   return out;
 }

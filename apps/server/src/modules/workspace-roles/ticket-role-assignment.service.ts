@@ -1,14 +1,26 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, In, DataSource } from 'typeorm';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
-import { resolveAgentDisplayMap, resolveAgentDisplayName } from '../../utils/agent-name';
+import { resolveAgentDisplayName, resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import type { DefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import {
+  computeHolderKey,
+  holderAssigneeId,
+  isRuntimeIdentityKey,
+  normalizeRuntimeSpec,
+  runtimeIdentityKey,
+  runtimeSpecFromAgentRow,
+  type HolderRef,
+  type RuntimeSpec,
+} from '../../common/runtime-spec';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 
 /**
@@ -52,26 +64,7 @@ function makeError(status: number, message: string): Error & { status: number } 
   return err;
 }
 
-/** A single holder identity — exactly one of agent_id / user_id is set. */
-export interface HolderRef {
-  agent_id?: string | null;
-  user_id?: string | null;
-}
 
-/**
- * Normalized holder identity written into `holder_key` — the third leg of the
- * `(ticket_id, role_id, holder_key)` unique key. Agents win when (illegally)
- * both are supplied; the empty string marks a vacant slot, which we never
- * actually persist (vacant rows are deleted). Kept as a pure function so the
- * migration backfill and the service agree on the exact format.
- */
-export function computeHolderKey(holder: HolderRef): string {
-  const agent_id = holder.agent_id || null;
-  const user_id = holder.user_id || null;
-  if (agent_id) return `agent:${agent_id}`;
-  if (user_id) return `user:${user_id}`;
-  return '';
-}
 
 /**
  * Read/write helper for `ticket_role_assignments`. Centralizes the
@@ -106,8 +99,8 @@ export class TicketRoleAssignmentService {
     @InjectRepository(WorkspaceRole)
     private readonly roleRepo: Repository<WorkspaceRole>,
 
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
 
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
@@ -121,10 +114,12 @@ export class TicketRoleAssignmentService {
     if (ids.length === 0) return;
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId }, select: ['id', 'workspace_id'] });
     if (!ticket) throw makeError(404, `ticket ${ticketId} not found`);
-    const agents = await this.agentRepo.find({ where: { id: In(ids) }, select: ['id', 'workspace_id'] });
-    for (const agent of agents) {
-      if (!agentIsVisibleInWorkspace(agent.workspace_id, ticket.workspace_id)) {
-        throw makeError(400, `agent ${agent.id} belongs to a different workspace`);
+    // P4c-4: Host/링크 해소 후 workspace 가시성 검사 (Agent 행 없음).
+    for (const id of ids) {
+      const holder = await resolveCallerIdentityRow(this.dataSource, id);
+      if (!holder) throw makeError(400, `agent ${id} not found`);
+      if (!agentIsVisibleInWorkspace(holder.workspace_id, ticket.workspace_id)) {
+        throw makeError(400, `agent ${id} belongs to a different workspace`);
       }
     }
   }
@@ -155,7 +150,13 @@ export class TicketRoleAssignmentService {
     let newName = '';
     if (first?.agent_id) {
       newId = first.agent_id;
-      newName = (await resolveAgentDisplayName(this.agentRepo, first.agent_id)) ?? '';
+      newName = (await resolveAgentDisplayName(this.dataSource, first.agent_id)) ?? '';
+    } else if (first && isRuntimeIdentityKey(holderAssigneeId(first))) {
+      // P4c-2b: spec-direct holder — flat id에 rt 키, 이름에 스냅샷 라벨.
+      // 레거시 리더(보드 카드, get_my_tickets)는 varchar 비교라 안전하다.
+      newId = holderAssigneeId(first) as string;
+      const spec = first.runtime_spec as any;
+      newName = (spec?.label || '').trim() || newId.slice(0, 11);
     } else if (first?.user_id) {
       newId = first.user_id;
       const u = await this.userRepo.findOne({ where: { id: first.user_id } });
@@ -184,32 +185,36 @@ export class TicketRoleAssignmentService {
     const agentIds = [...new Set(rows.map(r => r.agent_id).filter((x): x is string => !!x))];
     const userIds = [...new Set(rows.map(r => r.user_id).filter((x): x is string => !!x))];
 
-    const [roles, agents, users] = await Promise.all([
+    const [roles, users] = await Promise.all([
       this.roleRepo.find({ where: { id: In(roleIds) } }),
-      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) } }) : Promise.resolve([] as Agent[]),
       userIds.length ? this.userRepo.find({ where: { id: In(userIds) } }) : Promise.resolve([] as User[]),
     ]);
 
     const roleMap = new Map(roles.map(r => [r.id, r]));
-    const agentMap = new Map(agents.map(a => [a.id, a]));
     const userMap = new Map(users.map(u => [u.id, u]));
-    // Canonical <Manager>/<Agent> display per ST-7 — resolved by id with NO
-    // workspace filter (the `agents` load above is already id-only), so an
-    // agent assigned from ANOTHER workspace still renders its full name (never
-    // a bare leaf or raw id) on the REST role-assignments projection the ticket
-    // panel + trigger menu read. Matches the MCP get_ticket path
-    // (hydrateRoleAssignments). One extra manager query only when a holder is a
-    // managed agent (ticket 0cccf9b5).
-    const agentDisplayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: uuid holder 표시는 Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    // 못 찾으면 id 앞 8자리로 폴백 — holder 자체는 유지된다.
+    const agentDisplayById = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     return rows
       .map(r => {
         const role = roleMap.get(r.role_id);
         if (!role) return null;
         let holder: ResolvedAssignment['holder'] = null;
-        if (r.agent_id && agentMap.has(r.agent_id)) {
-          const a = agentMap.get(r.agent_id)!;
-          holder = { type: 'agent', id: a.id, name: agentDisplayById.get(a.id) ?? a.name };
+        if (r.agent_id) {
+          holder = { type: 'agent', id: r.agent_id, name: agentDisplayById.get(r.agent_id) ?? r.agent_id.slice(0, 8) };
+        } else if (!r.agent_id && !r.user_id && isRuntimeIdentityKey(holderAssigneeId(r))) {
+          // P4c-2b: spec-direct holder — agent 행 없이 라벨로 표시한다.
+          // P4c-4: runtime 스냅샷도 함께 내려 TicketPanel draft가 재지정 없이
+          // round-trip할 수 있게 한다.
+          const rtId = holderAssigneeId(r) as string;
+          const spec = r.runtime_spec as any;
+          holder = {
+            type: 'agent',
+            id: rtId,
+            name: (spec?.label || '').trim() || rtId.slice(0, 11),
+            ...(spec && typeof spec === 'object' ? { runtime: { ...spec } } : {}),
+          } as ResolvedAssignment['holder'];
         } else if (r.user_id && userMap.has(r.user_id)) {
           const u = userMap.get(r.user_id)!;
           holder = { type: 'user', id: u.id, name: u.name || u.email };
@@ -259,19 +264,14 @@ export class TicketRoleAssignmentService {
     const agentIds = [...new Set(rows.map(r => r.agent_id).filter((x): x is string => !!x))];
     const userIds = [...new Set(rows.map(r => r.user_id).filter((x): x is string => !!x))];
 
-    const [roles, agents, users] = await Promise.all([
+    const [roles, users] = await Promise.all([
       this.roleRepo.find({ where: { id: In(roleIds) } }),
-      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) } }) : Promise.resolve([] as Agent[]),
       userIds.length ? this.userRepo.find({ where: { id: In(userIds) } }) : Promise.resolve([] as User[]),
     ]);
     const roleMap = new Map(roles.map(r => [r.id, r]));
-    const agentMap = new Map(agents.map(a => [a.id, a]));
     const userMap = new Map(users.map(u => [u.id, u]));
-    // Canonical <Manager>/<Agent> display per ST-7 — same rationale as
-    // resolveForTicket above. Feeds the board-card multi-holder avatars
-    // (t.role_holders), which previously dropped the manager prefix on cross-
-    // workspace holders (ticket 0cccf9b5).
-    const agentDisplayById = await resolveAgentDisplayMap(this.agentRepo, agents);
+    // P4c-4: uuid holder 표시는 Host/링크 이름으로 해소한다 (Agent 테이블 없음).
+    const agentDisplayById = await resolveAgentDisplayNamesByIds(this.dataSource, agentIds);
 
     // ticketId → (roleId → group). Preserves per-ticket role grouping while
     // keeping insertion cheap; sorted by role.position on the way out.
@@ -280,9 +280,8 @@ export class TicketRoleAssignmentService {
       const role = roleMap.get(r.role_id);
       if (!role) continue;
       let holder: { type: 'agent' | 'user'; id: string; name: string } | null = null;
-      if (r.agent_id && agentMap.has(r.agent_id)) {
-        const a = agentMap.get(r.agent_id)!;
-        holder = { type: 'agent', id: a.id, name: agentDisplayById.get(a.id) ?? a.name };
+      if (r.agent_id) {
+        holder = { type: 'agent', id: r.agent_id, name: agentDisplayById.get(r.agent_id) ?? r.agent_id.slice(0, 8) };
       } else if (r.user_id && userMap.has(r.user_id)) {
         const u = userMap.get(r.user_id)!;
         holder = { type: 'user', id: u.id, name: u.name || u.email };
@@ -330,23 +329,53 @@ export class TicketRoleAssignmentService {
    * 단건 확인용.
    */
   private async isManagerAgent(agentId: string | null | undefined): Promise<boolean> {
-    const id = (agentId || '').trim();
-    if (!id) return false;
-    const a = await this.agentRepo.findOne({ where: { id }, select: ['id', 'type'] });
-    return a?.type === 'manager';
+    // P4c-4: Agent 테이블 없음 — manager 행 자체가 존재하지 않으므로 항상 false.
+    // (941c72d3 규칙의 검사 대상이 사라졌다. Host uuid holder 는 실행 위치이지
+    // supervisor 행이 아니라 허용한다.)
+    void agentId;
+    return false;
   }
 
   /**
    * 주어진 agent_id 들 중 manager(type='manager')인 것들의 집합을 한 번의 질의로
    * 반환. 여러 holder 를 한꺼번에 거를 때 사용 (ticket 941c72d3).
+   * P4c-2b: rt- identity는 Agent 행이 될 수 없어 조회에서 제외한다 (Postgres는
+   * uuid 컬럼에 비-uuid를 넣으면 throw한다).
    */
   private async managerAgentIdSet(
     agentIds: Array<string | null | undefined>,
   ): Promise<Set<string>> {
-    const ids = [...new Set(agentIds.map(x => (x || '').trim()).filter(Boolean))];
-    if (ids.length === 0) return new Set();
-    const rows = await this.agentRepo.find({ where: { id: In(ids), type: 'manager' }, select: ['id'] });
-    return new Set(rows.map(r => r.id));
+    // P4c-4: Agent 테이블 없음 — 항상 빈 집합.
+    void agentIds;
+    return new Set();
+  }
+
+  /**
+   * P4c-2b: holder 입력 정규화. agent_id/user_id/runtime 중 정확히 하나 —
+   * 둘 이상이면 400. runtime shape 오류도 400으로 감싼다. 반환된 runtime은
+   * 정규화된 RuntimeSpec (스냅샷 저장용) 또는 null.
+   */
+  private normalizeHolderInput(holder: HolderRef): {
+    agent_id: string | null;
+    user_id: string | null;
+    runtime: RuntimeSpec | null;
+  } {
+    const agent_id = holder.agent_id || null;
+    const user_id = holder.user_id || null;
+    const hasRuntime = holder.runtime !== undefined && holder.runtime !== null;
+    const setCount = (agent_id ? 1 : 0) + (user_id ? 1 : 0) + (hasRuntime ? 1 : 0);
+    if (setCount > 1) {
+      throw makeError(400, 'cannot set more than one of agent_id, user_id, runtime on the same role assignment');
+    }
+    let runtime: RuntimeSpec | null = null;
+    if (hasRuntime) {
+      try {
+        runtime = normalizeRuntimeSpec(holder.runtime, 'holder.runtime');
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid holder.runtime');
+      }
+    }
+    return { agent_id, user_id, runtime };
   }
 
   /**
@@ -364,13 +393,9 @@ export class TicketRoleAssignmentService {
   async setHolder(
     ticketId: string,
     roleId: string,
-    holder: { agent_id?: string | null; user_id?: string | null },
+    holder: HolderRef,
   ): Promise<TicketRoleAssignment | null> {
-    const agent_id = holder.agent_id || null;
-    const user_id = holder.user_id || null;
-    if (agent_id && user_id) {
-      throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
-    }
+    const { agent_id, user_id, runtime } = this.normalizeHolderInput(holder);
 
     // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
     // manager 만 지정된 경우는 무시 — 명시적 clear(둘 다 null)와 달리 기존
@@ -390,13 +415,18 @@ export class TicketRoleAssignmentService {
     // between holders.
     await this.assignRepo.delete({ ticket_id: ticketId, role_id: roleId });
     let saved: TicketRoleAssignment | null = null;
-    if (agent_id || user_id) {
+    if (agent_id || user_id || runtime) {
+      // P4c-4: agent 홀더 스냅샷 없음 (Agent 행 없음 — runtime holder 만
+      // spec 을 들고 간다).
       saved = await this.assignRepo.save(this.assignRepo.create({
         ticket_id: ticketId,
         role_id: roleId,
         agent_id,
         user_id,
-        holder_key: computeHolderKey({ agent_id, user_id }),
+        holder_key: computeHolderKey({ agent_id, user_id, runtime: runtime ?? undefined }),
+        runtime_spec: runtime
+          ? { ...runtime }
+          : null,
       }));
     }
     // Keep the flat legacy columns in lockstep with the normalized write
@@ -416,14 +446,10 @@ export class TicketRoleAssignmentService {
   async addHolder(
     ticketId: string,
     roleId: string,
-    holder: { agent_id?: string | null; user_id?: string | null },
+    holder: HolderRef,
   ): Promise<TicketRoleAssignment | null> {
-    const agent_id = holder.agent_id || null;
-    const user_id = holder.user_id || null;
-    if (agent_id && user_id) {
-      throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
-    }
-    if (!agent_id && !user_id) return null;
+    const { agent_id, user_id, runtime } = this.normalizeHolderInput(holder);
+    if (!agent_id && !user_id && !runtime) return null;
     // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3) — 무시.
     if (agent_id && await this.isManagerAgent(agent_id)) return null;
     if (agent_id) await this.assertAgentsVisibleForTicket(ticketId, [agent_id]);
@@ -431,18 +457,22 @@ export class TicketRoleAssignmentService {
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
     if (!role) throw makeError(404, `role ${roleId} not found`);
 
-    const holder_key = computeHolderKey({ agent_id, user_id });
+    const holder_key = computeHolderKey({ agent_id, user_id, runtime: runtime ?? undefined });
     const existing = await this.assignRepo.findOne({
       where: { ticket_id: ticketId, role_id: roleId, holder_key },
     });
     if (existing) return existing; // no-op — first holder unchanged, flat already correct
 
+    // P4c-4: agent 홀더 스냅샷 없음 (Agent 행 없음).
     const inserted = await this.assignRepo.save(this.assignRepo.create({
       ticket_id: ticketId,
       role_id: roleId,
       agent_id,
       user_id,
       holder_key,
+      runtime_spec: runtime
+        ? { ...runtime }
+        : null,
     }));
     // Adding the FIRST holder of a vacant role changes the flat projection;
     // adding a later holder re-writes the same first-holder value (idempotent).
@@ -459,12 +489,15 @@ export class TicketRoleAssignmentService {
   async removeHolder(
     ticketId: string,
     roleId: string,
-    holder: { agent_id?: string | null; user_id?: string | null },
+    holder: HolderRef,
   ): Promise<boolean> {
-    const holder_key = computeHolderKey({
-      agent_id: holder.agent_id || null,
-      user_id: holder.user_id || null,
-    });
+    let holder_key: string;
+    try {
+      const n = this.normalizeHolderInput(holder);
+      holder_key = computeHolderKey({ agent_id: n.agent_id, user_id: n.user_id, runtime: n.runtime ?? undefined });
+    } catch {
+      return false;
+    }
     if (!holder_key) return false;
     const res = await this.assignRepo.delete({ ticket_id: ticketId, role_id: roleId, holder_key });
     const removed = (res.affected || 0) > 0;
@@ -489,7 +522,7 @@ export class TicketRoleAssignmentService {
   async setHolders(
     ticketId: string,
     roleId: string,
-    holders: Array<{ agent_id?: string | null; user_id?: string | null }>,
+    holders: HolderRef[],
   ): Promise<TicketRoleAssignment[]> {
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
     if (!role) throw makeError(404, `role ${roleId} not found`);
@@ -503,17 +536,14 @@ export class TicketRoleAssignmentService {
     );
 
     // Normalize + de-dupe the desired set, keeping the first occurrence.
-    const desired = new Map<string, { agent_id: string | null; user_id: string | null }>();
+    // P4c-2b: runtime 홀더는 정규화된 spec까지 함께 들고 다닌다.
+    const desired = new Map<string, { agent_id: string | null; user_id: string | null; runtime: RuntimeSpec | null }>();
     for (const h of holders) {
-      const agent_id = h.agent_id || null;
-      const user_id = h.user_id || null;
-      if (agent_id && user_id) {
-        throw makeError(400, 'cannot set both agent_id and user_id on the same role assignment');
-      }
+      const { agent_id, user_id, runtime } = this.normalizeHolderInput(h);
       if (agent_id && managerIds.has(agent_id)) continue; // manager 는 holder 불가
-      const key = computeHolderKey({ agent_id, user_id });
+      const key = computeHolderKey({ agent_id, user_id, runtime: runtime ?? undefined });
       if (!key) continue; // skip vacant entries
-      if (!desired.has(key)) desired.set(key, { agent_id, user_id });
+      if (!desired.has(key)) desired.set(key, { agent_id, user_id, runtime });
     }
 
     const existing = await this.getAll(ticketId, roleId);
@@ -526,6 +556,7 @@ export class TicketRoleAssignmentService {
     }
 
     // Insert rows for newly-desired holders.
+    // P4c-4: agent 홀더 스냅샷 없음 (Agent 행 없음).
     const toInsert: TicketRoleAssignment[] = [];
     for (const [key, h] of desired) {
       if (existingKeys.has(key)) continue;
@@ -535,6 +566,10 @@ export class TicketRoleAssignmentService {
         agent_id: h.agent_id,
         user_id: h.user_id,
         holder_key: key,
+        // P4c-4: agent 홀더 스냅샷 없음 (Agent 행 없음).
+        runtime_spec: h.runtime
+          ? { ...h.runtime }
+          : null,
       }));
     }
     if (toInsert.length) await this.assignRepo.save(toInsert);
@@ -598,7 +633,8 @@ export class TicketRoleAssignmentService {
       }
       // Auto-detect agent vs user. Agents are checked first to match the
       // v1 default-fallback (legacy columns historically only stored agent IDs).
-      const agentExists = await this.agentRepo.findOne({ where: { id: raw } });
+      // P4c-4: Host/링크 해소 (Agent 행 없음).
+      const agentExists = await resolveCallerIdentityRow(this.dataSource, raw);
       if (agentExists) {
         await this.setHolder(ticketId, role.id, { agent_id: raw, user_id: null });
         continue;
@@ -621,28 +657,30 @@ export class TicketRoleAssignmentService {
    * dropped even if a user_id is also (illegally) present.
    */
   private async filterExistingHolders(
-    holders: Array<{ agent_id?: string | null; user_id?: string | null }>,
+    holders: Array<{ agent_id?: string | null; user_id?: string | null; runtime?: unknown }>,
     workspaceId: string,
-  ): Promise<Array<{ agent_id: string | null; user_id: string | null }>> {
+  ): Promise<HolderRef[]> {
     const agentIds = [...new Set(holders.map(h => (h.agent_id || '').trim()).filter(Boolean))];
     const userIds = [...new Set(holders.map(h => (h.user_id || '').trim()).filter(Boolean))];
-    const [agents, users] = await Promise.all([
-      agentIds.length ? this.agentRepo.find({ where: { id: In(agentIds) }, select: ['id', 'type', 'workspace_id'] }) : Promise.resolve([] as Agent[]),
-      userIds.length ? this.userRepo.find({ where: { id: In(userIds) }, select: ['id'] }) : Promise.resolve([] as User[]),
-    ]);
-    // Manager(type='manager')는 default holder 가 될 수 없다 (ticket 941c72d3) —
-    // 존재하는 비-manager agent 만 유효 holder 로 남긴다.
-    const agentSet = new Set(
-      agents
-        .filter(a => a.type !== 'manager' && agentIsVisibleInWorkspace(a.workspace_id, workspaceId))
-        .map(a => a.id),
-    );
+    const users = userIds.length ? await this.userRepo.find({ where: { id: In(userIds) }, select: ['id'] }) : [];
+    // P4c-4: Host/링크 해소 + workspace 가시성 (Agent 행 없음, manager 타입
+    // 검사 없음 — Host uuid holder 허용).
+    const agentSet = new Set<string>();
+    for (const id of agentIds) {
+      const row = await resolveCallerIdentityRow(this.dataSource, id);
+      if (row && agentIsVisibleInWorkspace(row.workspace_id, workspaceId)) agentSet.add(id);
+    }
     const userSet = new Set(users.map(u => u.id));
-    const out: Array<{ agent_id: string | null; user_id: string | null }> = [];
+    const out: HolderRef[] = [];
     for (const h of holders) {
       const agent_id = (h.agent_id || '').trim();
       const user_id = (h.user_id || '').trim();
-      if (agent_id && agentSet.has(agent_id)) out.push({ agent_id, user_id: null });
+      // P4c-3b: runtime holders pass through (shape already normalized by
+      // parseDefaultRoleAssignments; host existence was checked at board-save
+      // by validateBoardDefaults).
+      if (h.runtime !== undefined && h.runtime !== null) {
+        out.push({ agent_id: null, user_id: null, runtime: h.runtime });
+      } else if (agent_id && agentSet.has(agent_id)) out.push({ agent_id, user_id: null });
       else if (user_id && userSet.has(user_id)) out.push({ agent_id: null, user_id });
     }
     return out;
@@ -741,11 +779,18 @@ export class TicketRoleAssignmentService {
       for (const h of holders) {
         const agent_id = (h.agent_id || '').trim();
         const user_id = (h.user_id || '').trim();
-        if (agent_id) {
-          const a = await this.agentRepo.findOne({ where: { id: agent_id }, select: ['id', 'type', 'workspace_id'] });
+        // P4c-3b: runtime holders — shape already normalized; check the host.
+        if ((h as any).runtime !== undefined && (h as any).runtime !== null) {
+          const spec = (h as any).runtime as Record<string, any>;
+          const hostId = String(spec.manager_agent_id || '');
+          const host = hostId ? await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: hostId } }) : null;
+          if (!host) {
+            return { ok: false, error: `default_role_assignments["${slug}"]: runtime references an unknown Runtime Host` };
+          }
+        } else if (agent_id) {
+          // P4c-4: Host/링크 해소 (Agent 행 없음, manager 타입 검사 없음).
+          const a = await resolveCallerIdentityRow(this.dataSource, agent_id);
           if (!a) return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} not found` };
-          // Manager(type='manager')는 role holder 가 될 수 없다 (ticket 941c72d3).
-          if (a.type === 'manager') return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} 는 manager 이므로 역할 담당자로 지정할 수 없습니다` };
           if (!agentIsVisibleInWorkspace(a.workspace_id, workspaceId)) {
             return { ok: false, error: `default_role_assignments["${slug}"]: agent ${agent_id} belongs to a different workspace` };
           }

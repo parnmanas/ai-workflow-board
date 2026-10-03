@@ -42,6 +42,8 @@ test('Hermes transport receives attributed AWB MCP and never selects a CLI fallb
   assert.match(supervisor, /runtime_not_supported/);
 });
 
-test('Runtime Host canonical Agent fetch returns persisted runtime policy', () => {
-  assert.match(managerController, /runtime_config: target\.runtime_config/);
+test('trigger runtime spec carries the execution policy (P4c-4: no Agent fetch)', () => {
+  // P4c-4: canonical Agent fetch 삭제 (Agent 행 없음) — 실행 정책은 wire 의
+  // runtime spec 이 싣는다. 매니저가 spec.runtime_config 를 읽는지 고정한다.
+  assert.match(dispatcher, /runtime_config: \(spec\.runtime_config as AgentExecutionContext\['runtime_config'\]\)/);
 });

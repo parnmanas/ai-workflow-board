@@ -54,6 +54,12 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
 
   const ws = await createWorkspace(app, getDataSourceToken, 'actresume');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer' });
+  // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
+  const RUNTIME_SPEC = {
+    manager_agent_id: agent.manager_agent_id, cli: 'claude', model: null,
+    working_dir: '/srv/e2e', credential_id: null, label: 'e2e-deployer', role_prompt: '',
+    runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  };
   const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
   // The source ticket lives in an ACTIVE column routed to the assignee role so
   // the resume (dispatchCurrentColumn) has a holder to wake.
@@ -107,7 +113,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     workspace_id: ws.id,
     name: 'Reindex search',
     prompt: 'reindex {{workspace.name}}',
-    target_agent_id: agent.id,
+    target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!existing.isError, 'save_action (existing) succeeds');
 
@@ -187,7 +193,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     workspace_id: ws.id,
     name: 'Regenerate sitemap',
     prompt: 'regenerate',
-    target_agent_id: agent.id,
+    target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!fresh.isError && fresh.id, 'new Action registered');
   const ticket2 = await createTicket(app, getDataSourceToken, {
@@ -216,7 +222,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     workspace_id: ws.id,
     name: 'Flaky sync',
     prompt: 'sync-maybe',
-    target_agent_id: agent.id,
+    target_runtimes: [RUNTIME_SPEC],
   });
   const ticket3 = await createTicket(app, getDataSourceToken, {
     columnId: col.id,
@@ -303,7 +309,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   step('CASE 5 — concurrent completion is atomic (exactly-once audit + resume)');
   const svc = app.get(ActionsService);
   const conc = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Concurrent sync', prompt: 'x', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'Concurrent sync', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
   });
   const ticket5 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked concurrent', assigneeId: agent.id,
@@ -331,7 +337,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 6 — high-impact failure surfaces (no auto-retry) + stable idempotency key');
   const hi = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Prod release', prompt: 'release', target_agent_id: agent.id, high_impact: true,
+    workspace_id: ws.id, name: 'Prod release', prompt: 'release', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
   assert.ok(!hi.isError && hi.id, 'high-impact Action registered');
   assert.equal(hi.high_impact, true, 'high_impact flag round-trips through save_action');
@@ -375,7 +381,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 7 — idempotency key stable across the retry chain');
   const keyed = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Keyed retry', prompt: 'x', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'Keyed retry', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
   });
   const ticket7 = await createTicket(app, getDataSourceToken, {
     columnId: col.id, workspaceId: ws.id, title: 'blocked keyed', assigneeId: agent.id,
@@ -398,7 +404,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 8 — unapproved high-impact ticket-driven run is rejected + parks the ticket');
   const gated = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Ship release to production', prompt: 'ship', target_agent_id: agent.id, high_impact: true,
+    workspace_id: ws.id, name: 'Ship release to production', prompt: 'ship', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
   assert.ok(!gated.isError && gated.id, 'high-impact Action registered');
   const ticket8 = await createTicket(app, getDataSourceToken, {
@@ -505,7 +511,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 11 — a deploy-named Action with high_impact=false is still gated');
   const misclassified = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Deploy to production', prompt: 'deploy', target_agent_id: agent.id,
+    workspace_id: ws.id, name: 'Deploy to production', prompt: 'deploy', target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!misclassified.isError, 'misclassified action saves (high_impact omitted → false)');
   assert.equal(misclassified.high_impact, false, 'it is stored NOT explicitly flagged high_impact');
@@ -556,7 +562,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   // A second high-impact action to prove action-binding.
   const otherHi = await mcp.callTool('save_action', {
-    workspace_id: ws.id, name: 'Publish to production', prompt: 'publish', target_agent_id: agent.id, high_impact: true,
+    workspace_id: ws.id, name: 'Publish to production', prompt: 'publish', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
   const appr13 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket13a.id, token: adminToken });
   assert.equal(appr13.status, 201, 'grant created for (gated, ticket13a)');

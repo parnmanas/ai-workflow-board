@@ -54,12 +54,12 @@ test('open 이 실패하면 그 사유가 세션 상태에 남고 driver 에게 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'codex' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'ralf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'ralf' }); // P4c-4: fixture managerId = host id
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
   await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-ralf-1', agent_id: managerId, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
+      instance_id: 'inst-ralf-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf', plugin_version: 'test',
       cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 99,
       started_at: new Date().toISOString(),
     }),
@@ -140,11 +140,11 @@ test('세션 id 없이 새로 여는 경우는 붙일 곳이 없으므로 상태
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'ralf2' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'ralf2' }); // P4c-4: fixture managerId = host id
   await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-ralf-2', agent_id: managerId, mode: 'manager', hostname: 'ralf2', plugin_version: 'test',
+      instance_id: 'inst-ralf-2', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf2', plugin_version: 'test',
       cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 98,
       started_at: new Date().toISOString(),
     }),
@@ -196,11 +196,11 @@ test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder3', type: 'codex' });
   const managerId = agent.manager_agent_id;
   const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'ralf3' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'ralf3' }); // P4c-4: fixture managerId = host id
   await call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-ralf-3', agent_id: managerId, mode: 'manager', hostname: 'ralf3', plugin_version: 'test',
+      instance_id: 'inst-ralf-3', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf3', plugin_version: 'test',
       cli: 'codex', cli_adapters: ['codex'], acp_session_clis: ['codex'], pid: 97,
       started_at: new Date().toISOString(),
     }),

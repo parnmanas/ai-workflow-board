@@ -13,10 +13,10 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err } from '../shared/helpers';
 import { TicketArchivedError } from '../shared/archive-helpers';
+import { resolveCallerIdentityRow } from '../shared/authz';
 import type { ToolContext } from './context';
 
 export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): void {
@@ -39,7 +39,8 @@ export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): v
       if (!agentStatusService) {
         return err('set_current_task is unavailable in standalone MCP server mode — use the NestJS-integrated server.');
       }
-      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
+      // P4: Agent 행 또는 Host 행 — 둘 다 supervision seat 주체다.
+      const agent = await resolveCallerIdentityRow(dataSource, agent_id);
       if (!agent) return err('Agent not found');
 
       // Refuse to bind an agent to an archived ticket — the trigger loop
@@ -71,7 +72,8 @@ export function registerAgentStatusTools(server: McpServer, ctx: ToolContext): v
       if (!agentStatusService) {
         return err('clear_current_task is unavailable in standalone MCP server mode — use the NestJS-integrated server.');
       }
-      const agent = await dataSource.getRepository(Agent).findOne({ where: { id: agent_id } });
+      // P4: Agent 행 또는 Host 행 — 둘 다 supervision seat 주체다.
+      const agent = await resolveCallerIdentityRow(dataSource, agent_id);
       if (!agent) return err('Agent not found');
 
       agentStatusService.clearCurrentTask(agent_id, ticket_id, task_token);

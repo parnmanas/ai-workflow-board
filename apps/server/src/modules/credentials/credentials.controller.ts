@@ -18,7 +18,6 @@ import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
 import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
 import { Board } from '../../entities/Board';
-import { Agent } from '../../entities/Agent';
 import { Resource } from '../../entities/Resource';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { OutreachChannel } from '../../entities/OutreachChannel';
@@ -67,8 +66,8 @@ function isMaskedValue(value: string): boolean {
 // credential they can no longer read, so update() refuses the move instead.
 // A NULL workspace_id here means the holder is itself instance-wide (a manager
 // Agent row, a global Resource) and so is just as much outside the destination.
+// P4c-4: Agent 항목 제거 (Agent 테이블 없음).
 const CREDENTIAL_DEPENDENTS: Array<{ entity: Function; label: string }> = [
-  { entity: Agent, label: 'agent(s)' },
   { entity: Resource, label: 'resource(s)' },
   { entity: AgentSessionCliSetting, label: 'CLI session setting(s)' },
   { entity: OutreachChannel, label: 'outreach channel(s)' },

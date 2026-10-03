@@ -126,10 +126,14 @@ export default function AssistantAgentSetting({
 
   useEffect(() => {
     let cancelled = false;
+    // P4c-4: 어시스턴트 후보는 Host 카탈로그다 (Agent 목록 없음).
     api
-      .getAgents()
+      .listOrchestrationRuntimeHosts(workspace.id)
       .then((rows) => {
-        if (!cancelled) setAgents(eligibleAssistantAgents(rows as any, workspace.id));
+        if (!cancelled) {
+          const candidates = (rows as any[]).map((h: any) => ({ id: h.manager_agent_id, name: h.manager_name, is_active: 1, type: 'runtime-host' }));
+          setAgents(eligibleAssistantAgents(candidates as any, workspace.id));
+        }
       })
       .catch(() => {
         if (!cancelled) setAgents([]);

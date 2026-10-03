@@ -124,7 +124,7 @@ test('실제 서버 재시작: 새 프로세스의 부팅 스윕이 스스로 �
     step_timeout_minutes: 30,
   });
   await svcA.runner.startMission(mission.id, ws.id, HUMAN);
-  await svcA.runner.submitPlan(mission.id, lead.id, {
+  await svcA.runner.submitPlan(mission.id, { agentId: lead.id }, {
     steps: [{ step_key: 'build', title: 'Build it', instructions: 'build', assignee_agent_id: worker.id }],
   });
 
@@ -134,7 +134,7 @@ test('실제 서버 재시작: 새 프로세스의 부팅 스윕이 스스로 �
 
   // 작업자가 진행 상태를 남긴 뒤 세션이 죽는다.
   const freshStep = await svcA.missions.requireStep(stepId);
-  await svcA.runner.reportProgress(stepId, worker.id, '절반 진행', freshStep.lease_token, {
+  await svcA.runner.reportProgress(stepId, { agentId: worker.id }, '절반 진행', freshStep.lease_token, {
     stage: 'half-done',
     next: 'write the report',
   });
@@ -253,7 +253,7 @@ test('orchestrator 세션 재시작: 대화 맥락과 진행 상태를 그대로
     step_timeout_minutes: 30,
   });
   await svc.runner.startMission(mission.id, ws.id, HUMAN);
-  await svc.runner.submitPlan(mission.id, lead.id, {
+  await svc.runner.submitPlan(mission.id, { agentId: lead.id }, {
     steps: [{ step_key: 'build', title: 'Build it', instructions: 'build', assignee_agent_id: worker.id }],
   });
 

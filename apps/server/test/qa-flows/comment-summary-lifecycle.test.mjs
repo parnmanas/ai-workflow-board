@@ -29,7 +29,7 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
   const sceneA = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-a' });
   const sceneB = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'summary-b' });
   const agent = await createAgent(app, getDataSourceToken, sceneA.ws.id, { name: 'summarizer' });
-  await ds.getRepository('Agent').update({ id: agent.id }, { is_online: 1 });
+  // P4c-4: is_online 컬럼 없음 — presence 는 heartbeat/레지스트리다. 스트림은 host 키로 열려 있다.
   const runtimeHostKey = runtimeHostKeyForAgent(agent.id);
   assert.ok(runtimeHostKey, 'summary Agent must be owned by a Runtime Host fixture');
   const runtimeHostStream = await openSseStream(port, runtimeHostKey);
@@ -51,6 +51,8 @@ test('comment summary is workspace-scoped, idempotent, and preserves originals o
       columnId: sceneA.columns.todo.id,
       workspaceId: sceneA.ws.id,
       title,
+      // P4c-4: 요약 실행자는 assignee holder 다 — 없으면 409 SUMMARY_AGENT_UNAVAILABLE.
+      assigneeId: agent.id,
     });
     for (const content of contents) {
       await commentRepo.save(commentRepo.create({

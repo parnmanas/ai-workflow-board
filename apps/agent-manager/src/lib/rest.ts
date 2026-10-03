@@ -1115,6 +1115,43 @@ export async function provisionManagedAgentApiKey(
 }
 
 /**
+ * P4c-2a: issue a workspace-scoped API key bound to a runtime tuple identity
+ * (`rt-<hex16}`, no Agent row). The server binds it to this host (host_id from
+ * our own pairing-time key) and returns the raw key once; the manager persists
+ * it under the runtime key dir like a per-agent key. Returns null on any
+ * failure — the caller falls back to the legacy miss path.
+ */
+export async function provisionRuntimeApiKey(
+  config: AwbConfig,
+  key: string,
+  workspaceId: string,
+  label?: string,
+): Promise<{ raw_key: string; key_id: string; key: string; workspace_id: string } | null> {
+  if (!key || !workspaceId) return null;
+  try {
+    const url = `${trimSlash(config.url)}/api/agent-manager/runtime-keys/provision`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Agent-Key': config.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ key, workspace_id: workspaceId, label: (label || '').slice(0, 80) || undefined }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      log(`runtime key provision failed: ${resp.status} ${resp.statusText} (key=${key})`);
+      return null;
+    }
+    return (await resp.json()) as any;
+  } catch (err: any) {
+    log(`runtime key provision error: ${err?.message ?? err} (key=${key})`);
+    return null;
+  }
+}
+
+/**
  * Ask the server to immediately re-push agent_trigger(s) for the given
  * (ticket, role) work a just-restarted managed agent was interrupted on.
  * Used by restart_agent right after the fresh spawn so the agent resumes on

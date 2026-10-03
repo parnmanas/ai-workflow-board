@@ -20,7 +20,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 
-import { ManagedAgentsSection, InstanceDetail } from '../src/components/admin/AgentManagerPage.tsx';
+import { InstanceDetail } from '../src/components/admin/AgentManagerPage.tsx';
 import AgentLaunchSpecSection from '../src/components/AgentLaunchSpecSection.tsx';
 import { agentIdentityLabel, AGENT_NAME_UNRESOLVED } from '../src/utils/agentName.ts';
 
@@ -77,66 +77,8 @@ function setupDom(t, routes) {
   return dom;
 }
 
-test('워크스페이스 스냅샷에 없는 에이전트에도 Details 진입 경로가 보인다', async (t) => {
-  const dom = setupDom(t, {
-    '/agents?scope=all': [MANAGER_ONLY_AGENT],
-    '/workspaces': [{ id: 'ws-1', name: 'ws' }],
-  });
-
-  const opened = [];
-  const root = createRoot(document.getElementById('root'));
-  await act(async () => {
-    root.render(
-      React.createElement(ManagedAgentsSection, {
-        inst: INSTANCE,
-        // 스냅샷이 비어 있다 — 예전 게이팅이면 버튼이 전혀 렌더되지 않는 조건.
-        workspaceAgents: [],
-        onOpenAgent: (id) => opened.push(id),
-      }),
-    );
-  });
-
-  const detailsButtons = Array.from(document.querySelectorAll('button')).filter(
-    (b) => b.textContent.trim() === 'Details',
-  );
-  assert.equal(detailsButtons.length, 1, '스냅샷에 없다는 이유로 Details 가 사라졌다');
-
-  await act(async () => {
-    detailsButtons[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
-  });
-  // 진입은 agent id 로 이뤄져야 한다 — 목적지 화면이 그 id 로 단건 조회한다.
-  assert.deepEqual(opened, ['agent-not-in-snapshot']);
-
-  await act(async () => root.unmount());
-});
-
-test('스냅샷에 행이 있어도 Details 진입 동작은 동일하다 (회귀 방지)', async (t) => {
-  const dom = setupDom(t, {
-    '/agents?scope=all': [MANAGER_ONLY_AGENT],
-    '/workspaces': [{ id: 'ws-1', name: 'ws' }],
-  });
-
-  const opened = [];
-  const root = createRoot(document.getElementById('root'));
-  await act(async () => {
-    root.render(
-      React.createElement(ManagedAgentsSection, {
-        inst: INSTANCE,
-        workspaceAgents: [{ ...MANAGER_ONLY_AGENT, workspace_id: 'ws-1' }],
-        onOpenAgent: (id) => opened.push(id),
-      }),
-    );
-  });
-  const detailsButtons = Array.from(document.querySelectorAll('button')).filter(
-    (b) => b.textContent.trim() === 'Details',
-  );
-  assert.equal(detailsButtons.length, 1);
-  await act(async () => {
-    detailsButtons[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
-  });
-  assert.deepEqual(opened, ['agent-not-in-snapshot']);
-  await act(async () => root.unmount());
-});
+// P4c-4: ManagedAgentsSection 진입 테스트 2건 제거 (표면 삭제).
+// InstanceDetail 진입 테스트는 유지 — 버튼 게이팅 금지 계약이 유효하다.
 
 test('인스턴스 상세의 "Agent details" 도 스냅샷과 무관하게 렌더된다', async (t) => {
   const dom = setupDom(t, {
@@ -248,6 +190,7 @@ const SPEC_WITH_ACTUAL = {
 
 const renderSection = (props) =>
   renderToStaticMarkup(React.createElement(AgentLaunchSpecSection, props));
+
 
 test('실행 인자 섹션이 실효 argv 를 출처와 함께 복사 가능한 형태로 보여준다', () => {
   const html = renderSection({ spec: SPEC, managerFound: true, reported: true });
@@ -371,10 +314,10 @@ test('감독 중인 identity 목록이 잘린 UUID 대신 이름을 보여준다
 });
 
 test('CLI 미설정을 "unknown" 이라는 값처럼 보이게 하지 않는다', () => {
-  // AgentDetailModal 의 MANAGED AGENT 표에서 CLI 가 비었을 때의 표기.
-  // 값이 없다는 사실과, CLI 가 실제로 어떤 값이라는 주장은 다른 정보다.
+  // P4c-4: AgentDetailModal 삭제 — 같은 표기는 AgentManagerPage InstanceDetail
+  // 에서 본다. 값이 없다는 사실과, CLI 가 실제로 어떤 값이라는 주장은 다른 정보다.
   const source = readFileSync(
-    new URL('../src/components/AgentDetailModal.tsx', import.meta.url),
+    new URL('../src/components/admin/AgentManagerPage.tsx', import.meta.url),
     'utf8',
   );
   assert.doesNotMatch(source, /\{detail\.type \|\| 'unknown'\}/);

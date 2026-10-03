@@ -4,6 +4,7 @@ import { formatAgentDisplayName } from '../../utils/agentName';
 import type { Feature, FeatureStatus } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, Badge } from '../common';
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 
 /**
  * Feature/Epic intake manager (ticket aae7644c) — the human-facing surface of the
@@ -35,6 +36,8 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Feature | null>(null);
   const [agents, setAgents] = useState<AgentOpt[]>([]);
+  // P4b: runtime 선언 → 매칭용 full 행.
+  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,6 +47,8 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
   const [title, setTitle] = useState('');
   const [requirement, setRequirement] = useState('');
   const [plannerId, setPlannerId] = useState('');
+  // P4c-3b: spec-direct planner.
+  const [plannerSpec, setPlannerSpec] = useState<Record<string, any> | null>(null);
 
   const refresh = useCallback(async () => {
     if (!workspaceId) return;
@@ -64,8 +69,9 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
   useEffect(() => {
     (async () => {
       try {
-        const list = await api.getAgents(workspaceId);
+        const list: any[] = [];
         setAgents((list || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+        setAgentsFull((list || []) as any[]);
       } catch { /* non-fatal — planner defaults server-side */ }
     })();
   }, [workspaceId]);
@@ -88,10 +94,12 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
         board_id: boardId ?? null,
         title: title.trim(),
         requirement: requirement.trim(),
-        planner_agent_id: plannerId || undefined,
+        planner_agent_id: plannerSpec ? undefined : (plannerId || undefined),
+        // P4c-3b: plannerSpec이 있으면 spec-direct (api.createFeature passthrough).
+        ...(plannerSpec ? { planner_runtime: plannerSpec } : {}),
       });
       setShowCreate(false);
-      setTitle(''); setRequirement(''); setPlannerId('');
+      setTitle(''); setRequirement(''); setPlannerId(''); setPlannerSpec(null);
       await refresh();
       await loadDetail(created.id);
     } catch (e: any) {
@@ -207,6 +215,17 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
             placeholder="미지정 시 서버 기본값(호출자)"
             options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
           />
+          {/* P4c-3b: runtime 선언 → 매칭되면 id, 새로우면 spec-direct 저장. */}
+          {workspaceId && (
+            <DeclareRuntimeSection
+              workspaceId={workspaceId}
+              agentsFull={agentsFull}
+              onResolved={(id, created, spec) => {
+                setPlannerId(id);
+                setPlannerSpec(created ? spec : null);
+              }}
+            />
+          )}
           <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted }}>
             제출하면 planner 에게 전용 기획 방이 열리고, 구조화된 티켓 체인 제안이 돌아오면 여기서 승인/거부합니다.
           </div>

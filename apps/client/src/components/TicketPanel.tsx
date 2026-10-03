@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import DeclareRuntimeSection from './runtime/DeclareRuntimeSection';
 import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec, ClaudeBackendProfile } from '../types';
 import { api, TicketRoleAssignmentRow, ConsensusView, ConsensusParty, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
@@ -56,7 +57,7 @@ interface TicketPanelProps {
   // exclusive agent_id / user_id; pass both null/'' to clear. Used by legacy
   // direct-write call sites (none currently inside the panel — Save batches
   // role drafts through onSaveDraft below).
-  onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null }) => void | Promise<void>;
+  onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> }) => void | Promise<void>;
   // Commit the buffered Save/Discard draft in one shot. MUST reject (throw)
   // on server failure — the footer relies on the rejection to preserve dirty
   // state so the user doesn't lose their unsaved edits behind a misleading
@@ -146,15 +147,79 @@ const priorityColors: Record<string, string> = {
 };
 
 // Multi-holder role draft (T6 다중담당자). Each entry pins exactly one of
-// agent_id / user_id; a role's draft is its FULL desired holder set. The
-// picker buffers these and Save flushes them as the T1 role_assignments[] array.
-type HolderDraft = { agent_id: string | null; user_id: string | null };
-// Normalize a holder to `agent:<id>` / `user:<id>` for set comparison + dedupe.
-const holderDraftKey = (h: HolderDraft): string =>
-  h.agent_id ? `agent:${h.agent_id}` : h.user_id ? `user:${h.user_id}` : '';
+// agent_id / user_id / runtime; a role's draft is its FULL desired holder set.
+// The picker buffers these and Save flushes them as the T1 role_assignments[] array.
+type HolderDraft = { agent_id: string | null; user_id: string | null; runtime?: Record<string, any> | null };
+// Normalize a holder for set comparison + dedupe. Runtime holders key on
+// their identity tuple (stable across edits — the same tuple is the same holder).
+const holderDraftKey = (h: HolderDraft): string => {
+  if (h.agent_id) return `agent:${h.agent_id}`;
+  if (h.user_id) return `user:${h.user_id}`;
+  const r = h.runtime;
+  if (r && typeof r === 'object') {
+    return `runtime:${r.manager_agent_id || ''}:${r.cli || ''}:${r.working_dir || ''}:${r.model || ''}:${r.credential_id || ''}`;
+  }
+  return '';
+};
+/**
+ * P4c-4: 역할 선택 + runtime 선언 → draft holder 추가. 매칭되면 agent draft,
+ * 새로우면 runtime draft로 해당 역할 draft에 append한다.
+ */
+function TicketRuntimeSection({
+  roles,
+  agentsFull,
+  workspaceId,
+  onAdd,
+}: {
+  roles: Array<{ id: string; slug: string; name: string }>;
+  agentsFull: Array<any>;
+  workspaceId: string;
+  onAdd(roleId: string, draft: HolderDraft): void;
+}) {
+  const [roleId, setRoleId] = useState(() => roles.find((r) => r.slug === 'assignee')?.id ?? roles[0]?.id ?? '');
+  useEffect(() => {
+    if (!roles.some((r) => r.id === roleId) && roles.length > 0) setRoleId(roles[0].id);
+  }, [roles, roleId]);
+  if (roles.length === 0 || !workspaceId) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label style={{ display: 'block', fontSize: 11, color: '#8a8a8a', marginBottom: 4 }}>
+        Runtime으로 추가할 역할
+      </label>
+      <select
+        value={roleId}
+        onChange={(e) => setRoleId(e.target.value)}
+        style={{ background: 'transparent', border: '1px solid #333', borderRadius: 6, padding: '4px 6px', fontSize: 11, marginBottom: 8 }}
+      >
+        {roles.map((r) => (
+          <option key={r.id} value={r.id}>{r.name} ({r.slug})</option>
+        ))}
+      </select>
+      <DeclareRuntimeSection
+        workspaceId={workspaceId}
+        agentsFull={agentsFull}
+        onResolved={(id, created, spec) => {
+          if (!roleId) return;
+          if (created && spec) onAdd(roleId, { agent_id: null, user_id: null, runtime: spec });
+          else if (id) onAdd(roleId, { agent_id: id, user_id: null });
+        }}
+      />
+    </div>
+  );
+}
+
 // A resolved holder (from a role-assignment row) → its draft shape.
-const holderToDraft = (h: { type: 'agent' | 'user'; id: string }): HolderDraft =>
-  h.type === 'agent' ? { agent_id: h.id, user_id: null } : { agent_id: null, user_id: h.id };
+// P4c-4: rt- holders round-trip as runtime drafts (never as agent_id — the
+// server would reject the unknown id on lookup).
+const holderToDraft = (h: { type: 'agent' | 'user'; id: string; runtime?: Record<string, any> }): HolderDraft => {
+  if (h.type === 'agent') {
+    if ((h as any).runtime && typeof (h as any).runtime === 'object') {
+      return { agent_id: null, user_id: null, runtime: (h as any).runtime };
+    }
+    return { agent_id: h.id, user_id: null };
+  }
+  return { agent_id: null, user_id: h.id };
+};
 
 // Read path for the board's effort presets — degrade malformed/empty input to
 // the builtins, never throw (mirrors the server READ contract). Accepts the
@@ -1412,18 +1477,19 @@ export default function TicketPanel({
     // entry per holder (repeated role_slug = multi-holder set); a dirty role
     // whose set is empty emits a holder-less entry so the server CLEARS the slot.
     const roleIdToSlug = new Map((workspaceRoles || []).map(r => [r.id, r.slug]));
-    const roleAssignmentsPayload: Array<{ role_slug: string; agent_id?: string; user_id?: string }> = [];
+    const roleAssignmentsPayload: Array<{ role_slug: string; agent_id?: string; user_id?: string; runtime?: Record<string, any> }> = [];
     for (const roleId of dirtyRoleIds) {
       const slug = roleIdToSlug.get(roleId);
       if (!slug) continue;
-      const holders = roleDraftsToSave[roleId].filter(h => h.agent_id || h.user_id);
+      const holders = roleDraftsToSave[roleId].filter(h => h.agent_id || h.user_id || h.runtime);
       if (holders.length === 0) {
         roleAssignmentsPayload.push({ role_slug: slug }); // holder-less → clear
       } else {
         for (const h of holders) {
-          roleAssignmentsPayload.push(
-            h.agent_id ? { role_slug: slug, agent_id: h.agent_id } : { role_slug: slug, user_id: h.user_id! },
-          );
+          if (h.agent_id) roleAssignmentsPayload.push({ role_slug: slug, agent_id: h.agent_id });
+          else if (h.user_id) roleAssignmentsPayload.push({ role_slug: slug, user_id: h.user_id! });
+          // P4c-4: spec-direct holder.
+          else if (h.runtime) roleAssignmentsPayload.push({ role_slug: slug, runtime: h.runtime });
         }
       }
     }
@@ -1440,7 +1506,13 @@ export default function TicketPanel({
         }
         if (onSetRoleAssignment) {
           for (const roleId of dirtyRoleIds) {
-            const first = roleDraftsToSave[roleId].find(h => h.agent_id || h.user_id) || { agent_id: null, user_id: null };
+            const raw = roleDraftsToSave[roleId].find(h => h.agent_id || h.user_id || h.runtime) || { agent_id: null, user_id: null };
+            // HolderDraft.runtime 는 null 가능 — 전송 shape 에 맞춰 null 을 제거한다.
+            const first: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> } = {
+              agent_id: raw.agent_id ?? null,
+              user_id: raw.user_id ?? null,
+              ...(raw.runtime ? { runtime: raw.runtime } : {}),
+            };
             ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, first)));
           }
         }
@@ -2685,6 +2757,13 @@ export default function TicketPanel({
                       if (u) return (u.name || u.email);
                       return resolvedHolderNameById.get(h.user_id) || h.user_id;
                     }
+                    // P4c-4: spec-direct holder — 스냅샷 라벨.
+                    if (h.runtime && typeof h.runtime === 'object') {
+                      const label = ((h.runtime as any).label || '').trim();
+                      if (label) return label;
+                      const cli = ((h.runtime as any).cli || '').trim();
+                      if (cli) return cli;
+                    }
                     return '?';
                   };
                   const commit = (next: HolderDraft[]) => setRoleDrafts(prev => ({ ...prev, [role.id]: next }));
@@ -2778,6 +2857,13 @@ export default function TicketPanel({
                   );
                 });
               })()}
+              {/* P4c-4: runtime 선언 → 선택한 역할의 draft에 holder 추가. */}
+              <TicketRuntimeSection
+                roles={(workspaceRoles || []).slice().sort((a, b) => a.position - b.position)}
+                agentsFull={agents as any[]}
+                workspaceId={workspaceId || ''}
+                onAdd={(roleId, draft) => setRoleDrafts(prev => ({ ...prev, [roleId]: [...(prev[roleId] ?? (holdersByRoleId.get(roleId) || []).map(holderToDraft)), draft] }))}
+              />
             </div>
 
             {/* 다중담당자·합의 패널 (T6). 이탈(현재) 컬럼 라우팅 홀더가 ≥2 이거나

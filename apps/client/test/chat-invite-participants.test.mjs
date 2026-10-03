@@ -19,7 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
-import { api } from '../src/api.ts';
+import { api, getActiveWorkspaceId, setActiveWorkspaceId } from '../src/api.ts';
 import { RoomHeaderActions } from '../src/components/chat/RoomDetailPanel.tsx';
 import ParticipantPicker from '../src/components/chat/ParticipantPicker.tsx';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
@@ -169,9 +169,27 @@ const AGENTS = [
 function mountPicker(props) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
-  const originals = { getUsers: api.getUsers, getAgents: api.getAgents, addChatRoomParticipants: api.addChatRoomParticipants };
+  const originals = {
+    getUsers: api.getUsers,
+    getAgents: api.getAgents,
+    addChatRoomParticipants: api.addChatRoomParticipants,
+    listOrchestrationRuntimeHosts: api.listOrchestrationRuntimeHosts,
+    validateRuntimeSpec: api.validateRuntimeSpec,
+  };
   api.getUsers = async () => USERS;
   api.getAgents = async () => AGENTS;
+  // P4c-4: 에이전트 초대는 runtime 선언으로 들어간다 — Host 카탈로그 스텁.
+  api.listOrchestrationRuntimeHosts = async () => [{ manager_agent_id: 'host-1', manager_name: 'host-one' }];
+  api.validateRuntimeSpec = async (_ws, spec) => ({
+    ok: true,
+    spec: {
+      manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: spec.working_dir,
+      credential_id: null, label: '초대봇', role_prompt: '',
+    },
+  });
+  // DeclareRuntimeSection 은 workspaceId 가 있어야 Host 목록을 로드한다.
+  const prevWs = getActiveWorkspaceId();
+  setActiveWorkspaceId('ws-1');
   const mounted = mount(
     React.createElement(AuthProvider, null,
       React.createElement(ParticipantPicker, {
@@ -182,7 +200,7 @@ function mountPicker(props) {
       })),
   );
   // api 복원은 호출자가 finally 에서 한다 — 전역이라 남겨 두면 다음 테스트를 오염시킨다.
-  mounted.restore = () => Object.assign(api, originals);
+  mounted.restore = () => { Object.assign(api, originals); setActiveWorkspaceId(prevWs); };
   return mounted;
 }
 
@@ -245,7 +263,7 @@ test('후보에서 이미 참여 중인 대상과 Agent Manager 가 빠진다', 
   }
 });
 
-test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 나간다', async () => {
+test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 나간다 (P4c-4: 에이전트는 runtime 선언)', async () => {
   const calls = [];
   const picker = mountPicker({ addToRoomId: 'room-42', promotesDmToGroup: true });
   api.addChatRoomParticipants = async (roomId, participants) => {
@@ -255,16 +273,45 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
   try {
     await flush();
 
-    // 후보 행의 체크박스를 눌러 유저 하나 + 에이전트 하나를 고른다.
+    // 유저는 후보 행의 체크박스로 고른다.
     const rows = [...picker.container.querySelectorAll('label')];
-    const pick = (needle) => {
-      const row = rows.find((l) => l.textContent.includes(needle));
-      assert.ok(row, `후보 '${needle}' 를 찾을 수 없다`);
-      click(row.querySelector('input[type="checkbox"]'));
-    };
-    pick('Bob');
-    pick('Bot');
+    const bob = rows.find((l) => l.textContent.includes('Bob'));
+    assert.ok(bob, "후보 'Bob' 를 찾을 수 없다");
+    click(bob.querySelector('input[type="checkbox"]'));
     await flush();
+
+    // 에이전트는 runtime 선언으로 추가한다 (Agent 목록 표면 없음).
+    const toggle = [...picker.container.querySelectorAll('label')]
+      .find((l) => l.textContent.includes('Runtime으로 지정'));
+    assert.ok(toggle, 'runtime 선언 토글이 없다');
+    click(toggle.querySelector('input[type="checkbox"]'));
+    await flush();
+    const setNativeValue = (el, value) => {
+      const proto = el instanceof window.HTMLSelectElement
+        ? window.HTMLSelectElement.prototype
+        : window.HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value')?.set.call(el, value);
+      el.dispatchEvent(new window.Event('input', { bubbles: true }));
+      el.dispatchEvent(new window.Event('change', { bubbles: true }));
+    };
+    const selects = [...picker.container.querySelectorAll('select')];
+    const hostSelect = selects.find((s) => [...s.options].some((o) => o.value === 'host-1'));
+    const cliSelect = selects.find((s) => [...s.options].some((o) => o.value === 'claude'));
+    const dirInput = [...picker.container.querySelectorAll('input')].find((i) =>
+      i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+    assert.ok(hostSelect && cliSelect && dirInput, 'runtime 선언 입력이 없다');
+    await act(async () => {
+      setNativeValue(hostSelect, 'host-1');
+      setNativeValue(cliSelect, 'claude');
+      setNativeValue(dirInput, '/wt/invite-bot');
+    });
+    await flush();
+    const resolveBtn = [...picker.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('Resolve'));
+    assert.ok(resolveBtn, 'Resolve 버튼이 없다');
+    click(resolveBtn);
+    await flush();
+    assert.match(picker.container.textContent, /초대봇/, '선언한 runtime 칩이 선택에 추가돼야 한다');
 
     const submit = [...picker.container.querySelectorAll('button')]
       .find((b) => /Convert to Group/.test(b.textContent));
@@ -274,14 +321,15 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
 
     assert.equal(calls.length, 1, 'production 경로의 api.addChatRoomParticipants 가 불려야 한다');
     assert.equal(calls[0].roomId, 'room-42');
+    const byType = Object.fromEntries(calls[0].participants.map((p) => [p.participant_type, p]));
     assert.deepEqual(
-      [...calls[0].participants].sort((a, b) => a.participant_id.localeCompare(b.participant_id)),
-      [
-        { participant_type: 'agent', participant_id: 'agent-bot' },
-        { participant_type: 'user', participant_id: 'user-bob' },
-      ],
-      '유저와 에이전트가 모두, 선택한 그대로 나가야 한다',
+      byType.user,
+      { participant_type: 'user', participant_id: 'user-bob' },
+      '유저는 선택한 그대로 나가야 한다',
     );
+    assert.equal(byType.agent.participant_type, 'agent');
+    assert.equal(byType.agent.participant_id, '', 'spec-direct 초대는 id 가 비고 runtime 이 동봉된다');
+    assert.equal(byType.agent.runtime.working_dir, '/wt/invite-bot');
   } finally {
     picker.unmount();
     picker.restore();

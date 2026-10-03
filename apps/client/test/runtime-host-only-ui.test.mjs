@@ -16,10 +16,10 @@ test('client types expose Runtime Host sessions only', () => {
 });
 
 test('client has no standalone session routing controls or legacy topology choices', () => {
+  // P4c-4: AgentDetailModal 삭제 — 항목에서 제외.
   const source = [
     'api.ts',
     'components/admin/AgentManagerPage.tsx',
-    'components/AgentDetailModal.tsx',
   ].map(read).join('\n');
 
   assert.doesNotMatch(source, /setAgentMainSession|clearAgentMainSession/);
@@ -27,36 +27,30 @@ test('client has no standalone session routing controls or legacy topology choic
   assert.doesNotMatch(source, /source\s*===\s*['"]proxy['"]|mode\s*===\s*['"]daemon['"]/);
 });
 
-test('Agent forms require explicit Runtime Host, runtime, strategy, and permission mode', () => {
-  const source = [
-    'components/AgentsPage.tsx',
-    'components/admin/ManagedAgentDialog.tsx',
-    'components/admin/RuntimeConfigFields.tsx',
-  ].map(read).join('\n');
+// P4c-3b/4: Agent 생성 폼 삭제 — 선언은 RuntimeSpecEditor 가 받는다. Host
+// 미선택·상대경로 working_dir 을 거부하는지 소스 계약으로 단언한다.
+test('Runtime declaration requires an explicit Host and an absolute working dir', () => {
+  const source = read('components/runtime/RuntimeSpecEditor.tsx');
 
-  assert.match(source, /Runtime Host \*/);
-  assert.match(source, /Runtime \*/);
-  assert.match(source, /Strategy \*/);
-  assert.match(source, /Permission mode \*/);
-  assert.match(source, /runtime_config/);
+  assert.match(source, /label="Runtime Host"/);
+  assert.match(source, /value:\s*''\s*,\s*label:\s*'선택…'/);
+  assert.match(source, /isAbsoluteHostPath/);
+  assert.match(source, /dirError/);
   assert.doesNotMatch(source, /cli:\s*['"]claude['"]/);
-  assert.doesNotMatch(source, /strategy:\s*['"]single['"]/);
 });
 
-test('Agent creation resolves healthy runtimes from live Runtime Host instances', () => {
-  const source = read('components/AgentsPage.tsx');
-
-  assert.match(source, /listAgentManagerInstances\(\)/);
-  assert.match(source, /instance\.agent_id\s*===\s*managedForm\.manager_agent_id/);
-  assert.match(source, /health\.installed\s*&&\s*health\.healthy/);
-  assert.doesNotMatch(source, /managerInstanceByManagerAgentId/);
+// P4c-3b: AgentsPage 생성 폼 삭제 — healthy-runtime 매칭은 DeclareRuntimeSection
+// + resolveSpecAgent 가 하고 test/runtime-spec.test.mjs 가 커버한다.
+test('Runtime declaration resolves hosts through the shared matcher (no per-form logic)', () => {
+  const section = read('components/runtime/DeclareRuntimeSection.tsx');
+  assert.match(section, /validate/);
+  assert.doesNotMatch(section, /health\.installed\s*&&\s*health\.healthy/);
 });
 
 test('Hermes is explicit in the CLI catalog and collaboration controls are gated by its descriptor, not a literal', () => {
   const catalog = read('cli/catalog.ts');
+  // P4c-4: AgentsPage 삭제 — 항목에서 제외.
   const components = [
-    'components/AgentsPage.tsx',
-    'components/admin/ManagedAgentDialog.tsx',
     'components/admin/RuntimeConfigFields.tsx',
   ].map(read).join('\n');
 

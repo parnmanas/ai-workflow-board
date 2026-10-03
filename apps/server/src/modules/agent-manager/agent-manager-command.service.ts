@@ -2,14 +2,15 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { InstanceRegistryService, InstanceRecord } from './instance-registry.service';
 import { CommandLedgerService } from './command-ledger.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
 import type { AutostartFeasibility } from '../../common/agent-lifecycle';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+
 
 /**
  * Result of an auto-start (spawn_agent) attempt. `ok:true` means the command was
@@ -43,7 +44,8 @@ export class AgentManagerCommandService {
     private readonly registry: InstanceRegistryService,
     private readonly commandLedger: CommandLedgerService,
     private readonly logService: LogService,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectRepository(ApiKey) private readonly apiKeyRepo: Repository<ApiKey>,
   ) {}
 
   /**
@@ -53,9 +55,10 @@ export class AgentManagerCommandService {
    */
   resolveLiveManagerInstance(managerAgentId: string): InstanceRecord | null {
     if (!managerAgentId) return null;
+    // P4c-4: agent 바인딩 uuid 또는 Host id 둘 다 본다.
     const managers = this.registry
       .list()
-      .filter((i) => i.mode === 'manager' && i.agent_id === managerAgentId);
+      .filter((i) => i.mode === 'manager' && (i.agent_id === managerAgentId || i.host_id === managerAgentId));
     if (managers.length === 0) return null;
     // Newest by started_at (registry.list sorts hostname→started_at asc).
     return managers.reduce((a, b) => (a.started_at >= b.started_at ? a : b));
@@ -74,19 +77,8 @@ export class AgentManagerCommandService {
     args: Record<string, any>,
     issuedBy: string,
   ): Promise<{ command_id: string; issued_at: string }> {
+    // P4c-4: spawn 인자는 호출자가 완성해서 준다 (Agent 행 hydration 제거).
     const hydrated: Record<string, any> = { ...args };
-    if (command === 'spawn_agent' && typeof hydrated.agent_id === 'string' && hydrated.agent_id) {
-      const target = await this.agentRepo.findOne({ where: { id: hydrated.agent_id } });
-      if (target) {
-        if (hydrated.name === undefined) hydrated.name = target.name;
-        if (hydrated.cli === undefined) hydrated.cli = target.type;
-        if (hydrated.working_dir === undefined && target.working_dir) hydrated.working_dir = target.working_dir;
-        if (hydrated.manager_agent_id === undefined && target.manager_agent_id) hydrated.manager_agent_id = target.manager_agent_id;
-        if (hydrated.credential_id === undefined && target.credential_id) hydrated.credential_id = target.credential_id;
-        if (hydrated.model === undefined && target.model) hydrated.model = target.model;
-        if (hydrated.workspace_id === undefined && target.workspace_id) hydrated.workspace_id = target.workspace_id;
-      }
-    }
 
     const command_id = randomBytes(8).toString('hex');
     const issued_at = new Date().toISOString();
@@ -125,29 +117,35 @@ export class AgentManagerCommandService {
    * if a live manager instance exists and the agent has a working_dir, issue
    * spawn_agent. Every failure is CLASSIFIED (never thrown) so the caller can
    * surface an accurate reason:
-   *   - runtime_host_required — agent has no manager_agent_id
+   *  - agent_not_found — no Host row and no host-bound key link (P4c-4:
+   *    Host 바인딩 없는 identity 는 실행 경로 자체가 없다)
    *   - manager_offline   — a manager is linked but none is heartbeating
    *   - no_working_dir    — a live manager exists but the agent has no working dir
    */
+  // P4c-4: Agent 행 없음 — Host/link 해소 후 live 인스턴스 확인. working_dir 은
+  // 이 레이어에 없으므로 spawn 실발행은 불가하고 'no_working_dir' 로 분류한다
+  // (호출자의 피드백 문구가 정직하게 "시작 불가"를 말한다).
   async issueSpawnAgent(targetAgentId: string, issuedBy: string, workspaceId?: string): Promise<SpawnAgentResult> {
     if (!targetAgentId) return { ok: false, reason: 'agent_not_found' };
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
-    if (!target) return { ok: false, reason: 'agent_not_found' };
-    if (!target.manager_agent_id) return { ok: false, reason: 'runtime_host_required' };
-    const inst = this.resolveLiveManagerInstance(target.manager_agent_id);
+    void workspaceId;
+    void issuedBy;
+    let hostId: string | null = null;
+    const direct = await this.hostRepo.findOne({ where: { id: targetAgentId } });
+    if (direct) {
+      hostId = direct.id;
+    } else {
+      const link = await this.apiKeyRepo.findOne({
+        where: { agent_id: targetAgentId },
+        select: { agent_id: true, host_id: true },
+      });
+      if (link?.host_id) {
+        const linked = await this.hostRepo.findOne({ where: { id: link.host_id } });
+        if (linked) hostId = linked.id;
+      }
+    }
+    if (!hostId) return { ok: false, reason: 'agent_not_found' };
+    const inst = this.resolveLiveManagerInstance(hostId);
     if (!inst) return { ok: false, reason: 'manager_offline' };
-    if (!target.working_dir || !target.working_dir.trim()) {
-      return { ok: false, reason: 'no_working_dir' };
-    }
-    if (workspaceId && !agentIsVisibleInWorkspace(target.workspace_id, workspaceId)) {
-      return { ok: false, reason: 'agent_not_found' };
-    }
-    const { command_id } = await this.issue(
-      inst,
-      'spawn_agent',
-      { agent_id: targetAgentId, ...(workspaceId ? { workspace_id: workspaceId } : {}) },
-      issuedBy,
-    );
-    return { ok: true, reason: 'ok', command_id, instance_id: inst.instance_id };
+    return { ok: false, reason: 'no_working_dir' };
   }
 }

@@ -1,13 +1,12 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { activityEvents } from './activity.service';
 import { DiscordService } from './discord.service';
 import { LogService } from './log.service';
 import { Ticket } from '../entities/Ticket';
 import { Comment } from '../entities/Comment';
 import { User } from '../entities/User';
-import { Agent } from '../entities/Agent';
 import { BoardColumn } from '../entities/BoardColumn';
 import { ActivityLog } from '../entities/ActivityLog';
 import { WorkspaceRole } from '../entities/WorkspaceRole';
@@ -30,7 +29,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(WorkspaceRole) private readonly roleRepo: Repository<WorkspaceRole>,
     @InjectRepository(TicketRoleAssignment) private readonly assignRepo: Repository<TicketRoleAssignment>,
@@ -78,7 +77,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
             // match what the user sees on the board (TicketCard / activity feed
             // already render the prefixed form). resolveAgentDisplayName falls
             // back to the bare name if the manager row is missing.
-            const display = await resolveAgentDisplayName(this.agentRepo, a.agent_id);
+            const display = await resolveAgentDisplayName(this.dataSource, a.agent_id);
             if (role.slug === 'assignee') {
               assignee_id = a.agent_id;
               assignee_name = display || assignee_name;

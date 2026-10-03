@@ -11,16 +11,21 @@
  * chat-tools.ts already does at its `callerWorkspaceId` call sites.
  */
 
-import type { DataSource } from 'typeorm';
-import { Agent } from '../../../entities/Agent';
+import type { DataSource, EntityManager } from 'typeorm';
+import { RuntimeHost } from '../../../entities/RuntimeHost';
 import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
+import { isUuidShapedId } from '../../../utils/agent-name';
+import { ApiKey } from '../../../entities/ApiKey';
 import type { McpAgentContext } from './session-auth';
 
 export const FULL_SCOPE_GATE_ERROR =
-  'Unauthorized: this operation requires a DB-backed, full-scope MCP key bound to an Agent.';
+  'Unauthorized: this operation requires a DB-backed, full-scope MCP key bound to an Agent or Runtime Host.';
 
 /**
- * Requires a DB-backed, full-scope caller bound to a live Agent row.
+ * Requires a DB-backed, full-scope caller bound to a live identity.
+ * P4 (manager identity → RuntimeHost): host-keyed MCP sessions carry the
+ * HOST uuid as caller.agentId (mcp-http-auth) and have no Agent row — a live
+ * RuntimeHost row passes the same gate. Legacy Agent rows pass unchanged.
  * Returns an error string when the gate fails, or null when it passes —
  * callers do `const gateError = await requireFullScopeCaller(...); if (gateError) return err(gateError);`.
  */
@@ -36,10 +41,9 @@ export async function requireFullScopeCaller(
   ) {
     return FULL_SCOPE_GATE_ERROR;
   }
-  const agent = await dataSource.getRepository(Agent).findOne({
-    where: { id: caller.agentId },
-  });
-  return agent ? null : FULL_SCOPE_GATE_ERROR;
+  // P4c-4: Host 행 또는 페어링 링크 (Agent 테이블 없음).
+  const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
+  return row ? null : FULL_SCOPE_GATE_ERROR;
 }
 
 /**
@@ -60,10 +64,9 @@ export async function resolveCallerWorkspaceId(
   if (!caller) return null;
   if (caller.workspaceId) return normalizeAgentWorkspaceId(caller.workspaceId);
   if (!caller.agentId) return null;
-  const agent = await dataSource.getRepository(Agent).findOne({
-    where: { id: caller.agentId },
-  });
-  return agent ? normalizeAgentWorkspaceId(agent.workspace_id) : null;
+  // P4c-4: Host/링크 해소 (Agent 테이블 없음).
+  const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
+  return row ? normalizeAgentWorkspaceId(row.workspace_id) : null;
 }
 
 /**
@@ -93,25 +96,65 @@ export async function callerCanAccessWorkspace(
   targetWorkspaceId: string | null,
 ): Promise<boolean> {
   if (!caller) return false;
+  // P4c-4: Host/링크 해소 (Agent 테이블 없음). Host 는 장비 단위라
+  // workspace-less manager 와 같은 full-scope 취급 — pairing workspace
+  // 스탬프가 있어도 경계가 아니다.
+  const callerRowWorkspace = async (): Promise<string | null | undefined> => {
+    if (!caller.agentId) return undefined;
+    const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
+    if (!row) return undefined;
+    if (row.kind === 'host') return null;
+    return normalizeAgentWorkspaceId(row.workspace_id);
+  };
   if (targetWorkspaceId === null) {
     if (!caller.agentId) return false;
-    const agent = await dataSource.getRepository(Agent).findOne({ where: { id: caller.agentId } });
-    if (!agent) return false;
-    return normalizeAgentWorkspaceId(agent.workspace_id) === null && caller.scope === 'full';
+    const ws = await callerRowWorkspace();
+    if (ws === undefined) return false;
+    return ws === null && caller.scope === 'full';
   }
   if (caller.workspaceId) {
     return normalizeAgentWorkspaceId(caller.workspaceId) === targetWorkspaceId;
   }
   if (!caller.agentId) return false;
-  const agent = await dataSource.getRepository(Agent).findOne({
-    where: { id: caller.agentId },
-  });
-  if (!agent) return false;
-  const agentWorkspaceId = normalizeAgentWorkspaceId(agent.workspace_id);
-  if (agentWorkspaceId === null) {
+  const ws = await callerRowWorkspace();
+  if (ws === undefined) return false;
+  if (ws === null) {
     return caller.scope === 'full';
   }
-  return agentWorkspaceId === targetWorkspaceId;
+  return ws === targetWorkspaceId;
+}
+
+/**
+ * P4c-4 caller identity row (Agent 테이블 제거 이후). host-keyed MCP 세션은
+ * HOST uuid 를 caller.agentId 로 들고 온다. legacy agent uuid 는 api_keys
+ * 페어링 링크 경유로 Host 이름/워크스페이스를 해소한다 (kind 는 'legacy').
+ * 둘 다 없으면 null.
+ */
+export async function resolveCallerIdentityRow(
+  dataSource: DataSource | EntityManager,
+  agentId: string | undefined,
+): Promise<{ kind: 'host' | 'legacy'; id: string; name: string; workspace_id: string | null } | null> {
+  if (!agentId) return null;
+  const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: agentId } });
+  if (host) {
+    return { kind: 'host', id: host.id, name: host.name, workspace_id: host.workspace_id ?? null };
+  }
+  if (!isUuidShapedId(agentId)) return null;
+  // 같은 agent_id 로 키가 여러 개일 수 있다(로테이션) — host 바인딩이 있는
+  // 행을 우선한다. findOne 은 그 중 임의의 하나를 돌려줘 host 바인딩이
+  // 있어도 못 찾을 수 있다.
+  const links = await dataSource.getRepository(ApiKey).find({
+    where: { agent_id: agentId },
+    select: { agent_id: true, host_id: true, workspace_id: true },
+  });
+  const link = links.find((l) => !!l.host_id) ?? links[0];
+  if (link?.host_id) {
+    const linked = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: link.host_id } });
+    if (linked) {
+      return { kind: 'legacy', id: agentId, name: linked.name, workspace_id: link.workspace_id ?? linked.workspace_id ?? null };
+    }
+  }
+  return null;
 }
 
 export const WORKSPACE_SCOPE_GATE_ERROR =

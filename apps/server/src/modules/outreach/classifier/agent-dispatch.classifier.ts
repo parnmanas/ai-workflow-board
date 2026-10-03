@@ -25,9 +25,9 @@
  * happens for channels an operator explicitly pointed at a classifier agent.
  */
 import { Inject, Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Agent } from '../../../entities/Agent';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
+import { resolveCallerIdentityRow } from '../../mcp/shared/authz';
 import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { LogService } from '../../../services/log.service';
@@ -56,7 +56,7 @@ export class AgentDispatchClassifier implements OutreachClassifier {
   constructor(
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly bridge: ClassificationBridgeService,
     private readonly logService: LogService,
@@ -65,7 +65,8 @@ export class AgentDispatchClassifier implements OutreachClassifier {
   async classify(item: InboundItem, context: ClassificationContext): Promise<ClassificationResult> {
     if (!context.classifierAgentId) return this.fallback.classify(item);
 
-    const agent = await this.agentRepo.findOne({ where: { id: context.classifierAgentId } });
+    // P4c-4: Host/링크 해소 (Agent 행 없음) — 못 찾으면 rule 기반 폴백.
+    const agent = await resolveCallerIdentityRow(this.dataSource, context.classifierAgentId);
     if (!agent) {
       this.logService.warn('Outreach', `classifier_agent_id ${context.classifierAgentId} not found — falling back to rule-based`, {
         channel_id: context.channelId,
@@ -105,7 +106,7 @@ export class AgentDispatchClassifier implements OutreachClassifier {
     return report;
   }
 
-  private async _dispatch(context: ClassificationContext, agent: Agent, item: InboundItem, runId: string): Promise<void> {
+  private async _dispatch(context: ClassificationContext, agent: { id: string }, item: InboundItem, runId: string): Promise<void> {
     const room = await this.roomRepo.save(this.roomRepo.create({
       workspace_id: context.workspaceId,
       type: 'group',

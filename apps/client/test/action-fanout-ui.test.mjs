@@ -186,17 +186,35 @@ test('디스패치 실패 run(room_id=null)은 빈 대화가 아니라 실패로
   }
 });
 
-test('편집 화면에서 대상 2개를 선택해 저장하면 target_agent_ids 로 나간다', async () => {
+test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes 로 나간다 (P4c-4)', async () => {
   setupDom();
   const saved = [];
   const originals = {
     listActions: api.listActions,
-    getAgents: api.getAgents,
+    listOrchestrationRuntimeHosts: api.listOrchestrationRuntimeHosts,
+    validateRuntimeSpec: api.validateRuntimeSpec,
     createAction: api.createAction,
   };
   api.listActions = async () => [];
-  api.getAgents = async () => AGENTS;
+  api.listOrchestrationRuntimeHosts = async () => [
+    { manager_agent_id: 'host-1', manager_name: 'host-one' },
+  ];
+  const specFor = (dir) => ({
+    manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: dir,
+    credential_id: null, label: '', role_prompt: '',
+  });
+  api.validateRuntimeSpec = async (_ws, spec) => ({ ok: true, spec: specFor(spec.working_dir) });
   api.createAction = async (payload) => { saved.push(payload); return { id: 'action-new', ...payload }; };
+
+  const setNativeValue = (el, value, EventCtor) => {
+    const proto = el instanceof window.HTMLSelectElement
+      ? window.HTMLSelectElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    setter.call(el, value);
+    el.dispatchEvent(new EventCtor('input', { bubbles: true }));
+    el.dispatchEvent(new EventCtor('change', { bubbles: true }));
+  };
 
   try {
     const { container, unmount } = mount(React.createElement(ActionManager, { workspaceId: 'ws-1' }));
@@ -208,28 +226,46 @@ test('편집 화면에서 대상 2개를 선택해 저장하면 target_agent_ids
     click(newButton);
     await flush();
 
+    // agent 체크박스가 없고 runtime 안내가 보인다.
     const picker = container.querySelector('[data-testid="action-target-agents"]');
-    assert.ok(picker, '대상 에이전트 다중 선택 컨트롤이 없다');
+    assert.ok(picker, '대상 영역이 없다');
+    assert.equal(picker.querySelectorAll('input[type="checkbox"]').length, 0, 'Agent 체크박스가 남아 있으면 안 된다');
 
-    const boxes = [...picker.querySelectorAll('input[type="checkbox"]')];
-    assert.equal(boxes.length, 2, '워크스페이스의 에이전트마다 체크박스가 있어야 한다');
-
-    // 두 대상이 `<Manager>/<Agent>` 로 구분돼 보여야 한다 — bare name 이면
-    // 'deployer' 두 줄이라 어느 호스트인지 고를 수 없다.
-    const labels = [...picker.querySelectorAll('label')].map((l) => l.textContent.trim());
-    assert.deepEqual(labels.sort(), AGENTS.map(formatAgentDisplayName).sort());
-
-    // 첫 대상은 startCreate 가 기본 선택해 두므로, 두 번째만 추가로 체크한다.
-    assert.equal(boxes[0].checked, true, '첫 에이전트가 기본 선택되어야 한다');
-    click(boxes[1]);
+    // runtime 선언 섹션을 열고 Host/CLI/dir 을 채운다.
+    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes('Runtime으로 지정'));
+    assert.ok(toggle, 'runtime 선언 토글이 없다');
+    click(toggle.querySelector('input[type="checkbox"]'));
     await flush();
 
-    const nameInput = container.querySelector('input');
+    const selects = () => [...container.querySelectorAll('select')];
+    const hostSelect = () => selects().find((s) => [...s.options].some((o) => o.value === 'host-1'));
+    const cliSelect = () => selects().find((s) => [...s.options].some((o) => o.value === 'claude'));
+    const dirInput = () => [...container.querySelectorAll('input')].find((i) =>
+      i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+    for (const dir of ['/wt/a', '/wt/b']) {
+      assert.ok(hostSelect(), 'Host 셀렉트가 없다');
+      assert.ok(cliSelect(), 'CLI 셀렉트가 없다');
+      assert.ok(dirInput(), 'working dir 입력이 없다');
+      await act(async () => {
+        setNativeValue(hostSelect(), 'host-1', window.Event);
+        setNativeValue(cliSelect(), 'claude', window.Event);
+        setNativeValue(dirInput(), dir, window.Event);
+      });
+      await flush();
+      const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('Resolve'));
+      assert.ok(resolveBtn, 'Resolve 버튼이 없다');
+      click(resolveBtn);
+      await flush();
+    }
+    assert.match(container.textContent, /runtime 2개/, 'pending spec 2개가 표시되어야 한다');
+
+    // Name 필드는 폼의 첫 text input 이다.
+    const nameInput = [...container.querySelectorAll('input')].find((i) => i.type === 'text');
+    assert.ok(nameInput, 'Name 입력이 없다');
     await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      setter.call(nameInput, 'CLI 최신화');
-      nameInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      setNativeValue(nameInput, 'CLI 최신화', window.Event);
     });
+    await flush();
 
     const createButton = [...container.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Create Action');
     assert.ok(createButton, '저장 버튼을 찾지 못했다');
@@ -237,7 +273,7 @@ test('편집 화면에서 대상 2개를 선택해 저장하면 target_agent_ids
     await flush();
 
     assert.equal(saved.length, 1, '저장이 호출되지 않았다');
-    assert.deepEqual(saved[0].target_agent_ids, ['agent-a', 'agent-b']);
+    assert.deepEqual(saved[0].target_runtimes.map((s) => s.working_dir).sort(), ['/wt/a', '/wt/b']);
     unmount();
   } finally {
     Object.assign(api, originals);

@@ -18,6 +18,7 @@ async function heartbeat(port, key, manager, workspace, body) {
     headers: { 'X-Agent-Key': key.raw_key, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       agent_id: manager.id,
+      host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
       workspace_id: workspace.id,
       mode: 'manager',
       hostname: 'installed-version-host',

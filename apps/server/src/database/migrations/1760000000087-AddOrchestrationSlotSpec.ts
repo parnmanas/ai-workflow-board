@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 
@@ -57,7 +56,10 @@ export class AddOrchestrationSlotSpec1760000000087 implements MigrationInterface
     if (isPostgres) {
       await queryRunner.query('ALTER TABLE orchestration_team_members ADD COLUMN IF NOT EXISTS spec TEXT');
       await queryRunner.query('ALTER TABLE orchestration_teams ADD COLUMN IF NOT EXISTS orchestrator_spec TEXT');
-      await queryRunner.query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS origin VARCHAR NOT NULL DEFAULT ''");
+      // P4c-4: agents 테이블 없음 — 스킵한다.
+      if (await queryRunner.hasTable('agents')) {
+        await queryRunner.query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS origin VARCHAR NOT NULL DEFAULT ''");
+      }
     }
 
     // The backfill runs on BOTH backends: SQLite gets the columns from
@@ -89,14 +91,16 @@ export class AddOrchestrationSlotSpec1760000000087 implements MigrationInterface
    */
   private async backfillMembers(queryRunner: QueryRunner): Promise<void> {
     const memberRepo = queryRunner.manager.getRepository(OrchestrationTeamMember);
-    const agentRepo = queryRunner.manager.getRepository(Agent);
+    // P4c-4: agents 테이블 없음 — spec 역산 원본이 없으므로 스킵.
+    if (!(await this.hasTable(queryRunner, 'agents'))) return;
+    const agentRepo = queryRunner.manager.getRepository('agents');
     const pending = (await memberRepo.find()).filter((m) => !m.spec);
     if (pending.length === 0) return;
 
     const agents = await agentRepo.find();
     const byId = new Map(agents.map((a) => [a.id, a]));
     for (const member of pending) {
-      const spec = buildSpec(byId.get(member.agent_id));
+      const spec = buildSpec(byId.get(member.agent_id) as never);
       if (!spec) continue;
       member.spec = spec;
       await memberRepo.save(member);
@@ -105,14 +109,16 @@ export class AddOrchestrationSlotSpec1760000000087 implements MigrationInterface
 
   private async backfillOrchestrators(queryRunner: QueryRunner): Promise<void> {
     const teamRepo = queryRunner.manager.getRepository(OrchestrationTeam);
-    const agentRepo = queryRunner.manager.getRepository(Agent);
+    // P4c-4: agents 테이블 없음 — spec 역산 원본이 없으므로 스킵.
+    if (!(await this.hasTable(queryRunner, 'agents'))) return;
+    const agentRepo = queryRunner.manager.getRepository('agents');
     const pending = (await teamRepo.find()).filter((t) => !t.orchestrator_spec && t.orchestrator_agent_id);
     if (pending.length === 0) return;
 
     const agents = await agentRepo.find();
     const byId = new Map(agents.map((a) => [a.id, a]));
     for (const team of pending) {
-      const spec = buildSpec(byId.get(team.orchestrator_agent_id!));
+      const spec = buildSpec(byId.get(team.orchestrator_agent_id!) as never);
       if (!spec) continue;
       team.orchestrator_spec = spec;
       await teamRepo.save(team);
@@ -126,7 +132,7 @@ export class AddOrchestrationSlotSpec1760000000087 implements MigrationInterface
  * means there is nothing truthful to write, and a spec is only useful if it is
  * accurate).
  */
-function buildSpec(agent: Agent | undefined): Record<string, any> | null {
+function buildSpec(agent: { manager_agent_id: string | null; type: string; working_dir: string; model?: string | null; credential_id?: string | null; cli_runtime_profile?: string | null; runtime_config?: unknown } | undefined): Record<string, any> | null {
   if (!agent) return null;
   const managerAgentId = str(agent.manager_agent_id);
   const cli = str(agent.type).toLowerCase();

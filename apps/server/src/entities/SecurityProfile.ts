@@ -58,6 +58,14 @@ export class SecurityProfile {
   @Column({ type: 'varchar' })
   target_agent_id: string;
 
+  /**
+   * Snapshot of the target's runtime at save time (P2c dual-write).
+   * `target_agent_id`와 항상 함께 쓴다. P4에서 dispatch가 이쪽을 읽으면
+   * `target_agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  target_runtime: Record<string, any> | null;
+
   // The repo Resource to inspect. null = AWB's own codebase (the agent's own
   // worktree). A non-null Resource id points the agent at a checked-out repo.
   @Column({ type: 'varchar', nullable: true, default: null })

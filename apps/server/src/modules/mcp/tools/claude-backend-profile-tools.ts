@@ -2,8 +2,8 @@ import { randomUUID } from 'crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { DataSource, EntityManager } from 'typeorm';
-import { Agent } from '../../../entities/Agent';
 import { ClaudeBackendProfile } from '../../../entities/ClaudeBackendProfile';
+import { resolveCallerIdentityRow } from '../shared/authz';
 import { Credential } from '../../../entities/Credential';
 import {
   profileEntityToRuntime,
@@ -112,10 +112,9 @@ export async function requireAgentRegistryAccess(
   ) {
     return REGISTRY_GATE_ERROR;
   }
-  const agent = await dataSource.getRepository(Agent).findOne({
-    where: { id: caller.agentId },
-  });
-  return agent ? null : REGISTRY_GATE_ERROR;
+  // P4: Agent 행 또는 Host 행 — 둘 다 registry 접근 자격이다.
+  const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
+  return row ? null : REGISTRY_GATE_ERROR;
 }
 
 export async function upsertClaudeBackendProfile(

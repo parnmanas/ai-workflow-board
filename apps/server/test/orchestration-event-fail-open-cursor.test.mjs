@@ -41,7 +41,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
-import { Agent } from '../dist/entities/Agent.js';
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { OrchestrationStep } from '../dist/entities/OrchestrationStep.js';
 import { OrchestrationEvent } from '../dist/entities/OrchestrationEvent.js';
@@ -131,7 +130,7 @@ async function walkTimeline(missionId, limit, withId) {
 before(async () => {
   dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Agent, OrchestrationMission, OrchestrationStep, OrchestrationEvent, OrchestrationTeam, OrchestrationTeamMember],
+    entities: [OrchestrationMission, OrchestrationStep, OrchestrationEvent, OrchestrationTeam, OrchestrationTeamMember], // P4c-4
     synchronize: true,
     logging: false,
   });
@@ -145,8 +144,7 @@ before(async () => {
     eventRepo,
     dataSource.getRepository(OrchestrationTeam),
     dataSource.getRepository(OrchestrationTeamMember),
-    dataSource.getRepository(Agent),
-    dataSource,
+    dataSource, // P4c-4: agentRepo 인자 삭제
     {
       info() {}, debug() {}, error() {},
       warn: (...args) => warned.push(args.join(' ')),

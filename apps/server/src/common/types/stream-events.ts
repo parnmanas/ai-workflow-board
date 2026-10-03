@@ -11,6 +11,7 @@ import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
 import type { TerminalOutputChunk, TerminalSummary } from './terminals';
+import type { RuntimeSpec } from '../runtime-spec';
 import type {
   AgentSessionAuth,
   AgentSessionConfigOption,
@@ -103,6 +104,10 @@ export interface AgentTriggerPayload {
   trigger_id: string;
   ticket_id: string;
   agent_id: string;
+  // P2 additive: assignee의 RuntimeSpec 스냅샷. agent_id와 함께 동봉되며,
+  // 매니저는 당분간 agent_id를 읽고 P3에서 이쪽으로 전환한다. 미해결(행 삭제
+  // 등) 시 null — 그때는 기존 필드로만 동작한다.
+  runtime?: RuntimeSpec | null;
   role: string;
   role_prompt: string;      // D-20 — populated by trigger-loop in Task 3
   ticket_prompt: string;    // D-20 — populated by trigger-loop in Task 3
@@ -285,6 +290,9 @@ export interface ChatRequestHistoryEntry {
 
 export interface ChatRequestPayload {
   agent_id: string;
+  // P2b additive: 대상 agent의 RuntimeSpec 스냅샷. agent_id와 함께 동봉되며,
+  // 매니저는 당분간 agent_id를 읽고 P3에서 이쪽으로 전환한다.
+  runtime?: RuntimeSpec | null;
   user_id: string;
   // Stable idempotency anchor shared with the chat_room_message emitted for
   // the same persisted row. Older emitters may omit it; consumers retain their
@@ -447,6 +455,10 @@ export interface ChatRoomMessagePayload {
   // targeted chat_request events. Runtime Hosts must keep this room event for
   // history/UI fan-out but skip a second delegation when this list is non-empty.
   dispatch_agent_ids?: string[];
+  // P4c-2b: `{ participant_id: RuntimeSpec }` — 스냅샷이 있는 agent 참가자만.
+  // 매니저의 rt- 멤버 해석 + SSE fan-out의 host-affinity 판정에 쓰인다.
+  // 비어 있으면 생략이라 일반 채팅 턴의 wire는 그대로 유지된다.
+  agent_member_runtimes?: Record<string, RuntimeSpec>;
   // ticket 4: run-workspace provisioning hint. Present ONLY on a QA/security run
   // dispatch message (the system 'user' send that opens the run room) — absent on
   // every ordinary chat turn. The agent-manager reads it to prepare the run's
@@ -577,6 +589,9 @@ export interface CommentMentionPayload {
   // buildDispatchEnvVars() produces the same envVars a column trigger would.
   environment_config: ResolvedEnvironmentConfig | null;
   worktree_mode: WorktreeMode;
+  // P4c-4: spec-direct 멘션 대상의 스냅샷. 매니저 해소 + fan-out host-affinity용.
+  // 없으면 생략이라 기존 wire는 그대로 유지된다.
+  runtime?: RuntimeSpec | null;
 }
 
 // Phase-9 typed comments — fires when a user/agent starts composing a comment

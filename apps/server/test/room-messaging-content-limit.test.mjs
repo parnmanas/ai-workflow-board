@@ -42,7 +42,6 @@ function makeSvc() {
     roomRepo,     // roomRepo
     empty,        // participantRepo
     messageRepo,  // messageRepo
-    empty,        // agentRepo
     empty,        // ticketRepo
     empty,        // userMentionRepo
     empty,        // attachmentRepo

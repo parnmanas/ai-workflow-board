@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
@@ -14,7 +14,7 @@ import { TerminalsService } from './terminals.service';
  * 제공한다. docs/terminals.md 참조.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Agent])],
+  imports: [TypeOrmModule.forFeature([RuntimeHost])],
   controllers: [TerminalsController, TerminalsAgentController],
   providers: [TerminalsService, AuthGuard, PermissionGuard, AgentAuthGuard],
   exports: [TerminalsService],

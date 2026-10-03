@@ -4,7 +4,7 @@ import { WorkspaceSchedule } from '../../entities/WorkspaceSchedule';
 import { Action } from '../../entities/Action';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Board } from '../../entities/Board';
 import { WorkspaceScheduleService } from './workspace-schedule.service';
 import { WorkspaceScheduleController } from './workspace-schedule.controller';
@@ -24,7 +24,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([WorkspaceSchedule, ChatRoom, ChatRoomParticipant, Agent, Board, Action]),
+    TypeOrmModule.forFeature([WorkspaceSchedule, ChatRoom, ChatRoomParticipant, RuntimeHost, Board, Action]),
     ChatRoomsModule,
     // Action 형태 스케줄이 ActionsService.dispatch 로 발화한다. 단방향 —
     // ActionsModule 은 이 모듈을 import 하지 않는다.

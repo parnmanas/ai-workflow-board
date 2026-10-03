@@ -1,9 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, EntityManager } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, EntityManager, DataSource } from 'typeorm';
 import { EventEmitter } from 'events';
 import { ActivityLog } from '../entities/ActivityLog';
-import { Agent } from '../entities/Agent';
 import { LogService } from './log.service';
 import { resolveAgentDisplayNamesByIds } from '../utils/agent-name';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -79,7 +78,7 @@ export class ActivityService {
 
   constructor(
     @InjectRepository(ActivityLog) private readonly repo: Repository<ActivityLog>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
   ) {}
 
@@ -105,7 +104,7 @@ export class ActivityService {
   private async resolveActorDisplayNames(rows: ActivityLog[]): Promise<ActivityLog[]> {
     if (rows.length === 0) return rows;
     const displayById = await resolveAgentDisplayNamesByIds(
-      this.agentRepo,
+      this.dataSource,
       rows.map(r => r.actor_id),
     );
     if (displayById.size === 0) return rows;

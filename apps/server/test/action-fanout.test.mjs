@@ -26,7 +26,9 @@ import { Action } from '../dist/entities/Action.js';
 import { ActionRun } from '../dist/entities/ActionRun.js';
 import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js';
+import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 import { Workspace } from '../dist/entities/Workspace.js';
 // 엔티티 전체를 등록한다. Workspace→Board→BoardColumn→Ticket→Comment… 로
 // 역참조 관계가 줄줄이 이어져 부분 집합으로는 metadata 빌드가 통과하지 않고,
@@ -49,6 +51,21 @@ const MGR_2 = 'aaaaaaa2-0000-4000-8000-000000000002';
 const AGENT_A = '11111111-1111-4111-8111-111111111111';
 const AGENT_B = '22222222-2222-4222-8222-222222222222';
 const AGENT_C = '33333333-3333-4333-8333-333333333333';
+
+// P4c-4: dispatch 는 저장된 target_runtimes 스냅샷에서만 해소한다.
+// uuid 타겟은 스냅샷이 없어 missing 취급(삭제된 대상과 동일)이다.
+const SPECA = {
+  manager_agent_id: MGR_1, cli: 'hermes', model: null, working_dir: '/srv/a',
+  credential_id: null, label: 'deployer-a', role_prompt: '',
+  runtime_config: { strategy: 'single', permission_mode: 'strict' },
+};
+const SPECB = {
+  manager_agent_id: MGR_2, cli: 'hermes', model: null, working_dir: '/srv/b',
+  credential_id: null, label: 'deployer-b', role_prompt: '',
+  runtime_config: { strategy: 'single', permission_mode: 'strict' },
+};
+const KEYA = runtimeIdentityKey(SPECA);
+const KEYB = runtimeIdentityKey(SPECB);
 
 /** 아무것도 하지 않는 저장소 스텁 — 이 스위트가 검증하지 않는 부수 효과용. */
 function inertRepo() {
@@ -95,19 +112,28 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     // FK 순서대로 자식부터 지운다 — repo.clear() 는 TRUNCATE 성격이라
     // chat_room_participants 가 chat_rooms 를 참조하는 상태에서 실패한다.
     for (const table of [
+      // P4c-4: agents 테이블 없음. api_keys 는 링크 시드 때문에 매번 비운다.
       'chat_room_participants', 'chat_room_messages', 'action_runs',
-      'chat_rooms', 'actions', 'agents', 'workspaces',
+      'chat_rooms', 'actions', 'api_keys', 'workspaces',
     ]) {
       await dataSource.query(`DELETE FROM "${table}"`);
     }
 
-    const agentRepo = dataSource.getRepository(Agent);
-    await agentRepo.save([
-      agentRepo.create({ id: MGR_1, name: 'rolf', workspace_id: WS, manager_agent_id: null }),
-      agentRepo.create({ id: MGR_2, name: 'ragnar', workspace_id: WS, manager_agent_id: null }),
-      agentRepo.create({ id: AGENT_A, name: 'deployer', workspace_id: WS, manager_agent_id: MGR_1 }),
-      agentRepo.create({ id: AGENT_B, name: 'deployer', workspace_id: WS, manager_agent_id: MGR_2 }),
-      agentRepo.create({ id: AGENT_C, name: 'other', workspace_id: 'ws-other', manager_agent_id: null }),
+    // P4c-4: MGR_* 는 Host 행, AGENT_* 는 api_keys 페어링 링크다.
+    // AGENT_C 의 링크는 ws-other 소속이라 cross-workspace 거부 계약을 탄다.
+    const hostRepo = dataSource.getRepository(RuntimeHost);
+    await hostRepo.save([
+      hostRepo.create({ id: MGR_1, name: 'rolf', hostname: 'rolf', workspace_id: WS }),
+      hostRepo.create({ id: MGR_2, name: 'ragnar', hostname: 'ragnar', workspace_id: WS }),
+    ]);
+    const keyRepo = dataSource.getRepository(ApiKey);
+    // key/key_prefix 는 NOT NULL 이라 더미 해시를 넣는다 (해석은 agent_id/host_id 만 본다).
+    const link = (name, agent_id, host_id, workspace_id) =>
+      keyRepo.create({ name, key: `hash-${name}`, key_prefix: 'test***', agent_id, host_id, scope: 'full', workspace_id });
+    await keyRepo.save([
+      link('link-a', AGENT_A, MGR_1, WS),
+      link('link-b', AGENT_B, MGR_2, WS),
+      link('link-c', AGENT_C, MGR_1, 'ws-other'),
     ]);
 
     const realRunRepo = dataSource.getRepository(ActionRun);
@@ -154,7 +180,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       dataSource.getRepository(ChatRoomParticipant), // participantRepo
       inertRepo(),                             // messageRepo
       inertRepo(),                             // attachmentRepo
-      dataSource.getRepository(Agent),         // agentRepo
+      dataSource.getRepository(RuntimeHost),   // hostRepo (P4c-4: agentRepo 삭제)
       inertRepo(),                             // boardRepo
       dataSource.getRepository(Workspace),     // workspaceRepo
       inertRepo(),                             // userRepo
@@ -254,10 +280,10 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     }
   });
 
-  it('workspace-move 는 다중 대상을 두 컬럼 모두 복사하고, 비대표 대상도 경고 대상으로 잡는다', () => {
-    // 정적 가드 — 이 두 곳은 fan-out 이전 형태(단일 컬럼 매칭)로 되돌아가기 쉬운
-    // 지점이고, 되돌아가면 (1) 복사된 Action 이 조용히 대상 1개로 줄고
-    // (2) 대표가 아닌 대상으로 걸린 에이전트의 cross-workspace 경고가 사라진다.
+  it('workspace-move 는 다중 대상을 두 컬럼 모두 복사한다 (P4c-4: companion-agent 경고 표면 삭제)', () => {
+    // 정적 가드 — 복사가 단일 컬럼 매칭으로 되돌아가면 복사된 Action 이 조용히
+    // 대상 1개로 준다. P4c-4: warnForeignAgentActions 는 companion-agent 표면과
+    // 함께 삭제됐다 (cross-workspace 검사는 dry-run blockers 로 이동).
     const src = readFileSync(
       new URL('../src/services/workspace-move.service.ts', import.meta.url),
       'utf8',
@@ -265,20 +291,11 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const copyBlock = src.slice(src.indexOf('copy ws-level action'), src.indexOf('copy ws-level action') + 1200);
     assert.match(copyBlock, /target_agent_ids: src\.target_agent_ids/, 'Action 복사가 대상 배열을 빠뜨렸다');
 
-    // 호출부가 아니라 **메서드 정의**에 앵커링한다 — 첫 번째 등장은 호출
-    // 지점이라 본문이 창 안에 들어오지 않는다.
-    const defIdx = src.indexOf('private async warnForeignAgentActions');
-    assert.ok(defIdx > -1, 'warnForeignAgentActions 정의를 찾지 못했다');
-    const warnBlock = src.slice(defIdx, defIdx + 1200);
-    assert.match(
-      warnBlock,
-      /actionTargetAgentIds\(a\)\.includes\(agent\.id\)/,
-      'cross-workspace 경고가 대표 대상만 보고 있다 — 비대표 대상이 누락된다',
-    );
+    // 삭제된 표면이 부활하지 않았는지 — 부활하면 P4c-4 companion 제거가 깨진다.
     assert.doesNotMatch(
-      warnBlock,
-      /find\(\{ where: \{ target_agent_id: agent\.id \} \}\)/,
-      '컬럼 매칭으로 되돌아가면 다중 대상 Action 이 안 잡힌다',
+      src,
+      /warnForeignAgentActions/,
+      '삭제된 companion-agent 경고 경로가 되살아났다',
     );
   });
 
@@ -365,14 +382,14 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('실행 1회가 대상 수만큼 run 을 만들고 각 run 이 자기 방을 쓴다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'CLI 최신화', prompt: 'upgrade', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'CLI 최신화', prompt: 'upgrade', target_runtimes: [SPECA, SPECB],
     });
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
     assert.equal(result.runs.length, 2, '대상 수만큼 run 이 생겨야 한다');
     assert.equal(result.failures.length, 0);
-    assert.deepEqual(result.runs.map((r) => r.agent_id), [AGENT_A, AGENT_B]);
+    assert.deepEqual(result.runs.map((r) => r.agent_id), [KEYA, KEYB]);
 
     const roomIds = new Set(result.runs.map((r) => r.room_id));
     assert.equal(roomIds.size, 2, '각 run 은 독립된 방을 가져야 한다');
@@ -381,13 +398,13 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     assert.equal(rows.length, 2);
     assert.equal(new Set(rows.map((r) => r.batch_id)).size, 1, '같은 트리거의 run 은 한 배치');
     assert.ok(rows.every((r) => r.batch_id), 'batch_id 가 비어 있으면 배치 판정이 불가능하다');
-    assert.deepEqual(rows.map((r) => r.agent_id).sort(), [AGENT_A, AGENT_B].sort());
+    assert.deepEqual(rows.map((r) => r.agent_id).sort(), [KEYA, KEYB].sort());
 
     assert.equal(sent.length, 2, '대상마다 첫 메시지가 각자의 방으로 나가야 한다');
   });
 
   it('하위 호환: 반환값의 run/room_id/prompt 는 첫 run 을 가리킨다', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(result.run.id, result.runs[0].run.id);
     assert.equal(result.room_id, result.runs[0].room_id);
@@ -395,52 +412,53 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('회귀: 단일 대상 Action 은 예전과 같이 run 1건 + 방 1개만 만든다', async () => {
-    const action = await service.create({ workspace_id: WS, name: '단일', target_agent_id: AGENT_A });
+    const action = await service.create({ workspace_id: WS, name: '단일', target_runtimes: [SPECA] });
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
     assert.equal(result.runs.length, 1);
     assert.equal(result.failures.length, 0);
-    assert.equal(result.run.agent_id, AGENT_A);
+    assert.equal(result.run.agent_id, KEYA);
     assert.equal(await dataSource.getRepository(ChatRoom).count(), 1);
   });
 
   it('회귀: target_agent_ids 가 비어 있는 레거시 행도 단일 대상으로 정상 실행된다', async () => {
     // 마이그레이션 백필이 아직 돌지 않은 DB 를 재현한다 — create() 를 우회해
-    // 배열 컬럼을 '[]' 로 둔 행을 직접 넣는다.
+    // 배열 컬럼을 '[]' 로 둔 행을 직접 넣는다. P4c-4: dispatch 는 spec
+    // 스냅샷에서 해소하므로 스냅샷도 함께 둔다.
     const repo = dataSource.getRepository(Action);
     const legacy = await repo.save(repo.create({
       workspace_id: WS, name: 'legacy', prompt: 'p',
-      target_agent_id: AGENT_B, target_agent_ids: '[]',
+      target_agent_id: KEYB, target_agent_ids: '[]', target_runtimes: [SPECB],
     }));
-    assert.deepEqual(actionTargetAgentIds(legacy), [AGENT_B], '읽기 경로가 레거시 컬럼으로 폴백해야 한다');
+    assert.deepEqual(actionTargetAgentIds(legacy), [KEYB], '읽기 경로가 레거시 컬럼으로 폴백해야 한다');
 
     const result = await service.dispatch({ actionId: legacy.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(result.runs.length, 1);
-    assert.equal(result.run.agent_id, AGENT_B);
+    assert.equal(result.run.agent_id, KEYB);
   });
 
   // ── 3. 부분 실패 격리 ───────────────────────────────────────────────────
 
   it('한 대상이 실패해도 나머지 대상의 run 은 정상 생성된다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
-    failRunSaveFor = AGENT_A; // 첫 대상이 죽어도 뒤가 이어져야 한다
+    failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다 // 첫 대상이 죽어도 뒤가 이어져야 한다
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
     assert.equal(result.runs.length, 1);
-    assert.equal(result.runs[0].agent_id, AGENT_B);
+    assert.equal(result.runs[0].agent_id, KEYB);
     assert.equal(result.failures.length, 1);
-    assert.equal(result.failures[0].agent_id, AGENT_A);
+    assert.equal(result.failures[0].agent_id, KEYA);
     assert.match(result.failures[0].error, /injected run-save failure/);
     // 하위 호환 키는 살아남은 run 을 가리킨다.
-    assert.equal(result.run.agent_id, AGENT_B);
+    assert.equal(result.run.agent_id, KEYB);
   });
 
   it('전원 실패면 던진다 — 호출부의 "디스패치 실패는 throw" 계약을 유지한다', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_id: AGENT_A });
-    failRunSaveFor = AGENT_A;
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
+    failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다
     await assert.rejects(
       service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' }),
       /injected run-save failure/,
@@ -451,7 +469,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('같은 매니저 아래 2개 에이전트로 fan-out 해도 작업폴더가 겹치지 않는다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
@@ -463,21 +481,21 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('회귀: 단일 대상 Action 의 작업폴더는 글자 하나 바뀌지 않는다 (warm checkout 보존)', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_id: AGENT_A });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
     await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(sent[0].runProvision.workspace_folder, `.awb/act/${action.id.slice(0, 8)}`);
   });
 
   it('명시적 workspace_folder 도 fan-out 시에만 에이전트별로 갈라진다', async () => {
     const single = await service.create({
-      workspace_id: WS, name: 's', target_agent_id: AGENT_A, workspace_folder: 'ops/cli',
+      workspace_id: WS, name: 's', target_runtimes: [SPECA], workspace_folder: 'ops/cli',
     });
     await service.dispatch({ actionId: single.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(sent[0].runProvision.workspace_folder, '.awb/act/ops/cli', '단일 대상은 그대로');
 
     sent = [];
     const multi = await service.create({
-      workspace_id: WS, name: 'm', target_agent_ids: [AGENT_A, AGENT_B], workspace_folder: 'ops/cli',
+      workspace_id: WS, name: 'm', target_runtimes: [SPECA, SPECB], workspace_folder: 'ops/cli',
     });
     await service.dispatch({ actionId: multi.id, triggeredByType: 'system', triggeredById: '' });
     const folders = sent.map((s) => s.runProvision.workspace_folder);
@@ -495,7 +513,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('source_ticket_id 가 있으면 전원 종료 뒤 한 번만 재개한다', async () => {
     const ticketId = seedTicket('44444444-4444-4444-8444-444444444444');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
@@ -516,7 +534,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const ticketId = seedTicket('55555555-5555-4555-8555-555555555555');
     // high_impact 면 실패해도 자동 재시도하지 않으므로 배치가 곧장 확정된다.
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_agent_ids: [AGENT_A, AGENT_B], high_impact: true,
+      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
     });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
@@ -539,7 +557,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('배치 재개는 1회성이다 — 이미 클레임된 배치는 다시 재개하지 않는다', async () => {
     const ticketId = seedTicket('66666666-6666-4666-8666-666666666666');
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_agent_ids: [AGENT_A, AGENT_B], high_impact: true,
+      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
     });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
@@ -558,7 +576,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('회귀: 단일 대상 run 은 배치 로직을 타지 않고 즉시 재개한다', async () => {
     const ticketId = seedTicket('77777777-7777-4777-8777-777777777777');
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_agent_id: AGENT_A, high_impact: true,
+      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA], high_impact: true,
     });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
@@ -570,7 +588,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('batch_id 가 없는 레거시 run 도 즉시 재개한다', async () => {
     const ticketId = seedTicket('88888888-8888-4888-8888-888888888888');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_id: AGENT_A });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
     const runRepo = dataSource.getRepository(ActionRun);
     const legacyRun = await runRepo.save(runRepo.create({
       action_id: action.id, workspace_id: WS, room_id: 'room-legacy',
@@ -585,35 +603,35 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('실패한 대상만 재시도되고 원래 배치를 승계한다', async () => {
     const ticketId = seedTicket('99999999-9999-4999-8999-999999999999');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
-    const failing = result.runs.find((r) => r.agent_id === AGENT_A);
+    const failing = result.runs.find((r) => r.agent_id === KEYA);
 
     const outcome = await service.completeRun(failing.run.id, WS, { status: 'failed', summary: 'boom' });
     assert.equal(outcome.retried, true, 'high_impact 아닌 Action 은 자동 재시도한다');
 
     const runRepo = dataSource.getRepository(ActionRun);
     const retry = await runRepo.findOne({ where: { id: outcome.retryRunId } });
-    assert.equal(retry.agent_id, AGENT_A, '재시도가 배치 전체를 다시 돌리면 성공한 대상에서 작업이 두 번 실행된다');
+    assert.equal(retry.agent_id, KEYA, '재시도가 배치 전체를 다시 돌리면 성공한 대상에서 작업이 두 번 실행된다');
     assert.equal(retry.batch_id, failing.run.batch_id, '새 배치로 떨어지면 원래 배치가 전원 종료로 보인다');
     assert.equal(retry.attempt, 2);
     assert.equal(retry.idempotency_key, failing.run.idempotency_key, '재시도 체인은 키를 공유해야 대상이 dedupe 할 수 있다');
 
     // AGENT_B 는 재시도로 새 run 을 얻지 않는다.
-    const bRuns = await runRepo.find({ where: { action_id: action.id, agent_id: AGENT_B } });
+    const bRuns = await runRepo.find({ where: { action_id: action.id, agent_id: KEYB } });
     assert.equal(bRuns.length, 1);
   });
 
   it('재시도가 떠 있는 동안 배치는 미완으로 취급된다', async () => {
     const ticketId = seedTicket('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
-    const a = result.runs.find((r) => r.agent_id === AGENT_A);
-    const b = result.runs.find((r) => r.agent_id === AGENT_B);
+    const a = result.runs.find((r) => r.agent_id === KEYA);
+    const b = result.runs.find((r) => r.agent_id === KEYB);
 
     const failed = await service.completeRun(a.run.id, WS, { status: 'failed', summary: 'boom' });
     assert.equal(failed.retried, true);
@@ -634,12 +652,12 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('P1-1: 재시도 행이 삽입되기 전에 형제가 끝나도 배치가 조기 재개되지 않는다', async () => {
     const ticketId = seedTicket('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
-    const a = result.runs.find((r) => r.agent_id === AGENT_A);
-    const b = result.runs.find((r) => r.agent_id === AGENT_B);
+    const a = result.runs.find((r) => r.agent_id === KEYA);
+    const b = result.runs.find((r) => r.agent_id === KEYB);
 
     // A 의 실패 처리 도중, 재시도 run 이 저장되기 **직전** 에 B 를 완료시킨다 —
     // 리뷰가 지적한 정확히 그 창이다. dispatch 를 가로채 그 틈을 재현한다.
@@ -671,12 +689,12 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('P1-1: 재시도가 아예 못 뜨면 예약이 풀려 배치가 종료된다', async () => {
     const ticketId = seedTicket('cccccccc-cccc-4ccc-8ccc-cccccccccccc');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
-    const a = result.runs.find((r) => r.agent_id === AGENT_A);
-    const b = result.runs.find((r) => r.agent_id === AGENT_B);
+    const a = result.runs.find((r) => r.agent_id === KEYA);
+    const b = result.runs.find((r) => r.agent_id === KEYB);
 
     await service.completeRun(b.run.id, WS, { status: 'succeeded', summary: 'B ok' });
 
@@ -700,9 +718,9 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('P1-2: 디스패치에 실패한 대상도 terminal ActionRun 으로 남는다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
-    failRunSaveFor = AGENT_A;
+    failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(result.runs.length, 1);
@@ -711,7 +729,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const rows = await dataSource.getRepository(ActionRun).find({ where: { action_id: action.id } });
     assert.equal(rows.length, 2, '실패 대상이 DB 에 없으면 이력이 부분 실패를 "전체 성공" 으로 집계한다');
 
-    const failed = rows.find((r) => r.agent_id === AGENT_A);
+    const failed = rows.find((r) => r.agent_id === KEYA);
     assert.ok(failed, '실패 대상의 run 행이 없다');
     assert.equal(failed.status, 'failed');
     assert.equal(failed.batch_id, result.batch_id, '실패 행도 같은 배치에 속해야 x/N 분모가 맞는다');
@@ -720,29 +738,34 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     assert.match(failed.result_summary, /dispatch failed/);
   });
 
+  // P4c-4: dispatch 는 저장된 spec 스냅샷에서만 해소한다 — "사라진 대상"은
+  // 스냅샷에서 spec 이 빠진 상태다 (target_agent_ids 에는 키가 남아 있다).
+  async function stripSpecs(actionId, keepSpecs) {
+    await dataSource.getRepository(Action).update({ id: actionId }, { target_runtimes: keepSpecs });
+  }
+
   it('P1-2: 삭제된 대상 하나가 나머지 대상의 실행을 막지 않는다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
-    // AGENT_A 가 사라진 상황을 만든다.
-    await dataSource.getRepository(Agent).delete({ id: AGENT_A });
+    // KEYA 의 스냅샷이 사라진 상황을 만든다.
+    await stripSpecs(action.id, [SPECB]);
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
     assert.equal(result.runs.length, 1, '남은 대상은 정상 실행되어야 한다');
-    assert.equal(result.runs[0].agent_id, AGENT_B);
+    assert.equal(result.runs[0].agent_id, KEYB);
     assert.equal(result.failures.length, 1);
-    assert.equal(result.failures[0].agent_id, AGENT_A);
+    assert.equal(result.failures[0].agent_id, KEYA);
 
     const rows = await dataSource.getRepository(ActionRun).find({ where: { action_id: action.id } });
     assert.equal(rows.length, 2, '사라진 대상도 감사 행으로 남아야 한다');
-    assert.equal(rows.find((r) => r.agent_id === AGENT_A).status, 'failed');
+    assert.equal(rows.find((r) => r.agent_id === KEYA).status, 'failed');
   });
 
   it('P1-2: 대상이 모두 사라졌으면 던진다 (승인 grant 를 태우기 전 fail-fast)', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B] });
-    await dataSource.getRepository(Agent).delete({ id: AGENT_A });
-    await dataSource.getRepository(Agent).delete({ id: AGENT_B });
+    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    await stripSpecs(action.id, []);
 
     await assert.rejects(
       service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' }),
@@ -754,9 +777,9 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('P1-2: 실패 대상이 배치 재개의 x/N 분모에 포함된다', async () => {
     const ticketId = seedTicket('dddddddd-dddd-4ddd-8ddd-dddddddddddd');
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_agent_ids: [AGENT_A, AGENT_B], high_impact: true,
+      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
     });
-    failRunSaveFor = AGENT_A;
+    failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
     });
@@ -778,7 +801,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       hard_budget_config: JSON.stringify({ enabled: true, max_runs_per_window: 2, notify: false }),
     }));
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
 
     // 첫 트리거로 run 2건 — 여기서 상한(2)에 도달한다.
@@ -800,13 +823,13 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       hard_budget_config: JSON.stringify({ enabled: true, max_runs_per_window: 1, notify: false }),
     }));
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(result.runs.length, 1, '첫 대상만 예산 안에 들어간다');
     assert.equal(result.failures.length, 1);
-    assert.equal(result.failures[0].agent_id, AGENT_B);
+    assert.equal(result.failures[0].agent_id, KEYB);
     assert.match(result.failures[0].error, /run budget exceeded/);
   });
 
@@ -814,7 +837,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('max_runs 프루닝은 에이전트별로 적용된다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B], max_runs: 2,
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB], max_runs: 2,
     });
     // 3회 트리거 → 에이전트당 3건. 상한 2 이므로 에이전트별로 1건씩 잘린다.
     for (let i = 0; i < 3; i++) {
@@ -828,8 +851,8 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     for (const one of last.runs) await service.completeRun(one.run.id, WS, { status: 'succeeded' });
 
     const runRepo = dataSource.getRepository(ActionRun);
-    const aRuns = await runRepo.count({ where: { action_id: action.id, agent_id: AGENT_A } });
-    const bRuns = await runRepo.count({ where: { action_id: action.id, agent_id: AGENT_B } });
+    const aRuns = await runRepo.count({ where: { action_id: action.id, agent_id: KEYA } });
+    const bRuns = await runRepo.count({ where: { action_id: action.id, agent_id: KEYB } });
     assert.ok(aRuns >= 2, `A 의 이력이 에이전트별 상한 미만으로 잘리면 안 된다: ${aRuns}`);
     assert.ok(bRuns >= 2, `B 의 이력이 에이전트별 상한 미만으로 잘리면 안 된다: ${bRuns}`);
     // 결정적 판별: action 단위로 셌다면 총합이 max_runs(2)를 넘을 수 없다.

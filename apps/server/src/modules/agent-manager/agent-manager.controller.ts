@@ -4,7 +4,7 @@ import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Credential } from '../../entities/Credential';
 import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
@@ -18,6 +18,7 @@ import { DispatchIntentService } from '../agents/dispatch-intent.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 import { ChildRunService } from '../agents/child-run.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -43,12 +44,7 @@ import { PairingService } from './pairing.service';
 import { CommandLedgerService } from './command-ledger.service';
 import { AgentManagerCommandService } from './agent-manager-command.service';
 import type { AgentManagerCommand, AgentManagerCommandPayload } from '../../common/types/stream-events';
-import { ALLOWED_CLI_TYPES } from '../../common/types/cli-types';
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
-import {
-  AgentRuntimeConfigError,
-  validateAgentRuntimeConfig,
-} from '../../common/runtime-config';
 import { agentIsVisibleInWorkspace, normalizeAgentWorkspaceId } from '../../common/agent-workspace-scope';
 import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 
@@ -333,7 +329,7 @@ export class AgentManagerController {
     private readonly dispatchIntents: DispatchIntentService,
     private readonly runSkillSnapshots: RunSkillSnapshotService,
     private readonly childRuns: ChildRunService,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
@@ -435,7 +431,11 @@ export class AgentManagerController {
   })
   async heartbeat(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const auth = (req as any).apiKey;
-    const fallbackAgentId = (req as any).currentAgentId || auth?.agent_id || null;
+    // Raw key bindings — currentAgentId 는 P4 fallback 으로 host id 일 수
+    // 있으므로 (지워진 Agent 행 시나리오에서 body agent uuid 와 어긋나
+    // 오탐 403), agent 동등 검사는 키의 agent 바인딩 원본으로만 한다.
+    const keyAgentId = typeof auth?.agent_id === 'string' && auth.agent_id ? auth.agent_id : null;
+    const fallbackAgentId = keyAgentId;
 
     const instance_id = typeof body?.instance_id === 'string' ? body.instance_id.trim() : '';
     if (!instance_id) {
@@ -449,45 +449,71 @@ export class AgentManagerController {
       ? body.agent_id
       : null;
     const agent_id = fallbackAgentId || bodyAgentId;
+    // P4 (manager identity → RuntimeHost): heartbeat 정체성을 host-first 로
+    // 해소한다. 새 매니저는 agent_id 와 함께 host_id 를 동봉하고, 키에도
+    // host_id 가 stamped 되어 있다. host 가 해소되면 Agent 행은 best-effort
+    // dual-read (없어도 통과 — fan-out scope/agent_id 문자열 호환용).
+    // host 가 어디에도 없으면 legacy 경로 (agent 행 + self-heal) 로 폴백해
+    // 구버전 매니저/키와 호환을 유지한다.
+    const bodyHostId = typeof body?.host_id === 'string' && body.host_id
+      ? body.host_id
+      : null;
+    const keyHostId = typeof auth?.host_id === 'string' && auth.host_id
+      ? auth.host_id
+      : null;
+    const host_id = bodyHostId || keyHostId;
+    // agent_id 문자열은 당분간 유지 — registry agent_id + fan-out SSE scope +
+    // currentAgentId 호출자 식별이 전부 이 문자열을 키로 쓴다. host-first 로
+    // 바뀌는 것은 "어느 테이블에서 정체성을 검증하는가" 뿐이다. host 해소가
+    // 되면 Agent 행 부재는 더 이상 403 사유가 아니다.
     if (!agent_id) {
       return res.status(400).json({ error: 'agent_id is required (and could not be resolved from API key)' });
     }
     if (fallbackAgentId && bodyAgentId && bodyAgentId !== fallbackAgentId) {
       return res.status(403).json({ error: 'runtime_host_identity_mismatch' });
     }
-    let runtimeHost = await this.agentRepo.findOne({ where: { id: agent_id } });
-
-    // A valid manager API key can outlive an accidentally deleted Agent row.
-    // Recreate only the Runtime Host identity; executable Agents must always
-    // be provisioned and supervised through a host.
-    if (!runtimeHost) {
-      try {
-        const hostname =
-          typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
-        const recreated = this.agentRepo.create({
-          id: agent_id,
-          name: `awb-agent-manager (${hostname})`,
-          description: 'awb-agent-manager — recreated from Runtime Host heartbeat',
-          type: 'manager',
-          is_active: 1,
-          workspace_id: null,
-          roles: '[]',
-        });
-        runtimeHost = await this.agentRepo.save(recreated);
-        this.logService.warn(
-          'AgentManager',
-          `Recreated missing Runtime Host Agent row id=${agent_id.slice(0, 8)} name="${recreated.name}" from heartbeat`,
-          { agent_id, hostname, instance_id, via: 'instance-heartbeat self-heal' },
-        );
-      } catch (err: any) {
-        this.logService.warn(
-          'AgentManager',
-          `Self-heal failed for Runtime Host agent_id=${agent_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
-          { err: err?.message ?? String(err), agent_id, instance_id },
-        );
+    if (keyHostId && bodyHostId && bodyHostId !== keyHostId) {
+      return res.status(403).json({ error: 'runtime_host_identity_mismatch' });
+    }
+    let host: { id: string } | null = null;
+    if (host_id) {
+      host = await this.hostRepo.findOne({ where: { id: host_id } });
+      if (!host) {
+        // 키가 살아 있는데 Host 행이 지워진 경우 — agent self-heal 과 같은
+        // 계약으로 Host 행만 재생성한다. Agent 행은 더 이상 만들지 않는다 (P4).
+        try {
+          const hostname =
+            typeof body?.hostname === 'string' && body.hostname ? body.hostname : 'unknown';
+          const recreated = this.hostRepo.create({
+            id: host_id,
+            name: `awb-agent-manager (${hostname})`,
+            hostname,
+            workspace_id: auth?.workspace_id ?? null,
+            is_active: 1,
+          });
+          host = await this.hostRepo.save(recreated);
+          this.logService.warn(
+            'AgentManager',
+            `Recreated missing RuntimeHost id=${host_id.slice(0, 8)} from heartbeat`,
+            { host_id, hostname, instance_id, via: 'instance-heartbeat self-heal' },
+          );
+        } catch (err: any) {
+          this.logService.warn(
+            'AgentManager',
+            `Host self-heal failed for host_id=${host_id.slice(0, 8)}: ${err?.message ?? String(err)}`,
+            { err: err?.message ?? String(err), host_id, instance_id },
+          );
+        }
+      } else {
+        // best-effort presence — 실패해도 하트비트는 계속 간다.
+        try {
+          await this.hostRepo.update({ id: host.id }, { last_seen_at: new Date() });
+        } catch { /* best-effort */ }
       }
     }
-    if (!runtimeHost || runtimeHost.type !== 'manager') {
+    // P4c-4: Agent 행 조회/재생성 제거 — 정체성은 Host 행만 본다.
+    // host 바인딩 없는 구버전 매니저/키는 재페어링해야 한다 (마이그레이션 안내).
+    if (!host) {
       return res.status(403).json({ error: 'runtime_host_identity_required' });
     }
 
@@ -855,6 +881,9 @@ export class AgentManagerController {
     const rec = this.registry.upsert({
       instance_id,
       agent_id,
+      // P4: 어느 Host 에서 온 하트비트인지. fan-out host-affinity 와
+      // Host 기준 presence 집계가 이 필드로 붙는다.
+      host_id: host?.id ?? host_id ?? null,
       workspace_id: null,
       mode,
       hostname,
@@ -913,33 +942,8 @@ export class AgentManagerController {
       this._surfaceUpdateApprovalRequest(rec, update_approval_pending_version);
     }
 
-    // Mark every managed agent the manager is supervising as alive. Managed
-    // agents have no long-running process of their own — they only spawn
-    // short-lived ticket-session subagents per trigger — so without this
-    // their Agent.last_seen_at never advances and the AI Agents page shows
-    // them OFFLINE forever even when the manager has them in agent_ids[]
-    // ("live" on the Agent Manager detail page). AgentStatusService's 30s
-    // sweep reads last_seen_at and emits agent_status SSE, so this update
-    // is the only handoff needed.
-    //
-    // Ownership-scoped to the calling manager (manager_agent_id === agent_id)
-    // so a heartbeat from manager A can never accidentally signal aliveness
-    // for agents B owns. Empty/legacy heartbeats from non-manager modes
-    // skip the update entirely.
-    if (agent_ids && agent_ids.length > 0) {
-      try {
-        await this.agentRepo.update(
-          { id: In(agent_ids), manager_agent_id: agent_id },
-          { last_seen_at: new Date(), is_online: 1 },
-        );
-      } catch (err: any) {
-        this.logService.warn('AgentManager', 'Failed to refresh managed-agent presence on heartbeat', {
-          err: err?.message ?? String(err),
-          manager_agent_id: agent_id,
-          managed_agent_count: agent_ids.length,
-        });
-      }
-    }
+    // P4c-4: managed-agent presence 마킹 제거 (Agent 테이블 없음 — presence 는
+    // Host heartbeat + 레지스트리에서만 읽는다).
 
     return res.json({ ok: true, instance_id: rec.instance_id, last_seen_at: rec.last_seen_at });
   }
@@ -982,62 +986,46 @@ export class AgentManagerController {
     const rec = this.pairing.redeem(resolvedToken, instance_id);
     if (!rec) return res.status(401).json({ error: 'Invalid or expired pairing token' });
 
-    // Create (or reuse) the manager Agent identity. We always create a fresh
-    // identity per pairing redemption — sharing one Agent row across multiple
-    // hosts is supported (commands fan-out by agent_id), but each redemption
-    // gets its own row so revoking one host doesn't kick the others off.
+    // P4 (manager identity → RuntimeHost): redeem은 RuntimeHost 행만 만든다.
+    // manager Agent 행은 더 이상 만들지 않는다. 매니저가 agent.json에 저장하는
+    // agent_id 자리에는 Host id 가 그대로 들어간다 — heartbeat/SSE scope/
+    // fan-out/currentAgentId 가 전부 이 문자열을 키로 쓰므로 wire 호환이다.
+    // 각 redeem은 새 Host 행을 받는다 (한 Host 를 revoke 해도 다른 Host 에
+    // 영향 없음 — 예전 "redemption마다 새 Agent 행" 계약과 동일).
     //
-    // workspace_id is intentionally '' (workspace-less). A manager identity
-    // isn't a per-workspace concept — it supervises managed children that may
-    // live in any workspace — so the AI Agents tab in every workspace should
-    // see it. The pair record still carries the original workspace_id for
-    // audit / cleanup, and the API key below is stamped with it for the same
-    // bookkeeping. NOTE: that stamp is NOT a permission boundary — the manager
-    // operates instance-wide, so AgentAuthGuard treats any manager-owned key
-    // as full-scope (currentWorkspaceId=null) regardless of this column.
-    // (Earlier this column WAS the manager's effective scope, which broke
-    // cross-workspace /api/agent/* fetches with 403 once AgentApiController
-    // added workspace-scope guards.)
+    // workspace_id 스탬프는 bookkeeping 전용이며 권한 경계가 아니다 —
+    // AgentAuthGuard는 host 바인딩 키를 full-scope 로 취급한다.
     const agentName = (rec.agent_name || `awb-agent-manager (${hostname})`).slice(0, 200);
-    const agent = await this.agentRepo.save(
-      this.agentRepo.create({
+    const host = await this.hostRepo.save(
+      this.hostRepo.create({
         name: agentName,
-        description: 'awb-agent-manager — paired instance (ST-4)',
-        type: 'manager',
+        hostname,
+        workspace_id: rec.workspace_id,
         is_active: 1,
-        // null (not '') is the canonical "no workspace" value. Manager
-        // identities are global by design — they supervise children that
-        // may live in any workspace. Storing '' here historically caused
-        // workspace-scoped lookups (e.g. GET /api/agents/:id with
-        // `In([ws, ''])`) to silently fail when the manager's leftover
-        // workspace_id was something else, leaving the admin page unable
-        // to load Manager identity for editing.
-        workspace_id: null,
-        roles: '[]',
       }),
     );
 
     const apiKey = await this.apiKeyService.createApiKey({
       name: `agent-manager:${hostname}:${rec.id}`,
-      agent_id: agent.id,
+      agent_id: null,
+      host_id: host.id,
       scope: 'full',
       workspace_id: rec.workspace_id,
     });
 
-    this.logService.info('AgentManager', `Pairing redeemed id=${rec.id} ws=${rec.workspace_id} agent=${agent.id}`);
+    this.logService.info('AgentManager', `Pairing redeemed id=${rec.id} ws=${rec.workspace_id} host=${host.id}`);
 
-    // Audit: each redeem mints a *new* manager Agent row. If the operator
-    // re-paired a host that already had an operator-set name (e.g. "Ralf"),
-    // the new row carries the hostname-derived fallback unless rec.agent_name
-    // was supplied. Children whose manager_agent_id gets re-pointed to this
-    // new row will then display the new prefix — a frequent source of "all
-    // my agents got renamed" reports. Log so the trail is in /admin/logs.
+    // Audit: each redeem mints a *new* Host row. If the operator re-paired a
+    // host that already had an operator-set name (e.g. "Ralf"), the new row
+    // carries the hostname-derived fallback unless rec.agent_name was
+    // supplied — a frequent source of "all my agents got renamed" reports.
+    // Log so the trail is in /admin/logs.
     this.logService.info(
       'AgentIdentity',
-      `Manager agent created via pair/redeem: name="${agent.name}" (id=${agent.id.slice(0, 8)} hostname=${hostname} ws=${rec.workspace_id} pairing=${rec.id})`,
+      `Runtime Host created via pair/redeem: name="${host.name}" (id=${host.id.slice(0, 8)} hostname=${hostname} ws=${rec.workspace_id} pairing=${rec.id})`,
       {
-        agent_id: agent.id,
-        agent_name: agent.name,
+        host_id: host.id,
+        agent_name: host.name,
         agent_type: 'manager',
         hostname,
         workspace_id: rec.workspace_id,
@@ -1050,8 +1038,9 @@ export class AgentManagerController {
     return res.status(201).json({
       ok: true,
       api_key: apiKey.raw_key,
-      agent_id: agent.id,
-      agent_name: agent.name,
+      agent_id: host.id,
+      agent_name: host.name,
+      host_id: host.id,
       workspace_id: rec.workspace_id,
       paired_at: rec.redeemed_at,
     });
@@ -1179,9 +1168,12 @@ export class AgentManagerController {
     if (outcome === 'suppressed' && !trigger_id) {
       return res.status(400).json({ error: 'suppressed outcome requires trigger_id' });
     }
+    // P4c-4: suppressed 결과는 Host 키(매니저 세션)에서만 온다.
     if (outcome === 'suppressed') {
-      const caller = callerAgentId ? await this.agentRepo.findOne({ where: { id: callerAgentId } }) : null;
-      if (caller?.type !== 'manager') {
+      const callerHost = (req as any).currentHostId
+        ?? (req as any).apiKey?.host_id
+        ?? null;
+      if (!callerHost) {
         return res.status(403).json({ error: 'suppressed outcome requires a manager agent' });
       }
     }
@@ -1289,19 +1281,16 @@ export class AgentManagerController {
   @ApiOperation({ summary: 'List currently-heartbeating Runtime Host instances' })
   async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
     const data = workspaceId ? this.registry.listForWorkspace(workspaceId) : this.registry.list();
-    // Enrich each instance with the backing Agent.name so the admin list can
-    // render the configured identity (the operator-facing label they edit
-    // under "Edit Identity") instead of the OS hostname. Fallback to
-    // hostname when the Agent row is missing or has no name set — keeps
-    // the previous default behavior for stale rows.
+    // Enrich each instance with the RuntimeHost name so the admin list can
+    // render the configured identity instead of the OS hostname. Fallback to
+    // hostname when the Host row is missing — keeps the previous default
+    // behavior for stale rows.
     const agentIds = Array.from(new Set(data.flatMap((i) => [i.agent_id, ...(i.agent_ids ?? [])]).filter(Boolean)));
     const nameMap = new Map<string, string>();
-    const errorUploadMap = new Map<string, string>();
     if (agentIds.length > 0) {
-      const agents = await this.agentRepo.find({ where: { id: In(agentIds) } });
-      for (const a of agents) {
-        if (a.name) nameMap.set(a.id, a.name);
-        if (a.last_error_upload_at) errorUploadMap.set(a.id, new Date(a.last_error_upload_at).toISOString());
+      const hosts = await this.hostRepo.find({ where: { id: In(agentIds) } });
+      for (const h of hosts) {
+        if (h.name) nameMap.set(h.id, h.name);
       }
     }
     // Join each worktree entry's ticket_id → title so the admin "Live worktrees"
@@ -1327,11 +1316,9 @@ export class AgentManagerController {
     const enriched = data.map((inst) => ({
       ...inst,
       agent_name: nameMap.get(inst.agent_id) || null,
-      last_error_upload_at: [inst.agent_id, ...(inst.agent_ids ?? [])]
-        .map((id) => errorUploadMap.get(id))
-        .filter((ts): ts is string => !!ts)
-        .sort()
-        .at(-1) ?? null,
+      // P4c-4: last_error_upload_at 는 Agent 행과 함께 제거 (에러 로그 본문은
+      // agent-logs 표면에 남아 있다).
+      last_error_upload_at: null,
       ...(inst.active_worktrees
         ? {
             active_worktrees: inst.active_worktrees.map((w) => ({
@@ -1853,206 +1840,10 @@ export class AgentManagerController {
     }
     return res.json({ state: 'unknown', command_id: commandId, detail: '', acked_at: null });
   }
+  // ─── Managed-agent creation removed (P4c-3b) ────────────────────────
+  // POST api/admin/agent-manager/agents (createManagedAgent) no longer exists —
+  // execution is declared as RuntimeSpec, not Agent rows.
 
-  // ─── ST-4 admin → server: agent identity CRUD scoped for the manager ────
-
-  @ApiBearerAuth('user-session')
-  @Post('api/admin/agent-manager/agents')
-  @UseGuards(PermissionGuard, WorkspaceGuard)
-  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
-  @ApiOperation({
-    summary: 'Create an agent identity that the agent-manager will spawn (claude/codex/antigravity)',
-  })
-  async createManagedAgent(
-    @Body() body: any,
-    @CurrentWorkspaceId() workspaceId: string | null,
-    @Res() res: Response,
-  ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const agentWorkspaceId = Object.prototype.hasOwnProperty.call(body || {}, 'workspace_id')
-      ? normalizeAgentWorkspaceId(body.workspace_id)
-      : workspaceId;
-    if (agentWorkspaceId && agentWorkspaceId !== workspaceId) {
-      return res.status(403).json({ error: 'workspace_id must match the active workspace or be null' });
-    }
-    const name = typeof body?.name === 'string' ? body.name.trim() : '';
-    if (!name) return res.status(400).json({ error: 'name is required' });
-    const cli = typeof body?.cli === 'string' ? body.cli.trim().toLowerCase() : '';
-    if (!ALLOWED_CLI_TYPES.has(cli)) {
-      return res.status(400).json({ error: `cli must be one of ${[...ALLOWED_CLI_TYPES].join(', ')}` });
-    }
-    const working_dir = typeof body?.working_dir === 'string' ? body.working_dir.trim() : '';
-    const manager_agent_id = typeof body?.manager_agent_id === 'string' && body.manager_agent_id
-      ? body.manager_agent_id
-      : null;
-    if (!manager_agent_id) {
-      return res.status(400).json({ error: 'runtime_host_required' });
-    }
-    let runtime_config;
-    try {
-      runtime_config = validateAgentRuntimeConfig(cli, body?.runtime_config);
-    } catch (error) {
-      if (error instanceof AgentRuntimeConfigError) {
-        return res.status(400).json({ error: error.code, message: error.message });
-      }
-      throw error;
-    }
-    const credential_id = typeof body?.credential_id === 'string' && body.credential_id
-      ? body.credential_id
-      : null;
-    const description = typeof body?.description === 'string' ? body.description : '';
-    // Per-agent default model — free-form (validated only as a string). The
-    // admin UI fills it from the manager's reported available_models, but a
-    // free-text value is allowed too (the list may not cover every model the
-    // account can access). Empty = unset.
-    const model = typeof body?.model === 'string' && body.model.trim() ? body.model.trim() : null;
-
-    // If a manager_agent_id is supplied, sanity-check the row exists and is
-    // actually a manager identity (type='manager', minted by pair/redeem). The
-    // manager is intentionally *not* required to live in the same workspace as
-    // the agent it supervises — managers are paired once by an admin and may
-    // run agents for any workspace they're given identities in. Silently
-    // dropping a typo'd link would make spawn-routing mysteriously fail, so
-    // we still fail fast on a missing/wrong-type row.
-    if (manager_agent_id) {
-      const m = await this.agentRepo.findOne({ where: { id: manager_agent_id } });
-      if (!m) return res.status(400).json({ error: 'manager_agent_id does not exist' });
-      if (m.type !== 'manager') {
-        return res.status(400).json({ error: 'manager_agent_id must reference a manager-type agent' });
-      }
-    }
-    // Same sanity check for credential_id — fail fast with a clear error rather
-    // than letting spawn time discover the broken FK on the agent-manager side.
-    if (credential_id) {
-      // Accept a credential that is GLOBAL (workspace_id=NULL, shared
-      // instance-wide) or scoped to this agent's workspace. Reject other
-      // workspaces' credentials so a binding can't leak secrets.
-      const c = await this.credentialRepo.findOne({ where: { id: credential_id } });
-      if (!c || (c.workspace_id !== null && c.workspace_id !== agentWorkspaceId)) {
-        return res.status(400).json({ error: 'credential_id does not exist in this workspace or globally' });
-      }
-    }
-    // AgentsController 의 PATCH :id 검증과 같은 규칙 — Claude backend profile
-    // id 또는 'none' sentinel 을 받는다. 프로필은 인스턴스 전역이라 워크스페이스
-    // 스코프가 없다(티켓 e616dbfc). null/생략 = 디스패치 시점에 board 핀 →
-    // 전역 기본값 순으로 상속(resolveCliRuntimeProfile 참조).
-    // 이건 ManagedAgentDialog 의 "create" 흐름이 POST 하는 생성 시점 짝이다;
-    // without it the UI's profile selector silently had no effect on new
-    // agents (ticket 29ea479c).
-    const cli_runtime_profile = body?.cli_runtime_profile === undefined || body?.cli_runtime_profile === null
-      ? null
-      : String(body.cli_runtime_profile);
-    if (cli_runtime_profile && cli_runtime_profile !== 'none') {
-      const profiles = await globalRuntimeProfiles(this.dataSource);
-      if (!profiles.some(profile => profile.id === cli_runtime_profile)) {
-        return res.status(400).json({ error: `cli_runtime_profile "${cli_runtime_profile}" does not exist` });
-      }
-    }
-
-    const agent = await this.agentRepo.save(
-      this.agentRepo.create({
-        name,
-        description,
-        // Store the CLI selector in the existing `type` field so existing
-        // listings (which key off type) keep working. claude/codex/antigravity/custom.
-        type: cli,
-        is_active: 1,
-        workspace_id: agentWorkspaceId,
-        working_dir,
-        manager_agent_id,
-        runtime_config,
-        credential_id,
-        model,
-        cli_runtime_profile,
-        roles: '[]',
-      }),
-    );
-    return res.status(201).json(agent);
-  }
-
-  // ─── Cross-workspace manager listing ──────────────────────────────────
-  //
-  // Managers are paired by an admin into whatever workspace was active when
-  // the pairing token was minted, but the workspace AI Agents tab needs to
-  // surface every reachable manager so an operator can attach an agent in
-  // their own workspace to a globally-paired manager. We deliberately
-  // bypass the WorkspaceGuard scoping here — MANAGE_AGENTS still gates
-  // access — so managers minted in workspace A are visible to MANAGE_AGENTS
-  // holders in workspace B. Returns only the columns the picker needs.
-  @ApiBearerAuth('user-session')
-  @Get('api/admin/agent-manager/managers')
-  @UseGuards(PermissionGuard, WorkspaceGuard)
-  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
-  @ApiOperation({
-    summary: 'List every Agent row with type=manager (cross-workspace)',
-  })
-  async listManagers(@Res() res: Response) {
-    const managers = await this.agentRepo.find({
-      where: { type: 'manager' },
-      order: { name: 'ASC' },
-    });
-    return res.json(
-      managers.map((m) => ({
-        id: m.id,
-        name: m.name,
-        description: m.description,
-        workspace_id: m.workspace_id,
-        is_active: m.is_active,
-      })),
-    );
-  }
-
-  // ─── Move a managed agent to a different workspace ────────────────────
-  //
-  // Pre-existing managed agents created against a global manager already
-  // ended up in the manager's pairing-time workspace. The AgentManager
-  // admin page now exposes a per-row workspace picker so operators can
-  // re-home those agents into the correct workspace without recreating
-  // them. type and manager_agent_id are intentionally untouched.
-  @ApiBearerAuth('user-session')
-  @Patch('api/admin/agent-manager/agents/:id/workspace')
-  @UseGuards(PermissionGuard, WorkspaceGuard)
-  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
-  @ApiOperation({
-    summary: 'Move an existing managed-agent identity into a different workspace',
-  })
-  async setManagedAgentWorkspace(
-    @Param('id') agentId: string,
-    @Body() body: any,
-    @Res() res: Response,
-  ) {
-    if (!Object.prototype.hasOwnProperty.call(body || {}, 'workspace_id')) {
-      return res.status(400).json({ error: 'workspace_id is required' });
-    }
-    const target_workspace_id = normalizeAgentWorkspaceId(body.workspace_id);
-    if (target_workspace_id) {
-      const workspace = await this.workspaceRepo.findOne({ where: { id: target_workspace_id } });
-      if (!workspace) return res.status(400).json({ error: 'workspace_id does not exist' });
-    }
-
-    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
-    if (!agent) return res.status(404).json({ error: 'agent not found' });
-    // Guard against re-homing a manager identity through this endpoint —
-    // managers don't carry per-workspace meaning the same way managed
-    // children do (children inherit their manager regardless of ws).
-    if (agent.type === 'manager') {
-      return res.status(400).json({ error: 'cannot move a manager-type agent through this endpoint' });
-    }
-    if (!target_workspace_id && agent.credential_id) {
-      const credential = await this.credentialRepo.findOne({ where: { id: agent.credential_id } });
-      if (credential?.workspace_id) {
-        return res.status(409).json({ error: 'global agents require a global credential or no credential' });
-      }
-    }
-
-    agent.workspace_id = target_workspace_id;
-    const updated = await this.agentRepo.save(agent);
-    this.logService.info(
-      'AgentManager',
-      `Managed agent moved id=${agent.id.slice(0, 8)} → ws=${target_workspace_id?.slice(0, 8) || 'global'}`,
-    );
-    return res.json(updated);
-  }
 
   // ─── ST-6 manager → server: per-managed-agent API key provisioning ──────
   //
@@ -2069,406 +1860,97 @@ export class AgentManagerController {
   // user-session route exists too (below) so an operator can rotate without
   // a live manager.
 
-  @ApiSecurity('agent-api-key')
-  @Post('api/agent-manager/managed-agents/:id/apikey/provision')
-  @UseGuards(AgentAuthGuard)
-  @ApiOperation({
-    summary: 'Manager → server: rotate and fetch the apiKey for a managed agent it owns',
-  })
-  async provisionManagedAgentKey(
-    @Param('id') targetAgentId: string,
-    @Query('workspace_id') requestedWorkspaceId: string | undefined,
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    const callerAgentId = (req as any).currentAgentId as string | null;
-    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
-
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
-    if (!target) return res.status(404).json({ error: 'target agent not found' });
-
-    if (target.manager_agent_id !== callerAgentId) {
-      this.logService.warn(
-        'AgentManager',
-        `Refused apiKey provision: caller agent=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
-      );
-      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
-    }
-
-    const keyWorkspaceId = String(requestedWorkspaceId || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
-    if (!keyWorkspaceId) return res.status(400).json({ error: 'workspace-scoped API key is required for a global agent' });
-    if (!agentIsVisibleInWorkspace(target.workspace_id, keyWorkspaceId)) {
-      return res.status(403).json({ error: 'target agent is not available in the requested workspace' });
-    }
-    const issued = await this._rotateManagedAgentKey(target, keyWorkspaceId);
-    return res.status(201).json({
-      raw_key: issued.raw_key,
-      key_id: issued.key_id,
-      agent_id: target.id,
-      workspace_id: keyWorkspaceId,
-    });
-  }
-
-  // ─── ST-7 manager → server: read a managed-agent record the manager owns ─
+  // ─── P4c-2a manager → server: runtime-tuple key provisioning ─────────────
   //
-  // Mirror of the apikey provision route above: AgentAuthGuard + ownership
-  // check (`target.manager_agent_id === caller`). Manager calls this from
-  // `fetchAgentRecord` to hydrate a managed agent's canonical name / cli /
-  // working_dir before spawn / set_working_dir. Replaces the previous reach
-  // into `/api/agents/:id`, which is gated by user-session permissions and
-  // always returned 401 to the manager — see the matching enrichment in
-  // sendCommand for the dispatch-time fallback.
+  // Issues a workspace-scoped apiKey bound to a runtime identity
+  // (`rt-<hex16>`, no Agent row) instead of a managed agent. The key row
+  // carries host_id (this host, resolved from the caller's own pairing-time
+  // key) so a host can only ever provision keys for itself, and MCP-side
+  // attribution degrades to the `runtime:<key>` synthetic identity until
+  // P4c-4 reworks display. Same rotation hygiene as the managed-agent path:
+  // prior provisioning rows for (host, key, workspace) are hard-deleted.
+  //
+  // Auth model: AgentAuthGuard validates the manager's apiKey. Callers whose
+  // key predates the P0 host stamp (no host_id, legacy manager agent) are
+  // rejected with runtime_repair_required — re-pairing once mints a host-bound
+  // key and unblocks this path.
   @ApiSecurity('agent-api-key')
-  @Get('api/agent-manager/managed-agents/:id')
+  @Post('api/agent-manager/runtime-keys/provision')
   @UseGuards(AgentAuthGuard)
   @ApiOperation({
-    summary: 'Manager → server: fetch the canonical record of a managed agent it owns',
+    summary: 'Manager → server: rotate and fetch an apiKey for a runtime tuple it owns',
   })
-  async getManagedAgentForManager(
-    @Param('id') targetAgentId: string,
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    const callerAgentId = (req as any).currentAgentId as string | null;
-    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
-
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
-    if (!target) return res.status(404).json({ error: 'target agent not found' });
-
-    if (target.manager_agent_id !== callerAgentId) {
-      this.logService.warn(
-        'AgentManager',
-        `Refused agent record fetch: caller=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
-      );
-      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+  async provisionRuntimeKey(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const key = String(body?.key || '').trim();
+    if (!/^rt-[0-9a-f]{16}$/.test(key)) {
+      return res.status(400).json({ error: 'runtime_key_invalid' });
     }
-
-    return res.json({
-      id: target.id,
-      name: target.name,
-      type: target.type,
-      working_dir: target.working_dir,
-      manager_agent_id: target.manager_agent_id,
-      workspace_id: target.workspace_id,
-      credential_id: target.credential_id,
-      runtime_config: target.runtime_config,
-      // Per-agent default model — the manager's fetchAgentRecord reads this as
-      // remote.model and prefers it over the spawn payload's args.model.
-      model: target.model,
-    });
-  }
-
-  // Manager → server: read the decrypted CLI credential for a managed agent
-  // it owns. Same auth model as getManagedAgentForManager: AgentAuthGuard +
-  // ownership check. Returned payload carries provider + raw credential
-  // fields (auth.json contents, api_key string, etc.) so the manager can
-  // either write a credential file into per-agent cli-home (subscription
-  // kind) or set the matching env var at spawn (api_key kind). Returns 204
-  // when the agent has no credential_id set, which the manager treats as
-  // "fall back to operator HOME" (legacy behaviour).
-  @ApiSecurity('agent-api-key')
-  @Get('api/agent-manager/managed-agents/:id/credential')
-  @UseGuards(AgentAuthGuard)
-  @ApiOperation({
-    summary: "Manager → server: fetch the decrypted CLI credential for a managed agent it owns",
-  })
-  async getManagedAgentCredential(
-    @Param('id') targetAgentId: string,
-    @Query('workspace_id') requestedWorkspaceId: string | undefined,
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    const callerAgentId = (req as any).currentAgentId as string | null;
-    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
-
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
-    if (!target) return res.status(404).json({ error: 'target agent not found' });
-
-    if (target.manager_agent_id !== callerAgentId) {
-      this.logService.warn(
-        'AgentManager',
-        `Refused credential fetch: caller=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
-      );
-      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
+    const workspaceId = String(body?.workspace_id || '').trim();
+    if (!workspaceId) {
+      return res.status(400).json({ error: 'runtime_key_workspace_required' });
     }
-
-    if (!target.credential_id) return res.status(204).send();
-
-    // Look up by id first, then authorize. A credential is fetchable when it is
-    // GLOBAL (workspace_id=NULL, shared instance-wide) OR scoped to this
-    // agent's own workspace. Other-workspace credentials are refused so a
-    // cross-workspace binding can't leak secrets.
-    const cred = await this.credentialRepo.findOne({ where: { id: target.credential_id } });
-    if (!cred) {
-      this.logService.warn(
-        'AgentManager',
-        `Managed agent credential ${target.credential_id.slice(0, 8)} not found for agent=${target.id.slice(0, 8)} — falling back to none`,
-      );
-      return res.status(404).json({ error: 'credential not found' });
-    }
-    const targetWorkspaceId = String(requestedWorkspaceId || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
-    if (!targetWorkspaceId || !agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
-      return res.status(403).json({ error: 'target agent is not available in the requested workspace' });
-    }
-    if (cred.workspace_id !== null && cred.workspace_id !== targetWorkspaceId) {
-      this.logService.warn(
-        'AgentManager',
-        `Refused credential fetch: cred=${cred.id.slice(0, 8)} (workspace=${(cred.workspace_id || '').slice(0, 8)}) ` +
-          `is neither global nor owned by agent=${target.id.slice(0, 8)} (workspace=${(target.workspace_id || 'none')})`,
-      );
-      return res.status(403).json({ error: 'credential belongs to another workspace' });
-    }
-
-    // Disambiguate "stored fields legitimately empty" from "decrypt silently
-    // failed". encryption.service.decrypt() returns '' on key mismatch — the
-    // legacy code path then JSON.parse'd that, threw, and returned 200 OK
-    // with fields={} (silent), which downstream surfaced as a managed agent
-    // running with no auth at all. Now: if the ciphertext was 'enc:'-prefixed
-    // (i.e. genuinely encrypted) but decrypt returned '', surface as 503 with
-    // a clear message so the operator can re-edit the credential to re-encrypt
-    // it under the current key.
-    const ciphertext = cred.encrypted_data || '';
-    const plaintext = ciphertext ? decrypt(ciphertext) : '';
-    if (ciphertext.startsWith('enc:') && !plaintext) {
-      this.logService.error(
-        'AgentManager',
-        `Credential decrypt failed for cred=${cred.id.slice(0, 8)} (provider=${cred.provider}). ` +
-          `Likely cause: ENCRYPTION_KEY env / .encryption_key file changed since the credential was saved. ` +
-          `Operator must re-edit the credential in Settings → Credentials to re-encrypt it under the current key.`,
-      );
-      return res.status(503).json({
-        error: 'credential_decrypt_failed',
-        credential_id: cred.id,
-        provider: cred.provider,
-        detail:
-          'Server failed to decrypt the stored credential. The encryption key may have changed since ' +
-          'the credential was saved. Re-edit the credential in Settings → Credentials to re-encrypt it.',
+    const hostId = String((req as any).apiKey?.host_id || '').trim();
+    if (!hostId) {
+      return res.status(403).json({
+        error: 'runtime_repair_required',
+        message: 'this manager key predates host binding — re-pair once to mint a host-bound key',
       });
     }
-
-    let fields: Record<string, string> = {};
-    if (plaintext) {
-      try {
-        const decoded = JSON.parse(plaintext);
-        if (decoded && typeof decoded === 'object') {
-          // Heal paste damage on the way out too, not only on write: a row
-          // stored by an older build can carry a hard line break inside the
-          // secret (a wrapped terminal copy of `claude setup-token`), which
-          // the manager would export verbatim as CLAUDE_CODE_OAUTH_TOKEN and
-          // every spawn of every agent on that credential would fail auth.
-          const raw = decoded as Record<string, string>;
-          fields = normalizeCredentialFields(raw);
-          const repaired = Object.keys(fields).filter((k) => fields[k] !== raw[k]);
-          if (repaired.length > 0) {
-            this.logService.warn(
-              'AgentManager',
-              `Credential cred=${cred.id.slice(0, 8)} (provider=${cred.provider}) had whitespace inside ` +
-                `field(s) ${repaired.join(',')} — served normalized. Re-save it in Settings → Credentials ` +
-                `to fix it at rest.`,
-            );
-          }
-        }
-      } catch {
-        // Plaintext didn't parse as JSON — treat as empty fields and warn.
-        // Caller (manager) already handles the empty-fields case with its own
-        // explicit ERROR log so the operator sees what's mis-configured.
-        this.logService.warn(
-          'AgentManager',
-          `Credential plaintext is not valid JSON for cred=${cred.id.slice(0, 8)}`,
-        );
-      }
-    }
-
-    return res.json({
-      credential_id: cred.id,
-      provider: cred.provider,
-      fields,
-    });
-  }
-
-  @ApiSecurity('agent-api-key')
-  @Get('api/agent-manager/resources/:id/git-credential')
-  @UseGuards(AgentAuthGuard)
-  async getRepositoryGitCredential(
-    @Param('id') resourceId: string,
-    @Query('agent_id') targetAgentId: string,
-    @Query('workspace_id') requestedWorkspaceId: string | undefined,
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    const callerAgentId = (req as any).currentAgentId as string | null;
-    const target = targetAgentId ? await this.agentRepo.findOne({ where: { id: targetAgentId } }) : null;
-    if (!callerAgentId || !target || target.manager_agent_id !== callerAgentId) {
-      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
-    }
-    const targetWorkspaceId = String(requestedWorkspaceId || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
-    if (!targetWorkspaceId) return res.status(403).json({ error: 'workspace-scoped API key is required for a global agent' });
-    if (!agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
-      return res.status(403).json({ error: 'target agent is not available in the requested workspace' });
-    }
-    const resource = await this.resourceRepo.findOne({ where: { id: resourceId, workspace_id: targetWorkspaceId } });
-    if (!resource) return res.status(404).json({ error: 'repository resource not found in agent workspace' });
-    if (!resource.credential_id) return res.status(204).send();
-    const cred = await this.credentialRepo.findOne({ where: { id: resource.credential_id } });
-    if (!cred || (cred.workspace_id !== null && cred.workspace_id !== targetWorkspaceId)) {
-      return res.status(403).json({ error: 'repository credential is outside the agent workspace' });
-    }
-    const plaintext = decrypt(cred.encrypted_data || '');
-    if (!plaintext) return res.status(503).json({ error: 'credential_decrypt_failed' });
-    try {
-      const fields = JSON.parse(plaintext);
-      const token = fields.token || fields.api_key || '';
-      if (!token) return res.status(422).json({ error: 'repository credential has no token/api_key' });
-      return res.json({ username: fields.username || 'x-access-token', token });
-    } catch {
-      return res.status(503).json({ error: 'credential_payload_invalid' });
-    }
-  }
-
-  // Manager → server: immediately re-push agent_trigger(s) for the in-flight
-  // (ticket, role) work a just-restarted managed agent was interrupted on.
-  //
-  // restart_agent now reaps the agent's zombie one-shot subagents + persistent
-  // sessions (ticket 86683d12). The killed children were mid-flight on real
-  // tickets; without this endpoint the agent wouldn't resume that work until
-  // TicketSupervisorService's ~30-min stale sweep noticed and re-pushed. The
-  // manager calls this right after the fresh spawn so the agent picks the work
-  // back up on the new credential in seconds, not half an hour.
-  //
-  // Auth: AgentAuthGuard validates the manager's apiKey; ownership is enforced
-  // (target.manager_agent_id === caller) exactly like the sibling
-  // managed-agent routes. Each trigger is emitted with force_respawn +
-  // bypassFocus so the precise interrupted ticket resumes regardless of which
-  // ticket the focus selector would otherwise pick.
-  @ApiSecurity('agent-api-key')
-  @Post('api/agent-manager/managed-agents/:id/resume-triggers')
-  @UseGuards(AgentAuthGuard)
-  @ApiOperation({
-    summary: "Manager → server: re-push triggers for a restarted agent's interrupted work",
-  })
-  async resumeManagedAgentTriggers(
-    @Param('id') targetAgentId: string,
-    @Body() body: any,
-    @Req() req: Request,
-    @Res() res: Response,
-  ) {
-    const callerAgentId = (req as any).currentAgentId as string | null;
-    if (!callerAgentId) return res.status(401).json({ error: 'manager apiKey could not be resolved to an agent_id' });
-
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
-    if (!target) return res.status(404).json({ error: 'target agent not found' });
-
-    if (target.manager_agent_id !== callerAgentId) {
-      this.logService.warn(
+    // P4c-4: key 이름에 표시용 라벨을 함께 저장한다 (`runtime:<label>:<key>`).
+    // MCP author 표시 + 세션 who 로그가 사람이 읽을 이름이 된다. 라벨은
+    // 표시 전용이라 검증하지 않고 길이만 자른다 (키는 suffix 매칭으로 파싱).
+    const label = String((body as any)?.label || '').trim().slice(0, 80).replace(/:/g, ' ') || 'runtime';
+    const removed = await this.apiKeyService.deleteApiKeysByHostAndNamePrefix(
+      hostId, key, workspaceId,
+    );
+    if (removed > 0) {
+      this.logService.info(
         'AgentManager',
-        `Refused resume-triggers: caller=${callerAgentId.slice(0, 8)} is not owner of target=${targetAgentId.slice(0, 8)} (owner=${target.manager_agent_id || 'none'})`,
+        `Rotated runtime apiKey for ${key} — deleted ${removed} superseded provisioning row(s)`,
+        { host_id: hostId, removed },
       );
-      return res.status(403).json({ error: 'caller is not the owning manager for this agent' });
     }
-
-    // De-dup (ticket_id, role) and drop malformed rows. The manager already
-    // de-dups across its session/subagent managers, but a hostile / buggy
-    // client shouldn't be able to fan out N emits per ticket from here.
-    const rawItems = Array.isArray(body?.items) ? body.items : [];
-    const byKey = new Map<string, { ticket_id: string; role: string }>();
-    for (const item of rawItems) {
-      const ticket_id = typeof item?.ticket_id === 'string' ? item.ticket_id.trim() : '';
-      const role = typeof item?.role === 'string' ? item.role.trim() : '';
-      if (!ticket_id) continue;
-      byKey.set(`${ticket_id}:${role}`, { ticket_id, role });
-    }
-    const items = Array.from(byKey.values());
-
-    let emitted = 0;
-    let skipped = 0;
-    for (const { ticket_id, role } of items) {
-      const ticket = await this.ticketRepo.findOne({ where: { id: ticket_id } });
-      if (!ticket) {
-        skipped++;
-        continue;
-      }
-      try {
-        // bypassFocus: the agent was demonstrably working this exact ticket
-        // before the restart killed its child, so resume THIS ticket rather
-        // than letting the focus selector re-pick. force_respawn so any
-        // racing leftover child is replaced by a fresh one on the new
-        // credential. _emitTrigger still honors board-paused / archived /
-        // pending gates, so a re-push can't reanimate parked work.
-        await this.triggerLoop.emitAgentTrigger(
-          ticket,
-          target.id,
-          role,
-          'manager_restart',
-          'system',
-          { forceRespawn: true, bypassFocus: true },
-        );
-        emitted++;
-      } catch (err: any) {
-        skipped++;
-        this.logService.warn('AgentManager', 'resume-triggers emit failed', {
-          err: err?.message ?? String(err),
-          ticket_id,
-          role,
-          agent_id: target.id,
-        });
-      }
-    }
-
+    const issued = await this.apiKeyService.createApiKey({
+      name: `runtime:${label}:${key}`,
+      agent_id: null,
+      host_id: hostId,
+      scope: 'full',
+      workspace_id: workspaceId,
+      expires_at: null,
+    });
     this.logService.info(
       'AgentManager',
-      `resume-triggers agent=${target.id.slice(0, 8)} requested=${items.length} emitted=${emitted} skipped=${skipped}`,
-      { agent_id: target.id, requested: items.length, emitted, skipped },
+      `Provisioned runtime apiKey ${key} (host=${hostId.slice(0, 8)} ws=${workspaceId.slice(0, 8)})`,
+      { key_id: issued.apiKey.id, masked: issued.apiKey.key_masked },
     );
-    return res.json({ ok: true, emitted, skipped });
-  }
-
-  // Admin-side equivalent — useful for operator-driven rotation without a
-  // live manager (e.g. the manager box died and we want to re-provision
-  // before standing up a new one). Same payload shape as the manager path.
-  @ApiBearerAuth('user-session')
-  @Post('api/admin/agent-manager/agents/:id/apikey/provision')
-  @UseGuards(PermissionGuard, WorkspaceGuard)
-  @RequirePermission(PERMISSIONS.MANAGE_AGENTS)
-  @ApiOperation({ summary: 'Admin: rotate and return the managed agent\'s apiKey (one-shot)' })
-  async adminProvisionManagedAgentKey(
-    @Param('id') targetAgentId: string,
-    @CurrentWorkspaceId() workspaceId: string | null,
-    @Res() res: Response,
-  ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
-    const target = await this.agentRepo.findOne({ where: { id: targetAgentId } });
-    if (!target || !agentIsVisibleInWorkspace(target.workspace_id, workspaceId)) {
-      return res.status(404).json({ error: 'target agent not found in this workspace' });
-    }
-
-    const issued = await this._rotateManagedAgentKey(target, workspaceId);
     return res.status(201).json({
       raw_key: issued.raw_key,
-      key_id: issued.key_id,
-      agent_id: target.id,
+      key_id: issued.apiKey.id,
+      key,
       workspace_id: workspaceId,
     });
   }
 
-  @ApiSecurity('agent-api-key')
   @Post('api/agent-manager/runtime/child-runs/start')
   @UseGuards(AgentAuthGuard)
   @ApiOperation({ summary: 'Runtime Host: persist a bounded Hermes ChildRun start' })
   async runtimeChildStart(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const callerAgentId = String((req as any).currentAgentId || '').trim();
     const parentAgentId = String(body?.parent_agent_id || '').trim();
-    const target = parentAgentId
-      ? await this.agentRepo.findOne({ where: { id: parentAgentId } })
+    // P4c-4: parent 는 자기 자신(self) 또는 같은 Host 의 실행 id 다.
+    const callerHostId = String((req as any).currentHostId || (req as any).apiKey?.host_id || '').trim();
+    const parent = parentAgentId
+      ? await resolveCallerIdentityRow(this.dataSource, parentAgentId)
       : null;
     if (
       !callerAgentId
-      || !target
-      || (target.id !== callerAgentId && target.manager_agent_id !== callerAgentId)
+      || !parent
+      || (parentAgentId !== callerAgentId && parentAgentId !== callerHostId)
     ) {
       return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
     }
-    const targetWorkspaceId = String(body?.workspace_id || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
-    if (targetWorkspaceId && !agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
+    const targetWorkspaceId = String(body?.workspace_id || parent.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (targetWorkspaceId && !agentIsVisibleInWorkspace(parent.workspace_id, targetWorkspaceId)) {
       return res.status(403).json({ error: 'runtime_child_workspace_mismatch' });
     }
     if (!targetWorkspaceId) {
@@ -2484,7 +1966,7 @@ export class AgentManagerController {
       const child = await this.childRuns.start({
         workspaceId: targetWorkspaceId,
         parentRunId: String(body?.parent_run_id || ''),
-        parentAgentId: target.id,
+        parentAgentId: parent.id,
         childId: String(body?.child_run_id || ''),
         strategy,
         depth: Number(body?.depth || 1),
@@ -2508,18 +1990,20 @@ export class AgentManagerController {
   async runtimeChildFinish(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const callerAgentId = String((req as any).currentAgentId || '').trim();
     const parentAgentId = String(body?.parent_agent_id || '').trim();
-    const target = parentAgentId
-      ? await this.agentRepo.findOne({ where: { id: parentAgentId } })
+    // P4c-4: parent 는 자기 자신(self) 또는 같은 Host 의 실행 id 다.
+    const callerHostId = String((req as any).currentHostId || (req as any).apiKey?.host_id || '').trim();
+    const parent = parentAgentId
+      ? await resolveCallerIdentityRow(this.dataSource, parentAgentId)
       : null;
     if (
       !callerAgentId
-      || !target
-      || (target.id !== callerAgentId && target.manager_agent_id !== callerAgentId)
+      || !parent
+      || (parentAgentId !== callerAgentId && parentAgentId !== callerHostId)
     ) {
       return res.status(403).json({ error: 'runtime_child_owner_mismatch' });
     }
-    const targetWorkspaceId = String(body?.workspace_id || target.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
-    if (targetWorkspaceId && !agentIsVisibleInWorkspace(target.workspace_id, targetWorkspaceId)) {
+    const targetWorkspaceId = String(body?.workspace_id || parent.workspace_id || (req as any).apiKey?.workspace_id || '').trim();
+    if (targetWorkspaceId && !agentIsVisibleInWorkspace(parent.workspace_id, targetWorkspaceId)) {
       return res.status(403).json({ error: 'runtime_child_workspace_mismatch' });
     }
     if (!targetWorkspaceId) {
@@ -2547,49 +2031,5 @@ export class AgentManagerController {
     }
   }
 
-  /**
-   * Issue a fresh apiKey for a managed agent and revoke any prior keys
-   * created via this same provisioning path. The convention is name-based:
-   * keys produced here carry the prefix `agent-manager-provisioned:` so
-   * routine listings can distinguish them from human-created keys, and
-   * rotations only invalidate previous provisioning-path keys (not user-
-   * minted ones an operator might have created manually).
-   */
-  private async _rotateManagedAgentKey(target: Agent, workspaceId?: string): Promise<{ raw_key: string; key_id: string }> {
-    const provisionPrefix = 'agent-manager-provisioned:';
-    // Hard-delete previous provisioning rows (not soft-revoke). Each spawn /
-    // restart used to add one is_active=0 row and never clean it up, so the
-    // table grew unbounded — operator hit "수십개" after only a few weeks
-    // of normal use. The audit trail for "previous key existed and rotated"
-    // is captured in the LogService.info call below; the raw row itself
-    // carries no information once it's superseded.
-    const effectiveWorkspaceId = workspaceId || target.workspace_id || '';
-    const removed = await this.apiKeyService.deleteApiKeysByAgentAndNamePrefix(target.id, provisionPrefix, effectiveWorkspaceId);
-    if (removed > 0) {
-      this.logService.info(
-        'AgentManager',
-        `Rotated managed-agent apiKey for ${target.id.slice(0, 8)} — deleted ${removed} superseded provisioning row(s)`,
-        { agent_id: target.id, removed },
-      );
-    }
 
-    const issued = await this.apiKeyService.createApiKey({
-      name: `${provisionPrefix}${target.name}`,
-      agent_id: target.id,
-      scope: 'full',
-      // target.workspace_id is nullable (managers carry NULL). Provisioning
-      // a key for a managed agent that has no workspace falls back to '' so
-      // the apiKey row's workspace_id stays a definite string (which the
-      // ApiKey entity / query layer expect).
-      workspace_id: effectiveWorkspaceId,
-      expires_at: null,
-    });
-
-    this.logService.info(
-      'AgentManager',
-      `Provisioned apiKey for managed agent ${target.id.slice(0, 8)} (name=${target.name})`,
-      { key_id: issued.apiKey.id, masked: issued.apiKey.key_masked },
-    );
-    return { raw_key: issued.raw_key, key_id: issued.apiKey.id };
-  }
 }

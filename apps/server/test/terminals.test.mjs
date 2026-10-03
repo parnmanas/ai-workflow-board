@@ -56,13 +56,13 @@ test('terminals relay: hosts → RPC list/open/attach → input/resize → outpu
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'claude' });
   const managerId = agent.manager_agent_id;
   const managerKey = runtimeHostKeyForAgent(agent.id);
-  await ds.getRepository('Agent').update({ id: managerId }, { name: 'rolf' });
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'rolf' }); // P4c-4: fixture managerId = host id
   const managerHeaders = { 'X-Agent-Key': managerKey, 'Content-Type': 'application/json' };
 
   const sendHeartbeat = (extra) => call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-rolf-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-rolf-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude'], pid: 4242, started_at: new Date().toISOString(),
       platform: 'linux',
       terminal_shells: [
@@ -270,7 +270,7 @@ test('terminals: a live row the heartbeat no longer reports is retired', async (
   const beat = (terminals) => call(`${base}/api/agent/instance-heartbeat`, {
     method: 'POST', headers: managerHeaders,
     body: JSON.stringify({
-      instance_id: 'inst-1', agent_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      instance_id: 'inst-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
       cli: 'claude', cli_adapters: ['claude'], pid: 1, started_at: new Date().toISOString(),
       terminal_shells: [{ id: 'bash', label: 'bash', path: '/bin/bash', default: true }],
       terminals,

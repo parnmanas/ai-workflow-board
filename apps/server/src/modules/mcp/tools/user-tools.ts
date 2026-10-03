@@ -10,11 +10,10 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
 import { User } from '../../../entities/User';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { requireFullScopeCaller } from '../shared/authz';
+import { requireFullScopeCaller, resolveCallerIdentityRow } from '../shared/authz';
 import type { ToolContext } from './context';
 
 export function registerUserTools(server: McpServer, ctx: ToolContext): void {
@@ -141,18 +140,15 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller) return ok({ authenticated: false, message: 'No agent context — running in dev mode or unauthenticated.' });
 
+      // P4: Agent 행 또는 Host 행 — host-keyed 세션도 identity 를 본다.
       let agentInfo: Record<string, any> | null = null;
       if (caller.agentId) {
-        const found = await dataSource.getRepository(Agent).findOne({
-          where: { id: caller.agentId },
-        });
+        const found = await resolveCallerIdentityRow(dataSource, caller.agentId);
         if (found) {
           agentInfo = {
             id: found.id,
             name: found.name,
-            type: found.type,
-            description: found.description,
-            is_active: found.is_active,
+            kind: found.kind,
             workspace_id: found.workspace_id || '',
           };
         }

@@ -36,7 +36,6 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Agent } from '../../entities/Agent';
 import { BoardColumn, NON_TERMINAL_KINDS } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { Subagent } from '../../entities/Subagent';
@@ -44,6 +43,8 @@ import { Ticket } from '../../entities/Ticket';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { LogService } from '../../services/log.service';
+import { holderAssigneeId } from '../../common/runtime-spec';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { AgentStatusService } from './agent-status.service';
 import { TriggerLoopService } from './trigger-loop.service';
@@ -540,15 +541,16 @@ export class DispatchReconcilerService implements OnModuleInit, OnModuleDestroy 
     const seen = new Set<string>();
     const ids: string[] = [];
     for (const r of rows) {
-      if (r.agent_id && !seen.has(r.agent_id)) { seen.add(r.agent_id); ids.push(r.agent_id); }
+      // P4c-4: spec-direct holder도 포함한다 (rt- 키).
+      const id = holderAssigneeId(r);
+      if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
     }
     if (ids.length === 0) return [];
-    const managers = await this.dataSource.getRepository(Agent).find({
-      where: { id: In(ids), type: 'manager' }, select: ['id'],
-    });
-    if (managers.length === 0) return ids;
-    const mgr = new Set(managers.map(a => a.id));
-    return ids.filter(id => !mgr.has(id));
+    // P4c-4: rt- identity는 manager 행이 될 수 없어 조회에서 제외한다.
+    const uuidIds = ids.filter((id) => isUuidShapedId(id));
+    // P4c-4: Agent 테이블 없음 — manager 행 자체가 존재하지 않는다.
+    void uuidIds;
+    return ids;
   }
 
   /**

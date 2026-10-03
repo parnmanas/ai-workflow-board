@@ -17,6 +17,7 @@ import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_MCP_SURFACE_PORT || '0';
 
+// P4c-4: list_agents / ping / move_agent_to_workspace 삭제 (Agent 표면 없음).
 const EXPECTED_TOOLS = [
   'get_ticket',
   'create_ticket',
@@ -30,11 +31,9 @@ const EXPECTED_TOOLS = [
   // Ticket c1512333 — 다중담당자·합의 T5 이동 제안(전원 승인 → auto-execute).
   'propose_move',
   'get_allocated_tickets',
-  'list_agents',
   'list_workspaces',
   'list_boards',
   'create_column',
-  'ping',
   // Ticket 48d14fff — prerequisite ("blocked-by ticket") surface.
   'add_ticket_prerequisites',
   'remove_ticket_prerequisite',
@@ -45,7 +44,6 @@ const EXPECTED_TOOLS = [
   // Ticket 8882056b — cross-workspace board move.
   'move_board_to_workspace',
   // Ticket 868ead64 — cross-workspace agent move.
-  'move_agent_to_workspace',
   // Ticket 684c012b — benchmark scoring + leaderboard surface.
   'submit_benchmark_score',
   'get_benchmark_leaderboard',

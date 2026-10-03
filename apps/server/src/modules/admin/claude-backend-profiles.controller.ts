@@ -8,7 +8,6 @@ import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import {
   profileEntityToRuntime, publicProfile, runtimeToProfileEntity,
 } from '../../common/claude-backend-registry';
-import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
@@ -29,10 +28,10 @@ export class ClaudeBackendProfilesController {
   // 프로필은 인스턴스 전역이므로(티켓 e616dbfc) 워크스페이스 배정·기본값을
   // 조회하던 3개 쿼리는 사라졌다. 남은 `workspaces` 는 실제 참조자(board /
   // agent / ticket 핀)가 어느 워크스페이스에 걸쳐 있는지를 알려주는 파생값이다.
+  // P4c-4: Agent 참조 섹션 제거 (Agent 테이블 없음).
   private async impact(id: string) {
-    const [boards, agents, runs, defaultId] = await Promise.all([
+    const [boards, runs, defaultId] = await Promise.all([
       this.dataSource.getRepository(Board).find({ where: { cli_runtime_profile: id } }),
-      this.dataSource.getRepository(Agent).find({ where: { cli_runtime_profile: id } }),
       this.dataSource.getRepository(Ticket).find({ where: { cli_runtime_profile: id } }),
       this.defaultId(),
     ]);
@@ -40,11 +39,10 @@ export class ClaudeBackendProfilesController {
       global_default: defaultId === id,
       workspaces: Array.from(new Set([
         ...boards.map(x => x.workspace_id).filter(Boolean),
-        ...agents.map(x => x.workspace_id).filter((value): value is string => Boolean(value)),
         ...runs.map(x => x.workspace_id).filter(Boolean),
       ])),
       boards: boards.map(x => ({ id: x.id, name: x.name, workspace_id: x.workspace_id })),
-      agents: agents.map(x => ({ id: x.id, name: x.name, workspace_id: x.workspace_id })),
+      agents: [],
       runs: runs.map(x => ({ id: x.id, title: x.title, workspace_id: x.workspace_id })),
     };
   }
@@ -142,7 +140,7 @@ export class ClaudeBackendProfilesController {
     await this.dataSource.transaction(async manager => {
       const next = replacement || null; // detach means inherit
       await manager.update(Board, { cli_runtime_profile: id }, { cli_runtime_profile: next });
-      await manager.update(Agent, { cli_runtime_profile: id }, { cli_runtime_profile: next });
+      // P4c-4: Agent 행 없음 — 남은 참조 테이블만 정리한다.
       await manager.update(Ticket, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       if (impact.global_default) {
         await manager.update(SystemSetting, { key: DEFAULT_KEY }, { value: next || '' });

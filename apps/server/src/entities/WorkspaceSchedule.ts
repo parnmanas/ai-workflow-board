@@ -70,6 +70,15 @@ export class WorkspaceSchedule {
   @Column({ type: 'varchar', default: '' })
   target_agent_id: string;
 
+  /**
+   * Snapshot of the target's runtime at save time (P2c dual-write).
+   * `target_agent_id`와 항상 함께 쓴다. Action 형태에서는 둘 다 비어 있다.
+   * P4에서 dispatch가 이쪽을 읽으면 `target_agent_id`는 제거된다.
+   * 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  target_runtime: Record<string, any> | null;
+
   // The free-text task message sent to the agent when the schedule fires. `text`
   // (not varchar) so long multi-line prompts are not truncated on either DB.
   // Action 형태에서는 비어 있다.

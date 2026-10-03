@@ -10,6 +10,7 @@ import { tokens } from '../../tokens';
 import { Button, Input, Select, Modal, Card, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { formatAgentDisplayName } from '../../utils/agentName';
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 import { canOpenTicketOnBoard, ticketBoardPath } from '../../utils/ticketBoardLink';
 import {
   WorkspaceFolderOptions,
@@ -126,6 +127,8 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
 
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
   const [agents, setAgents] = useState<SecAgent[]>([]);
+  // P4b: runtime 선언 → 매칭용 full 행.
+  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   const [selected, setSelected] = useState<SecurityProfile | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<string | null>(null);
@@ -145,7 +148,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
     try {
       const [list, agentList, scheduleList] = await Promise.all([
         api.listSecurityProfiles(effectiveWorkspaceId),
-        api.getAgents(effectiveWorkspaceId).catch(() => []),
+        Promise.resolve([]),
         api.listSecuritySchedules(effectiveWorkspaceId).catch(() => []),
       ]);
       // Enrich each profile with pass_rate + worst severity from its run history.
@@ -167,6 +170,8 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
       }));
       setProfiles(rows);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
+      // P4b: runtime 선언 → 매칭용 full 행 보관.
+      setAgentsFull((agentList || []) as any[]);
       setSchedules(scheduleList || []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load security profiles', 'error');
@@ -186,9 +191,13 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
 
   // manager_name 을 포함한 full name(Manager/Agent)으로 표시. 목록에 없는
   // agent 는 id 앞 8자리 fallback (QA 가 빠뜨렸던 버그 반복 금지).
-  const agentName = useCallback((id: string) => {
+  // P4c-3b: rt- target은 target_runtime 라벨로 표시한다.
+  const agentName = useCallback((id: string, spec?: any) => {
     const a = agents.find((x) => x.id === id);
-    return a ? formatAgentDisplayName(a) : id.slice(0, 8);
+    if (a) return formatAgentDisplayName(a);
+    const label = (spec?.label || '').trim();
+    if (label) return label;
+    return id.slice(0, 8);
   }, [agents]);
 
   const handleRun = async (p: SecurityProfile) => {
@@ -324,6 +333,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
           profile={editing === 'new' ? null : editing}
           workspaceId={effectiveWorkspaceId}
           agents={agents}
+          agentsFull={agentsFull}
           onClose={() => setEditing(null)}
           onSaved={async (saved) => {
             setEditing(null);
@@ -660,7 +670,7 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
 
 interface ProfileTableProps {
   profiles: ProfileRow[];
-  agentName: (id: string) => string;
+  agentName: (id: string, spec?: any) => string;
   running: string | null;
   refreshing: string | null;
   selectedIds: Set<string>;
@@ -734,7 +744,7 @@ function ProfileTable({ profiles, agentName, running, refreshing, selectedIds, o
 
 interface ProfileRowProps {
   p: ProfileRow;
-  agentName: (id: string) => string;
+  agentName: (id: string, spec?: any) => string;
   running: boolean;
   refreshing: boolean;
   selected: boolean;
@@ -765,7 +775,7 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
           <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{p.name}</span>
           {!p.enabled && <Pill variant="warning">disabled</Pill>}
         </div>
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{agentName(p.target_agent_id)}</div>
+        <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{agentName(p.target_agent_id, (p as any).target_runtime)}</div>
       </td>
       <td style={TD}>
         {p.scan_driver ? <Pill variant="info">{p.scan_driver}</Pill> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
@@ -813,7 +823,7 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
 interface ProfileDetailProps {
   profile: SecurityProfile;
   workspaceId: string;
-  agentName: (id: string) => string;
+  agentName: (id: string, spec?: any) => string;
   onBack: () => void;
   onRun: () => void;
   running: boolean;
@@ -866,7 +876,7 @@ function ProfileDetail({ profile, workspaceId, agentName, onBack, onRun, running
             {profile.scan_driver && <Pill variant="info">{profile.scan_driver}</Pill>}
             <TargetBadge resourceId={profile.target_resource_id} />
             <Pill variant="neutral">scope: {profile.scope_mode}</Pill>
-            <Pill variant="neutral">agent: {agentName(profile.target_agent_id)}</Pill>
+            <Pill variant="neutral">agent: {agentName(profile.target_agent_id, (profile as any).target_runtime)}</Pill>
             {passRate !== null && <Pill variant={passRate === 100 ? 'success' : 'warning'}>{passRate}% pass</Pill>}
             {profile.last_passed_commit && (
               <span style={{ fontSize: 11, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
@@ -1166,15 +1176,19 @@ interface ProfileEditorProps {
   profile: SecurityProfile | null;
   workspaceId: string;
   agents: SecAgent[];
+  /** P4b: runtime 선언 → 매칭용 full 행. */
+  agentsFull: Array<any>;
   onClose: () => void;
   onSaved: (p: SecurityProfile) => void;
 }
 
-function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: ProfileEditorProps) {
+function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSaved }: ProfileEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(profile?.name ?? '');
   const [description, setDescription] = useState(profile?.description ?? '');
   const [targetAgentId, setTargetAgentId] = useState(profile?.target_agent_id ?? (agents[0]?.id ?? ''));
+  // P4c-3b: spec-direct target (QA와 동일).
+  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>(null);
   const [targetResourceId, setTargetResourceId] = useState(profile?.target_resource_id ?? '');
   const [scanDriver, setScanDriver] = useState(profile?.scan_driver ?? 'code-review');
   const [scopeMode, setScopeMode] = useState<SecurityScopeMode>(profile?.scope_mode ?? 'incremental');
@@ -1203,7 +1217,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
-    if (!targetAgentId) { showToast('Target agent 를 선택하세요', 'error'); return; }
+    if (!targetAgentId && !pendingSpec) { showToast('Target agent 를 선택하세요', 'error'); return; }
     let checklist: any; let config: any;
     try { checklist = checklistText.trim() ? JSON.parse(checklistText) : []; } catch { showToast('체크리스트는 유효한 JSON 배열이어야 합니다', 'error'); return; }
     if (!Array.isArray(checklist)) { showToast('체크리스트는 JSON 배열이어야 합니다', 'error'); return; }
@@ -1227,8 +1241,12 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
     setSaving(true);
     try {
       let saved: SecurityProfile;
+      // P4c-3b: pendingSpec이 있으면 spec-direct 저장.
+      const targetPayload = pendingSpec
+        ? { target_agent_id: undefined, target_runtime: pendingSpec }
+        : { target_agent_id: targetAgentId, target_runtime: undefined };
       const common = {
-        name, description, target_agent_id: targetAgentId,
+        name, description, ...targetPayload,
         target_resource_id: targetResourceId.trim() || null,
         scan_driver: scanDriver, scan_driver_config: config, scope_mode: scopeMode,
         checklist, tags, enabled, on_failure_ticket: onFailureTicket, max_runs: maxRunsNum,
@@ -1276,7 +1294,20 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
           placeholder="— select —"
           value={targetAgentId}
           options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-          onChange={(e) => setTargetAgentId((e.target as HTMLSelectElement).value)}
+          onChange={(e) => { setTargetAgentId((e.target as HTMLSelectElement).value); setPendingSpec(null); }}
+        />
+        {/* P4b: runtime 선언 → Agent 매칭/생성 (QA 파일럿과 동일). */}
+        <DeclareRuntimeSection
+          workspaceId={workspaceId}
+          agentsFull={agentsFull}
+          onResolved={(id, created, spec) => {
+            setTargetAgentId(id);
+            setPendingSpec(created ? spec : null);
+            showToast(
+              created ? 'Runtime spec으로 저장됩니다 (Agent 행 없음)' : '기존 Agent와 매칭되었습니다',
+              'success',
+            );
+          }}
         />
         <Input
           label="Target resource ID (비우면 AWB 자체 코드베이스 = self)"

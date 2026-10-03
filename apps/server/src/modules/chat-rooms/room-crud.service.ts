@@ -1,16 +1,18 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { User } from '../../entities/User';
-import { Agent } from '../../entities/Agent';
+
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { RoomMembershipService } from './room-membership.service';
-import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 
 const PARTICIPANT_CAP = 50;
 
@@ -56,8 +58,8 @@ export class RoomCrudService {
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
 
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
 
     private readonly logService: LogService,
 
@@ -208,7 +210,7 @@ export class RoomCrudService {
         ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email])))
         : Promise.resolve(new Map<string, string>()),
       agentIds.length > 0
-        ? this.agentRepo.findByIds(agentIds).then(list => resolveAgentDisplayMap(this.agentRepo, list))
+        ? resolveAgentDisplayNamesByIds(this.dataSource, agentIds)
         : Promise.resolve(new Map<string, string>()),
     ]);
 
@@ -311,7 +313,7 @@ export class RoomCrudService {
   async createRoom(
     workspaceId: string,
     creator: { type: 'user' | 'agent'; id: string },
-    participantIds: { participant_type: string; participant_id: string }[],
+    participantIds: { participant_type: string; participant_id: string; runtime?: unknown }[],
     name?: string,
   ): Promise<{ room: any; existing: boolean }> {
     // Ensure creator is always included (deduplicate). v0.32: creator can be
@@ -323,9 +325,29 @@ export class RoomCrudService {
       participantIds = [{ participant_type: creator.type, participant_id: creator.id }, ...participantIds];
     }
 
+    // P4c-3b: runtime만 들고 id가 빈 항목은 서버가 identity 키를 매긴다
+    // (addParticipants와 동일 — 클라이언트가 키를 계산할 수 없어서).
+    const keyedParticipants = participantIds.map((p) => {
+      const raw = (p as any).runtime;
+      if (
+        (p.participant_id || '').trim() ||
+        p.participant_type !== 'agent' ||
+        raw === undefined ||
+        raw === null
+      ) {
+        return p;
+      }
+      try {
+        const spec = normalizeRuntimeSpec(raw, 'participant.runtime');
+        return { ...p, participant_id: runtimeIdentityKey(spec), runtime: { ...spec } };
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid participant.runtime');
+      }
+    });
+
     // Deduplicate participants list
     const seen = new Set<string>();
-    let uniqueParticipants = participantIds.filter(p => {
+    let uniqueParticipants = keyedParticipants.filter(p => {
       const key = `${p.participant_type}:${p.participant_id}`;
       if (seen.has(key)) return false;
       seen.add(key);
@@ -339,14 +361,27 @@ export class RoomCrudService {
       .filter(p => p.participant_type === 'agent')
       .map(p => p.participant_id)
       .filter(id => UUID_RE.test(id));
+    // P4c-3b: runtime을 직접 든 항목은 정규화한다 (rt- 참가자의 스냅샷).
+    const directSpecs = new Map<string, Record<string, any>>();
+    for (const p of uniqueParticipants) {
+      const raw = (p as any).runtime;
+      if (p.participant_type !== 'agent' || raw === undefined || raw === null) continue;
+      try {
+        directSpecs.set(p.participant_id, { ...normalizeRuntimeSpec(raw, 'participant.runtime') });
+      } catch (e: any) {
+        throw makeError(400, e?.message || 'invalid participant.runtime');
+      }
+    }
+    // P4c-4: uuid 참가자는 Host/링크 해소 + workspace 가시성 검사 (Agent 행 없음).
+    // 스냅샷은 직접 든 spec(directSpecs)만 기록한다.
     if (requestedAgentIds.length > 0) {
-      const agents = await this.agentRepo.findByIds(requestedAgentIds);
-      const byId = new Map(agents.map(agent => [agent.id, agent]));
-      const invalid = requestedAgentIds.find((id) => {
-        const agent = byId.get(id);
-        return !agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId);
-      });
-      if (invalid) throw makeError(400, `Agent ${invalid} does not belong to this workspace`);
+      for (const id of requestedAgentIds) {
+        const holder = await resolveCallerIdentityRow(this.dataSource, id);
+        if (!holder) throw makeError(400, `Agent ${id} does not belong to this workspace`);
+        if (!agentIsVisibleInWorkspace(holder.workspace_id, workspaceId)) {
+          throw makeError(400, `Agent ${id} does not belong to this workspace`);
+        }
+      }
     }
 
     if (uniqueParticipants.length < 2) {
@@ -387,15 +422,19 @@ export class RoomCrudService {
     // badge on first entry. Any message sent between this insert and the
     // first page load is caught via SSE/REST refresh.
     const joinedAt = new Date();
-    const participantRows = uniqueParticipants.map(p =>
-      this.participantRepo.create({
+    // P4c-4: 직접 든 spec(directSpecs)만 스냅샷으로 기록한다 (Agent 행 없음).
+    const participantRows = uniqueParticipants.map(p => {
+      return this.participantRepo.create({
         room_id: room.id,
         participant_type: p.participant_type,
         participant_id: p.participant_id,
+        runtime_spec: p.participant_type === 'agent'
+          ? directSpecs.get(p.participant_id) ?? null
+          : null,
         last_read_at: joinedAt,
         left_at: null,
-      }),
-    );
+      });
+    });
     await this.participantRepo.save(participantRows);
 
     this.logService.info('ChatRooms', `Created ${roomType} room ${room.id} in workspace ${workspaceId}`);
@@ -639,15 +678,27 @@ export class RoomCrudService {
     const agentIds = [...new Set(participantRows.filter(p => p.participant_type === 'agent').map(p => p.participant_id))].filter(id => UUID_RE.test(id));
     const [usersById, agentsById] = await Promise.all([
       userIds.length > 0 ? this.userRepo.findByIds(userIds).then(list => new Map(list.map(u => [u.id, u.name || u.email]))) : Promise.resolve(new Map<string, string>()),
-      agentIds.length > 0 ? this.agentRepo.findByIds(agentIds).then(list => resolveAgentDisplayMap(this.agentRepo, list)) : Promise.resolve(new Map<string, string>()),
+      agentIds.length > 0 ? resolveAgentDisplayNamesByIds(this.dataSource, agentIds) : Promise.resolve(new Map<string, string>()),
     ]);
+    // P4c-4: spec-direct (rt-) 참가자는 행 스냅샷 라벨로 표시한다.
+    const specLabelById = new Map<string, string>();
+    for (const p of participantRows) {
+      if (p.participant_type !== 'agent') continue;
+      const spec = (p as any).runtime_spec as Record<string, any> | null;
+      const label = spec && typeof spec === 'object' ? String(spec.label || '').trim() : '';
+      if (label) specLabelById.set(p.participant_id, label);
+    }
     const nameOf = (type: string, id: string): string => {
       // Non-uuid ids never made it into the maps above (filtered out) — resolve
       // the known synthetic 'system' author by convention, same as
       // resolveParticipantName, so the observer view shows "System" not "Unknown".
-      if (!id || !UUID_RE.test(id)) return id === 'system' ? 'System' : 'Unknown';
+      if (!id || !UUID_RE.test(id)) {
+        if (id === 'system') return 'System';
+        if (type === 'agent') return specLabelById.get(id) || 'Unknown';
+        return 'Unknown';
+      }
       if (type === 'user') return usersById.get(id) || 'Unknown User';
-      if (type === 'agent') return agentsById.get(id) || 'Unknown Agent';
+      if (type === 'agent') return agentsById.get(id) || specLabelById.get(id) || 'Unknown Agent';
       return 'Unknown';
     };
     return rooms.map((r) => {

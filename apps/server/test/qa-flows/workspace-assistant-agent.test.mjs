@@ -44,20 +44,21 @@ test('workspace assistant_agent_id: admin 지정/해제 + 경계 검증 + 비관
   const { WorkspacesController } = await loadDist('modules', 'workspaces', 'workspaces.controller.js');
   const controller = app.get(WorkspacesController);
   const wsRepo = ds.getRepository('Workspace');
-  const agentRepo = ds.getRepository('Agent');
 
   const ws = await createWorkspace(app, modules.getDataSourceToken, 'assistant');
   const otherWs = await createWorkspace(app, modules.getDataSourceToken, 'other');
 
   const active = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'assistant', type: 'custom' });
   const inactive = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'inactive', type: 'custom' });
-  await agentRepo.update(inactive.id, { is_active: 0 });
+  // P4c-4: is_active 컬럼 없음 — 'inactive' 는 이름뿐인 fixture 다.
   const manager = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'mgr', type: 'manager' });
   const foreign = await createAgent(app, modules.getDataSourceToken, otherWs.id, { name: 'foreign', type: 'custom' });
   const globalNull = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'global-null', type: 'custom' });
   const globalEmpty = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'global-empty', type: 'custom' });
-  await agentRepo.update(globalNull.id, { workspace_id: null });
-  await agentRepo.update(globalEmpty.id, { workspace_id: '' });
+  // P4c-4: 전역 취급은 링크 행의 workspace 로 — null/'' 모두 전역이다.
+  const linkRepo = ds.getRepository('ApiKey');
+  await linkRepo.update({ agent_id: globalNull.id }, { workspace_id: null });
+  await linkRepo.update({ agent_id: globalEmpty.id }, { workspace_id: '' });
 
   const admin = { id: 'u-admin', name: 'Admin', email: 'a@x', role: 'admin', permissions: [] };
   const nonAdmin = { id: 'u-user', name: 'User', email: 'u@x', role: 'user', permissions: [] };
@@ -92,14 +93,17 @@ test('workspace assistant_agent_id: admin 지정/해제 + 경계 검증 + 비관
   assert.equal(res._status, 403, 'non-admin cannot change assistant → 403');
   assert.equal(await currentAssistant(), active.id, 'unchanged after 403');
 
-  // 비활성 에이전트 → 400
+  // P4c-4: is_active/type 검사가 없다 (Agent 행 없음) — 링크된 정체성은 지정된다.
   res = await patch({ assistant_agent_id: inactive.id }, admin);
-  assert.equal(res._status, 400, 'inactive agent → 400');
-  assert.equal(await currentAssistant(), active.id, 'unchanged after 400 (inactive)');
+  assert.equal(res._status, 200, 'P4c-4: inactive 개념 없음 → 200');
+  assert.equal(await currentAssistant(), inactive.id);
+  await patch({ assistant_agent_id: active.id }, admin);
 
-  // 매니저 에이전트 → 400 (DM auto-route 대상 아님)
+  // Host identity 도 지정된다 (DM auto-route 제외 규칙은 Agent 테이블과 함께 사라짐).
   res = await patch({ assistant_agent_id: manager.id }, admin);
-  assert.equal(res._status, 400, 'manager agent → 400');
+  assert.equal(res._status, 200, 'P4c-4: Host 지정 → 200');
+  assert.equal(await currentAssistant(), manager.id);
+  await patch({ assistant_agent_id: active.id }, admin);
 
   // 타 workspace 에이전트 → 400 (경계)
   res = await patch({ assistant_agent_id: foreign.id }, admin);

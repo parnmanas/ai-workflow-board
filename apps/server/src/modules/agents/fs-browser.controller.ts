@@ -1,9 +1,9 @@
 import { Controller, Get, Post, Body, Param, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { Agent } from '../../entities/Agent';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -32,9 +32,9 @@ const READ_LIMIT_CAP = 5 * 1024 * 1024; // 5 MB per read — plugin enforces the
 @Controller()
 export class FsBrowserController {
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     private readonly fsBrowser: FsBrowserService,
     private readonly logService: LogService,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   // ─── User-facing: roots / list / stat / read ──────────────────────
@@ -202,11 +202,10 @@ export class FsBrowserController {
     const currentUser = (req as any).currentUser;
     const userLabel = currentUser?.name || currentUser?.id || 'unknown';
 
-    const agent = await this.agentRepo.findOne({ where: { id: agentId } });
+    // P4c-4: Host/링크 해소 (Agent 행 없음, online 비트 없음 — 라우팅
+    // 실패는 request()가 그대로 503/실패로 돌려준다).
+    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
-    if (!agent.is_online) {
-      return res.status(503).json({ error: 'Agent is offline', code: 'AGENT_OFFLINE' });
-    }
 
     const argLabel = op === 'mkdir' ? `${args.path ?? ''}/${args.name ?? ''}` : (args.path ?? '');
     this.logService.info('FsBrowser', `${userLabel} ${op} ${argLabel} on agent ${agent.name} (${agent.id})`);

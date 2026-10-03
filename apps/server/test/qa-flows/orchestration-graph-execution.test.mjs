@@ -126,8 +126,11 @@ async function stage(t, { graphEnabled = true, label = 'graph' } = {}) {
     name: `Graph squad ${label}`,
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
     members: [
-      { role_label: 'builder', capabilities: 'builds things', max_concurrent: 4 },
-      { role_label: 'reviewer', capabilities: 'judges work', max_concurrent: 2 },
+      // P4c-4: 슬롯마다 다른 working_dir — identity 가 슬롯별로 달라져야
+      // builder/reviewer 가 서로 다른 worker 다 (같은 키면 workspace 이동
+      // 테스트가 양쪽 member 행을 함께 옮겨 버린다).
+      { role_label: 'builder', capabilities: 'builds things', max_concurrent: 4, spec: { working_dir: '/srv/graph-builder' } },
+      { role_label: 'reviewer', capabilities: 'judges work', max_concurrent: 2, spec: { working_dir: '/srv/graph-reviewer' } },
     ],
   });
   const team = squad.team;
@@ -639,8 +642,9 @@ test('디스패치 실패 시 예산: work order 전송 전에 실패하면 예�
   // critic을 다른 workspace로 옮겨 dispatchStep의 workspace 재검증에서 던지게 만든다.
   // 이 검사는 room 생성과 예산 커밋보다 **앞**이므로, 이 실패는 subagent를 띄운 적이
   // 없고 따라서 예산도 쓰지 않아야 한다(정책: 예산은 "떴을 수 있는가" 기준).
+  // P4c-4: 검사는 member 행 스냅샷을 본다 (Agent 행 없음).
   const other = await createWorkspace(app, getDataSourceToken, 'orch-elsewhere');
-  await ds.getRepository('Agent').update({ id: critic.id }, { workspace_id: other.id });
+  await ds.getRepository('OrchestrationTeamMember').update({ agent_id: critic.id }, { workspace_id: other.id });
 
   step('entry 2개 중 하나는 정상 디스패치, 하나는 전송 전 실패');
   const submitted = await leadMcp.callTool('submit_orchestration_plan', {

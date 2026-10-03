@@ -49,7 +49,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
-import { getCallerAgent } from '../shared/session-auth';
+import { callerHoldsId, getCallerAgent } from '../shared/session-auth';
+import type { OrchestrationCaller } from '../../orchestration/orchestration.constants';
 import { isInFlight } from '../../orchestration/orchestration.constants';
 import {
   GRAPH_TEMPLATE_NAMES,
@@ -70,8 +71,13 @@ const NO_RUNTIME =
 const AGENT_MAX_STEPS_CEILING = 20;
 const AGENT_MAX_PARALLEL_STEPS_CEILING = 4;
 
-function callerAgentId(extra: { sessionId?: string }): string {
-  return getCallerAgent(extra)?.agentId || '';
+/**
+ * P4c-2b: runner 게이트에 넘기는 호출자 신원. uuid agent holds와 rt- spec
+ * holds를 게이트(callerHoldsId)가 함께 본다.
+ */
+function callerRef(extra: { sessionId?: string }): OrchestrationCaller {
+  const caller = getCallerAgent(extra);
+  return { agentId: caller?.agentId || '', runtimeKey: caller?.runtimeKey };
 }
 
 function toolError(e: any, fallback: string) {
@@ -103,14 +109,14 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     async ({ mission_id }, extra) => {
       const svc = missions();
       if (!svc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
+      const caller = callerRef(extra);
       try {
         const mission = await svc.requireMission(mission_id);
         // A member may also read the mission it is working inside — it needs the
         // objective for context — but only the orchestrator gets the plan.
-        if (mission.orchestrator_agent_id !== agentId) {
+        if (!callerHoldsId(caller, mission.orchestrator_agent_id)) {
           const steps = await svc.listSteps(mission.id);
-          if (!steps.some((s) => s.assignee_agent_id === agentId)) {
+          if (!steps.some((s) => callerHoldsId(caller, s.assignee_agent_id))) {
             return err('you are neither the orchestrator nor an assignee of this mission');
           }
           return ok({
@@ -289,7 +295,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const result = await svc.submitPlan(mission_id, callerAgentId(extra), {
+        const result = await svc.submitPlan(mission_id, callerRef(extra), {
           summary,
           steps,
           graph,
@@ -399,7 +405,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const result = await svc.patchGraph(mission_id, callerAgentId(extra), patch);
+        const result = await svc.patchGraph(mission_id, callerRef(extra), patch);
         const inert = result.changes.filter((c) => c.inert_reason);
         return ok({
           mission_id,
@@ -488,7 +494,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const { step, dispatched } = await svc.updateStep(args.step_id, callerAgentId(extra), args as any);
+        const { step, dispatched } = await svc.updateStep(args.step_id, callerRef(extra), args as any);
         return ok({
           step_id: step.id,
           step_key: step.step_key,
@@ -515,12 +521,12 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     async ({ mission_id, message }, extra) => {
       const svc = missions();
       if (!svc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
+      const caller = callerRef(extra);
       try {
         const mission = await svc.requireMission(mission_id);
-        if (mission.orchestrator_agent_id !== agentId) {
+        if (!callerHoldsId(caller, mission.orchestrator_agent_id)) {
           const steps = await svc.listSteps(mission.id);
-          if (!steps.some((s) => s.assignee_agent_id === agentId)) {
+          if (!steps.some((s) => callerHoldsId(caller, s.assignee_agent_id))) {
             return err('you are neither the orchestrator nor an assignee of this mission');
           }
         }
@@ -528,7 +534,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           type: 'note',
           message: String(message || '').slice(0, 2000),
           actor_type: 'agent',
-          actor_id: agentId,
+          actor_id: caller.agentId,
           actor_name: getCallerAgent(extra)?.agentName || '',
         });
         return ok({ mission_id, recorded: true });
@@ -561,7 +567,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const mission = await svc.updateCriteria(mission_id, callerAgentId(extra), updates);
+        const mission = await svc.updateCriteria(mission_id, callerRef(extra), updates);
         return ok({
           mission_id: mission.id,
           completion_criteria: mission.completion_criteria ?? [],
@@ -592,7 +598,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const mission = await svc.completeMission(mission_id, callerAgentId(extra), { status, summary });
+        const mission = await svc.completeMission(mission_id, callerRef(extra), { status, summary });
         return ok({ mission_id: mission.id, status: mission.status, finished_at: mission.finished_at });
       } catch (e: any) {
         return toolError(e, 'failed to complete mission');
@@ -621,8 +627,8 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const agentId = callerAgentId(extra);
-        const mission = await svc.reopenMission(mission_id, undefined, { type: 'agent', id: agentId, name: '' }, { reason });
+        const caller = callerRef(extra);
+        const mission = await svc.reopenMission(mission_id, undefined, { type: 'agent', id: caller.agentId, name: '', runtimeKey: caller.runtimeKey }, { reason });
         return ok({ mission_id: mission.id, status: mission.status });
       } catch (e: any) {
         return toolError(e, 'failed to reopen mission');
@@ -643,11 +649,11 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     async ({ step_id }, extra) => {
       const svc = missions();
       if (!svc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
+      const caller = callerRef(extra);
       try {
         const step = await svc.requireStep(step_id);
         const mission = await svc.requireMission(step.mission_id);
-        if (step.assignee_agent_id !== agentId && mission.orchestrator_agent_id !== agentId) {
+        if (!callerHoldsId(caller, step.assignee_agent_id) && !callerHoldsId(caller, mission.orchestrator_agent_id)) {
           return err('this step is assigned to another agent');
         }
         const all = await svc.listSteps(mission.id);
@@ -702,10 +708,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     async (_args, extra) => {
       const svc = missions();
       if (!svc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
-      if (!agentId) return err('this tool requires an authenticated agent session');
+      const caller = callerRef(extra);
+      if (!caller.agentId && !caller.runtimeKey) return err('this tool requires an authenticated agent session');
       try {
-        return ok({ open_steps: await svc.listOpenStepsForAgent(agentId) });
+        return ok({ open_steps: await svc.listOpenStepsForAgent(caller) });
       } catch (e: any) {
         return toolError(e, 'failed to list steps');
       }
@@ -744,7 +750,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       try {
         const step = await svc.reportProgress(
           step_id,
-          callerAgentId(extra),
+          callerRef(extra),
           message,
           lease_token,
           checkpoint as Record<string, any> | undefined,
@@ -812,7 +818,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const svc = runner();
       if (!svc) return err(NO_RUNTIME);
       try {
-        const result = await svc.reportStep(step_id, callerAgentId(extra), {
+        const result = await svc.reportStep(step_id, callerRef(extra), {
           status,
           summary,
           artifacts: artifacts as any,
@@ -854,10 +860,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     async (_args, extra) => {
       const svc = teams();
       if (!svc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
-      if (!agentId) return err('this tool requires an authenticated agent session');
+      const caller = callerRef(extra);
+      if (!caller.agentId && !caller.runtimeKey) return err('this tool requires an authenticated agent session');
       try {
-        return ok({ teams: await svc.listTeamsForAgent(agentId) });
+        return ok({ teams: await svc.listTeamsForAgent(caller) });
       } catch (e: any) {
         return toolError(e, 'failed to list teams');
       }
@@ -880,10 +886,10 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     async ({ include_finished, limit }, extra) => {
       const svc = missions();
       if (!svc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
-      if (!agentId) return err('this tool requires an authenticated agent session');
+      const caller = callerRef(extra);
+      if (!caller.agentId && !caller.runtimeKey) return err('this tool requires an authenticated agent session');
       try {
-        const list = await svc.listMissionsForAgent(agentId, {
+        const list = await svc.listMissionsForAgent(caller, {
           status: include_finished ? 'all' : 'active',
           limit,
         });
@@ -998,12 +1004,12 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
       const missionSvc = missions();
       const runnerSvc = runner();
       if (!teamSvc || !missionSvc || !runnerSvc) return err(NO_RUNTIME);
-      const agentId = callerAgentId(extra);
-      if (!agentId) return err('this tool requires an authenticated agent session');
+      const caller = callerRef(extra);
+      if (!caller.agentId && !caller.runtimeKey) return err('this tool requires an authenticated agent session');
 
       try {
         const team = await teamSvc.requireTeamById(args.team_id);
-        if (!team.orchestrator_agent_id || team.orchestrator_agent_id !== agentId) {
+        if (!team.orchestrator_agent_id || !callerHoldsId(caller, team.orchestrator_agent_id)) {
           return err(
             'you are not the orchestrator of this team — only the agent named as team.orchestrator_agent_id ' +
               'may create a mission for it. Use list_orchestration_teams to see teams you actually belong to.',
@@ -1050,7 +1056,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         // mission — that is the actual self-recursion risk (briefing itself is
         // already structurally impossible: startMission posts the brief exactly
         // once and updateMission locks the brief once status leaves 'draft').
-        const openSteps = await missionSvc.listOpenStepsForAgent(agentId);
+        const openSteps = await missionSvc.listOpenStepsForAgent(caller);
         if (openSteps.length > 0) {
           return err(
             `you have ${openSteps.length} step(s) still in flight (e.g. "${openSteps[0].step_key}" on mission ` +
@@ -1080,7 +1086,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         // 필터는 거기서 no-op이다(기존 동작 그대로). 글로벌 팀에서는 workspace A의
         // 열린 미션이 workspace B의 슬롯을 잡아먹는 걸 막아준다 — 팀이 허용된 각
         // workspace마다 독립된 `cap`을 가진다.
-        const openMissions = await missionSvc.listMissionsForAgent(agentId, { status: 'active', limit: 500 });
+        const openMissions = await missionSvc.listMissionsForAgent(caller, { status: 'active', limit: 500 });
         const openForTeam = openMissions.filter(
           (m) => m.team_id === team.id && m.workspace_id === resolvedWorkspaceId,
         );
@@ -1133,13 +1139,15 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           max_parallel_steps: maxParallelSteps,
           step_timeout_minutes: args.step_timeout_minutes,
           created_by_type: 'agent',
-          created_by: agentId,
+          created_by: caller.agentId,
           // Stamp the orchestrator NOW, not only on a successful startMission —
           // already proven above to equal team.orchestrator_agent_id. Without
           // this a mission left `draft` (start:false, or startMission throwing
           // below) has orchestrator_agent_id=null forever and no caller can ever
           // pass requireOrchestrator on it again — not even to close it.
-          orchestrator_agent_id: agentId,
+          // P4c-2b: the TEAM's id, not the caller's — runtime callers act as
+          // their host uuid, which never equals the stored rt- identity.
+          orchestrator_agent_id: team.orchestrator_agent_id,
         });
 
         let current = mission;
@@ -1148,7 +1156,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
           try {
             current = await runnerSvc.startMission(mission.id, mission.workspace_id, {
               type: 'agent',
-              id: agentId,
+              id: caller.agentId,
               name: getCallerAgent(extra)?.agentName || '',
             });
           } catch (e: any) {

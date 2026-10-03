@@ -52,7 +52,16 @@ function makeScenario() {
 // buildRunProvision degrades repo -> null on any throw; enforceRunBudget
 // fail-opens the same way (wraps its config/count resolution in try/catch) —
 // exactly the fixture qa-dispatch-failfast.test.mjs already relies on.
-const dataSource = { getRepository: () => ({ findOne: async () => { throw new Error('no repo'); } }) };
+// P4c-4: 시나리오 target 해소를 위해 Host 행만 답하고 나머지는 throw
+// (fail-open 경로가 그대로 타도록).
+const dataSource = {
+  getRepository: (entity) => {
+    if (entity?.name === 'RuntimeHost') {
+      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', workspace_id: 'ws-1' }; }, async find() { return []; } };
+    }
+    return { findOne: async () => { throw new Error('no repo'); } };
+  },
+};
 
 function makeRunRepo() {
   return {
@@ -98,7 +107,7 @@ function makeSvc({ batch, onSend }) {
     empty,           // messageRepo
     empty,           // attachmentRepo
     empty,           // resourceRepo
-    agentRepo,       // agentRepo
+    // P4c-4: agentRepo 인자 삭제.
     dataSource,      // dataSource
     messaging,       // messaging
     noopLog,         // logService

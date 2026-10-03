@@ -21,9 +21,10 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Agent } from '../../entities/Agent';
 import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { Ticket } from '../../entities/Ticket';
+import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
@@ -77,10 +78,7 @@ const SUPERVISOR_FORCE_RESPAWN_MAX = 5;
 // historically mis-set to 4 h — stale window. Present-but-quiet strands are
 // untouched (they keep the full stale window + output-liveness gate).
 const SUPERVISOR_LIVENESS_FLOOR_MS = resolveSupervisorLivenessFloorMs();
-// Match AgentStatusService.OFFLINE_THRESHOLD_MS. Agents whose last_seen_at is
-// older than this are considered offline and skipped — no point pushing
-// triggers when there is no live Runtime Host delivery route.
-const ONLINE_THRESHOLD_MS = 90_000;
+// P4c-4: last_seen liveness 게이트 제거 — strand 단위 stale 판정이 처리한다.
 
 interface SupervisorEntry {
   lastEmitAt: number;
@@ -145,7 +143,6 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
   private tickHandle: NodeJS.Timeout | null = null;
 
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly allocationService: AllocationService,
     private readonly triggerLoop: TriggerLoopService,
@@ -213,57 +210,6 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * Structured reason audit for the offline-agent skip (ticket e7c87517). An
-   * agent that WAS being supervised (has live `state` keys) just went offline:
-   * its stale allocations are now unsupervised. For every (ticket, role) key we
-   * were tracking, write one grepable `supervisor_skip_agent_offline` ActivityLog
-   * row, then prune the key so the audit is emitted exactly ONCE per offline
-   * episode (the next tick, still offline, has no keys → no re-audit). This
-   * removes the supervisor's last SILENT early-return — the reason a frozen
-   * ticket stopped being re-pushed is now on the record. actor_id='system' so
-   * the row never re-enters TriggerLoopService._handleActivity; a write failure
-   * must not change the skip outcome. Agents with no prior state keys (never
-   * supervised, or already pruned) are a no-op — the cause-agnostic no-progress
-   * detector is what guarantees such a ticket still reaches an operator.
-   */
-  private async _auditAgentOfflineSkip(agentId: string): Promise<void> {
-    const prefix = `${agentId}:`;
-    const staleKeys: string[] = [];
-    for (const key of this.state.keys()) {
-      if (key.startsWith(prefix)) staleKeys.push(key);
-    }
-    if (staleKeys.length === 0) return;
-    for (const key of staleKeys) {
-      // key = `${agentId}:${ticketId}:${role}` — agentId/ticketId are colon-free
-      // UUIDs, role is a colon-free slug, so positional split is exact.
-      const parts = key.split(':');
-      const ticketId = parts[1] || '';
-      const role = parts[2] || '';
-      try {
-        const activityLogRepo = this.dataSource.getRepository(ActivityLog);
-        await activityLogRepo.save(activityLogRepo.create({
-          entity_type: 'ticket',
-          entity_id: ticketId,
-          ticket_id: ticketId,
-          actor_id: 'system',
-          actor_name: 'TicketSupervisor',
-          action: 'supervisor_skip_agent_offline',
-          new_value: `agent=${agentId} role=${role} reason=agent_offline_no_runtime_host_to_repush`,
-          role,
-          trigger_source: 'supervisor',
-        }));
-      } catch (e) {
-        this.logService.warn('TicketSupervisor', 'offline-skip audit write failed (skip still applied)', {
-          err: String(e), ticket_id: ticketId, agent_id: agentId,
-        });
-      }
-      this.state.delete(key);
-    }
-    this.logService.info('TicketSupervisor', 'agent offline — supervised tickets now unsupervised (audited + pruned)', {
-      agent_id: agentId, count: staleKeys.length,
-    });
-  }
 
   /**
    * Surface a supervisor_stale_ms that exceeds the output-liveness retention
@@ -325,9 +271,15 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
 
   private async _tick(): Promise<void> {
     const now = Date.now();
-    const onlineCutoff = new Date(now - ONLINE_THRESHOLD_MS);
-
-    const agents = await this.agentRepo.find();
+    // P4c-4: Agent 테이블 없음 — 감독 대상은 assignment holder id 집합이다.
+    // last_seen liveness 게이트는 없다 (strand 단위 stale 판정이 downstream 에서
+    // 처리한다). rt- holder 는 push dispatch 영역이라 여기서 건너뛴다.
+    const holderRows = await this.dataSource.getRepository(TicketRoleAssignment).find({
+      select: ['agent_id'],
+    });
+    const agents = [...new Set(
+      holderRows.map((r) => r.agent_id).filter((id): id is string => !!id && isUuidShapedId(id)),
+    )].map((id) => ({ id, last_seen_at: new Date(), workspace_id: null as string | null }));
     const liveKeys = new Set<string>();
 
     // v0.41 — workspace-keyed cadence cache. Avoids re-querying the
@@ -364,22 +316,9 @@ export class TicketSupervisorService implements OnModuleInit, OnModuleDestroy {
     };
 
     for (const agent of agents) {
-      if (!agent.last_seen_at || agent.last_seen_at < onlineCutoff) {
-        // Offline Agent — no live Runtime Host to re-push to (ticket e7c87517). This
-        // used to be a SILENT early-return: an assignee whose manager went
-        // offline had its stale tickets stop being re-pushed with no trail at
-        // all ("why did my agent's ticket freeze?"). Emit ONE structured reason
-        // audit per (ticket, role) we were actively supervising, then prune —
-        // so the skip is greppable and bounded (once per offline episode, not
-        // every 60s tick). The cause-agnostic no-progress detector still
-        // surfaces such a ticket to an operator regardless of agent state; this
-        // just closes the supervisor's own silent early-return (no silent drop).
-        await this._auditAgentOfflineSkip(agent.id);
-        continue;
-      }
-      const workspaceIds = agent.workspace_id
-        ? [agent.workspace_id]
-        : await this.allocationService.getAllocatedWorkspaceIds(agent.id);
+      // P4c-4: holder id 집합을 직접 돈다 (last_seen 게이트 없음 — strand 단위
+      // stale 판정이 아래에서 처리한다).
+      const workspaceIds = await this.allocationService.getAllocatedWorkspaceIds(agent.id);
       if (workspaceIds.length === 0) continue;
 
       // On allocation lookup failure (throw or a non-array result) this agent

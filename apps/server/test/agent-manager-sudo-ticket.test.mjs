@@ -66,6 +66,7 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
       body: JSON.stringify({
         instance_id: INSTANCE_ID,
         agent_id: manager.id,
+        host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
         mode: 'manager',
         hostname: 'sudo-host',
         plugin_version: 'test',

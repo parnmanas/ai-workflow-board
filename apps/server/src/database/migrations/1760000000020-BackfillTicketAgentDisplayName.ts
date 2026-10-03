@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 
 /**
@@ -36,18 +35,20 @@ export class BackfillTicketAgentDisplayName1760000000020 implements MigrationInt
   name = 'BackfillTicketAgentDisplayName1760000000020';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // P4c-4: agents 테이블 없음 — 이 백필의 대상 자체가 존재하지 않는다.
+    if (!(await queryRunner.hasTable('agents'))) return;
     const manager = queryRunner.manager;
     const ticketRepo = manager.getRepository(Ticket);
-    const agentRepo = manager.getRepository(Agent);
+    const agentRepo = manager.getRepository('agents');
 
     // Load every agent once and build a lookup of canonical display names
     // keyed by agent id. Cheaper than per-ticket lookups; the agent table
     // is small relative to tickets.
-    const agents = await agentRepo.find();
-    const agentById = new Map<string, Agent>();
+    const agents = await agentRepo.find() as Array<{ id: string; name: string; manager_agent_id: string | null }>;
+    const agentById = new Map<string, { id: string; name: string; manager_agent_id: string | null }>();
     for (const a of agents) agentById.set(a.id, a);
 
-    const formatDisplay = (agent: Agent): string => {
+    const formatDisplay = (agent: { name: string; manager_agent_id: string | null }): string => {
       if (!agent.manager_agent_id) return agent.name;
       const mgr = agentById.get(agent.manager_agent_id);
       if (!mgr) return agent.name;

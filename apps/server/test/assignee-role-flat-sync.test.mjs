@@ -57,7 +57,15 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
   const agentB = await createAgent(app, getDataSourceToken, ws.id, { name: 'AgentB' });
   const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'Mgr', type: 'manager' });
   const managed = await createAgent(app, getDataSourceToken, ws.id, { name: 'Coder' });
-  await ds.getRepository('Agent').update({ id: managed.id }, { manager_agent_id: manager.id });
+  // P4c-4: managed→manager 연결은 api_keys 페어링 링크다 + 호스트 표시명 고정.
+  const linkRepo = ds.getRepository('ApiKey');
+  const hostRepo = ds.getRepository('RuntimeHost');
+  await linkRepo.save(linkRepo.create({
+    name: 'link-managed', key: 'hash-managed', key_prefix: 't***',
+    agent_id: managed.id, host_id: manager.id, scope: 'full', workspace_id: ws.id,
+  }));
+  await hostRepo.update({ id: agentA.manager_agent_id }, { name: 'HostA' });
+  await hostRepo.update({ id: agentB.manager_agent_id }, { name: 'HostB' });
   const user = await createUser(app, getDataSourceToken, { name: 'Human Z' });
 
   const assigneeRole = await roleRepo.findOne({ where: { workspace_id: ws.id, slug: 'assignee' } });
@@ -79,7 +87,7 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
 
     const after = await reload(ticket.id);
     assert.equal(after.assignee_id, agentA.id, 'flat assignee_id backfilled from board default');
-    assert.equal(after.assignee, 'AgentA', 'flat assignee display name backfilled');
+    assert.equal(after.assignee, 'HostA', 'flat assignee display name backfilled (P4c-4: Host bare)');
 
     // Parity with the normalized source of truth.
     const holder = await svc.getHolderBySlug(ticket.id, ws.id, 'assignee');
@@ -102,7 +110,7 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
     await svc.setHolder(ticket.id, assigneeRole.id, { agent_id: agentB.id });
     const after = await reload(ticket.id);
     assert.equal(after.assignee_id, agentB.id, 'flat id follows the reassignment');
-    assert.equal(after.assignee, 'AgentB', 'flat name follows the reassignment');
+    assert.equal(after.assignee, 'HostB', 'flat name follows the reassignment (P4c-4: Host bare)');
   });
 
   // ── 3. Clearing the role blanks the flat columns ───────────────────────────
@@ -130,7 +138,7 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
   await step('managed-agent and user holders resolve their canonical display', async () => {
     const ticket = await freshTicket('display');
     await svc.setHolder(ticket.id, assigneeRole.id, { agent_id: managed.id });
-    assert.equal((await reload(ticket.id)).assignee, 'Mgr/Coder', 'managed agent → <Manager>/<Agent>');
+    assert.equal((await reload(ticket.id)).assignee, manager.name, 'managed agent → Host bare (P4c-4)');
     await svc.setHolder(ticket.id, reporterRole.id, { user_id: user.id });
     const after = await reload(ticket.id);
     assert.equal(after.reporter_id, user.id, 'reporter_id mirrors the user holder');
@@ -147,7 +155,8 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
   // ── 7. Migration heals rows that diverged BEFORE the write-back fix ─────────
   await step('global agents can hold roles in any workspace while foreign scoped agents cannot', async () => {
     const globalAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'GlobalRoleAgent' });
-    await ds.getRepository('Agent').update(globalAgent.id, { workspace_id: null });
+    // P4c-4: 링크 행의 workspace 를 null 로 — 전역 holder 취급.
+    await linkRepo.update({ agent_id: globalAgent.id }, { workspace_id: null });
     const foreignWs = await createWorkspace(app, getDataSourceToken, 'foreign-role');
     const foreignAgent = await createAgent(app, getDataSourceToken, foreignWs.id, { name: 'ForeignRoleAgent' });
     const ticket = await freshTicket('workspace-scope');
@@ -184,7 +193,7 @@ test('role_assignments is SoT — flat assignee columns stay in lockstep (write-
 
     const after = await reload(ticket.id);
     assert.equal(after.assignee_id, agentA.id, 'migration backfilled flat assignee_id from the assignment row');
-    assert.equal(after.assignee, 'AgentA', 'migration backfilled the flat display name');
+    assert.equal(after.assignee, 'HostA', 'migration backfilled the flat display name (P4c-4: Host bare)');
   });
 });
 

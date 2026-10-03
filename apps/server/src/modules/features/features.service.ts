@@ -6,8 +6,11 @@ import { Ticket } from '../../entities/Ticket';
 import { TicketDuplicateService } from '../tickets/ticket-duplicate.service';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
-import { Agent } from '../../entities/Agent';
+import { ApiKey } from '../../entities/ApiKey';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey, runtimeSpecFromAgentRow } from '../../common/runtime-spec';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ActivityService } from '../../services/activity.service';
@@ -18,6 +21,7 @@ import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assi
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { validateHandoffSpecInput, parseHandoffSpec } from '../../common/handoff-spec-config';
 import {
@@ -33,6 +37,8 @@ export interface CreateFeatureInput {
   title: string;
   requirement: string;
   planner_agent_id?: string;
+  /** P4c-3b: spec-direct planner. 있으면 정규화 + identity 키가 planner가 된다. */
+  planner_runtime?: unknown;
   source_chat_room_id?: string;
   created_by?: string;
   created_by_id?: string;
@@ -69,7 +75,7 @@ export class FeaturesService {
     @InjectRepository(Feature) private readonly featureRepo: Repository<Feature>,
     @InjectRepository(ChatRoom) private readonly roomRepo: Repository<ChatRoom>,
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly dataSource: DataSource,
@@ -143,13 +149,41 @@ export class FeaturesService {
     if (!requirement) throw new BadRequestException('requirement is required');
     if (!input.workspace_id) throw new BadRequestException('workspace_id is required');
 
+    // P4c-3b: spec-direct면 정규화 + identity 키가 planner가 된다.
+    // 아니면 기존 폴백 (planner_agent_id → created_by_id → 빈 값).
+    let plannerId = (input.planner_agent_id || input.created_by_id || '').trim();
+    let plannerSpec: Record<string, any> | null = null;
+    if (input.planner_runtime !== undefined && input.planner_runtime !== null) {
+      let spec;
+      try {
+        spec = normalizeRuntimeSpec(input.planner_runtime, 'planner_runtime');
+      } catch (e: any) {
+        throw new BadRequestException(e?.message || 'invalid planner_runtime');
+      }
+      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
+      const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
+      if (!hostRow) {
+        const link = await this.dataSource.getRepository(ApiKey).findOne({
+          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
+          select: { agent_id: true, host_id: true },
+        });
+        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
+        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
+        if (!linked) throw new BadRequestException('planner_runtime references an unknown Runtime Host');
+      }
+      plannerId = runtimeIdentityKey(spec);
+      plannerSpec = { ...spec };
+    }
+    // P4c-4: uuid planner 스냅샷 없음 (Agent 행 없음 — runtime holder 만 spec).
+    const plannerRow = null;
     const feature = await this.featureRepo.save(this.featureRepo.create({
       workspace_id: input.workspace_id,
       board_id: input.board_id || null,
       title,
       requirement,
       status: 'draft',
-      planner_agent_id: (input.planner_agent_id || input.created_by_id || '').trim(),
+      planner_agent_id: plannerId,
+      planner_runtime: plannerSpec ?? (plannerRow ? { ...runtimeSpecFromAgentRow(plannerRow) } : null),
       source_chat_room_id: (input.source_chat_room_id || '').trim(),
       created_by: input.created_by || '',
       proposal: null,
@@ -190,9 +224,12 @@ export class FeaturesService {
     if (!plannerId) {
       throw new BadRequestException('planner_agent_id is required to dispatch planning');
     }
-    const agent = await this.agentRepo.findOne({ where: { id: plannerId } });
-    if (!agent) throw new BadRequestException('planner agent not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, feature.workspace_id)) {
+    // P4c-4: planner 는 rt- 키 또는 Host/링크 uuid 다 (Agent 행 없음).
+    const agent = await resolveCallerIdentityRow(this.dataSource, plannerId);
+    if (!agent && !isRuntimeIdentityKey(plannerId)) {
+      throw new BadRequestException('planner agent not found');
+    }
+    if (agent && !agentIsVisibleInWorkspace(agent.workspace_id, feature.workspace_id)) {
       throw new BadRequestException('planner agent belongs to a different workspace');
     }
 
@@ -208,7 +245,10 @@ export class FeaturesService {
       this.participantRepo.create({
         room_id: room.id,
         participant_type: 'agent',
-        participant_id: agent.id,
+        participant_id: plannerId,
+        runtime_spec: feature.planner_runtime
+          ? { ...feature.planner_runtime }
+          : agent ? { ...runtimeSpecFromAgentRow(agent) } : null,
         last_read_at: joinedAt,
         left_at: null,
       }),
@@ -231,8 +271,8 @@ export class FeaturesService {
     feature.planning_room_id = room.id;
     feature.status = 'planning';
     await this.featureRepo.save(feature);
-    this.logService.info('Features', `dispatched planning for feature ${feature.id} → agent ${agent.id} room ${room.id}`);
-    return { room_id: room.id, agent_id: agent.id };
+    this.logService.info('Features', `dispatched planning for feature ${feature.id} → agent ${plannerId} room ${room.id}`);
+    return { room_id: room.id, agent_id: plannerId };
   }
 
   // ── Proposal (planner deliverable) ─────────────────────────────────────────

@@ -71,17 +71,26 @@ export function slotSpec(managerAgentId, overrides = {}) {
 export async function buildTeam(app, getDataSourceToken, teams, opts) {
   const { workspaceId, name, members = [], team: teamFields = {} } = opts;
   const host = opts.host ?? (await createRuntimeHost(app, getDataSourceToken, workspaceId, { name: `host-${name}` }));
+  // P4c-4: identity 는 spec 내용 주소다 — 기본 dir 을 팀·슬롯마다 다르게 둬야
+  // 서로 다른 팀/슬롯이 같은 worker 로 합쳐지지 않는다 (in-flight 가드·cap 공유).
+  // 명시 spec(m.spec / opts.orchestrator.spec)은 그대로 우선한다.
+  const slug = String(name || 'team').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 40) || 'team';
+  const dirFor = (slot) =>
+    `/srv/awb-test/${slug}-${String(slot).replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 40)}`;
 
   let view = await teams.createTeam({
     workspace_id: workspaceId,
     name,
     ...teamFields,
-    orchestrator: slotSpec(host.id, opts.orchestrator?.spec ?? {}),
+    orchestrator: slotSpec(host.id, { working_dir: dirFor('orch'), ...opts.orchestrator?.spec }),
   });
 
-  for (const m of members) {
+  for (const [i, m] of members.entries()) {
     view = await teams.addMember(view.id, workspaceId, {
-      runtime: slotSpec(m.host?.id ?? host.id, m.spec ?? {}),
+      runtime: slotSpec(m.host?.id ?? host.id, {
+        working_dir: dirFor(`m${i}-${m.role_label || 'slot'}`),
+        ...m.spec,
+      }),
       role_label: m.role_label,
       capabilities: m.capabilities,
       max_concurrent: m.max_concurrent,
@@ -95,14 +104,11 @@ export async function buildTeam(app, getDataSourceToken, teams, opts) {
     await registerRuntimeHostKeyFor(app, getDataSourceToken, m.agent_id, { workspaceId });
   }
 
-  const ds = app.get(getDataSourceToken());
-  const agentRepo = ds.getRepository('Agent');
-  const nameOf = async (id) => (await agentRepo.findOne({ where: { id } }))?.name ?? '';
-
-  const orchestrator = { id: view.orchestrator_agent_id, name: await nameOf(view.orchestrator_agent_id) };
+  // P4c-4: 이름은 팀 투영이 합성한 agent_name/orchestrator_name 이다 (Agent 행 없음).
+  const orchestrator = { id: view.orchestrator_agent_id, name: view.orchestrator_name };
   const memberRows = [];
   for (const m of view.members) {
-    memberRows.push({ id: m.agent_id, name: await nameOf(m.agent_id), role_label: m.role_label });
+    memberRows.push({ id: m.agent_id, name: m.agent_name, role_label: m.role_label });
   }
 
   return {

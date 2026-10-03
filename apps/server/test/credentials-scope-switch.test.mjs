@@ -13,7 +13,6 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { Credential } from '../dist/entities/Credential.js';
-import { Agent } from '../dist/entities/Agent.js';
 import { Resource } from '../dist/entities/Resource.js';
 import { AgentSessionCliSetting } from '../dist/entities/AgentSessionCliSetting.js';
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
@@ -41,7 +40,7 @@ describe('Credential scope switch (update)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Credential, Agent, Resource, AgentSessionCliSetting, OutreachChannel],
+      entities: [Credential, Resource, AgentSessionCliSetting, OutreachChannel],
       synchronize: true,
       logging: false,
     });
@@ -64,7 +63,7 @@ describe('Credential scope switch (update)', () => {
 
   beforeEach(async () => {
     audit.length = 0;
-    for (const entity of [Credential, Agent, Resource, AgentSessionCliSetting, OutreachChannel]) {
+    for (const entity of [Credential, Resource, AgentSessionCliSetting, OutreachChannel]) {
       await dataSource.getRepository(entity).clear();
     }
   });
@@ -164,16 +163,17 @@ describe('Credential scope switch (update)', () => {
       assert.equal((await credRepo.findOne({ where: { id: cred.id } })).workspace_id, null);
     });
 
+    // P4c-4: Agent 항목 제거 — instance-wide 종속은 global Resource 로 센다.
     it('counts an instance-wide dependent (NULL workspace_id) as outside', async () => {
       const cred = await seed(null);
-      const agentRepo = dataSource.getRepository(Agent);
-      await agentRepo.save(agentRepo.create({
-        workspace_id: null, name: 'runtime-host', credential_id: cred.id,
+      const resourceRepo = dataSource.getRepository(Resource);
+      await resourceRepo.save(resourceRepo.create({
+        workspace_id: null, board_id: null, credential_id: cred.id, name: 'Global repo',
       }));
       const res = response();
       await controller.update(cred.id, { workspace_id: 'ws-a', scope: 'workspace' }, adminReq, res);
       assert.equal(res.statusCode, 409);
-      assert.match(res.body.error, /1 agent\(s\)/);
+      assert.match(res.body.error, /1 resource\(s\)/);
     });
 
     it('allows the move when every dependent already lives in the destination', async () => {

@@ -43,7 +43,7 @@ const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'Bo
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
+/* P4c-4: Agent 엔티티 삭제 — import 제거. */
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { registerMiscTools } = await import('file://' + path.join(DIST, 'modules', 'mcp', 'tools', 'misc-tools.js'));
 
@@ -51,7 +51,7 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 
 const boardRepo = ds.getRepository(Board);
 const colRepo = ds.getRepository(BoardColumn);

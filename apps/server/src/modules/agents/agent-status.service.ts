@@ -14,7 +14,6 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { QaRun } from '../../entities/QaRun';
@@ -25,6 +24,7 @@ import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
 import { AgentLifecycleState, deriveAgentLifecycleState, autostartFeasibilityLabel } from '../../common/agent-lifecycle';
+import { isUuidShapedId } from '../../utils/agent-name';
 
 // Internal shape — held in memory with Date objects for precision. The wire
 // shape (AgentStatusPayload in common/types/stream-events.ts) carries ISO-8601
@@ -194,7 +194,6 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   private sweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     metrics: MemoryMetricsRegistry,
@@ -350,17 +349,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit(): Promise<void> {
-    // Seed the in-memory map from the current DB snapshot so that the first
-    // sweep after startup compares against real state (not an empty map).
-    const agents = await this.agentRepo.find();
-    for (const a of agents) {
-      this.state.set(a.id, {
-        agent_id: a.id,
-        is_online: !!a.is_online,
-        last_seen_at: a.last_seen_at,
-        connected_at: a.connected_at,
-      });
-    }
+    // P4c-4: Agent 테이블 없음 — seed 없음 (in-memory 상태는 heartbeat/SSE 와
+    // setCurrentTask 경로에서 쌓인다).
 
     // QA live-task wiring (ticket 09ed8def). Subscribe to the internal
     // qa_task_changed signal QaRunService fires on run start/finalize, then seed
@@ -384,9 +374,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
       });
     }, SWEEP_INTERVAL_MS);
 
-    this.logService.info('AgentStatus', 'Service initialized with N agents seeded', {
-      count: agents.length,
-    });
+    // P4c-4: Agent 테이블 없음 — seed 없음.
+    this.logService.info('AgentStatus', 'Service initialized (no agent seed — Agent table dropped)');
   }
 
   onModuleDestroy(): void {
@@ -732,13 +721,8 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
     try {
       let status = this.state.get(agent_id);
       if (!status) {
-        const a = await this.agentRepo.findOne({ where: { id: agent_id } });
-        status = a
-          ? { agent_id, is_online: !!a.is_online, last_seen_at: a.last_seen_at, connected_at: a.connected_at }
-          : { agent_id, is_online: false, last_seen_at: null, connected_at: null };
-        // Persist only a real agent's status; a phantom id stays transient and
-        // the sweep's deleted-agent eviction would drop it anyway.
-        if (a) this.state.set(agent_id, status);
+        // P4c-4: Agent 테이블 없음 — offline 스냅샷으로 emit 한다.
+        status = { agent_id, is_online: false, last_seen_at: null, connected_at: null };
       }
       this._emit(status);
     } catch (err) {
@@ -978,13 +962,23 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
    * persist is_online=0 to the DB so admin views stay consistent.
    */
   private async _sweep(): Promise<void> {
+    // P4c-4: Agent 테이블 없음 — DB 스윕 없이 인메모리 상태만 유지한다.
+    // P4c-4: Agent 테이블 없음 — 스윕은 인메모리 상태 키를 직접 돈다.
+    // presence 의 유일한 원천은 heartbeat/레지스트리다.
     const threshold = new Date(Date.now() - OFFLINE_THRESHOLD_MS);
-    const agents = await this.agentRepo.find();
     const seen = new Set<string>();
-    for (const a of agents) {
-      seen.add(a.id);
-      const prev = this.state.get(a.id);
-      const is_online = !!(a.last_seen_at && a.last_seen_at > threshold);
+    for (const id of this.state.keys()) {
+      const prev = this.state.get(id);
+      const lastSeen = prev?.last_seen_at instanceof Date
+        ? prev.last_seen_at.getTime()
+        : typeof prev?.last_seen_at === 'string' ? new Date(prev.last_seen_at).getTime() : 0;
+      const is_online = lastSeen > threshold.getTime();
+      const a = {
+        id,
+        last_seen_at: prev?.last_seen_at instanceof Date ? prev.last_seen_at : null,
+        connected_at: prev?.connected_at instanceof Date ? prev.connected_at : null,
+        is_online: is_online ? 1 : 0,
+      };
 
       // Auto-start markers (ticket bfdd80b7). Drop them the moment the agent is
       // actually online — a spawn that landed shouldn't keep flashing "시작 중".
@@ -1059,37 +1053,13 @@ export class AgentStatusService implements OnModuleInit, OnModuleDestroy {
         });
       }
 
-      // D-54: persist is_online flip when crossing from online → offline.
-      // We only write when it actually changed to avoid write amplification.
-      if (!is_online && a.is_online === 1) {
-        await this.agentRepo.update(a.id, { is_online: 0 });
-      }
     }
 
-    // Evict in-memory entries for agents whose DB row no longer exists (agent
-    // deleted / moved out of this single-workspace scope). Without this the
-    // sweep only ever `set`s, so a deleted agent's AgentStatus lingered for the
-    // life of the process — a slow unbounded grower over months of churn.
-    // active_tasks for a vanished agent goes with the entry; nothing else holds
-    // a reference. (setCurrentTask can transiently re-add an id the next time
-    // that agent signals; only ids absent from the DB snapshot are dropped.)
-    for (const id of this.state.keys()) {
-      if (!seen.has(id)) this.state.delete(id);
-    }
-    // Same eviction for the QA registry (ticket 09ed8def) — an agent deleted
-    // mid-run would otherwise leave its QA task lingering. The reaper still
-    // finalizes the orphaned run, but this bounds the map even if that lags.
-    for (const id of this.qaTasks.keys()) {
-      if (!seen.has(id)) this.qaTasks.delete(id);
-    }
-    // Same eviction for the auto-start markers (ticket bfdd80b7) — a deleted
-    // agent must not leave a starting/error marker lingering.
-    for (const id of this.startingAt.keys()) {
-      if (!seen.has(id)) this.startingAt.delete(id);
-    }
-    for (const id of this.startErrorAt.keys()) {
-      if (!seen.has(id)) this.startErrorAt.delete(id);
-    }
+    // P4c-4: Agent 테이블 없음 — DB 스냅샷 비교 eviction 을 하지 않는다.
+    // 인메모리 항목은 TTL/완료 경로에서 정리된다 (아래 output-liveness TTL 과
+    // 각 task 완료 시점). 빈 seen 으로 전부 지우면 setCurrentTask 상태가
+    // 매 스윕마다 날아가므로 여기는 손대지 않는다.
+    void seen;
 
     // Refresh the effective output-liveness retention TTL (ticket 47a72129)
     // from the largest supervisor_stale_ms across workspaces, so retention is

@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Agent } from '../../entities/Agent';
 import { AgentSkillAssignment } from '../../entities/AgentSkillAssignment';
 import { RunSkillSnapshot } from '../../entities/RunSkillSnapshot';
 import { Skill } from '../../entities/Skill';
@@ -25,7 +24,6 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     RunSkillSnapshot,
     SkillProposal,
     SkillTap,
-    Agent,
   ])],
   controllers: [SkillsController, SkillRegistryController],
   providers: [

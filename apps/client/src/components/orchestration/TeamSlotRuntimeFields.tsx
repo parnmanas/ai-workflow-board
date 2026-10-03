@@ -151,7 +151,10 @@ export default function TeamSlotRuntimeFields({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [customFolder, setCustomFolder] = useState(false);
 
-  const host = hosts.find((h) => h.manager_agent_id === value.manager_agent_id) ?? null;
+  // P4: 구 spec(manager Agent uuid)과 신 spec(Host id) 둘 다 같은 Host 로 본다.
+  const host = hosts.find(
+    (h) => h.manager_agent_id === value.manager_agent_id || (h.legacy_agent_id != null && h.legacy_agent_id === value.manager_agent_id),
+  ) ?? null;
   const cli = value.runtime.runtime || '';
 
   const patch = (next: Partial<SlotDraft>) => onChange({ ...value, ...next });

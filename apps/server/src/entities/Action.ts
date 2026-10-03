@@ -55,6 +55,15 @@ export class Action {
   target_agent_ids: string;
 
   /**
+   * Snapshots of every target's runtime at save time (P2c dual-write).
+   * `target_agent_ids`와 항상 함께 쓴다 — 배열이 정본, 저장 시점에 각 대상의
+   * `runtimeSpecFromAgentRow()` 복사. P4에서 dispatch가 이쪽을 읽으면
+   * `target_agent_id(s)`는 제거된다. 그 전까지 읽는 쪽은 없다.
+   */
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  target_runtimes: Array<Record<string, any>> | null;
+
+  /**
    * @deprecated 크론은 Workspace Schedule 로 옮겼다 — `workspace_schedules.action_id`
    * 가 이 Action 을 가리키고 "언제" 는 그쪽이 정한다. 이유는
    * `entities/WorkspaceSchedule.ts` 헤더 참조(구현이 두 벌이었고 이쪽은 로컬시간

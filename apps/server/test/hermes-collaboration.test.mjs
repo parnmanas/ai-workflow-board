@@ -85,10 +85,23 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
     },
   };
   const proposals = [];
+  // P4c-4: 호출자 정체성은 Host 행 또는 ApiKey 링크로 해소한다 (Agent 테이블 없음).
+  const childUuid = '11111111-1111-4111-8111-111111111111';
   const repositories = {
-    Agent: {
+    RuntimeHost: {
+      // 링크 해소는 연결된 Host 행까지 확인한다 (authz.resolveCallerIdentityRow).
+      async findOne({ where } = {}) {
+        if (where?.id && where.id !== 'host-1') return null;
+        return { id: 'host-1', name: 'host', workspace_id: 'ws-1' };
+      },
+    },
+    ApiKey: {
       async findOne() {
-        return { id: 'agent-1', workspace_id: 'ws-1' };
+        return { agent_id: childUuid, host_id: 'host-1', workspace_id: 'ws-1' };
+      },
+      // resolveCallerIdentityRow 는 host 바인딩 우선 조회(find)다.
+      async find() {
+        return [{ agent_id: childUuid, host_id: 'host-1', workspace_id: 'ws-1' }];
       },
     },
     Skill: {
@@ -119,7 +132,7 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
 
   const transport = { close: async () => {} };
   sessionStore.register('runtime-session', transport, {}, {
-    agentId: 'agent-1',
+    agentId: childUuid,
     source: 'db',
     clientType: 'runtime-child',
     runtimeRunId: 'ticket:t-1:reviewer',
@@ -136,7 +149,7 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
   assert.equal(result.isError, undefined);
   assert.equal(proposals.length, 1);
   assert.equal(proposals[0].status, 'pending');
-  assert.equal(proposals[0].source_agent_id, 'agent-1');
+  assert.equal(proposals[0].source_agent_id, childUuid);
   assert.equal(proposals[0].source_run_id, 'ticket:t-1:reviewer');
 
   const unauthorized = await registered.handler({

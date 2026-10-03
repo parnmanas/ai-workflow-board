@@ -1,6 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
@@ -19,7 +19,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Agent, AgentSessionCliSetting, Credential, ClaudeBackendProfile]),
+    TypeOrmModule.forFeature([RuntimeHost, AgentSessionCliSetting, Credential, ClaudeBackendProfile]),
     // 모델 목록의 단일 출처(HostModelsService)를 **공유**하기 위해서다 — providers 에
     // 넣으면 이 모듈만의 인스턴스가 생겨 세션이 관측한 모델이 다른 화면에 전달되지 않는다.
     forwardRef(() => AgentManagerModule),

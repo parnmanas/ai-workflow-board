@@ -9,7 +9,6 @@ import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { Agent } from '../../entities/Agent';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
@@ -17,6 +16,9 @@ import { renderSecurityRunPrompt, renderChecklistRefreshPrompt } from './securit
 import { SecurityFailureTicketService } from './security-failure-ticket.service';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { Board } from '../../entities/Board';
+import { isRuntimeIdentityKey } from '../../common/runtime-spec';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
+import { isUuidShapedId } from '../../utils/agent-name';
 
 function makeError(status: number, message: string): Error & { status: number } {
   const err = new Error(message) as Error & { status: number };
@@ -121,7 +123,6 @@ export class SecurityRunService {
     @InjectRepository(ChatRoomParticipant) private readonly participantRepo: Repository<ChatRoomParticipant>,
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
@@ -152,8 +153,11 @@ export class SecurityRunService {
     if (!profile.target_agent_id) throw makeError(400, 'security profile has no target agent set');
     if (profile.enabled === false) throw makeError(400, 'security profile is disabled');
 
-    const agent = await this.agentRepo.findOne({ where: { id: profile.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
+    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음). rt- 는 스냅샷이 해소.
+    const agent = await resolveCallerIdentityRow(this.dataSource, profile.target_agent_id);
+    if (!agent && !isRuntimeIdentityKey(profile.target_agent_id)) {
+      throw makeError(400, 'target agent not found');
+    }
     const boardId = String(args.boardId ?? profile.on_failure_ticket?.board_id ?? '').trim() || null;
     if (boardId) {
       await findOrFail(
@@ -209,12 +213,17 @@ export class SecurityRunService {
 
     // Add the inspection agent as a participant. A synthetic 'system' user
     // carries the first message (no real triggering user in scope), like QA.
+    // P4a: profile 스냅샷 우선, agent 행 폴백.
     const joinedAt = new Date();
     await this.participantRepo.save([
       this.participantRepo.create({
         room_id: room.id,
         participant_type: 'agent',
-        participant_id: agent.id,
+        participant_id: profile.target_agent_id,
+        // P4c-4: profile 스냅샷만 기록한다 (Agent 행 없음).
+        runtime_spec: profile.target_runtime
+          ? { ...profile.target_runtime }
+          : null,
         last_read_at: joinedAt,
         left_at: null,
       }),
@@ -275,7 +284,7 @@ export class SecurityRunService {
       throw makeError(e?.status ?? 502, reason);
     }
 
-    this.logService.info('Security', `started security run ${runId} profile ${profile.id} scope=${scopeUsed} baseline=${baselineCommit ?? '(none)'} → agent ${agent.id} room ${room.id}`);
+    this.logService.info('Security', `started security run ${runId} profile ${profile.id} scope=${scopeUsed} baseline=${baselineCommit ?? '(none)'} → agent ${profile.target_agent_id} room ${room.id}`);
     return { run, room_id: room.id, prompt };
   }
 
@@ -295,8 +304,11 @@ export class SecurityRunService {
     if (!profile.target_agent_id) throw makeError(400, 'security profile has no target agent set');
     if (profile.enabled === false) throw makeError(400, 'security profile is disabled');
 
-    const agent = await this.agentRepo.findOne({ where: { id: profile.target_agent_id } });
-    if (!agent) throw makeError(400, 'target agent not found');
+    // P4c-4: checklist refresh 방도 Host/링크 해소 (Agent 행 없음).
+    const agent = await resolveCallerIdentityRow(this.dataSource, profile.target_agent_id);
+    if (!agent && !isRuntimeIdentityKey(profile.target_agent_id)) {
+      throw makeError(400, 'target agent not found');
+    }
 
     const room = await this.roomRepo.save(this.roomRepo.create({
       workspace_id: profile.workspace_id,
@@ -314,7 +326,12 @@ export class SecurityRunService {
       this.participantRepo.create({
         room_id: room.id,
         participant_type: 'agent',
-        participant_id: agent.id,
+        participant_id: profile.target_agent_id,
+        // P4a: checklist refresh 방도 profile 스냅샷 우선.
+        // P4c-4: profile 스냅샷만 기록한다 (Agent 행 없음).
+        runtime_spec: profile.target_runtime
+          ? { ...profile.target_runtime }
+          : null,
         last_read_at: joinedAt,
         left_at: null,
       }),
@@ -340,7 +357,7 @@ export class SecurityRunService {
       this.logService.warn('Security', `sendMessage failed for checklist refresh of profile ${profile.id}: ${e?.message || e}`);
     }
 
-    this.logService.info('Security', `dispatched checklist refresh for profile ${profile.id} → agent ${agent.id} room ${room.id}`);
+    this.logService.info('Security', `dispatched checklist refresh for profile ${profile.id} → agent ${profile.target_agent_id} room ${room.id}`);
     return { profile_id: profile.id, room_id: room.id, prompt };
   }
 

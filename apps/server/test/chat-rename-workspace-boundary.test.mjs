@@ -29,7 +29,8 @@ import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
 import { User } from '../dist/entities/User.js';
-import { Agent } from '../dist/entities/Agent.js';
+import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
+import { ApiKey } from '../dist/entities/ApiKey.js';
 import { OrchestrationMission } from '../dist/entities/OrchestrationMission.js';
 import { RoomMembershipService } from '../dist/modules/chat-rooms/room-membership.service.js';
 import { RoomCrudService } from '../dist/modules/chat-rooms/room-crud.service.js';
@@ -134,7 +135,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, OrchestrationMission],
+      entities: [ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, RuntimeHost, ApiKey, OrchestrationMission],
       synchronize: true,
       logging: false,
     });
@@ -149,13 +150,14 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
     const partRepo = dataSource.getRepository(ChatRoomParticipant);
     const msgRepo = dataSource.getRepository(ChatRoomMessage);
     const userRepo = dataSource.getRepository(User);
-    const agentRepo = dataSource.getRepository(Agent);
+    const hostRepo = dataSource.getRepository(RuntimeHost); // P4c-4
 
+    // P4c-4: agentRepo 인자 삭제.
     membership = new RoomMembershipService(
-      roomRepo, partRepo, userRepo, agentRepo, dataSource,
+      roomRepo, partRepo, userRepo, dataSource,
       dataSource.getRepository(OrchestrationMission),
     );
-    crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, agentRepo, noopLog, membership);
+    crud = new RoomCrudService(roomRepo, partRepo, msgRepo, userRepo, dataSource, noopLog, membership); // P4c-4
     // rename 경로는 messaging / attachmentRepo 를 건드리지 않는다 — 이 스위트가 쓰지
     // 않는 의존성만 빈 객체로 둔다. crud 와 membership 은 전부 진짜다.
     controller = new ChatRoomsController(crud, membership, {}, {});
@@ -178,9 +180,9 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
       userRepo.create({ id: ALICE, name: 'Alice', email: 'alice@example.com' }),
       userRepo.create({ id: OUTSIDER, name: 'Outsider', email: 'out@example.com' }),
     ]);
-    await agentRepo.save([
-      agentRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
-      agentRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
+    await hostRepo.save([
+      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
+      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
     ]);
 
     roomUpdates = [];

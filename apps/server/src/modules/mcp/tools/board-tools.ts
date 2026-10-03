@@ -479,9 +479,8 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
     'ws-level actions / resources / channels into the destination by name if absent (non-destructive). ' +
     'ALWAYS dry-run first (dry_run=true, the default) to see exactly what will move / copy / remap and what blocks ' +
     'the move — then re-call with dry_run=false to commit atomically (single transaction, all-or-nothing). ' +
-    'Companion agents (those holding roles on the board\'s tickets) are reported; pass carry_agents=true to move ' +
-    'them too, which is refused for any agent that also holds roles on tickets outside this board (pass that agent\'s ' +
-    'id in exclude_agent_ids to move the board without it). The dry-run report\'s `blockers` are STRUCTURED objects ' +
+    'P4c-4: companion-agent carry is retired (Agent table dropped) — carry_agents/exclude_agent_ids are accepted ' +
+    'but ignored; role holders stay as-is. The dry-run report\'s `blockers` are STRUCTURED objects ' +
     '({ code, message, agent_id?, ticket_ids?, remedies[] }) — `message` is the human-readable reason; `remedies` ' +
     'lists the actions that clear each blocker. Admin-gated.',
     {
@@ -490,9 +489,9 @@ export function registerBoardTools(server: McpServer, ctx: ToolContext): void {
       dry_run: z.boolean().optional().default(true)
         .describe('true (default) returns the preview report without writing; false commits the move atomically'),
       carry_agents: z.boolean().optional().default(false)
-        .describe('Also move companion agents (workspace_id + api keys + credential) when they hold no roles outside this board'),
+        .describe('Retired in P4c-4 (accepted but ignored — Agent table dropped)'),
       exclude_agent_ids: z.array(z.string()).optional()
-        .describe('Companion agent ids to EXCLUDE from the carry even when carry_agents=true — the board moves without them (write-free way to clear a companion_agent_outside_roles blocker)'),
+        .describe('Retired in P4c-4 (accepted but ignored — Agent table dropped)'),
     },
     async ({ board_id, target_workspace_id, dry_run, carry_agents, exclude_agent_ids }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);

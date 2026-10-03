@@ -50,29 +50,42 @@ const TICKET_ID = '44444444-4444-4444-8444-444444444444';
 const COLUMN_ID = 'column-done';
 const BOARD_ID = 'board-1';
 
-/** Postgres 의 uuid 컬럼을 모사한 agents repo — 비-uuid id 에 실제로 던진다. */
+/** Postgres 의 uuid 컬럼을 모사한 scope — 비-uuid id 에 실제로 던진다.
+ * P4c-4: Agent 행 없음 — AGENT_UUID 는 Host 행('Rolf')으로 해소된다. */
 function pgLikeAgentRepo(calls) {
+  const check = (id) => {
+    calls.push(id);
+    if (!UUID_SHAPE.test(String(id ?? ''))) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+  };
+  const unwrap = (v) => (v && typeof v === 'object' && 'value' in v ? v.value : v);
+  const hostFind = async (opts) => {
+    const op = opts?.where?.id;
+    const raw = unwrap(op);
+    const ids = Array.isArray(raw) ? raw : [raw];
+    // ApiKey OR 분기(where 배열)도 같은 엄격함으로 본다.
+    const flat = Array.isArray(opts?.where)
+      ? opts.where.flatMap((w) => [unwrap(w?.agent_id), unwrap(w?.host_id)])
+      : ids;
+    for (const id of flat) {
+      if (id !== undefined) check(id);
+    }
+    return ids.filter((id) => id === AGENT_UUID).map((id) => ({ id, name: 'Rolf' }));
+  };
   return {
     async findOne(opts) {
-      const id = opts?.where?.id;
-      calls.push(id);
-      if (!UUID_SHAPE.test(String(id ?? ''))) {
-        throw new Error(`invalid input syntax for type uuid: "${id}"`);
-      }
-      return id === AGENT_UUID
-        ? { id, name: 'Bob', manager_agent_id: MANAGER_UUID }
-        : null;
+      check(opts?.where?.id);
+      return null;
     },
     async find(opts) {
-      const op = opts?.where?.id;
-      const raw = op && typeof op === 'object' && 'value' in op ? op.value : op;
-      const ids = Array.isArray(raw) ? raw : [raw];
-      return ids
-        .filter((id) => id === MANAGER_UUID)
-        .map((id) => ({ id, name: 'Rolf', manager_agent_id: null }));
+      return hostFind(opts);
     },
   };
 }
+
+/** P4c-4: resolveAgentDisplayName 은 scope(getRepository 보유)를 받는다. */
+const asScope = (repo) => ({ getRepository: () => repo });
 
 function boardUpdateDef() {
   const def = EVENT_TYPES.find((d) => d.eventType === 'board_update');
@@ -86,7 +99,7 @@ function mapCtx(agentRepo) {
     resolveBoardId: async () => BOARD_ID,
     resolveTicketRepositoryResourceId: async () => '',
     resolveTicketColumnSnapshot: async () => ({ id: COLUMN_ID, name: 'Done', kind: 'done' }),
-    resolveActorDisplayName: (actorId) => resolveAgentDisplayName(agentRepo, actorId),
+    resolveActorDisplayName: (actorId) => resolveAgentDisplayName(asScope(agentRepo), actorId),
   };
 }
 
@@ -129,7 +142,7 @@ test('sentinel actor 의 board_update 프레임이 살아남고 저장된 actor_
   }
 });
 
-test('실제 agent actor 는 여전히 <Manager>/<Agent> 로 정규화된다 (수정이 보강을 끄지 않았다)', async () => {
+test('실제 agent actor 는 Host bare display 로 보강된다 (수정이 보강을 끄지 않았다)', async () => {
   const def = boardUpdateDef();
   const calls = [];
   const mapped = await def.map({
@@ -139,10 +152,10 @@ test('실제 agent actor 는 여전히 <Manager>/<Agent> 로 정규화된다 (�
 
   assert.ok(mapped);
   assert.equal(
-    mapped.payload.actor_name, 'Rolf/Bob',
-    'uuid actor 는 manager prefix 까지 붙은 정규 표시로 보강된다',
+    mapped.payload.actor_name, 'Rolf',
+    'uuid actor 는 Host display 로 보강된다 (P4c-4: prefix 합성 없음)',
   );
-  assert.deepEqual(calls, [AGENT_UUID]);
+  assert.ok(calls.includes(AGENT_UUID), 'uuid actor 는 조회에 닿아야 한다 (가드가 공허하면 안 된다)');
 });
 
 // ── 2차 방어: 이름 보강 실패가 프레임을 죽이지 못한다 ───────────────────────
@@ -152,9 +165,9 @@ test('실제 agent actor 는 여전히 <Manager>/<Agent> 로 정규화된다 (�
 // 감싼다 — 실패 시 warn 을 남기고 저장된 actor_name 으로 프레임을 내보낸다.
 
 function alwaysThrowingAgentRepo() {
+  // P4c-4: dataSource 자리 — getRepository 자체가 던진다.
   return {
-    async findOne() { throw new Error('agents 조회 실패 (연결 끊김 모사)'); },
-    async find() { throw new Error('agents 조회 실패 (연결 끊김 모사)'); },
+    getRepository() { throw new Error('agents 조회 실패 (연결 끊김 모사)'); },
   };
 }
 
@@ -191,6 +204,7 @@ test('EventsController 는 actor 이름 보강이 던져도 board_update 를 발
 
   const controller = new EventsController(
     ticketRepo, colRepo, emptyRepo, emptyRepo, alwaysThrowingAgentRepo(),
+    /* hostRepo (P4c-4) */ emptyRepo, /* apiKeyRepo (P4c-4) */ emptyRepo,
     authService,
     { async validateApiKey() { return { valid: false }; } },
     logService,

@@ -90,7 +90,8 @@ test('Orchestration Team: global roster integrity — a global team provisions w
   const ds = app.get(getDataSourceToken());
   const { OrchestrationTeamService } = services;
   const teams = app.get(OrchestrationTeamService);
-  const agentRepo = ds.getRepository('Agent');
+  // P4c-4: workspace 귀속은 member 행이 진다 (Agent 행 없음).
+  const memberRepo = ds.getRepository('OrchestrationTeamMember');
 
   const ws = await createWorkspace(app, getDataSourceToken, 'roster-integrity');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'roster-host' });
@@ -110,15 +111,14 @@ test('Orchestration Team: global roster integrity — a global team provisions w
   assert.deepEqual(team.allowed_workspace_ids, [ws.id]);
 
   step('Its orchestrator identity is workspace-less, not stamped with the creating workspace');
-  const orchRow = await agentRepo.findOne({ where: { id: team.orchestrator_agent_id } });
-  assert.equal(orchRow.workspace_id, null,
-    'a global team must not mint a workspace-scoped worker — that is what would leak one workspace\'s mission room to another');
-  assert.equal(orchRow.origin, 'orchestration', 'the identity is team-owned, so the roster may edit and delete it');
+  // P4c-4: orchestrator identity 는 rt- 키라 행이 없다 — 팀 행의 null workspace +
+  // 아래 member 행 단언이 귀속을 커버한다.
+  assert.equal(team.workspace_id, null, 'global team row carries no workspace');
 
   step('So is every member identity it provisions');
   const withMember = await teams.addMember(team.id, ws.id, { runtime: slotSpec(host.id), role_label: 'builder' });
   assert.equal(withMember.members.length, 1);
-  const memberRow = await agentRepo.findOne({ where: { id: withMember.members[0].agent_id } });
+  const memberRow = await memberRepo.findOne({ where: { team_id: team.id, agent_id: withMember.members[0].agent_id } });
   assert.equal(memberRow.workspace_id, null);
 
   step('A workspace-scoped team stamps its workspace onto the identities instead');
@@ -128,8 +128,8 @@ test('Orchestration Team: global roster integrity — a global team provisions w
     orchestrator: slotSpec(host.id),
     created_by: HUMAN.id,
   });
-  const scopedOrch = await agentRepo.findOne({ where: { id: scopedTeam.orchestrator_agent_id } });
-  assert.equal(scopedOrch.workspace_id, ws.id);
+  // P4c-4: orchestrator 는 member 행이 없다 — 팀 행 + 아래 member 행 귀속이 귀속을 커버한다.
+  assert.equal(scopedTeam.workspace_id, ws.id);
 });
 
 test('Orchestration Team: allowed_workspace_ids is validated against real workspace rows, not just normalized', async (t) => {
@@ -300,7 +300,7 @@ test('Orchestration Team: workspace-scoped team behavior is unchanged by the glo
   const missionsSvc = app.get(services.OrchestrationMissionService);
   const detail = await missionsSvc.getMissionDetail(omitted.mission_id, wsA.id);
   assert.equal(detail.workspace_id, wsA.id);
-  await app.get(services.OrchestrationRunnerService).completeMission(omitted.mission_id, orch.id, {
+  await app.get(services.OrchestrationRunnerService).completeMission(omitted.mission_id, { agentId: orch.id }, {
     status: 'failed', summary: 'cleanup',
   });
 
@@ -309,7 +309,7 @@ test('Orchestration Team: workspace-scoped team behavior is unchanged by the glo
     team_id: team.id, title: 'matching ws', objective: 'matching ws', workspace_id: wsA.id, start: false,
   });
   assert.ok(!matching.isError, `create failed: ${JSON.stringify(matching)}`);
-  await app.get(services.OrchestrationRunnerService).completeMission(matching.mission_id, orch.id, {
+  await app.get(services.OrchestrationRunnerService).completeMission(matching.mission_id, { agentId: orch.id }, {
     status: 'failed', summary: 'cleanup',
   });
 
@@ -433,12 +433,13 @@ test('Orchestration Team: dispatchStep re-validates workspace legality — a mem
   const stayer = squad.member('stayer');
   const mover = squad.member('mover');
 
-  step('mover joins while still in workspace A, then is moved to workspace B — membership row is left stale (pre-existing bug)');
-  await workspaceMove.commitAgentMove(mover.id, wsB.id, { actor_id: HUMAN.id, actor_name: HUMAN.name });
-  const moverRow = await ds.getRepository('Agent').findOne({ where: { id: mover.id } });
-  assert.equal(moverRow.workspace_id, wsB.id);
+  step('mover joins while still in workspace A, then its membership goes stale in workspace B');
+  // P4c-4: agent 이동 retired — stale membership 을 member 행 직접 수정으로 재현한다.
+  await ds.getRepository('OrchestrationTeamMember').update(
+    { team_id: team.id, agent_id: mover.id }, { workspace_id: wsB.id },
+  );
   const staleMembership = await ds.getRepository('OrchestrationTeamMember').findOne({ where: { team_id: team.id, agent_id: mover.id } });
-  assert.ok(staleMembership, 'the membership row is NOT cleaned up by the move — this is the gap dispatchStep must catch');
+  assert.ok(staleMembership, 'the membership row carries the stale workspace — this is the gap dispatchStep must catch');
 
   step('Start a mission and submit a plan with one step per member, both dependency-free');
   const mission = await missions.createMission({
@@ -446,7 +447,7 @@ test('Orchestration Team: dispatchStep re-validates workspace legality — a mem
     created_by_type: 'user', created_by: HUMAN.id,
   });
   const started = await runner.startMission(mission.id, wsA.id, HUMAN);
-  const plan = await runner.submitPlan(mission.id, orch.id, {
+  const plan = await runner.submitPlan(mission.id, { agentId: orch.id }, {
     steps: [
       { step_key: 'stays', title: 'Goes to the agent still in A', instructions: 'do it', assignee_agent_id: stayer.id },
       { step_key: 'moved', title: 'Goes to the agent moved to B', instructions: 'do it', assignee_agent_id: mover.id },
@@ -484,7 +485,6 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const teams = app.get(OrchestrationTeamService);
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
-  const workspaceMove = app.get(WorkspaceMoveService);
 
   const wsA = await createWorkspace(app, getDataSourceToken, 'double-wake-a');
   const wsB = await createWorkspace(app, getDataSourceToken, 'double-wake-b');
@@ -498,8 +498,10 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const orch = squad.orchestrator;
   const first = squad.member('first');
   const second = squad.member('second');
-  await workspaceMove.commitAgentMove(second.id, wsB.id, { actor_id: HUMAN.id, actor_name: HUMAN.name });
-
+  // P4c-4: agent 이동 retired — stale membership 을 member 행 직접 수정으로 재현한다 (move-bug 테스트와 동일).
+  await ds.getRepository('OrchestrationTeamMember').update(
+    { team_id: team.id, agent_id: second.id }, { workspace_id: wsB.id },
+  );
   const mission = await missions.createMission({
     workspace_id: wsA.id, team_id: team.id, title: 'Double-wake mission',
     objective: 'Prove one pump-time dispatch failure yields exactly one wake.',
@@ -509,7 +511,7 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   // "blocked-on-first"는 "first"에 의존하므로 submitPlan 자체로는 디스패치되지
   // 않는다 — "first"가 done으로 보고되어야만, 즉 reportStep이 유발하는 pump()
   // 안에서만 디스패치 가능해진다.
-  await runner.submitPlan(mission.id, orch.id, {
+  await runner.submitPlan(mission.id, { agentId: orch.id }, {
     steps: [
       { step_key: 'first', title: 'First step', instructions: 'do it', assignee_agent_id: first.id },
       {
@@ -526,7 +528,7 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   // lease token 은 dispatchStep 이 attempt 마다 발급해 work order 에 실어 보낸다 —
   // 실제 작업자가 그걸 복사해 오듯, 여기서도 현재 값을 그대로 되돌려준다(티켓 4d065f82).
   const freshFirst = await missions.requireStep(firstStep.id);
-  const report = await runner.reportStep(firstStep.id, first.id, {
+  const report = await runner.reportStep(firstStep.id, { agentId: first.id }, {
     status: 'done',
     summary: 'done',
     lease_token: freshFirst.lease_token,

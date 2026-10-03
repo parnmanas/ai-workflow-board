@@ -115,6 +115,8 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   step('Create a team with an orchestrator and two members');
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 프로비저닝한다 — 에이전트를 미리 만들지 않고 만들어진 것을 돌려받는다.
+  // P4c-4: identity 는 spec 내용 주소다 — 서로 다른 worker 가 필요하면
+  // working_dir 가 달라야 한다 (같은 폴더·CLI·credential 은 같은 worker).
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     workspaceId: ws.id,
     name: 'Platform squad',
@@ -123,9 +125,10 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
       max_parallel_steps: 2,
       created_by: HUMAN.id,
     },
+    orchestrator: { spec: { working_dir: '/srv/lead' } },
     members: [
-      { role_label: 'backend', capabilities: 'NestJS + TypeORM, owns apps/server' },
-      { role_label: 'frontend', capabilities: 'React + Vite, owns apps/client' },
+      { role_label: 'backend', capabilities: 'NestJS + TypeORM, owns apps/server', spec: { working_dir: '/srv/server' } },
+      { role_label: 'frontend', capabilities: 'React + Vite, owns apps/client', spec: { working_dir: '/srv/client' } },
     ],
   });
   const team = squad.team;
@@ -137,28 +140,36 @@ test('Orchestration: team → mission → plan → parallel dispatch → reports
   const backendMcp = await mcpFor(backend, 'backend');
   const frontendMcp = await mcpFor(frontend, 'frontend');
 
-  // Two slots with an identical spec are two DIFFERENT workers — each slot owns
-  // its own identity so the orchestrator can address them separately (and so
-  // they can share a working folder while still getting distinct steps). The
-  // old "same agent twice" rejection has no input left to fire on.
+  // Two slots with an identical spec share ONE worker identity (content-addressed:
+  // same (cli, dir, credential) IS the same worker — the manager provisions by
+  // that key too). They are still two member rows (distinct role_labels, rooms,
+  // caps), and folder sharing is exactly this shape. The old "same agent twice"
+  // rejection has no input left to fire on.
+  // P4c-4: backend 멤버와 바이트 단위 동일 스펙으로 두 번째 backend 슬롯을
+  // 추가한다 (어느 필드 하나라도 다르면 다른 worker 다).
+  const backendCurrent = team.members.find((m) => m.role_label === 'backend');
+  const backendSpec = {
+    manager_agent_id: squad.host.id,
+    cli: backendCurrent.runtime.cli,
+    working_dir: backendCurrent.runtime.working_dir,
+    folder_scope: backendCurrent.runtime.folder_scope,
+    credential_id: backendCurrent.runtime.credential_id ?? null,
+    runtime_config: backendCurrent.runtime.runtime_config,
+  };
   const twinned = await teams.addMember(team.id, ws.id, {
-    runtime: {
-      manager_agent_id: squad.host.id,
-      cli: 'claude',
-      working_dir: '/srv/awb-test/workspace',
-      folder_scope: 'isolated',
-      runtime_config: { strategy: 'single', permission_mode: 'strict' },
-    },
+    runtime: backendSpec,
     role_label: 'backend',
     capabilities: 'NestJS + TypeORM, owns apps/server',
   });
   assert.equal(twinned.members.length, 3, 'an identically-configured slot is a new member, not a duplicate');
   const backendSlots = twinned.members.filter((m) => m.role_label === 'backend');
   assert.equal(backendSlots.length, 2);
-  assert.notEqual(backendSlots[0].agent_id, backendSlots[1].agent_id,
-    'each slot gets its own identity even when the runtime spec is identical');
+  assert.equal(backendSlots[0].agent_id, backendSlots[1].agent_id,
+    'identical specs share one worker identity (content-addressed)');
   assert.equal(backendSlots[0].runtime.working_dir, backendSlots[1].runtime.working_dir,
-    'and they can still name the same folder — that is how two workers share one tree');
+    'and they name the same folder — that is how two slots share one tree');
+  assert.notEqual(backendSlots[0].id, backendSlots[1].id,
+    'but they stay distinct member rows with their own role_labels and rooms');
   await teams.removeMember(team.id, ws.id, backendSlots[1].id);
 
   // ── 2. Mission + start ────────────────────────────────────────────────────

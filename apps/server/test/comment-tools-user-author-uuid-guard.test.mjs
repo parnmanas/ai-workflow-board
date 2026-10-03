@@ -40,7 +40,6 @@ const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.
 const { DataSource } = await import('typeorm');
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
 // comment-tools.js 가 보는 것과 **같은 클래스 객체**여야 프록시가 User 저장소를
 // 식별할 수 있다 — 그래서 배럴(index.js) 이 아니라 같은 모듈 경로로 집는다.
 const { User } = await import('file://' + path.join(DIST, 'entities', 'User.js'));
@@ -51,7 +50,7 @@ const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 
 const ticketRepo = ds.getRepository(Ticket);
 const userRepo = ds.getRepository(User);

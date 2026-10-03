@@ -91,7 +91,7 @@ test('SecurityScheduleService.runOnce short-circuits while quiesced, before touc
 test('WorkspaceScheduleService.runOnce short-circuits while quiesced, before touching any schedule row', async () => {
   const svc = new WorkspaceScheduleService(
     /* scheduleRepo */ {}, /* roomRepo */ {}, /* participantRepo */ {}, /* agentRepo */ {},
-    /* messaging */ {}, logStub, /* boardRepo */ {}, quiescedTrue,
+    /* hostRepo (P4c-4) */ {}, /* messaging */ {}, logStub, /* boardRepo */ {}, quiescedTrue,
   );
   const result = await svc.runOnce();
   assert.deepEqual(result, { dispatched: [] });
@@ -99,8 +99,10 @@ test('WorkspaceScheduleService.runOnce short-circuits while quiesced, before tou
 
 test('AgentAutostartService chat-path autostart (_handleChatRequest) short-circuits while quiesced, before classifying reachability', async () => {
   const metricsStub = { register: () => {} };
+  // P4c-4: (hostRepo, apiKeyRepo, managerCommand, agentStatus, activityService,
+  // roomMessaging, logService, metrics, instanceQuiesce).
   const svc = new AgentAutostartService(
-    /* agentRepo */ {}, /* managerCommand */ {}, /* agentStatus */ {}, /* activityService */ {},
+    {}, {}, /* managerCommand */ {}, /* agentStatus */ {}, /* activityService */ {},
     /* roomMessaging */ {}, logStub, metricsStub, quiescedTrue,
   );
   // Valid-looking event so the FIRST guard (`!evt?.agent_id || !evt.room_id`)
@@ -149,7 +151,7 @@ test('[review round 1 P2] QaRerunOnFixService bypasses QaScheduleService.runOnce
 test('[review round 1 P2] FeaturesService.dispatchPlanning refuses while quiesced (shared by create()auto_plan, reject()replan, AND the manual replan controller endpoint)', async () => {
   const svc = new FeaturesService(
     /* featureRepo */ {}, /* roomRepo */ {}, /* participantRepo */ {}, /* agentRepo */ {},
-    /* colRepo */ {}, /* boardRepo */ {}, /* dataSource */ {}, /* activityService */ {},
+    /* hostRepo (P4c-4) */ {}, /* colRepo */ {}, /* boardRepo */ {}, /* dataSource */ {}, /* activityService */ {},
     logStub, /* messaging */ {}, /* roleAssignmentService */ {}, /* prereqService */ {},
     /* triggerLoop */ {}, quiescedTrue,
   );

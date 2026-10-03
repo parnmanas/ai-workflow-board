@@ -23,11 +23,20 @@ export default function AgentSessionDashboard() {
 
   const workspaceId: string = (user as any)?.workspace_id ?? '';
 
+  // P4c-4: Agent 대시보드 제거 — Host 카탈로그를 행으로 매핑한다.
   const load = async () => {
     if (!workspaceId) return;
     try {
-      const data = await api.getAgentDashboard(workspaceId);
-      setRows(data);
+      const hosts = await api.listOrchestrationRuntimeHosts(workspaceId);
+      setRows((hosts as any[]).map((h: any) => ({
+        id: h.manager_agent_id,
+        name: h.manager_name,
+        is_online: !!h.is_online,
+        last_seen_at: h.last_seen_at,
+        connected_at: null,
+        workspace_id: workspaceId,
+        pending_trigger_count: 0,
+      })));
       setLastRefresh(new Date());
     } catch {
       // silently ignore polling errors — stale data is shown

@@ -105,7 +105,8 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       name: z.string().describe('Schedule name (required)'),
-      target_agent_id: z.string().optional().describe('The single agent the task is dispatched to (task_prompt 형태에서 필수)'),
+      target_agent_id: z.string().optional().describe('The single agent the task is dispatched to (task_prompt 형태에서 필수 — target_runtime과 택일)'),
+      target_runtime: z.record(z.string(), z.any()).optional().describe('RuntimeSpec declaring execution without an Agent row (task_prompt 형태에서 target_agent_id와 택일)'),
       task_prompt: z.string().optional().describe('Free-text task message sent to the agent when the schedule fires (action_id 와 택일)'),
       action_id: z.string().optional().describe('실행할 Action 의 id (task_prompt 와 택일)'),
       cron: z.string().optional().describe('5-field UTC cron (e.g. "0 3 * * *"). Mutually exclusive with interval_ms'),
@@ -120,6 +121,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
           workspaceId: args.workspace_id,
           name: args.name,
           targetAgentId: args.target_agent_id,
+          targetRuntime: (args as any).target_runtime,
           taskPrompt: args.task_prompt,
           actionId: args.action_id,
           cron: args.cron,
@@ -143,6 +145,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
       workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
       name: z.string().optional(),
       target_agent_id: z.string().optional(),
+      target_runtime: z.record(z.string(), z.any()).optional().describe('RuntimeSpec declaring execution without an Agent row'),
       task_prompt: z.string().optional(),
       action_id: z.string().nullable().optional(),
       cron: z.string().optional(),
@@ -155,6 +158,7 @@ export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolConte
         const row = await workspaceScheduleService.update(schedule_id, workspace_id, {
           name: patch.name,
           targetAgentId: patch.target_agent_id,
+          targetRuntime: (patch as any).target_runtime,
           taskPrompt: patch.task_prompt,
           actionId: patch.action_id,
           cron: patch.cron,

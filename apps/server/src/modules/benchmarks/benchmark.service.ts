@@ -3,15 +3,15 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { BenchmarkScore } from '../../entities/BenchmarkScore';
 import { Ticket } from '../../entities/Ticket';
-import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
-import { resolveAgentDisplayMap } from '../../utils/agent-name';
+import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 import { ActivityService } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 
 // ─── Run lifecycle labels (ticket 5eb459c4) ───────────────────
 // Run state lives on the run ticket's `labels` (a JSON-array field already wired
@@ -161,9 +161,10 @@ export class BenchmarkService {
 
     const { board, runColumn, candidateColumn } = await this._resolveRunColumns(boardId, input.candidate_column_name);
     const workspaceId = board.workspace_id || '';
+    // P4c-4: Host/링크 해소 (Agent 행 없음, manager 타입 검사 없음).
     for (const evaluatorId of evaluatorIds) {
-      const evaluator = await this.dataSource.getRepository(Agent).findOne({ where: { id: evaluatorId } });
-      if (!evaluator || evaluator.type === 'manager' || !agentIsVisibleInWorkspace(evaluator.workspace_id, workspaceId)) {
+      const evaluator = await resolveCallerIdentityRow(this.dataSource, evaluatorId);
+      if (!evaluator || !agentIsVisibleInWorkspace(evaluator.workspace_id, workspaceId)) {
         throw httpError(`Evaluator agent ${evaluatorId} is not available in this workspace`, 400);
       }
     }
@@ -312,8 +313,8 @@ export class BenchmarkService {
     const boardId = await this._runBoardId(run);
     if (patch.evaluator_agent_ids !== undefined) {
       for (const evaluatorId of patch.evaluator_agent_ids.filter(Boolean)) {
-        const evaluator = await this.dataSource.getRepository(Agent).findOne({ where: { id: evaluatorId } });
-        if (!evaluator || evaluator.type === 'manager' || !agentIsVisibleInWorkspace(evaluator.workspace_id, run.workspace_id)) {
+        const evaluator = await resolveCallerIdentityRow(this.dataSource, evaluatorId);
+        if (!evaluator || !agentIsVisibleInWorkspace(evaluator.workspace_id, run.workspace_id)) {
           throw httpError(`Evaluator agent ${evaluatorId} is not available in this workspace`, 400);
         }
       }
@@ -496,7 +497,6 @@ export class BenchmarkService {
     agentIds: string[],
     opts: { columnId: string; workspaceId: string; prompt: string; parked: boolean; actor?: RunActor },
   ): Promise<Array<{ candidate_ticket_id: string; assignee_agent_id: string; title: string; dispatched: number }>> {
-    const agentRepo = this.dataSource.getRepository(Agent);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     let childPos = await ticketRepo
       .createQueryBuilder('t')
@@ -505,9 +505,8 @@ export class BenchmarkService {
 
     const out: Array<{ candidate_ticket_id: string; assignee_agent_id: string; title: string; dispatched: number }> = [];
     for (const agentId of agentIds) {
-      const agent = await agentRepo.findOne({ where: { id: agentId } });
+      const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
       if (!agent) throw httpError(`Candidate agent ${agentId} not found`, 400);
-      if (agent.type === 'manager') throw httpError('Manager agents cannot be benchmark candidates', 400);
       if (!agentIsVisibleInWorkspace(agent.workspace_id, opts.workspaceId)) {
         throw httpError(`Candidate agent ${agentId} belongs to a different workspace`, 400);
       }
@@ -701,8 +700,8 @@ export class BenchmarkService {
     if (!candidate) {
       throw Object.assign(new Error(`Candidate ticket ${candidateId} not found`), { status: 404 });
     }
-    const evaluator = await this.dataSource.getRepository(Agent).findOne({ where: { id: evaluatorId } });
-    if (!evaluator || evaluator.type === 'manager' || !agentIsVisibleInWorkspace(evaluator.workspace_id, candidate.workspace_id)) {
+    const evaluator = await resolveCallerIdentityRow(this.dataSource, evaluatorId);
+    if (!evaluator || !agentIsVisibleInWorkspace(evaluator.workspace_id, candidate.workspace_id)) {
       throw Object.assign(new Error('Evaluator agent is not available in the candidate workspace'), { status: 400 });
     }
     // Run = candidate's parent (the run ticket holds the task). Explicit
@@ -865,14 +864,10 @@ export class BenchmarkService {
       .sort((a, b) => a.dimension.localeCompare(b.dimension));
   }
 
+  // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
   private async _resolveAgentNames(agentIds: string[]): Promise<Map<string, string>> {
     const ids = Array.from(new Set(agentIds.filter(Boolean)));
     if (ids.length === 0) return new Map();
-    const agentRepo = this.dataSource.getRepository(Agent);
-    const agents = await agentRepo
-      .createQueryBuilder('a')
-      .where('a.id IN (:...ids)', { ids })
-      .getMany();
-    return resolveAgentDisplayMap(agentRepo, agents);
+    return resolveAgentDisplayNamesByIds(this.dataSource, ids);
   }
 }

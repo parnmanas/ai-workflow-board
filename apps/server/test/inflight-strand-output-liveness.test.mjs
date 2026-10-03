@@ -60,7 +60,7 @@ async function makeStatus() {
   // connectivity + instanceRegistry (ticket 1f750878) — inert fakes so
   // isReachable() falls back to status.is_online (identical to the pre-1f750878
   // _emit behavior these strand assertions were written against).
-  return new AgentStatusService(agentRepo, dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
+  return new AgentStatusService(dataSource, noopLog, new MemoryMetricsRegistry(), { isReachable: () => false }, { list: () => [] });
 }
 
 // Seed a current_task (active_tasks entry) directly, exactly like the eviction

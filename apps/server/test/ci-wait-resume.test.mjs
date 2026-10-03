@@ -80,7 +80,7 @@ const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
 const { Resource } = await import('file://' + path.join(DIST, 'entities', 'Resource.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
-const { Agent } = await import('file://' + path.join(DIST, 'entities', 'Agent.js'));
+/* P4c-4: Agent 엔티티 삭제 — import 제거. */
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { isValidGitHubRunId, isValidGitSha } = await import('file://' + path.join(DIST, 'services', 'github-connector.service.js'));
 const { CiWaitService } = await import('file://' + path.join(DIST, 'modules', 'tickets', 'ci-wait.service.js'));
@@ -101,7 +101,7 @@ await ds.initialize();
 serializeSqljsTransactions(ds);
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
-const activityService = new ActivityService(ds.getRepository(ActivityLog), ds.getRepository(Agent), logStub);
+const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const ciWaitService = new CiWaitService(ds, activityService);
 
 const boardRepo = ds.getRepository(Board);

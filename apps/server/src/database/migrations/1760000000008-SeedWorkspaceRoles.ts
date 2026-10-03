@@ -3,7 +3,6 @@ import { Workspace } from '../../entities/Workspace';
 import { Ticket } from '../../entities/Ticket';
 import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
-import { Agent } from '../../entities/Agent';
 import { User } from '../../entities/User';
 import { BUILTIN_ROLES } from '../../db';
 
@@ -44,7 +43,6 @@ export class SeedWorkspaceRoles1760000000008 implements MigrationInterface {
     const roleRepo = manager.getRepository(WorkspaceRole);
     const ticketRepo = manager.getRepository(Ticket);
     const assignRepo = manager.getRepository(TicketRoleAssignment);
-    const agentRepo = manager.getRepository(Agent);
     const userRepo = manager.getRepository(User);
 
     // ── Pass 1: seed built-in roles (preset shared with new-workspace path) ──
@@ -80,8 +78,8 @@ export class SeedWorkspaceRoles1760000000008 implements MigrationInterface {
       roleIndex.set(`${r.workspace_id}:${r.slug}`, r.id);
     }
 
-    // Cache holder-type lookup so we don't re-query per ticket.
-    const agentIds = new Set<string>((await agentRepo.find({ select: ['id'] })).map(a => a.id));
+    // P4c-4: agents 테이블 없음 — agent holder 판정은 빈 집합으로 둔다.
+    const agentIds = new Set<string>();
     const userIds = new Set<string>((await userRepo.find({ select: ['id'] })).map(u => u.id));
 
     // Stream through tickets in batches — workspaces with thousands of

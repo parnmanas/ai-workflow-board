@@ -112,27 +112,29 @@ test('Slot spec → provisioned identity: the roster mints its own agents with t
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
   const teams = app.get(services.OrchestrationTeamService);
-  const agentRepo = ds.getRepository('Agent');
+  // P4c-4: identity 는 member 행 + spec 스냅샷이다 (Agent 행 없음).
+  const memberRepo = ds.getRepository('OrchestrationTeamMember');
 
   const ws = await createWorkspace(app, getDataSourceToken, 'slot-provision');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'slot-host' });
 
   step('Creating a team provisions an orchestrator identity from the spec alone — no agent existed beforehand');
+  // P4c-4: orchestrator 는 멤버와 cli 가 달라 별개 worker 다 (spec 이 같으면
+  // 같은 identity 를 공유해 updateMember 가드(409)에 걸린다). 폴더는 같아
+  // folder mate 로는 남는다 (shared 판정은 host+dir 기준).
   const team = await teams.createTeam({
     workspace_id: ws.id,
     name: 'Provisioning squad',
     created_by: HUMAN.id,
-    orchestrator: slotSpec(host.id, { model: 'opus', working_dir: SHARED_DIR, folder_scope: 'shared' }),
+    orchestrator: slotSpec(host.id, { cli: 'codex', model: 'opus', working_dir: SHARED_DIR, folder_scope: 'shared' }),
   });
   assert.ok(team.orchestrator_agent_id, 'the team must come out of createTeam with a dispatchable orchestrator');
 
-  const orchRow = await agentRepo.findOne({ where: { id: team.orchestrator_agent_id } });
-  assert.equal(orchRow.manager_agent_id, host.id, 'the identity is linked to the Runtime Host the slot named');
-  assert.equal(orchRow.type, 'claude', 'the CLI selector lands in Agent.type, as it does for every managed agent');
-  assert.equal(orchRow.model, 'opus');
-  assert.equal(orchRow.working_dir, SHARED_DIR);
-  assert.equal(orchRow.is_active, 1);
-  assert.equal(orchRow.origin, 'orchestration', 'the row is team-owned, so the roster may edit and retire it');
+  assert.ok(team.orchestrator_agent_id.startsWith('rt-'), 'the identity is a runtime key, not an agent row');
+  assert.equal(team.orchestrator_runtime.manager_agent_id, host.id, 'the identity names the Runtime Host the slot named');
+  assert.equal(team.orchestrator_runtime.cli, 'codex', 'the CLI selector lands in the spec');
+  assert.equal(team.orchestrator_runtime.model, 'opus');
+  assert.equal(team.orchestrator_runtime.working_dir, SHARED_DIR);
 
   step('The team view reads the spec back with the names the UI renders');
   assert.equal(team.orchestrator_runtime.manager_name, host.name);
@@ -150,9 +152,11 @@ test('Slot spec → provisioned identity: the roster mints its own agents with t
   });
   assert.equal(withTwo.members.length, 2);
   const [builder, reviewer] = ['builder', 'reviewer'].map((r) => withTwo.members.find((m) => m.role_label === r));
-  assert.notEqual(builder.agent_id, reviewer.agent_id,
-    'an identical spec must NOT collapse two slots into one worker — they need separate identities to get separate steps');
-  assert.notEqual(builder.agent_name, reviewer.agent_name, 'and distinguishable names');
+  // P4c-4: 동일 스펙은 같은 worker 다 (content-addressed). 슬롯은 2개, 정체성은 1개.
+  assert.equal(builder.agent_id, reviewer.agent_id,
+    'an identical spec addresses one shared worker — distinguishability comes from role_labels, not identities');
+  assert.ok(builder.agent_name.includes('/') && reviewer.agent_name.includes('/'),
+    'slot labels carry the host prefix so identical specs stay distinguishable in the UI');
 
   step('...while still sharing the folder, which is what they were configured for');
   assert.equal(builder.runtime.working_dir, reviewer.runtime.working_dir);
@@ -168,85 +172,69 @@ test('Slot spec → provisioned identity: the roster mints its own agents with t
     runtime: { working_dir: OTHER_DIR },
   });
   const movedBuilder = moved.members.find((m) => m.id === builder.id);
-  assert.equal(movedBuilder.agent_id, builder.agent_id, 'a folder change must not mint a new identity');
+  // P4c-4: working_dir 는 identity 해시에 들어간다 — 폴더 변경은 새 worker 다.
+  assert.notEqual(movedBuilder.agent_id, builder.agent_id, 'a folder change mints a new identity (dir is identity)');
   assert.equal(movedBuilder.runtime.working_dir, OTHER_DIR);
-  const movedRow = await agentRepo.findOne({ where: { id: builder.agent_id } });
-  assert.equal(movedRow.working_dir, OTHER_DIR, 'and the identity itself followed');
+  const movedRow = await memberRepo.findOne({ where: { id: builder.id } });
+  assert.equal(movedRow.spec.working_dir, OTHER_DIR, 'and the slot spec itself followed');
   assert.deepEqual(movedBuilder.runtime.shared_with, [], 'it no longer shares a tree with anyone');
 
-  step('Changing the Runtime Host DOES mint a new identity — per-agent cli-home/api key live on the old machine');
+  step('Changing the Runtime Host moves the SAME worker — host is placement, not identity');
+  // P4c-4: identity 키는 cli+dir+credential 다. host 변경은 같은 worker 의
+  // 배치만 옮긴다 (다음 dispatch 부터 새 host 에서 뜬다).
   const otherHost = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'slot-host-2' });
   const rehosted = await teams.updateMember(team.id, ws.id, builder.id, {
     runtime: { manager_agent_id: otherHost.id },
   });
   const rehostedBuilder = rehosted.members.find((m) => m.id === builder.id);
-  assert.notEqual(rehostedBuilder.agent_id, builder.agent_id, 'a host change is a new worker, not an edit');
-  assert.equal(rehostedBuilder.runtime.manager_agent_id, otherHost.id);
-  const retired = await agentRepo.findOne({ where: { id: builder.agent_id } });
-  assert.equal(retired, null, 'the replaced identity never ran, so it is deleted rather than left behind');
+  assert.equal(rehostedBuilder.agent_id, movedBuilder.agent_id, 'a host change keeps the worker identity');
+  assert.equal(rehostedBuilder.runtime.manager_agent_id, otherHost.id, 'and records the new placement');
 
   step('Removing a slot releases its identity; deleting the team releases the rest');
   await teams.removeMember(team.id, ws.id, rehostedBuilder.id);
-  assert.equal(await agentRepo.findOne({ where: { id: rehostedBuilder.agent_id } }), null);
+  assert.equal(await memberRepo.findOne({ where: { id: rehostedBuilder.id } }), null);
   await teams.deleteTeam(team.id, ws.id);
-  assert.equal(await agentRepo.findOne({ where: { id: team.orchestrator_agent_id } }), null);
-  assert.equal(await agentRepo.findOne({ where: { id: reviewer.agent_id } }), null);
+  assert.equal(await memberRepo.count({ where: { team_id: team.id } }), 0, 'no member rows survive the team');
 });
 
-test('An operator-authored agent on a roster is never mutated — a spec edit mints a team-owned identity instead', async (t) => {
-  // This is the shape every pre-refactor roster row has after the back-fill
-  // migration: the slot points at an agent a human made, which may also be a
-  // ticket assignee or a chat participant. Editing one team must not reach into it.
+test('A slot edit never touches sibling slots — each member row keeps its own spec and identity', async (t) => {
+  // P4c-4: Agent 행이 없어 "operator-owned row 를 건드리지 않는다" 는 명제 자체가
+  // 성립하지 않는다. 대신 같은 팀의 형제 슬롯이 고립됨을 본다.
   const { app, modules, services } = await sharedApp();
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
   const teams = app.get(services.OrchestrationTeamService);
-  const agentRepo = ds.getRepository('Agent');
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-legacy');
-  const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'legacy-host' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'slot-sibling');
+  const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'sibling-host' });
   const squad = await buildTeam(app, getDataSourceToken, teams, {
     workspaceId: ws.id,
-    name: 'Legacy squad',
+    name: 'Sibling squad',
     host,
     team: { created_by: HUMAN.id },
-    members: [{ role_label: 'builder' }],
+    members: [{ role_label: 'builder' }, { role_label: 'reviewer' }],
   });
 
-  step('Simulate the back-filled state: the slot points at an operator-authored agent with a derived spec');
-  const operatorAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'operator-owned', hosted: false });
-  await agentRepo.update({ id: operatorAgent.id }, {
-    manager_agent_id: host.id,
-    type: 'claude',
-    working_dir: SHARED_DIR,
-    origin: '',
-  });
+  step('Editing one slot leaves the sibling\'s spec and identity untouched');
   const memberRow = await ds.getRepository('OrchestrationTeamMember').findOne({
     where: { team_id: squad.team.id, role_label: 'builder' },
   });
-  await ds.getRepository('OrchestrationTeamMember').update({ id: memberRow.id }, {
-    agent_id: operatorAgent.id,
-    // The column is `simple-json`; hand it the object and let the entity
-    // metadata encode it, exactly as the back-fill migration does.
-    spec: slotSpec(host.id, { working_dir: SHARED_DIR }),
+  const siblingBefore = await ds.getRepository('OrchestrationTeamMember').findOne({
+    where: { team_id: squad.team.id, role_label: 'reviewer' },
   });
-
-  step('Editing that slot leaves the operator\'s agent untouched and points the slot at a new identity');
   const edited = await teams.updateMember(squad.team.id, ws.id, memberRow.id, {
     runtime: { model: 'sonnet' },
   });
   const editedMember = edited.members.find((m) => m.id === memberRow.id);
-  assert.notEqual(editedMember.agent_id, operatorAgent.id,
-    'the roster must not adopt-and-rewrite an agent a human owns');
+  // P4c-4: model 은 identity 해시에 없으므로 같은 worker 다 — spec 내용만 바뀐다.
+  assert.equal(editedMember.agent_id, memberRow.agent_id, 'a model-only edit keeps the worker identity');
+  assert.equal(editedMember.runtime.model, 'sonnet', 'and the new spec carries the edit');
 
-  const untouched = await agentRepo.findOne({ where: { id: operatorAgent.id } });
-  assert.ok(untouched, 'the operator\'s agent still exists');
-  assert.equal(untouched.model, null, 'and its model was not rewritten by the team edit');
-  assert.equal(untouched.origin, '', 'and it did not become team-owned');
-
-  const minted = await agentRepo.findOne({ where: { id: editedMember.agent_id } });
-  assert.equal(minted.origin, 'orchestration');
-  assert.equal(minted.model, 'sonnet');
+  const siblingAfter = await ds.getRepository('OrchestrationTeamMember').findOne({
+    where: { team_id: squad.team.id, role_label: 'reviewer' },
+  });
+  assert.equal(siblingAfter.agent_id, siblingBefore.agent_id, 'the sibling keeps its identity');
+  assert.deepEqual(siblingAfter.spec, siblingBefore.spec, 'and its spec is byte-identical');
 });
 
 test('Releasing an identity that already ran retires it instead of deleting it, so mission history stays readable', async (t) => {
@@ -256,7 +244,6 @@ test('Releasing an identity that already ran retires it instead of deleting it, 
   const teams = app.get(services.OrchestrationTeamService);
   const missions = app.get(services.OrchestrationMissionService);
   const runner = app.get(services.OrchestrationRunnerService);
-  const agentRepo = ds.getRepository('Agent');
 
   const ws = await createWorkspace(app, getDataSourceToken, 'slot-retire');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
@@ -276,22 +263,25 @@ test('Releasing an identity that already ran retires it instead of deleting it, 
     created_by: HUMAN.id,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
-  await runner.submitPlan(mission.id, squad.orchestrator.id, {
+  await runner.submitPlan(mission.id, { agentId: squad.orchestrator.id }, {
     steps: [{ step_key: 'work', title: 'Do work', instructions: 'do it', assignee_agent_id: builder.id }],
   });
 
-  step('Remove the member that ran a step — the identity survives, deactivated');
+  step('Remove the member that ran a step — its row goes, the step snapshot keeps history readable');
+  // P4c-4: retire/deactivate 개념 없음 (Agent 행 없음). member 행 삭제 후에도
+  // step 의 assignee_spec 스냅샷으로 이름이 해소된다.
   const memberRow = squad.team.members.find((m) => m.agent_id === builder.id);
   await teams.removeMember(squad.team.id, ws.id, memberRow.id);
-  const kept = await agentRepo.findOne({ where: { id: builder.id } });
-  assert.ok(kept, 'an identity referenced by a finished step must not be deleted — the timeline resolves its name at read time');
-  assert.equal(kept.is_active, 0, 'but it is deactivated, so nothing can dispatch to it again');
+  assert.equal(
+    await ds.getRepository('OrchestrationTeamMember').findOne({ where: { id: memberRow.id } }),
+    null, 'the member row is gone',
+  );
 
   step('The step it ran still resolves to a name, not to "(deleted agent)"');
   const detail = await missions.getMissionDetail(mission.id, ws.id);
   const workStep = detail.steps.find((s) => s.step_key === 'work');
   assert.ok(workStep.assignee_name && workStep.assignee_name.includes('/'),
-    `the assignee must still render as <Manager>/<Agent>, got "${workStep.assignee_name}"`);
+    `the assignee must still render as <Host>/<leaf>, got "${workStep.assignee_name}"`);
 });
 
 // ─── B. Folder scope ─────────────────────────────────────────────────────────
@@ -334,7 +324,7 @@ test('folder_scope: shared dispatches into the working folder with NO provisioni
     created_by: HUMAN.id,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
-  await runner.submitPlan(mission.id, squad.orchestrator.id, {
+  await runner.submitPlan(mission.id, { agentId: squad.orchestrator.id }, {
     steps: [
       { step_key: 'write', title: 'Write a file', instructions: 'write', assignee_agent_id: writer.id },
       { step_key: 'read', title: 'Read the file', instructions: 'read', assignee_agent_id: reader.id },

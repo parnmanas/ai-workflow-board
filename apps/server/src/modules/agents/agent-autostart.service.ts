@@ -1,8 +1,10 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
+import { ApiKey } from '../../entities/ApiKey';
 import { Ticket } from '../../entities/Ticket';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
@@ -26,10 +28,17 @@ import {
 } from '../../common/agent-autostart-events';
 
 export interface ReachabilityClassification {
-  agent: Agent | null;
+  // P4c-4: Agent 행 대신 Host 요약 ({id, name}) — 피드백 경로의 null 체크용.
+  agent: { id: string; name: string } | null;
   reachable: boolean;
   state: AgentLifecycleState;
   autostart: AutostartFeasibility;
+  /**
+   * P4c-2b: spec-direct (rt-) holder — no Agent row exists by design. Dispatch
+   * proceeds (the manager resolves/auto-provisions at delivery); autostart's
+   * agent-keyed spawn path is skipped for it.
+   */
+  runtime?: boolean;
 }
 
 // Don't re-issue spawn_agent for the same agent more than once per window — the
@@ -89,7 +98,8 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
   private readonly lastChatFeedback = new Map<string, number>();
 
   constructor(
-    @InjectRepository(Agent) private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
+    @InjectRepository(ApiKey) private readonly apiKeyRepo: Repository<ApiKey>,
     private readonly managerCommand: AgentManagerCommandService,
     // Reachability now delegates to AgentStatusService.isReachable (ticket
     // 1f750878) — the single shared definition — so this service no longer
@@ -170,41 +180,51 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
    * spawn will even be attempted (and, if not, why) so feedback is accurate.
    */
   async classify(agentId: string): Promise<ReachabilityClassification> {
-    const agent = agentId ? await this.agentRepo.findOne({ where: { id: agentId } }) : null;
-    if (!agent) {
+    // P4c-2b: rt- identity는 Agent 행이 없다 — uuid가 아니면 조회하지 않는다
+    // (Postgres throw 방지). dispatch는 진행하고 autostart spawn은 건너뛴다
+    // (매니저가 배달 시점에 해소/auto-provision한다).
+    if (agentId && !isUuidShapedId(agentId)) {
+      return { agent: null, reachable: false, state: 'offline', autostart: 'runtime_host_required', runtime: true };
+    }
+    // P4c-4: Agent 행 없음 — Host 직접 조회 후 api_keys 페어링 링크.
+    // agent 자리에는 Host 요약({id, name})을 넣어 피드백 경로가 동작하게 한다.
+    // spawn 에 필요한 working_dir 은 이 레이어에 없으므로, live Host여도
+    // autostart 판정은 'no_working_dir' (정직한 불가 사유) 로 둔다.
+    const host = agentId ? await this.hostRepo.findOne({ where: { id: agentId } }) : null;
+    let hostId: string | null = host?.id ?? null;
+    let hostName = host?.name ?? '';
+    if (!host && agentId) {
+      const link = await this.apiKeyRepo.findOne({
+        where: { agent_id: agentId },
+        select: { agent_id: true, host_id: true },
+      });
+      if (link?.host_id) {
+        const linked = await this.hostRepo.findOne({ where: { id: link.host_id } });
+        if (linked) {
+          hostId = linked.id;
+          hostName = linked.name;
+        }
+      }
+    }
+    if (!hostId) {
       return { agent: null, reachable: false, state: 'offline', autostart: 'runtime_host_required' };
     }
-    if (!agent.manager_agent_id) {
-      const state = deriveAgentLifecycleState({
-        isOnline: false,
-        connectedAt: agent.connected_at ?? null,
-        isStarting: false,
-        hasRecentStartError: this.agentStatus.getStartError(agent.id) !== undefined,
-      });
-      return {
-        agent,
-        reachable: false,
-        state,
-        autostart: 'runtime_host_required',
-      };
-    }
-    // Reachability = a live Runtime Host delivery session or Host instance. A
-    // DB is_online bit alone is never treated as an execution route.
-    const reachable = this.agentStatus.isReachable(agent.id, !!agent.is_online);
+    const summary = { id: agentId, name: hostName };
+    const reachable = this.agentStatus.isReachable(hostId, false)
+      || !!this.managerCommand.resolveLiveManagerInstance(hostId);
     const state = deriveAgentLifecycleState({
       isOnline: reachable,
-      connectedAt: agent.connected_at ?? null,
-      isStarting: this.agentStatus.isStarting(agent.id),
-      hasRecentStartError: this.agentStatus.getStartError(agent.id) !== undefined,
+      connectedAt: null,
+      isStarting: this.agentStatus.isStarting(hostId),
+      hasRecentStartError: this.agentStatus.getStartError(hostId) !== undefined,
     });
 
     let autostart: AutostartFeasibility;
     if (reachable) autostart = 'already_live';
-    else if (!this.managerCommand.resolveLiveManagerInstance(agent.manager_agent_id)) autostart = 'manager_offline';
-    else if (!agent.working_dir || !agent.working_dir.trim()) autostart = 'no_working_dir';
-    else autostart = 'ok';
+    else if (!this.managerCommand.resolveLiveManagerInstance(hostId)) autostart = 'manager_offline';
+    else autostart = 'no_working_dir';
 
-    return { agent, reachable, state, autostart };
+    return { agent: summary, reachable, state, autostart };
   }
 
   // ── Auto-start execution ────────────────────────────────────────────────
@@ -283,6 +303,8 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
     const { ticket, agentId, role, triggerSource } = input;
     const cls = await this.classify(agentId);
     if (cls.reachable) return false;
+    // P4c-2b: runtime holder는 emit을 진행한다 (매니저가 배달 시점에 해소).
+    if (cls.runtime) return false;
     // Agent row vanished mid-flight (rare delete race) — nothing to start or
     // feed back about; still skip the emit (there's no live target).
     if (!cls.agent) return true;

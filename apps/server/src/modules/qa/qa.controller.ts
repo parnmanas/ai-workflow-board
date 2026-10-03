@@ -15,7 +15,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { User } from '../../entities/User';
-import { Agent } from '../../entities/Agent';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Channel } from '../../entities/Channel';
 import { ApiKey } from '../../entities/ApiKey';
 import { ActivityLog } from '../../entities/ActivityLog';
@@ -133,7 +133,8 @@ export class QaController {
     const ticketRepo = wrapRepo(this.dataSource.getRepository(Ticket), 'Ticket', collectorRef);
     const commentRepo = wrapRepo(this.dataSource.getRepository(Comment), 'Comment', collectorRef);
     const userRepo = wrapRepo(this.dataSource.getRepository(User), 'User', collectorRef);
-    const agentRepo = wrapRepo(this.dataSource.getRepository(Agent), 'Agent', collectorRef);
+    // P4c-4: Agent smoke 행 대신 RuntimeHost 행을 만들고 지운다 (Agent 테이블 제거 대비).
+    const hostRepo = wrapRepo(this.dataSource.getRepository(RuntimeHost), 'RuntimeHost', collectorRef);
     const channelRepo = wrapRepo(this.dataSource.getRepository(Channel), 'Channel', collectorRef);
     const activityService = wrapService(this.activityService, 'ActivityService', collectorRef);
     const apiKeyService = wrapService(this.apiKeyService, 'ApiKeyService', collectorRef);
@@ -250,11 +251,12 @@ export class QaController {
     });
 
     // === AGENT TESTS ===
-    await runTest('Create Agent', 'Agent', async ({ step }) => {
-      step('Insert Agent (QA Agent / type=custom)');
-      const a = await agentRepo.save(agentRepo.create({ name: 'QA Agent', type: 'custom', description: 'QA test agent' }));
-      qaAgentId = a.id;
-      return `Agent ${a.id}`;
+    // P4c-4: 실행 정체성 smoke 는 RuntimeHost 행으로 옮겼다 (Agent 행 생성 중단).
+    await runTest('Create Runtime Host', 'RuntimeHost', async ({ step }) => {
+      step('Insert RuntimeHost (QA Host)');
+      const h = await hostRepo.save(hostRepo.create({ name: 'QA Host', hostname: 'qa-smoke', workspace_id: qaWsId || null, is_active: 1 }));
+      qaAgentId = h.id;
+      return `RuntimeHost ${h.id}`;
     });
 
     // === CHANNEL TESTS ===
@@ -308,9 +310,9 @@ export class QaController {
       return 'Deleted';
     });
 
-    await runTest('Cleanup: Delete Agent', 'Cleanup', async ({ step }) => {
-      step(`Agent.delete(${qaAgentId.slice(0, 8)})`);
-      await agentRepo.delete(qaAgentId);
+    await runTest('Cleanup: Delete Runtime Host', 'Cleanup', async ({ step }) => {
+      step(`RuntimeHost.delete(${qaAgentId.slice(0, 8)})`);
+      await hostRepo.delete(qaAgentId);
       return 'Deleted';
     });
 

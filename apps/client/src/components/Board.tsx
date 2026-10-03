@@ -357,7 +357,7 @@ export default function Board() {
   const handleSetRoleAssignment = useCallback(async (
     ticketId: string,
     roleId: string,
-    holder: { agent_id?: string | null; user_id?: string | null },
+    holder: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> },
   ) => {
     await wrapAction(() => setTicketRoleAssignment(ticketId, roleId, holder));
   }, [wrapAction, setTicketRoleAssignment]);

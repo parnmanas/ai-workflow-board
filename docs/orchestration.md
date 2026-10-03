@@ -38,26 +38,20 @@
 | `folder_scope` | `shared`(기본) / `isolated`. 아래 참고. |
 | `credential_id` · `cli_runtime_profile` · `runtime_config` | 선택 — 관리자 Agent 생성 폼과 같은 노브. |
 
-`OrchestrationAgentProvisionerService` 가 이 spec 으로부터 **backing Agent 행을
-직접 만든다**. dispatch·SSE 스코프·MCP api key·ChatRoomParticipant·
-`<Manager>/<Agent>` 표시 규약이 전부 Agent 정체성에 걸려 있으므로 Agent 행 자체는
-남되, 이제 로스터 편집의 **입력이 아니라 출력**이다.
+각 slot 은 **runtime identity key**(`runtimeIdentityKey(spec)`,
+`common/runtime-spec.ts`) 로 주소가 정해진다 — Agent 행을 만들지 않는다.
+dispatch 는 그 키를 레지스트리 튜플 매칭으로 해소하고, 없으면 첫 디스패치 때
+매니저가 runtime 키 + cli-home 을 self-heal 로 발급한다(P4c-2a). 같은 spec 은
+같은 키이므로, 폴더를 공유하는 두 멤버는 **서로 다른 slot 행 + 같은 실행 위치**
+가 아니라 **같은 identity** 로 합쳐진다 — 한 트리를 공유하는 협업이 기본값이다.
 
-소유권 규칙 두 가지:
+Host 가 바뀌면 identity key 자체가 바뀐다. 이전 키의 cli-home/api key 는 그
+장비에 남지만 새 키와 충돌하지 않으므로(키가 다르다) 고아 상태가 되지 않는다 —
+이전 키의 행은 미션 이력이 참조할 수 있어 삭제하지 않는다.
 
-1. **우리가 만든 행만 우리가 고친다.** provisioner 가 만든 행은
-   `Agent.origin='orchestration'` 을 달고, slot 편집 시 제자리 수정, slot 삭제 시
-   함께 삭제된다. 운영자가 만든 Agent(= 이 기능 이전 로스터에서 마이그레이션된
-   전부)는 절대 건드리지 않는다 — 그런 slot 의 spec 을 바꾸면 **새** 팀 소유
-   정체성을 발급한다. 운영자의 Agent 를 팀 편집의 부작용으로 바꿔버리면 그
-   Agent 를 쓰는 티켓·채팅까지 같이 바뀐다.
-2. **팀 소유 정체성은 slot 하나에만 속한다.** spec 이 똑같아도 재사용하지 않는다 —
-   두 멤버가 같은 폴더를 공유하면서도 각자 step 을 배정받으려면 서로 다른 정체성이
-   필요하기 때문이다.
-
-Host 가 바뀌면 정체성을 **재발급**한다(제자리 수정이 아니다): 매니저가 per-agent
-cli-home 과 api key 를 소유하므로, 정체성만 다른 장비로 옮기면 그 상태가 예전
-장비에 남아 고아가 된다.
+레거시: `Agent.origin='orchestration'` 행(provisioner 시절에 만들어진 것)은
+그대로 두고 절대 건드리지 않는다. 그 행을 가리키는 기존 미션/step 은 예전
+경로로 계속 디스패치된다.
 
 `Agent.origin='orchestration'` 행은 `GET /api/agents` 기본 목록에서 **숨는다**
 (`?include_orchestration=1` 로 옵트인). 그 목록의 소비자는 전부 picker(티켓 담당자,

@@ -7,7 +7,8 @@ export { TicketCompletionVerificationAttempt } from './TicketCompletionVerificat
 export { Comment } from './Comment';
 export { CommentSummaryRun } from './CommentSummaryRun';
 export { User } from './User';
-export { Agent } from './Agent';
+// Runtime Host — 실행 정체성. manager Agent 행은 P4c-4 로 제거됐다.
+export { RuntimeHost } from './RuntimeHost';
 export { Channel } from './Channel';
 export { ActivityLog } from './ActivityLog';
 export { ApiKey } from './ApiKey';

@@ -6,7 +6,6 @@ import { ApiKey } from '../../entities/ApiKey';
 import { Channel } from '../../entities/Channel';
 import { PromptTemplate } from '../../entities/PromptTemplate';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Agent } from '../../entities/Agent';
 import { Board } from '../../entities/Board';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
@@ -110,7 +109,7 @@ export class WorkspaceV2Backfill1760000000002 implements MigrationInterface {
     await backfillWorkspaceId(manager.getRepository(Channel));
     await backfillWorkspaceId(manager.getRepository(PromptTemplate));
     await backfillWorkspaceId(manager.getRepository(ActivityLog));
-    await backfillWorkspaceId(manager.getRepository(Agent));
+    // P4c-4: Agent 항목 제거 (Agent 테이블 없음).
     await backfillWorkspaceId(manager.getRepository(Board));
     await backfillWorkspaceId(manager.getRepository(Ticket));
     await backfillWorkspaceId(manager.getRepository(Comment));

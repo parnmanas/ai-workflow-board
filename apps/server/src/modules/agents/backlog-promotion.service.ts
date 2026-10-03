@@ -94,7 +94,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit, forwardRef, Inject } from '@
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Agent } from '../../entities/Agent';
+import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { Board } from '../../entities/Board';
 import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
@@ -106,6 +106,7 @@ import { InstanceQuiesceService } from '../../services/instance-quiesce.service'
 import { AgentWorkloadService } from './agent-workload.service';
 import { TriggerLoopService } from './trigger-loop.service';
 import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { priorityIndex } from './priority';
 import {
   FOCUS_RELEASED_EVENT,
@@ -308,12 +309,13 @@ export class BacklogPromotionService implements OnModuleInit, OnModuleDestroy {
    * prompt and keeps the audit trail readable.
    */
   private async _onAgentIdle(agentId: string): Promise<void> {
-    const agentRepo = this.dataSource.getRepository(Agent);
-    const agent = await agentRepo.findOne({ where: { id: agentId } });
-    if (!agent) return;
+    // P4c-4: Host/링크 해소 (Agent 행 없음) — 못 찾은 uuid 는 스킵.
+    // rt- identity는 전체 보드를 스캔한다 (글로벌 취급).
+    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
+    if (!agent && isUuidShapedId(agentId)) return;
 
     const boardRepo = this.dataSource.getRepository(Board);
-    const boards = agent.workspace_id
+    const boards = agent?.workspace_id
       ? await boardRepo.find({ where: { workspace_id: agent.workspace_id } })
       : await boardRepo.find();
     for (const board of boards) {

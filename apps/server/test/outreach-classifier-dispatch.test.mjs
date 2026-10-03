@@ -56,8 +56,13 @@ function context(over = {}) {
   };
 }
 
-function makeAgentRepo(agents) {
-  return { async findOne({ where: { id } }) { return agents.find((a) => a.id === id) || null; } };
+// P4c-4: classifier 정체성은 Host 행이다 — fixture agent 를 Host 행처럼 내놓는다.
+function makeHostScope(agents) {
+  const hostRepo = {
+    async findOne({ where: { id } }) { return agents.find((a) => a.id === id) || null; },
+    async find() { return []; },
+  };
+  return { getRepository: () => hostRepo };
 }
 
 function makeRoomRepo() {
@@ -104,12 +109,13 @@ function extractRunId(prompt) {
 function makeClassifier({ agents = [], timeoutMs, onSend } = {}) {
   if (timeoutMs !== undefined) process.env.OUTREACH_CLASSIFIER_TIMEOUT_MS = String(timeoutMs);
   else delete process.env.OUTREACH_CLASSIFIER_TIMEOUT_MS;
-  const agentRepo = makeAgentRepo(agents);
+  const dataSource = makeHostScope(agents);
   const roomRepo = makeRoomRepo();
   const participantRepo = makeParticipantRepo();
   const messaging = makeMessaging(onSend);
   const bridge = new ClassificationBridgeService();
-  const classifier = new AgentDispatchClassifier(roomRepo, participantRepo, agentRepo, messaging, bridge, noopLog);
+  // P4c-4: (roomRepo, participantRepo, dataSource, messaging, bridge, logService).
+  const classifier = new AgentDispatchClassifier(roomRepo, participantRepo, dataSource, messaging, bridge, noopLog);
   delete process.env.OUTREACH_CLASSIFIER_TIMEOUT_MS;
   return { classifier, roomRepo, participantRepo, messaging, bridge };
 }
@@ -244,12 +250,12 @@ test('dispatch failure cancels the pending bridge entry immediately, not after t
   // block must cancel that entry right away — otherwise a sustained outage
   // leaves one doomed, never-to-be-reported entry per item sitting in the
   // bridge for up to timeoutMs each.
-  const agentRepo = makeAgentRepo([{ id: 'agent-1', workspace_id: 'ws-1' }]);
+  const dataSource = makeHostScope([{ id: 'agent-1', workspace_id: 'ws-1' }]);
   const roomRepo = makeRoomRepo();
   const participantRepo = makeParticipantRepo();
   const messaging = { calls: [], async sendMessage() { throw new Error('messaging unavailable'); } };
   const bridge = new ClassificationBridgeService();
-  const classifier = new AgentDispatchClassifier(roomRepo, participantRepo, agentRepo, messaging, bridge, noopLog);
+  const classifier = new AgentDispatchClassifier(roomRepo, participantRepo, dataSource, messaging, bridge, noopLog);
 
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());

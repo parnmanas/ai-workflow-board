@@ -1,5 +1,4 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Agent } from '../../entities/Agent';
 
 /**
  * Backfill: set `workspace_id = NULL` on every `type='manager'` Agent row.
@@ -28,7 +27,9 @@ export class NullManagerAgentWorkspace1760000000019 implements MigrationInterfac
   name = 'NullManagerAgentWorkspace1760000000019';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    const agentRepo = queryRunner.manager.getRepository(Agent);
+    // P4c-4: agents 테이블 없음 — 대상 자체가 존재하지 않는다.
+    if (!(await queryRunner.hasTable('agents'))) return;
+    const agentRepo = queryRunner.manager.getRepository('agents');
     const managers = await agentRepo.find({ where: { type: 'manager' } });
     const orphaned = managers.filter((a) => a.workspace_id !== null);
     if (orphaned.length === 0) return;

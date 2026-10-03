@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Agent } from '../../../entities/Agent';
 import { Skill } from '../../../entities/Skill';
+import { resolveCallerIdentityRow } from '../shared/authz';
 import { SkillProposal } from '../../../entities/SkillProposal';
 import { canonicalizeSkillContent } from '../../skills/skill-validation';
 import { err, ok } from '../shared/helpers';
@@ -33,9 +33,8 @@ export function registerSkillProposalTools(server: McpServer, ctx: ToolContext):
           'propose_skill_change requires an authenticated Runtime Host child session with a bound run id.',
         );
       }
-      const agent = await ctx.dataSource.getRepository(Agent).findOne({
-        where: { id: caller.agentId },
-      });
+      // P4: runtime child identity 는 Agent 행 또는 Host 행이다.
+      const agent = await resolveCallerIdentityRow(ctx.dataSource, caller.agentId);
       if (!agent) return err('The runtime Agent identity was not found.');
       const workspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
       if (!workspaceId) return err('The runtime API key is not scoped to a workspace.');
