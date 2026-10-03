@@ -1416,10 +1416,11 @@ async function runSelfUpdateLocked(
       `Self-update: v${pin.badVersion} will be skipped automatically (${pin.reason || 'no reason recorded'}) — ` +
         `newer versions are unaffected; delete ${updatePinPath(opts.stateDir)} to retry it (operator only)`,
     );
-  } else if (opts.pinnedTargetVersion) {
+  }
+  if (opts.pinnedTargetVersion) {
     // ticket 9408b308: 승인된 개시는 승인된 그 버전만 설치한다. 채널을 다시
     // 해석하면 승인 판정과 설치 사이에 움직인 dist-tag 가 승인 없는 버전을
-    // 밀어 넣을 수 있다. 복귀 핀이 있으면 그쪽이 이기므로 else 다.
+    // 밀어 넣을 수 있다. 실패 버전 차단은 아래 설치 게이트가 별도로 검사한다.
     channel = opts.pinnedTargetVersion;
     out(`Self-update: install pinned to the approved version v${opts.pinnedTargetVersion}`);
   }

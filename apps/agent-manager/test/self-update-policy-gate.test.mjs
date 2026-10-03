@@ -664,24 +664,28 @@ test('승인된 개시는 그 버전으로 설치를 고정한다 — 채널이 
   assert.doesNotMatch(r.summary, /99\.0\.0/, '승인하지 않은 버전이 설치 spec 에 들어가면 안 된다');
 });
 
-test('복귀 핀은 승인 고정보다 우선한다 — 안전 핀이 승인보다 세다', async (t) => {
-  const home = tempHome(t);
-  _resetSelfUpdateInFlightForTests();
-  t.after(() => _resetSelfUpdateInFlightForTests());
+for (const badVersion of [undefined, '97.1.0', '98.0.0']) {
+  test(`복귀 핀은 승인 버전을 바꾸지 않고 실패한 버전만 차단한다 (bad=${badVersion ?? 'legacy'})`, async (t) => {
+    const home = tempHome(t);
+    _resetSelfUpdateInFlightForTests();
+    t.after(() => _resetSelfUpdateInFlightForTests());
 
-  writeUpdatePin({ version: '97.0.0', reason: 'boot verification failed', pinnedAtMs: 1 }, home);
-  const { ports, calls } = pinPorts();
-  await runSelfUpdate({
-    stateDir: home, ports, noReExec: true, log: () => {},
-    pinnedTargetVersion: '98.0.0',
+    writeUpdatePin({ version: '97.0.0', ...(badVersion ? { badVersion } : {}), reason: 'boot verification failed', pinnedAtMs: 1 }, home);
+    const { ports, calls } = pinPorts();
+    const result = await runSelfUpdate({
+      stateDir: home, ports, noReExec: true, log: () => {},
+      pinnedTargetVersion: '98.0.0',
+    });
+
+    assert.deepEqual(calls.provenance, ['98.0.0'], '승인한 버전을 조회한다 — 복귀 버전이나 움직인 latest로 바꾸지 않는다');
+    assert.equal(calls.install.length, 0, '차단 또는 noReExec이므로 실제 설치 없음');
+    if (badVersion === '98.0.0') {
+      assert.match(result.summary, /failed before and is pinned against reinstall/);
+    } else {
+      assert.match(result.summary, /awb-agent-manager@98\.0\.0/);
+    }
   });
-
-  assert.deepEqual(
-    calls.provenance,
-    ['97.0.0'],
-    '복귀 핀이 걸려 있으면 승인 고정이 그것을 덮어써서는 안 된다',
-  );
-});
+}
 
 test('정책 경로: 승인 개시만 pinnedTargetVersion 을 넘기고, auto 는 넘기지 않는다', async (t) => {
   const approvedHome = tempHome(t);
