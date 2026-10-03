@@ -328,3 +328,17 @@ test('runner 가 기록 이미지 통로를 건다 — 기록에서 읽은 이�
   const back = await runner.readStoredImage('claude', id, image.payload.image_ref);
   assert.equal(back?.base64, PNG_1x1, '보관된 바이트가 image RPC 로 그대로 돌아온다');
 });
+
+
+test('concurrent title updates, turn touches and session creation preserve all index entries', async (t) => {
+  const home = await seedHome(t);
+  const store = new AgentSessionStore(home);
+  const ids = Array.from({ length: 20 }, (_, i) => `title-${i}`);
+  await Promise.all(ids.map((session_id) => store.recordAwbSession({ cli: 'hermes', session_id, cwd: '/work', title: 'Original' })));
+  await Promise.all(ids.flatMap((id) => [
+    store.touchAwbSession('hermes', id, { title: `CLI title ${id}` }),
+    store.touchAwbSession('hermes', id),
+  ]));
+  const histories = await Promise.all(ids.map((id) => store.readHistory('hermes', id)));
+  assert.deepEqual(histories.map((h) => h.session?.title), ids.map((id) => `CLI title ${id}`));
+});

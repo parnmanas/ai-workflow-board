@@ -214,6 +214,8 @@ interface LiveSession {
   sessionId: string;
   cwd: string;
   title: string;
+  /** Only a newly created session may derive its initial title from a prompt. */
+  allowPromptTitle: boolean;
   client: AcpClient;
   loadSupported: boolean;
   /** session/load 가 기록을 재생하는 동안 true — 재생 이벤트는 UI 가 이미 history 로 가졌으므로 버린다. */
@@ -735,10 +737,11 @@ export class AgentSessionRunner {
   async #open(cli: string, requestedSessionId: string, requestedCwd: string, title: string, request: AgentSessionRequest): Promise<LiveSession> {
     const tag = `[agent-session ${cli}${requestedSessionId ? ` ${requestedSessionId.slice(0, 8)}` : ' new'}]`;
     let cwd = requestedCwd.trim();
-    if (requestedSessionId && !cwd) {
-      // 기존 세션은 원래 cwd 로 열어야 한다(Claude Code 는 cwd 별 폴더에 기록을 둔다).
+    if (requestedSessionId) {
+      // Restore metadata even when the caller already supplied a working directory.
       const history = await this.#store.readHistory(cli, requestedSessionId).catch(() => null);
-      cwd = history?.session?.cwd || '';
+      cwd ||= history?.session?.cwd || '';
+      title = history?.session?.title || title;
     }
     if (!cwd) throw new Error('No working directory: pass cwd for a new session.');
     try {
@@ -806,6 +809,7 @@ export class AgentSessionRunner {
         sessionId: requestedSessionId,
         cwd,
         title,
+        allowPromptTitle: !requestedSessionId,
         client,
         loadSupported,
         loading: false,
@@ -866,9 +870,12 @@ export class AgentSessionRunner {
         live.sessionId = created.sessionId;
         modes = created.modes;
         configOptions = created.configOptions;
-        await this.#store.recordAwbSession({ cli, session_id: live.sessionId, cwd, title }).catch(() => undefined);
+        await this.#store.recordAwbSession({ cli, session_id: live.sessionId, cwd, title: live.title }).catch(() => undefined);
       }
       if (!live.sessionId) throw new Error('ACP adapter returned no session id.');
+      if (resumed && live.title) {
+        await this.#store.touchAwbSession(cli, live.sessionId, { title: live.title }).catch(() => undefined);
+      }
       const key = this.#key(cli, live.sessionId);
       this.#live.set(key, live);
       client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
@@ -889,7 +896,7 @@ export class AgentSessionRunner {
       }], {
         status: 'ready',
         cwd,
-        ...(title ? { title } : {}),
+        ...(live.title ? { title: live.title } : {}),
         current_mode: modeInfo.current,
         available_modes: modeInfo.available,
         config_options: live.configOptions,
@@ -1399,7 +1406,7 @@ export class AgentSessionRunner {
     }
     live.turn = { turnId, startedAt: Date.now(), sawUsage: false };
     this.#clearIdle(live);
-    if (!live.title) {
+    if (!live.title && live.allowPromptTitle) {
       const titleText = text.trim() || (blocks.length > 1 ? `${blocks.length - 1} image(s)` : '');
       live.title = titleText.replace(/\s+/g, ' ').slice(0, 80);
       await this.#store.touchAwbSession(live.cli, live.sessionId, { title: live.title }).catch(() => undefined);
@@ -1496,11 +1503,23 @@ export class AgentSessionRunner {
   // ─── ACP 스트림 → 서버 ───────────────────────────────────────────────
 
   #onEvent(live: LiveSession, event: RuntimeEvent): void {
-    // Command discovery is live control state, even when session/load is replaying
-    // old messages. Some adapters announce it only before the load response.
+    // Metadata is live control state even during session/load replay, or before
+    // session/new has returned an id. Publish it with the opening snapshot.
     if (event.type === 'diagnostic' && event.method === 'session/update') {
       const data = (event.data ?? {}) as Record<string, unknown>;
-      if ((data.sessionUpdate ?? data.session_update) === 'available_commands_update') {
+      const update = data.sessionUpdate ?? data.session_update;
+      if (update === 'session_info_update') {
+        const title = typeof data.title === 'string' ? data.title.trim().slice(0, 200) : '';
+        if (title && title !== live.title) {
+          live.title = title;
+          if (!live.loading && live.sessionId) {
+            this.#enqueue(live, [], { title, reason: 'title' });
+            void this.#store.touchAwbSession(live.cli, live.sessionId, { title }).catch(() => undefined);
+          }
+        }
+        return;
+      }
+      if (update === 'available_commands_update') {
         live.availableCommands = parseCommands(data.availableCommands ?? data.available_commands);
         if (!live.loading) this.#enqueue(live, [], { available_commands: live.availableCommands, reason: 'commands' });
         return;
@@ -1619,15 +1638,6 @@ export class AgentSessionRunner {
             }
             case 'plan_removed':
               return;
-            case 'session_info_update': {
-              const title = typeof data.title === 'string' ? data.title.trim().slice(0, 200) : '';
-              if (title && title !== live.title) {
-                live.title = title;
-                this.#enqueue(live, [], { title, reason: 'title' });
-                void this.#store.touchAwbSession(live.cli, live.sessionId, { title }).catch(() => undefined);
-              }
-              return;
-            }
             default:
               break;
           }

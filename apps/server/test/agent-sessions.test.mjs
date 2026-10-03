@@ -175,14 +175,23 @@ test('agent sessions relay: hosts → RPC list/history/open → prompt stream �
   assert.equal(noCwd.status, 400);
   assert.equal(noCwd.body.error, 'cwd_required');
 
+  // No cached metadata after reconnect: defer title recovery to the manager.
+  const unknownTitle = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/uncached-title/prompt`, {
+    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'Do not rename this session' }),
+  });
+  assert.equal(unknownTitle.status, 202, unknownTitle.text);
+  assert.equal(unknownTitle.body.live.title, '');
+  assert.equal(requests.find((r) => r.op === 'prompt' && r.session_id === 'uncached-title').title, '');
+
   // 3. prompt on the existing claude session (idle → starting, driver = owner)
   const prompt = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'run the suite' }) });
   assert.equal(prompt.status, 202, prompt.text);
   assert.equal(prompt.body.live.status, 'starting');
   assert.equal(prompt.body.live.driver_user_id, owner.id);
-  const promptReq = requests.find((r) => r.op === 'prompt');
+  const promptReq = requests.find((r) => r.op === 'prompt' && r.session_id === 'sess-aaaa');
   assert.equal(promptReq.session_id, 'sess-aaaa');
   assert.equal(promptReq.text, 'run the suite');
+  assert.equal(promptReq.title, 'Fix login', 'existing title is preserved');
   assert.equal(promptReq.turn_id, prompt.body.turn_id);
   assert.equal(promptReq.cwd, '/home/parn/repo', 'cwd from the history summary is forwarded');
   const busy = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-aaaa/prompt`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ text: 'again' }) });

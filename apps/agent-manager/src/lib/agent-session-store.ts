@@ -14,8 +14,9 @@
 //
 // 스토어 드라이버가 없는 CLI(hermes)는 AWB 화면에서 만든 세션만 인덱스로 기억한다.
 
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import crossSpawn from 'cross-spawn';
@@ -190,6 +191,7 @@ async function defaultRunToFile(bin: string, args: string[]): Promise<string> {
 }
 
 export class AgentSessionStore {
+  #indexWrites: Promise<void> = Promise.resolve();
   readonly indexPath: string;
   readonly #homes: Record<string, string>;
   readonly #env: NodeJS.ProcessEnv;
@@ -386,26 +388,43 @@ export class AgentSessionStore {
   // ─── AWB 가 만든 세션 인덱스 ──────────────────────────────────────────────
 
   async recordAwbSession(entry: { cli: string; session_id: string; cwd: string; title: string }): Promise<void> {
-    const index = await this.#readIndex();
-    const now = new Date().toISOString();
-    const idx = index.findIndex((e) => e.cli === entry.cli && e.session_id === entry.session_id);
-    if (idx === -1) {
-      index.push({ ...entry, created_at: now, updated_at: now });
-    } else {
-      index[idx] = { ...index[idx], cwd: entry.cwd || index[idx].cwd, title: entry.title || index[idx].title, updated_at: now };
-    }
-    await this.#writeIndex(index);
+    await this.#updateIndex((index) => {
+      const now = new Date().toISOString();
+      const idx = index.findIndex((e) => e.cli === entry.cli && e.session_id === entry.session_id);
+      if (idx === -1) {
+        index.push({ ...entry, created_at: now, updated_at: now });
+      } else {
+        index[idx] = { ...index[idx], cwd: entry.cwd || index[idx].cwd, title: entry.title || index[idx].title, updated_at: now };
+      }
+      return true;
+    });
   }
 
   async touchAwbSession(cli: string, sessionId: string, patch: { title?: string } = {}): Promise<void> {
-    const index = await this.#readIndex();
-    const idx = index.findIndex((e) => e.cli === cli && e.session_id === sessionId);
-    if (idx === -1) return;
-    index[idx] = { ...index[idx], ...(patch.title ? { title: patch.title } : {}), updated_at: new Date().toISOString() };
-    await this.#writeIndex(index);
+    await this.#updateIndex((index) => {
+      const idx = index.findIndex((e) => e.cli === cli && e.session_id === sessionId);
+      if (idx === -1) return false;
+      index[idx] = { ...index[idx], ...(patch.title ? { title: patch.title } : {}), updated_at: new Date().toISOString() };
+      return true;
+    });
+  }
+
+  /** Title notifications and turn completion can write concurrently, across sessions too. */
+  #updateIndex(update: (index: AwbSessionIndexEntry[]) => boolean): Promise<void> {
+    const next = this.#indexWrites.then(async () => {
+      const index = await this.#readIndexFile();
+      if (update(index)) await this.#writeIndex(index);
+    });
+    this.#indexWrites = next.catch(() => undefined);
+    return next;
   }
 
   async #readIndex(): Promise<AwbSessionIndexEntry[]> {
+    await this.#indexWrites;
+    return this.#readIndexFile();
+  }
+
+  async #readIndexFile(): Promise<AwbSessionIndexEntry[]> {
     try {
       const raw = JSON.parse(await readFile(this.indexPath, 'utf8'));
       const list = Array.isArray(raw?.sessions) ? raw.sessions : [];
@@ -417,6 +436,12 @@ export class AgentSessionStore {
 
   async #writeIndex(entries: AwbSessionIndexEntry[]): Promise<void> {
     await mkdir(join(this.indexPath, '..'), { recursive: true });
-    await writeFile(this.indexPath, JSON.stringify({ version: 1, sessions: entries.slice(-500) }, null, 2), { mode: 0o600 });
+    const temporary = `${this.indexPath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify({ version: 1, sessions: entries.slice(-500) }, null, 2), { mode: 0o600 });
+      await rename(temporary, this.indexPath);
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
   }
 }

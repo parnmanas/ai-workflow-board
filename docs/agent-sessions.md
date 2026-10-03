@@ -118,6 +118,8 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 | `plan` / `plan_update` | `plan` 행(`entries[{content, priority, status}]`) — 같은 turn 의 최신 것이 이전 것을 대체 | 체크리스트 카드 |
 | `session_info_update` | 제목 패치 | — |
 
+재접속 시 작업 폴더 전달 여부와 관계없이 기존 저장소의 제목을 복원한다. 입력문으로 제목을 만드는 것은 새로 만든 무제목 세션의 첫 입력에만 적용하며, 기존 세션의 제목을 읽지 못한 경우에도 후속 입력으로 대체하지 않는다. CLI의 `session_info_update`는 `session/new`·`session/load` 응답 전과 라이브 턴 중 모두 반영하고, AWB 인덱스가 있는 세션은 갱신된 제목을 보존한다.
+
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
 **모델 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다.** (1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP
 `configOptions` — 표시 이름·현재값까지 있어 가장 정확하다. (2) 지금 살아 있는 세션이 아는 선택지(서버 재시작 직후).
