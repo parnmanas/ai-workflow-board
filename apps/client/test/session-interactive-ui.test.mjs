@@ -347,3 +347,31 @@ test('composer: exact slash commands send on Enter; Shift+Enter does not pick or
     view.unmount();
   } finally { dom.cleanup(); }
 });
+
+
+test('automatic continuation is a labelled note with a distinct appearance and expandable original text', () => {
+  const dom = setupDom();
+  try {
+    const notice = '[Your previous response had no visible output. Please continue and produce a user-visible response.]';
+    const blocks = buildTranscript([
+      { id: 'history:1', seq: 1, turn_id: 't1', type: 'user_prompt', created_at: '', payload: { text: 'Continue my task' } },
+      { id: 'history:2', seq: 2, turn_id: 't2', type: 'user_prompt', created_at: '', payload: { text: notice } },
+    ]);
+    const view = mount(h(SessionTranscript, { blocks, decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {} }));
+    const user = document.querySelector('[data-block="prompt"]');
+    const automatic = document.querySelector('[data-block="automatic-prompt"]');
+    assert.equal(document.querySelectorAll('[data-block="prompt"]').length, 1);
+    assert.equal(user.textContent, 'Continue my task');
+    assert.equal(automatic.getAttribute('role'), 'note');
+    assert.equal(automatic.getAttribute('aria-label'), '자동 이어쓰기');
+    assert.match(automatic.textContent, /표시된 응답이 없어 자동으로 이어쓰기를 요청했습니다/);
+    assert.notEqual(automatic.style.background, user.style.background);
+    const details = automatic.querySelector('details');
+    assert.equal(details.open, false);
+    assert.equal(details.querySelector('summary').textContent, '전송된 원문 보기');
+    click(details.querySelector('summary'));
+    assert.equal(details.open, true);
+    assert.ok(details.textContent.includes(notice), 'the sent prompt remains inspectable');
+    view.unmount();
+  } finally { dom.cleanup(); }
+});
