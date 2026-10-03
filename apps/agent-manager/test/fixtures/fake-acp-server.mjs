@@ -202,6 +202,11 @@ rl.on('line', (line) => {
         );
       }
       const sessionId = `session-${nextSession++}`;
+      if (process.env.FAKE_ACP_COMMANDS) send({
+        jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: {
+          sessionUpdate: 'available_commands_update', availableCommands: JSON.parse(process.env.FAKE_ACP_COMMANDS),
+        } },
+      });
       // codex-acp 는 session/new **응답 전에** MCP 서버 연결을 update 없는 한 번짜리 tool_call 로 알린다
       // (status 가 곧 결과다). 이 시점에는 클라이언트가 아직 세션 id 를 모른다 — 실제 순서를 그대로 재현한다.
       if (clientCapabilities?.session?.configOptions) send({
@@ -211,7 +216,7 @@ rl.on('line', (line) => {
       });
       result(message.id, { sessionId, configOptions });
       // 어댑터들은 session/new 직후 slash command 목록을 알린다 — 세션 설정을 이해하는 client 에게만
-      if (clientCapabilities?.session?.configOptions) send({
+      if (clientCapabilities?.session?.configOptions && !process.env.FAKE_ACP_COMMANDS) send({
         jsonrpc: '2.0',
         method: 'session/update',
         params: {
@@ -232,6 +237,14 @@ rl.on('line', (line) => {
       if (invalid) {
         invalidParams(message.id, invalid);
         break;
+      }
+      if (process.env.FAKE_ACP_COMMANDS) {
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OLD_REPLAY_MUST_NOT_APPEAR' },
+        } } });
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          session_update: 'available_commands_update', available_commands: JSON.parse(process.env.FAKE_ACP_COMMANDS),
+        } } });
       }
       result(message.id, { configOptions });
       break;
@@ -266,6 +279,16 @@ rl.on('line', (line) => {
       // 업스트림 오류를 조용히 재시도하는 CLI 흉내 — 응답도 알림도 stderr 도 없다
       // (실측: opencode 1.18.32 의 무료 모델 429). 러너의 침묵 감시가 이 상황을 본다.
       if (process.env.FAKE_ACP_SILENT_PROMPT === '1') break;
+      if (process.env.FAKE_ACP_COMMANDS && message.params.prompt?.[0]?.text?.startsWith('/')) {
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Native command: ${message.params.prompt[0].text}` },
+        } } });
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          sessionUpdate: 'available_commands_update', availableCommands: [],
+        } } });
+        result(message.id, { stopReason: 'end_turn' });
+        break;
+      }
       if (JSON.stringify(message.params.prompt).includes('PROVIDER_ERROR_TEST')) {
         send({ jsonrpc: '2.0', id: message.id, error: {
           code: -32603,

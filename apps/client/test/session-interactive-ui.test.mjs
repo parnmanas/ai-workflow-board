@@ -309,3 +309,41 @@ test('transcript: 토큰 줄 끝에 응답을 받은 시각이 붙는다', () =>
     dom.cleanup();
   }
 });
+
+test('composer: command browser exposes all CLI commands and never replaces a draft', async () => {
+  const dom = setupDom();
+  try {
+    const many = Array.from({ length: 25 }, (_, i) => ({ name: `skill-${String(i).padStart(2, '0')}`, description: `Skill ${i}` }));
+    const view = mount(h(SessionComposer, { disabled: false, busy: false, placeholder: 'Prompt…', commands: many, onSend() {}, onCancel() {} }));
+    const textarea = document.querySelector('textarea[aria-label="Prompt"]');
+    const browse = document.querySelector('button[aria-label="Browse slash commands"]');
+    click(browse);
+    assert.equal(textarea.value, '/');
+    assert.equal(document.querySelectorAll('[role="option"]').length, 25, 'commands past the old 12-item cap are selectable');
+    for (let i = 0; i < 24; i++) keydown('ArrowDown', { target: textarea });
+    keydown('Tab', { target: textarea });
+    assert.equal(textarea.value, '/skill-24');
+    typeInto(textarea, 'keep this draft');
+    assert.equal(browse.disabled, true);
+    click(browse);
+    assert.equal(textarea.value, 'keep this draft');
+    view.unmount();
+  } finally { dom.cleanup(); }
+});
+
+test('composer: exact slash commands send on Enter; Shift+Enter does not pick or send', async () => {
+  const dom = setupDom();
+  try {
+    const sent = [];
+    const view = mount(h(SessionComposer, { disabled: false, busy: false, placeholder: 'Prompt…', commands, onSend: (p) => sent.push(p), onCancel() {} }));
+    const textarea = document.querySelector('textarea[aria-label="Prompt"]');
+    typeInto(textarea, '/compact');
+    keydown('Enter', { target: textarea, shiftKey: true });
+    assert.equal(sent.length, 0);
+    assert.equal(Boolean(document.querySelector('[role="listbox"]')), true);
+    keydown('Enter', { target: textarea });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.deepEqual(sent, [{ text: '/compact', images: [] }]);
+    view.unmount();
+  } finally { dom.cleanup(); }
+});

@@ -1031,3 +1031,28 @@ test('native diagnostic failure cannot swallow the original provider error or le
   assert.doesNotMatch(error.payload.message, /native store unavailable/);
   assert.equal(server.states(sessionId).find((s) => s.reason === 'turn_failed').status, 'error');
 });
+
+for (const [cli, name] of [['claude', 'compact'], ['codex', 'review-branch'], ['opencode', 'init'], ['hermes', 'compress']]) {
+  test(`${cli}: native slash commands survive reopen, execute verbatim, and follow live list updates`, async (t) => {
+    const commands = [{ name, description: `${cli} command`, input: { hint: 'optional argument' } }];
+    const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_COMMANDS: JSON.stringify(commands) });
+    await runner.handle(request('open', { cli, request_id: `${cli}-new`, cwd }));
+    const opened = server.rpc(`${cli}-new`);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.result.available_commands.map((c) => c.name), [name], 'announcement before session/new response is kept');
+    const sid = opened.result.session_id;
+    await runner.handle(request('close', { cli, session_id: sid }));
+    await runner.handle(request('open', { cli, request_id: `${cli}-resume`, session_id: sid, cwd }));
+    const resumed = server.rpc(`${cli}-resume`);
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.deepEqual(resumed.result.available_commands, [{ name, description: `${cli} command`, input_hint: 'optional argument' }], 'announcement during session/load must not be discarded as transcript replay');
+    const text = `/${name} focus on auth / keep this argument`;
+    await runner.handle(request('prompt', { cli, session_id: sid, turn_id: `${cli}-slash`, text }));
+    await waitFor(() => server.events(sid).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'slash command finished');
+    const output = server.events(sid).filter((e) => e.type === 'text').map((e) => e.payload.text).join('');
+    assert.match(output, new RegExp(`Native command: /${name}`));
+    assert.ok(output.includes(text), 'arguments go through the normal ACP prompt unchanged');
+    assert.ok(!output.includes('OLD_REPLAY_MUST_NOT_APPEAR'), 'history replay remains suppressed');
+    assert.deepEqual(server.states(sid).filter((s) => s.reason === 'commands').at(-1).available_commands, [], 'empty updates remove stale commands');
+  });
+}

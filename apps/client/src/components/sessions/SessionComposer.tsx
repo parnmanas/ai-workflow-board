@@ -9,7 +9,7 @@ import { readFileAsBase64 } from '../chat/utils/attachments';
  * 묶이지 않는다 — 텍스트 + 이미지 첨부를 그대로 CLI 세션에 보낸다. Enter 전송,
  * Shift+Enter 줄바꿈, 한글 IME 조합 중 Enter 는 무시한다.
  * `/` 로 시작하면 어댑터가 알려 준 slash command 목록으로 자동완성한다
- * (↑/↓ 이동, Enter/Tab 선택, Esc 닫기) — 선택해도 전송하지 않고 텍스트만 채운다.
+ * (↑/↓ 이동, Enter/Tab 선택, Esc 닫기). 완성된 명령은 Enter 로 바로 전송한다.
  *
  * 이미지는 ACP Image 블록으로 간다 — opencode 가 `promptCapabilities.image` 를
  * 광고하는(1.18.34 실측) 네이티브 경로라 별도 MCP 우회가 필요 없다. vision 을
@@ -177,7 +177,11 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
 
   const slash = useMemo(() => matchSlashCommands(text, commands ?? []), [text, commands]);
   const popupOpen = slash.active && slash.matches.length > 0 && dismissedFor !== text;
+  const commandListRef = useRef<HTMLUListElement>(null);
   useEffect(() => { setSelected(0); }, [slash.query, slash.matches.length]);
+  useEffect(() => {
+    if (popupOpen) commandListRef.current?.children[selected]?.scrollIntoView?.({ block: 'nearest' });
+  }, [popupOpen, selected]);
 
   const pick = useCallback((command: AgentSessionCommand) => {
     const next = applySlashCommand(command);
@@ -226,10 +230,17 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
+    if (e.key === 'Enter' && e.shiftKey) return;
     if (popupOpen) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelected((i) => (i + 1) % slash.matches.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSelected((i) => (i - 1 + slash.matches.length) % slash.matches.length); return; }
-      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(slash.matches[Math.min(selected, slash.matches.length - 1)]); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const command = slash.matches[Math.min(selected, slash.matches.length - 1)];
+        if (e.key === 'Enter' && text === `/${command.name}`) void submit();
+        else pick(command);
+        return;
+      }
       if (e.key === 'Escape') { e.preventDefault(); setDismissedFor(text); return; }
     }
     if (e.key !== 'Enter' || e.shiftKey) return;
@@ -253,6 +264,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       )}
       {queue.length > 0 && (
         <ul
+          ref={commandListRef}
           aria-label="Queued prompts"
           style={{
             listStyle: 'none', margin: '0 0 6px', padding: 0, display: 'flex', flexDirection: 'column', gap: 4,
@@ -330,6 +342,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
               role="option"
               aria-selected={i === selected}
               data-command={c.name}
+              title={c.description}
               onMouseDown={(e) => { e.preventDefault(); pick(c); }}
               onMouseEnter={() => setSelected(i)}
               style={{
@@ -344,6 +357,18 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         </ul>
       )}
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        {!!commands?.length && (
+          <button
+            type="button"
+            aria-label="Browse slash commands"
+            title="Browse this CLI's commands (or type /). Terminal-only commands may be unavailable here."
+            disabled={locked || (!!text.trim() && !slash.active)}
+            onClick={() => { setText('/'); setDismissedFor(null); ref.current?.focus(); }}
+            style={{ height: 40, minWidth: 40, borderRadius: tokens.radii.lg, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surface, color: tokens.colors.textSecondary }}
+          >
+            /
+          </button>
+        )}
         <input
           ref={fileRef}
           type="file"

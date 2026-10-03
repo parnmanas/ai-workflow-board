@@ -390,13 +390,15 @@ export function parseConfigOptions(raw: unknown): AgentSessionConfigOptionPatch[
 export function parseCommands(raw: unknown): CommandPatch[] {
   if (!Array.isArray(raw)) return [];
   const out: CommandPatch[] = [];
+  const names = new Set<string>();
   for (const entry of raw) {
     if (!entry || typeof entry !== 'object') continue;
     const c = entry as Record<string, unknown>;
     const name = typeof c.name === 'string' ? c.name.trim().replace(/^\//, '') : '';
-    if (!name) continue;
+    if (!name || /\s/.test(name) || names.has(name)) continue;
+    names.add(name);
     const input = c.input && typeof c.input === 'object' ? (c.input as Record<string, unknown>) : null;
-    const hint = input && typeof input.hint === 'string' ? input.hint : '';
+    const hint = input && typeof input.hint === 'string' ? input.hint : typeof c.input_hint === 'string' ? c.input_hint : '';
     out.push({ name, description: typeof c.description === 'string' ? c.description : '', ...(hint ? { input_hint: hint } : {}) });
   }
   return out;
@@ -1494,6 +1496,16 @@ export class AgentSessionRunner {
   // ─── ACP 스트림 → 서버 ───────────────────────────────────────────────
 
   #onEvent(live: LiveSession, event: RuntimeEvent): void {
+    // Command discovery is live control state, even when session/load is replaying
+    // old messages. Some adapters announce it only before the load response.
+    if (event.type === 'diagnostic' && event.method === 'session/update') {
+      const data = (event.data ?? {}) as Record<string, unknown>;
+      if ((data.sessionUpdate ?? data.session_update) === 'available_commands_update') {
+        live.availableCommands = parseCommands(data.availableCommands ?? data.available_commands);
+        if (!live.loading) this.#enqueue(live, [], { available_commands: live.availableCommands, reason: 'commands' });
+        return;
+      }
+    }
     if (live.loading) return; // session/load 재생분 — history 가 이미 UI 에 있다
     // 무엇이든 하나 왔으면 이 턴은 조용하지 않다.
     this.#clearSilenceWatch(live);
@@ -1595,10 +1607,6 @@ export class AgentSessionRunner {
             case 'config_option_update':
               live.configOptions = parseConfigOptions(data.configOptions ?? data.config_options);
               this.#enqueue(live, [], { config_options: live.configOptions, reason: 'config_option' });
-              return;
-            case 'available_commands_update':
-              live.availableCommands = parseCommands(data.availableCommands ?? data.available_commands);
-              this.#enqueue(live, [], { available_commands: live.availableCommands, reason: 'commands' });
               return;
             case 'plan':
             case 'plan_update': {
