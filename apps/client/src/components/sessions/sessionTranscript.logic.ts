@@ -141,6 +141,7 @@ export interface PlanEntryView {
 
 export type TranscriptBlock =
   | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string }
+  | { kind: 'automatic_prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'assistant'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'reasoning'; key: string; seq: number; turnId: string; text: string }
   | {
@@ -278,6 +279,13 @@ export function normalizeElicitationSchema(raw: unknown): ElicitationSchemaView 
   return { title: str(schema.title), description: str(schema.description), fields };
 }
 
+/** Legacy CLI histories encode this continuation request as a user message without sender metadata.
+ * Match only the complete known notice; quotations and ordinary requests to continue stay user input.
+ */
+function isAutomaticContinuation(text: string): boolean {
+  return text.trim().replace(/\s+/g, ' ') === '[Your previous response had no visible output. Please continue and produce a user-visible response.]';
+}
+
 export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   const toolIndex = new Map<string, number>();
@@ -291,9 +299,13 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     const turnId = ev.turn_id || '';
     const last = blocks[blocks.length - 1];
     switch (ev.type) {
-      case 'user_prompt':
-        blocks.push({ kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text: str(p.text), createdAt: ev.created_at });
+      case 'user_prompt': {
+        const text = str(p.text);
+        // Local echoes are known user input, even if someone pastes this exact notice.
+        const automatic = !ev.id.startsWith('local:') && isAutomaticContinuation(text);
+        blocks.push({ kind: automatic ? 'automatic_prompt' : 'prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at });
         break;
+      }
       case 'text':
         if (last && last.kind === 'assistant' && last.turnId === turnId) {
           last.text += str(p.text);
