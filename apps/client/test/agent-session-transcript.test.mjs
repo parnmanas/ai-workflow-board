@@ -601,3 +601,53 @@ test('formatReceivedAt: 오늘이면 시각만, 다른 날이면 날짜까지, �
   assert.equal(formatReceivedAt(''), '');
   assert.equal(formatReceivedAt('not-a-date'), '');
 });
+
+test('trimmed history usage stays before the new response instead of becoming its footer', () => {
+  seq = 0;
+  const oldTool = ev('tool_call', { tool_call_id: 'old-tool', title: 'Bash' }, 'old');
+  const oldUsage = {
+    ...ev('usage', { input_tokens: 471, output_tokens: 140, cached_read_tokens: 797169, total_tokens: 797780, cost_usd: 0.001669438 }, 'old'),
+    created_at: '2026-10-03T04:34:39.421Z',
+  };
+  const recent = { ...ev('text', { text: 'New response' }, 'new'), created_at: '2026-10-03T14:40:00Z' };
+  const trimmed = appendLiveEvent([oldTool, oldUsage], recent, 2);
+  const blocks = buildTranscript(trimmed);
+  assert.deepEqual(blocks.map((b) => b.kind), ['system', 'usage', 'assistant']);
+  assert.equal(blocks[1].receivedAt, oldUsage.created_at);
+  assert.equal(blocks[2].createdAt, recent.created_at);
+});
+
+test('usage-only turns keep input order and the last sample without sorting separate seq spaces', () => {
+  seq = 0;
+  const rows = [
+    ev('text', { text: 'Earlier' }, 'a'),
+    ev('usage', { total_tokens: 100 }, 'a'),
+    ev('usage', { total_tokens: 200 }, 'b'),
+    ev('usage', { total_tokens: 300 }, 'b'),
+    ev('text', { text: 'Later' }, 'c'),
+    ev('usage', { total_tokens: 400 }, 'c'),
+    ev('usage', { total_tokens: 500 }, 'd'),
+  ];
+  rows.forEach((row, i) => { row.seq = i < 4 ? 100 + i : i - 3; });
+  const blocks = buildTranscript(rows);
+  assert.deepEqual(blocks.map((b) => [b.kind, b.turnId, b.totalTokens]), [
+    ['assistant', 'a', undefined], ['usage', 'a', 100], ['usage', 'b', 300],
+    ['assistant', 'c', undefined], ['usage', 'c', 400], ['usage', 'd', 500],
+  ]);
+});
+
+test('received time converts the reported UTC record to the browser timezone once', () => {
+  const originalTz = process.env.TZ;
+  try {
+    const at = '2026-10-03T04:34:39.421Z';
+    const now = new Date('2026-10-03T14:40:00Z');
+    process.env.TZ = 'Asia/Seoul';
+    assert.equal(formatReceivedAt(at, now), '13:34:39');
+    assert.equal(formatReceivedAt('2026-10-03T13:34:39.421+09:00', now), '13:34:39');
+    process.env.TZ = 'UTC';
+    assert.equal(formatReceivedAt(at, now), '04:34:39');
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+});
