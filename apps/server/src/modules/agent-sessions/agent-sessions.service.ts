@@ -1132,7 +1132,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.last_error = null;
     state.last_error_code = null;
     state.updated_at = Date.now();
-    if (!state.title) state.title = (text.trim() || (images.length ? `${images.length} image(s)` : '')).replace(/\s+/g, ' ').slice(0, 80);
+    // The manager restores native titles and names new sessions. A missing server
+    // snapshot after reconnect must not rename an existing session from this prompt.
     const live = this.emitUpdate(state, 'prompt');
     this.emitRequest({
       manager_id: managerId,

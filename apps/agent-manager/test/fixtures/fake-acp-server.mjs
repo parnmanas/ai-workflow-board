@@ -202,6 +202,11 @@ rl.on('line', (line) => {
         );
       }
       const sessionId = `session-${nextSession++}`;
+      if (process.env.FAKE_ACP_NEW_TITLE) send({
+        jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: {
+          sessionUpdate: 'session_info_update', title: process.env.FAKE_ACP_NEW_TITLE,
+        } },
+      });
       if (process.env.FAKE_ACP_COMMANDS) send({
         jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: {
           sessionUpdate: 'available_commands_update', availableCommands: JSON.parse(process.env.FAKE_ACP_COMMANDS),
@@ -238,6 +243,11 @@ rl.on('line', (line) => {
         invalidParams(message.id, invalid);
         break;
       }
+      if (process.env.FAKE_ACP_LOAD_TITLE) send({
+        jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          session_update: 'session_info_update', title: process.env.FAKE_ACP_LOAD_TITLE,
+        } },
+      });
       if (process.env.FAKE_ACP_COMMANDS) {
         send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
           sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OLD_REPLAY_MUST_NOT_APPEAR' },
@@ -279,6 +289,15 @@ rl.on('line', (line) => {
       // 업스트림 오류를 조용히 재시도하는 CLI 흉내 — 응답도 알림도 stderr 도 없다
       // (실측: opencode 1.18.32 의 무료 모델 429). 러너의 침묵 감시가 이 상황을 본다.
       if (process.env.FAKE_ACP_SILENT_PROMPT === '1') break;
+      if (process.env.FAKE_ACP_PROMPT_TITLE) send({
+        jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          sessionUpdate: 'session_info_update', title: process.env.FAKE_ACP_PROMPT_TITLE,
+        } },
+      });
+      if (process.env.FAKE_ACP_FAST_PROMPT === '1') {
+        result(message.id, { stopReason: 'end_turn' });
+        break;
+      }
       if (process.env.FAKE_ACP_COMMANDS && message.params.prompt?.[0]?.text?.startsWith('/')) {
         send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
           sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Native command: ${message.params.prompt[0].text}` },

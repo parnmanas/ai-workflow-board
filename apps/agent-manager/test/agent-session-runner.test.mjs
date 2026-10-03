@@ -1056,3 +1056,75 @@ for (const [cli, name] of [['claude', 'compact'], ['codex', 'review-branch'], ['
     assert.deepEqual(server.states(sid).filter((s) => s.reason === 'commands').at(-1).available_commands, [], 'empty updates remove stale commands');
   });
 }
+
+
+for (const suppliedCwd of [false, true]) {
+  test(`resume preserves native title on the next prompt (supplied cwd: ${suppliedCwd})`, async (t) => {
+    const { cwd, store, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+    const original = (await store.readHistory('claude', CLAUDE_ID)).session.title;
+    assert.ok(original);
+    await runner.handle(request('open', {
+      request_id: 'title-open', session_id: CLAUDE_ID,
+      ...(suppliedCwd ? { cwd } : {}),
+    }));
+    assert.equal(server.rpc('title-open').result.title, original);
+    await runner.handle(request('prompt', { session_id: CLAUDE_ID, turn_id: 'title-turn', text: 'An unrelated follow-up' }));
+    await waitFor(() => server.states(CLAUDE_ID).some((s) => s.reason === 'turn_finished'), 'title turn finished');
+    assert.equal(server.states(CLAUDE_ID).find((s) => s.reason === 'turn_started').title, original);
+  });
+}
+
+test('prompt-triggered resume restores the indexed title over a stale caller title', async (t) => {
+  const { cwd, store, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  const sid = 'indexed-title-session';
+  await store.recordAwbSession({ cli: 'claude', session_id: sid, cwd, title: 'Original project' });
+  await runner.handle(request('prompt', { session_id: sid, cwd, title: 'Stale title', turn_id: 'title-turn', text: 'Follow-up' }));
+  await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'resumed turn finished');
+  assert.equal(server.states(sid).find((s) => s.reason === 'turn_started').title, 'Original project');
+  assert.equal((await store.readHistory('claude', sid)).session.title, 'Original project');
+});
+
+test('an existing session with unreadable metadata is not renamed from the next prompt', async (t) => {
+  const { cwd, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  const sid = 'no-local-metadata';
+  await runner.handle(request('prompt', { session_id: sid, cwd, turn_id: 'title-turn', text: 'Do not use this as the title' }));
+  await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'unknown-title turn finished');
+  assert.equal(server.states(sid).find((s) => s.reason === 'turn_started').title, '');
+});
+
+test('a new untitled session keeps its first prompt title across restart and later input', async (t) => {
+  const { cwd, store, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  await runner.handle(request('open', { request_id: 'title-new', cwd }));
+  const sid = server.rpc('title-new').result.session_id;
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 'title-first', text: 'Original task' }));
+  await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'first title turn');
+  await runner.handle(request('restart', { session_id: sid, cwd }));
+  await runner.handle(request('history', { request_id: 'title-restart', session_id: sid }));
+  assert.equal(server.rpc('title-restart').result.live.title, 'Original task');
+  await runner.handle(request('prompt', { session_id: sid, turn_id: 'title-second', text: 'Different follow-up' }));
+  await waitFor(() => server.events(sid).some((e) => e.turn_id === 'title-second' && e.payload.phase === 'finished'), 'second title turn');
+  assert.equal(server.states(sid).filter((s) => s.reason === 'turn_started').at(-1).title, 'Original task');
+  assert.equal((await store.readHistory('claude', sid)).session.title, 'Original task');
+});
+
+for (const stage of ['NEW', 'LOAD', 'PROMPT']) {
+  test(`CLI title update during ${stage.toLowerCase()} overrides and persists the title`, async (t) => {
+    const title = `CLI title from ${stage}`;
+    const { cwd, store, server, runner } = await harness(t, {}, {
+      FAKE_ACP_FAST_PROMPT: '1', [`FAKE_ACP_${stage}_TITLE`]: title,
+    });
+    let sid = 'cli-title-session';
+    if (stage !== 'NEW') await store.recordAwbSession({ cli: 'claude', session_id: sid, cwd, title: 'Previous title' });
+    await runner.handle(request('open', { request_id: 'cli-title-open', session_id: stage === 'NEW' ? null : sid, cwd, title: 'Caller title' }));
+    sid = server.rpc('cli-title-open').result.session_id;
+    if (stage !== 'PROMPT') assert.equal(server.rpc('cli-title-open').result.title, title);
+    await runner.handle(request('prompt', { session_id: sid, turn_id: 'cli-title-turn', text: 'Follow-up' }));
+    await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'CLI title turn');
+    await runner.handle(request('history', { request_id: 'cli-title-history', session_id: sid }));
+    assert.equal(server.rpc('cli-title-history').result.live.title, title);
+    assert.equal((await store.readHistory('claude', sid)).session.title, title);
+    await runner.handle(request('restart', { session_id: sid, cwd }));
+    await runner.handle(request('history', { request_id: 'cli-title-restart', session_id: sid }));
+    assert.equal(server.rpc('cli-title-restart').result.live.title, title);
+  });
+}
