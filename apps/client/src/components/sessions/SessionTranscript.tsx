@@ -580,7 +580,7 @@ function PlanBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'plan' }
   );
 }
 
-function Note({ children, tone }: { children: React.ReactNode; tone: 'muted' | 'danger' | 'warning' }) {
+function Note({ children, tone, multiline = false }: { children: React.ReactNode; tone: 'muted' | 'danger' | 'warning'; multiline?: boolean }) {
   const color = tone === 'danger' ? tokens.colors.dangerLight : tone === 'warning' ? tokens.colors.warningLight : tokens.colors.textMuted;
   return (
     <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -588,12 +588,13 @@ function Note({ children, tone }: { children: React.ReactNode; tone: 'muted' | '
         style={{
           fontSize: 11.5,
           color,
-          padding: '3px 10px',
-          borderRadius: 999,
+          padding: multiline ? '8px 12px' : '3px 10px',
+          borderRadius: multiline ? 8 : 999,
           border: `1px solid ${tone === 'muted' ? tokens.colors.border : color}`,
           background: tokens.colors.surface,
           maxWidth: 760,
-          textAlign: 'center',
+          textAlign: multiline ? 'left' : 'center',
+          whiteSpace: multiline ? 'pre-wrap' : undefined,
           wordBreak: 'break-word',
         }}
       >
@@ -973,7 +974,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
             );
           case 'error':
             return (
-              <Note key={block.key} tone="danger">
+              <Note key={block.key} tone="danger" multiline>
                 {block.message}{block.code ? ` (${block.code})` : ''}
               </Note>
             );

@@ -316,6 +316,17 @@ export class AgentSessionStore {
 
   // ─── 기록 ───────────────────────────────────────────────────────────────
 
+  async readTurnFailure(cli: string, sessionId: string, startedAt: number): Promise<import('./session-failure.js').SessionFailureDetails | null> {
+    if (!SESSION_ID_RE.test(sessionId) || !Number.isFinite(startedAt)) return null;
+    const bound = this.#driverFor(cli);
+    if (!bound?.driver.readTurnFailure) return null;
+    try {
+      return await bound.driver.readTurnFailure(bound.ctx, sessionId, startedAt);
+    } catch {
+      return null; // Diagnostics must never replace the original failure.
+    }
+  }
+
   async readHistory(cli: string, sessionId: string): Promise<HistoryResult> {
     const indexEntry = (await this.#readIndex()).find((e) => e.cli === cli && e.session_id === sessionId) ?? null;
     const fromIndexOnly: HistoryResult = {

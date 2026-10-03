@@ -995,3 +995,39 @@ test('a turn that emits nothing gets a silence warning in the transcript, and a 
   );
   await talking.runner.handle(request('close', { session_id: tid }));
 });
+
+test('provider failure details reach the existing error event and state with secrets redacted', async (t) => {
+  const { cwd, store, server, runner } = await harness(t);
+  const start = Date.now();
+  store.readTurnFailure = async (cli, id, startedAt) => {
+    assert.equal(cli, 'claude'); // Runner delegates; no OpenCode-name branch.
+    assert.ok(id);
+    assert.ok(startedAt >= start);
+    return { status: 400, provider: 'opencode-go', model: 'muse-spark', previousTokens: 1016258, compactCommand: '/compact', message: 'Rejected api_key=secret-value' };
+  };
+  await runner.handle(request('open', { request_id: 'error-open', cwd }));
+  const sessionId = server.rpc('error-open').result.session_id;
+  await runner.handle(request('prompt', { session_id: sessionId, turn_id: 'failure-turn', text: 'PROVIDER_ERROR_TEST' }));
+  await waitFor(() => server.events(sessionId).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'failed turn');
+  const error = server.events(sessionId).find((e) => e.type === 'error');
+  assert.equal(error.payload.code, 'acp_remote_error');
+  assert.match(error.payload.message, /HTTP 400/);
+  assert.match(error.payload.message, /1,016,258/);
+  assert.match(error.payload.message, /\/compact/);
+  assert.doesNotMatch(error.payload.message, /secret-value/);
+  assert.equal(server.states(sessionId).find((s) => s.reason === 'turn_failed').last_error, error.payload.message);
+});
+
+test('native diagnostic failure cannot swallow the original provider error or leave the turn busy', async (t) => {
+  const { cwd, store, server, runner } = await harness(t);
+  store.readTurnFailure = async () => { throw new Error('native store unavailable'); };
+  await runner.handle(request('open', { request_id: 'fallback-open', cwd }));
+  const sessionId = server.rpc('fallback-open').result.session_id;
+  await runner.handle(request('prompt', { session_id: sessionId, turn_id: 'fallback-turn', text: 'PROVIDER_ERROR_TEST' }));
+  await waitFor(() => server.events(sessionId).some((e) => e.type === 'turn' && e.payload.phase === 'finished'), 'failed turn');
+  const error = server.events(sessionId).find((e) => e.type === 'error');
+  assert.equal(error.payload.code, 'acp_remote_error');
+  assert.match(error.payload.message, /The request contains invalid parameters/);
+  assert.doesNotMatch(error.payload.message, /native store unavailable/);
+  assert.equal(server.states(sessionId).find((s) => s.reason === 'turn_failed').status, 'error');
+});

@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 
 import { AgentSessionStore, type HistoryEvent, type SessionSummary } from './agent-session-store.js';
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
+import { describeSessionFailure } from './session-failure.js';
 import { cliModulesWith, cliSessions, findCliModule, requiredCredentialFields } from './clis/index.js';
 import { findOnPath } from './find-on-path.js';
 import { describeHolders, findLockHolders, killHolder, selectKillTargets, type LockHolder } from './file-lock-holders.js';
@@ -1438,7 +1439,10 @@ export class AgentSessionRunner {
       await this.#store.touchAwbSession(live.cli, live.sessionId).catch(() => undefined);
     } catch (err: any) {
       this.#flushBuffers(live, turnId);
-      const message = redactSecrets(err?.message ?? String(err));
+      const native = err?.code === 'acp_remote_error'
+        ? await this.#store.readTurnFailure(live.cli, live.sessionId, live.turn?.startedAt ?? Date.now()).catch(() => null)
+        : null;
+      const message = redactSecrets(describeSessionFailure(err instanceof Error ? err : { message: String(err) }, native));
       this.#enqueue(live, [
         { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: turnId },
         { type: 'turn', payload: { phase: 'finished', stop_reason: 'error' }, turn_id: turnId },
