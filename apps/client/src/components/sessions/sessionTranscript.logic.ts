@@ -595,8 +595,7 @@ export function matchSlashCommands(text: string, commands: AgentSessionCommand[]
   const query = m[1].toLowerCase();
   const matches = commands
     .filter((c) => c.name.toLowerCase().startsWith(query))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(0, 12);
+    .sort((a, b) => a.name.localeCompare(b.name));
   return { active: true, query, matches };
 }
 
