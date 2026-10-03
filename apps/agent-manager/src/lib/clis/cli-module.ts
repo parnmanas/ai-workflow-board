@@ -179,6 +179,8 @@ export interface CliSessionStoreContext {
 }
 
 export interface CliSessionStoreDriver {
+  /** Optional native failure evidence for this turn only; null if unavailable or stale. */
+  readTurnFailure?(ctx: CliSessionStoreContext, sessionId: string, startedAt: number): Promise<import('../session-failure.js').SessionFailureDetails | null>;
   /** CLI 자체 기록에서 세션을 열거한다(AWB 인덱스는 호출자가 합친다). 절대 throw 하지
    *  않는다 — 못 읽으면 빈 목록. */
   listSessions(ctx: CliSessionStoreContext): Promise<CliSessionSummary[]>;

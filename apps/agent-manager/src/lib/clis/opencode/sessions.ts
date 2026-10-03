@@ -28,6 +28,7 @@ import {
 } from '../../agent-session-history.js';
 import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
 import { sniffImageMime } from '../../session-local-image.js';
+import { sessionFailureDetails } from '../../session-failure.js';
 import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
 
 /**
@@ -119,6 +120,39 @@ async function query<T>(ctx: CliSessionStoreContext, sql: string): Promise<T[]> 
 }
 
 export const opencodeSessionStore: CliSessionStoreDriver = {
+  async readTurnFailure(ctx, sessionId, startedAt) {
+    const [row] = await query<Record<string, unknown>>(ctx,
+      `SELECT data, time_created FROM message WHERE session_id = '${sessionId}' `
+      + `AND time_created >= ${Math.floor(startedAt)} AND json_extract(data, '$.role') = 'assistant' `
+      + 'ORDER BY time_created DESC, id DESC LIMIT 1');
+    if (!row || !Number.isFinite(Number(row.time_created)) || Number(row.time_created) < startedAt) return null;
+    const message = parseJsonObject(row.data);
+    const error = message && isRecord(message.error) ? message.error : null;
+    if (!error || !isRecord(error.data)) return null;
+    const data = error.data;
+    // OpenCode's ACP error only says APIError; the provider's code/param live in
+    // responseBody. Select those fields, never expose headers, URLs or raw JSON.
+    const body = typeof data.responseBody === 'string' && data.responseBody.length <= 65_536
+      ? parseJsonObject(data.responseBody) : null;
+    const details = sessionFailureDetails({ ...data, ...(body && isRecord(body.error) ? { error: body.error } : {}) });
+    const provider = typeof message?.providerID === 'string' ? message.providerID : '';
+    const model = typeof message?.modelID === 'string' ? message.modelID : '';
+    const sqlString = (value: string) => `'${value.replace(/'/g, "''")}'`;
+    const [previous] = await query<Record<string, unknown>>(ctx,
+      `SELECT data FROM message WHERE session_id = '${sessionId}' `
+      + `AND time_created <= ${Math.floor(Number(row.time_created))} `
+      + "AND json_extract(data, '$.role') = 'assistant' AND json_extract(data, '$.error') IS NULL "
+      + "AND json_extract(data, '$.finish') IS NOT NULL "
+      + `AND json_extract(data, '$.providerID') = ${sqlString(provider)} AND json_extract(data, '$.modelID') = ${sqlString(model)} `
+      + 'ORDER BY time_created DESC, id DESC LIMIT 1');
+    const previousMessage = parseJsonObject(previous?.data);
+    const tokens = previousMessage && isRecord(previousMessage.tokens) ? previousMessage.tokens : {};
+    const count = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+    const cache = isRecord(tokens.cache) ? tokens.cache : {};
+    const previousTokens = count(tokens.total) || count(tokens.input) + count(tokens.output) + count(cache.read) + count(cache.write);
+    return { ...details, provider: provider.slice(0, 160), model: model.slice(0, 160), previousTokens, compactCommand: '/compact' };
+  },
+
   /** 마지막 step-finish 하나만 질의한다(ACP 어댑터가 usage 를 안 줄 때의 메꿈). */
   async readLatestUsage(ctx, sessionId) {
     const rows = await query<Record<string, unknown>>(

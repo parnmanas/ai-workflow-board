@@ -446,6 +446,12 @@ cache_write` 로 계산한다.
 
 ## 운영 메모
 
+- 프롬프트 실패는 원문과 함께 ACP 코드, 제공자가 알려 준 HTTP 상태·오류 코드·문제 파라미터 및 복구 안내를 표시한다.
+  OpenCode는 해당 턴이 시작된 뒤의 최신 assistant 오류만 네이티브 DB에서 읽고, 같은 모델의 마지막 성공 요청 토큰 수(캐시 포함)를 덧붙인다.
+  이 수치는 실패한 요청의 크기가 아니다. `invalid parameters`/HTTP 400만으로 컨텍스트 초과를 단정하지 않으며,
+  긴 대화라면 `/compact` 또는 새 세션, 새 세션에서도 실패하면 모델 설정·첨부를 확인하도록 안내한다.
+  제공자가 명시한 컨텍스트 초과·인증/권한·사용량 제한·서버 오류는 각각 다른 안내를 사용한다.
+  기록을 못 읽으면 ACP 정보로 표시하며, 원문 응답 본문·헤더는 전송하지 않는다. 기존 error 이벤트의 message만 확장하므로 SSE 스키마 변경은 없다.
 - `agent_sessions.use` 는 기본 admin 전용이다 — 장비 운영자의 개인 CLI 기록이 그대로 보이기 때문이다. 필요한 사용자에게만 부여한다.
 - 세션이 "Authentication required" 로 실패하면 장비에서 `claude login` / `codex login` 을 하거나 CLI 설정에 credential 을 묶는다.
 - Codex 세션이 "Model metadata for … not found" / "requires a newer version of Codex" 를 내면 어댑터가 옛 zed-industries 것이다 —
