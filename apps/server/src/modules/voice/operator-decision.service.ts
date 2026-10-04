@@ -76,9 +76,20 @@ export class OperatorDecisionService {
     if (!caller || caller.source !== 'db' || caller.scope !== 'full' || !caller.agentId || !caller.agentSessionId) {
       throw new OperatorDecisionError('not_an_operator', NOT_AN_OPERATOR);
     }
+    // 새로 만든 세션의 연결은 세션 id 대신 참조값을 보낸다 — 매니저가 하트비트로 알려 준 대응으로 바꾼다.
+    const sessionId = this.sessions.resolveMcpSessionRef(caller.agentId, caller.agentSessionId) ?? caller.agentSessionId;
     const operator = (await cachedOperators(this.dataSource))
-      .find((op) => op.manager_id === caller.agentId && op.session_id === caller.agentSessionId);
-    if (!operator) throw new OperatorDecisionError('not_an_operator', NOT_AN_OPERATOR);
+      .find((op) => op.manager_id === caller.agentId && op.session_id === sessionId);
+    if (!operator) {
+      // 옛 매니저는 새 세션의 연결에 글자 그대로 'new' 를 실었다 — 그 연결로는 어느 세션인지 알 수 없다.
+      if (sessionId === 'new' || sessionId.startsWith('pending-')) {
+        throw new OperatorDecisionError('session_unidentified',
+          `${NOT_AN_OPERATOR} AWB cannot tell which session this connection belongs to yet (it was opened as a new session`
+          + `${sessionId === 'new' ? ' by an older agent-manager' : ' and the Runtime Host has not reported it — wait ~30 s'}). `
+          + 'If you are the operator, ask the user to restart this session once (session header → ⟳ Restart).');
+      }
+      throw new OperatorDecisionError('not_an_operator', NOT_AN_OPERATOR);
+    }
     return operator;
   }
 

@@ -161,11 +161,14 @@ AGENTS.md 를 덮어쓰면 안 되고, 예전 지침 파일은 새로 써야 이
 
 **operator 로 등록된 세션의 MCP 연결만 그 묶음을 푼다**(`modules/voice/operator-config.ts` `isOperatorConnection`,
 `mcp.controller.ts`). 조건은 셋이 다: ① 매니저가 Agent Session 에 주입한 연결(`X-AWB-Client-Type: agent-session`),
-② `X-AWB-Session-Id` 가 등록된 operator 세션 중 하나, ③ 키가 그 operator Host 의 full 키. 풀린 연결은 Host 신원(장비 단위,
+② `X-AWB-Session-Id` 가 등록된 operator 세션 중 하나(새로 만든 세션의 연결은 세션 id 대신 매니저가 정한 참조값을 싣고,
+하트비트 `agent_sessions[].mcp_session_ref` 가 알려 준 대응으로 바꿔 본다 — 예전 매니저는 `'new'` 를 실어 operator 가 Restart
+전까지 인식되지 않았다), ③ 키가 그 operator Host 의 full 키. 풀린 연결은 Host 신원(장비 단위,
 워크스페이스 없음)으로 판정된다. 판정은 요청마다 다시 한다 — 이미 열린 MCP 세션도 지정·해제 직후의 요청부터 맞는
 범위로 돈다(지정값은 5초 캐시, 지정·해제 때 즉시 버림).
 
-- 이 방식은 agent-manager 를 바꾸지 않는다(SSE contract · 매니저 배포 없음). 처음 생각한 "operator 전용 키를 open RPC 로
+- 처음에는 agent-manager 를 바꾸지 않는 방식으로 만들었지만, 새 세션의 연결이 `'new'` 를 싣는다는 것을 운영에서 발견해
+  하트비트 `mcp_session_ref` 를 더했다(server · agent-manager 같은 PR). 처음 생각한 "operator 전용 키를 open RPC 로
   넘기기" 와 신뢰 경계가 같다 — 어느 쪽이든 그 장비의 사용자로 도는 다른 프로세스가 매니저 키를 읽고 같은 헤더를
   만들 수 있다. 그래서 지정은 admin 전용이고, 풀린 연결이 처음 붙을 때 `MCP` 로그를 남긴다.
 - 회귀: `apps/server/test/voice-operator-scope.test.mjs`(등록 전 거부 → 등록 후 허용 → 다른 세션은 거부 → 두 번째 operator 도

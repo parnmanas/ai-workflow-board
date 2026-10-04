@@ -10,6 +10,9 @@
 //   5. 질문(form): 정해진 값만 받고, 맞으면 `op:'elicitation'` 으로 답이 나간다.
 //   6. operator 의 요약은 SSE `voice_announcement` 로 operator 이름과 "결정 필요" 표시를 싣고 간다(화면이 다 읽은
 //      뒤 이름 없이 답을 듣는 창을 연다).
+//   7. AWB 에서 새로 만든 operator 세션의 MCP 연결은 세션 id 대신 매니저가 정한 참조값(`pending-…`)을 보낸다 —
+//      하트비트가 그 대응을 알려 주기 전에는 이유와 함께 거절하고, 알려 준 뒤에는 operator 로 알아본다(실측: 운영의
+//      operator 가 'new' 로 붙어 도구를 못 썼다).
 //
 //
 // 실행: node --test --test-force-exit test/voice-operator-answers.test.mjs (dist 필요)
@@ -221,6 +224,29 @@ test('a spoken choice reaches the waiting session only from a turn the user star
   assert.ok(['not_user_turn', 'request_gone'].includes(after.error.code), JSON.stringify(after));
   assert.equal(after.error.code, 'not_user_turn', 'the gate closes with the user turn');
 
+  // 7. 새로 만든 세션의 연결 — 참조값으로 붙는다.
+  const fresh = mcp('pending-7f3a9c2e-0000-4000-8000-000000000001');
+  const unknown = await fresh.callTool('list_pending_session_requests', {});
+  assert.equal(unknown.error.code, 'session_unidentified', JSON.stringify(unknown));
+  assert.match(unknown.error.error, /⟳ Restart/);
+  const mapped = await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-rolf', agent_id: host.id, host_id: host.id, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude', 'codex'], acp_session_clis: ['claude', 'codex'], pid: 4242, started_at: new Date().toISOString(),
+      agent_sessions: [{ cli: 'claude', session_id: 'op-1', status: 'ready', mcp_session_ref: 'pending-7f3a9c2e-0000-4000-8000-000000000001' }],
+    }),
+  });
+  assert.ok(mapped.status < 300, mapped.text);
+  await new Promise((r) => setTimeout(r, 50));
+  const known = await fresh.callTool('list_pending_session_requests', {});
+  assert.ok(Array.isArray(known.sessions), `the ref now resolves to the operator session: ${JSON.stringify(known)}`);
+  const legacy = mcp('new');
+  assert.equal((await legacy.callTool('list_pending_session_requests', {})).error.code, 'session_unidentified',
+    'an older manager sends the literal "new" — AWB says why and how to fix it');
+
   await operator.close();
   await bystander.close();
+  await fresh.close();
+  await legacy.close();
 });

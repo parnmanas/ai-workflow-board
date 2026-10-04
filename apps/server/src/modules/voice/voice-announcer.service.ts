@@ -246,7 +246,10 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     }
     if (!kind) return;
     // 사용자가 그 세션 화면을 보고 있다 — 이미 보고 있는 것을 보고하지 않는다.
-    if (viewing()) return;
+    if (viewing()) {
+      this.logService.debug('Voice', `not reporting ${kind} of ${session.cli}/${String(session.session_id).slice(0, 8)} — the user is looking at it`);
+      return;
+    }
     const report = { ...this.toReport(kind, userId, session, detail, durationMs, now), ...(request ? { request } : {}) };
     if (await this.reports.submit(report)) return;
     // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(짧은 턴은 화면을 보며 기다린 것으로 본다).
