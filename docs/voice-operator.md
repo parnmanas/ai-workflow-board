@@ -389,6 +389,10 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
   흘리지 않고, 끝난 발화 구간(16 kHz WAV)만 `/api/voice/transcribe` 로 보낸다. 모델·런타임(약 16MB)은 AWB 가 직접
   내려준다: 빌드 때 `apps/client/scripts/copy-vad-assets.mjs` 가 `public/vad/` 로 복사(gitignore), dev 서버는
   `vite.config.ts` 의 `serveVadAssetsRaw` 가 원본 그대로 준다(Vite 는 public 의 .mjs 를 모듈로 import 하면 500 을 낸다).
+- **CSP**: 운영 서버의 CSP(`apps/server/src/common/security-headers.ts`)가 `script-src` 에 `'wasm-unsafe-eval'` 을 가져야
+  VAD(onnxruntime-web, WASM)가 뜬다 — 없으면 `WebAssembly.instantiate()` 가 막혀 "no available backend found" 로 대화 모드·이름
+  부르기·불러 보기가 전부 죽는다(2026-10-04, 배포 뒤 사용자가 발견). `'unsafe-eval'` 이 아니라 WASM 컴파일만 여는 키워드다.
+  **브라우저 검증은 CSP 가 붙는 서버 빌드로 한다** — Vite 개발 서버에는 CSP 가 없어 거기서는 멀쩡하다(이 사고가 그렇게 지나갔다).
 - 실시간 자막: 말하는 동안 1.5초마다 지금까지의 구간을 받아써 보여 준다 — 엔진을 그만큼 더 부르므로 **무료인
   셀프호스팅(`local`) 엔진일 때만** 켠다.
 - 답을 읽는 동안에는 듣기를 멈춘다(마이크 트랙을 닫는다) — 스피커 소리를 다시 듣고 자기 답을 프롬프트로 보내지 않게.

@@ -14,6 +14,8 @@
 //      blob:/data: 를 받지 않는다. 이게 이 완화의 안전선이다.
 //   3. objectSrc 'none' / frameAncestors 'none' 이 그대로 남아 있다.
 //   4. main.ts 가 이 상수를 실제로 쓴다 — 값만 맞고 배선이 끊기면 의미가 없다.
+//   5. script-src 는 WASM 컴파일만 연다('wasm-unsafe-eval') — 음성 감지(VAD)가 WASM 이다. JS eval 을 여는
+//      'unsafe-eval' 은 주지 않는다(2026-10-04 실측: CSP 가 VAD 를 막아 대화 모드·이름 부르기가 운영에서만 죽었다).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -47,6 +49,16 @@ test('완화가 실행 가능한 자원으로 번지지 않는다 — blob: 은 
       assert.ok(!v.includes(scheme), `${key} 에 ${scheme} 을 주면 임의 코드 실행 경로가 열린다`);
     }
   }
+});
+
+test("script-src 는 WebAssembly 만 허락한다 — 음성 감지(VAD)가 WASM 이고, JS eval 은 그대로 막힌다", () => {
+  const v = CSP_DIRECTIVES.scriptSrc;
+  assert.ok(Array.isArray(v), 'scriptSrc 가 선언돼 있어야 한다 — helmet 기본값은 WASM 컴파일을 막는다');
+  assert.ok(v.includes("'self'"));
+  assert.ok(v.includes("'wasm-unsafe-eval'"), "없으면 WebAssembly.instantiate() 가 CSP 위반 — 대화 모드·이름 부르기의 VAD 가 뜨지 않는다");
+  assert.ok(!v.includes("'unsafe-eval'"), "'unsafe-eval' 은 JS eval 까지 연다 — WASM 에는 'wasm-unsafe-eval' 이면 된다");
+  assert.ok(!v.includes("'unsafe-inline'"));
+  assert.deepEqual(v.filter((x) => !["'self'", "'wasm-unsafe-eval'"].includes(x)), [], '코드 출처는 같은 오리진뿐이다');
 });
 
 test('기존 하드닝은 그대로 남는다', () => {
