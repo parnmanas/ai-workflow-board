@@ -20,16 +20,34 @@ export function loadVoiceOperators(force = false): Promise<VoiceOperator[]> {
   return cache;
 }
 
+/** 다른 단말·탭에서 바꾼 목록을 이 탭이 다시 보일 때 받아 온다 — 이 간격보다 자주는 묻지 않는다. */
+const REFRESH_ON_VISIBLE_MS = 30_000;
+let loadedAt = 0;
+
 export function useVoiceOperators(enabled = true): VoiceOperator[] {
   const [operators, setOperators] = useState<VoiceOperator[]>([]);
   useEffect(() => {
     if (!enabled) { setOperators([]); return; }
     let alive = true;
-    const load = (force: boolean) => { void loadVoiceOperators(force).then((list) => { if (alive) setOperators(list); }); };
-    load(false);
-    const onChanged = () => load(true);
+    // 캐시는 탭 하나에 하나다 — 바뀌었다는 알림(announceOperatorsChanged)이 캐시를 비우면 처음 묻는 훅만 받아 오고
+    // 나머지는 그 응답을 같이 쓴다.
+    const load = () => {
+      if (!cache) loadedAt = Date.now();
+      void loadVoiceOperators().then((list) => { if (alive) setOperators(list); });
+    };
+    load();
+    const onChanged = () => load();
+    // 이름 부르기는 이 목록으로 듣는다 — 다른 단말에서 등록한 이름도 새로고침 없이 알아듣게.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - loadedAt > REFRESH_ON_VISIBLE_MS) announceOperatorsChanged();
+    };
     window.addEventListener(OPERATORS_CHANGED_EVENT, onChanged);
-    return () => { alive = false; window.removeEventListener(OPERATORS_CHANGED_EVENT, onChanged); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.removeEventListener(OPERATORS_CHANGED_EVENT, onChanged);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [enabled]);
   return operators;
 }
