@@ -15,7 +15,7 @@ process.env.NODE_ENV = 'test';
 const { buildDataSourceOptions } = await import('file://' + path.join(dist, 'db.js'));
 const entities = await import('file://' + path.join(dist, 'entities', 'index.js'));
 const { TicketDuplicateService } = await import('file://' + path.join(dist, 'modules', 'tickets', 'ticket-duplicate.service.js'));
-const { DataSource, In } = await import('typeorm');
+const { DataSource } = await import('typeorm');
 const ds = new DataSource(buildDataSourceOptions());
 await ds.initialize();
 
@@ -24,61 +24,52 @@ after(async () => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test('확정 오탐 정정은 관계와 stale intent를 원자적으로 교체하고 재실행은 거절한다', async () => {
+// correctConfirmedLink() is the data-correction half of
+// correct_confirmed_ticket_duplicate: it clears the false-positive canonical
+// link with a compare-and-swap and writes the audit trail (decision row,
+// system comment, activity) in the same transaction. Re-waking the assignee is
+// the caller's job (TicketDispatchService.resumeTicket) — see
+// qa-flows/confirmed-duplicate-correction-wire.test.mjs.
+test('확정 오탐 정정은 관계를 원자적으로 해제하고 감사 기록을 남기며 재실행은 거절한다', async () => {
   const workspace = await ds.getRepository(entities.Workspace).save({ name: 'ws' });
-  const board = await ds.getRepository(entities.Board).save({ workspace_id: workspace.id, name: 'board' });
-  const column = await ds.getRepository(entities.BoardColumn).save({
-    workspace_id: workspace.id, board_id: board.id, name: 'To Do', position: 0,
-    kind: 'active', role_routing: '["assignee"]',
-  });
   const canonical = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, column_id: column.id, title: '무관한 완료 티켓',
+    workspace_id: workspace.id, status: 'done', title: '무관한 완료 티켓',
   });
   const report = await ds.getRepository(entities.Ticket).save({
-    workspace_id: workspace.id, column_id: column.id, title: '독립 작업 티켓',
-    canonical_ticket_id: canonical.id, assignee_id: 'agent-1',
-  });
-  const oldIntent = await ds.getRepository(entities.DispatchIntent).save({
-    workspace_id: workspace.id, board_id: board.id, ticket_id: report.id,
-    role: 'assignee', agent_id: 'agent-1', trigger_source: 'reconcile_seed',
-    status: 'in_flight', attempts: 209, dispatch_generation: 209, next_attempt_at: new Date(),
+    workspace_id: workspace.id, status: 'in_progress', title: '독립 작업 티켓',
+    canonical_ticket_id: canonical.id,
   });
 
   const service = new TicketDuplicateService(ds);
-  const corrected = await service.correctConfirmedLink(report.id, 'assignee', 'operator', 'operator-1');
+  const corrected = await service.correctConfirmedLink(report.id, 'operator', 'operator-1');
   assert.equal(corrected.previousCanonicalId, canonical.id);
+  assert.equal(corrected.ticket.id, report.id);
+  assert.equal(corrected.ticket.canonical_ticket_id, null);
   assert.equal((await ds.getRepository(entities.Ticket).findOneByOrFail({ id: report.id })).canonical_ticket_id, null);
-  assert.equal((await ds.getRepository(entities.Ticket).findOneByOrFail({ id: canonical.id })).title, '무관한 완료 티켓');
-
-  const intents = await ds.getRepository(entities.DispatchIntent).find({
-    where: { ticket_id: report.id, role: 'assignee' }, order: { created_at: 'ASC' },
-  });
-  assert.equal(intents.length, 2);
-  assert.equal(intents.find(row => row.id === oldIntent.id)?.status, 'resolved');
-  const open = intents.filter(row => ['pending', 'in_flight'].includes(row.status));
-  assert.equal(open.length, 1);
-  assert.equal(open[0].id, corrected.intentId);
-  assert.equal(open[0].attempts, 1);
-  assert.equal(open[0].dispatch_generation, 1);
-  assert.match(open[0].lease_owner, /^duplicate-correction:/);
-  assert.equal(open[0].trigger_source, 'duplicate_correction');
+  const untouchedCanonical = await ds.getRepository(entities.Ticket).findOneByOrFail({ id: canonical.id });
+  assert.equal(untouchedCanonical.title, '무관한 완료 티켓');
+  assert.equal(untouchedCanonical.status, 'done', 'canonical 티켓은 절대 수정하지 않는다');
 
   const decision = await ds.getRepository(entities.TicketDuplicateDecision).findOneByOrFail({
     report_ticket_id: report.id, outcome: 'corrected_independent',
   });
   assert.equal(decision.candidate_ticket_id, canonical.id);
+  assert.equal(decision.actor_id, 'operator-1');
   const audit = await ds.getRepository(entities.ActivityLog).findOneByOrFail({
     ticket_id: report.id, action: 'duplicate_link_corrected',
   });
   assert.equal(audit.old_value, canonical.id);
   assert.equal(audit.new_value, '');
+  assert.equal(audit.trigger_source, 'duplicate_correction');
+  assert.equal(await ds.getRepository(entities.Comment).count({
+    where: { ticket_id: report.id, author: 'Duplicate correction' },
+  }), 1);
 
   await assert.rejects(
-    () => service.correctConfirmedLink(report.id, 'assignee', 'operator', 'operator-1'),
+    () => service.correctConfirmedLink(report.id, 'operator', 'operator-1'),
     /no confirmed canonical link/,
   );
-  const stillOpen = await ds.getRepository(entities.DispatchIntent).count({
-    where: { ticket_id: report.id, role: 'assignee', status: In(['pending', 'in_flight']) },
-  });
-  assert.equal(stillOpen, 1, '중복 정정 호출이 두 번째 open intent를 만들지 않는다');
+  assert.equal(await ds.getRepository(entities.TicketDuplicateDecision).count({
+    where: { report_ticket_id: report.id, outcome: 'corrected_independent' },
+  }), 1, '거절된 재실행은 감사 기록을 더 남기지 않는다');
 });

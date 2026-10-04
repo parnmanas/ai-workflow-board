@@ -13,8 +13,6 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
   createAgent,
-  createBoard,
-  createColumn,
   createTicket,
   createApiKey,
 } from '../helpers/fixtures.mjs';
@@ -31,13 +29,7 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   const { getDataSourceToken } = modules;
 
   const ws = await createWorkspace(app, getDataSourceToken, 'pendgate');
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
-  const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
-  const col = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'In Progress',
-    position: 1,
-    workspaceId: ws.id,
-  });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
 
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
     workspaceId: ws.id,
@@ -49,9 +41,9 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   // ── Control: no Actions in scope → pend succeeds ──────────────────
   step('Control — no Actions in scope: pend succeeds');
   const t0 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
     workspaceId: ws.id,
     title: 'no-action blocker',
+    status: 'in_progress',
   });
   const okNoActions = await mcp.callTool('pend_ticket', {
     ticket_id: t0.id,
@@ -70,9 +62,9 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   });
   assert.ok(!saved.isError, 'save_action succeeds');
   const t1 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
     workspaceId: ws.id,
     title: 'deploy blocker',
+    status: 'in_progress',
   });
 
   step('Gate fires — a bare pend is REJECTED and names the Action');
@@ -106,29 +98,25 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
 
   // ── Terminal-aware gate (ticket ec498050) ────────────────────────────────
   // pend_ticket is agent-invoked (unlike the human-only REST PATCH path), so
-  // it gets the same terminal check the 5 system pend sites got: a ticket
-  // already in a Done column is never revisited by the dispatch loop, so
-  // parking it there would strand it invisibly. `no_action_reason` is
+  // it gets a terminal check: a `done` ticket is never revisited by the
+  // dispatcher, so parking it there would strand it invisibly. `no_action_reason` is
   // supplied so the CASE-above's "Deploy prod" Action (still registered on
   // this same workspace) clears the Action gate first — the terminal gate
   // runs "Action 게이트 직후" (right after), so it needs a clean pass through
   // that earlier gate to be observable on its own.
-  step('Terminal gate — pend_ticket on a Done-column ticket is rejected and does NOT park it');
-  const doneCol = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'Done', position: 2, workspaceId: ws.id, isTerminal: true,
-  });
+  step('Terminal gate — pend_ticket on a done ticket is rejected and does NOT park it');
   const terminalTicket = await createTicket(app, getDataSourceToken, {
-    columnId: doneCol.id,
     workspaceId: ws.id,
     title: 'already done',
+    status: 'done',
   });
   const terminalBlocked = await mcp.callTool('pend_ticket', {
     ticket_id: terminalTicket.id,
     reason: 'flag this closed ticket for a human',
     no_action_reason: 'clearing the unrelated Action gate to isolate the terminal gate',
   });
-  assert.equal(terminalBlocked.isError, true, 'pend_ticket on a terminal-column ticket is rejected');
-  assert.match(terminalBlocked.error.error, /terminal/i, 'rejection explains the ticket is already terminal');
+  assert.equal(terminalBlocked.isError, true, 'pend_ticket on a done ticket is rejected');
+  assert.match(terminalBlocked.error.error, /already done/i, 'rejection explains the ticket is already done');
   const terminalTicketFresh = await mcp.callTool('get_ticket', { ticket_id: terminalTicket.id });
   assert.equal(terminalTicketFresh.pending_user_action, false, 'a rejected terminal pend must not park the ticket');
 

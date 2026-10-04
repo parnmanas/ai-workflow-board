@@ -5,8 +5,7 @@
 //   1. 카탈로그 자체가 자기 검증(validateCliCatalog)을 통과한다.
 //   2. 예전에 7개 파일에 손으로 베껴 두던 표들이 카탈로그에서 파생된 뒤에도
 //      **정확히 예전 리터럴 값**과 같다 — 리팩터링이 동작을 바꾸지 않았다는 증거.
-//   3. effort preset 스키마가 예전과 같은 preset 을 받고, 여전히 strict 하다.
-//   4. 카탈로그 사본에 fixture descriptor 하나를 덧붙이면 다른 파일을 하나도
+//   3. 카탈로그 사본에 fixture descriptor 하나를 덧붙이면 다른 파일을 하나도
 //      안 고쳐도 스키마/표들이 그것을 포함한다 — "CLI 추가 = descriptor 하나".
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
@@ -27,13 +26,6 @@ const {
 } = await import('../dist/common/cli-catalog.js');
 const { CLI_TYPES, ALLOWED_CLI_TYPES } = await import('../dist/common/types/cli-types.js');
 const { isExecutableRuntime, validateAgentRuntimeConfig } = await import('../dist/common/runtime-config.js');
-const {
-  EffortPresetSchema,
-  EffortPresetsConfigSchema,
-  BUILTIN_EFFORT_PRESETS,
-  buildEffortPresetSchema,
-  validateEffortPresetsInput,
-} = await import('../dist/common/effort-presets.js');
 const { ACP_SESSION_CLIS } = await import('../dist/common/types/agent-sessions.js');
 const { MULTILINE_CREDENTIAL_FIELDS } = await import('../dist/common/credential-fields.js');
 const {
@@ -87,7 +79,6 @@ const OLD_REQUIRED_FIELD = {
   opencode_auth: 'auth_json',
 };
 const OLD_MULTILINE_CREDENTIAL_FIELDS = ['credentials_json', 'auth_json', 'config_toml', 'oauth_creds_json'];
-const OLD_EFFORT_CLI_BLOCKS = ['claude', 'codex', 'antigravity', 'pi', 'opencode'];
 
 const sorted = (xs) => [...xs].sort();
 const plain = (v) => JSON.parse(JSON.stringify(v));
@@ -272,41 +263,7 @@ test('mergeTeamAgentSpec resets strategy/knobs per the catalog on a CLI change',
   assert.deepEqual(toHermes.runtime_config, { strategy: 'single', permission_mode: 'strict' });
 });
 
-// ─── 3. effort preset 스키마 ────────────────────────────────────────────
-
-test('effort preset schema accepts the same presets as before and stays strict', () => {
-  assert.deepEqual(sorted(Object.keys(EffortPresetSchema.shape)), sorted(['id', 'label', ...OLD_EFFORT_CLI_BLOCKS]));
-  assert.equal('deepseek' in EffortPresetSchema.shape, false, 'deepseek reads the claude slice — no block of its own');
-  assert.equal('hermes' in EffortPresetSchema.shape, false);
-  assert.equal('custom' in EffortPresetSchema.shape, false);
-
-  const ok = EffortPresetsConfigSchema.safeParse(BUILTIN_EFFORT_PRESETS);
-  assert.equal(ok.success, true, JSON.stringify(ok.error?.issues));
-
-  const rich = {
-    id: 'everything',
-    label: 'Everything',
-    claude: { effort: 'max', ultracode: true, model: 'claude-opus' },
-    codex: { model: 'gpt-5-codex' },
-    antigravity: { model: 'gemini' },
-    pi: { model: 'pi-1' },
-    opencode: { model: 'x/y' },
-  };
-  assert.equal(EffortPresetSchema.safeParse(rich).success, true);
-
-  // strict: unknown keys at either level are rejected exactly as before.
-  assert.equal(EffortPresetSchema.safeParse({ ...rich, bogus: {} }).success, false);
-  assert.equal(EffortPresetSchema.safeParse({ ...rich, codex: { effort: 'high' } }).success, true, 'codex supports effort');
-  assert.equal(EffortPresetSchema.safeParse({ ...rich, claude: { speed: 'fast' } }).success, false);
-  assert.equal(EffortPresetSchema.safeParse({ ...rich, claude: { effort: 'turbo' } }).success, false, 'effort enum');
-  assert.equal(EffortPresetSchema.safeParse({ ...rich, deepseek: { model: 'v3' } }).success, false, 'no deepseek block');
-
-  const invalid = validateEffortPresetsInput({ default: 'x', presets: [{ id: 'x', label: 'X', codex: { ultracode: true } }] });
-  assert.equal(invalid.ok, false);
-  assert.match(invalid.error, /codex/);
-});
-
-// ─── 4. fixture descriptor 하나로 모든 표가 따라온다 ─────────────────────
+// ─── 3. fixture descriptor 하나로 모든 표가 따라온다 ─────────────────────
 
 const FIXTURE = {
   id: 'zeta',
@@ -368,10 +325,4 @@ test('appending one descriptor to a catalog copy propagates to every derived tab
   assert.deepEqual(plain(buildRevealableFields(copy)), { ...OLD_REVEALABLE_OAUTH_FIELDS, zeta_subscription: ['region'] });
   assert.deepEqual(catalogMultilineFields(copy), [...OLD_MULTILINE_CREDENTIAL_FIELDS, 'auth_blob']);
   assert.deepEqual(catalogLoginCapable(copy).map((d) => d.id), ['claude', 'codex', 'opencode', 'zeta']);
-
-  const schema = buildEffortPresetSchema(copy);
-  assert.ok('zeta' in schema.shape);
-  assert.equal(schema.safeParse({ id: 'p', label: 'P', zeta: { model: 'z-1', effort: 'high' } }).success, true);
-  assert.equal(schema.safeParse({ id: 'p', label: 'P', zeta: { ultracode: true } }).success, false, 'only the declared keys');
-  assert.equal(EffortPresetSchema.safeParse({ id: 'p', label: 'P', zeta: { model: 'z-1' } }).success, false, 'real schema unchanged');
 });

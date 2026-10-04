@@ -4,7 +4,7 @@
 //   • 신규 Action 등록      — ActionsService.create → 영속 + enabled 기본값.
 //   • 기존 Action 실행      — ActionsService.dispatch → run + ChatRoom 생성, 프롬프트 렌더.
 //   • 실행 실패 / 재시도    — 없는 action id dispatch 는 loud 실패, 재실행은 독립 run.
-//   • pend 게이트 스코프    — 실 DataSource 로 enabled+board 스코프 후보를 뽑아
+//   • pend 게이트 스코프    — 실 DataSource 로 enabled+workspace 스코프 후보를 뽑아
 //                             evaluatePendActionGate 가 강제/허용하는지 end-to-end.
 //
 // 사람 개입 필요(no_action_reason) 판정 자체는 actions-pend-gate.test.mjs 가 순수
@@ -19,8 +19,6 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
   createAgent,
-  createBoard,
-  createColumn,
   createTicket,
 } from '../helpers/fixtures.mjs';
 
@@ -187,16 +185,10 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
 
   // ── pend 게이트 스코프 + 판정 (실 DataSource end-to-end) ───────────
   step('Pend gate: scope query surfaces only enabled, in-scope Actions');
-  const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
-  const col = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'In Progress',
-    position: 1,
-    workspaceId: ws.id,
-  });
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
     workspaceId: ws.id,
     title: 'blocked on deploy',
+    status: 'in_progress',
   });
 
   // A disabled Action must NOT count (scheduler-off = gate-off)…
@@ -207,23 +199,21 @@ test('Actions: register new, run existing, fail + retry, and pend-gate scope end
     target_runtimes: [RUNTIME_SPEC],
     enabled: false,
   });
-  // …and a *different* board's board-scoped Action must NOT count either.
-  await assert.rejects(
-    actions.create({
-      workspace_id: ws.id,
-      board_id: board.id,
-      name: 'Legacy board deploy',
-      prompt: 'x',
-      target_runtimes: [RUNTIME_SPEC],
-    }),
-    /Board-scoped Actions are no longer supported/,
-  );
+  // …and another workspace's Action must NOT count either — the workspace is
+  // the only scope an Action has.
+  const otherWs = await createWorkspace(app, getDataSourceToken, 'actions-other');
+  await actions.create({
+    workspace_id: otherWs.id,
+    name: 'Other workspace deploy',
+    prompt: 'x',
+    target_runtimes: [RUNTIME_SPEC],
+  });
 
   const candidates = await loadPendActionCandidates(ds, ticket);
   const names = candidates.map((c) => c.name);
   assert.ok(names.includes('Deploy prod'), 'enabled workspace-level Action is a candidate');
   assert.ok(!names.includes('Disabled deploy'), 'disabled Action is excluded');
-  assert.ok(!names.includes('Legacy board deploy'), 'rejected legacy Action is absent');
+  assert.ok(!names.includes('Other workspace deploy'), 'another workspace\'s Action is out of scope');
 
   step('Pend gate: blocks a bare pend, allows once a reason is supplied');
   const blocked = evaluatePendActionGate(candidates, undefined);

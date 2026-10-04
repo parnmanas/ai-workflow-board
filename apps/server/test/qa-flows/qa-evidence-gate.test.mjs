@@ -19,16 +19,15 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_EVIDENCE_GATE_PORT || '0';
 
-async function makeScenario(mcp, seedKey, { ws, board, agent, seed }) {
+async function makeScenario(mcp, seedKey, { ws, agent, seed }) {
   const [payload] = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
     target_runtime: agent.runtime_spec,
-    board_id: board.id,
     only: [seedKey],
   });
   assert.ok(payload, `seed catalogue has ${seedKey}`);
@@ -47,13 +46,13 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   const DIST = path.join(__dirname, '..', '..', 'dist');
   const seed = await import(pathToFileURL(path.join(DIST, 'modules', 'qa', 'qa-seed-scenarios.js')).href);
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-evidence' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-evidence');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-evidence-runner' });
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
 
-  const ctx = { ws, board, agent: qaAgent, seed };
+  const ctx = { ws, agent: qaAgent, seed };
 
   // ── 1. Visual run, no visual evidence → must be downgraded to failed ─────────
   step('browser scenario reports passed with zero image/video artifacts');
@@ -84,7 +83,7 @@ test('QA evidence gate: visual PASSED without image/video artifacts is downgrade
   const ds = app.get(getDataSourceToken());
   const resourceRepo = ds.getRepository('Resource');
   const shot = await resourceRepo.save(resourceRepo.create({
-    workspace_id: ws.id, board_id: board.id, name: 'login.png', type: 'image',
+    workspace_id: ws.id, name: 'login.png', type: 'image',
     file_name: 'login.png', file_mimetype: 'image/png', file_data: 'ZmFrZQ==',
   }));
 

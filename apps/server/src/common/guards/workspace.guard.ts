@@ -9,9 +9,13 @@ export class WorkspaceGuard implements CanActivate {
     const req = context.switchToHttp().getRequest();
     const user = req.currentUser;
 
+    // A `/workspaces/:wsId/...` route names its workspace in the path; the
+    // header is what membership was checked against, so the two must agree.
+    const pathWorkspaceId = req.params?.wsId;
+
     // Admin bypass — per D-09: admins can access any workspace without a tuple
     if (user?.role === 'admin') {
-      const wsId = req.headers['x-workspace-id'] || req.query['workspace_id'];
+      const wsId = req.headers['x-workspace-id'] || req.query['workspace_id'] || pathWorkspaceId;
       req.currentWorkspaceId = wsId || null;
       return true;
     }
@@ -35,6 +39,9 @@ export class WorkspaceGuard implements CanActivate {
     );
 
     if (!isMember && !isOwner) {
+      throw new ForbiddenException('workspace_access_denied');
+    }
+    if (pathWorkspaceId && pathWorkspaceId !== workspaceId) {
       throw new ForbiddenException('workspace_access_denied');
     }
 

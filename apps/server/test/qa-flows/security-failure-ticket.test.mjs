@@ -2,9 +2,10 @@
 //
 // Ticket 86b8fadc. Exercises SecurityFailureTicketService through the real
 // completeRun choke point over MCP:
-//   • high finding + failed run → fix ticket auto-filed, with evidence (finding
-//     list + commit range + artifact link) and the security-profile:<id> back-ref
-//     label, landing in a non-terminal (To Do) column.
+//   • high finding + failed run → fix ticket auto-filed through TicketService,
+//     with evidence (finding list + commit range + artifact link), the
+//     security-profile:<id> back-ref tag, status `todo` and the policy's
+//     assignee_runtime as the ticket assignee.
 //   • run-level idempotency: re-finalizing the SAME run does not double-file.
 //   • NEGATIVE 1 — passed run never files.
 //   • NEGATIVE 2 — failed run whose worst finding is below the gate (medium with
@@ -15,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SECURITY_FAIL_PORT || '0';
@@ -26,7 +27,7 @@ const SHA_HEAD = 'c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1';
 async function countTicketsForProfile(ds, wsId, profileId) {
   const rows = await ds.getRepository('Ticket').createQueryBuilder('t')
     .where('t.workspace_id = :ws', { ws: wsId })
-    .andWhere('t.labels LIKE :marker', { marker: `%security-profile:${profileId}%` })
+    .andWhere('t.tags LIKE :marker', { marker: `%security-profile:${profileId}%` })
     .getMany();
   return rows;
 }
@@ -37,7 +38,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'sec-fail' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'sec-fail');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'inspector' });
 
@@ -51,12 +52,10 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
     target_runtime: agent.runtime_spec,
     scan_driver: 'code-review',
     scope_mode: 'incremental',
-    board_id: board.id,
     checklist: [{ id: 'authz', title: 'Broken access control', category: 'authz', severity_hint: 'high' }],
     on_failure_ticket: {
       enabled: true,
-      board_id: board.id,
-      column_name: 'Todo',
+      tags: ['security', 'self-review'],
       priority: 'high',
       min_severity: 'high',
       assignee_runtime: agent.runtime_spec,
@@ -123,17 +122,19 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   const tickets = await countTicketsForProfile(ds, ws.id, profile.id);
   assert.equal(tickets.length, 1, 'exactly one security ticket filed');
   const ticket = tickets[0];
-  const fixHolders = await ds.getRepository('TicketRoleAssignment').find({ where: { ticket_id: doneC.auto_ticket_id } });
-  assert.equal(fixHolders.length, 3);
-  assert.ok(fixHolders.every(holder => holder.runtime_spec?.manager_agent_id === agent.manager_agent_id && holder.agent_id === null), 'failure ticket carries inline runtimes, with no Agent binding');
   assert.equal(ticket.id, doneC.auto_ticket_id, 'run.auto_ticket_id points at the filed ticket');
+  // The one assignee is the policy's assignee_runtime — an inline RuntimeSpec,
+  // with no Agent binding.
+  assert.equal(ticket.assignee?.manager_agent_id, agent.manager_agent_id, 'failure ticket assignee is the assignee_runtime');
+  assert.ok(ticket.assignee_key, 'assignee_key stamped from the RuntimeSpec');
 
-  // Lands in the configured non-terminal column.
-  assert.equal(ticket.column_id, board && (await ds.getRepository('BoardColumn').findOne({ where: { board_id: board.id, name: 'Todo' } })).id, 'filed into the Todo column');
+  // Lands in the default non-terminal status (no host stream → stays queued).
+  assert.equal(ticket.status, 'todo', 'filed as todo');
 
-  // Labels carry the back-ref marker.
-  const labels = JSON.parse(ticket.labels || '[]');
-  assert.ok(labels.includes(`security-profile:${profile.id}`), 'back-ref label present');
+  // Tags = configured tags + the back-ref marker.
+  const tags = JSON.parse(ticket.tags || '[]');
+  assert.ok(tags.includes('self-review'), 'configured tag present');
+  assert.ok(tags.includes(`security-profile:${profile.id}`), 'back-ref tag present');
 
   // Body has the evidence: finding, commit range, artifact link, gate.
   const body = ticket.description || '';

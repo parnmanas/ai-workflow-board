@@ -1,7 +1,8 @@
-// board_id는 65adf0b(카탈로그 board→workspace 승격)에서 폐지된 레거시 호환
-// 컬럼으로, 부트 마이그레이션 이후에는 항상 NULL이어야 한다(Credential 엔티티
-// 주석 참고). git-credential-resolution.test.mjs는 git 자격증명 해석 경로만
-// 다루므로, 이 파일은 REST CRUD(list/create) 자체의 scope 계약을 검증한다.
+// Credentials live in exactly two catalog layers — Global (`workspace_id NULL`)
+// and one Workspace (common/catalog-scope.ts). The Board layer and its dead
+// `board_id` column are gone with boards. git-credential-resolution.test.mjs
+// covers the git credential resolution path and credentials-scope-switch
+// covers update(); this file pins the REST CRUD (list/create) scope contract.
 
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
@@ -18,7 +19,10 @@ function response() {
   };
 }
 
-describe('Credentials board-scope cleanup', () => {
+const adminReq = { currentUser: { id: 'u-admin', name: 'Admin', role: 'admin', permissions: [] } };
+const memberReq = { currentUser: { id: 'u-member', name: 'Member', role: 'user', permissions: ['admin.credentials'] } };
+
+describe('Credentials REST scope contract (Global / Workspace)', () => {
   let dataSource;
   let controller;
 
@@ -31,9 +35,7 @@ describe('Credentials board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const credRepo = dataSource.getRepository(Credential);
-    // assertCatalogBoardScope is a documented no-op (see catalog-scope.ts), so
-    // the closure create() builds around `dataSource` is never invoked; auth/
-    // activity services are only touched by reveal(), not exercised here.
+    // auth/activity services are only touched by reveal()/update(), not here.
     controller = new CredentialsController(credRepo, {}, {}, {});
   });
 
@@ -41,49 +43,60 @@ describe('Credentials board-scope cleanup', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a new Board-scoped Credential', async () => {
+  it('rejects a Board scope — it is just an unknown scope now', async () => {
     const res = response();
     await controller.create(
       {
+        scope: 'board',
         workspace_id: 'workspace-a',
-        board_id: 'board-a',
         name: 'Board credential',
         provider: 'github',
         credentials: { token: 'secret' },
       },
-      {},
+      memberReq,
       res,
     );
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /no longer supported/);
+    assert.match(res.body.error, /scope must be 'global' or 'workspace'/);
   });
 
-  it('excludes a legacy Board-scoped Credential row from list() regardless of scope', async () => {
-    const repo = dataSource.getRepository(Credential);
-    await repo.save(repo.create({
-      workspace_id: 'workspace-a',
-      board_id: 'board-a',
-      name: 'Legacy board-only credential',
-      provider: 'github',
-      encrypted_data: '',
-    }));
-    const createRes = response();
+  it('refuses a global credential without admin.global_credentials', async () => {
+    const res = response();
     await controller.create(
-      {
-        workspace_id: 'workspace-a',
-        name: 'Workspace credential',
-        provider: 'github',
-        credentials: { token: 'secret' },
-      },
-      {},
-      createRes,
+      { scope: 'global', name: 'Global PAT', provider: 'github', credentials: { token: 'secret' } },
+      memberReq,
+      res,
     );
-    assert.equal(createRes.statusCode, 201);
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /admin\.global_credentials/);
+  });
+
+  it('list() returns the Workspace own credentials plus inherited globals, never another Workspace', async () => {
+    for (const [body, req] of [
+      [{ workspace_id: 'workspace-a', name: 'Workspace credential', provider: 'github', credentials: { token: 'a' } }, memberReq],
+      [{ workspace_id: 'workspace-b', name: 'Other workspace credential', provider: 'github', credentials: { token: 'b' } }, memberReq],
+      [{ scope: 'global', name: 'Global credential', provider: 'github', credentials: { token: 'g' } }, adminReq],
+    ]) {
+      const res = response();
+      await controller.create(body, req, res);
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    }
 
     const listRes = response();
     await controller.list('workspace-a', undefined, undefined, undefined, listRes);
-    assert.equal(listRes.body.some(row => row.name === 'Legacy board-only credential'), false);
-    assert.ok(listRes.body.every(row => row.board_id === null));
-    assert.ok(listRes.body.some(row => row.name === 'Workspace credential'));
+    const names = listRes.body.map((row) => row.name).sort();
+    assert.deepEqual(names, ['Global credential', 'Workspace credential']);
+    assert.equal(listRes.body.find((r) => r.name === 'Global credential').scope, 'global');
+    assert.equal(listRes.body.find((r) => r.name === 'Workspace credential').scope, 'workspace');
+    // The response shape carries no Board layer at all.
+    assert.ok(listRes.body.every((row) => !('board_id' in row)));
+
+    const globalsOnly = response();
+    await controller.list(undefined, undefined, 'global', undefined, globalsOnly);
+    assert.deepEqual(globalsOnly.body.map((r) => r.name), ['Global credential']);
+
+    const missingWs = response();
+    await controller.list(undefined, undefined, undefined, undefined, missingWs);
+    assert.equal(missingWs.statusCode, 400);
   });
 });

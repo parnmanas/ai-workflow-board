@@ -1,8 +1,8 @@
 // QA flow: QA → fix → QA closed loop (ticket 467dbc7a).
 //
 // When a scenario opts into on_failure_ticket.rerun_on_fix, the fix ticket auto-
-// filed on failure re-runs the SAME scenario the moment it lands on a terminal
-// (Done) column — server-side, deterministic, no agent prompt parsing. This test
+// filed on failure re-runs the SAME scenario the moment it enters status `done`
+// — server-side, deterministic, no agent prompt parsing. This test
 // drives the loop end-to-end and asserts the Verify cases from the ticket:
 //
 //   1. failed run → fix ticket (gen 0); moving it to Done fires a rerun
@@ -15,28 +15,29 @@
 //      restamp) does NOT fire a second rerun.
 //   5. negative: a scenario with rerun_on_fix OFF never fires a rerun on Done.
 //
-// Like on-ticket-done-hook.test.mjs we simulate the terminal landing directly
-// (stamp terminal_entered_at + log a `moved` activity) so the service sees
-// exactly what the production move path emits, and we can control restamping for
-// the idempotency case.
+// Like on-ticket-done-hook.test.mjs we simulate the done landing directly
+// (status `done` + terminal_entered_at stamp + a `moved` status activity) so the
+// service sees exactly what TicketService.move emits, and we can control
+// restamping for the idempotency case.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_RERUN_ON_FIX_PORT || '0';
 
-// Simulate a real terminal landing (see on-ticket-done-hook.test.mjs).
-async function moveToDone(ds, activityService, ticketId, doneColId, { restamp = true } = {}) {
+// Simulate a real done landing (see on-ticket-done-hook.test.mjs) — the same
+// row update + `moved` activity TicketService.move produces.
+async function moveToDone(ds, activityService, ticketId, { restamp = true } = {}) {
   const tRepo = ds.getRepository('Ticket');
   if (restamp) {
-    await tRepo.update(ticketId, { column_id: doneColId, terminal_entered_at: new Date() });
+    await tRepo.update(ticketId, { status: 'done', terminal_entered_at: new Date() });
   }
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticketId, action: 'moved',
-    field_changed: 'column', new_value: 'Done', ticket_id: ticketId,
+    field_changed: 'status', old_value: 'todo', new_value: 'done', ticket_id: ticketId,
     actor_id: 'test-user', actor_name: 'Tester',
   });
 }
@@ -64,7 +65,7 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   const ds = app.get(getDataSourceToken());
   const activityService = app.get(modules.ActivityService);
 
-  const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-rerun' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-rerun');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-runner' });
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
 
@@ -90,8 +91,8 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   };
 
   const ticketsForScenario = async (scenarioId) =>
-    ds.query(`SELECT id, column_id, labels FROM tickets WHERE labels LIKE '%qa-scenario:${scenarioId}%' ORDER BY created_at ASC`);
-  const labelsOf = (row) => JSON.parse(row.labels || '[]');
+    ds.query(`SELECT id, status, tags FROM tickets WHERE tags LIKE '%qa-scenario:${scenarioId}%' ORDER BY created_at ASC`);
+  const tagsOf = (row) => JSON.parse(row.tags || '[]');
 
   // ── Setup: a scenario opted into the closed loop, max 2 reruns ───────────────
   step('Create scenario with rerun_on_fix, max_rerun_attempts=2');
@@ -99,7 +100,7 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
     workspace_id: ws.id, name: 'Closed loop QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
-      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
+      enabled: true, dedupe: 'per_open_ticket',
       rerun_on_fix: true, max_rerun_attempts: 2, rerun_delay_seconds: 0,
     },
   });
@@ -119,7 +120,7 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   let allRuns = await runsForScenario(ds, sc.id);
   assert.equal(allRuns.length, 1, 'exactly one run so far');
 
-  await moveToDone(ds, activityService, t0, columns.done.id);
+  await moveToDone(ds, activityService, t0);
   allRuns = await waitForRunCount(ds, sc.id, 2);
   assert.equal(allRuns.length, 2, 'moving the gen-0 fix ticket to Done fired a rerun');
   const rerun1 = allRuns[1];
@@ -133,10 +134,10 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   assert.notEqual(done1.auto_ticket_id, t0, 'a fresh gen-1 ticket, not the Done gen-0 one');
   const t1 = done1.auto_ticket_id;
   const t1row = (await ticketsForScenario(sc.id)).find((r) => r.id === t1);
-  assert.ok(labelsOf(t1row).includes('qa-rerun:1'), 'gen-1 ticket carries qa-rerun:1');
-  assert.ok(labelsOf(t1row).includes('qa-failure') && labelsOf(t1row).includes('auto'), 'gen-1 ticket keeps the marker labels');
+  assert.ok(tagsOf(t1row).includes('qa-rerun:1'), 'gen-1 ticket carries qa-rerun:1');
+  assert.ok(tagsOf(t1row).includes('qa-failure') && tagsOf(t1row).includes('auto'), 'gen-1 ticket keeps the marker tags');
 
-  await moveToDone(ds, activityService, t1, columns.done.id);
+  await moveToDone(ds, activityService, t1);
   allRuns = await waitForRunCount(ds, sc.id, 3);
   assert.equal(allRuns.length, 3, 'gen-1 ticket Done fired rerun gen 2');
   assert.equal(allRuns[2].rerun_generation, 2, 'rerun is generation 2');
@@ -146,9 +147,9 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   const done2 = await completeLatest(sc.id, 'failed');
   const t2 = done2.auto_ticket_id;
   const t2row = (await ticketsForScenario(sc.id)).find((r) => r.id === t2);
-  assert.ok(labelsOf(t2row).includes('qa-rerun:2'), 'gen-2 ticket carries qa-rerun:2');
+  assert.ok(tagsOf(t2row).includes('qa-rerun:2'), 'gen-2 ticket carries qa-rerun:2');
 
-  await moveToDone(ds, activityService, t2, columns.done.id);
+  await moveToDone(ds, activityService, t2);
   // Give the listener time; assert it did NOT add a run.
   await new Promise((r) => setTimeout(r, 600));
   allRuns = await runsForScenario(ds, sc.id);
@@ -161,7 +162,7 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
 
   // ── CASE 4: idempotency — re-emit a prior Done move, no restamp → no rerun ───
   step('CASE 4: re-emitting the same terminal entry does not double-fire');
-  await moveToDone(ds, activityService, t0, columns.done.id, { restamp: false });
+  await moveToDone(ds, activityService, t0, { restamp: false });
   await new Promise((r) => setTimeout(r, 500));
   assert.equal((await runsForScenario(ds, sc.id)).length, 3, 'same-entry re-emit fired no extra rerun');
 
@@ -171,14 +172,14 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
     workspace_id: ws.id, name: 'No-rerun QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
-      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_run', rerun_on_fix: false,
+      enabled: true, dedupe: 'per_run', rerun_on_fix: false,
     },
   });
   assert.ok(!scOff?.isError && scOff.id);
   await mcp.callTool('start_qa_run', { scenario_id: scOff.id });
   const doneOff = await completeLatest(scOff.id, 'failed');
   assert.ok(doneOff.auto_ticket_id, 'opt-out scenario still files a fix ticket');
-  await moveToDone(ds, activityService, doneOff.auto_ticket_id, columns.done.id);
+  await moveToDone(ds, activityService, doneOff.auto_ticket_id);
   await new Promise((r) => setTimeout(r, 600));
   assert.equal((await runsForScenario(ds, scOff.id)).length, 1, 'rerun_on_fix=false → Done fires no rerun');
 });

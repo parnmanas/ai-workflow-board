@@ -31,7 +31,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -68,7 +68,7 @@ test('QaRunBatchReaperService resumes an ad-hoc (schedule-less) batch wedged on 
   );
   const batchReaper = app.get(QaRunBatchReaperService);
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch-ad-hoc-reaper' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-batch-ad-hoc-reaper');
   // Tight run-creation-rate ceiling — scenario 0's own run consumes the
   // window's only slot, so dispatching scenario 1 trips the guard.
   await ds.getRepository('Workspace').update(ws.id, {
@@ -89,7 +89,6 @@ test('QaRunBatchReaperService resumes an ad-hoc (schedule-less) batch wedged on 
   step('start_qa_batch directly — ad-hoc, no QaSchedule ever created for it');
   const batch0 = await mcp.callTool('start_qa_batch', {
     workspace_id: ws.id,
-    board_id: board.id,
     scenario_ids: [s0.id, s1.id],
   });
   assert.ok(!batch0?.isError && batch0.id, `start_qa_batch failed: ${JSON.stringify(batch0)}`);

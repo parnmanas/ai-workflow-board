@@ -4,12 +4,14 @@
 //   - initialize succeeds with awb/schemaVersion:2 capability
 //   - session-id is propagated back to the client
 //   - every tool in EXPECTED_TOOLS is registered (drift-detection canary)
+//   - no tool in REMOVED_TOOLS is registered — the board-less model
+//     (docs/tickets.md → MCP) dropped them and they must not come back
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene,
+  createWorkspace,
   createAgent,
   createApiKey,
 } from '../helpers/fixtures.mjs';
@@ -19,21 +21,24 @@ process.env.PORT = process.env.QA_MCP_SURFACE_PORT || '0';
 
 // P4c-4: list_agents / ping / move_agent_to_workspace 삭제 (Agent 표면 없음).
 const EXPECTED_TOOLS = [
+  // Board-less tickets (docs/tickets.md → MCP).
+  'list_tickets',
   'get_ticket',
   'create_ticket',
   'update_ticket',
   'move_ticket',
   'claim_ticket',
   'release_ticket',
+  'get_my_tickets',
+  'list_archived_tickets',
+  'subscribe_events',
   'add_comment',
-  // Ticket 44f7f0eb — 다중담당자·합의 T4 명시적 합의 시그널.
-  'record_agreement',
-  // Ticket c1512333 — 다중담당자·합의 T5 이동 제안(전원 승인 → auto-execute).
-  'propose_move',
-  'get_allocated_tickets',
+  // Projects (repository + main clone folder per host).
+  'list_projects',
+  'get_project',
+  'save_project',
+  'list_repo_branches',
   'list_workspaces',
-  'list_boards',
-  'create_column',
   // Ticket 48d14fff — prerequisite ("blocked-by ticket") surface.
   'add_ticket_prerequisites',
   'remove_ticket_prerequisite',
@@ -41,13 +46,6 @@ const EXPECTED_TOOLS = [
   // Ticket 9d892da9 — chat-message read surface.
   'get_chat_room_messages',
   'search_chat_messages',
-  // Ticket 8882056b — cross-workspace board move.
-  'move_board_to_workspace',
-  // Ticket 868ead64 — cross-workspace agent move.
-  // Ticket 684c012b — benchmark scoring + leaderboard surface.
-  'submit_benchmark_score',
-  'get_benchmark_leaderboard',
-  'create_benchmark_run',
   // Ticket 3c655d20 — scenario-based QA surface (QaScenario/QaRun).
   'list_qa_scenarios',
   'get_qa_scenario',
@@ -104,17 +102,6 @@ const EXPECTED_TOOLS = [
   'get_latest_artifact',
   'register_build_artifact',
   'report_build_failure',
-  // Ticket aae7644c — Feature/Epic intake (one-stop automated development 진입 플로우).
-  'submit_feature_request',
-  'propose_feature_chain',
-  'approve_feature',
-  'reject_feature',
-  'list_features',
-  'get_feature',
-  // Ticket 9d0d6ac4 — board 지식베이스(Lessons/Runbook) 등록/조회/비활성 surface.
-  'add_board_lesson',
-  'list_board_lessons',
-  'update_board_lesson',
   // AWB Functions: structured, auditable operations callable by agents.
   'list_functions',
   'get_function',
@@ -126,12 +113,37 @@ const EXPECTED_TOOLS = [
   'record_outreach_classification',
 ];
 
+// Removed with boards (docs/tickets.md → MCP "Removed"): board / column /
+// lesson / prompt-template / consensus / handoff / benchmark / feature /
+// merge-lease / review-drift / self-improvement / completion-verification /
+// comment-summary tools, plus move_ticket_to_board, get_allocated_tickets,
+// batch_operations and get_board_summary.
+const REMOVED_TOOLS = [
+  'list_boards', 'get_board', 'create_board', 'update_board', 'delete_board',
+  'get_board_summary', 'move_board_to_workspace', 'move_ticket_to_board',
+  'create_column', 'update_column', 'delete_column',
+  'add_board_lesson', 'list_board_lessons', 'update_board_lesson',
+  'list_prompt_templates', 'save_prompt_template', 'delete_prompt_template',
+  'record_agreement', 'propose_move',
+  'handoff_to_agent', 'reject_handoff', 'get_handoff_pipeline',
+  'submit_benchmark_score', 'get_benchmark_leaderboard', 'create_benchmark_run',
+  'submit_feature_request', 'propose_feature_chain', 'approve_feature',
+  'reject_feature', 'list_features', 'get_feature',
+  'await_merge_lease', 'release_merge_lease',
+  'check_review_drift',
+  'create_remote_improvement_ticket',
+  'register_completion_verification', 'record_completion_verification',
+  'complete_comment_summary',
+  'batch_operations',
+  'get_allocated_tickets',
+];
+
 test('MCP initialize + tools/list returns expected AWB tool surface', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'mcp-surface' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'mcp-surface');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
     workspaceId: ws.id,
@@ -150,6 +162,9 @@ test('MCP initialize + tools/list returns expected AWB tool surface', async (t) 
   for (const expected of EXPECTED_TOOLS) {
     assert.ok(names.has(expected), `Expected MCP tool '${expected}' (saw ${tools.length} tools)`);
   }
+  step(`Verify ${REMOVED_TOOLS.length} removed board-era tool names are absent`);
+  const revived = REMOVED_TOOLS.filter((name) => names.has(name));
+  assert.deepEqual(revived, [], `Removed MCP tool(s) registered again: ${revived.join(', ')}`);
   await mcp.close();
   exitAfterTests(0);
 });

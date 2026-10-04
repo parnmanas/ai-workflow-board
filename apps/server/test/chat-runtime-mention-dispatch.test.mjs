@@ -1,8 +1,9 @@
 // P4c-4: group-room @-mention of a spec-direct (rt-) member dispatches a
-// chat_request WITHOUT an Agent row — from the assignment snapshot in ticket
-// rooms, from the participant snapshot in ticket-less rooms. Drives the
-// compiled sendMessage() with stub repos, asserting on emitted activityEvents
-// (same technique as room-messaging-manager-capability-gate.test.mjs).
+// chat_request WITHOUT an Agent row — from the ticket's assignee RuntimeSpec in
+// ticket rooms (docs/tickets.md: one assignee per ticket, `assignee_key` is its
+// runtime identity), from the participant snapshot in ticket-less rooms. Drives
+// the compiled sendMessage() with stub repos, asserting on emitted
+// activityEvents (same technique as room-messaging-manager-capability-gate.test.mjs).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,7 +20,7 @@ const { activityEvents } = await import(
   'file://' + path.join(DIST_ROOT, 'services', 'activity.service.js')
 );
 const entities = await import('file://' + path.join(DIST_ROOT, 'entities', 'index.js'));
-const { Ticket, TicketRoleAssignment, ChatRoomParticipant } = entities;
+const { Ticket, ChatRoomParticipant } = entities;
 
 const RT = 'rt-0123456789abcdef';
 const SPEC = {
@@ -51,11 +52,10 @@ function makeQueryBuilder() {
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
-function makeSvc({ room, ticket, assignmentRows, participantSpec, withRoleRef }) {
+function makeSvc({ room, ticket, participantSpec }) {
   const dataSource = {
     getRepository(entity) {
       if (entity === Ticket) return { async findOne() { return ticket; } };
-      if (entity === TicketRoleAssignment) return { async find() { return assignmentRows; } };
       if (entity === ChatRoomParticipant) return { async find() { return []; } };
       return { async findOne() { return null; }, async find() { return []; } };
     },
@@ -98,11 +98,7 @@ function makeSvc({ room, ticket, assignmentRows, participantSpec, withRoleRef })
     async getRoomAgentRuntimeSpecs() { return {}; },
   };
   const mentionService = {
-    // A role ref forces _processMentions to load room.ticket_id (ticket path);
-    // without it ticket stays null and the participant fallback answers.
-    parseMentions: () => withRoleRef
-      ? [{ type: 'role', id: 'assignee' }, { type: 'agent', id: RT }]
-      : [{ type: 'agent', id: RT }],
+    parseMentions: () => [{ type: 'agent', id: RT }],
     resolveMentions: async () => [{ type: 'agent', id: RT }],
   };
   // P4c-4: agentRepo 인자 삭제 (no Agent row — the point of the test).
@@ -121,17 +117,19 @@ function captureOnce(eventName) {
   return { off: () => activityEvents.off(eventName, handler), get: () => captured };
 }
 
+// The mentioned rt- key is the ticket's assignee identity; the room has no
+// participant snapshot for it, so only the assignee spec can answer. A stored
+// assignee went through TicketService's RuntimeSpec normalisation, which
+// requires runtime_config — parseRuntimeSpec rejects a spec without it.
 const TICKET = {
-  id: 'ticket-1', column_id: 'col-1', workspace_id: 'ws-1',
-  effort_preset: null, cli_runtime_profile: null,
+  id: 'ticket-1', workspace_id: 'ws-1', status: 'in_progress',
+  assignee: { ...SPEC, runtime_config: { strategy: 'single', permission_mode: 'strict' } },
+  assignee_key: RT,
 };
-const ASSIGNMENT_ROWS = [
-  { agent_id: null, user_id: null, holder_key: 'runtime:' + RT, runtime_spec: { ...SPEC } },
-];
 
-test('ticket room @rt-mention emits chat_request from the assignment snapshot (no Agent row)', async () => {
+test('ticket room @rt-mention emits chat_request from the assignee spec (no Agent row)', async () => {
   const room = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, workspace_id: 'ws-1', ticket_id: 'ticket-1' };
-  const svc = makeSvc({ room, ticket: TICKET, assignmentRows: ASSIGNMENT_ROWS, participantSpec: null, withRoleRef: true });
+  const svc = makeSvc({ room, ticket: TICKET, participantSpec: null });
   const chatRequest = captureOnce('chat_request');
   try {
     await svc.sendMessage('room-1', 'ws-1', 'user', 'user-1', 'Alice', 'hey @[agent:' + RT + '] look');
@@ -141,6 +139,7 @@ test('ticket room @rt-mention emits chat_request from the assignment snapshot (n
   const evt = chatRequest.get();
   assert.ok(evt, 'chat_request must be emitted for an rt- mention');
   assert.equal(evt.agent_id, RT);
+  assert.equal(evt.ticket_id, 'ticket-1');
   assert.equal(evt.runtime.manager_agent_id, 'host-1');
   assert.equal(evt.runtime.cli, 'opencode');
   assert.equal(evt.role_prompt, 'You are rt.');
@@ -148,7 +147,7 @@ test('ticket room @rt-mention emits chat_request from the assignment snapshot (n
 
 test('ticket-less room @rt-mention emits chat_request from the participant snapshot', async () => {
   const room = { id: 'room-2', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, workspace_id: 'ws-1', ticket_id: null };
-  const svc = makeSvc({ room, ticket: null, assignmentRows: [], participantSpec: { ...SPEC } });
+  const svc = makeSvc({ room, ticket: null, participantSpec: { ...SPEC } });
   const chatRequest = captureOnce('chat_request');
   try {
     await svc.sendMessage('room-2', 'ws-1', 'user', 'user-1', 'Alice', 'hey @[agent:' + RT + '] look');

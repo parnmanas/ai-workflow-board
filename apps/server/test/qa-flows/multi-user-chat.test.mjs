@@ -12,7 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene,
+  createWorkspace,
   createAgent,
   createApiKey,
   createUser,
@@ -27,7 +27,7 @@ test('chat_room_message is delivered only to the room participants', async (t) =
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-room' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-room');
 
   const agentInRoom = await createAgent(app, getDataSourceToken, ws.id, { name: 'insider' });
   const keyIn = await createApiKey(app, getDataSourceToken, agentInRoom.id, {

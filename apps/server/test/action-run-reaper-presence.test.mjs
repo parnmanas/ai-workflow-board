@@ -8,9 +8,10 @@
 // touches the 'running' status, reuses ActionsService.completeRun() (not a
 // direct status mutation) so the idempotent transition + bounded retry +
 // audit-comment machinery are never duplicated, resumes the source ticket via
-// TriggerLoopService when completeRun says to, and is wired into the actions
-// module's providers + imports (AgentsModule, for TriggerLoopService) — so a
-// refactor can't silently delete the wiring and let runs rot `running` again.
+// TicketDispatchService.resumeTicket when completeRun says to, and is wired into
+// the actions module's providers + imports (AgentsModule, for
+// TicketDispatchService) — so a refactor can't silently delete the wiring and
+// let runs rot `running` again.
 //
 // Comments are stripped before grepping so prose in the module/header that
 // legitimately names tokens doesn't false-positive the call-site grep.
@@ -80,10 +81,11 @@ test('ActionRunReaperService source defines the sweep loop, TTL gate, and env co
   // A concurrent real complete_action_run must not be double-counted as reaped.
   assert.match(code, /previouslyCompleted/, 'must skip runs completeRun reports as previouslyCompleted (raced by a real completion)');
   // ActionRun uniquely carries a "resume the source ticket" contract — the
-  // reaper must drive it via TriggerLoopService, gated on shouldResume.
-  assert.match(code, /triggerLoopService/, 'must inject TriggerLoopService to resume the source ticket');
+  // reaper must drive it via TicketDispatchService (the one dispatch path),
+  // gated on shouldResume.
+  assert.match(code, /TicketDispatchService/, 'must inject TicketDispatchService to resume the source ticket');
   assert.match(code, /shouldResume/, 'must gate the resume dispatch on completeRun\'s shouldResume flag');
-  assert.match(code, /dispatchCurrentColumn\(/, 'must call dispatchCurrentColumn to resume the source ticket');
+  assert.match(code, /\.resumeTicket\(/, 'must call resumeTicket to resume the source ticket');
   // No-restart activation: an immediate boot sweep runs runOnce() from onModuleInit
   // so a deploy clears standing phantoms without waiting a full sweep interval.
   const init = code.slice(code.indexOf('onModuleInit'));
@@ -101,9 +103,9 @@ test('actions.module wires ActionRunReaperService into providers and imports Age
   assert.match(
     code,
     /import\s+\{\s*AgentsModule\s*\}\s+from\s+['"]\.\.\/agents\/agents\.module['"]/,
-    'ActionsModule must import AgentsModule (source of TriggerLoopService)',
+    'ActionsModule must import AgentsModule (source of TicketDispatchService)',
   );
-  assert.match(code, /imports\s*:\s*\[[\s\S]*AgentsModule/, 'must list AgentsModule in imports so TriggerLoopService resolves via DI');
+  assert.match(code, /imports\s*:\s*\[[\s\S]*AgentsModule/, 'must list AgentsModule in imports so TicketDispatchService resolves via DI');
 });
 
 test('actions.controller exposes the operator reaper sweep endpoint', () => {

@@ -10,6 +10,7 @@ import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
+import { TicketWorkspaceGuard } from './ticket-workspace.guard';
 import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -52,7 +53,7 @@ import { parseTicketStatus, TICKET_STATUSES, type TicketStatus } from '../../com
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
 @Controller('api')
-@UseGuards(AuthGuard, WorkspaceGuard)
+@UseGuards(AuthGuard, WorkspaceGuard, TicketWorkspaceGuard)
 export class TicketsController {
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -1069,9 +1070,9 @@ export class TicketsController {
     const refs = this.mentionService.parseMentions(comment.content);
     if (refs.length === 0) return;
 
-    // T3 self-exclusion: the comment author (a user on this REST path — the
-    // emitted events below hardcode actor_type 'user') is dropped so a
-    // `@[role:…]` fan-out never notifies them of their own comment.
+    // Self-exclusion: the comment author (a user on this REST path — the
+    // emitted events below hardcode actor_type 'user') is never notified of
+    // their own comment.
     const resolved = await this.mentionService.resolveMentions(refs, ticket, {
       excludeActor: { type: 'user', id: actor.id },
     });

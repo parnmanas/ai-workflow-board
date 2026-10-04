@@ -36,8 +36,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
 import { Workspace } from '../dist/entities/Workspace.js';
-import { Board } from '../dist/entities/Board.js';
-import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
@@ -51,7 +49,7 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, OutreachChannel, OutreachOutboundPost],
+    entities: [Workspace, Ticket, Comment, Credential, OutreachChannel, OutreachOutboundPost],
     synchronize: true,
     logging: false,
   });
@@ -63,7 +61,6 @@ async function seedCredential(dataSource, over = {}) {
   const repo = dataSource.getRepository(Credential);
   return repo.save(repo.create({
     workspace_id: null,
-    board_id: null,
     name: 'reddit bot',
     description: '',
     provider: 'reddit',
@@ -83,7 +80,8 @@ async function seedChannel(dataSource, credentialId, over = {}) {
     enabled: true,
     publish_policy: 'approval',
     rate_limit_per_hour: 0,
-    target_board_id: null,
+    target_tags: [],
+    target_project_id: null,
     poll_interval_ms: 3600000,
     poll_cron: null,
     next_poll_at: null,

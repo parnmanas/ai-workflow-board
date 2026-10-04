@@ -30,16 +30,16 @@ There is no port ledger to keep in sync (ticket f2d82793).
 
 | File                               | Covers                                                                |
 | ---------------------------------- | --------------------------------------------------------------------- |
-| `ticket-lifecycle.test.mjs`        | Reporter → Assignee → Reviewer routing; terminal column suppresses trigger |
-| `self-trigger-guard.test.mjs`      | `actor_id === targetAgentId` skips emission (no self-loops)            |
-| `comment-trigger.test.mjs`         | A new comment on a routed column fires `trigger_source='comment'`      |
+| `ticket-lifecycle.test.mjs`        | backlog → todo → in_progress → review → done over REST and MCP: the dispatcher starts a todo ticket for its assignee only, done is refused while a checklist item is open, archive/unarchive, reopening |
 | `comment-mention.test.mjs`         | `comment_mention` only reaches the mentioned agent (ws-scoped)         |
-| `mcp-tools-surface.test.mjs`       | MCP initialize + `tools/list` returns the expected AWB tool surface    |
+| `mcp-tools-surface.test.mjs`       | MCP initialize + `tools/list` returns the expected AWB tool surface, and none of the retired board tools |
 | `mcp-schema-version.test.mjs`      | Missing `experimental.awb/schemaVersion` → JSON-RPC `-32000`           |
 | `mcp-agent-roundtrip.test.mjs`     | Virtual agent reacts to `agent_trigger` by calling `add_comment` + `move_ticket`; DB state reflects the tool calls |
-| `multi-agent-concurrency.test.mjs` | 5 agents × 4 tickets: every trigger lands at its owner, no cross-agent leak under parallel load |
 | `multi-user-chat.test.mjs`         | `chat_room_message` SSE fan-out is scoped to room participants only    |
-| `large-data.test.mjs`              | 200 tickets, 200 moves: stream keeps pace, no drops, no duplicates     |
+| `large-data.test.mjs`              | 200 queued tickets for one agent: exactly one starts (capacity 1), the activity stream keeps pace with no drops or duplicates |
+
+The rest of the directory covers QA/Security runs, Actions, orchestration, CI
+monitoring, duplicates and archive paths; each file's header says what it pins.
 
 Each file boots its own NestJS app on an OS-assigned port and runs exactly one
 `test()` block that ends with `exitAfterTests()` — this is the only shape
@@ -68,12 +68,13 @@ meta-test guards against that regression returning.
   **not** call `process.exit`; handle teardown + the real exit code come from
   the `--test-force-exit` flag the runners pass.
 - **`fixtures.mjs`** — TypeORM-repo-direct factories:
-  `createWorkspace`, `createUser`, `createAgent`, `createApiKey`,
-  `createBoard`, `createColumn`, `createTicket`, plus composites
-  `setupKanbanScene` (ws + board + Todo/In Progress/Review/Done/Blocked
-  columns with a standard `routing_config`) and `createAgentTrio`
-  (assignee + reporter + reviewer + scoped API keys).
-- **`sse-listener.mjs`** — `openSseStream(port, token, { boardId?, onFrame? })`.
+  `createWorkspace`, `createUser`, `createAgent` (`runtime: true` gives the
+  agent a Runtime Host and a `runtime_spec` to use as a ticket `assignee`),
+  `createApiKey`, `createProject` (with `hostFolders` main clone folders) and
+  `createTicket` (`status`, `assignee`, `tags`, `projectId`, …).
+  `runtimeHostKeyForAgent(agent.id)` is the API key an agent's VirtualAgent
+  connects with.
+- **`sse-listener.mjs`** — `openSseStream(port, token, { onFrame? })`.
   Generic event-type-agnostic listener; the same helper works for user
   session tokens and agent API keys (events.controller accepts both).
   Supports `waitFor(event?, predicate?, timeoutMs?)` with per-predicate FIFO
@@ -105,57 +106,43 @@ meta-test guards against that regression returning.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgentTrio, createTicket } from '../helpers/fixtures.mjs';
+import { createAgent, createTicket, createWorkspace, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-// 포트는 선언하지 않는다 — 0 을 넘기면 OS 가 빈 포트를 고르고 bootApp 이 실제
-// 바인딩된 번호를 돌려준다. 특정 번호에 붙어 디버깅할 때만 env 로 덮어쓴다.
-process.env.PORT = process.env.QA_MY_PORT || '0';
+const { TicketDispatchService } = await import('../../dist/modules/agents/ticket-dispatch.service.js');
 
 test('my scenario', async (t) => {
-  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  // port 0: the OS picks a free port and bootApp returns the one it bound.
+  const { app, port, modules } = await bootApp({ port: 0 });
   // Fire-and-forget: do NOT return app.close()'s promise from an after-hook.
   // NestJS's HTTP server won't close while SSE streams are open, so a returned
   // promise hangs the hook forever and node:test never reaches exit (see Gotchas).
   t.after(() => { void app.close().catch(() => {}); });
-  const { getDataSourceToken, ActivityService } = modules;
+  const { getDataSourceToken } = modules;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken);
-  const trio = await createAgentTrio(app, getDataSourceToken, ws.id);
-  const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id,
-    workspaceId: ws.id,
-    title: 'demo',
-    assigneeId: trio.assignee.agent.id,
-  });
+  const ws = await createWorkspace(app, getDataSourceToken, 'demo');
+  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
 
   const agent = new VirtualAgent({
-    name: 'assignee',
-    agentId: trio.assignee.agent.id,
-    apiKey: trio.assignee.key.raw_key,
+    name: 'worker',
+    agentId: worker.id,
+    apiKey: runtimeHostKeyForAgent(worker.id),
     port,
     onTrigger: async ({ mcp, trigger }) => {
-      await mcp.callTool('add_comment', {
-        ticket_id: trigger.ticket_id,
-        content: 'ack',
-        type: 'note',
-      });
+      await mcp.callTool('add_comment', { ticket_id: trigger.ticket_id, content: 'ack', type: 'note' });
     },
   });
   await agent.start();
   t.after(() => agent.stop());
   await new Promise(r => setTimeout(r, 200));
 
-  await app.get(ActivityService).logActivity({
-    entity_type: 'ticket',
-    entity_id: ticket.id,
-    action: 'moved',
-    ticket_id: ticket.id,
-    new_value: 'In Progress',
-    actor_id: 'test-user',
+  // A todo ticket with an assignee is started by the dispatcher's queue.
+  const ticket = await createTicket(app, getDataSourceToken, {
+    workspaceId: ws.id, title: 'demo', status: 'todo', assignee: worker.runtime_spec,
   });
+  await app.get(TicketDispatchService).startQueued({ workspaceId: ws.id });
 
-  const trig = await agent.waitForTrigger(t => t.ticket_id === ticket.id);
+  const trig = await agent.waitForTrigger(tr => tr.ticket_id === ticket.id);
   assert.equal(trig.role, 'assignee');
 
   exitAfterTests(); // Only in the LAST test() of the file. Flushes the trace;
@@ -201,14 +188,9 @@ test('my scenario', async (t) => {
 - **SSE subscriptions are async.** After starting a `VirtualAgent`, give
   it ~200ms before emitting the event under test — the subscription
   attaches asynchronously and events fired before attach are lost.
-- **`activityEvents.emit('activity', ...)` bypasses DB.** The trigger
-  loop reads the ticket from DB before routing, so the ticket row must
-  exist and its `column_id` must point at a column on the same board as
-  the `new_value` destination. Prefer `ActivityService.logActivity(...)` —
-  it does the DB write and the emit atomically.
-- **`actor_id === 'system'` skips.** TriggerLoopService deliberately
-  ignores system-originated activity to prevent loops. Use a real user or
-  agent id in test emissions.
-- **Terminal columns never trigger.** If your routing config maps a
-  column that's `is_terminal: true`, no agent_trigger ever fires for it.
-  The fixture's `Done` column is terminal by default.
+- **Tickets reach agents through `TicketDispatchService` only.** A row
+  written straight into the DB (as `createTicket` does) is not started until
+  something pumps the queue — call `startQueued()`, or create the ticket over
+  REST/MCP, which goes through `TicketService`. Children (checklist items),
+  pending, archived, duplicate and `done`/`review`/`backlog` tickets are never
+  dispatched.

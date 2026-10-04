@@ -2,10 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, IsNull, Not } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
+import { ActivityLog } from '../../entities/ActivityLog';
 import { Comment } from '../../entities/Comment';
 import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
 import { Project } from '../../entities/Project';
 import { RuntimeHost } from '../../entities/RuntimeHost';
+import { Credential } from '../../entities/Credential';
 import { ActivityService } from '../../services/activity.service';
 import { ProjectsService } from '../projects/projects.service';
 import { TicketDispatchService } from '../agents/ticket-dispatch.service';
@@ -19,6 +21,7 @@ import {
 } from '../../common/ticket-status';
 import { normalizeRuntimeSpec, parseRuntimeSpec, runtimeIdentityKey, RuntimeSpecError, type RuntimeSpec } from '../../common/runtime-spec';
 import { PRIORITY_ORDER } from '../agents/priority';
+import { validateCliRuntimeProfileSelection } from '../../common/claude-backend-registry';
 import { validateNextTicketId } from '../mcp/shared/ticket-helpers';
 
 /** Caller mistake; `status` is the HTTP status the REST layer answers with. */
@@ -118,15 +121,30 @@ export class TicketService {
 
   // ── input normalization ───────────────────────────────────────────────
 
-  normalizeAssignee(input: unknown): { assignee: RuntimeSpec | null; assignee_key: string } {
+  /**
+   * Shape-check an assignee RuntimeSpec and refuse what dispatch would only
+   * discover later: a CLI runtime profile that does not exist, or a credential
+   * this workspace cannot use — the same checks team slots and
+   * /runtime-specs/validate apply.
+   */
+  async normalizeAssignee(input: unknown, workspaceId: string): Promise<{ assignee: RuntimeSpec | null; assignee_key: string }> {
     if (input === null || input === undefined || input === '') return { assignee: null, assignee_key: '' };
+    let spec: RuntimeSpec;
     try {
-      const spec = normalizeRuntimeSpec(input, 'assignee');
-      return { assignee: spec, assignee_key: runtimeIdentityKey(spec) };
+      spec = normalizeRuntimeSpec(input, 'assignee');
     } catch (e) {
       if (e instanceof RuntimeSpecError) throw new TicketInputError(e.message);
       throw e;
     }
+    const profile = await validateCliRuntimeProfileSelection(this.dataSource, spec.cli_runtime_profile);
+    if (!profile.ok) throw new TicketInputError(profile.error);
+    if (spec.credential_id) {
+      const credential = await this.dataSource.getRepository(Credential).findOne({ where: { id: spec.credential_id } });
+      if (!credential || (credential.workspace_id !== null && credential.workspace_id !== workspaceId)) {
+        throw new TicketInputError(`credential ${spec.credential_id} is not available to this workspace`);
+      }
+    }
+    return { assignee: spec, assignee_key: runtimeIdentityKey(spec) };
   }
 
   private parseStatusInput(value: unknown): TicketStatus {
@@ -177,7 +195,7 @@ export class TicketService {
 
     // Explicit `assignee: null` means "nobody"; omitted means "the project's default".
     const assigneeInput = body.assignee !== undefined ? body.assignee : (project?.default_assignee ?? null);
-    const { assignee, assignee_key } = this.normalizeAssignee(assigneeInput);
+    const { assignee, assignee_key } = await this.normalizeAssignee(assigneeInput, workspaceId);
 
     let nextTicketId: string | null = null;
     if (body.next_ticket_id !== undefined) {
@@ -202,49 +220,67 @@ export class TicketService {
       throw new TicketInputError('A follow-up ticket (related_ticket_id) cannot be created as done — it would never be worked.');
     }
 
-    const repo = this.dataSource.getRepository(Ticket);
-    const position = typeof body.position === 'number' && Number.isFinite(body.position)
-      ? Math.max(0, Math.floor(body.position))
-      : await this.nextPosition(this.dataSource, workspaceId, status);
-    const ticket = await repo.save(repo.create({
-      workspace_id: workspaceId,
-      title: title.slice(0, 500),
-      description: body.description == null ? '' : String(body.description),
-      prompt_text: body.prompt_text == null ? '' : String(body.prompt_text),
-      priority,
-      status,
-      tags: JSON.stringify(tags),
-      project_id: project?.id ?? null,
-      base_branch: str(body.base_branch),
-      assignee: assignee as any,
-      assignee_key,
-      channel_ids: JSON.stringify(Array.isArray(body.channel_ids) ? body.channel_ids : []),
-      on_done_action_ids: JSON.stringify(Array.isArray(body.on_done_action_ids) ? body.on_done_action_ids : []),
-      next_ticket_id: nextTicketId,
-      position,
-      parent_id: null,
-      depth: 0,
-      terminal_entered_at: status === 'done' ? new Date() : null,
-      operational_dedupe_key: body.operational_dedupe_key ? String(body.operational_dedupe_key) : null,
-      source_kind: duplicateAssessment.source_kind,
-      source_chat_room_id: duplicateAssessment.source_chat_room_id,
-      related_ticket_id: duplicateAssessment.related_ticket_id,
-      canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
-      pending_user_action: duplicateAssessment.ambiguous || body.pending_user_action === true,
-      pending_reason: duplicateAssessment.ambiguous
-        ? 'Confirm whether this chat report duplicates one of the suggested tickets.'
-        : (body.pending_user_action === true ? str(body.pending_reason) : ''),
-      pending_set_at: duplicateAssessment.ambiguous || body.pending_user_action === true ? new Date() : null,
-      pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : (body.pending_user_action === true ? actor.name : ''),
-      created_by: actor.name,
-      created_by_type: actor.type === 'system' ? 'agent' : actor.type,
-      created_by_id: actor.id,
-    }));
-    await this.duplicates.record(ticket, duplicateAssessment, actor.name, actor.id);
-    await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: workspaceId,
-      action: 'created', actor_id: actor.id || undefined, actor_name: actor.name,
-    });
+    const pendingReason = duplicateAssessment.ambiguous
+      ? `Confirm whether this ${duplicateAssessment.source_kind || 'chat'} report duplicates one of the suggested tickets.`
+      : (body.pending_user_action === true ? str(body.pending_reason) : '');
+    // A report with duplicate candidates commits together with its decision
+    // rows and 'created' row — a half-written one would lose them for good.
+    // Plain tickets skip the explicit transaction: sql.js has one connection,
+    // and an open transaction there breaks any other request's save.
+    let created: ActivityLog | null = null;
+    const write = async (manager: EntityManager): Promise<Ticket> => {
+      const repo = manager.getRepository(Ticket);
+      const position = typeof body.position === 'number' && Number.isFinite(body.position)
+        ? Math.max(0, Math.floor(body.position))
+        : await this.nextPosition(manager, workspaceId, status);
+      const saved = await repo.save(repo.create({
+        workspace_id: workspaceId,
+        title: title.slice(0, 500),
+        description: body.description == null ? '' : String(body.description),
+        prompt_text: body.prompt_text == null ? '' : String(body.prompt_text),
+        priority,
+        status,
+        tags: JSON.stringify(tags),
+        project_id: project?.id ?? null,
+        base_branch: str(body.base_branch),
+        assignee: assignee as any,
+        assignee_key,
+        channel_ids: JSON.stringify(Array.isArray(body.channel_ids) ? body.channel_ids : []),
+        on_done_action_ids: JSON.stringify(Array.isArray(body.on_done_action_ids) ? body.on_done_action_ids : []),
+        next_ticket_id: nextTicketId,
+        position,
+        parent_id: null,
+        depth: 0,
+        terminal_entered_at: status === 'done' ? new Date() : null,
+        operational_dedupe_key: body.operational_dedupe_key ? String(body.operational_dedupe_key) : null,
+        source_kind: duplicateAssessment.source_kind,
+        source_chat_room_id: duplicateAssessment.source_chat_room_id,
+        related_ticket_id: duplicateAssessment.related_ticket_id,
+        canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
+        pending_user_action: duplicateAssessment.ambiguous || body.pending_user_action === true,
+        pending_reason: pendingReason,
+        pending_set_at: duplicateAssessment.ambiguous || body.pending_user_action === true ? new Date() : null,
+        pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : (body.pending_user_action === true ? actor.name : ''),
+        created_by: actor.name,
+        created_by_type: actor.type === 'system' ? 'agent' : actor.type,
+        created_by_id: actor.id,
+      }));
+      await this.duplicates.recordTx(manager, saved, duplicateAssessment, actor.name, actor.id);
+      created = await this.activityService.logActivityTx(manager, {
+        entity_type: 'ticket', entity_id: saved.id, ticket_id: saved.id, workspace_id: workspaceId,
+        action: 'created', actor_id: actor.id || undefined, actor_name: actor.name,
+      });
+      return saved;
+    };
+    const ticket = duplicateAssessment.candidates.length > 0
+      ? await this.dataSource.transaction(write)
+      : await write(this.dataSource.manager);
+    if (created) this.activityService.emitLogged([created]);
+    // A todo ticket is started by the dispatcher's queue; one created straight
+    // into in_progress means "work on it now".
+    if (ticket.status === 'in_progress' && ticket.assignee_key && !isTicketPending(ticket)) {
+      await this.dispatcher.dispatch(ticket, 'start');
+    }
     return { ticket, duplicate_candidates: duplicateAssessment.candidates };
   }
 
@@ -298,7 +334,7 @@ export class TicketService {
     }
     let assigneeChanged = false;
     if (body.assignee !== undefined) {
-      const { assignee, assignee_key } = this.normalizeAssignee(body.assignee);
+      const { assignee, assignee_key } = await this.normalizeAssignee(body.assignee, ticket.workspace_id);
       if (assignee_key !== ticket.assignee_key || JSON.stringify(assignee) !== JSON.stringify(ticket.assignee)) {
         const prevLabel = parseRuntimeSpec(ticket.assignee)?.label || '';
         ticket.assignee = assignee as any;
@@ -366,6 +402,9 @@ export class TicketService {
     ticket.status = status;
     ticket.position = position ?? await this.nextPosition(this.dataSource, ticket.workspace_id, status);
     ticket.terminal_entered_at = status === 'done' ? new Date() : null;
+    // A finished ticket stops answering for its dedupe key, so the next
+    // request with that key files fresh work instead of folding into this one.
+    if (status === 'done') ticket.operational_dedupe_key = null;
     if (prev === 'in_progress' || status !== 'in_progress') ticket.supervisor_redispatches = 0;
     await repo.save(ticket);
     if (position !== null) await this.reposition(ticket, status, position);

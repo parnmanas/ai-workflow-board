@@ -1,9 +1,9 @@
-// board_id는 65adf0b(카탈로그 board→workspace 승격)에서 폐지된 레거시 호환
-// 컬럼으로, 부트 마이그레이션 이후에는 항상 NULL이어야 한다(Action 엔티티
-// 주석 참고). 이 회귀 테스트는 workflow-functions.test.mjs의 골드 스탠다드
-// 패턴을 Action에 그대로 적용한다: (1) 신규 board-scope Action 생성은
-// 거부되고, (2) create()를 우회해 남아있는 legacy board-scoped 행이 있어도
-// list()는 이를 항상 제외해야 한다.
+// Actions are workspace-scoped catalog rows. Boards are gone (docs/tickets.md),
+// and with them Action.board_id — the board layer this file used to guard
+// (reject new board-scoped Actions, hide legacy board-only rows) no longer
+// exists. What survives is the workspace boundary: list() returns only the
+// workspace's own Actions, and a stale client that still sends `board_id`
+// gets an ordinary workspace Action rather than an error or a hidden row.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -16,8 +16,9 @@ import { ActionsService } from '../dist/modules/actions/actions.service.js';
 // P4c-4: 대상 검증은 Host 행으로 해소한다 (Agent 테이블 없음). 전역 스코프
 // 행이면 모든 워크스페이스에서 보인다.
 const HOST_ID = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+const TARGET = { manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
 
-describe('Actions board-scope cleanup', () => {
+describe('Actions workspace scope', () => {
   let dataSource;
   let service;
 
@@ -34,14 +35,14 @@ describe('Actions board-scope cleanup', () => {
     );
     const actionRepo = dataSource.getRepository(Action);
     const stub = {};
-    // P4c-4: (action, run, approval, room, participant, message, attachment,
-    // host, board, workspace, user, comment, activity, ticket, column,
-    // dataSource, membership, messaging, logService).
+    // (action, run, approval, room, participant, message, attachment, host,
+    // workspace, user, comment, activity, ticket, dataSource, membership,
+    // messaging, logService, projects).
     const hostRepo = dataSource.getRepository(RuntimeHost);
     service = new ActionsService(
       actionRepo, stub, stub, stub, stub, stub, stub,
-      hostRepo, stub, stub, stub, stub, stub, stub, stub,
-      dataSource, stub, stub, stub,
+      hostRepo, stub, stub, stub, stub, stub,
+      dataSource, stub, stub, stub, stub,
     );
   });
 
@@ -49,35 +50,27 @@ describe('Actions board-scope cleanup', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a new Board-scoped Action', async () => {
-    await assert.rejects(
-      service.create({
-        workspace_id: 'workspace-a',
-        board_id: 'board-a',
-        name: 'Board Action',
-        target_runtimes: [{ manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
-      }),
-      /no longer supported/,
-    );
-  });
-
-  it('excludes a legacy Board-scoped Action row from list() regardless of scope', async () => {
-    const repo = dataSource.getRepository(Action);
-    await repo.save(repo.create({
+  it('a stale board_id in the create payload yields a plain workspace Action', async () => {
+    const created = await service.create({
       workspace_id: 'workspace-a',
       board_id: 'board-a',
-      name: 'Legacy board-only action',
-      target_runtimes: [{ manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
-    }));
-    await service.create({
-      workspace_id: 'workspace-a',
-      name: 'Workspace action',
-      target_runtimes: [{ manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
+      name: 'Stale client action',
+      target_runtimes: [TARGET],
     });
-
+    assert.equal(created.workspace_id, 'workspace-a');
+    assert.equal('board_id' in created, false, 'Action has no board layer to persist into');
     const rows = await service.list('workspace-a');
-    assert.equal(rows.some(row => row.name === 'Legacy board-only action'), false);
-    assert.ok(rows.every(row => row.board_id === null));
-    assert.ok(rows.some(row => row.name === 'Workspace action'));
+    assert.ok(rows.some((row) => row.id === created.id), 'the Action is listed in its workspace');
+  });
+
+  it('list() returns only the requested workspace\'s Actions', async () => {
+    await service.create({ workspace_id: 'workspace-a', name: 'Workspace A action', target_runtimes: [TARGET] });
+    await service.create({ workspace_id: 'workspace-b', name: 'Workspace B action', target_runtimes: [TARGET] });
+
+    const rowsA = await service.list('workspace-a');
+    assert.ok(rowsA.some((row) => row.name === 'Workspace A action'));
+    assert.ok(rowsA.every((row) => row.workspace_id === 'workspace-a'));
+    const rowsB = await service.list('workspace-b');
+    assert.deepEqual(rowsB.map((row) => row.name), ['Workspace B action']);
   });
 });

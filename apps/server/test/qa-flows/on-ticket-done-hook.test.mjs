@@ -1,15 +1,15 @@
 // QA flow: on-ticket-done Action hook (ticket 16a6339c).
 //
 // Proves OnTicketDoneActionService dispatches the right Actions exactly once
-// when a ticket lands on a terminal (Done) column, with the finished ticket
-// injected into the prompt, and that the four guarantees hold:
+// when a ticket enters status `done`, with the finished ticket injected into
+// the prompt, and that the four guarantees hold:
 //
-//   1. method (b) board/label-scoped Action fires once on terminal entry, and
-//      the prompt is rendered with {{ticket.*}} context.
-//   2. idempotency — re-emitting the terminal `moved` activity for the SAME
+//   1. method (b) tag-scoped Action fires once on entering done, and the
+//      prompt is rendered with {{ticket.*}} context.
+//   2. idempotency — re-emitting the `moved` → done activity for the SAME
 //      entry does NOT dispatch a second time.
 //   3. enabled=false Actions are skipped (hook honours the flag).
-//   4. recursion guard — a ticket labelled `no-on-done-hook` fires nothing.
+//   4. recursion guard — a ticket tagged `no-on-done-hook` fires nothing.
 //   5. method (a) per-ticket `on_done_action_ids` fires even when the Action
 //      itself has no on_ticket_done trigger.
 //
@@ -21,12 +21,11 @@ import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
-  createBoard,
-  createColumn,
   createAgent,
   createTicket,
 } from '../helpers/fixtures.mjs';
 import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
+import { TicketService, SYSTEM_ACTOR } from '../../dist/modules/tickets/ticket.service.js';
 
 process.env.PORT = process.env.QA_ON_DONE_HOOK_PORT || '0';
 
@@ -37,7 +36,6 @@ async function createAction(ds, fields, spec = null) {
   const key = spec ? runtimeIdentityKey(spec) : null;
   return repo.save(repo.create({
     workspace_id: fields.workspace_id,
-    board_id: fields.board_id ?? null,
     name: fields.name,
     description: '',
     prompt: fields.prompt ?? '',
@@ -52,17 +50,19 @@ async function createAction(ds, fields, spec = null) {
   }));
 }
 
-// Simulate a real terminal landing: the move path stamps terminal_entered_at on
-// the non-terminal → terminal crossing, then logs a `moved` activity. We do the
-// same so the service sees exactly what production emits.
-async function moveToDone(ds, activityService, ticketId, doneColId, { restamp = true } = {}) {
-  const tRepo = ds.getRepository('Ticket');
-  if (restamp) {
-    await tRepo.update(ticketId, { column_id: doneColId, terminal_entered_at: new Date() });
+// A real terminal landing goes through TicketService.move — it stamps
+// terminal_entered_at on entering `done` and logs the `moved` activity
+// (field_changed 'status', new_value 'done') the hook listens for. The
+// idempotency check re-emits that same activity WITHOUT a move, which is what
+// a duplicate/reordered event looks like to the listener.
+async function moveToDone(ds, activityService, ticketService, ticketId, { reemitOnly = false } = {}) {
+  if (!reemitOnly) {
+    await ticketService.move(ticketId, 'done', SYSTEM_ACTOR);
+    return;
   }
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticketId, action: 'moved',
-    field_changed: 'column', new_value: 'Done', ticket_id: ticketId,
+    field_changed: 'status', old_value: 'todo', new_value: 'done', ticket_id: ticketId,
     actor_id: 'test-user', actor_name: 'Tester',
   });
 }
@@ -89,16 +89,10 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
   const activityService = app.get(modules.ActivityService);
+  const ticketService = app.get(TicketService);
 
-  step('Seed workspace + board + Todo/Done columns + agent');
+  step('Seed workspace + agent');
   const ws = await createWorkspace(app, modules.getDataSourceToken, 'on-done');
-  const board = await createBoard(app, modules.getDataSourceToken, ws.id, { name: 'hookboard' });
-  const todo = await createColumn(app, modules.getDataSourceToken, board.id, {
-    name: 'Todo', position: 0, workspaceId: ws.id, kind: 'intake', roleRouting: ['assignee'],
-  });
-  const done = await createColumn(app, modules.getDataSourceToken, board.id, {
-    name: 'Done', position: 1, workspaceId: ws.id, isTerminal: true, kind: 'terminal', roleRouting: [],
-  });
   const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'hook-target' });
   // P4c-4: hook dispatch 용 spec (아래 모든 createAction 에 전달).
   const HOOK_SPEC = {
@@ -107,33 +101,31 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
     runtime_config: { strategy: 'single', permission_mode: 'strict' },
   };
 
-  const newTicket = (title, labels) =>
+  // Unassigned on purpose: the hook does not care who did the work, and an
+  // assignee would only add queue/dispatch noise to the move.
+  const newTicket = (title, tags) =>
     createTicket(app, modules.getDataSourceToken, {
-      columnId: todo.id, workspaceId: ws.id, title, assigneeId: agent.id,
-    }).then(async (tk) => {
-      if (labels) {
-        await ds.getRepository('Ticket').update(tk.id, { labels: JSON.stringify(labels) });
-      }
-      return tk;
+      workspaceId: ws.id, title, status: 'in_progress', tags: tags || [],
     });
 
   // ── Scenario 1: method (b) + context + idempotency ──────────────────────
-  step('S1: on_ticket_done Action (label-scoped) fires once with {{ticket.*}}');
+  step('S1: on_ticket_done Action (tag-scoped) fires once with {{ticket.*}}');
   const a1 = await createAction(ds, {
     workspace_id: ws.id, name: 'S1 hook', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's1',
-    prompt: 'Finished ticket {{ticket.id}} titled "{{ticket.title}}" on board {{ticket.board_id}}.',
+    prompt: 'Finished ticket {{ticket.id}} titled "{{ticket.title}}" (status {{ticket.status}}, tags {{ticket.tags}}).',
   }, HOOK_SPEC);
-  const t1 = await newTicket('S1 feature ticket', ['s1']);
-  await moveToDone(ds, activityService, t1.id, done.id);
+  const t1 = await newTicket('S1 feature ticket', ['s1', 'feature']);
+  await moveToDone(ds, activityService, ticketService, t1.id);
   const s1Runs = await waitForRuns(ds, a1.id, 1);
-  assert.equal(s1Runs.length, 1, 'S1: exactly one run dispatched on terminal entry');
+  assert.equal(s1Runs.length, 1, 'S1: exactly one run dispatched on entering done');
   assert.match(s1Runs[0].prompt_rendered, new RegExp(t1.id), 'S1: {{ticket.id}} interpolated');
   assert.match(s1Runs[0].prompt_rendered, /S1 feature ticket/, 'S1: {{ticket.title}} interpolated');
-  assert.match(s1Runs[0].prompt_rendered, new RegExp(board.id), 'S1: {{ticket.board_id}} interpolated');
+  assert.match(s1Runs[0].prompt_rendered, /status done/, 'S1: {{ticket.status}} interpolated');
+  assert.match(s1Runs[0].prompt_rendered, /tags s1, feature/, 'S1: {{ticket.tags}} interpolated');
 
-  step('S1: re-emitting the same terminal move does NOT double-dispatch');
-  await moveToDone(ds, activityService, t1.id, done.id, { restamp: false });
+  step('S1: re-emitting the same done move does NOT double-dispatch');
+  await moveToDone(ds, activityService, ticketService, t1.id, { reemitOnly: true });
   await new Promise((r) => setTimeout(r, 400));
   const s1RunsAgain = await runsFor(ds, a1.id);
   assert.equal(s1RunsAgain.length, 1, 'S1: idempotent — still one run after re-emit');
@@ -145,18 +137,18 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
     trigger: 'on_ticket_done', trigger_label: 's2', enabled: false, prompt: 'should not run',
   }, HOOK_SPEC);
   const t2 = await newTicket('S2 ticket', ['s2']);
-  await moveToDone(ds, activityService, t2.id, done.id);
+  await moveToDone(ds, activityService, ticketService, t2.id);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal((await runsFor(ds, a2.id)).length, 0, 'S2: disabled Action never dispatched');
 
-  // ── Scenario 3: recursion guard label ───────────────────────────────────
-  step('S3: ticket labelled no-on-done-hook fires nothing');
+  // ── Scenario 3: recursion guard tag ─────────────────────────────────────
+  step('S3: ticket tagged no-on-done-hook fires nothing');
   const a3 = await createAction(ds, {
     workspace_id: ws.id, name: 'S3 hook', target_agent_id: agent.id,
     trigger: 'on_ticket_done', trigger_label: 's3', prompt: 'should not run',
   }, HOOK_SPEC);
   const t3 = await newTicket('S3 hook-origin ticket', ['s3', 'no-on-done-hook']);
-  await moveToDone(ds, activityService, t3.id, done.id);
+  await moveToDone(ds, activityService, ticketService, t3.id);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal((await runsFor(ds, a3.id)).length, 0, 'S3: recursion guard blocked dispatch');
 
@@ -168,7 +160,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   }, HOOK_SPEC);
   const t4 = await newTicket('S4 ticket', []);
   await ds.getRepository('Ticket').update(t4.id, { on_done_action_ids: JSON.stringify([a4.id]) });
-  await moveToDone(ds, activityService, t4.id, done.id);
+  await moveToDone(ds, activityService, ticketService, t4.id);
   const s4Runs = await waitForRuns(ds, a4.id, 1);
   assert.equal(s4Runs.length, 1, 'S4: explicit per-ticket binding dispatched once');
   assert.match(s4Runs[0].prompt_rendered, /S4 ticket/, 'S4: ticket context injected');
@@ -185,7 +177,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
     workspace_id: ws.id, name: 'S5 manual (unbound)', target_agent_id: agent.id,
     trigger: '', prompt: 'should never run from a Done event',
   }, HOOK_SPEC);
-  // Default on_done_action_ids is '[]' (empty binding) and no label, so neither
+  // Default on_done_action_ids is '[]' (empty binding) and no tag, so neither
   // method (a) nor method (b) can pick this ticket up.
   const t5 = await newTicket('S5 unrelated ticket', []);
   assert.equal(
@@ -193,7 +185,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
     '[]',
     'S5: fixture ticket starts with an empty binding',
   );
-  await moveToDone(ds, activityService, t5.id, done.id);
+  await moveToDone(ds, activityService, ticketService, t5.id);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal((await runsFor(ds, a5.id)).length, 0, 'S5(d): manual Action did not leak onto a Done event');
   // Per-ticket isolation: t5 reaching Done must NOT re-fire the action bound
@@ -236,7 +228,7 @@ test('on-ticket-done hook dispatches bound Actions exactly once with ticket cont
   };
   t.after(() => { actionsService.dispatch = realDispatch; });
 
-  await moveToDone(ds, activityService, t6.id, done.id);
+  await moveToDone(ds, activityService, ticketService, t6.id);
   // Wait until all three runs have landed, which means dispatch() returned for all
   // three — by then dispatchOrder holds the full sequence.
   for (const id of order) await waitForRuns(ds, id, 1);

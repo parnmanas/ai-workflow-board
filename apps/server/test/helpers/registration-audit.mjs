@@ -28,7 +28,6 @@ export const TEST_ENTRY_SCRIPTS = [
   'test:catalog-scope',
   'test:auto-notice',
   'test:postgres-schema',
-  'test:subtask-gate-contract',
   'test:mention-audit',
 ];
 

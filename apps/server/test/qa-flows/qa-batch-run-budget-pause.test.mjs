@@ -8,8 +8,7 @@
 // fix a single breach at index k walked every remaining index off the same
 // cliff (100% reproducible, not a race) and finalized the batch `done` with
 // the whole tail burned as `errored`, with no documented recovery path for a
-// batch (unlike a ticket, which the ticket-scoped guard auto-pends instead of
-// destroying).
+// batch.
 //
 // This test drives a real 2-scenario batch over MCP HTTP, using a workspace
 // run-budget tight enough that scenario 0's own run consumes the window's
@@ -22,7 +21,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_PORT || '0';
@@ -44,7 +43,7 @@ test('QA batch: a run-budget breach on the next index leaves the batch running, 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch-budget' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-batch-budget');
   // Tight run-creation-rate ceiling — scenario 0's own run consumes the
   // window's only slot, so dispatching scenario 1 trips the guard.
   await ds.getRepository('Workspace').update(ws.id, {
@@ -66,7 +65,6 @@ test('QA batch: a run-budget breach on the next index leaves the batch running, 
   step('start_qa_batch — scenario 0 dispatches and consumes the only run-budget slot');
   const batch0 = await mcp.callTool('start_qa_batch', {
     workspace_id: ws.id,
-    board_id: board.id,
     scenario_ids: [s0.id, s1.id],
   });
   assert.ok(!batch0?.isError && batch0.id, `start_qa_batch failed: ${JSON.stringify(batch0)}`);
@@ -104,7 +102,7 @@ test('QA batch: a run-budget breach on the FIRST index (0) propagates as a rejec
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch-budget-first' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-batch-budget-first');
   await ds.getRepository('Workspace').update(ws.id, {
     hard_budget_config: JSON.stringify({ max_runs_per_window: 1, window_minutes: 60, notify: false }),
   });
@@ -124,13 +122,12 @@ test('QA batch: a run-budget breach on the FIRST index (0) propagates as a rejec
   assert.ok(!s1?.isError && s1.id, `create s1 failed: ${JSON.stringify(s1)}`);
 
   step('Consume the only run-budget slot with an unrelated single run BEFORE the batch starts');
-  const warmRun = await mcp.callTool('start_qa_run', { scenario_id: warm.id, board_id: board.id });
+  const warmRun = await mcp.callTool('start_qa_run', { scenario_id: warm.id });
   assert.ok(!warmRun?.isError && warmRun.run_id, `warm run failed: ${JSON.stringify(warmRun)}`);
 
   step('start_qa_batch — index 0 itself hits the guard, since the window is already exhausted');
   const batchResp = await mcp.callTool('start_qa_batch', {
     workspace_id: ws.id,
-    board_id: board.id,
     scenario_ids: [s0.id, s1.id],
   });
   assert.ok(batchResp?.isError, 'start_qa_batch must surface the rejection, not a fake success');

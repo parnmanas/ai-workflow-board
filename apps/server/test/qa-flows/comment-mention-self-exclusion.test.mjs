@@ -1,128 +1,112 @@
-// QA flow: 다중담당자 T3 — comment_mention self-exclusion.
+// QA flow: comment_mention self-exclusion.
 //
-// T2 gave the DISPATCH path a per-holder self-guard. This is its twin on the
-// MENTION path: when a co-holder writes `@[role:assignee]` to summon their
-// peers for discussion, the server must fire comment_mention to every OTHER
-// holder but NEVER back to the author. Without this, an assignee mentioning
-// their own role would notify themselves → agent-manager re-spawns the author's
-// own subagent → recursive loop.
+// When an agent writes a comment that @-tags ITSELF, the server must never
+// fire comment_mention back to the author. Without this, the assignee
+// mentioning its own identity would notify itself → agent-manager re-spawns
+// the author's own subagent → recursive loop.
 //
-// Two agents (A, B) both hold the assignee role. A drives the REAL MCP
-// add_comment tool:
-//   1. `@[role:assignee]` fan-out   → B gets exactly one comment_mention,
-//                                      A (author) gets zero.
-//   2. direct `@[agent:A]` + `@[agent:B]` in one comment
-//                                   → B gets it, A's own self-mention dropped.
+// Workspace roles and `@[role:…]` fan-out are gone (docs/tickets.md): a
+// ticket has exactly one agent — its assignee — and only a mention of the
+// assignee identity can wake anything. So the author that can hit the loop
+// is the assignee itself. Two agents drive the REAL MCP add_comment tool,
+// each authenticated with its Host-bound runtime credential (the key a
+// dispatched subagent gets, so the author id is the runtime identity key):
+//   1. assignee A tags `@[agent:A]` (+ bystander B) → nobody is notified:
+//      A's self-mention is dropped, B is not on the ticket.
+//   2. peer B tags `@[agent:A]`                     → A gets exactly one
+//      comment_mention, attributed to B. This proves the mention path is
+//      live, so the zero in (1) is self-exclusion and not a dead pipe.
+// Both comments also pin the author_role stamp (author-role.ts #3): A's
+// comment is badged `assignee` (author id == ticket.assignee_key), B's has no
+// badge.
 //
-// Regression cover for DoD #1 (전원 호출) and #5 (재귀 방지) of ticket 40024001.
+// Regression cover for DoD #5 (재귀 방지) of ticket 40024001.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene,
+  createWorkspace,
   createAgent,
   createApiKey,
   createTicket,
-  addRoleHolder,
+  runtimeHostKeyForAgent,
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
-// Each test boots its own app on a distinct port so a not-yet-released listener
-// from the prior test can't collide (EADDRINUSE).
-const BASE_PORT = parseInt(process.env.QA_MENTION_SELF_EXCL_PORT || '0', 10);
-process.env.PORT = String(BASE_PORT);
+process.env.PORT = process.env.QA_MENTION_SELF_EXCL_PORT || '0';
 
-async function seedTwoAssigneeScene(app, getDataSourceToken, port, wsName) {
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: wsName });
+test('self-mention dropped: the assignee never wakes itself; a peer mention still lands', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(() => { void app.close().catch(() => {}); });
+  const { getDataSourceToken } = modules;
 
-  const agentA = await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-a' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'mention-self-excl');
+  const agentA = await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-a', runtime: true });
+  const agentB = await createAgent(app, getDataSourceToken, ws.id, { name: 'peer-b', runtime: true });
+  // The Host-bound runtime credential (`runtime:<label>:<rt-key>`): MCP calls
+  // made with it are authored as the runtime identity key, exactly like a
+  // dispatched subagent's.
   const keyA = await createApiKey(app, getDataSourceToken, agentA.id, { workspaceId: ws.id, label: 'assignee-a' });
-  const agentB = await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-b' });
-  const keyB = await createApiKey(app, getDataSourceToken, agentB.id, { workspaceId: ws.id, label: 'assignee-b' });
+  const keyB = await createApiKey(app, getDataSourceToken, agentB.id, { workspaceId: ws.id, label: 'peer-b' });
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'Discussion self-exclusion',
-    assigneeId: agentA.id,
-  });
-  await addRoleHolder(app, getDataSourceToken, {
-    ticketId: ticket.id, workspaceId: ws.id, agentId: agentB.id,
+    status: 'in_progress',
+    assignee: agentA,
   });
 
+  // SSE rides the Host key (one stream per Runtime Host); MCP rides the
+  // runtime credential.
   const vaA = new VirtualAgent({ name: 'assignee-a', agentId: agentA.id, apiKey: keyA.raw_key, port });
-  const vaB = new VirtualAgent({ name: 'assignee-b', agentId: agentB.id, apiKey: keyB.raw_key, port });
+  const vaB = new VirtualAgent({ name: 'peer-b', agentId: agentB.id, apiKey: keyB.raw_key, port });
+  assert.ok(runtimeHostKeyForAgent(agentA.id) && runtimeHostKeyForAgent(agentB.id));
   await Promise.all([vaA.start(), vaB.start()]);
+  t.after(() => { vaA.stop(); vaB.stop(); });
   await new Promise((r) => setTimeout(r, 200));
 
-  return { ws, columns, agentA, agentB, ticket, vaA, vaB };
-}
-
-test('role fan-out self-exclusion: co-holder gets comment_mention, author does not', async (t) => {
-  const { app, port, modules } = await bootApp({ port: BASE_PORT });
-  t.after(() => { void app.close().catch(() => {}); });
-  const { getDataSourceToken } = modules;
-
-  const { agentA, agentB, ticket, vaA, vaB } =
-    await seedTwoAssigneeScene(app, getDataSourceToken, port, 'mention-self-excl');
-  t.after(() => { vaA.stop(); vaB.stop(); });
-
-  step('Author (holder A) posts @[role:assignee] to summon co-assignees via MCP add_comment');
-  const res = await vaA.mcp.callTool('add_comment', {
-    ticket_id: ticket.id,
-    content: '@[role:assignee|Assignees] 이 phase 어떻게 나눌까요?',
-    author_role: 'assignee',
-  });
-  assert.ok(!res?.isError, `add_comment must succeed, got: ${JSON.stringify(res)}`);
-
-  step('Verify co-holder B received exactly one role-sourced comment_mention');
-  const bMention = await vaB.waitForMention((m) => m.ticket_id === ticket.id, 4000);
-  assert.equal(bMention.agent_id, agentB.id, 'B is the mentioned agent');
-  assert.equal(bMention.mention_source, 'role', 'delivered via role fan-out');
-
-  await new Promise((r) => setTimeout(r, 400));
-  assert.equal(vaB.mentionsFor(ticket.id).length, 1, 'B gets exactly one mention (no duplicate)');
-  assert.equal(
-    vaA.mentionsFor(ticket.id).length,
-    0,
-    'author A must NOT receive a comment_mention for their own role fan-out (self-exclusion)',
-  );
-});
-
-test('direct self-mention dropped: @[agent:self] excluded, @[agent:other] delivered', async (t) => {
-  // 두 번째 부팅부터는 BASE_PORT 에서 산술로 파생하지 않고 OS 가 고른 빈 포트를
-  // 쓴다 (ticket 5db0964a). 파생 번호는 소스 검색에 잡히지 않아 다른 파일이 자기
-  // 기본 포트로 같은 번호를 선언해도 아무도 눈치채지 못하고, 데스크톱 앱이 인접
-  // 번호를 잡고 있으면 그대로 EADDRINUSE 로 죽는다. 실제 포트는 반환값을 쓴다.
-  const { app, port, modules } = await bootApp({ port: 0 });
-  t.after(() => { void app.close().catch(() => {}); });
-  const { getDataSourceToken } = modules;
-
-  const { agentA, agentB, ticket, vaA, vaB } =
-    await seedTwoAssigneeScene(app, getDataSourceToken, port, 'mention-self-excl-direct');
-  t.after(() => { vaA.stop(); vaB.stop(); });
-
-  step('Author A posts a comment mentioning BOTH themselves and B directly');
-  const res = await vaA.mcp.callTool('add_comment', {
+  step('Assignee A posts a comment mentioning itself and B via MCP add_comment');
+  const self = await vaA.mcp.callTool('add_comment', {
     ticket_id: ticket.id,
     content: `note to @[agent:${agentA.id}|Me] and @[agent:${agentB.id}|Peer]`,
-    author_role: 'assignee',
   });
-  assert.ok(!res?.isError, `add_comment must succeed, got: ${JSON.stringify(res)}`);
+  assert.ok(!self?.isError, `add_comment must succeed, got: ${JSON.stringify(self)}`);
 
-  step('Verify B received the direct mention but A did not self-notify');
-  const bMention = await vaB.waitForMention((m) => m.ticket_id === ticket.id, 4000);
-  assert.equal(bMention.agent_id, agentB.id, 'B is the mentioned agent');
-  assert.equal(bMention.mention_source, 'direct', 'delivered via direct agent mention');
-
-  await new Promise((r) => setTimeout(r, 400));
-  assert.equal(vaB.mentionsFor(ticket.id).length, 1, 'B gets exactly one direct mention');
+  await new Promise((r) => setTimeout(r, 500));
   assert.equal(
     vaA.mentionsFor(ticket.id).length,
     0,
     'author A must NOT receive a comment_mention for their own direct self-mention',
   );
+  assert.equal(vaB.mentionsFor(ticket.id).length, 0, 'B is not on the ticket — its tag wakes nothing');
+
+  step('Peer B mentions the assignee A — A is woken once, attributed to B');
+  const peer = await vaB.mcp.callTool('add_comment', {
+    ticket_id: ticket.id,
+    content: `@[agent:${agentA.id}|Assignee] can you double-check this?`,
+  });
+  assert.ok(!peer?.isError, `add_comment must succeed, got: ${JSON.stringify(peer)}`);
+
+  const aMention = await vaA.waitForMention((m) => m.ticket_id === ticket.id, 4000);
+  assert.equal(aMention.agent_id, agentA.id, 'A is the mentioned agent');
+  assert.equal(aMention.mention_source, 'direct', 'delivered via direct agent mention');
+  assert.equal(aMention.actor_type, 'agent');
+  assert.equal(aMention.actor_id, agentB.id, 'the author is B\'s runtime identity');
+
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(vaA.mentionsFor(ticket.id).length, 1, 'A gets exactly one mention — only the peer\'s');
+  assert.equal(vaB.mentionsFor(ticket.id).length, 0, 'B never self-notifies');
+
+  step('author_role: the assignee\'s comment is badged, the peer\'s is not');
+  const rows = await app.get(getDataSourceToken()).getRepository('Comment')
+    .find({ where: { ticket_id: ticket.id }, order: { created_at: 'ASC' } });
+  const byAuthor = (id) => rows.find((c) => c.author_id === id);
+  const meta = (c) => (typeof c?.metadata === 'string' ? JSON.parse(c.metadata || '{}') : (c?.metadata || {}));
+  assert.equal(byAuthor(agentA.id)?.author_type, 'agent');
+  assert.equal(meta(byAuthor(agentA.id)).author_role, 'assignee');
+  assert.ok(byAuthor(agentB.id), 'peer comment stored under B\'s runtime identity');
+  assert.equal(meta(byAuthor(agentB.id)).author_role, undefined, 'a non-assignee agent gets no role badge');
 
   exitAfterTests(0);
 });

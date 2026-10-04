@@ -289,19 +289,3 @@ export async function createTicket(
   traceEvent('fixture', { kind: 'ticket', id: row.id, title, status, assignee_key: row.assignee_key });
   return row;
 }
-
-export async function createAgentTrio(app, getDataSourceToken, workspaceId) {
-  const mk = async (role) => {
-    const agent = await createAgent(app, getDataSourceToken, workspaceId, { name: role });
-    const key = await createApiKey(app, getDataSourceToken, agent.id, {
-      workspaceId,
-      label: role,
-    });
-    return { agent, key };
-  };
-  return {
-    assignee: await mk('assignee'),
-    reporter: await mk('reporter'),
-    reviewer: await mk('reviewer'),
-  };
-}

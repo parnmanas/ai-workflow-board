@@ -36,24 +36,25 @@ const { OntologyExtractionService } = await import(
   'file://' + path.join(DIST_ROOT, 'modules/ontology/ontology-extraction.service.js')
 );
 
-function fakeResourceRepo() {
+// 그래프의 `resourceId` 는 이름만 남은 것이고 값은 Project id 다 — 저장소
+// Resource 가 같은 id 로 Project 로 이관됐다(docs/tickets.md). 서비스는
+// ProjectsService.getInWorkspace(id, workspaceId) 로 저장소를 해소한다.
+function fakeProjectsService() {
   return {
-    async findOne() {
+    async getInWorkspace(id, workspaceId) {
+      if (id !== 'res-1' || workspaceId !== 'ws-1') return null;
       return {
         id: 'res-1',
         workspace_id: 'ws-1',
-        board_id: null,
-        credential_id: null,
         name: 'fake-repo',
         description: '',
-        type: 'repository',
-        url: 'https://example.invalid/fake-repo.git',
+        repo_url: 'https://example.invalid/fake-repo.git',
         default_branch: 'main',
-        content: '',
-        file_data: '',
-        file_name: '',
-        file_mimetype: '',
-        tags: '',
+        credential_id: null,
+        clone_policy: null,
+        use_pr: false,
+        instructions: '',
+        default_assignee: null,
         created_at: new Date(0),
         updated_at: new Date(0),
       };
@@ -98,7 +99,7 @@ function defaultPersistImpl() {
 // 테스트의 목적이라, 그 앞뒤 단계(repo fetch, tree walk, 실제 파싱, 실제
 // insert)는 전부 결정론적 페이크로 대체한다.
 function buildService({ poolResults, persistImpl }) {
-  const svc = new OntologyExtractionService(fakeResourceRepo(), {}, {});
+  const svc = new OntologyExtractionService(fakeProjectsService(), {}, {});
   svc.resolveGitCredential = async () => null;
   svc.ensureRepoCache = async () => '/fake/repo/path';
   svc.listCommits = async () => [{ sha: 'c0ffee' }];

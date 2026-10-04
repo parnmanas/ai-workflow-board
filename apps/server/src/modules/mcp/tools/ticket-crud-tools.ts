@@ -13,8 +13,9 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import type { DataSource } from 'typeorm';
 import { Ticket } from '../../../entities/Ticket';
-import { ok, err, sanitizeHarnessMarkers } from '../shared/helpers';
+import { ok, err, sanitizeHarnessMarkers, withArtifactRef } from '../shared/helpers';
 import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
 import { loadPendActionCandidates } from '../shared/pend-action-scope';
 import { loadTicketFull } from '../shared/ticket-parsing';
@@ -33,6 +34,12 @@ export function callerActor(caller: McpAgentContext | undefined): TicketActor {
     name: caller?.agentName || 'agent',
     type: 'agent',
   };
+}
+
+/** callerActor with the Host display name — for names stored on the ticket itself (created_by, pending_set_by). */
+async function namedCallerActor(dataSource: DataSource, caller: McpAgentContext | undefined): Promise<TicketActor> {
+  const actor = callerActor(caller);
+  return { ...actor, name: (await resolveCallerDisplayName(dataSource, caller)) || actor.name };
 }
 
 const RuntimeSpecInput = z.record(z.string(), z.any()).describe(
@@ -89,12 +96,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       });
       // Compact rows — the full thread is get_ticket's job.
       return ok({
-        tickets: result.tickets.map((t: any) => ({
+        tickets: result.tickets.map((t: any) => withArtifactRef('ticket', {
           id: t.id, title: t.title, status: t.status, priority: t.priority, tags: t.tags,
           project: t.project ?? null, assignee_name: t.assignee_name, assignee_key: t.assignee_key,
           pending_user_action: t.pending_user_action, pending_on_tickets: t.pending_on_tickets,
           updated_at: t.updated_at, children: (t.children || []).length,
-        })),
+        }, t.title)),
         tags: result.tags,
       });
     },
@@ -134,7 +141,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           ...args,
           description,
           ...(args.assignee === undefined ? {} : { assignee: args.assignee }),
-        }, callerActor(caller));
+        }, await namedCallerActor(dataSource, caller));
         // Inline checklist items.
         const repo = dataSource.getRepository(Ticket);
         for (let i = 0; i < (args.subtasks || []).length; i += 1) {
@@ -186,7 +193,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         body.description = sanitizeHarnessMarkers(body.description, { logger, toolName: 'update_ticket', fieldName: 'description', agentId: caller?.agentId });
       }
       try {
-        const actor = callerActor(caller);
+        const actor = await namedCallerActor(dataSource, caller);
         if (args.pending_user_action === true) await ticketService.pend(existing.id, args.pending_reason ?? existing.pending_reason ?? '', actor);
         const before = JSON.stringify(await loadTicketFull(dataSource, existing.id));
         await ticketService.update(existing.id, body, actor);
@@ -288,7 +295,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
         );
       }
       try {
-        const actor = { ...callerActor(caller), name: await resolveCallerDisplayName(dataSource, caller) };
+        const actor = await namedCallerActor(dataSource, caller);
         await ticketService.pend(ticket.id, reason, actor);
         const noActionReason = (no_action_reason ?? '').trim();
         if (gate.candidateCount > 0 && noActionReason) {
@@ -385,12 +392,12 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
       if (ws) qb.andWhere('t.workspace_id = :ws', { ws });
       if (statuses.length) qb.andWhere('t.status IN (:...statuses)', { statuses });
       const rows = await qb.orderBy('t.updated_at', 'DESC').take(200).getMany();
-      return ok((await ticketService.cards(rows)).map((t: any) => ({
+      return ok((await ticketService.cards(rows)).map((t: any) => withArtifactRef('ticket', {
         id: t.id, title: t.title, status: t.status, priority: t.priority, tags: t.tags,
         project: t.project ?? null, pending_user_action: t.pending_user_action,
         pending_on_tickets: t.pending_on_tickets, pending_ci_wait: t.pending_ci_wait,
         updated_at: t.updated_at,
-      })));
+      }, t.title)));
     },
   );
 }

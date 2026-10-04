@@ -20,8 +20,8 @@
 // Imports the compiled service from dist/ (built by `npm run build` in the test
 // script) and injects stub repos + a stub logger, exactly the seams the service
 // exposes via constructor + the `now` param on runOnce(). These fixtures carry no
-// scenario_id/board_id, so they exercise the default zero_progress policy and the
-// scenario/board repos are never queried — empty stubs suffice. The
+// scenario_id, so they exercise the default zero_progress policy and the
+// scenario repo is never queried — an empty stub suffices. The
 // heartbeat_deadline policy is covered in qa-liveness-policy.test.mjs.
 
 import { test } from 'node:test';
@@ -52,9 +52,9 @@ const noopLog = { info() {}, warn() {}, error() {} };
 // fixture runs have no batch_id, so onRunFinalized early-returns — a no-op stub
 // matches the real (DI-injected) QaRunService surface the reaper depends on.
 const noopQaRunService = { onRunFinalized: async () => {} };
-// Scenario/Board repos the reaper bulk-queries to resolve each run's liveness
-// policy. These fixtures carry no scenario_id/board_id, so the queries never run;
-// an empty stub is enough.
+// Scenario repo the reaper bulk-queries to resolve each run's liveness policy.
+// These fixtures carry no scenario_id, so the query never runs; an empty stub is
+// enough.
 const emptyRepo = { async find() { return []; } };
 
 const NOW = new Date('2026-06-22T21:00:00Z');
@@ -84,7 +84,7 @@ test('zero-progress fuse: 0-step runs past the 40m window are reaped; fresh / pr
     makeRun('done-failed', 'failed', 50 * MIN),               // terminal           -> never selected
   ];
   const repo = makeRepo(rows);
-  const svc = new QaRunReaperService(repo, emptyRepo, emptyRepo, noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, emptyRepo, noopLog, noopQaRunService);
 
   const { reaped, details } = await svc.runOnce(NOW);
 
@@ -116,7 +116,7 @@ test('6h-TTL fuse: a progressing run that stalls past 6h is reaped via the absol
     makeRun('progressing-5h', 'running', 5 * HOUR, { steps: 5 }),   // has steps, 5h < 6h -> spare
   ];
   const repo = makeRepo(rows);
-  const svc = new QaRunReaperService(repo, emptyRepo, emptyRepo, noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, emptyRepo, noopLog, noopQaRunService);
 
   const { reaped, details } = await svc.runOnce(NOW);
 
@@ -136,7 +136,7 @@ test('runOnce is idempotent — a second sweep reaps nothing', async () => {
     makeRun('ttl-running', 'running', 8 * HOUR, { steps: 2 }), // 6h-TTL
   ];
   const repo = makeRepo(rows);
-  const svc = new QaRunReaperService(repo, emptyRepo, emptyRepo, noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, emptyRepo, noopLog, noopQaRunService);
 
   const first = await svc.runOnce(NOW);
   assert.deepEqual(first.reaped.sort(), ['ttl-running', 'zp-running'].sort(), 'first sweep reaps both stale runs');

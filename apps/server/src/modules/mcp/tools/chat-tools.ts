@@ -187,9 +187,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     'send_chat_room_message',
     'Send a message to a chat room. The agent must be an active participant in the room. ' +
     'Messages are persisted and delivered to all room participants via SSE.\n\n' +
-    MENTION_SYNTAX_DOC +
-    '\n\nNote: chat rooms are not ticket-scoped, so `@[role:...]` role shortcuts have no target context and are dropped on delivery. ' +
-    'Stick to `@[user:<uuid>|Name]` and `@[agent:<uuid>|Name]` in chat messages.',
+    MENTION_SYNTAX_DOC,
     {
       room_id: z.string().describe('Chat room ID to send the message to'),
       // Empty string allowed when attachment_ids carries the payload

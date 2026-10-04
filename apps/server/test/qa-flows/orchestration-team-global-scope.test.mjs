@@ -18,9 +18,10 @@
 //   5. max_open_missions는 팀 단위가 아니라 (팀, workspace) 단위로 강제된다 —
 //      글로벌 팀의 workspace A 캡이 workspace B의 슬롯을 소비하지 않는다.
 //   6. dispatchStep은 디스패치 시점에 assignee의 workspace를 재검증한다 — 팀 가입
-//      이후 move_agent_to_workspace로 다른 workspace로 옮겨진 에이전트는 절대
+//      이후 멤버십의 workspace가 다른 workspace로 어긋난(stale) 멤버는 절대
 //      스텝을 받지 않는다; 대신 실패 처리되고 오케스트레이터가 깨어난다(글로벌 팀
-//      여부와 무관하게 기존에 있던 구멍도 닫는다).
+//      여부와 무관하게 기존에 있던 구멍도 닫는다). Agent/보드의 workspace 이동
+//      서비스는 사라졌으므로 멤버 행을 직접 고쳐 stale 상태를 재현한다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,14 +47,10 @@ async function loadServices() {
   const runner = await import(
     pathToFileURL(path.join(DIST, 'modules', 'orchestration', 'orchestration-runner.service.js')).href
   );
-  const workspaceMove = await import(
-    pathToFileURL(path.join(DIST, 'services', 'workspace-move.service.js')).href
-  );
   return {
     OrchestrationTeamService: team.OrchestrationTeamService,
     OrchestrationMissionService: mission.OrchestrationMissionService,
     OrchestrationRunnerService: runner.OrchestrationRunnerService,
-    WorkspaceMoveService: workspaceMove.WorkspaceMoveService,
   };
 }
 
@@ -414,11 +411,10 @@ test('Orchestration Team: dispatchStep re-validates workspace legality — a mem
   const { app, port, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService, WorkspaceMoveService } = services;
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
   const teams = app.get(OrchestrationTeamService);
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);
-  const workspaceMove = app.get(WorkspaceMoveService);
 
   const wsA = await createWorkspace(app, getDataSourceToken, 'move-bug-a');
   const wsB = await createWorkspace(app, getDataSourceToken, 'move-bug-b');
@@ -481,7 +477,7 @@ test('Orchestration Team: a dispatch failure surfaced during reportStep wakes th
   const { app, modules, services } = await sharedApp(t);
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
-  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService, WorkspaceMoveService } = services;
+  const { OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService } = services;
   const teams = app.get(OrchestrationTeamService);
   const missions = app.get(OrchestrationMissionService);
   const runner = app.get(OrchestrationRunnerService);

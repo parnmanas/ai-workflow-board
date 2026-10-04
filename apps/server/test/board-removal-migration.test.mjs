@@ -11,6 +11,8 @@
 //     `resources`;
 //   - tickets of an archived board are archived;
 //   - board settings with a workspace home move there;
+//   - board-scoped workflow functions become workspace rows unless that would
+//     collide, and the key indexes are rebuilt on the same boot;
 //   - the retired tables and the snapshots are dropped.
 
 import { test } from 'node:test';
@@ -39,6 +41,12 @@ const COL = {
   archivedTodo: 'c0000000-0000-4000-8000-000000000008',
 };
 const T = (n) => `a0000000-0000-4000-8000-00000000000${n}`;
+const FN = {
+  ws: 'f0000000-0000-4000-8000-000000000001',
+  boardDup: 'f0000000-0000-4000-8000-000000000002',
+  boardFree: 'f0000000-0000-4000-8000-000000000003',
+  otherBoardDup: 'f0000000-0000-4000-8000-000000000004',
+};
 const ROLE_ASSIGNEE = 'r0000000-0000-4000-8000-000000000001';
 const ROLE_REVIEWER = 'r0000000-0000-4000-8000-000000000002';
 const SPEC = {
@@ -81,6 +89,11 @@ async function writeLegacyDb(file) {
       labels varchar NOT NULL DEFAULT '[]', position integer NOT NULL DEFAULT 0, status varchar NOT NULL DEFAULT 'todo',
       base_repo_resource_id varchar NOT NULL DEFAULT '', base_branch varchar NOT NULL DEFAULT '', archived_at datetime,
       created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}), version integer NOT NULL DEFAULT 1);
+    CREATE TABLE workflow_functions (id varchar PRIMARY KEY NOT NULL, workspace_id varchar, board_id varchar, key varchar NOT NULL,
+      name varchar NOT NULL, created_at datetime NOT NULL DEFAULT (${now}), updated_at datetime NOT NULL DEFAULT (${now}));
+    CREATE UNIQUE INDEX uq_workflow_functions_workspace_key ON workflow_functions (workspace_id, key)
+      WHERE workspace_id IS NOT NULL AND board_id IS NULL;
+    CREATE UNIQUE INDEX uq_workflow_functions_board_key ON workflow_functions (board_id, key) WHERE board_id IS NOT NULL;
   `);
   const run = (sql, params) => db.run(sql, params);
   run('INSERT INTO workspaces (id, name) VALUES (?, ?)', [WS, 'legacy']);
@@ -129,6 +142,13 @@ async function writeLegacyDb(file) {
   // A legacy agent-uuid holder without a spec stays unassigned.
   run('INSERT INTO ticket_role_assignments (id, ticket_id, role_id, agent_id, holder_key) VALUES (?,?,?,?,?)',
     ['ra3', T(5), ROLE_ASSIGNEE, '88888888-8888-4888-8888-888888888888', 'agent:88888888']);
+  // Workspace row + a board row with the same key (collides → dropped), a board
+  // row with a free key (kept as a workspace row) and a second board's copy of
+  // that key (collides with the kept one → dropped).
+  for (const [id, board, key] of [[FN.ws, null, 'custom.deploy'], [FN.boardDup, BOARD, 'custom.deploy'],
+    [FN.boardFree, BOARD, 'custom.lint'], [FN.otherBoardDup, ARCHIVED_BOARD, 'custom.lint']]) {
+    run('INSERT INTO workflow_functions (id, workspace_id, board_id, key, name) VALUES (?,?,?,?,?)', [id, WS, board, key, key]);
+  }
   fs.writeFileSync(file, Buffer.from(db.export()));
   db.close();
 }
@@ -217,6 +237,15 @@ test('board settings move to the workspace', async () => {
   assert.equal(ws.language, 'Korean');
   assert.equal(Number(ws.auto_archive_days), 14);
   assert.equal(Number(ws.max_concurrent_tickets_per_agent), 2);
+});
+
+test('board-scoped workflow functions fold into the workspace without key collisions', async () => {
+  const rows = await ds.query("SELECT id, key FROM workflow_functions WHERE workspace_id = ? ORDER BY key", [WS]);
+  assert.deepEqual(rows.map((r) => [r.key, r.id]), [['custom.deploy', FN.ws], ['custom.lint', FN.boardFree]]);
+  const indexes = (await ds.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'workflow_functions'")).map((r) => r.name);
+  assert.ok(indexes.includes('uq_workflow_functions_workspace_key'), indexes.join(', '));
+  assert.ok(indexes.includes('uq_workflow_functions_global_key'), indexes.join(', '));
+  assert.ok(!indexes.includes('uq_workflow_functions_board_key'));
 });
 
 test('retired tables and snapshots are dropped', async () => {

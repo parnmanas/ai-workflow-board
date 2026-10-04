@@ -153,7 +153,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       // the arg schema; empty objects collapse to null via the serializer.
       if (hard_budget_config !== undefined) ws.hard_budget_config = serializeHardBudgetConfig(hard_budget_config);
       // Default repository clone policy (ticket bddb63ee) — same shape as
-      // save_resource.clone_policy; strict-validated by the arg schema, and an
+      // save_project.clone_policy; strict-validated by the arg schema, and an
       // empty object collapses to null via the serializer.
       if (clone_policy !== undefined) ws.clone_policy = serializeClonePolicy(clone_policy);
 

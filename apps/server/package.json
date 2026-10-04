@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test:subtask-gate-contract": "node --test test/subtask-gate-contract.test.mjs",
     "pretest:qa:pg": "node test/run-suite.mjs --suite pretest-qa-pg",
     "pretest": "npm run build && node test/run-suite.mjs --suite pretest",
     "posttest": "node test/run-suite.mjs --suite posttest",

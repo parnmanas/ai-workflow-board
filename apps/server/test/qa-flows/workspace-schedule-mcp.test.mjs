@@ -8,7 +8,7 @@ import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.WS_SCHED_MCP_PORT || '0';
@@ -18,7 +18,7 @@ test('Workspace schedule MCP: create → run_now → list round-trip', async (t)
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-mcp' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'ws-sched-mcp');
   // The schedule both dispatches to, and authenticates as, this agent.
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'sched' });

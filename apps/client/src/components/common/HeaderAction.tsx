@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { tokens } from '../../tokens';
 
 /**
- * 공용 헤더 액션 컴포넌트 (board-ux-guidelines §2).
+ * 공용 헤더 액션 컴포넌트.
  *
  * `headerActionStyle` 인라인 스타일이 여러 페이지 헤더에 복제돼 있던 것을 단일
  * 컴포넌트로 추출한 것. hover/active/disabled/state-active

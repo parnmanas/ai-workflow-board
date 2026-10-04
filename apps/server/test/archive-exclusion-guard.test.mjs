@@ -2,15 +2,20 @@
 //
 // The archive feature is a soft-delete: archived rows stay in the DB and
 // remain reachable through the dedicated archive endpoints, but every
-// "active ticket" scan path must filter them out so the supervisor /
-// trigger-loop / backlog-promotion / focus-selector stop re-routing
-// completed work to agents.
+// "active ticket" scan path must filter them out so the dispatcher's queue /
+// supervisor and the ticket list stop re-routing completed work to agents.
 //
 // The reviewer explicitly asked for a regression test guarding the
 // supervisor exclusion (see ticket comment 2026-05-25 "Implementation
 // guardrails I want preserved"). Static grep is cheap, fast, and survives
 // every refactor short of removing the column itself — exactly the right
 // shape for "this filter must not silently disappear".
+//
+// Board removal (docs/tickets.md): the old scan sites (allocation,
+// backlog-promotion, agent-workload, trigger-loop, boards.controller,
+// stuck-ticket-detector) are gone. Their jobs now live in
+// TicketDispatchService (queue, capacity, supervisor) and TicketService
+// (list + every create/move, incl. the terminal_entered_at stamp).
 //
 // Same pattern as workflow-state-cap-guard.test.mjs: strip comments first
 // so doc-prose that legitimately mentions "archived_at" doesn't false-
@@ -31,27 +36,14 @@ function stripComments(src) {
 }
 
 // (file, human-readable reason the filter must exist there).
-//
-// Note — trigger-loop.service.ts intentionally NOT in this list. Its archive
-// guard is a runtime re-read inside `_emitTrigger` (covered by the dedicated
-// test below), not a SQL scan filter. Listing it here would force a SQL
-// pattern into a file that doesn't need one.
 const ACTIVE_TICKET_SOURCES = [
   [
-    'modules/agents/agent-workload.service.ts',
-    'focus-selector candidate set must not include archived tickets',
+    'modules/agents/ticket-dispatch.service.ts',
+    'the todo queue, the per-agent capacity count and the supervisor re-send scan must all skip archived tickets — otherwise the dispatcher re-fires triggers for completed work (or counts it against an agent\'s capacity)',
   ],
   [
-    'modules/agents/allocation.service.ts',
-    'supervisor re-push (allocation) must skip archived tickets — otherwise it re-fires triggers for completed work',
-  ],
-  [
-    'modules/agents/backlog-promotion.service.ts',
-    'backlog-promotion must not consume a promotion slot with an archived intake ticket',
-  ],
-  [
-    'modules/boards/boards.controller.ts',
-    'GET /api/boards/:id must exclude archived tickets by default (include_archived=true opt-in only)',
+    'modules/tickets/ticket.service.ts',
+    'GET /api/workspaces/:wsId/tickets + MCP list_tickets must exclude archived tickets by default (include_archived / archived_only opt-in only)',
   ],
 ];
 
@@ -68,19 +60,20 @@ for (const [relPath, why] of ACTIVE_TICKET_SOURCES) {
   });
 }
 
-// trigger-loop also carries a fresh-read archive gate inside `_emitTrigger`
-// (the chokepoint every dispatch path runs through). Removing it would let
-// a manual archive that races a queued trigger slip past the supervisor
-// gate. Distinct from the candidate-filter check above — the gate is a
-// runtime re-read at emit time, the filter is at scan time. Both matter.
-test('trigger-loop.service.ts re-checks archived_at at emit time', () => {
-  const SOURCE = path.resolve(__dirname, '..', 'src', 'modules', 'agents', 'trigger-loop.service.ts');
+// TicketDispatchService.dispatch() is the chokepoint every agent_trigger runs
+// through (start, comment, unpend, prerequisite/CI resume, supervisor, manual
+// Run). It must refuse an archived ticket itself — a re-wake path that read
+// the ticket before a manual archive landed must not slip past. Distinct from
+// the candidate-filter check above — the gate is at emit time, the filter is
+// at scan time. Both matter.
+test('ticket-dispatch.service.ts refuses archived tickets at dispatch time', () => {
+  const SOURCE = path.resolve(__dirname, '..', 'src', 'modules', 'agents', 'ticket-dispatch.service.ts');
   const src = fs.readFileSync(SOURCE, 'utf8');
   const code = stripComments(src);
   assert.match(
     code,
-    /freshForArchive\?\.archived_at|agent_trigger_dropped_archived/,
-    'trigger-loop._emitTrigger must keep the fresh-read archive gate so manual archives that race a queued trigger still win.',
+    /async\s+dispatch\([^)]*\)[^{]*\{\s*if\s*\(ticket\.archived_at\)\s*return\s*\{\s*dispatched:\s*false,\s*reason:\s*'archived'/,
+    'TicketDispatchService.dispatch must open with the archived_at gate so a manual archive that races a re-wake still wins.',
   );
 });
 
@@ -103,26 +96,53 @@ test('archive-helpers.ts exports TicketArchivedError + assertTicketActive', () =
     src, /export\s+function\s+assertTicketActive/,
     'archive-helpers.ts must export assertTicketActive (used by code paths that prefer throw-over-return).',
   );
-  assert.match(
-    src, /applyTerminalEnteredAtForMove/,
-    'archive-helpers.ts must export applyTerminalEnteredAtForMove so every move path stamps terminal_entered_at consistently.',
-  );
 });
 
-// Compound cursor — the archiver stamps every ticket in a per-board sweep
+// TicketService owns every status change (docs/tickets.md), so it is the one
+// place that stamps terminal_entered_at — on create (born in done) and on every
+// move (stamped entering done, cleared leaving it). The archiver's
+// `terminal_entered_at IS NOT NULL` candidate filter silently skips any done
+// ticket that missed the stamp, forever. And every mutation path must reject an
+// archived ticket (409 ticket_archived) instead of moving it behind the
+// operator's back.
+const DONE_STAMP = String.raw`terminal_entered_at\s*[:=]\s*(?:status\s*===\s*(?:'done'|DONE_STATUS)|isDoneStatus\(status\))\s*\?\s*new\s+Date\(\)\s*:\s*null`;
+test('ticket.service.ts stamps terminal_entered_at on create and move, and rejects archived tickets', () => {
+  const SOURCE = path.resolve(__dirname, '..', 'src', 'modules', 'tickets', 'ticket.service.ts');
+  const code = stripComments(fs.readFileSync(SOURCE, 'utf8'));
+  const body = (name) => {
+    const start = code.search(new RegExp(String.raw`\n  async ${name}\(`));
+    assert.ok(start !== -1, `TicketService.${name}() not found`);
+    const next = code.slice(start + 1).search(/\n  (?:async |private |\/\*\*)/);
+    return next === -1 ? code.slice(start) : code.slice(start, start + 1 + next);
+  };
+  assert.match(
+    body('create'), new RegExp(DONE_STAMP),
+    'TicketService.create must stamp terminal_entered_at when a ticket is created straight into done — otherwise an operator-created Done ticket never auto-archives',
+  );
+  const move = body('move');
+  assert.match(
+    move, new RegExp(DONE_STAMP),
+    'TicketService.move must stamp terminal_entered_at entering done and clear it leaving done',
+  );
+  for (const name of ['update', 'move', 'pend']) {
+    assert.match(
+      body(name), /if\s*\(ticket\.archived_at\)\s*throw\s+new\s+TicketInputError\([^)]*'ticket_archived'\)/,
+      `TicketService.${name} must reject archived tickets with ticket_archived`,
+    );
+  }
+});
+
+// Compound cursor — the archiver stamps every ticket in a per-workspace sweep
 // with the same `archived_at`, so a cursor that only carries the timestamp
 // would skip the rest of that batch when a page boundary lands inside it.
-// Both surfaces (REST + MCP) must order on (archived_at, id) and carry both
-// in next_cursor so cursors are interchangeable + same-timestamp ties pass
-// through stably.
+// MCP list_archived_tickets must order on (archived_at, id) and carry both in
+// next_cursor so same-timestamp ties pass through stably. (The REST archive
+// view is now `GET /api/workspaces/:wsId/tickets?archived_only=1` — a filter
+// on the ticket list, not a cursor-paged endpoint.)
 const COMPOUND_CURSOR_SOURCES = [
   [
-    'modules/boards/boards.controller.ts',
-    'GET /api/boards/:id/archived-tickets must use a compound (archived_at,id) cursor — otherwise a 500-ticket batch stamped with the same archived_at silently skips the rest of the batch at the page boundary',
-  ],
-  [
     'modules/mcp/tools/archive-tools.ts',
-    'MCP list_archived_tickets must use the same compound cursor — REST + MCP must agree so cursors are interchangeable',
+    'MCP list_archived_tickets must use a compound (archived_at,id) cursor — otherwise a 500-ticket batch stamped with the same archived_at silently skips the rest of the batch at the page boundary',
   ],
 ];
 for (const [relPath, why] of COMPOUND_CURSOR_SOURCES) {
@@ -145,27 +165,23 @@ for (const [relPath, why] of COMPOUND_CURSOR_SOURCES) {
   });
 }
 
-// Label search — the archive q parameter searches title / id / labels.
-// Reviewer flagged that title/id-only would miss "find every archived
-// ticket with the `legal` label" workflows.
-const LABEL_SEARCH_SOURCES = [
-  [
-    'modules/boards/boards.controller.ts',
-    'GET /api/boards/:id/archived-tickets must let q match labels — operators routinely filter archive by label',
-  ],
+// Tag search — the archive q parameter searches title / id / tags (labels
+// became tags with the board removal). Reviewer flagged that title/id-only
+// would miss "find every archived ticket tagged `legal`" workflows.
+const TAG_SEARCH_SOURCES = [
   [
     'modules/mcp/tools/archive-tools.ts',
-    'MCP list_archived_tickets must let q match labels too — the contract is documented in the tool description',
+    'MCP list_archived_tickets must let q match tags — the contract is documented in the tool description',
   ],
 ];
-for (const [relPath, why] of LABEL_SEARCH_SOURCES) {
-  test(`${path.basename(relPath)} archive q matches title / id / label`, () => {
+for (const [relPath, why] of TAG_SEARCH_SOURCES) {
+  test(`${path.basename(relPath)} archive q matches title / id / tag`, () => {
     const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
     const src = fs.readFileSync(SOURCE, 'utf8');
     const code = stripComments(src);
     assert.match(
-      code, /LOWER\(t\.labels\)\s+LIKE/,
-      `${relPath} must match labels (LOWER(t.labels) LIKE …) in the q clause. ${why}`,
+      code, /LOWER\(t\.tags\)\s+LIKE/,
+      `${relPath} must match tags (LOWER(t.tags) LIKE …) in the q clause. ${why}`,
     );
   });
 }
@@ -209,28 +225,24 @@ test('archive cursor helpers round-trip + accept legacy bare-timestamp', async (
   assert.deepEqual(parseArchiveCursor(''), { ts: null, id: null });
 });
 
-// Review-bounce guards (2026-05-25). Reviewer flagged three surfaces that
-// either still scanned/mutated archived tickets or silently leaked them:
+// Review-bounce guards (2026-05-25). Reviewer flagged surfaces that either
+// still scanned/mutated archived tickets or silently leaked them:
 //
-//   1. StuckTicketDetector candidate scan + remediation
-//   2. Workspace REST + MCP get_workspace (default-exclusion violation)
-//   3. Create-directly-in-terminal-column missing terminal_entered_at stamp
+//   1. Workspace REST + MCP get_workspace (default-exclusion violation)
+//   2. Create-directly-in-done missing terminal_entered_at stamp
 //
+// (The third, StuckTicketDetector, was removed with the board model.)
 // Static-grep guards mirror the rest of this file: cheap, fast, and they
 // survive every refactor short of removing the column itself.
 
 const REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES = [
   [
-    'modules/agents/stuck-ticket-detector.service.ts',
-    'StuckTicketDetector candidate scan must skip archived tickets — manual archive is permitted on non-terminal columns, so an archived ticket can otherwise still be flagged and yanked back to intake by the remediation path',
-  ],
-  [
     'modules/workspaces/workspaces.controller.ts',
-    'GET /api/workspaces/:id is an active board snapshot — archived tickets must not silently inflate it (use the dedicated archive endpoints for archive-inclusive reads)',
+    'GET /api/workspaces/:id is an active snapshot — archived tickets must not silently inflate its per-status ticket_counts (use the archive filters for archive-inclusive reads)',
   ],
   [
     'modules/mcp/tools/workspace-tools.ts',
-    'MCP get_workspace per-column ticket_count is the same active surface as the REST workspace get — archived rows must not be counted',
+    'MCP get_workspace per-status ticket_counts is the same active surface as the REST workspace get — archived rows must not be counted',
   ],
 ];
 for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
@@ -246,46 +258,48 @@ for (const [relPath, why] of REVIEW_BOUNCE_ARCHIVE_FILTER_SOURCES) {
   });
 }
 
-// Stamping terminal_entered_at on create. Every create path (REST, MCP,
-// legacy agent-api) must stamp the column when the destination column is
-// already terminal — otherwise the archiver's `terminal_entered_at IS NOT
-// NULL` candidate filter silently skips the row forever.
+// Stamping terminal_entered_at on create. Every root-ticket create path
+// (REST, MCP, the agent-api chat fallbacks) must route through
+// TicketService.create — the one place that stamps terminal_entered_at for a
+// ticket born in done (guarded above). A surface that hand-writes its own
+// Ticket row would skip the stamp, and the archiver's `terminal_entered_at IS
+// NOT NULL` candidate filter would then skip the row forever.
 const TERMINAL_STAMP_CREATE_SOURCES = [
   [
     'modules/tickets/tickets.controller.ts',
-    'POST /api/columns/:columnId/tickets must stamp terminal_entered_at when the destination column is terminal — otherwise an operator-created Done ticket never auto-archives',
+    'POST /api/workspaces/:wsId/tickets must create through TicketService — otherwise an operator-created Done ticket never auto-archives',
   ],
   [
     'modules/mcp/tools/ticket-crud-tools.ts',
-    'MCP create_ticket must stamp terminal_entered_at on direct-to-terminal creates — same archiver eligibility issue as the REST path',
+    'MCP create_ticket must create through TicketService — same archiver eligibility issue as the REST path',
   ],
   [
     'modules/agent-api/agent-api.controller.ts',
-    'Legacy /agent-api create-ticket must stamp terminal_entered_at too — the back-door agent path is still live and writes the same Ticket row shape',
+    'the agent-api operational / ordinary-work fallbacks must create through TicketService too — the manager back-door writes the same Ticket row shape',
   ],
 ];
 for (const [relPath, why] of TERMINAL_STAMP_CREATE_SOURCES) {
-  test(`${path.basename(relPath)} stamps terminal_entered_at on direct-to-terminal create`, () => {
+  test(`${path.basename(relPath)} creates root tickets through TicketService`, () => {
     const SOURCE = path.resolve(__dirname, '..', 'src', relPath);
     const src = fs.readFileSync(SOURCE, 'utf8');
     const code = stripComments(src);
     assert.match(
       code,
-      /isTerminalColumn\([^)]+\)\s*\?\s*new\s+Date\(\)\s*:\s*null/,
-      `${relPath} must compute terminal_entered_at via isTerminalColumn(col) ? new Date() : null on the create path. ${why}`,
+      /(?:this\.tickets|ticketService)\.create\(/,
+      `${relPath} must create root tickets via TicketService.create. ${why}`,
     );
-    assert.match(
+    assert.doesNotMatch(
       code,
-      /terminal_entered_at:\s*terminalEnteredAt/,
-      `${relPath} must pass terminal_entered_at into the Ticket row it creates. ${why}`,
+      /terminal_entered_at\s*:/,
+      `${relPath} must not hand-write terminal_entered_at into a Ticket row — TicketService owns the stamp. ${why}`,
     );
   });
 }
 
-// The archiver itself must keep the per-board batch cap (operator
-// guardrail — the first tick after enabling auto-archive on a 10k-Done
-// board shouldn't ship 10k writes in one transaction).
-test('ticket-archiver.service.ts caps its per-board sweep', () => {
+// The archiver itself must keep the per-workspace batch cap (operator
+// guardrail — the first tick after enabling auto-archive on a workspace with
+// 10k done tickets shouldn't ship 10k writes in one transaction).
+test('ticket-archiver.service.ts caps its per-workspace sweep', () => {
   const SOURCE = path.resolve(
     __dirname, '..', 'src', 'modules', 'tickets', 'ticket-archiver.service.ts',
   );
@@ -294,7 +308,7 @@ test('ticket-archiver.service.ts caps its per-board sweep', () => {
   assert.match(
     code,
     /ARCHIVER_BATCH_LIMIT|\.take\(/,
-    'ticket-archiver.service.ts must keep a per-board batch cap so first-tick activation on a large board does not blow up.',
+    'ticket-archiver.service.ts must keep a per-workspace batch cap so first-tick activation on a large workspace does not blow up.',
   );
   assert.match(
     code,
@@ -304,11 +318,11 @@ test('ticket-archiver.service.ts caps its per-board sweep', () => {
 });
 
 // Dedupe-key release on archive (ticket a565b657) — a ticket manually
-// archived while still non-terminal (archive_ticket / REST archive) must
-// give up its operational_dedupe_key the same way entering a terminal column
-// already does (archive-helpers.ts applyTerminalEnteredAtForMove). Otherwise
-// outreach-ingest.service.ts's dedupe-winner lookup can pick an invisible
-// archived ticket as the "open" ticket for a re-processed external item.
+// archived while still open (archive_ticket / REST archive) must give up its
+// operational_dedupe_key the same way entering done should (see the todo
+// guard below). Otherwise outreach-ingest.service.ts's dedupe-winner lookup
+// can pick an invisible archived ticket as the "open" ticket for a
+// re-processed external item.
 const ARCHIVE_DEDUPE_KEY_RELEASE_SOURCES = [
   [
     'modules/mcp/tools/archive-tools.ts',
@@ -345,5 +359,21 @@ test('outreach-ingest.service.ts excludes archived tickets from the dedupe-key w
     code,
     /operational_dedupe_key:\s*dedupeKey,\s*archived_at:\s*IsNull\(\)/,
     'the dedupe-key collision winner lookup must filter archived_at: IsNull() — otherwise an archived ticket can be selected as the winner and silently absorb new feedback.',
+  );
+});
+
+// Entering done releases operational_dedupe_key, so a finished capability /
+// ordinary-work ticket stops absorbing later requests for the same key.
+// Behavioural twin: operational-capability-ticket.test.mjs.
+test('ticket.service.ts move releases operational_dedupe_key on entering done', () => {
+  const SOURCE = path.resolve(__dirname, '..', 'src', 'modules', 'tickets', 'ticket.service.ts');
+  const code = stripComments(fs.readFileSync(SOURCE, 'utf8'));
+  const start = code.search(/\n  async move\(/);
+  const end = code.slice(start + 1).search(/\n  (?:async |private |\/\*\*)/);
+  const move = code.slice(start, start + 1 + end);
+  assert.match(
+    move,
+    /operational_dedupe_key\s*[:=]\s*null/,
+    'TicketService.move must clear operational_dedupe_key when the ticket enters done.',
   );
 });

@@ -1,15 +1,18 @@
 // QA: a virtual agent receives an SSE trigger and responds by calling MCP
 // tools. Verifies the closed-loop contract (SSE in → tool call out) the
 // real proxy.mjs + Claude CLI stack depends on.
+//
+// A human creates a `todo` ticket for the agent over REST; the dispatcher
+// starts it (todo → in_progress) and sends agent_trigger; the agent answers
+// with MCP add_comment + move_ticket { status: 'review' } (docs/tickets.md).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene,
+  createWorkspace,
   createAgent,
   createApiKey,
-  createTicket,
   createUser,
 } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
@@ -19,33 +22,16 @@ process.env.PORT = process.env.QA_MCP_ROUNDTRIP_PORT || '0';
 test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_comment', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => { void app.close().catch(() => {}); });
-  const { getDataSourceToken, ActivityService } = modules;
+  const { getDataSourceToken, AuthService } = modules;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'roundtrip',
-    envRepo: true,
-  });
+  const ws = await createWorkspace(app, getDataSourceToken, 'roundtrip');
   const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
   const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {
     workspaceId: ws.id,
     label: 'worker',
   });
-  // The Review column routes to the reviewer slug only. A ticket moved into a
-  // routed column that has NO holder for that role auto-advances past it (the
-  // auto-advance-vs-halt rule), so without a reviewer the ticket would skip
-  // Review → Blocked and this test's "moved to Review" assertion would fail.
-  // Assign a reviewer so Review is servable and the ticket parks there. The
-  // reviewer never has to react — only a holder must exist.
-  const reviewer = await createAgent(app, getDataSourceToken, ws.id, { name: 'reviewer', runtime: true });
   const user = await createUser(app, getDataSourceToken, { name: 'manager' });
-  const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
-    workspaceId: ws.id,
-    title: 'Roundtrip ticket',
-    promptText: 'Move me to review and leave a note.',
-    assigneeId: worker.id,
-    reviewerId: reviewer.id,
-  });
+  const token = app.get(AuthService).createSession(user.id);
 
   const va = new VirtualAgent({
     name: 'worker',
@@ -55,13 +41,12 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
     onTrigger: async ({ mcp, trigger }) => {
       await mcp.callTool('add_comment', {
         ticket_id: trigger.ticket_id,
-        content: 'Got it — advancing to Review.',
+        content: 'Got it — advancing to review.',
         type: 'note',
       });
       await mcp.callTool('move_ticket', {
         ticket_id: trigger.ticket_id,
-        target_column_name: 'Review',
-        board_id: columns.review.board_id,
+        status: 'review',
       });
     },
   });
@@ -69,41 +54,43 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
   t.after(() => va.stop());
   await new Promise((r) => setTimeout(r, 200));
 
-  step('Move ticket Todo → In Progress to trigger the worker agent');
-  const ticketRepo = app.get(getDataSourceToken()).getRepository('Ticket');
-  const commentRepo = app.get(getDataSourceToken()).getRepository('Comment');
-  await ticketRepo.update(ticket.id, { column_id: columns.inProgress.id });
-  await app.get(ActivityService).logActivity({
-    entity_type: 'ticket',
-    entity_id: ticket.id,
-    action: 'moved',
-    ticket_id: ticket.id,
-    new_value: 'In Progress',
-    actor_id: user.id,
-    actor_name: user.name,
+  step('Create a todo ticket for the worker over REST — the dispatcher starts it');
+  const res = await fetch(`http://localhost:${port}/api/workspaces/${ws.id}/tickets`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id },
+    body: JSON.stringify({
+      title: 'Roundtrip ticket',
+      prompt_text: 'Move me to review and leave a note.',
+      assignee: worker.runtime_spec,
+    }),
   });
+  assert.equal(res.status, 201);
+  const ticket = await res.json();
+  assert.equal(ticket.status, 'todo', 'REST create defaults to todo');
 
   step('Wait for trigger, then verify agent called add_comment + move_ticket via MCP');
-  await va.waitForTrigger((tr) => tr.ticket_id === ticket.id, 4000);
+  const trigger = await va.waitForTrigger((tr) => tr.ticket_id === ticket.id, 4000);
+  assert.equal(trigger.role, 'assignee');
+  assert.equal(trigger.trigger_source, 'start');
 
   // Poll DB until the agent's reactions commit (move + comment).
-  const reviewId = columns.review.id;
+  const ticketRepo = app.get(getDataSourceToken()).getRepository('Ticket');
+  const commentRepo = app.get(getDataSourceToken()).getRepository('Comment');
   const deadline = Date.now() + 8000;
   let finalTicket;
   while (Date.now() < deadline) {
     finalTicket = await ticketRepo.findOne({ where: { id: ticket.id } });
-    if (finalTicket?.column_id === reviewId) break;
+    if (finalTicket?.status === 'review') break;
     await new Promise((r) => setTimeout(r, 100));
   }
-  assert.equal(finalTicket?.column_id, reviewId, 'Agent moved ticket to Review via MCP');
+  assert.equal(finalTicket?.status, 'review', 'Agent moved ticket to review via MCP');
 
-  // SystemCommentService auto-posts move-tracking comments, so total comment
-  // count is >=1. Filter to the agent-authored ones we actually care about.
+  // System comments may also be posted on the ticket; filter to the
+  // agent-authored ones we actually care about.
   const allComments = await commentRepo.find({ where: { ticket_id: ticket.id } });
-  const agentComments = allComments.filter(
-    (c) => c.author_type === 'agent' && c.author_id === worker.id,
-  );
+  const agentComments = allComments.filter((c) => c.author_type === 'agent');
   assert.equal(agentComments.length, 1, 'Exactly one agent-authored comment');
-  assert.equal(agentComments[0].content, 'Got it — advancing to Review.');
+  assert.equal(agentComments[0].content, 'Got it — advancing to review.');
+  assert.equal(agentComments[0].author_id, worker.id, 'authored by the assignee runtime identity');
   exitAfterTests(0);
 });

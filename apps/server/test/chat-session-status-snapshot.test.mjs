@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
@@ -48,7 +48,7 @@ test('GET session-status: a live push is visible on the next room entry without 
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-session-status-snapshot' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-session-status-snapshot');
   const user = await createUser(app, getDataSourceToken, { name: 'viewer' });
   const userToken = app.get(AuthService).createSession(user.id);
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
@@ -125,7 +125,7 @@ test('GET session-status: rejects a foreign-workspace roomId and a same-workspac
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-session-status-access-a' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-session-status-access-a');
   const otherWs = await createWorkspace(app, getDataSourceToken, 'chat-session-status-access-b');
   const member = await createUser(app, getDataSourceToken, { name: 'member' });
   const outsider = await createUser(app, getDataSourceToken, { name: 'outsider' });

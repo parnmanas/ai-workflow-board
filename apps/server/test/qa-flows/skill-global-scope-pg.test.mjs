@@ -4,10 +4,11 @@
 // dev backend, but on Postgres that index does NOT constrain global rows —
 // `NULL != NULL` there, so it would happily accept ten global skills sharing a
 // slug, and `list()` would then return duplicates that shadow each other
-// nondeterministically. The real guarantee is the PARTIAL unique index created
-// in migration 1760000000077 (`uq_skills_global_slug`), and a partial index is
-// exactly the thing sql.js cannot model — so this assertion only means
-// anything here, in the Postgres dialect matrix.
+// nondeterministically. The real guarantee is the PARTIAL unique index the
+// Skill entity declares (`uq_skills_global_slug`). It must live on the entity:
+// synchronize drops undeclared indexes, which is how the migration-only copy
+// vanished from production. Only Postgres shows the real index DDL, so this
+// file runs in the Postgres dialect matrix.
 //
 // Runs under `npm run test:qa:pg` (CI job `postgres-dialect-matrix`). On any
 // other backend it self-skips rather than asserting something untrue.
@@ -16,7 +17,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createWorkspace } from '../helpers/fixtures.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_SKILL_PG_PORT || '0', 10);
 
@@ -53,14 +54,14 @@ test('the partial unique indexes exist and are scoped as documented', { skip: !i
      WHERE tablename = 'skills' AND indexname IN ('uq_skills_global_slug', 'uq_skills_workspace_slug')`,
   );
   const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
-  assert.ok(byName.has('uq_skills_global_slug'), 'migration 1760000000077 must create uq_skills_global_slug');
-  assert.ok(byName.has('uq_skills_workspace_slug'), 'migration 1760000000077 must create uq_skills_workspace_slug');
+  assert.ok(byName.has('uq_skills_global_slug'), 'the Skill entity must declare uq_skills_global_slug');
+  assert.ok(byName.has('uq_skills_workspace_slug'), 'the Skill entity must declare uq_skills_workspace_slug');
   assert.match(byName.get('uq_skills_global_slug'), /WHERE .*workspace_id IS NULL/i);
   assert.match(byName.get('uq_skills_workspace_slug'), /WHERE .*workspace_id IS NOT NULL/i);
 });
 
 test('a workspace MAY reuse a global slug — that is the fork path, not a conflict', { skip: !isPostgres && 'postgres only' }, async () => {
-  const { ws } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: `pgfork-${stamp}` });
+  const ws = await createWorkspace(app, modules.getDataSourceToken, `pgfork-${stamp}`);
   const slug = `pg-fork-${stamp}`;
   await skills.create('', { slug, name: 'Global', body: '# global\n' }, 'admin', 'global');
   const fork = await skills.create(ws.id, { slug, name: 'Fork', body: '# fork\n' }, 'tester', 'workspace');

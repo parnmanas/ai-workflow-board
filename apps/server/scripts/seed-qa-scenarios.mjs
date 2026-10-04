@@ -13,7 +13,6 @@
 //     --base-url http://localhost:7701 \
 //     --workspace <workspace_id> \
 //     --runtime <runtime-spec.json> \
-//     [--board <board_id>] \
 //     [--api-key <key>] \
 //     [--only ticket-lifecycle,chat-room-messaging] \
 //     [--dry-run]
@@ -47,7 +46,6 @@ async function main() {
   const baseUrl = args['base-url'] || process.env.AWB_BASE_URL || 'http://localhost:7701';
   const workspaceId = args.workspace || process.env.AWB_WORKSPACE_ID;
   const runtimePath = args.runtime || process.env.AWB_QA_RUNTIME_FILE;
-  const boardId = args.board || process.env.AWB_BOARD_ID || null;
   const apiKey = args['api-key'] || process.env.AWB_API_KEY || '';
   const only = args.only ? String(args.only).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
 
@@ -69,7 +67,6 @@ async function main() {
   const payloads = buildScenarioCreatePayloads({
     workspace_id: workspaceId,
     target_runtime: JSON.parse(await readFile(runtimePath, 'utf8')),
-    board_id: boardId,
     created_by: 'seed-qa-scenarios',
     only,
     // `--no-on-failure-ticket` seeds with the failure→ticket side-effect OFF;
@@ -78,7 +75,6 @@ async function main() {
   });
 
   console.log(`Seeding ${payloads.length} QA scenario(s) → workspace ${workspaceId}`
-    + (boardId ? ` board ${boardId}` : ' (workspace-scope)')
     + (only ? ` [filter: ${only.join(', ')}]` : '')
     + (args.dryRun ? '  [DRY RUN]' : ''));
 
@@ -86,8 +82,7 @@ async function main() {
   await mcp.initialize();
 
   // Existing scenarios in the same scope, indexed by their key tag.
-  const listScope = boardId ? boardId : '';
-  const existing = await mcp.callTool('list_qa_scenarios', { workspace_id: workspaceId, board_id: listScope });
+  const existing = await mcp.callTool('list_qa_scenarios', { workspace_id: workspaceId });
   if (existing?.isError) throw new Error(`list_qa_scenarios failed: ${JSON.stringify(existing.error)}`);
   const byKey = new Map();
   for (const s of Array.isArray(existing) ? existing : []) {

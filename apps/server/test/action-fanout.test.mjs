@@ -30,8 +30,8 @@ import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { ApiKey } from '../dist/entities/ApiKey.js';
 import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 import { Workspace } from '../dist/entities/Workspace.js';
-// 엔티티 전체를 등록한다. Workspace→Board→BoardColumn→Ticket→Comment… 로
-// 역참조 관계가 줄줄이 이어져 부분 집합으로는 metadata 빌드가 통과하지 않고,
+// 엔티티 전체를 등록한다. 엔티티 간 역참조 관계가 줄줄이 이어져 부분
+// 집합으로는 metadata 빌드가 통과하지 않고,
 // run-budget 가드가 Workspace 행을 진짜로 읽어야 해서 스텁으로 대체할 수도 없다.
 import * as ALL_ENTITIES from '../dist/entities/index.js';
 import { ActionsService } from '../dist/modules/actions/actions.service.js';
@@ -181,20 +181,18 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       inertRepo(),                             // messageRepo
       inertRepo(),                             // attachmentRepo
       dataSource.getRepository(RuntimeHost),   // hostRepo (P4c-4: agentRepo 삭제)
-      inertRepo(),                             // boardRepo
       dataSource.getRepository(Workspace),     // workspaceRepo
       inertRepo(),                             // userRepo
       commentRepo,                             // commentRepo
       inertRepo(),                             // activityRepo
-      // Ticket 엔티티는 BoardColumn 관계(Ticket#column)를 끌고 오므로 이
-      // 스위트에 등록하지 않는다. dispatch 가 티켓에서 읽는 것은 워크스페이스
-      // 경계 검사용 findOne 하나뿐이라 스텁으로 충분하다.
-      { findOne: async ({ where }) => tickets.get(where.id) ?? null }, // ticketRepo
-      inertRepo(),                             // columnRepo
+      // dispatch 가 티켓에서 읽는 것은 워크스페이스 경계 검사용 findOne
+      // 하나뿐이라, 소스 티켓은 스텁 Map 으로 둔다 (행 전체를 심을 필요 없음).
+      { findOne: async ({ where }) => tickets.get(where.id) ?? null, update: async () => ({ affected: 1 }) }, // ticketRepo
       dataSource,                              // dataSource
       {},                                      // membership
       messaging,                               // messaging
       logService,                              // logService
+      { getInWorkspace: async () => null },    // projects (훅 경로 전용)
     );
   });
 
@@ -278,25 +276,6 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       const after = src.slice(idx, idx + 400);
       assert.match(after, /actionToWireJson/, `정규화를 거치지 않는 읽기 경로: ${read}`);
     }
-  });
-
-  it('workspace-move 는 다중 대상을 두 컬럼 모두 복사한다 (P4c-4: companion-agent 경고 표면 삭제)', () => {
-    // 정적 가드 — 복사가 단일 컬럼 매칭으로 되돌아가면 복사된 Action 이 조용히
-    // 대상 1개로 준다. P4c-4: warnForeignAgentActions 는 companion-agent 표면과
-    // 함께 삭제됐다 (cross-workspace 검사는 dry-run blockers 로 이동).
-    const src = readFileSync(
-      new URL('../src/services/workspace-move.service.ts', import.meta.url),
-      'utf8',
-    );
-    const copyBlock = src.slice(src.indexOf('copy ws-level action'), src.indexOf('copy ws-level action') + 1200);
-    assert.match(copyBlock, /target_agent_ids: src\.target_agent_ids/, 'Action 복사가 대상 배열을 빠뜨렸다');
-
-    // 삭제된 표면이 부활하지 않았는지 — 부활하면 P4c-4 companion 제거가 깨진다.
-    assert.doesNotMatch(
-      src,
-      /warnForeignAgentActions/,
-      '삭제된 companion-agent 경고 경로가 되살아났다',
-    );
   });
 
   it('예약 실행과 on_ticket_done 훅이 같은 dispatch() 를 거쳐 fan-out 을 상속한다', () => {

@@ -15,7 +15,7 @@
 // 이 파일이 그 end-to-end 이음매다 — MCP 툴(start_qa_run initial_phase / set_qa_phase)
 // 이 라이브 서버에서 구동하는 것과 같은 코드 경로를, 통제된 시계로 결정론적으로 돌린다.
 // 라이브 서버 상대로는 phase 타임아웃을 실시간으로 기다려야 해 재현이 안 되기 때문이다.
-// 실제 보드 위 replay 는 docs/qa-phases.md 의 라이브 MCP playbook 이 맡고, 그쪽은
+// 실제 서버 위 replay 는 docs/qa-phases.md 의 라이브 MCP playbook 이 맡고, 그쪽은
 // **배포된** 서버를 친다 — 배포 호스트가 `origin/main` 을 detached 로 다시 체크아웃해
 // 재빌드·재기동해야 그 커밋이 서빙되므로 main 머지만으로는 아직 아니다.
 //
@@ -26,7 +26,7 @@
 //       sat 1h in import (long past import's 600s) is spared in build for ~1700s
 //       and only reaped past build's OWN 1800s, naming 'Build'.
 //   (3) A phase-timeout reap records WHICH phase overran, in the run summary.
-//   (4) No regression for a phases-undefined board — it still resolves to
+//   (4) No regression for a phases-undefined scenario — it still resolves to
 //       zero_progress and reaps on the legacy fuses, untouched by phase logic.
 //
 // Imports the compiled modules from dist/ (built by `npm run build`).
@@ -81,7 +81,6 @@ function makeRun(id, overrides = {}) {
     id,
     workspace_id: 'w1',
     scenario_id: 'sc-ph',
-    board_id: null,
     status: 'running',
     started_at: base,
     created_at: base,
@@ -102,9 +101,9 @@ function makeRun(id, overrides = {}) {
 const makeRunSvc = (runRepo) => new QaRunService(null, runRepo, null, null, null, null, null, null, null);
 
 const reaper = (runRepo, scenarios) =>
-  new QaRunReaperService(runRepo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  new QaRunReaperService(runRepo, listRepo(scenarios), noopLog, noopQaRunService);
 
-const PHASE_SCENARIO = [{ id: 'sc-ph', board_id: null, liveness_policy: null, qa_phases: PHASES_JSON }];
+const PHASE_SCENARIO = [{ id: 'sc-ph', liveness_policy: null, qa_phases: PHASES_JSON }];
 
 // ── (1) independent per-phase timeouts ───────────────────────────────────────
 
@@ -175,13 +174,13 @@ test('(2) a real import→build transition resets the deadline — prior phase t
   assert.match(run.summary, /NOT a tested failure/, 'reaped reason reads as infra death, not a test fail');
 });
 
-// ── (4) regression: a phases-undefined board is untouched by phase logic ──────
+// ── (4) regression: a phases-undefined scenario is untouched by phase logic ───
 
 test('(4) regression — a run with no phases resolves to zero_progress and reaps on the legacy fuse', async () => {
   // Belt-and-suspenders at the resolver: no phases anywhere → zero_progress.
-  assert.deepEqual(resolveLivenessPolicy(null, null, null), { type: 'zero_progress' });
+  assert.deepEqual(resolveLivenessPolicy(null, null), { type: 'zero_progress' });
 
-  const legacyScenario = [{ id: 'sc-legacy', board_id: null, liveness_policy: null, qa_phases: null }];
+  const legacyScenario = [{ id: 'sc-legacy', liveness_policy: null, qa_phases: null }];
   // 0 steps, 50min old (> 40min zero-progress fuse) → reaped, but NOT via phase wording.
   const stale = makeRun('legacy-stale', {
     scenario_id: 'sc-legacy',

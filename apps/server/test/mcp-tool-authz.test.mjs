@@ -34,7 +34,6 @@ import { ApiKey } from '../dist/entities/ApiKey.js';
 import { registerUserTools } from '../dist/modules/mcp/tools/user-tools.js';
 import { registerApiKeyTools } from '../dist/modules/mcp/tools/api-key-tools.js';
 import { registerWorkflowFunctionTools } from '../dist/modules/mcp/tools/workflow-function-tools.js';
-import { registerAgentTools } from '../dist/modules/mcp/tools/agent-tools.js';
 import { registerWorkspaceTools } from '../dist/modules/mcp/tools/workspace-tools.js';
 
 import { ApiKeyService } from '../dist/services/api-key.service.js';
@@ -100,7 +99,6 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     registerUserTools(fakeServer, ctx);
     registerApiKeyTools(fakeServer, ctx);
     registerWorkflowFunctionTools(fakeServer, ctx);
-    registerAgentTools(fakeServer, ctx);
     registerWorkspaceTools(fakeServer, ctx);
   });
 
@@ -397,11 +395,6 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   });
 
 
-
-
-
-
-
   // ─── workspace-tools.ts: update/delete_workspace ───
 
   it('rejects update_workspace when the caller does not belong to the target workspace', async () => {
@@ -447,13 +440,6 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   // the sessionless user-tools gate and foreign agent_id linking. ───
 
 
-
-
-
-
-
-
-
   it('rejects delete_workspace of workspace B from a workspace-A full-scope caller', async () => {
     const caller = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
@@ -469,8 +455,6 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
 
     assert.equal(result.isError, true);
   });
-
-
 
 
   // ─── DoD (b): sessionless / unresolvable-session create_user / update_user ───
@@ -613,11 +597,11 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     // (confirmed by reading source, not inferred from tests) — the fallback
     // is what now covers them without touching each tool file.
     const uncoveredDeleteTools = [
-      'delete_board', 'delete_action', 'delete_ticket', 'delete_qa_scenario',
+      'delete_action', 'delete_ticket', 'delete_qa_scenario',
       'delete_security_profile', 'delete_child_ticket', 'delete_qa_schedule',
       'delete_workspace_schedule', 'delete_security_schedule', 'delete_ticket_attachment',
-      'delete_function', 'delete_channel', 'delete_resource', 'delete_column',
-      'delete_prompt_template', 'delete_chat_message_attachment',
+      'delete_function', 'delete_channel', 'delete_resource',
+      'delete_chat_message_attachment',
     ];
     for (const name of uncoveredDeleteTools) {
       assert.equal(resolveAuthzTier(name), 'caller', `${name} should fall back to 'caller'`);
@@ -884,6 +868,11 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     // coverage without anyone noticing, since a removed name can never be
     // called anyway — but a rename means the NEW name is unaccounted-for,
     // which the check above already catches).
+    // TODO(board removal): src/modules/mcp/shared/tool-authz-gate.ts still
+    // lists the removed board/column/lesson/prompt-template/consensus/handoff/
+    // benchmark/feature/self-improvement/comment-summary/batch/allocated tool
+    // names in KNOWN_EXISTING_TOOLS — this assertion stays red until they are
+    // dropped from that src set (tests must not edit src).
     const staleSnapshotEntries = [...KNOWN_EXISTING_TOOLS].filter(name => !liveNames.has(name));
     assert.deepEqual(
       staleSnapshotEntries,

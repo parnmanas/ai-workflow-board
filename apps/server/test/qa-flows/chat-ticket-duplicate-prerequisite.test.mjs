@@ -1,127 +1,114 @@
-import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
+// Chat-ticket duplicate intake (docs/tickets.md).
+//
+// A chat report that matches an open chat ticket with strong provenance (same
+// source room / related ticket + same normalized title or overlapping tags) is
+// auto-linked to it as a duplicate (`canonical_ticket_id`); medium-confidence
+// matches park the report for a human decision. A linked duplicate must never
+// be worked on its own — not when it is created, not when its prerequisites
+// finish, not after an explicit link — and completing the canonical ticket
+// resolves its duplicates without firing the duplicates' own done hooks.
+//
+// Board removal: tickets are created through the real REST intake
+// (POST /api/workspaces/:wsId/tickets → TicketService.create) and dispatch is
+// TicketDispatchService. The old role-assignment child checks went away with
+// workspace roles.
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser, registerRuntimeHostKeyFor } from '../helpers/fixtures.mjs';
+import { createAgent, createTicket, createUser, createWorkspace, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_CHAT_DUPLICATE_PORT || '0';
 
-test('prerequisite completion cannot redispatch a linked chat duplicate', async (t) => {
-  const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
-  t.after(() => { void app.close().catch(() => {}); });
-  const ds = app.get(modules.getDataSourceToken());
-  const dist = path.resolve('dist/modules');
-  const { TriggerLoopService } = await import(pathToFileURL(path.join(dist, 'agents/trigger-loop.service.js')));
-  const { TicketPrerequisitesService } = await import(pathToFileURL(path.join(dist, 'tickets/ticket-prerequisites.service.js')));
-  const { TicketDuplicateService } = await import(pathToFileURL(path.join(dist, 'tickets/ticket-duplicate.service.js')));
-  const triggerLoop = app.get(TriggerLoopService);
-  const prerequisites = app.get(TicketPrerequisitesService);
-  const duplicateService = app.get(TicketDuplicateService);
+const { app, port, modules } = await bootApp({ port: Number(process.env.PORT) });
+const gdst = modules.getDataSourceToken;
+const ds = app.get(gdst());
+const { TicketDispatchService } = await import('../../dist/modules/agents/ticket-dispatch.service.js');
+const { TicketPrerequisitesService } = await import('../../dist/modules/tickets/ticket-prerequisites.service.js');
+const { TicketDuplicateService } = await import('../../dist/modules/tickets/ticket-duplicate.service.js');
+const { TicketService, SYSTEM_ACTOR } = await import('../../dist/modules/tickets/ticket.service.js');
+const dispatcher = app.get(TicketDispatchService);
+const prerequisites = app.get(TicketPrerequisitesService);
+const duplicateService = app.get(TicketDuplicateService);
+const ticketService = app.get(TicketService);
+const ticketRepo = ds.getRepository('Ticket');
+const decisionRepo = ds.getRepository('TicketDuplicateDecision');
+const commentRepo = ds.getRepository('Comment');
+const prereqRepo = ds.getRepository('TicketPrerequisite');
 
-  step('Seed prerequisite C and lifecycle sentinels');
-  const { ws, columns } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'chat-dedupe-prereq' });
-  const assignee = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'duplicate-assignee' });
-  const runtime = { manager_agent_id: assignee.manager_agent_id, cli: 'codex', working_dir: '/tmp/duplicate', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
-  assignee.id = runtimeIdentityKey(runtime);
-  await registerRuntimeHostKeyFor(app, modules.getDataSourceToken, assignee.id, { workspaceId: ws.id, hostId: runtime.manager_agent_id });
-  const key = await createApiKey(app, modules.getDataSourceToken, null, { workspaceId: ws.id, hostId: runtime.manager_agent_id });
-  const operator = await createUser(app, modules.getDataSourceToken, { name: 'duplicate-intake-operator' });
-  const userToken = app.get(modules.AuthService).createSession(operator.id);
-  const prerequisite = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Prerequisite', assigneeId: assignee.id,
+const operator = await createUser(app, gdst, { name: 'duplicate-intake-operator' });
+const userToken = app.get(modules.AuthService).createSession(operator.id);
+
+const vagents = [];
+test.after(async () => {
+  for (const va of vagents) await va.stop();
+  await app.close();
+});
+
+const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function rest(method, path, wsId, body) {
+  const response = await fetch(`http://localhost:${port}/api${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': wsId },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const nextTicket = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Must not wake after duplicate resolution', assigneeId: assignee.id,
-  });
-  const dependent = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Must not resume from duplicate resolution', assigneeId: assignee.id,
-  });
-  const ticketRepo = ds.getRepository('Ticket');
-  const va = new VirtualAgent({ name: assignee.name, agentId: assignee.id, apiKey: key.raw_key, port });
+  const text = await response.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { json = text; }
+  return { status: response.status, body: json };
+}
+
+/** Real REST intake (TicketService.create incl. duplicate assessment). */
+async function intake(wsId, body) {
+  const res = await rest('POST', `/workspaces/${wsId}/tickets`, wsId, body);
+  if (res.status !== 201) assert.fail(`REST ticket intake failed (${res.status}): ${JSON.stringify(res.body)}`);
+  return res.body;
+}
+
+/** A workspace + an assignee agent whose Runtime Host stream a VirtualAgent listens on. */
+async function scene(name, { capacity = 10 } = {}) {
+  const ws = await createWorkspace(app, gdst, name);
+  // Capacity is raised so "the agent is busy" can never be why a duplicate
+  // stayed quiet — the duplicate gate itself must be.
+  await ds.getRepository('Workspace').update({ id: ws.id }, { max_concurrent_tickets_per_agent: capacity });
+  const assignee = await createAgent(app, gdst, ws.id, { name: `${name}-assignee`, runtime: true });
+  const va = new VirtualAgent({ name: assignee.name, agentId: assignee.id, apiKey: runtimeHostKeyForAgent(assignee.id), port });
   await va.start();
-  t.after(() => va.stop());
-  const createRestTicket = async (body) => {
-    const response = await fetch(`http://localhost:${port}/api/columns/${columns.inProgress.id}/tickets`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${userToken}`,
-        'X-Workspace-Id': ws.id,
-      },
-      body: JSON.stringify({ role_assignments: [{ role_slug: 'assignee', runtime }], ...body }),
-    });
-    if (response.status !== 201) {
-      assert.fail(`REST ticket intake failed (${response.status}): ${await response.text()}`);
-    }
-    return response.json();
-  };
-  const consumeCreatedActivity = async (ticketId) => {
-    const activity = await ds.getRepository('ActivityLog').findOne({
-      where: { ticket_id: ticketId, entity_type: 'ticket', action: 'created' },
-      order: { created_at: 'DESC' },
-    });
-    assert.ok(activity, 'real intake must persist a created activity');
-    return triggerLoop.dispatchCurrentColumn(ticketId, 'ticket_created', activity.actor_id || 'qa');
-  };
+  vagents.push(va);
+  return { ws, assignee, va };
+}
 
-  step('Create canonical A through REST and observe exactly one initial assignee trigger');
-  const canonical = await createRestTicket({
-    title: 'Artifact pipeline regression',
-    labels: ['artifact', 'pipeline'],
-    source_kind: 'chat',
-    source_chat_room_id: 'room-r',
-    related_ticket_id: prerequisite.id,
-  });
-  assert.deepEqual(await consumeCreatedActivity(canonical.id), { emitted: 1 });
+const CHAT_REPORT = {
+  title: 'Artifact pipeline regression',
+  tags: ['artifact', 'pipeline'],
+  source_kind: 'chat',
+  source_chat_room_id: 'room-r',
+};
 
-  step('Create equivalent B through REST; intake must persist and suppress it before dispatch');
-  const duplicate = await createRestTicket({
-    title: '[Bug] Artifact pipeline regression',
-    labels: ['artifact', 'pipeline'],
-    source_kind: 'chat',
-    source_chat_room_id: 'room-r',
-    related_ticket_id: prerequisite.id,
-    next_ticket_id: nextTicket.id,
+test('chat intake auto-links an equivalent report to its canonical ticket and records the audit trail', async () => {
+  const ws = await createWorkspace(app, gdst, 'chat-dedupe-intake');
+  const prerequisite = await createTicket(app, gdst, { workspaceId: ws.id, status: 'backlog', title: 'Prerequisite' });
+
+  step('Create canonical A through REST');
+  // backlog keeps dispatch out of this test — it is about intake linking.
+  const canonical = await intake(ws.id, { ...CHAT_REPORT, status: 'backlog', related_ticket_id: prerequisite.id });
+  assert.equal(canonical.canonical_ticket_id, null);
+  assert.deepEqual(canonical.duplicate_candidates, []);
+
+  step('Create equivalent B through REST; intake must persist the link before anything else');
+  const duplicate = await intake(ws.id, {
+    ...CHAT_REPORT, title: '[Bug] Artifact pipeline regression', status: 'backlog', related_ticket_id: prerequisite.id,
   });
   assert.equal(duplicate.canonical_ticket_id, canonical.id);
-  assert.equal(duplicate.pending_user_action, false);
-  const persistedDuplicate = await ticketRepo.findOne({ where: { id: duplicate.id } });
-  assert.equal(persistedDuplicate.canonical_ticket_id, canonical.id);
-  const childResponse = await fetch(`http://localhost:${port}/api/tickets/${canonical.id}/children`, {
-    method: 'POST', headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: 'Runtime child', description: 'Uses the copied template settings', role_assignments: [{ role_slug: 'assignee', runtime }] }),
-  });
-  assert.equal(childResponse.status, 201, await childResponse.clone().text());
-  const child = await childResponse.json();
-  const childHolder = await ds.getRepository('TicketRoleAssignment').findOne({ where: { ticket_id: child.id, holder_key: `runtime:${runtimeIdentityKey(runtime)}` } });
-  assert.equal(childHolder?.runtime_spec?.working_dir, runtime.working_dir);
-  assert.equal(childHolder?.agent_id, null);
-  const decisionRepo = ds.getRepository('TicketDuplicateDecision');
+  assert.equal(duplicate.pending_user_action, false, 'a confident auto-link needs no human decision');
+  assert.equal((await ticketRepo.findOneByOrFail({ id: duplicate.id })).canonical_ticket_id, canonical.id);
   assert.equal(await decisionRepo.count({
     where: { report_ticket_id: duplicate.id, candidate_ticket_id: canonical.id, outcome: 'auto_linked' },
   }), 1, 'REST intake must persist the auto-link audit decision');
-  const commentRepo = ds.getRepository('Comment');
   assert.equal(await commentRepo.count({ where: { ticket_id: duplicate.id, author: 'Duplicate intake' } }), 1);
   assert.equal(await commentRepo.count({ where: { ticket_id: canonical.id, author: 'Duplicate intake' } }), 1);
-  assert.deepEqual(await consumeCreatedActivity(duplicate.id), { emitted: 0 });
-  await new Promise(resolve => setTimeout(resolve, 250));
-  assert.equal(va.triggersFor(duplicate.id).length, 0, 'duplicate create activity must not emit an independent trigger');
-
-  await ticketRepo.update(duplicate.id, { pending_on_tickets: true });
-  const prereqRepo = ds.getRepository('TicketPrerequisite');
-  await prereqRepo.save(prereqRepo.create({
-    ticket_id: duplicate.id,
-    prerequisite_ticket_id: prerequisite.id,
-    workspace_id: ws.id,
-  }));
-  await prereqRepo.save(prereqRepo.create({
-    ticket_id: dependent.id,
-    prerequisite_ticket_id: duplicate.id,
-    workspace_id: ws.id,
-  }));
 
   step('Strong provenance plus normalized title auto-links; room-only match stays ambiguous');
   const strong = await duplicateService.assess(ws.id, {
@@ -158,204 +145,204 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   assert.equal(conflictingRoom.canonical_ticket_id, null);
   assert.ok(conflictingRoom.candidates.find(c => c.ticket_id === canonical.id)?.matched_signals.includes('conflicting_source_room'));
 
-  step('The root dispatch gate suppresses the duplicate before prerequisite completion');
-  assert.deepEqual(await triggerLoop.dispatchCurrentColumn(duplicate.id, 'ticket_created', 'qa'), { emitted: 0 });
+  step('Completing a prerequisite flips the linked duplicate\'s pending flag exactly once');
+  await ticketRepo.update(duplicate.id, { pending_on_tickets: true });
+  await prereqRepo.save(prereqRepo.create({
+    ticket_id: duplicate.id, prerequisite_ticket_id: prerequisite.id, workspace_id: ws.id,
+  }));
+  await ticketRepo.update(prerequisite.id, { status: 'done', terminal_entered_at: new Date() });
+  assert.deepEqual(await prerequisites.onPrerequisiteReached(prerequisite.id), [duplicate.id]);
+  assert.equal((await ticketRepo.findOneByOrFail({ id: duplicate.id })).pending_on_tickets, false);
+  assert.deepEqual(await prerequisites.onPrerequisiteReached(prerequisite.id), [],
+    'repeating prerequisite completion remains idempotent');
+});
 
-  step('Complete C and exercise the real prerequisite auto-resume callback');
-  await ticketRepo.update(prerequisite.id, { column_id: columns.done.id, terminal_entered_at: new Date() });
-  const unblocked = await prerequisites.onPrerequisiteReached(prerequisite.id);
-  assert.deepEqual(unblocked, [duplicate.id]);
-  const after = await ticketRepo.findOne({ where: { id: duplicate.id } });
-  assert.equal(after.pending_on_tickets, false);
-  assert.deepEqual(await triggerLoop.dispatchCurrentColumn(duplicate.id, 'prerequisite_resolved', 'qa'), { emitted: 0 });
-  await new Promise(resolve => setTimeout(resolve, 250));
-  assert.equal(va.triggersFor(duplicate.id).length, 0, 'duplicate must never wake an assignee or reviewer');
+// A confirmed duplicate is worked through its canonical ticket: the queue
+// never starts it and dispatch() refuses it ('duplicate').
+test('a linked duplicate is never dispatched on its own', async () => {
+  const { ws, assignee, va } = await scene('chat-dedupe-dispatch');
 
-  step('Repeating prerequisite completion remains idempotent and silent');
-  assert.deepEqual(await prerequisites.onPrerequisiteReached(prerequisite.id), []);
-  assert.deepEqual(await triggerLoop.dispatchCurrentColumn(duplicate.id, 'prerequisite_resolved', 'qa'), { emitted: 0 });
-  assert.equal(va.triggersFor(duplicate.id).length, 0);
+  step('Canonical A is a normal ticket: it starts once');
+  const canonical = await intake(ws.id, { ...CHAT_REPORT, assignee: assignee.runtime_spec });
+  const start = await va.waitForTrigger((tr) => tr.ticket_id === canonical.id, 5000);
+  assert.equal(start.trigger_source, 'start');
 
-  step('Complete canonical A; B resolves exactly once without duplicate terminal hooks');
-  const terminalCalls = { next: [], dependents: [], review: [] };
-  const originalNext = triggerLoop._dispatchNextTicket.bind(triggerLoop);
-  const originalDependents = triggerLoop._resumePrerequisiteDependents.bind(triggerLoop);
-  const originalReview = triggerLoop._dispatchPostDoneReview.bind(triggerLoop);
-  triggerLoop._dispatchNextTicket = async (ticket, ...args) => {
-    terminalCalls.next.push(ticket.id);
-    return originalNext(ticket, ...args);
-  };
-  triggerLoop._resumePrerequisiteDependents = async (ticketId, ...args) => {
-    terminalCalls.dependents.push(ticketId);
-    return originalDependents(ticketId, ...args);
-  };
-  triggerLoop._dispatchPostDoneReview = async (ticket, ...args) => {
-    terminalCalls.review.push(ticket.id);
-    return originalReview(ticket, ...args);
-  };
-  await ticketRepo.update(canonical.id, {
-    column_id: columns.done.id,
-    status: 'done',
-    terminal_entered_at: new Date(),
+  step('Duplicate B is queued like work but must stay quiet');
+  const duplicate = await intake(ws.id, { ...CHAT_REPORT, title: '[Bug] Artifact pipeline regression', assignee: assignee.runtime_spec });
+  assert.equal(duplicate.canonical_ticket_id, canonical.id);
+  await settle();
+  assert.equal(va.triggersFor(duplicate.id).length, 0, 'duplicate create must not emit an independent trigger');
+  assert.equal((await ticketRepo.findOneByOrFail({ id: duplicate.id })).status, 'todo',
+    'the queue must not start a linked duplicate');
+
+  step('Prerequisite completion / an explicit re-wake must not dispatch it either');
+  await ticketRepo.update(duplicate.id, { status: 'in_progress' });
+  const resumed = await dispatcher.resumeTicket(duplicate.id, 'prerequisite_resolved');
+  assert.equal(resumed.dispatched, false);
+  await settle();
+  assert.equal(va.triggersFor(duplicate.id).length, 0, 'duplicate must never wake an assignee');
+});
+
+// TicketDispatchService.onDone closes every open duplicate of a finished
+// canonical ticket ('resolved_from_canonical'); the duplicates' own done hooks
+// (next ticket, dependents) stay silent.
+test('completing the canonical ticket resolves its duplicates exactly once without their done hooks', async () => {
+  const ws = await createWorkspace(app, gdst, 'chat-dedupe-resolve');
+  const nextTicket = await createTicket(app, gdst, { workspaceId: ws.id, status: 'backlog', title: 'Must not wake after duplicate resolution' });
+  const canonical = await intake(ws.id, { ...CHAT_REPORT, status: 'backlog' });
+  const duplicate = await intake(ws.id, {
+    ...CHAT_REPORT, title: '[Bug] Artifact pipeline regression', status: 'backlog', next_ticket_id: nextTicket.id,
   });
-  const completedCanonical = await ticketRepo.findOne({ where: { id: canonical.id } });
-  await triggerLoop._resolveCanonicalDuplicates(completedCanonical, columns.done, 'qa');
-  await triggerLoop._resolveCanonicalDuplicates(completedCanonical, columns.done, 'qa');
-  const resolved = await ticketRepo.findOne({ where: { id: duplicate.id } });
-  assert.equal(resolved.column_id, columns.done.id);
+  assert.equal(duplicate.canonical_ticket_id, canonical.id);
+
+  await ticketService.move(canonical.id, 'done', SYSTEM_ACTOR);
+  await settle(500);
+  const resolved = await ticketRepo.findOneByOrFail({ id: duplicate.id });
+  assert.equal(resolved.status, 'done', 'canonical completion resolves the duplicate');
+  assert.ok(resolved.terminal_entered_at);
   assert.equal(await decisionRepo.count({
     where: { report_ticket_id: duplicate.id, outcome: 'resolved_from_canonical' },
   }), 1, 'canonical completion resolves the duplicate exactly once');
-  await triggerLoop._handleActivity({
-    ticket_id: duplicate.id,
-    entity_type: 'ticket',
-    entity_id: duplicate.id,
-    action: 'moved',
-    actor_id: 'qa-replayed-actor',
-    field_changed: 'resolved_from_canonical',
-  });
-  assert.ok(!terminalCalls.next.includes(duplicate.id), 'duplicate next_ticket must stay silent');
-  assert.ok(!terminalCalls.dependents.includes(duplicate.id), 'duplicate prerequisite dependents must stay silent');
-  assert.ok(!terminalCalls.review.includes(duplicate.id), 'duplicate reviewer/on-done/QA path must stay silent');
-  assert.equal(va.triggersFor(nextTicket.id).length, 0);
-  assert.equal(va.triggersFor(dependent.id).length, 0);
 
-  step('Ambiguous decisions only link offered candidates; explicit link remains silent');
-  await ticketRepo.update(nextTicket.id, {
-    source_kind: 'chat', source_chat_room_id: 'room-r',
-  });
+  step('Re-entering done does not resolve it twice');
+  await ticketService.move(canonical.id, 'review', SYSTEM_ACTOR);
+  await ticketService.move(canonical.id, 'done', SYSTEM_ACTOR);
+  await settle(500);
+  assert.equal(await decisionRepo.count({
+    where: { report_ticket_id: duplicate.id, outcome: 'resolved_from_canonical' },
+  }), 1);
+  assert.equal((await ticketRepo.findOneByOrFail({ id: nextTicket.id })).status, 'backlog',
+    'a resolved duplicate\'s next_ticket must stay silent');
+});
+
+test('ambiguous decisions only link offered candidates, pending projection is cause-exact, keep-independent dispatches once', async () => {
+  const { ws, assignee, va } = await scene('chat-dedupe-decisions');
+  // Two chat roots in the same room with unrelated titles — a report from that
+  // room matches both at medium confidence.
+  const rootOne = await intake(ws.id, { title: 'Upload button broken', source_kind: 'chat', source_chat_room_id: 'room-r', status: 'backlog' });
+  const rootTwo = await intake(ws.id, { title: 'Login page slow', source_kind: 'chat', source_chat_room_id: 'room-r', status: 'backlog' });
+  const unrelated = await createTicket(app, gdst, { workspaceId: ws.id, status: 'backlog', title: 'Not a candidate' });
+
+  step('Ambiguous decisions only link offered candidates');
   const linkAssessment = await duplicateService.assess(ws.id, {
     title: 'Different symptom one', source_kind: 'chat', source_chat_room_id: 'room-r',
   });
   assert.ok(linkAssessment.candidates.length >= 2, 'ambiguous report must expose multiple medium-confidence roots');
-  const ambiguousLink = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Different symptom one', assigneeId: assignee.id,
+  assert.equal(linkAssessment.ambiguous, true);
+  const ambiguousLink = await createTicket(app, gdst, {
+    workspaceId: ws.id, status: 'in_progress', title: 'Different symptom one', assignee,
   });
   await ticketRepo.update(ambiguousLink.id, {
     source_kind: 'chat', source_chat_room_id: 'room-r', pending_user_action: true,
     pending_set_by: 'duplicate_decision_guard',
   });
-  const linkReport = await ticketRepo.findOne({ where: { id: ambiguousLink.id } });
-  await duplicateService.record(linkReport, linkAssessment, 'qa', 'qa');
-  const reopenedResponse = await fetch(`http://localhost:${port}/api/tickets/${ambiguousLink.id}`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
-  });
-  assert.equal(reopenedResponse.status, 200);
-  const reopenedReport = await reopenedResponse.json();
-  assert.equal(reopenedReport.duplicate_decision_pending, true,
+  await duplicateService.record(await ticketRepo.findOneByOrFail({ id: ambiguousLink.id }), linkAssessment, 'qa', 'qa');
+  const reopened = await rest('GET', `/tickets/${ambiguousLink.id}`, ws.id);
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.body.duplicate_decision_pending, true,
     '실제 duplicate pending은 원인 플래그를 명시해야 한다');
-  assert.ok(reopenedReport.duplicate_candidates.length >= 2,
+  assert.ok(reopened.body.duplicate_candidates.length >= 2,
     'reopened ticket reads must project every persisted ambiguous candidate');
   await assert.rejects(
-    duplicateService.confirm(ambiguousLink.id, dependent.id, 'qa', 'qa'),
+    duplicateService.confirm(ambiguousLink.id, unrelated.id, 'qa', 'qa'),
     /not offered/,
     'shared confirmation mutation must reject arbitrary workspace tickets',
   );
-  const linked = await duplicateService.confirm(ambiguousLink.id, canonical.id, 'qa', 'qa');
-  assert.equal(linked.canonical_ticket_id, canonical.id);
-  assert.deepEqual(await triggerLoop.dispatchCurrentColumn(linked.id, 'duplicate_confirmed', 'qa'), { emitted: 0 });
-  assert.equal(va.triggersFor(linked.id).length, 0);
+  const linked = await duplicateService.confirm(ambiguousLink.id, rootOne.id, 'qa', 'qa');
+  assert.equal(linked.canonical_ticket_id, rootOne.id);
+  assert.equal(linked.pending_user_action, false);
+  assert.equal(await decisionRepo.count({ where: { report_ticket_id: ambiguousLink.id, outcome: 'ambiguous_pending' } }), 0,
+    'confirming closes every ambiguous candidate row');
 
-  step('Explicit keep-independent emits exactly one normal dispatch');
+  step('Seed a second ambiguous report to keep independent');
   const keepAssessment = await duplicateService.assess(ws.id, {
     title: 'Different symptom two', source_kind: 'chat', source_chat_room_id: 'room-r',
   });
-  const independent = await createTicket(app, modules.getDataSourceToken, {
-    columnId: columns.inProgress.id, workspaceId: ws.id, title: 'Different symptom two', assigneeId: assignee.id,
+  assert.ok(keepAssessment.candidates.some(c => c.ticket_id === rootTwo.id));
+  const independent = await createTicket(app, gdst, {
+    workspaceId: ws.id, status: 'in_progress', title: 'Different symptom two', assignee,
   });
   await ticketRepo.update(independent.id, {
     source_kind: 'chat', source_chat_room_id: 'room-r', pending_user_action: true,
     pending_set_by: 'duplicate_decision_guard',
   });
-  const keepReport = await ticketRepo.findOne({ where: { id: independent.id } });
-  await duplicateService.record(keepReport, keepAssessment, 'qa', 'qa');
+  await duplicateService.record(await ticketRepo.findOneByOrFail({ id: independent.id }), keepAssessment, 'qa', 'qa');
 
-  step('stale ambiguous 행은 hard-budget pending 원인을 덮어쓸 수 없다');
+  const projection = async () => (await rest('GET', `/tickets/${independent.id}`, ws.id)).body;
+
+  step('stale ambiguous 행은 supervisor pending 원인을 덮어쓸 수 없다');
   await ticketRepo.update(independent.id, {
     pending_user_action: true,
-    pending_reason: '실제 dispatch 실행 횟수가 hard budget을 초과했습니다.',
-    pending_set_by: 'hard_budget_dispatch_guard',
+    pending_reason: 'The assignee stopped 3 times without finishing or reporting progress.',
+    pending_set_by: 'AWB',
   });
-  const staleHardBudgetResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
-  });
-  assert.equal(staleHardBudgetResponse.status, 200);
-  const staleHardBudgetReport = await staleHardBudgetResponse.json();
-  assert.equal(staleHardBudgetReport.duplicate_decision_pending, false,
-    'stale ambiguous 행이 있어도 hard-budget pending은 duplicate 결정 상태가 아니다');
-  assert.deepEqual(staleHardBudgetReport.duplicate_candidates, [],
-    'stale ambiguous 후보를 hard-budget pending UI에 투영하면 안 된다');
+  const supervisorParked = await projection();
+  assert.equal(supervisorParked.duplicate_decision_pending, false,
+    'stale ambiguous 행이 있어도 supervisor pending은 duplicate 결정 상태가 아니다');
+  assert.deepEqual(supervisorParked.duplicate_candidates, [],
+    'stale ambiguous 후보를 다른 원인의 pending UI에 투영하면 안 된다');
   await assert.rejects(
     duplicateService.confirm(independent.id, null, 'qa', 'qa'),
     /no duplicate decision pending/,
-    'duplicate confirm이 hard-budget pending을 해제하면 안 된다',
+    'duplicate confirm이 다른 원인의 pending을 해제하면 안 된다',
   );
-  const stillHardBudgetPending = await ticketRepo.findOne({ where: { id: independent.id } });
-  assert.equal(stillHardBudgetPending.pending_user_action, true);
-  assert.equal(stillHardBudgetPending.pending_set_by, 'hard_budget_dispatch_guard');
+  const stillParked = await ticketRepo.findOneByOrFail({ id: independent.id });
+  assert.equal(stillParked.pending_user_action, true);
+  assert.equal(stillParked.pending_set_by, 'AWB');
 
   step('레거시 생성자명이 저장된 duplicate pending도 조회하고 결정할 수 있다');
   await ticketRepo.update(independent.id, {
     pending_reason: 'Confirm whether this chat report duplicates one of the suggested tickets.',
     pending_set_by: 'Outreach',
   });
-  const legacyResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
-  });
-  assert.equal(legacyResponse.status, 200);
-  const legacyReport = await legacyResponse.json();
-  assert.equal(legacyReport.duplicate_decision_pending, true,
+  const legacy = await projection();
+  assert.equal(legacy.duplicate_decision_pending, true,
     'ambiguous 후보가 남은 레거시 생성자명 pending은 duplicate 결정 상태다');
-  assert.ok(legacyReport.duplicate_candidates.length > 0,
+  assert.ok(legacy.duplicate_candidates.length > 0,
     '레거시 duplicate pending도 후보를 다시 노출해야 한다');
 
   step('stale 후보와 생성자명이 있어도 일반 사용자 Pending은 duplicate가 아니다');
   await ticketRepo.update(independent.id, {
-    pending_reason: '벤치마크 실행 결과를 확인해 주세요.',
-    pending_set_by: 'Benchmark Operator',
+    pending_reason: '배포 결과를 확인해 주세요.',
+    pending_set_by: 'Release Operator',
   });
-  const userPendingResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
-  });
-  assert.equal(userPendingResponse.status, 200);
-  const userPendingReport = await userPendingResponse.json();
-  assert.equal(userPendingReport.duplicate_decision_pending, false,
+  const userPending = await projection();
+  assert.equal(userPending.duplicate_decision_pending, false,
     '레거시 안내가 아닌 임의 Pending은 stale 후보만으로 duplicate가 되면 안 된다');
-  assert.deepEqual(userPendingReport.duplicate_candidates, []);
+  assert.deepEqual(userPending.duplicate_candidates, []);
   await assert.rejects(
     duplicateService.confirm(independent.id, null, 'qa', 'qa'),
     /no duplicate decision pending/,
     'duplicate confirm이 일반 사용자 Pending을 해제하면 안 된다',
   );
-  const stillUserPending = await ticketRepo.findOne({ where: { id: independent.id } });
+  const stillUserPending = await ticketRepo.findOneByOrFail({ id: independent.id });
   assert.equal(stillUserPending.pending_user_action, true);
-  assert.equal(stillUserPending.pending_set_by, 'Benchmark Operator');
+  assert.equal(stillUserPending.pending_set_by, 'Release Operator');
 
+  step('Explicit keep-independent (REST) emits exactly one normal dispatch');
   await ticketRepo.update(independent.id, {
     pending_reason: 'Confirm whether this chat report duplicates one of the suggested tickets.',
     pending_set_by: 'Outreach',
   });
+  const kept = await rest('POST', `/tickets/${independent.id}/duplicate-decision`, ws.id, { action: 'keep_independent' });
+  assert.ok(kept.status === 200 || kept.status === 201, JSON.stringify(kept.body));
+  assert.equal(kept.body.canonical_ticket_id, null);
+  assert.equal(kept.body.pending_user_action, false);
+  const wake = await va.waitForTrigger((tr) => tr.ticket_id === independent.id, 5000);
+  assert.equal(wake.trigger_source, 'duplicate_rejected');
+  await settle();
+  assert.equal(va.triggersFor(independent.id).length, 1, 'keep-independent wakes the assignee exactly once');
 
-  const kept = await duplicateService.confirm(independent.id, null, 'qa', 'qa');
-  assert.equal(kept.canonical_ticket_id, null);
+  step('결정 뒤 다른 pending 원인이 생겨도 duplicate 원인으로 분류하면 안 된다');
   await ticketRepo.update(independent.id, {
     pending_user_action: true,
-    pending_reason: '실제 dispatch 실행 횟수가 hard budget을 초과했습니다.',
-    pending_set_by: 'hard_budget_dispatch_guard',
+    pending_reason: 'The assignee stopped 3 times without finishing or reporting progress.',
+    pending_set_by: 'AWB',
   });
-  const hardBudgetResponse = await fetch(`http://localhost:${port}/api/tickets/${independent.id}`, {
-    headers: { Authorization: `Bearer ${userToken}`, 'X-Workspace-Id': ws.id },
-  });
-  assert.equal(hardBudgetResponse.status, 200);
-  const hardBudgetReport = await hardBudgetResponse.json();
-  assert.equal(hardBudgetReport.duplicate_decision_pending, false,
-    '결정 뒤 다른 pending 원인이 생겨도 duplicate 원인으로 분류하면 안 된다');
-  assert.deepEqual(hardBudgetReport.duplicate_candidates, [],
+  const afterDecision = await projection();
+  assert.equal(afterDecision.duplicate_decision_pending, false);
+  assert.deepEqual(afterDecision.duplicate_candidates, [],
     'Keep independent는 과거 ambiguous 후보를 종료해야 한다');
-  await ticketRepo.update(independent.id, {
-    pending_user_action: false, pending_reason: '', pending_set_by: '', pending_set_at: null,
-  });
-  assert.deepEqual(await triggerLoop.dispatchCurrentColumn(kept.id, 'duplicate_rejected', 'qa'), { emitted: 1 });
-
-  exitAfterTests(0);
 });
+
+test.after(() => exitAfterTests(0));

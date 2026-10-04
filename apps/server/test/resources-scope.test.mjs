@@ -1,8 +1,9 @@
-// board_id는 65adf0b(카탈로그 board→workspace 승격)에서 폐지된 레거시 호환
-// 컬럼으로, 부트 마이그레이션 이후에는 항상 NULL이어야 한다(Resource 엔티티
-// 주석 참고). Resource CRUD는 별도 서비스 없이 컨트롤러에 직접 구현돼 있어,
-// credentials-reveal.test.mjs 선례를 따라 컨트롤러를 직접 인스턴스화해
-// 검증한다.
+// Resources live in exactly two catalog layers — Global (`workspace_id NULL`)
+// and one Workspace (common/catalog-scope.ts). The Board layer and its dead
+// `board_id` column are gone with boards, and repository Resources became
+// Projects (same id). Resource CRUD is implemented directly in the controller
+// with no separate service, so — following credentials-reveal.test.mjs — the
+// controller is instantiated directly.
 
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
@@ -19,7 +20,10 @@ function response() {
   };
 }
 
-describe('Resources board-scope cleanup', () => {
+const adminReq = { currentUser: { id: 'u-admin', role: 'admin' } };
+const memberReq = { currentUser: { id: 'u-member', role: 'user' } };
+
+describe('Resources scope contract (Global / Workspace)', () => {
   let dataSource;
   let controller;
 
@@ -32,58 +36,73 @@ describe('Resources board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const resourceRepo = dataSource.getRepository(Resource);
-    // assertCatalogBoardScope is a documented no-op (see catalog-scope.ts), so
-    // the closure create() builds around `dataSource` is never invoked, and no
-    // test here sets credential_id — both stubs are safe as-is.
-    controller = new ResourcesController(resourceRepo, {}, {});
+    // No test here sets credential_id, so the credential repo stub is never read.
+    controller = new ResourcesController(resourceRepo, {});
   });
 
   after(async () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a new Board-scoped Resource', async () => {
+  it('rejects a Board scope — it is just an unknown scope now', async () => {
     const res = response();
     await controller.create(
-      { workspace_id: 'workspace-a', board_id: 'board-a', name: 'Board resource', type: 'link', url: 'https://example.test' },
-      {},
+      { scope: 'board', workspace_id: 'workspace-a', name: 'Board resource', type: 'link', url: 'https://example.test' },
+      memberReq,
       res,
     );
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /no longer supported/);
+    assert.match(res.body.error, /scope must be 'global' or 'workspace'/);
   });
 
-  it('excludes a legacy Board-scoped Resource row from list() regardless of scope', async () => {
-    const repo = dataSource.getRepository(Resource);
-    await repo.save(repo.create({
-      workspace_id: 'workspace-a',
-      board_id: 'board-a',
-      name: 'Legacy board-only resource',
-    }));
-    const createRes = response();
+  it('refuses a repository Resource — repositories are Projects now', async () => {
+    const res = response();
     await controller.create(
-      { workspace_id: 'workspace-a', name: 'Workspace resource', type: 'link', url: 'https://example.test' },
-      {},
-      createRes,
+      { workspace_id: 'workspace-a', name: 'Repo', type: 'repository', url: 'https://github.com/o/r.git' },
+      memberReq,
+      res,
     );
-    assert.equal(createRes.statusCode, 201);
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.error, /repositories are Projects now/);
+  });
+
+  it('only admins create Global Resources', async () => {
+    const res = response();
+    await controller.create({ scope: 'global', name: 'Global doc', type: 'link' }, memberReq, res);
+    assert.equal(res.statusCode, 403);
+  });
+
+  it('list() returns the Workspace own Resources plus inherited globals, never another Workspace', async () => {
+    for (const [body, req] of [
+      [{ workspace_id: 'workspace-a', name: 'Workspace resource', type: 'link', url: 'https://a.test' }, memberReq],
+      [{ workspace_id: 'workspace-b', name: 'Other workspace resource', type: 'link', url: 'https://b.test' }, memberReq],
+      [{ scope: 'global', name: 'Global resource', type: 'link', url: 'https://g.test' }, adminReq],
+    ]) {
+      const res = response();
+      await controller.create(body, req, res);
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    }
 
     const listRes = response();
-    await controller.list('workspace-a', undefined, undefined, undefined, undefined, listRes);
-    assert.equal(listRes.body.some(row => row.name === 'Legacy board-only resource'), false);
-    assert.ok(listRes.body.every(row => row.board_id === null));
-    assert.ok(listRes.body.some(row => row.name === 'Workspace resource'));
+    await controller.list('workspace-a', undefined, 'name', 'asc', undefined, listRes);
+    assert.deepEqual(listRes.body.map((row) => row.name), ['Global resource', 'Workspace resource']);
+    assert.deepEqual(listRes.body.map((row) => row.scope), ['global', 'workspace']);
+    // The row shape carries no Board layer at all.
+    assert.ok(listRes.body.every((row) => !('board_id' in row)));
   });
 
-  it('get() hides a legacy Board-scoped Resource even by direct id lookup', async () => {
+  it('get() hides another Workspace Resource even by direct id lookup, but serves globals', async () => {
     const repo = dataSource.getRepository(Resource);
-    const legacy = await repo.save(repo.create({
-      workspace_id: 'workspace-a',
-      board_id: 'board-a',
-      name: 'Direct-lookup legacy resource',
-    }));
-    const res = response();
-    await controller.get(legacy.id, 'workspace-a', res);
-    assert.equal(res.statusCode, 404);
+    const foreign = await repo.save(repo.create({ workspace_id: 'workspace-b', name: 'Direct-lookup foreign resource' }));
+    const global = await repo.save(repo.create({ workspace_id: null, name: 'Direct-lookup global resource' }));
+
+    const hidden = response();
+    await controller.get(foreign.id, 'workspace-a', hidden);
+    assert.equal(hidden.statusCode, 404);
+
+    const shown = response();
+    await controller.get(global.id, 'workspace-a', shown);
+    assert.equal(shown.statusCode, 200);
+    assert.equal(shown.body.scope, 'global');
   });
 });

@@ -108,7 +108,6 @@ function makeSchedule(over = {}) {
   return {
     id: 'sch-1',
     workspace_id: 'ws-1',
-    board_id: null,
     name: 'nightly-security',
     scope: 'all',
     profile_ids: null,
@@ -129,12 +128,12 @@ function svcWith(rows, batches = []) {
   const scheduleRepo = makeScheduleRepo(rows);
   const batchRepo = makeBatchRepo(batches);
   const runService = makeRunService();
-  const svc = new SecurityScheduleService(scheduleRepo, batchRepo, runService, noopLog, {}, noQuiesce);
+  const svc = new SecurityScheduleService(scheduleRepo, batchRepo, runService, noopLog, noQuiesce);
   return { svc, scheduleRepo, batchRepo, runService };
 }
 
 test("scope='all' due schedule dispatches startBatch({all}) and advances next_run_at", async () => {
-  const sch = makeSchedule({ scope: 'all', board_id: 'board-9' });
+  const sch = makeSchedule({ scope: 'all' });
   const { svc, runService } = svcWith([sch]);
 
   const { dispatched, skipped } = await svc.runOnce(NOW);
@@ -144,7 +143,7 @@ test("scope='all' due schedule dispatches startBatch({all}) and advances next_ru
   assert.equal(runService.calls.length, 1, 'startBatch called once');
   const { args } = runService.calls[0];
   assert.equal(args.all, true, 'scope=all → all:true');
-  assert.equal(args.boardId, undefined, 'legacy Board ownership is not propagated');
+  assert.equal(args.workspaceId, 'ws-1', 'dispatch is scoped to the schedule Workspace');
   assert.equal(args.profileIds, undefined, 'no explicit id list for scope=all');
   assert.equal(args.triggeredByType, 'system');
   assert.equal(sch.last_batch_id, 'batch-1', 'last_batch_id stamped');
@@ -236,7 +235,7 @@ test('runNow fires regardless of enabled and does NOT disturb next_run_at', asyn
 // ── kind='checklist_refresh' (ticket e07ea821) ───────────────────────────────
 
 test("checklist_refresh kind: scope='all' due schedule dispatches refresh (NOT a batch) and advances next_run_at", async () => {
-  const sch = makeSchedule({ kind: 'checklist_refresh', scope: 'all', board_id: 'board-9' });
+  const sch = makeSchedule({ kind: 'checklist_refresh', scope: 'all' });
   const { svc, runService } = svcWith([sch]);
 
   const { dispatched, skipped } = await svc.runOnce(NOW);
@@ -247,7 +246,7 @@ test("checklist_refresh kind: scope='all' due schedule dispatches refresh (NOT a
   assert.equal(runService.refreshCalls.length, 1, 'refreshChecklistsForScope called once');
   const { args } = runService.refreshCalls[0];
   assert.equal(args.all, true, 'scope=all → all:true');
-  assert.equal(args.boardId, undefined, 'legacy Board ownership is not propagated');
+  assert.equal(args.workspaceId, 'ws-1', 'dispatch is scoped to the schedule Workspace');
   assert.equal(args.profileIds, undefined, 'no explicit id list for scope=all');
   assert.equal(args.triggeredByType, 'system');
   assert.equal(sch.last_batch_id, null, 'last_batch_id stays null — a refresh creates no batch');

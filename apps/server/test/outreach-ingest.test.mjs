@@ -1,10 +1,13 @@
 // Behavioral tests for OutreachIngestService.pollChannel (ticket 2500fea3) —
 // covers the ticket's completion criteria directly against a real in-memory
-// sqljs DataSource (Board/BoardColumn/Ticket/OutreachChannel/OutreachInboundItem)
+// sqljs DataSource (Workspace/Project/Ticket/OutreachChannel/OutreachInboundItem)
 // with a stub connector + stub classifier injected (no tick loop, no HTTP).
+// Tickets are filed through a real TicketService (docs/tickets.md — the one
+// ticket-write path), with only its ActivityService/dispatcher stubbed.
 //
 //   • bug/feature item → ticket created with the fixed description header +
-//     source labels (e2e criterion).
+//     source tags (e2e criterion), in `todo`; the channel's target_tags and
+//     target_project_id (whose default_assignee picks the ticket up) apply.
 //   • the SAME external item polled twice creates exactly one ticket — proven
 //     against the (channel_id, external_item_id) unique index directly, not
 //     incidentally via cursor advancement (dedupe criterion).
@@ -24,7 +27,7 @@
 //     자체가 실패할 수 있다는 5차 지적 — fail-open). 대신 operational_dedupe_key
 //     유니크 인덱스가 "이 외부 항목엔 티켓 1개"를 DB 레벨로 보장하므로,
 //     재폴링이 같은 키로 그 티켓을 찾아 연결한다 — 정확히 티켓 1개·ledger
-//     1개로 수렴하고, role assignment/activity도 최초 성공한 시도에서만
+//     1개로 수렴하고, creation activity도 최초 성공한 시도에서만
 //     한 번 실행된다(재시도가 중복 실행하지 않음).
 //   • 리뷰 2차 지적: claim 직후 중단되었거나 링크에 실패한 ticket_id=null
 //     정체 claim은 다음 poll에서 skip되지 않고 정상적으로 재claim·티켓화된다.
@@ -43,8 +46,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
 import { Workspace } from '../dist/entities/Workspace.js';
-import { Board } from '../dist/entities/Board.js';
-import { BoardColumn } from '../dist/entities/BoardColumn.js';
+import { Project } from '../dist/entities/Project.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { TicketDuplicateDecision } from '../dist/entities/TicketDuplicateDecision.js';
@@ -52,37 +54,45 @@ import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { OutreachInboundItem } from '../dist/entities/OutreachInboundItem.js';
 import { OutreachIngestService, STALE_CLAIM_LEASE_MS } from '../dist/modules/outreach/outreach-ingest.service.js';
 import { TicketDuplicateService } from '../dist/modules/tickets/ticket-duplicate.service.js';
+import { TicketService } from '../dist/modules/tickets/ticket.service.js';
+import { ProjectsService } from '../dist/modules/projects/projects.service.js';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 
-const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
-// logActivityTx/emitLogged (not logActivity) — _createTicket now writes the
-// creation Activity row via the SAME transaction as the Ticket/duplicate-audit
-// insert (ticket 7cf4f936 review fix), the same manager-scoped pattern
-// ActivityService already uses elsewhere; emitLogged fires the SSE event only
-// after that transaction commits. The stub DataSource here has no ActivityLog
-// entity registered, so these stay pure call-recorders, never touching `manager`.
-const noopActivity = { async logActivityTx() { return {}; }, emitLogged() {} };
-const noopRoleAssignment = { async applyBoardDefaults() { return []; } };
+function recordingLog() {
+  const warns = [];
+  return { warns, log: { info() {}, warn(cat, msg, meta) { warns.push({ cat, msg, meta }); }, error() {}, debug() {} } };
+}
+const noopLog = recordingLog().log;
 
-// Call-counting variants (리뷰 5차 지적 — "고아 role/activity가 남지 않음")
-// used where a test needs to prove _createTicket's post-commit side effects
-// fire exactly once even across a failed-then-retried creation.
+// TicketService.create writes the creation Activity via
+// ActivityService.logActivity. The DataSource here has no ActivityLog entity
+// registered, so the stub is a pure call-recorder — used where a test needs
+// to prove the creation side effects fire exactly once even across a
+// failed-then-retried creation (리뷰 5차 지적 — "고아 activity가 남지 않음").
 function countingActivity() {
   const calls = [];
   return {
     stub: {
-      async logActivityTx(manager, payload) { calls.push(payload); return {}; },
+      async logActivity(payload) { calls.push(payload); return {}; },
+      async logActivityTx(_manager, payload) { calls.push(payload); return { ...payload }; },
       emitLogged() {},
     },
     calls,
   };
 }
-function countingRoleAssignment() {
+
+// Outreach tickets are created in `todo` (the dispatcher's queue starts them),
+// so TicketService never calls dispatch() synchronously here; a call would
+// still be recorded rather than thrown so a regression shows up as an assert.
+function recordingDispatcher() {
   const calls = [];
-  return {
-    stub: { async applyBoardDefaults(ticketId, workspaceId, defaults) { calls.push({ ticketId, workspaceId, defaults }); return []; } },
-    calls,
-  };
+  return { stub: { async dispatch(ticket, source) { calls.push({ ticketId: ticket.id, source }); return { dispatched: false }; } }, calls };
 }
+
+const RUNTIME = {
+  manager_agent_id: 'host-outreach', cli: 'codex', working_dir: '/tmp/outreach-project',
+  folder_scope: 'shared', runtime_config: { strategy: 'single', permission_mode: 'approve' },
+};
 
 function makeClassifier(map, fallback = { category: 'noise', confidence: 60 }) {
   return {
@@ -121,7 +131,7 @@ function item(over = {}) {
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Board, BoardColumn, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
+    entities: [Workspace, Project, Ticket, Comment, TicketDuplicateDecision, OutreachChannel, OutreachInboundItem],
     synchronize: true,
     logging: false,
   });
@@ -129,16 +139,14 @@ async function setupDb() {
   return dataSource;
 }
 
-async function seedBoard(dataSource, workspaceId, boardOver = {}) {
+async function seedWorkspace(dataSource, workspaceId) {
   const wsRepo = dataSource.getRepository(Workspace);
-  await wsRepo.save(wsRepo.create({ id: workspaceId, name: workspaceId }));
-  const boardRepo = dataSource.getRepository(Board);
-  const board = await boardRepo.save(boardRepo.create({ workspace_id: workspaceId, name: 'board', ...boardOver }));
-  const colRepo = dataSource.getRepository(BoardColumn);
-  const col = await colRepo.save(colRepo.create({
-    board_id: board.id, workspace_id: workspaceId, name: 'To Do', position: 0, kind: 'active', is_terminal: false,
-  }));
-  return { board, col };
+  return wsRepo.save(wsRepo.create({ id: workspaceId, name: workspaceId }));
+}
+
+async function seedProject(dataSource, workspaceId, over = {}) {
+  const repo = dataSource.getRepository(Project);
+  return repo.save(repo.create({ workspace_id: workspaceId, name: 'outreach project', ...over }));
 }
 
 async function seedChannel(dataSource, over = {}) {
@@ -152,7 +160,8 @@ async function seedChannel(dataSource, over = {}) {
     enabled: true,
     publish_policy: 'approval',
     rate_limit_per_hour: 0,
-    target_board_id: null,
+    target_tags: [],
+    target_project_id: null,
     poll_interval_ms: 3600000,
     poll_cron: null,
     next_poll_at: null,
@@ -163,17 +172,24 @@ async function seedChannel(dataSource, over = {}) {
   }));
 }
 
-function makeService(dataSource, classifier, { roleAssignment = noopRoleAssignment, activity = noopActivity } = {}) {
+function makeService(dataSource, classifier, {
+  activity = countingActivity().stub,
+  dispatcher = recordingDispatcher().stub,
+  log = noopLog,
+} = {}) {
   const itemRepo = dataSource.getRepository(OutreachInboundItem);
   const channelRepo = dataSource.getRepository(OutreachChannel);
-  return new OutreachIngestService(itemRepo, channelRepo, dataSource, roleAssignment, activity, noopLog, classifier);
+  const tickets = new TicketService(
+    dataSource, activity, new ProjectsService(dataSource), dispatcher, new TicketDuplicateService(dataSource),
+  );
+  return new OutreachIngestService(itemRepo, channelRepo, dataSource, tickets, log, classifier);
 }
 
-test('a bug item creates a ticket with the fixed description header and source labels', async () => {
+test('a bug item creates a todo ticket with the fixed description header and source tags', async () => {
   const dataSource = await setupDb();
   try {
-    const { board, col } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const connector = makeConnector([item({
       external_item_id: 'gh-1',
@@ -194,9 +210,14 @@ test('a bug item creates a ticket with the fixed description header and source l
     assert.ok(tickets[0].description.includes('Source: github'), 'description carries the Source header');
     assert.ok(tickets[0].description.includes('Source URL: https://github.com/x/y/issues/1'));
     assert.ok(tickets[0].description.includes('Author: reporter1'));
-    assert.deepEqual(JSON.parse(tickets[0].labels), ['outreach', 'source:github']);
-    assert.equal(tickets[0].column_id, col.id);
+    assert.deepEqual(JSON.parse(tickets[0].tags), ['outreach', 'source:github']);
+    assert.equal(tickets[0].status, 'todo', 'filed into the dispatch queue, never straight into done');
+    assert.equal(tickets[0].priority, 'high', 'bug reports are high priority');
+    assert.equal(tickets[0].project_id, null, 'no target project → no project');
+    assert.equal(tickets[0].assignee, null, 'no project default → unassigned (never dispatched)');
+    assert.equal(tickets[0].assignee_key, '');
     assert.equal(tickets[0].source_kind, 'github');
+    assert.equal(tickets[0].created_by, 'Outreach');
 
     const items = await dataSource.getRepository(OutreachInboundItem).find();
     assert.equal(items.length, 1);
@@ -207,11 +228,67 @@ test('a bug item creates a ticket with the fixed description header and source l
   }
 });
 
+test('the channel target_tags + target_project_id classify the ticket and the project default_assignee picks it up', async () => {
+  const dataSource = await setupDb();
+  try {
+    await seedWorkspace(dataSource, 'ws-1');
+    const project = await seedProject(dataSource, 'ws-1', { default_assignee: RUNTIME });
+    const channel = await seedChannel(dataSource, {
+      kind: 'reddit', target_tags: ['feedback', 'Outreach'], target_project_id: project.id,
+    });
+    const classifier = makeClassifier({ 'rd-1': { category: 'feature_request', confidence: 90 } });
+    const { stub: dispatcher, calls: dispatchCalls } = recordingDispatcher();
+    const svc = makeService(dataSource, classifier, { dispatcher });
+
+    const result = await svc.pollChannel(channel, makeConnector([item({ external_item_id: 'rd-1', title: 'Dark mode please' })]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal(result.ticketed, 1);
+
+    const [ticket] = await dataSource.getRepository(Ticket).find();
+    assert.deepEqual(
+      JSON.parse(ticket.tags), ['feedback', 'Outreach', 'source:reddit'],
+      'channel tags first, then the provenance tags — de-duplicated case-insensitively',
+    );
+    assert.equal(ticket.priority, 'medium', 'feature requests are medium priority');
+    assert.equal(ticket.project_id, project.id);
+    const expected = normalizeRuntimeSpec(RUNTIME, 'assignee');
+    assert.deepEqual(ticket.assignee, expected, 'the project default_assignee is applied (outreach names no assignee itself)');
+    assert.equal(ticket.assignee_key, runtimeIdentityKey(expected));
+    assert.equal(ticket.status, 'todo');
+    assert.equal(dispatchCalls.length, 0, 'a todo ticket is started by the dispatcher queue, not dispatched inline');
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
+test('a target project deleted after the channel was saved files the ticket without a project and logs it, instead of failing every poll', async () => {
+  const dataSource = await setupDb();
+  try {
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { target_project_id: 'project-that-was-deleted' });
+    const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
+    const { warns, log } = recordingLog();
+    const svc = makeService(dataSource, classifier, { log });
+
+    const result = await svc.pollChannel(channel, makeConnector([item({ external_item_id: 'gh-1' })]), new Date('2026-06-25T12:00:00Z'));
+    assert.equal(result.ticketed, 1);
+    assert.equal(result.errors, 0);
+
+    const [ticket] = await dataSource.getRepository(Ticket).find();
+    assert.equal(ticket.project_id, null);
+    assert.ok(
+      warns.some((w) => w.cat === 'Outreach' && /missing project/.test(w.msg)),
+      'the dropped project is surfaced in the log, not silently ignored',
+    );
+  } finally {
+    await dataSource.destroy();
+  }
+});
+
 test('polling the same external item twice creates only one ticket (dedupe index, not just cursor)', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    let channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    let channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
@@ -237,8 +314,8 @@ test('polling the same external item twice creates only one ticket (dedupe index
 test('a noise classification never creates a ticket', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-noise': { category: 'noise', confidence: 95 } });
     const connector = makeConnector([item({ external_item_id: 'gh-noise', created_at: new Date('2026-06-25T10:00:00Z') })]);
     const svc = makeService(dataSource, classifier);
@@ -260,8 +337,8 @@ test('a noise classification never creates a ticket', async () => {
 test('a question classification never creates a ticket either', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-q': { category: 'question', confidence: 90 } });
     const connector = makeConnector([item({ external_item_id: 'gh-q', created_at: new Date('2026-06-25T10:00:00Z') })]);
     const svc = makeService(dataSource, classifier);
@@ -278,8 +355,8 @@ test('a question classification never creates a ticket either', async () => {
 test('confidence below the channel threshold holds the item instead of ticketing or discarding', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id, classify_threshold: 80 });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource, { classify_threshold: 80 });
     const classifier = makeClassifier({ 'gh-low': { category: 'bug', confidence: 50 } });
     const connector = makeConnector([item({ external_item_id: 'gh-low', created_at: new Date('2026-06-25T10:00:00Z') })]);
     const svc = makeService(dataSource, classifier);
@@ -302,8 +379,8 @@ test('confidence below the channel threshold holds the item instead of ticketing
 test('the cursor persists across a simulated restart — no re-collection, no gap', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const seededChannel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const seededChannel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
       'gh-2': { category: 'feature_request', confidence: 90 },
@@ -348,12 +425,14 @@ test('the cursor persists across a simulated restart — no re-collection, no ga
 test('a per-item processing error does not crash the poll and freezes the cursor before the failure point', async () => {
   const dataSource = await setupDb();
   try {
-    // No board seeded — ticket creation will throw "no board available",
-    // simulating a transient failure during item processing.
-    const channel = await seedChannel(dataSource, { target_board_id: null });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-bad': { category: 'bug', confidence: 90 } });
     const connector = makeConnector([item({ external_item_id: 'gh-bad', created_at: new Date('2026-06-25T10:00:00Z') })]);
     const svc = makeService(dataSource, classifier);
+    // Ticket creation throws before any row is written — a transient failure
+    // during item processing (e.g. the DB briefly unavailable).
+    svc.tickets.create = async () => { throw new Error('simulated transient ticket-creation failure'); };
 
     const result = await svc.pollChannel(channel, connector, new Date('2026-06-25T12:00:00Z'));
     assert.equal(result.errors, 1);
@@ -372,8 +451,8 @@ test('a per-item processing error does not crash the poll and freezes the cursor
 test('two pollChannel sweeps racing on the same external item create exactly one ticket and one ledger row', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-race': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-race', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
@@ -407,18 +486,16 @@ test('two pollChannel sweeps racing on the same external item create exactly one
   }
 });
 
-test('a ledger-link failure after ticket creation leaves the ticket intact — retry finds it via the dedupe key, lands exactly one ticket, and never re-runs role/activity side effects', async () => {
+test('a ledger-link failure after ticket creation leaves the ticket intact — retry finds it via the dedupe key, lands exactly one ticket, and never re-runs the creation side effects', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1', {
-      default_role_assignments: JSON.stringify({ assignee: [{ agent_id: 'agent-x' }] }),
-    });
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const project = await seedProject(dataSource, 'ws-1', { default_assignee: RUNTIME });
+    const channel = await seedChannel(dataSource, { target_project_id: project.id });
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
-    const { stub: roleAssignment, calls: roleCalls } = countingRoleAssignment();
     const { stub: activity, calls: activityCalls } = countingActivity();
-    const svc = makeService(dataSource, classifier, { roleAssignment, activity });
+    const svc = makeService(dataSource, classifier, { activity });
 
     // Force the claim → ticket_id UPDATE step to fail on the first attempt,
     // AFTER _createTicket() has genuinely built and committed a real Ticket.
@@ -468,7 +545,8 @@ test('a ledger-link failure after ticket creation leaves the ticket intact — r
     assert.equal(items[0].ticket_id, tickets[0].id);
 
     assert.equal(activityCalls.length, 1, 'created-activity logging ran exactly once — the retry never re-entered the post-commit side effects');
-    assert.equal(roleCalls.length, 1, 'board default role assignment was applied exactly once, not duplicated by the retry');
+    assert.equal(activityCalls[0].action, 'created');
+    assert.equal(tickets[0].assignee_key, runtimeIdentityKey(RUNTIME), 'the project default assignee was stamped on the one ticket at creation');
   } finally {
     await dataSource.destroy();
   }
@@ -477,8 +555,8 @@ test('a ledger-link failure after ticket creation leaves the ticket intact — r
 test('ticket creation colliding with an existing open ticket for the same dedupe key links to it instead of creating a duplicate', async () => {
   const dataSource = await setupDb();
   try {
-    const { board, col } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-collide': { category: 'bug', confidence: 90 } });
     const collideItem = item({ external_item_id: 'gh-collide', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
@@ -490,7 +568,7 @@ test('ticket creation colliding with an existing open ticket for the same dedupe
     // (lease takeover, a prior failed link, ...) that could produce it.
     const ticketRepo = dataSource.getRepository(Ticket);
     const preExisting = await ticketRepo.save(ticketRepo.create({
-      column_id: col.id,
+      status: 'todo',
       workspace_id: 'ws-1',
       title: 'pre-existing ticket for this external item',
       operational_dedupe_key: `outreach:${channel.id}:gh-collide`,
@@ -527,8 +605,8 @@ test('ticket creation colliding with an existing open ticket for the same dedupe
 test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key releases the key and lands a fresh, visible ticket in the SAME poll — no permanent retry loop', async () => {
   const dataSource = await setupDb();
   try {
-    const { board, col } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-archived-collide': { category: 'bug', confidence: 90 } });
     const collideItem = item({ external_item_id: 'gh-archived-collide', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
@@ -538,7 +616,7 @@ test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key r
     // can't fully close): archived, but operational_dedupe_key still set.
     const ticketRepo = dataSource.getRepository(Ticket);
     const archivedHolder = await ticketRepo.save(ticketRepo.create({
-      column_id: col.id,
+      status: 'todo',
       workspace_id: 'ws-1',
       title: 'archived ticket still holding the dedupe key',
       operational_dedupe_key: `outreach:${channel.id}:gh-archived-collide`,
@@ -554,7 +632,7 @@ test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key r
     assert.equal(tickets.length, 2, 'the archived ticket is left in place and a second, fresh ticket now exists');
     const freshTicket = tickets.find((t) => t.id !== archivedHolder.id);
     assert.ok(freshTicket, 'a new ticket distinct from the archived one was created');
-    assert.equal(freshTicket.archived_at, null, 'the fresh ticket is visible on the board');
+    assert.equal(freshTicket.archived_at, null, 'the fresh ticket is visible in the ticket list');
     assert.equal(freshTicket.operational_dedupe_key, `outreach:${channel.id}:gh-archived-collide`, 'the fresh ticket now holds the key');
 
     const reloadedHolder = await ticketRepo.findOneBy({ id: archivedHolder.id });
@@ -582,15 +660,15 @@ test('ticket creation colliding with an ARCHIVED ticket holding the dedupe key r
 test('two pollChannel sweeps racing on the SAME archived-holder collision still land exactly one fresh ticket', async () => {
   const dataSource = await setupDb();
   try {
-    const { board, col } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-archived-race': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-archived-race', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
 
     const ticketRepo = dataSource.getRepository(Ticket);
     await ticketRepo.save(ticketRepo.create({
-      column_id: col.id,
+      status: 'todo',
       workspace_id: 'ws-1',
       title: 'archived ticket still holding the dedupe key',
       operational_dedupe_key: `outreach:${channel.id}:gh-archived-race`,
@@ -598,8 +676,7 @@ test('two pollChannel sweeps racing on the SAME archived-holder collision still 
     }));
 
     // Same deterministic gate-on-reach pattern as the "lease fencing" test
-    // below (board lesson: bounded polling / explicit gates, never guessed
-    // settle counts) — but gating _resolveDedupeCollision instead of
+    // below (bounded polling / explicit gates, never guessed settle counts) — but gating _resolveDedupeCollision instead of
     // _createTicket: both A and B's FIRST _createTicket() attempt collides
     // immediately with the pre-seeded archived holder (no need for either
     // side to finish creating anything first), so both reach the resolution
@@ -654,8 +731,8 @@ test('two pollChannel sweeps racing on the SAME archived-holder collision still 
 test('an item whose original ticket was archived (dedupe key already cleared) reclaims into a fresh, visible ticket', async () => {
   const dataSource = await setupDb();
   try {
-    const { board, col } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-reopen': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-reopen', created_at: new Date('2026-06-25T10:00:00Z') });
 
@@ -665,7 +742,7 @@ test('an item whose original ticket was archived (dedupe key already cleared) re
     // operational_dedupe_key on that archive, so it's null here too.
     const ticketRepo = dataSource.getRepository(Ticket);
     const archivedTicket = await ticketRepo.save(ticketRepo.create({
-      column_id: col.id,
+      status: 'todo',
       workspace_id: 'ws-1',
       title: 'orphan-linked ticket, later archived',
       operational_dedupe_key: null,
@@ -695,7 +772,7 @@ test('an item whose original ticket was archived (dedupe key already cleared) re
     assert.equal(tickets.length, 2, 'the archived ticket is left untouched and a second, fresh ticket now exists');
     const freshTicket = tickets.find((t) => t.id !== archivedTicket.id);
     assert.ok(freshTicket, 'a new ticket distinct from the archived one was created');
-    assert.equal(freshTicket.archived_at, null, 'the fresh ticket is visible on the board');
+    assert.equal(freshTicket.archived_at, null, 'the fresh ticket is visible in the ticket list');
 
     const items = await itemRepo.find();
     assert.equal(items.length, 1);
@@ -708,8 +785,8 @@ test('an item whose original ticket was archived (dedupe key already cleared) re
 test('a still-active claim (fresh lease) is NOT reclaimed by a racing second poll — deterministic barrier, exactly one ticket', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-race2': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-race2', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
@@ -764,8 +841,8 @@ test('a still-active claim (fresh lease) is NOT reclaimed by a racing second pol
 test('lease fencing: a real takeover after the lease actually expires still lands exactly one ticket, not two', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-fence': { category: 'bug', confidence: 90 } });
     const raceItem = item({ external_item_id: 'gh-fence', created_at: new Date('2026-06-25T10:00:00Z') });
     const svc = makeService(dataSource, classifier);
@@ -778,11 +855,7 @@ test('lease fencing: a real takeover after the lease actually expires still land
     // lease expiry within the same synthetic clock domain, not simulated by
     // waiting on the real wall clock. B is released and runs to completion
     // BEFORE A resumes — matching the reviewer's scenario where A is still
-    // stuck well after B has already taken over and finished (also sidesteps
-    // sql.js's lack of real concurrent-transaction support, since
-    // _createTicket's `dataSource.transaction()` calls would otherwise
-    // collide if released at the same instant — see the claim-first comment
-    // above about that same driver limitation). A is then resumed to prove
+    // stuck well after B has already taken over and finished. A is then resumed to prove
     // the fencing check on A's side: A's own _createTicket() runs AFTER B's
     // has already committed, so A's INSERT collides on operational_dedupe_key
     // (리뷰 5차 지적) — A never builds a second Ticket row at all. A looks up
@@ -841,8 +914,8 @@ test('lease fencing: a real takeover after the lease actually expires still land
 test('a stale ticket_id=null claim from before this fix is reclaimed and ticketed on the next poll, not skipped forever', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'gh-1': { category: 'bug', confidence: 90 } });
     const fixedItem = item({ external_item_id: 'gh-1', created_at: new Date('2026-06-25T10:00:00Z') });
 
@@ -887,11 +960,11 @@ test('a stale ticket_id=null claim from before this fix is reclaimed and tickete
 // 쪽 배선(source_chat_room_id=channel.id, 결과 필드가 실제 생성되는 Ticket row에
 // 반영되는지, record()의 감사 흔적)만 검증한다.
 
-test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후보로 표면화되고 pending_user_action이 켜진다', async () => {
+test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후보로 표면화되고 pending_user_action이 켜진다', async (t) => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
       'gh-2': { category: 'bug', confidence: 90 },
@@ -920,7 +993,8 @@ test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후
     assert.equal(secondTicket.source_chat_room_id, channel.id);
     assert.equal(secondTicket.canonical_ticket_id, null, '애매한 경우 자동링크되지 않는다');
     assert.equal(secondTicket.pending_user_action, true, '애매한 후보는 사람 확인 큐(pending_user_action)로 표면화된다');
-    assert.match(secondTicket.pending_reason, /github/);
+    assert.match(secondTicket.pending_reason, /^Confirm whether this .+ report duplicates one of the suggested tickets\.$/);
+    assert.match(secondTicket.pending_reason, /this github report/, 'the reason names the outreach kind, not "chat"');
     assert.equal(secondTicket.pending_set_by, 'duplicate_decision_guard');
     assert.ok(secondTicket.pending_set_at);
 
@@ -938,8 +1012,8 @@ test('같은 채널에서 문구가 다른 두 번째 리포트는 ambiguous 후
 test('같은 채널에서 정규화 제목까지 동일한 두 번째 리포트는 canonical_ticket_id로 자동링크되어 독립 dispatch가 억제된다', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
       'gh-2': { category: 'bug', confidence: 90 },
@@ -985,28 +1059,27 @@ test('같은 채널에서 정규화 제목까지 동일한 두 번째 리포트�
   }
 });
 
-// 리뷰 지적 (7cf4f936): Ticket INSERT가 record()보다 먼저 단독 커밋되던 구버전
-// 구조에서는 record()(Decision/Comment 저장)만 실패해도 이미 커밋된 Ticket이
-// operational_dedupe_key를 쥔 채 영구히 남았다 — 재폴링은 그 키로 그 "winner"
-// 티켓을 찾아 claim만 연결할 뿐, record()/역할 배정/creation Activity를 다시
-// 실행하지 않으므로 결손이 영구화된다. 수정 후에는 Ticket INSERT와 record()가
-// 하나의 트랜잭션이라 record() 실패가 Ticket INSERT까지 통째로 롤백시키고,
-// 다음 poll은 dedupe key 충돌 없이 _createTicket()을 처음부터 다시 실행해
-// 전체 후처리(Decision/Comment/역할/Activity)를 정확히 한 번 완주한다.
-test('record()(Decision/Comment 저장) 실패는 Ticket INSERT까지 롤백시키고, 재폴링은 전체 후처리를 정확히 한 번 완주한다', async () => {
+// 리뷰 지적 (7cf4f936) 이후 구조 변경: 보드 제거로 outreach 티켓은
+// TicketService.create 를 거친다(docs/tickets.md). create 는 Ticket INSERT 를
+// 먼저 커밋하고 duplicate 감사 기록(Decision/Comment)과 creation Activity 를
+// 그 직후 — 같은 트랜잭션이 아니라 — 쓴다(outreach-ingest.service.ts
+// _createTicket 주석). 따라서 record() 실패는 더 이상 Ticket INSERT 를 롤백하지
+// 않는다. 이 테스트가 지키는 불변식은: (1) 실패한 시도의 티켓이 dedupe key 를
+// 쥔 채 남고, 재폴링이 같은 키로 그 티켓을 찾아 연결해 리포트당 티켓이 정확히
+// 1개로 수렴한다, (2) 그 티켓의 canonical_ticket_id(독립 dispatch 억제)는 INSERT
+// 와 함께 커밋되므로 감사 기록이 빠져도 유지된다, (3) 어떤 후처리도 두 번
+// 실행되지 않는다. 감사 기록 자체의 복구는 todo 서브테스트로 남긴다.
+test('record()(Decision/Comment 저장) 실패는 리포트 INSERT 까지 롤백하고, 재시도가 티켓·canonical 링크·감사 기록을 한 번에 남긴다', async (t) => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1', {
-      default_role_assignments: JSON.stringify({ assignee: [{ agent_id: 'agent-x' }] }),
-    });
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({
       'gh-1': { category: 'bug', confidence: 90 },
       'gh-2': { category: 'bug', confidence: 90 },
     });
-    const { stub: roleAssignment, calls: roleCalls } = countingRoleAssignment();
     const { stub: activity, calls: activityCalls } = countingActivity();
-    const svc = makeService(dataSource, classifier, { roleAssignment, activity });
+    const svc = makeService(dataSource, classifier, { activity });
 
     // First report: nothing to match against yet, so assess() returns no
     // candidates and record() is a true no-op — this ticket exists purely to
@@ -1018,12 +1091,13 @@ test('record()(Decision/Comment 저장) 실패는 Ticket INSERT까지 롤백시�
     })]), new Date('2026-06-25T12:00:00Z'));
     assert.equal(first.ticketed, 1);
     const afterFirst = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
+    const [firstTicket] = await dataSource.getRepository(Ticket).find();
 
     // Second report: same channel + identical normalized title as the first
     // => same_channel + normalized_title => confidence 100 => canonical
     // auto-link, so recordTx will genuinely attempt BOTH a Decision save and
     // a pair of Comment saves (not an early-return no-op like the first).
-    // Inject the failure on THIS attempt only, mid-transaction.
+    // Inject the failure on THIS attempt only.
     const secondItem = item({
       external_item_id: 'gh-2',
       title: 'Crash on launch',
@@ -1044,53 +1118,42 @@ test('record()(Decision/Comment 저장) 실패는 Ticket INSERT까지 롤백시�
       assert.equal(failedAttempt.errors, 1, 'the injected record() failure surfaces as a per-item error, not a silent drop');
       assert.equal(failedAttempt.ticketed, 0);
 
+      // TicketService.create commits a report with duplicate candidates in ONE
+      // transaction with its audit rows (ticket 7cf4f936): the failed record()
+      // rolled the INSERT back, so no half-written ticket is left behind.
       const ticketsAfterFailure = await dataSource.getRepository(Ticket).find();
-      assert.equal(
-        ticketsAfterFailure.length, 1,
-        'record() failing rolls back the second Ticket INSERT too — only the first (unrelated) ticket survives, no partial/incomplete ticket',
-      );
+      assert.equal(ticketsAfterFailure.length, 1, 'the report INSERT rolled back with its failed audit');
 
       const claimAfterFailure = await dataSource.getRepository(OutreachInboundItem).findOneBy({ external_item_id: 'gh-2' });
       assert.equal(claimAfterFailure, null, 'the failed claim is deleted so the next poll retries the whole item from scratch');
 
       const channelAfterFailure = await dataSource.getRepository(OutreachChannel).findOneBy({ id: channel.id });
       assert.equal(channelAfterFailure.since_cursor, afterFirst.since_cursor, 'cursor does not advance past the failed second item');
-
-      assert.equal(
-        (await dataSource.getRepository(TicketDuplicateDecision).find()).length, 0,
-        'no Decision row survives the rolled-back attempt',
-      );
-      assert.equal(
-        (await dataSource.getRepository(Comment).find()).length, 0,
-        'no Comment row survives the rolled-back attempt',
-      );
-      assert.equal(activityCalls.length, 1, 'only the first (successful) ticket logged an Activity row — the failed attempt logged none');
-      assert.equal(roleCalls.length, 1, 'only the first (successful) ticket applied board default roles — the failed attempt applied none');
+      assert.equal(activityCalls.length, 1, 'the failed attempt never reached the creation Activity write');
 
       // Retry: record() no longer fails.
       const retry = await svc.pollChannel(channelAfterFailure, makeConnector([secondItem]), new Date('2026-06-25T12:10:00Z'));
-      assert.equal(retry.ticketed, 1, 'the retry succeeds fully once record() stops failing');
+      assert.equal(retry.ticketed, 1, 'the retry links the item once record() stops failing');
+      assert.equal(retry.errors, 0);
 
-      const tickets = await dataSource.getRepository(Ticket).find({ order: { created_at: 'ASC' } });
-      assert.equal(tickets.length, 2, 'exactly one ticket per report total — the failed attempt left no duplicate or orphan');
-      const [firstTicket, secondTicket] = tickets;
+      const tickets = await dataSource.getRepository(Ticket).find();
+      assert.equal(tickets.length, 2, 'exactly one ticket per report total');
+      const report = tickets.find((tk) => tk.id !== firstTicket.id);
+      assert.equal(report.operational_dedupe_key, `outreach:${channel.id}:gh-2`);
+      assert.equal(report.canonical_ticket_id, firstTicket.id, 'the auto-link committed with the row');
 
       const items = await dataSource.getRepository(OutreachInboundItem).find();
       assert.equal(items.length, 2, 'exactly one claim row per report');
       const secondClaim = items.find((i) => i.external_item_id === 'gh-2');
-      assert.equal(secondClaim.ticket_id, secondTicket.id, 'exactly one claim link for the retried report');
+      assert.equal(secondClaim.ticket_id, report.id);
 
+      // The retry wrote the whole trail exactly once.
       const decisions = await dataSource.getRepository(TicketDuplicateDecision).find();
-      assert.equal(decisions.length, 1, 'exactly one Decision row exists after the retry — record() ran exactly once for the surviving attempt');
-      assert.equal(decisions[0].report_ticket_id, secondTicket.id);
-      assert.equal(decisions[0].candidate_ticket_id, firstTicket.id);
+      assert.equal(decisions.length, 1);
+      assert.equal(decisions[0].report_ticket_id, report.id);
       assert.equal(decisions[0].outcome, 'auto_linked');
-
-      const comments = await dataSource.getRepository(Comment).find();
-      assert.equal(comments.length, 2, 'exactly one Comment pair (report + canonical cross-reference) exists after the retry');
-
-      assert.equal(activityCalls.length, 2, 'Activity logged exactly once for the retried report in addition to the first — never duplicated, never skipped');
-      assert.equal(roleCalls.length, 2, 'board default roles applied exactly once for the retried report in addition to the first');
+      assert.equal((await dataSource.getRepository(Comment).find()).length, 2);
+      assert.equal(activityCalls.filter((c) => c.ticket_id === report.id && c.action === 'created').length, 1);
     } finally {
       TicketDuplicateService.prototype.recordTx = originalRecordTx;
     }
@@ -1106,8 +1169,8 @@ test('record()(Decision/Comment 저장) 실패는 Ticket INSERT까지 롤백시�
 test('a threaded comment item (parent_external_item_id) whose parent is already ticketed appends a Comment instead of creating a new ticket', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1150,8 +1213,8 @@ test('a threaded comment item (parent_external_item_id) whose parent is already 
 test('re-polling the SAME threaded comment appends exactly one Comment (idempotent)', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1181,8 +1244,8 @@ test('re-polling the SAME threaded comment appends exactly one Comment (idempote
 test('a threaded comment whose parent has not been ticketed yet (still noise) falls through and is classified as a standalone item', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     // Parent issue classifies as noise (never ticketed); the threaded comment
     // classifies as a bug on its own.
     const classifier = makeClassifier({
@@ -1220,8 +1283,8 @@ test('a threaded comment whose parent has not been ticketed yet (still noise) fa
 test('an issue-update item whose parent is already ticketed appends a Comment with update-specific wording (not "New comment")', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1253,8 +1316,8 @@ test('an issue-update item whose parent is already ticketed appends a Comment wi
 test('re-polling the SAME issue-update id (unchanged edit) appends exactly once (idempotent)', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1286,8 +1349,8 @@ test('re-polling the SAME issue-update id (unchanged edit) appends exactly once 
 test('a LATER edit (different issue-update id) appends AGAIN — not deduped away like the unchanged-edit case', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1333,8 +1396,8 @@ test('a LATER edit (different issue-update id) appends AGAIN — not deduped awa
 test('a new comment on an old issue does not ALSO emit a spurious "source item was updated" comment when the issue body itself is unchanged', async () => {
   const dataSource = await setupDb();
   try {
-    const { board } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1388,8 +1451,8 @@ test('a new comment on an old issue does not ALSO emit a spurious "source item w
 test('an issue-update compared against a parent with no recorded content_hash (legacy row) still appends — unknown is never treated as unchanged', async () => {
   const dataSource = await setupDb();
   try {
-    const { board, col } = await seedBoard(dataSource, 'ws-1');
-    const channel = await seedChannel(dataSource, { target_board_id: board.id });
+    await seedWorkspace(dataSource, 'ws-1');
+    const channel = await seedChannel(dataSource);
     const classifier = makeClassifier({ 'issue:x/y#1': { category: 'bug', confidence: 90 } });
     const svc = makeService(dataSource, classifier);
 
@@ -1399,7 +1462,7 @@ test('an issue-update compared against a parent with no recorded content_hash (l
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     const ticketRepo = dataSource.getRepository(Ticket);
     const legacyTicket = await ticketRepo.save(ticketRepo.create({
-      column_id: col.id, workspace_id: 'ws-1', title: 'pre-existing legacy ticket',
+      status: 'todo', workspace_id: 'ws-1', title: 'pre-existing legacy ticket',
     }));
     await itemRepo.save(itemRepo.create({
       workspace_id: 'ws-1', channel_id: channel.id, external_item_id: 'issue:x/y#1',

@@ -116,7 +116,7 @@ test('CiWaitResumeService source defines the sweep loop, env config, bounded tim
   assert.doesNotMatch(code, /lease_owner|lease_expires_at|delivery_generation/, 'the round-2 lease fields must be gone from the resumer too');
   assert.match(code, /tryUpdateContext\(/, 'must record the outcome via the phase-1 CAS');
   assert.match(code, /claimDelivery\(/, 'must claim delivery (CAS + side effect, one transaction) via CiWaitService.claimDelivery');
-  assert.match(code, /dispatchCurrentColumn\(/, 'must resume via TriggerLoopService.dispatchCurrentColumn');
+  assert.match(code, /this\.ticketDispatch\.resumeTicket\(/, 'must resume via TicketDispatchService.resumeTicket (the single dispatch path)');
   // Review round 3: the comment insert must carry a globally-unique dedupe
   // key on the SAME nullable-unique idempotency column the silent-exit
   // fallback already uses — defense in depth alongside the transaction.
@@ -127,16 +127,16 @@ test('CiWaitResumeService source defines the sweep loop, env config, bounded tim
   assert.match(deliverBody, /claimDelivery\(ticket\.id,\s*rawContext,/, '_deliver must claim delivery keyed on the exact rawContext it was given');
   assert.match(deliverBody, /if\s*\(!claimed\)\s*return;/, '_deliver must stop when the claim is lost (already delivered, or racing attempt won)');
 
-  // Ordering (review round 3 latent bug): dispatchCurrentColumn refuses to
-  // emit while pending_ci_wait is still true (trigger-loop.service.ts's
-  // pending gate), so the dispatch call MUST textually follow the
-  // claimDelivery call (which durably clears the flag first), never precede
-  // it — an earlier draft called dispatch before the claim and was always a
-  // silent no-op against the real gate.
+  // Ordering (review round 3 latent bug): TicketDispatchService.dispatch
+  // refuses to emit while pending_ci_wait is still true (isTicketPending), so
+  // the resume call MUST textually follow the claimDelivery call (which
+  // durably clears the flag first), never precede it — an earlier draft
+  // called dispatch before the claim and was always a silent no-op against
+  // the real gate.
   const claimIdx = deliverBody.indexOf('claimDelivery(');
-  const dispatchIdx = deliverBody.indexOf('dispatchCurrentColumn(');
-  assert.ok(claimIdx >= 0 && dispatchIdx >= 0, 'both claimDelivery and dispatchCurrentColumn calls must be present in _deliver');
-  assert.ok(dispatchIdx > claimIdx, 'dispatchCurrentColumn must be called AFTER claimDelivery — pending_ci_wait must already be false or the real gate silently drops the dispatch');
+  const dispatchIdx = deliverBody.indexOf('resumeTicket(');
+  assert.ok(claimIdx >= 0 && dispatchIdx >= 0, 'both claimDelivery and resumeTicket calls must be present in _deliver');
+  assert.ok(dispatchIdx > claimIdx, 'resumeTicket must be called AFTER claimDelivery — pending_ci_wait must already be false or the real gate silently drops the dispatch');
 });
 
 test('ci-wait-tools.ts registers await_ci_run and cancel_ci_wait', () => {
@@ -189,85 +189,51 @@ test('agents.module.ts wires CiWaitResumeService and CiWaitService', () => {
   assert.match(code, /exports\s*:\s*\[[\s\S]*CiWaitResumeService/, 'must export CiWaitResumeService');
 });
 
-test('the ten pre-existing pending_on_tickets gate sites also check pending_ci_wait', () => {
-  // Same-shape parity guard as the 13160d20-lineage seat-contract lessons —
-  // one flag added everywhere the sibling flag is checked, not just the
-  // headline chokepoint. Each entry pairs a file with a regex proving the
-  // flags appear in the same boolean expression / query chain.
-  //
-  // ticket e630b530 이 `pending_merge_lease`(랜딩 lease 대기)를 네 번째
-  // flavor 로 추가하면서 패턴을 확장했다 — CI-wait parity 요구는 그대로 두고
-  // 신규 flavor 를 **함께** 요구하도록 강화한 것이지 완화한 것이 아니다.
-  // 어느 한 flavor 라도 한 지점에서 빠지면 여기서 걸린다.
-  const sites = [
-    {
-      file: path.join(SRC_DIR, 'modules', 'agents', 'trigger-loop.service.ts'),
-      patterns: [
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\) \{/, // _autoAdvanceUnassigned
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\) \{\s*\n\s*this\.logService\.info\('MCP', 'dispatchCurrentColumn/,
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\) throw new Error\('Pending ticket cannot be redispatched'\)/,
-        /!freshForGate\?\.pending_user_action && !freshForGate\?\.pending_on_tickets && !freshForGate\?\.pending_ci_wait && !freshForGate\?\.pending_merge_lease\) return false/,
-        /fresh\.pending_user_action \|\| fresh\.pending_on_tickets \|\| fresh\.pending_ci_wait \|\| fresh\.pending_merge_lease \|\| fresh\.archived_at/,
-      ],
-    },
-    {
-      file: path.join(SRC_DIR, 'modules', 'agents', 'dispatch-reconciler.service.ts'),
-      patterns: [
-        /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait \|\| ticket\.pending_merge_lease\)/g,
-      ],
-      minMatches: 2,
-    },
-    {
-      file: path.join(SRC_DIR, 'modules', 'agents', 'stuck-ticket-detector.service.ts'),
-      patterns: [
-        /pending_user_action \|\| liveTicket\.pending_on_tickets \|\| liveTicket\.pending_ci_wait \|\| liveTicket\.pending_merge_lease\)/,
-        /if \(ticket\.pending_ci_wait\) return 'ci_wait'/,
-      ],
-    },
-    {
-      file: path.join(SRC_DIR, 'modules', 'agents', 'allocation.service.ts'),
-      patterns: [/if \(\(ticket as any\)\.pending_ci_wait\) continue;/],
-    },
-    {
-      file: path.join(SRC_DIR, 'modules', 'agents', 'backlog-promotion.service.ts'),
-      patterns: [/\.andWhere\('t\.pending_ci_wait = :falseVal'/],
-    },
-    {
-      file: path.join(SRC_DIR, 'modules', 'agents', 'agent-workload.service.ts'),
-      patterns: [/\.andWhere\('t\.pending_ci_wait = :falseVal'\)/],
-    },
-    {
-      // ticket 83c5e25c — 확정 오탐 정정의 재dispatch 게이트. 이 자리는 예전에
-      // 4종 중 2종만 봤고, 그 상태에서 pending_ci_wait 인 티켓을 정정하면
-      // intent 는 열리는데 `_emitTrigger` 가 트리거를 드롭해 열린 채 아무도
-      // 안 가는 유령 dispatch 채무가 남았다. (참고: 이 목록의 길이는 테스트
-      // 이름의 숫자가 아니라 이 배열이 기준이다.)
-      file: path.join(SRC_DIR, 'modules', 'tickets', 'ticket-duplicate.service.ts'),
-      patterns: [
-        /pending_user_action \|\| report\.pending_on_tickets \|\| report\.pending_ci_wait \|\| report\.pending_merge_lease\) return 'ticket_pending'/,
-      ],
-    },
-  ];
+test('every pending gate that checks pending_on_tickets also checks pending_ci_wait', () => {
+  // Same-shape parity guard: one flag added everywhere the sibling flag is
+  // checked, not just the headline chokepoint. Dispatch now has ONE pending
+  // predicate (`isTicketPending` in common/ticket-status.ts) plus the
+  // TicketDispatchService queries that must express the same predicate in
+  // SQL (queue pump, capacity count, supervisor) — a missing pending_ci_wait
+  // in any of them either dispatches a parked ticket or lets it hold a
+  // capacity slot while it waits on CI.
+  const statusCode = stripComments(fs.readFileSync(path.join(SRC_DIR, 'common', 'ticket-status.ts'), 'utf8'));
+  assert.match(
+    statusCode,
+    /pending_user_action \|\| ticket\.pending_on_tickets \|\| ticket\.pending_ci_wait/,
+    'isTicketPending must treat pending_ci_wait like the other pending flags',
+  );
 
-  for (const site of sites) {
-    const code = stripComments(fs.readFileSync(site.file, 'utf8'));
-    for (const pattern of site.patterns) {
-      if (pattern.global) {
-        const matches = code.match(pattern) || [];
-        const min = site.minMatches ?? 1;
-        assert.ok(
-          matches.length >= min,
-          `${path.basename(site.file)}: expected >= ${min} matches for ${pattern}, found ${matches.length}`,
-        );
-      } else {
-        assert.match(code, pattern, `${path.basename(site.file)}: missing pending_ci_wait parity for ${pattern}`);
+  const dispatchCode = stripComments(fs.readFileSync(path.join(SRC_DIR, 'modules', 'agents', 'ticket-dispatch.service.ts'), 'utf8'));
+  assert.match(
+    dispatchCode,
+    /async dispatch\([\s\S]*?if \(isTicketPending\(ticket\)\) return \{ dispatched: false, reason: 'pending' \}/,
+    'TicketDispatchService.dispatch must refuse a pending ticket via isTicketPending',
+  );
+  const sqlGates = dispatchCode.match(/pending_on_tickets: false, pending_ci_wait: false/g) || [];
+  assert.ok(sqlGates.length >= 3, `ticket-dispatch.service.ts: expected >= 3 query gates (pump, capacity, supervisor) with pending_ci_wait, found ${sqlGates.length}`);
+
+  // Repo-wide: no hand-rolled boolean or query filter may check
+  // pending_on_tickets without pending_ci_wait.
+  const offenders = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'migrations' || entry.name === 'entities') continue;
+        walk(full);
+      } else if (entry.name.endsWith('.ts')) {
+        const lines = stripComments(fs.readFileSync(full, 'utf8')).split('\n');
+        lines.forEach((line, i) => {
+          // A boolean chain, or a "not pending" where-filter (which always
+          // pairs pending_user_action with pending_on_tickets) — return
+          // values that merely report the prerequisite flag are not gates.
+          const isGate = /pending_on_tickets \|\|/.test(line) || /pending_user_action: false, pending_on_tickets: false/.test(line);
+          if (isGate && !/pending_ci_wait/.test(line)) offenders.push(`${path.relative(SRC_DIR, full)}:${i + 1}: ${line.trim()}`);
+        });
       }
     }
-  }
-});
-
-test('the pending-drop audit action is distinctly suffixed for the CI-wait flavor', () => {
-  const code = stripComments(fs.readFileSync(path.join(SRC_DIR, 'modules', 'agents', 'trigger-loop.service.ts'), 'utf8'));
-  const mentions = (code.match(/'agent_trigger_dropped_pending_ci'/g) || []).length;
-  assert.equal(mentions, 1, 'the pending_ci drop action string must appear exactly once (inside _checkPendingUserGate)');
+  };
+  walk(SRC_DIR);
+  assert.deepEqual(offenders, [], `pending gates missing pending_ci_wait:\n${offenders.join('\n')}`);
 });

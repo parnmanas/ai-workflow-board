@@ -107,16 +107,6 @@ test('a nonexistent credential id is rejected (never falls back to anonymous)', 
   );
 });
 
-test('a legacy Board-scoped credential fails closed until migrated to Workspace scope', async () => {
-  await assert.rejects(
-    resolveOutreachCredential(repoWith({
-      id: 'cred-board', workspace_id: 'ws-1', board_id: 'board-1',
-      encrypted_data: JSON.stringify({ token: 'board-token' }),
-    }), 'cred-board', 'ws-1'),
-    /has not been migrated to Workspace scope/,
-  );
-});
-
 test('an unreadable credential never falls back to anonymous access', async () => {
   await assert.rejects(
     resolveOutreachCredential(repoWith({

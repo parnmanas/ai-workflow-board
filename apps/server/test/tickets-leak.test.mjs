@@ -6,13 +6,10 @@
 // workspace B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
 // when WorkspaceGuard is applied to TicketsController.
 //
-// Current state (Phase 5):
-//   - TicketsController uses AuthGuard only — no workspace scoping on list/get.
-//   - Ticket access is column-scoped (POST /api/columns/:id/tickets), not workspace-scoped at list.
-//   - Cross-workspace isolation is enforced at the board/column level once WorkspaceGuard
-//     is applied in Phase 6.
-//
-// Tests marked it.todo() will pass after Phase 6 applies WorkspaceGuard to all controllers.
+// Tickets live in one pool per workspace (docs/tickets.md): created and listed
+// under /api/workspaces/:wsId/tickets, read by id at /api/tickets/:id. Every
+// route sits behind AuthGuard + WorkspaceGuard, which checks the caller's
+// membership of the workspace named by the X-Workspace-Id header.
 //
 // Design (mirrors proxy-passthrough.test.mjs):
 //   - Boots NestJS app in-process from compiled dist/. Requires `npm run build` (satisfied by test script).
@@ -77,13 +74,14 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
   let userB;
   let tokenA;
   let tokenB;
-  let boardA;
-  let columnA;
+  let userC;
+  let tokenC;
   let ticketA;
 
   const ADMIN_EMAIL = `tickets-leak-admin-${randomUUID()}@awb.local`;
   const USER_A_EMAIL = `tickets-leak-ua-${randomUUID()}@awb.local`;
   const USER_B_EMAIL = `tickets-leak-ub-${randomUUID()}@awb.local`;
+  const USER_C_EMAIL = `tickets-leak-uc-${randomUUID()}@awb.local`;
   const PASSWORD = 'TestPass123!';
 
   before(async () => {
@@ -98,8 +96,6 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
     const wsRepo = dataSource.getRepository('Workspace');
-    const boardRepo = dataSource.getRepository('Board');
-    const colRepo = dataSource.getRepository('BoardColumn');
 
     // ─── Create admin user directly via TypeORM ────────────────────────────────
     const adminUser = await userRepo.save(userRepo.create({
@@ -129,11 +125,19 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     });
     userB = createUserBRes.data;
 
+    const createUserCRes = await apiRequest(BASE_URL, '/users', {
+      token: adminToken,
+      method: 'POST',
+      body: { name: 'Tickets Leak User C', email: USER_C_EMAIL, password: PASSWORD, role: 'user' },
+    });
+    userC = createUserCRes.data;
+
     // ─── Activate users (users created via /users endpoint start as active) ───
     // The /users endpoint does not set status — users created without signup are active by default.
     // Login to get tokens for each user.
     tokenA = authService.createSession(userA.id);
     tokenB = authService.createSession(userB.id);
+    tokenC = authService.createSession(userC.id);
 
     // Phase 6+: WorkspaceGuard requires an explicit ReBAC membership tuple plus
     // an X-Workspace-Id header for non-admin callers. Grant user A membership
@@ -141,23 +145,14 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     // own workspace) actually exercises the allow path. User B is deliberately
     // left without any membership so the negative controls below still reject.
     await rebacService.grant({ type: 'user', id: userA.id }, 'member', { type: 'workspace', id: wsA.id });
+    // User C is a genuine member of workspace B — the guard lets them in with
+    // X-Workspace-Id: ws_b, so these cases probe the routes' own scoping.
+    await rebacService.grant({ type: 'user', id: userC.id }, 'member', { type: 'workspace', id: wsB.id });
 
-    // ─── Create a board in workspace A with a column ───────────────────────────
-    boardA = await boardRepo.save(boardRepo.create({
-      name: 'Leak Board A',
-      workspace_id: wsA.id,
-      description: 'Leak test board',
-    }));
-    columnA = await colRepo.save(colRepo.create({
-      name: 'To Do',
-      board_id: boardA.id,
-      position: 0,
-      color: '#e2e8f0',
-    }));
-
-    // ─── Create a ticket in workspace A's board via HTTP ──────────────────────
-    const ticketRes = await apiRequest(BASE_URL, `/columns/${columnA.id}/tickets`, {
+    // ─── Create a ticket in workspace A's pool via HTTP ───────────────────────
+    const ticketRes = await apiRequest(BASE_URL, `/workspaces/${wsA.id}/tickets`, {
       token: adminToken,
+      workspaceId: wsA.id,
       method: 'POST',
       body: { title: 'Leak Test Ticket in WS A', description: 'Should not be visible to WS B users' },
     });
@@ -175,10 +170,11 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     // the code node:test computed.
   });
 
-  it('admin can create a ticket in workspace A board', () => {
+  it('admin can create a ticket in workspace A', () => {
     assert.ok(ticketA?.id, 'Ticket should have been created with an ID');
     assert.equal(ticketA.title, 'Leak Test Ticket in WS A');
-    assert.equal(ticketA.column_id, columnA.id);
+    assert.equal(ticketA.workspace_id, wsA.id);
+    assert.equal(ticketA.status, 'todo');
   });
 
   it('admin can retrieve ticket A by ID (ticket exists)', async () => {
@@ -189,7 +185,7 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     assert.equal(res.data.id, ticketA.id);
   });
 
-  it('user A (ws_a member) can retrieve ticket from workspace A board', async () => {
+  it('user A (ws_a member) can retrieve ticket from workspace A', async () => {
     // tokenA is a valid session AND user A holds a member tuple on ws_a, so the
     // WorkspaceGuard allow path is satisfied once X-Workspace-Id is supplied.
     const res = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
@@ -200,59 +196,80 @@ describe('tickets-leak: cross-workspace ticket isolation', async () => {
     assert.equal(res.data.id, ticketA.id);
   });
 
-  // ─── Phase 6 isolation contract ───────────────────────────────────────────
-  // The following tests document the EXPECTED behavior once WorkspaceGuard is applied
-  // to TicketsController in Phase 6. They will fail until then because the controller
-  // currently uses AuthGuard only (no workspace scoping on GET /api/tickets/:id).
-
-  it('user B (ws_b member) cannot retrieve workspace A ticket by ID — returns 403 or 404 after Phase 6 WorkspaceGuard', async () => {
-    // tokenB has no workspace membership — WorkspaceGuard should reject without X-Workspace-Id
-    // or reject with ws_b since ticket belongs to ws_a column/board
-    const res = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
-      token: tokenB,
-      workspaceId: wsB.id,
-    });
-    // WorkspaceGuard will allow ws_b member into ws_b scope, but ticket is in ws_a board —
-    // the workspace-scoped ticket lookup will not find it under ws_b, yielding 403 or 404
-    assert.ok(
-      res.status === 403 || res.status === 404,
-      `Expected 403 or 404 for cross-workspace ticket access, got ${res.status}: ${JSON.stringify(res.data)}`,
-    );
-  });
-
-  it('user B with X-Workspace-Id: ws_b cannot see workspace A tickets via board listing — Phase 6 board workspace scoping', async () => {
-    // Listing boards for ws_b should not expose ws_a tickets
-    const boardsRes = await apiRequest(BASE_URL, `/boards?workspace_id=${wsB.id}`, {
-      token: tokenB,
-      workspaceId: wsB.id,
-    });
-    assert.equal(boardsRes.status, 200);
-    const boards = Array.isArray(boardsRes.data) ? boardsRes.data : [];
-    // No ws_a boards should appear under ws_b scope
-    assert.equal(
-      boards.filter(b => b.id === boardA.id).length,
-      0,
-      'Workspace A board must not appear in workspace B listing',
-    );
-  });
-
-  it('workspace A board is NOT returned when listing boards for workspace B', async () => {
-    // GET /api/boards?workspace_id=ws_b.id should return empty for a fresh ws_b
-    const res = await apiRequest(BASE_URL, `/boards?workspace_id=${wsB.id}`, {
-      token: tokenB,
+  it('user A lists workspace A tickets and sees ticket A (control)', async () => {
+    const res = await apiRequest(BASE_URL, `/workspaces/${wsA.id}/tickets`, {
+      token: tokenA,
+      workspaceId: wsA.id,
     });
     assert.equal(res.status, 200);
-    const boards = Array.isArray(res.data) ? res.data : [];
-    const wsABoardIds = boards.filter(b => b.id === boardA.id);
-    assert.equal(wsABoardIds.length, 0, 'Workspace A board should not appear in workspace B board listing');
+    assert.ok(res.data.tickets.some((t) => t.id === ticketA.id), 'Workspace A ticket should appear in workspace A listing');
   });
 
-  it('GET /api/boards?workspace_id=ws_a returns workspace A board (control)', async () => {
-    const res = await apiRequest(BASE_URL, `/boards?workspace_id=${wsA.id}`, {
-      token: adminToken,
+  // ─── Isolation contract ───────────────────────────────────────────────────
+
+  it('user B (no membership) cannot retrieve workspace A ticket by ID — 403 or 404', async () => {
+    for (const workspaceId of [wsB.id, wsA.id]) {
+      const res = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
+        token: tokenB,
+        workspaceId,
+      });
+      assert.ok(
+        res.status === 403 || res.status === 404,
+        `Expected 403 or 404 for cross-workspace ticket access (X-Workspace-Id ${workspaceId}), got ${res.status}: ${JSON.stringify(res.data)}`,
+      );
+    }
+  });
+
+  it('user B (no membership) cannot list workspace A tickets — 403', async () => {
+    const res = await apiRequest(BASE_URL, `/workspaces/${wsA.id}/tickets`, {
+      token: tokenB,
+      workspaceId: wsA.id,
+    });
+    assert.equal(res.status, 403, `Expected 403, got ${res.status}: ${JSON.stringify(res.data)}`);
+  });
+
+  it('user C (ws_b member) listing workspace B does not see workspace A tickets', async () => {
+    const res = await apiRequest(BASE_URL, `/workspaces/${wsB.id}/tickets`, {
+      token: tokenC,
+      workspaceId: wsB.id,
     });
     assert.equal(res.status, 200);
-    const boards = Array.isArray(res.data) ? res.data : [];
-    assert.ok(boards.some(b => b.id === boardA.id), 'Workspace A board should appear in workspace A board listing');
+    assert.equal(res.data.tickets.filter((t) => t.id === ticketA.id).length, 0, 'Workspace A ticket must not appear in workspace B listing');
+  });
+
+  // WorkspaceGuard checks membership against X-Workspace-Id and requires a
+  // `/workspaces/:wsId` path to name the same workspace; TicketWorkspaceGuard
+  // 404s a `/tickets/:id` of any other workspace.
+  it('user C (ws_b member) cannot list workspace A tickets through the ws_a path', async () => {
+    const res = await apiRequest(BASE_URL, `/workspaces/${wsA.id}/tickets`, {
+      token: tokenC,
+      workspaceId: wsB.id,
+    });
+    assert.ok(res.status === 403 || res.status === 404, `Expected 403/404, got ${res.status}`);
+  });
+
+  it('user C (ws_b member) cannot create a ticket in workspace A', async () => {
+    const res = await apiRequest(BASE_URL, `/workspaces/${wsA.id}/tickets`, {
+      token: tokenC,
+      workspaceId: wsB.id,
+      method: 'POST',
+      body: { title: 'planted from ws_b' },
+    });
+    assert.ok(res.status === 403 || res.status === 404, `Expected 403/404, got ${res.status}`);
+  });
+
+  it('user C (ws_b member) cannot read or edit workspace A ticket by ID', async () => {
+    const read = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
+      token: tokenC,
+      workspaceId: wsB.id,
+    });
+    assert.ok(read.status === 403 || read.status === 404, `read: expected 403/404, got ${read.status}`);
+    const edit = await apiRequest(BASE_URL, `/tickets/${ticketA.id}`, {
+      token: tokenC,
+      workspaceId: wsB.id,
+      method: 'PATCH',
+      body: { title: 'edited from ws_b' },
+    });
+    assert.ok(edit.status === 403 || edit.status === 404, `edit: expected 403/404, got ${edit.status}`);
   });
 });

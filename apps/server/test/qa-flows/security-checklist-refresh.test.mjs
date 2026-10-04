@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SECURITY_REFRESH_PORT || '0';
@@ -24,7 +24,7 @@ test('security checklist: source/added_at model + refresh_security_checklist dis
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'sec-refresh' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'sec-refresh');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'inspector' });
 

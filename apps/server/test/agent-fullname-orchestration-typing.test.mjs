@@ -24,9 +24,9 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
+  createWorkspace,
   createAgent,
   createApiKey,
-  setupKanbanScene,
   createTicket,
 } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
@@ -55,7 +55,7 @@ const missions = app.get(OrchestrationMissionService);
 // DIFFERENT managers. That is the case a bare name cannot express, and it is
 // why this contract exists: without the prefix the operator (and the
 // orchestrator's own roster prompt) sees two identical entries.
-const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'orch-fullname' });
+const ws = await createWorkspace(app, getDataSourceToken, 'orch-fullname');
 
 const mgrA = await createAgent(app, getDataSourceToken, ws.id, { name: 'MgrA', type: 'manager' });
 const mgrB = await createAgent(app, getDataSourceToken, ws.id, { name: 'MgrB', type: 'manager' });
@@ -213,10 +213,8 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
 // "e9d0e8bc-… is typing". Drive set_typing through the real /mcp transport.
 test('agent_typing SSE: actor_name is the Host display, never the raw agent id', async () => {
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'typing target',
-    assigneeId: mgrA.id,
   });
 
   const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'typing-sub' });

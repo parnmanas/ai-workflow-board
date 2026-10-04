@@ -25,17 +25,15 @@ export class VirtualAgent {
    * @param {string} opts.agentId          DB id of the agents row.
    * @param {string} opts.apiKey           Raw API key string (from createApiKey.raw_key).
    * @param {number} opts.port             Test server port.
-   * @param {string} [opts.boardId]        Optional board filter.
    * @param {(ctx)=>Promise<void>} [opts.onTrigger]         Called for each agent_trigger.
    * @param {(ctx)=>Promise<void>} [opts.onCommentMention]  Called for each comment_mention.
    * @param {(ctx)=>Promise<void>} [opts.onChatMessage]     Called for each chat_message.
    */
-  constructor({ name, agentId, apiKey, port, boardId, onTrigger, onCommentMention, onChatMessage }) {
+  constructor({ name, agentId, apiKey, port, onTrigger, onCommentMention, onChatMessage }) {
     this.name = name;
     this.agentId = agentId;
     this.apiKey = apiKey;
     this.port = port;
-    this.boardId = boardId;
     this.onTrigger = onTrigger;
     this.onCommentMention = onCommentMention;
     this.onChatMessage = onChatMessage;
@@ -70,7 +68,6 @@ export class VirtualAgent {
     // All frame handling happens inside the SSE listener via the onFrame hook
     // so we don't race with test code that also wants to call stream.waitFor.
     this._stream = await openSseStream(this.port, runtimeHostApiKey, {
-      boardId: this.boardId,
       onFrame: (frame) => {
         this.frames.push({ ts: Date.now(), ...frame });
         // Every non-ping frame gets logged for the UI timeline — users can

@@ -36,8 +36,9 @@ const profiles = [
 ];
 
 const here = dirname(fileURLToPath(import.meta.url));
-const triggerSource = await readFile(
-  join(here, '..', 'src', 'modules', 'agents', 'trigger-loop.service.ts'),
+// 티켓 디스패치의 단일 경로(docs/tickets.md) — 예전 trigger-loop.service.ts 자리.
+const dispatchSource = await readFile(
+  join(here, '..', 'src', 'modules', 'agents', 'ticket-dispatch.service.ts'),
   'utf8',
 );
 const adminControllerSource = await readFile(
@@ -48,18 +49,15 @@ const workspaceControllerSource = await readFile(
   join(here, '..', 'src', 'modules', 'workspaces', 'workspaces.controller.ts'),
   'utf8',
 );
-const migrationSource = await readFile(
-  join(here, '..', 'src', 'database', 'migrations', '1760000000066-BackfillGlobalClaudeBackendProfiles.ts'),
-  'utf8',
-);
 
-test('validates a configuration-only backend catalog and resolves Agent > Board', () => {
+// 보드 제거 후 디스패치 체인은 assignee spec 핀(`agent`) → 전역 기본값이다.
+// 해석기 자체는 selector 목록에 무관하게 "처음으로 null 이 아닌 값" 을 고른다.
+test('validates a configuration-only backend catalog and resolves the first pinned selector', () => {
   const checked = validateCliRuntimeProfiles(profiles);
   assert.equal(checked.ok, true);
   assert.equal(checked.value.length, 2, 'a second backend/model requires only another profile');
   assert.equal(resolveCliRuntimeProfile(checked.value, [
-    { source: 'agent', value: null },
-    { source: 'board', value: 'local-openai' },
+    { source: 'agent', value: 'local-openai' },
     { source: 'global', value: 'local-anthropic' },
   ]).id, 'local-openai');
   assert.equal(resolveCliRuntimeProfile(checked.value, [
@@ -68,11 +66,10 @@ test('validates a configuration-only backend catalog and resolves Agent > Board'
   ]), null);
 });
 
-test('resolves run > Agent > Board > Global and explicit none stops inheritance', () => {
+test('resolves run > Agent > Global and explicit none stops inheritance', () => {
   assert.equal(resolveCliRuntimeProfile(profiles, [
     { source: 'run', value: null },
     { source: 'agent', value: null },
-    { source: 'board', value: null },
     { source: 'global', value: 'local-anthropic' },
   ]).id, 'local-anthropic');
   assert.equal(resolveCliRuntimeProfile(profiles, [
@@ -251,22 +248,24 @@ test('legacy backend-launch rows fail with an actionable migration error', () =>
   );
 });
 
-test('trigger dispatch resolves and validates Claude backend profiles only for Claude agents', () => {
-  const guard = triggerSource.match(
+test('ticket dispatch resolves and validates Claude backend profiles only for Claude assignees', () => {
+  const guard = dispatchSource.match(
     // 게이트는 cli-catalog.ts 의 `sessions.backend_profile`(오늘은 claude 뿐)로 판정한다 —
     // 리터럴 'claude' 비교로 되돌리지 말 것.
-    /if \(specCli && cliDescriptor\(specCli\)\?\.sessions\.backend_profile\) \{[\s\S]*?specProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
+    /if \(cliDescriptor\(spec\.cli\)\?\.sessions\.backend_profile\) \{[\s\S]*?runtimeProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
   );
   assert.ok(guard, 'runtime profile resolution and credential validation share the catalog guard');
-  assert.match(guard[0], /\{ source: 'run', value: ticket\.cli_runtime_profile \}[\s\S]*source: 'agent'[\s\S]*source: 'board'/);
+  // 체인은 assignee spec 핀 하나 → (resolveClaudeBackendProfileForDispatch 가 붙이는) 전역 기본값.
+  assert.match(guard[0], /\{ source: 'agent', value: spec\.cli_runtime_profile \?\? null \}/);
+  assert.doesNotMatch(guard[0], /source: 'board'/, 'there is no board layer any more');
   assert.match(
-    triggerSource,
+    dispatchSource,
     /let runtimeProfile: CliRuntimeProfile \| null = null;/,
     'non-Claude SSE payload must retain a null cli_runtime_profile',
   );
   assert.doesNotMatch(
-    triggerSource.slice(guard.index + guard[0].length),
-    /specProfile = await resolveClaudeBackendProfileForDispatch/,
+    dispatchSource.slice(guard.index + guard[0].length),
+    /runtimeProfile = await resolveClaudeBackendProfileForDispatch/,
     'profile resolution must not have an unguarded fallback',
   );
 });
@@ -302,19 +301,5 @@ test('a non-admin catalog route exists and still masks credential refs', () => {
   assert.match(adminControllerSource, /profiles: rows\.map\(publicProfile\)/);
 });
 
-test('legacy migration dedupes exact canonical payload plus credential ref and stays entity-free', () => {
-  assert.match(migrationSource, /createHash\('sha256'\)/);
-  assert.match(migrationSource, /credential_ref: candidate\.credential_ref/);
-  assert.match(migrationSource, /fingerprintToId/);
-  assert.match(migrationSource, /cli_runtime_profiles/);
-  // 마이그레이션은 synchronize 이후에 돈다(db.ts D-02). 엔티티 리포지토리로
-  // 컬럼을 읽으면 이미 DROP 된 컬럼을 건드려 부팅이 터지므로, 테이블명 기반
-  // 쿼리 + 존재 가드만 써야 한다.
-  // 엔티티를 단 하나도 import 하지 않아야 한다(주석 언급은 무관 — import 줄만 본다).
-  const entityImports = migrationSource
-    .split('\n')
-    .filter(line => /^import /.test(line) && /entities\//.test(line));
-  assert.deepEqual(entityImports, [], `마이그레이션이 엔티티를 import 하면 안 됩니다: ${entityImports.join(' | ')}`);
-  assert.doesNotMatch(migrationSource, /getRepository\((?:Workspace|ClaudeBackendProfile|Board|Agent|Ticket)\)/);
-  assert.match(migrationSource, /hasColumn\('workspaces', 'cli_runtime_profiles'\)/);
-});
+// 1760000000066-BackfillGlobalClaudeBackendProfiles 는 보드 제거와 함께 삭제됐다 —
+// 그 마이그레이션 소스를 고정하던 테스트도 함께 제거.

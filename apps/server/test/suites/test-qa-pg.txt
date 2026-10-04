@@ -3,18 +3,13 @@
 # 자리가 헷갈리면 아무 데나 넣고 apps/server 에서 npm run test:suites:sort 를 돌려라.
 test/drop-agent-host-backfill.test.mjs
 test/qa-flows/activity-actor-sentinel-pg.test.mjs
-test/qa-flows/auto-advance-gate-halt.test.mjs
-test/qa-flows/auto-advance-halt-unassigned.test.mjs
-test/qa-flows/auto-advance-unassigned.test.mjs
-test/qa-flows/backlog-promotion-chain.test.mjs
-test/qa-flows/backlog-promotion-pg-slot-race.test.mjs
 test/qa-flows/chat-attachments.test.mjs
 test/qa-flows/chat-dm-promotion-pg-race.test.mjs
 test/qa-flows/chat-message-read.test.mjs
 test/qa-flows/comment-author-uuid-guard-pg.test.mjs
 test/qa-flows/comment-dedupe-pg.test.mjs
 test/qa-flows/comment-pagination.test.mjs
-test/qa-flows/dispatch-intent-pg-race.test.mjs
+test/qa-flows/confirmed-duplicate-correction-pg-race.test.mjs
 test/qa-flows/mcp-agent-roundtrip.test.mjs
 test/qa-flows/multi-user-chat.test.mjs
 test/qa-flows/orchestration-confirm-reminder-pg-cast.test.mjs

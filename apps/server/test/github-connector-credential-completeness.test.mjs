@@ -59,7 +59,6 @@ const GITHUB_CONNECTOR_SERVICE_FILE = path.join(SRC_DIR, 'services', 'github-con
 // 테스트가 실패한다.
 const CREDENTIAL_SCOPED_METHODS = [
   'isEnabled',
-  'fetchBranchTipSha',
   'listWorkflows',
   'listWorkflowRuns',
   'getWorkflowRun',
@@ -234,21 +233,25 @@ test('sanity: GitHubConnectorService receiver 식별자를 실제로 발견한�
   assert.ok(receiverNames.has('githubService'), 'receiver "githubService"를 발견하지 못했다 — 발견 정규식이 깨졌는가?');
 });
 
-test('sanity: 감사 기준선(14곳) 이상의 credential-스코프 호출부를 발견한다', () => {
+// 기준선 13곳: 원래 14곳이었으나 보드 제거 때 trigger-loop.service.ts 의
+// fetchBranchTipSha 호출부(티켓 branch-tip 추적)가 메서드째 사라졌다. 호출부가
+// 늘면 그대로 두고, 줄면 그 호출부가 정말 기능째 삭제됐는지 확인한 뒤 낮춰라.
+test('sanity: 감사 기준선(13곳) 이상의 credential-스코프 호출부를 발견한다', () => {
   const { sites } = scanLiveCallSites();
   assert.ok(
-    sites.length >= 14,
-    `credential-스코프 호출부를 ${sites.length}곳만 발견했다(기대: 14곳 이상) — ` +
+    sites.length >= 13,
+    `credential-스코프 호출부를 ${sites.length}곳만 발견했다(기대: 13곳 이상) — ` +
       '스캔 자체가 깨져 완전성 검사가 공허해졌을 수 있다.',
   );
 });
 
+// 기준선 9개: 보드 제거 때 호출부가 없던 fetchBranchTipSha 가 메서드째 지워졌다.
 test('sanity: github-connector.service.ts에서 credential-경유 public 메서드를 실제로 발견한다', () => {
   const content = fs.readFileSync(GITHUB_CONNECTOR_SERVICE_FILE, 'utf8');
   const discovered = discoverCredentialRoutedPublicMethods(content);
   assert.ok(
-    discovered.size >= 10,
-    `credential-경유 public 메서드를 ${discovered.size}개만 발견했다(기대: 10개 이상) — ` +
+    discovered.size >= 9,
+    `credential-경유 public 메서드를 ${discovered.size}개만 발견했다(기대: 9개 이상) — ` +
       '발견 로직(2-space 멤버 들여쓰기 파싱)이 깨졌을 수 있다.',
   );
 });

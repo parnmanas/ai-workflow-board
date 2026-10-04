@@ -27,9 +27,9 @@ let outsiderToken;
 let workspace;
 let owner;
 let member;
-let board;
-/* P4c-4: agent fixture 삭제 (Agent 행 없음). */
-let ticket;
+/* P4c-4: agent fixture 삭제 (Agent 행 없음). 보드 제거 후 Board / Ticket 핀도
+   없다 — 프로필 핀은 RuntimeSpec(`cli_runtime_profile`) 에만 실린다. */
+let host;
 let profileA;
 let profileB;
 const secretCredentialId = randomUUID();
@@ -92,17 +92,9 @@ before(async () => {
   await rebac.grant({ type: 'user', id: owner.id }, 'owner', { type: 'workspace', id: workspace.id });
   await rebac.grant({ type: 'user', id: member.id }, 'member', { type: 'workspace', id: workspace.id });
 
-  board = await ds.getRepository('Board').save(ds.getRepository('Board').create({
-    workspace_id: workspace.id, name: 'Profiles board',
-  }));
-  // P4c-4: Agent 행 없음 — PATCH /agents/:id 표면 삭제. 핀 경로는 board/ticket 으로만 본다.
-  // 루트 티켓은 컬럼에 놓여 있어야 한다 — PATCH /tickets/:id 의 후속 처리가
-  // 컬럼을 전제하므로, 컬럼 없는 티켓으로는 프로필 핀 저장 경로를 볼 수 없다.
-  const column = await ds.getRepository('BoardColumn').save(ds.getRepository('BoardColumn').create({
-    board_id: board.id, name: 'To Do', position: 0, kind: 'active',
-  }));
-  ticket = await ds.getRepository('Ticket').save(ds.getRepository('Ticket').create({
-    workspace_id: workspace.id, title: 'Profiles run', column_id: column.id,
+  // RuntimeSpec 검증(POST /runtime-specs/validate)은 Host 존재부터 본다.
+  host = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({
+    name: 'profiles-host', hostname: 'fixture', workspace_id: workspace.id, is_active: 1,
   }));
 
   await ds.getRepository('Credential').save(ds.getRepository('Credential').create({
@@ -160,38 +152,32 @@ describe('Claude backend profile integration', () => {
   // 예전에는 워크스페이스 allow-set 이 Board/Agent/run 핀의 권위였고, 비워두면
   // 전역에 존재하는 프로필이라도 거부됐다. 이제 권위는 전역 목록 하나뿐이므로
   // (a) 전역에 없는 id 는 여전히 400 이고 (b) 전역에 있으면 배정 없이도 통과한다.
-  it('전역 목록이 Board/run 핀의 유일한 권위다 (P4c-4: Agent 핀 표면 삭제)', async () => {
-    for (const [pathName, body] of [
-      [`/boards/${board.id}`, { cli_runtime_profile: 'legacy-profile' }],
-      [`/tickets/${ticket.id}`, { cli_runtime_profile: 'legacy-profile' }],
-    ]) {
-      const denied = await apiRequest(baseUrl, pathName, {
-        token: adminToken, method: 'PATCH', body,
-      });
-      assert.equal(denied.status, 400, `${pathName}: ${JSON.stringify(denied.data)}`);
-      assert.match(denied.data.error, /does not exist$/, '에러 문구에 워크스페이스 스코프가 남으면 안 됩니다.');
-    }
+  // Board / Ticket 핀은 보드 제거와 함께 사라졌다 — 남은 핀 표면은 RuntimeSpec
+  // 이고, 그 쓰기 전 검증이 POST /runtime-specs/validate 다.
+  it('전역 목록이 RuntimeSpec 핀의 유일한 권위다 (Board/Agent 핀 표면 삭제)', async () => {
+    const spec = (cli_runtime_profile) => ({
+      manager_agent_id: host.id, cli: 'claude', working_dir: '/srv/profiles', cli_runtime_profile,
+      runtime_config: { strategy: 'single', permission_mode: 'strict' },
+    });
+    const denied = await apiRequest(baseUrl, '/runtime-specs/validate', {
+      token: adminToken, method: 'POST', body: { workspace_id: workspace.id, spec: spec('legacy-profile') },
+    });
+    assert.equal(denied.status, 400, JSON.stringify(denied.data));
+    assert.match(denied.data.error, /does not exist$/, '에러 문구에 워크스페이스 스코프가 남으면 안 됩니다.');
 
     // profileB 는 어떤 워크스페이스에도 배정된 적이 없다 — 예전 계약이라면 400.
-    for (const pathName of [`/boards/${board.id}`, `/tickets/${ticket.id}`]) {
-      const accepted = await apiRequest(baseUrl, pathName, {
-        token: adminToken, method: 'PATCH', body: { cli_runtime_profile: profileB.id },
+    // 검증은 로그인만 요구하므로 워크스페이스 멤버도 같은 판정을 받는다.
+    for (const token of [adminToken, memberToken]) {
+      const accepted = await apiRequest(baseUrl, '/runtime-specs/validate', {
+        token, method: 'POST', body: { workspace_id: workspace.id, spec: spec(profileB.id) },
       });
-      assert.equal(accepted.status, 200, `${pathName}: ${JSON.stringify(accepted.data)}`);
+      assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+      assert.equal(accepted.data.spec.cli_runtime_profile, profileB.id);
     }
-    assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
-    assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
 
     const { globalRuntimeProfiles } = await import('../dist/common/claude-backend-registry.js');
     const ids = (await globalRuntimeProfiles(ds)).map(row => row.id);
     assert.ok(ids.includes(profileA.id) && ids.includes(profileB.id));
-
-    // 뒤 테스트에 영향이 없도록 핀을 되돌린다.
-    for (const pathName of [`/boards/${board.id}`, `/tickets/${ticket.id}`]) {
-      await apiRequest(baseUrl, pathName, {
-        token: adminToken, method: 'PATCH', body: { cli_runtime_profile: null },
-      });
-    }
   });
 
   it('rejects a missing credential_ref, accepts an existing credential, and clears an optional selection', async () => {
@@ -203,6 +189,10 @@ describe('Claude backend profile integration', () => {
     });
     assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
     assert.equal(rejected.data.error, 'credential_ref does not exist');
+    // credential_ref 자리에 비밀값을 넣어도 거부 응답에 그 값이 되돌아오면 안 된다.
+    const invalid = await createProfile(adminToken, 'bad-secret', 'Bad secret', 'plaintext-secret-value');
+    assert.equal(invalid.status, 400);
+    assert.equal(JSON.stringify(invalid.data).includes('plaintext-secret-value'), false);
     assert.equal(
       (await ds.getRepository('ClaudeBackendProfile').findOneByOrFail({ id: profileA.id })).credential_ref,
       secretCredentialId,
@@ -292,9 +282,9 @@ describe('Claude backend profile integration', () => {
     assert.equal(reloaded.omit_effort, false);
   });
 
-  it('blocks referenced deletion, then replaces every selector/default reference transactionally', async () => {
-    await ds.getRepository('Board').update({ id: board.id }, { cli_runtime_profile: profileA.id });
-    await ds.getRepository('Ticket').update({ id: ticket.id }, { cli_runtime_profile: profileA.id });
+  // Board / Ticket 핀이 사라져 남은 참조자는 전역 기본값뿐이다
+  // (claude-backend-profiles.controller.ts impact()).
+  it('blocks referenced deletion, then replaces the default reference transactionally', async () => {
     await apiRequest(baseUrl, '/admin/claude-backend-profiles/default', {
       token: adminToken, method: 'PATCH', body: { profile_id: profileA.id },
     });
@@ -312,8 +302,6 @@ describe('Claude backend profile integration', () => {
     });
     assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
     assert.equal(await ds.getRepository('ClaudeBackendProfile').countBy({ id: profileA.id }), 0);
-    assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, profileB.id);
-    assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, profileB.id);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
     })).value, profileB.id);
@@ -329,8 +317,7 @@ describe('Claude backend profile integration', () => {
       token: adminToken, method: 'DELETE', body: { detach: true },
     });
     assert.equal(detached.status, 200, JSON.stringify(detached.data));
-    assert.equal((await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile, null);
-    assert.equal((await ds.getRepository('Ticket').findOneByOrFail({ id: ticket.id })).cli_runtime_profile, null);
+    assert.equal(await ds.getRepository('ClaudeBackendProfile').countBy({ id: profileB.id }), 0);
     assert.equal((await ds.getRepository('SystemSetting').findOneByOrFail({
       key: 'claude_backend_profiles.default',
     })).value, globalProfile.id);
@@ -338,101 +325,13 @@ describe('Claude backend profile integration', () => {
     // detach 뒤에는 어떤 핀도 남지 않으므로 전역 기본값으로 떨어져야 한다.
     const { resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js');
     const resolved = await resolveClaudeBackendProfileForDispatch(ds, [
-      { source: 'run', value: null },
       { source: 'agent', value: null },
-      { source: 'board', value: null },
     ]);
     assert.equal(resolved?.id, globalProfile.id);
   });
 
-  it('migrates identical legacy ids with different payloads without loss and never exposes credential identity', async () => {
-    const wsRepo = ds.getRepository('Workspace');
-    const legacyA = await wsRepo.save(wsRepo.create({
-      name: 'legacy collision A',
-      cli_runtime_profiles: JSON.stringify([{
-        id: 'same-id', kind: 'claude-backend', protocol: 'anthropic-compatible',
-        base_url: 'http://legacy-a.invalid', model: 'a',
-      }]),
-      default_cli_runtime_profile: 'same-id',
-    }));
-    const legacyB = await wsRepo.save(wsRepo.create({
-      name: 'legacy collision B',
-      cli_runtime_profiles: JSON.stringify([{
-        id: 'same-id', kind: 'claude-backend', protocol: 'anthropic-compatible',
-        base_url: 'http://legacy-b.invalid', model: 'b',
-      }]),
-      default_cli_runtime_profile: 'same-id',
-    }));
-    const { BackfillGlobalClaudeBackendProfiles1760000000066 } =
-      await import('../dist/database/migrations/1760000000066-BackfillGlobalClaudeBackendProfiles.js');
-    const runner = ds.createQueryRunner();
-    await new BackfillGlobalClaudeBackendProfiles1760000000066().up(runner);
-    // 워크스페이스 기본값 포인터가 사라졌으므로(티켓 e616dbfc) 승격된 전역 행을
-    // 직접 확인한다. 같은 레거시 id 라도 payload 가 다르면 별개 행이어야 한다 —
-    // 하나가 다른 하나를 덮어쓰면 프로필 정의가 조용히 유실된다.
-    const promoted = await ds.getRepository('ClaudeBackendProfile').find();
-    const promotedA = promoted.find(row => row.base_url === 'http://legacy-a.invalid');
-    const promotedB = promoted.find(row => row.base_url === 'http://legacy-b.invalid');
-    assert.ok(promotedA, 'legacy A payload 가 승격되지 않았습니다.');
-    assert.ok(promotedB, 'legacy B payload 가 승격되지 않았습니다.');
-    assert.notEqual(promotedA.id, promotedB.id, '충돌한 레거시 id 는 서로 다른 전역 id 로 갈라져야 합니다.');
-    assert.equal(promotedA.model, 'a');
-    assert.equal(promotedB.model, 'b');
-
-    // 멱등성: 다시 돌려도 fingerprint dedupe 로 행이 늘지 않아야 한다.
-    const before = promoted.length;
-    await new BackfillGlobalClaudeBackendProfiles1760000000066().up(runner);
-    assert.equal(await ds.getRepository('ClaudeBackendProfile').count(), before);
-
-    const adminList = await apiRequest(baseUrl, '/admin/claude-backend-profiles', { token: adminToken });
-    const serialized = JSON.stringify(adminList.data);
-    assert.equal(serialized.includes(secretCredentialId), false);
-    assert.equal(serialized.includes('TOP-SECRET-CIPHERTEXT'), false);
-    const invalid = await createProfile(adminToken, 'bad-secret', 'Bad secret', 'plaintext-secret-value');
-    assert.equal(invalid.status, 400);
-    assert.equal(JSON.stringify(invalid.data).includes('plaintext-secret-value'), false);
-  });
-
-  // 리뷰 지적 P0 (티켓 e616dbfc) — down() 이 `DELETE FROM claude_backend_profiles`
-  // 였을 때는 이 마이그레이션과 무관하게 존재하던 운영자 생성 전역 프로필까지
-  // 함께 지워졌고, up() 이 리맵한 핀은 복원되지 않아 dangling selector 가 남았다.
-  // 생성 provenance 가 없어 특정 행만 안전하게 식별할 수 없으므로 down() 은
-  // 명시적 no-op 이다. 그 계약을 여기서 고정한다.
-  it('마이그레이션 down() 은 기존 전역 프로필과 핀을 지우지 않는다 (no-op)', async () => {
-    const created = await createProfile(adminToken, 'operator-made-profile', 'Operator Made Profile');
-    assert.equal(created.status, 201, JSON.stringify(created.data));
-    const operatorProfile = created.data;
-
-    // 운영자 프로필을 board / ticket 에 각각 핀으로 걸어둔다 (P4c-4: Agent 핀 없음).
-    const boardRepo = ds.getRepository('Board');
-    const ticketRepo = ds.getRepository('Ticket');
-    await boardRepo.update({ id: board.id }, { cli_runtime_profile: operatorProfile.id });
-    await ticketRepo.update({ id: ticket.id }, { cli_runtime_profile: operatorProfile.id });
-
-    const profileRepo = ds.getRepository('ClaudeBackendProfile');
-    const { BackfillGlobalClaudeBackendProfiles1760000000066 } =
-      await import('../dist/database/migrations/1760000000066-BackfillGlobalClaudeBackendProfiles.js');
-    const migration = new BackfillGlobalClaudeBackendProfiles1760000000066();
-    const runner = ds.createQueryRunner();
-    await migration.up(runner);
-
-    const countAfterUp = await profileRepo.count();
-    await migration.down(runner);
-
-    assert.equal(await profileRepo.count(), countAfterUp, 'down() 이 전역 프로필 행을 지우면 안 됩니다.');
-    assert.ok(
-      await profileRepo.findOneBy({ id: operatorProfile.id }),
-      '운영자가 직접 만든 전역 프로필이 롤백으로 사라지면 안 됩니다.',
-    );
-    // 핀이 살아 있어야 dangling selector 가 생기지 않는다.
-    assert.equal((await boardRepo.findOneByOrFail({ id: board.id })).cli_runtime_profile, operatorProfile.id);
-    assert.equal((await ticketRepo.findOneByOrFail({ id: ticket.id })).cli_runtime_profile, operatorProfile.id);
-
-    // 뒤 테스트에 영향이 없도록 핀을 되돌린다.
-    for (const [repo, id] of [[boardRepo, board.id], [ticketRepo, ticket.id]]) {
-      await repo.update({ id }, { cli_runtime_profile: null });
-    }
-  });
-
+  // 1760000000066-BackfillGlobalClaudeBackendProfiles 는 보드 제거와 함께
+  // 삭제됐다(Board/Ticket 핀을 리맵하던 마이그레이션) — 그 up()/down() 계약
+  // 테스트 2건도 함께 제거.
   // P4c-4: POST /agents + POST /admin/agent-manager/agents 삭제 — 생성 시 핀 테스트 제거.
 });

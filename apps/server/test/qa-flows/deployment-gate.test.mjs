@@ -16,17 +16,17 @@
 //      the moment it lands (generation 1, server-triggered) — and the new run's
 //      server-authoritative `tested_commit`/`tested_environment` record the exact
 //      deployed commit it validated (DoD item 4 evidence).
-//   4. freshness fallback: with NO `fix-commit:` label, a deployment whose
+//   4. freshness fallback: with NO `fix-commit:` tag, a deployment whose
 //      `deployed_at` is at/after the fix's Done un-gates the rerun (deploy-ordering).
 //
-// Like qa-rerun-on-fix.test.mjs we simulate the terminal landing directly (stamp
-// terminal_entered_at + log a `moved` activity) so the service sees exactly what
-// the production move path emits.
+// Like qa-rerun-on-fix.test.mjs we simulate the done landing directly (status
+// `done` + terminal_entered_at stamp + a `moved` status activity) so the
+// service sees exactly what TicketService.move emits.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.DEPLOYMENT_GATE_PORT || '0';
@@ -38,14 +38,16 @@ const DEPLOY_HEAD = '0f1e2d3c4b5a69788796a5b4c3d2e1f000112233';
 // A HEAD that does NOT contain the fix (no matching ancestor).
 const UNRELATED_HEAD = 'ffffffffffffffffffffffffffffffffffffffff';
 
-async function moveToDone(ds, activityService, ticketId, doneColId, { restamp = true } = {}) {
+// Simulate a real done landing — the same row update + `moved` activity
+// TicketService.move produces.
+async function moveToDone(ds, activityService, ticketId, { restamp = true } = {}) {
   const tRepo = ds.getRepository('Ticket');
   if (restamp) {
-    await tRepo.update(ticketId, { column_id: doneColId, terminal_entered_at: new Date() });
+    await tRepo.update(ticketId, { status: 'done', terminal_entered_at: new Date() });
   }
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticketId, action: 'moved',
-    field_changed: 'column', new_value: 'Done', ticket_id: ticketId,
+    field_changed: 'status', old_value: 'todo', new_value: 'done', ticket_id: ticketId,
     actor_id: 'test-user', actor_name: 'Tester',
   });
 }
@@ -65,13 +67,13 @@ async function waitForRunCount(ds, scenarioId, expected, timeoutMs = 4000) {
   return rows;
 }
 
-// Append a label to a ticket without dropping the marker labels the gate needs.
-async function addLabel(ds, ticketId, label) {
+// Append a tag to a ticket without dropping the marker tags the gate needs.
+async function addTag(ds, ticketId, tag) {
   const tRepo = ds.getRepository('Ticket');
   const row = await tRepo.findOne({ where: { id: ticketId } });
-  const labels = JSON.parse(row.labels || '[]');
-  if (!labels.includes(label)) labels.push(label);
-  await tRepo.update(ticketId, { labels: JSON.stringify(labels) });
+  const tags = JSON.parse(row.tags || '[]');
+  if (!tags.includes(tag)) tags.push(tag);
+  await tRepo.update(ticketId, { tags: JSON.stringify(tags) });
 }
 
 test('deployment gate: rerun waits for the deploy that includes the fix, then fires', async (t) => {
@@ -82,7 +84,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   const ds = app.get(getDataSourceToken());
   const activityService = app.get(modules.ActivityService);
 
-  const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'deploy-gate' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'deploy-gate');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-runner' });
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
 
@@ -111,7 +113,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
     workspace_id: ws.id, name: 'Gated QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps, target_environment: 'gate-env',
     on_failure_ticket: {
-      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
+      enabled: true, dedupe: 'per_open_ticket',
       rerun_on_fix: true, max_rerun_attempts: 5, rerun_delay_seconds: 0, deployment_gate: true,
     },
   });
@@ -120,15 +122,15 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   assert.equal(sc.on_failure_ticket?.deployment_gate, true, 'deployment_gate round-trips');
 
   // ── CASE 1: fix Done with the gate ON but NO deployment → rerun is DEFERRED ───
-  step('CASE 1: fail run → fix ticket; label it fix-commit:<sha>; Done fires NO rerun (no deploy yet)');
+  step('CASE 1: fail run → fix ticket; tag it fix-commit:<sha>; Done fires NO rerun (no deploy yet)');
   const r0 = await mcp.callTool('start_qa_run', { scenario_id: sc.id });
   assert.ok(!r0?.isError && r0.run_id, `start run: ${JSON.stringify(r0)}`);
   const done0 = await completeLatest(sc.id, 'failed');
   assert.ok(done0.auto_ticket_id, 'failure files a fix ticket');
   const fixTicket = done0.auto_ticket_id;
 
-  await addLabel(ds, fixTicket, `fix-commit:${FIX_SHA}`);
-  await moveToDone(ds, activityService, fixTicket, columns.done.id);
+  await addTag(ds, fixTicket, `fix-commit:${FIX_SHA}`);
+  await moveToDone(ds, activityService, fixTicket);
   // Settle: assert the gate held (no rerun without a deployment).
   await new Promise((r) => setTimeout(r, 600));
   assert.equal((await runsForScenario(ds, sc.id)).length, 1, 'gate holds — no rerun before deploy');
@@ -159,13 +161,13 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   assert.equal(rerun.tested_commit, DEPLOY_HEAD, 'tested_commit = the live deployed commit at dispatch');
   assert.equal(rerun.tested_environment, 'gate-env', 'tested_environment recorded');
 
-  // ── CASE 4: freshness fallback — no fix-commit label, deploy-ordering un-gates ─
-  step('CASE 4: freshness fallback — no fix-commit label; a deploy at/after Done un-gates');
+  // ── CASE 4: freshness fallback — no fix-commit tag, deploy-ordering un-gates ───
+  step('CASE 4: freshness fallback — no fix-commit tag; a deploy at/after Done un-gates');
   const scF = await mcp.callTool('create_qa_scenario', {
     workspace_id: ws.id, name: 'Freshness QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps, target_environment: 'fresh-env',
     on_failure_ticket: {
-      enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
+      enabled: true, dedupe: 'per_open_ticket',
       rerun_on_fix: true, max_rerun_attempts: 5, rerun_delay_seconds: 0, deployment_gate: true,
     },
   });
@@ -173,8 +175,8 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   await mcp.callTool('start_qa_run', { scenario_id: scF.id });
   const doneF = await completeLatest(scF.id, 'failed');
   assert.ok(doneF.auto_ticket_id, 'freshness scenario files a fix ticket');
-  // NO fix-commit label this time → the gate uses deployed_at >= Done ordering.
-  await moveToDone(ds, activityService, doneF.auto_ticket_id, columns.done.id);
+  // NO fix-commit tag this time → the gate uses deployed_at >= Done ordering.
+  await moveToDone(ds, activityService, doneF.auto_ticket_id);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal((await runsForScenario(ds, scF.id)).length, 1, 'freshness gate holds before any deploy');
 

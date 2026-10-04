@@ -5,7 +5,8 @@
 //
 //   • a credential from a DIFFERENT workspace is rejected on create.
 //   • a GLOBAL credential (workspace_id=null) is accepted from any workspace.
-//   • a target_board_id from a DIFFERENT workspace is rejected on create.
+//   • a target_project_id from a DIFFERENT workspace is rejected on create;
+//     a same-workspace project + target_tags are stored and echoed back.
 //   • a channel created in workspace A never appears listing workspace B.
 //   • get() 404s for a channel that exists but in a different workspace.
 //   • the response never carries `credential_id` (see outreach.controller.ts's
@@ -16,8 +17,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { Workspace } from '../dist/entities/Workspace.js';
-import { Board } from '../dist/entities/Board.js';
-import { BoardColumn } from '../dist/entities/BoardColumn.js';
+import { Project } from '../dist/entities/Project.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
@@ -47,7 +47,7 @@ describe('Outreach channels — workspace scope contract', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, RuntimeHost, ApiKey, OutreachChannel, OutreachInboundItem], // P4c-4
+      entities: [Workspace, Project, Ticket, Comment, Credential, RuntimeHost, ApiKey, OutreachChannel, OutreachInboundItem], // P4c-4
       synchronize: true,
       logging: false,
     });
@@ -56,12 +56,12 @@ describe('Outreach channels — workspace scope contract', () => {
     const channelRepo = dataSource.getRepository(OutreachChannel);
     const itemRepo = dataSource.getRepository(OutreachInboundItem);
     const credentialRepo = dataSource.getRepository(Credential);
-    const boardRepo = dataSource.getRepository(Board);
     // pollingService is only used for computeNextPoll() here (a pure
     // date computation) — its own repo/ingest deps are never exercised.
     const pollingService = new OutreachPollingService(channelRepo, credentialRepo, {}, noopLog, noQuiesce);
-    // P4c-4: (channel, item, credential, board, dataSource, polling) — agentRepo 없음.
-    const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, boardRepo, dataSource, pollingService);
+    // (channel, item, credential, dataSource, polling) — the target project is
+    // looked up through dataSource, so no Project repo is injected.
+    const channelService = new OutreachChannelService(channelRepo, itemRepo, credentialRepo, dataSource, pollingService);
     controller = new OutreachController(channelService);
   });
 
@@ -105,19 +105,43 @@ describe('Outreach channels — workspace scope contract', () => {
     assert.equal(res.body.credential_id, undefined, 'credential_id must never appear in the response');
   });
 
-  it('rejects a target_board_id belonging to a DIFFERENT workspace', async () => {
+  it('rejects a target_project_id belonging to a DIFFERENT workspace', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
-    const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-board-a' }));
-    const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-board-b' }));
-    const boardRepo = dataSource.getRepository(Board);
-    const boardB = await boardRepo.save(boardRepo.create({ workspace_id: wsB.id, name: 'board-b' }));
+    const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-project-a' }));
+    const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-project-b' }));
+    const projectRepo = dataSource.getRepository(Project);
+    const projectB = await projectRepo.save(projectRepo.create({ workspace_id: wsB.id, name: 'project-b' }));
 
     const res = response();
     await controller.create({
-      workspace_id: wsA.id, kind: 'github', name: 'channel board scope', target_board_id: boardB.id,
+      workspace_id: wsA.id, kind: 'github', name: 'channel project scope', target_project_id: projectB.id,
     }, res);
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /target_board_id must reference a board in this workspace/);
+    assert.match(res.body.error, /target_project_id must reference a project in this workspace/);
+  });
+
+  it('stores a same-workspace target_project_id and normalized target_tags', async () => {
+    const wsRepo = dataSource.getRepository(Workspace);
+    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-project-ok' }));
+    const projectRepo = dataSource.getRepository(Project);
+    const project = await projectRepo.save(projectRepo.create({ workspace_id: ws.id, name: 'project-ok' }));
+
+    const res = response();
+    await controller.create({
+      workspace_id: ws.id, kind: 'github', name: 'channel project ok',
+      target_project_id: project.id, target_tags: [' feedback ', 'Feedback', 'mobile'],
+    }, res);
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.target_project_id, project.id);
+    assert.deepEqual(res.body.target_tags, ['feedback', 'mobile'], 'tags are trimmed and de-duplicated case-insensitively');
+    assert.equal(res.body.target_board_id, undefined, 'the board target is gone from the response');
+
+    // Clearing both on update.
+    const upd = response();
+    await controller.update(res.body.id, { workspace_id: ws.id, target_project_id: null, target_tags: [] }, upd);
+    assert.equal(upd.statusCode, 200);
+    assert.equal(upd.body.target_project_id, null);
+    assert.deepEqual(upd.body.target_tags, []);
   });
 
   it('rejects a classifier runtime with a credential from another workspace', async () => {

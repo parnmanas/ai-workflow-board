@@ -13,8 +13,8 @@
 //     computes avg cost over PRICED runs only (not all instrumented runs —
 //     the exact skew the assignee flagged before starting), ranks top_tickets
 //     by token volume, and derives estimated_saved_usd from a WINDOWED
-//     suppression-event count (not RespawnStormDetectorService's lifetime
-//     getSuppressionStats()).
+//     suppression-event count (historical activity rows — the respawn-storm
+//     detector that wrote them, and its lifetime counter, are gone).
 //   Controller wiring: the combined workflow-health rollup embeds token_usage,
 //     and the standalone /token-usage endpoint returns the same shape.
 //   일별 롤업(ticket 8d5c6f5d, 후속): SubagentMonitorService의 sweep이 곧
@@ -48,9 +48,6 @@ import {
   createWorkspace,
   createAgent,
   createApiKey,
-  createBoard,
-  createColumn,
-  createTicket,
 } from '../helpers/fixtures.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -64,8 +61,7 @@ let subCounter = 0;
 /**
  * Insert a Subagent row directly with an already-ended lifecycle + usage
  * columns. started_at/ended_at are plain @Column Date fields (not
- * @CreateDateColumn), so a historical timestamp can be written on insert —
- * mirrors seedSubagent in respawn-storm-detector.test.mjs.
+ * @CreateDateColumn), so a historical timestamp can be written on insert.
  */
 async function seedSubagent(subRepo, {
   workspaceId, ticketId = null, ticketTitle = null, role = null,
@@ -101,8 +97,7 @@ async function seedSubagent(subRepo, {
 }
 
 /** ActivityLog.created_at IS a @CreateDateColumn — insert then backdate via a
- *  separate UPDATE, same pattern as stuck-detector-hardening.test.mjs uses
- *  for Ticket.created_at. */
+ *  separate UPDATE. */
 async function seedActivityLog(activityRepo, { action, createdAt, ticketId = 'fixture', workspaceId = '' }) {
   const row = await activityRepo.save(activityRepo.create({
     entity_type: 'ticket',
@@ -293,7 +288,7 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     assert.equal(second.output_tokens, 300);
     assert.equal(second.runs, 2, 'the 30h-stale ticket-A row is NOT included — window-scoped, not all-time');
 
-    step('estimated_saved_usd derives from a WINDOWED suppression count, not the lifetime getSuppressionStats()');
+    step('estimated_saved_usd derives from a WINDOWED suppression count, not a lifetime one');
     assert.equal(stats.suppressed_attempts_in_window, 2, 'only the 2 in-window suppression events count; the 30h-old one is excluded');
     assert.ok(
       Math.abs(stats.estimated_saved_usd - (0.015 * 2)) < 1e-9,
@@ -311,71 +306,6 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     assert.deepEqual(stats.top_tickets, []);
   });
 
-  // ── Group 2.5: boardId scoping ───────────────────────────────────────────
-  // The ticket plan's stage-5 signature is `getTokenUsageStats({windowMs,
-  // boardId?})` — Group 2 above never exercises `boardId` (its rows use bare
-  // string ticket ids like 'ticket-A' with no real Ticket row behind them),
-  // so this group proves the ticket→column→board resolution independently,
-  // on a time window isolated from every other group's seeded data.
-  await t.test('getTokenUsageStats boardId scoping — same-board tickets only, zero-ticket board short-circuits', async () => {
-    const scopedNow = new Date(Date.now() - 300 * HOUR);
-
-    const boardA = await createBoard(app, getDataSourceToken, ws.id, { name: 'usage-board-a' });
-    const colA = await createColumn(app, getDataSourceToken, boardA.id, { name: 'active', position: 1, workspaceId: ws.id });
-    const ticketA = await createTicket(app, getDataSourceToken, { columnId: colA.id, workspaceId: ws.id, title: 'Board A ticket' });
-
-    const boardB = await createBoard(app, getDataSourceToken, ws.id, { name: 'usage-board-b' });
-    const colB = await createColumn(app, getDataSourceToken, boardB.id, { name: 'active', position: 1, workspaceId: ws.id });
-    const ticketB = await createTicket(app, getDataSourceToken, { columnId: colB.id, workspaceId: ws.id, title: 'Board B ticket' });
-
-    const emptyBoard = await createBoard(app, getDataSourceToken, ws.id, { name: 'usage-board-empty' });
-
-    await seedSubagent(subRepo, {
-      workspaceId: ws.id, ticketId: ticketA.id, ticketTitle: ticketA.title,
-      startedAt: new Date(scopedNow.getTime() - 1 * HOUR), endedAt: new Date(scopedNow.getTime() - 1 * HOUR + 1000),
-      usage: { input_tokens: 2000, output_tokens: 400, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0.05 },
-    });
-    await seedSubagent(subRepo, {
-      workspaceId: ws.id, ticketId: ticketB.id, ticketTitle: ticketB.title,
-      startedAt: new Date(scopedNow.getTime() - 30 * 60_000), endedAt: new Date(scopedNow.getTime() - 30 * 60_000 + 1000),
-      usage: { input_tokens: 3000, output_tokens: 600, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0.07 },
-    });
-    await seedActivityLog(activityRepo, { action: 'respawn_storm_halted', createdAt: new Date(scopedNow.getTime() - 20 * 60_000), ticketId: ticketA.id, workspaceId: ws.id });
-    await seedActivityLog(activityRepo, { action: 'comment_pingpong_suppressed', createdAt: new Date(scopedNow.getTime() - 10 * 60_000), ticketId: ticketB.id, workspaceId: ws.id });
-
-    step('boardId=A scopes totals/top_tickets/suppression count to ticketA only');
-    const statsA = await usageSvc.getTokenUsageStats({ windowMs: 24 * HOUR, now: scopedNow, boardId: boardA.id });
-    assert.equal(statsA.coverage.runs_total, 1, 'only the boardA-ticket row counts');
-    assert.equal(statsA.totals.input_tokens, 2000);
-    assert.equal(statsA.totals.output_tokens, 400);
-    assert.equal(statsA.top_tickets.length, 1);
-    assert.equal(statsA.top_tickets[0].ticket_id, ticketA.id);
-    assert.equal(statsA.suppressed_attempts_in_window, 1, 'only the ticketA suppression event counts');
-
-    step('boardId=B scopes to ticketB only');
-    const statsB = await usageSvc.getTokenUsageStats({ windowMs: 24 * HOUR, now: scopedNow, boardId: boardB.id });
-    assert.equal(statsB.coverage.runs_total, 1);
-    assert.equal(statsB.totals.input_tokens, 3000);
-    assert.equal(statsB.suppressed_attempts_in_window, 1);
-
-    step('unscoped stats over the same isolated window sum both boards');
-    const statsAll = await usageSvc.getTokenUsageStats({ windowMs: 24 * HOUR, now: scopedNow });
-    assert.equal(statsAll.coverage.runs_total, 2);
-    assert.equal(statsAll.totals.input_tokens, 2000 + 3000);
-    assert.equal(statsAll.suppressed_attempts_in_window, 2);
-
-    step('a board with zero tickets short-circuits to the null/zero shape');
-    const statsEmpty = await usageSvc.getTokenUsageStats({ windowMs: 24 * HOUR, now: scopedNow, boardId: emptyBoard.id });
-    assert.equal(statsEmpty.coverage.runs_total, 0);
-    assert.equal(statsEmpty.priced_runs, 0);
-    assert.equal(statsEmpty.avg_cost_per_run_usd_priced_only, null);
-    assert.equal(statsEmpty.estimated_saved_usd, null);
-    assert.deepEqual(statsEmpty.top_tickets, []);
-
-    await subRepo.delete({ ticket_id: ticketA.id });
-    await subRepo.delete({ ticket_id: ticketB.id });
-  });
-
   // ── Group 3: controller wiring ──────────────────────────────────────────
   await t.test('WorkflowHealthController embeds token_usage in the combined rollup and exposes it standalone', async () => {
     const controllerModule = await import(
@@ -383,24 +313,23 @@ test('Agent usage stats — end() round-trip + windowed aggregation + controller
     );
     const controller = app.get(controllerModule.WorkflowHealthController);
 
-    step('GET / (combined rollup) — token_usage riding alongside the existing sub-rollups');
+    step('GET / (combined rollup) — token_usage embedded, window_minutes mirrored at the top level');
     const rollupRes = fakeRes();
-    await controller.health(undefined, rollupRes);
+    await controller.health(rollupRes);
     assert.ok(rollupRes.body.token_usage, 'combined rollup embeds a non-null token_usage');
     assert.equal(typeof rollupRes.body.token_usage.window_minutes, 'number');
-    assert.ok('suppression_stats' in rollupRes.body, 'existing 3970db66 sub-rollups are untouched by this addition');
+    assert.equal(rollupRes.body.window_minutes, rollupRes.body.token_usage.window_minutes);
+    assert.equal(typeof rollupRes.body.generated_at, 'string');
+    // docs/tickets.md → Workflow health: storms / respawns / suppressions went
+    // away with the respawn-storm detector — only the usage rollups remain.
+    assert.ok(!('suppression_stats' in rollupRes.body), 'removed respawn-storm sub-rollups must not reappear');
 
     step('GET /token-usage (standalone) — same shape as the embedded field');
     const standaloneRes = fakeRes();
-    await controller.tokenUsage(undefined, standaloneRes);
+    await controller.tokenUsage(standaloneRes);
     assert.equal(typeof standaloneRes.body.coverage.runs_total, 'number');
     assert.equal(typeof standaloneRes.body.avg_cost_per_run_usd_priced_only === 'number' || standaloneRes.body.avg_cost_per_run_usd_priced_only === null, true);
-
-    step('GET /token-usage?board_id= (standalone) forwards board_id through to the service scoping');
-    const scopedRes = fakeRes();
-    await controller.tokenUsage('non-existent-board-id', scopedRes);
-    assert.equal(scopedRes.body.coverage.runs_total, 0, 'a board_id matching no board resolves to zero tickets, same as AgentUsageService directly');
-    assert.deepEqual(scopedRes.body.top_tickets, []);
+    assert.deepEqual(Object.keys(standaloneRes.body).sort(), Object.keys(rollupRes.body.token_usage).sort(), 'standalone and embedded token_usage share one shape');
   });
 
   // ── Group 4: sweep 시 일별 롤업 접기(ticket 8d5c6f5d) ─────────────────────

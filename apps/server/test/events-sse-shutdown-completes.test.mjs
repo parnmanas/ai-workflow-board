@@ -44,8 +44,10 @@ function buildController(EventsController) {
   const connectivity = { markConnected() {}, markDisconnected() {}, isConnected() { return false; } };
   const metrics = { register() {}, observe() {}, set() {}, gauge() {} };
 
+  const dataSource = { getRepository: () => noopRepo() };
+
   return new EventsController(
-    noopRepo(), noopRepo(), noopRepo(), noopRepo(), noopRepo(),
+    /* ticketRepo */ noopRepo(), dataSource,
     /* hostRepo (P4c-4) */ noopRepo(), /* apiKeyRepo (P4c-4) */ noopRepo(),
     authService, apiKeyService, logService, instanceRegistry, connectivity, metrics,
   );

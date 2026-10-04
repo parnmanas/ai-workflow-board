@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene,
+  createWorkspace,
   createAgent,
   runtimeHostKeyForAgent,
 } from '../helpers/fixtures.mjs';
@@ -54,7 +54,7 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   const svc = app.get(WorkspaceScheduleService);
   const ds = app.get(getDataSourceToken());
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-e2e' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'ws-sched-e2e');
   // The schedule dispatches to this agent; we also subscribe to SSE as it.
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const runtimeHostKey = runtimeHostKeyForAgent(agent.id);
@@ -65,7 +65,7 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   const sse = await openSseStream(port, runtimeHostKey);
   t.after(() => sse.close());
 
-  step('create an interval schedule (workspace-scoped, board_id=null)');
+  step('create an interval schedule (workspace-scoped)');
   const schedule = await svc.create({
     workspaceId: ws.id,
     name: 'e2e nightly task',

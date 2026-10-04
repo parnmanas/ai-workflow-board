@@ -1,56 +1,55 @@
 // QA flow: comment payload contract for the two read paths that feed the UI.
 //
 // Regression guard for ticket 898c94ba ("Comments tab renders empty bodies").
-// The bug surfaced after the board GET response was slimmed to a light comment
+// The bug surfaced after the card list response was slimmed to a light comment
 // projection (perf b3812637) and the detail panel was re-wired to fetch the
 // full thread from GET /api/tickets/:id (fix d4113f7). The contract those two
 // commits established — and which a future projection change could silently
 // re-break — is:
 //
-//   • GET /api/boards/:id   → comments are the LIGHT projection: exactly
-//     {id, ticket_id, type, status, created_at}. No content/author/author_type/
-//     parent_id/metadata. (perf must stay: card payloads never carry bodies.)
+//   • GET /api/workspaces/:wsId/tickets → card comments are the LIGHT
+//     projection: exactly {id, ticket_id, type, status, created_at}. No
+//     content/author/author_type/parent_id/metadata. (perf must stay: card
+//     payloads never carry bodies.)
 //   • GET /api/tickets/:id  → comments are the FULL thread: content + author +
 //     author_type + parent_id present, so the Comments tab can render body,
 //     author, and threading.
 //
-// If the board GET ever starts shipping `content` (perf regression) OR the
+// If the card list ever starts shipping `content` (perf regression) OR the
 // ticket GET ever stops shipping `content`/`author` (the Comments-tab
 // regression), this test fails — locking both halves of the contract.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { createWorkspace, createTicket, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_PROJECTION_PORT || '0';
 
-// Fields the light board projection is allowed to expose. Kept in lockstep
-// with BoardCardComment (apps/server/src/modules/boards/boards.controller.ts
-// and apps/client/src/types.ts).
+// Fields the light card projection is allowed to expose. Kept in lockstep
+// with TicketService.cards() (apps/server/src/modules/tickets/ticket.service.ts)
+// and the client's card comment type.
 const LIGHT_KEYS = ['id', 'ticket_id', 'type', 'status', 'created_at'];
-// Fields the board projection must NOT leak (these carry the comment body and
+// Fields the card projection must NOT leak (these carry the comment body and
 // are the perf reason the projection exists).
 const HEAVY_KEYS = ['content', 'author', 'author_type', 'parent_id', 'metadata'];
 
-test('comment payload contract: board GET light, ticket GET full thread', async (t) => {
+test('comment payload contract: card list GET light, ticket GET full thread', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => closeTestApp(app));
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'comment-projection',
-  });
+  const ws = await createWorkspace(app, getDataSourceToken, 'comment-projection');
   const user = await createUser(app, getDataSourceToken, { name: 'reader' });
   const token = app.get(AuthService).createSession(user.id);
   const authHeaders = {
     Authorization: `Bearer ${token}`,
+    'X-Workspace-Id': ws.id,
     Connection: 'close',
   };
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'projection ticket',
   });
@@ -69,25 +68,21 @@ test('comment payload contract: board GET light, ticket GET full thread', async 
     parent_id: root.id, attachment_resource_ids: '[]', metadata: '{}',
   }));
 
-  step('GET /api/boards/:id — comments must be the light projection (no bodies)');
-  const boardRes = await fetch(`http://localhost:${port}/api/boards/${board.id}`, { headers: authHeaders });
-  assert.equal(boardRes.status, 200, 'board GET should succeed');
-  const boardJson = await boardRes.json();
-  const findCard = (cols) => {
-    for (const col of cols || []) for (const tk of col.tickets || []) if (tk.id === ticket.id) return tk;
-    return null;
-  };
-  const card = findCard(boardJson.columns);
-  assert.ok(card, 'ticket card present on board');
-  const boardComments = card.comments || [];
-  assert.equal(boardComments.length, 2, 'board card carries the comment rows (count, not bodies)');
-  for (const bc of boardComments) {
-    const keys = Object.keys(bc).sort();
+  step('GET /api/workspaces/:wsId/tickets — card comments must be the light projection (no bodies)');
+  const listRes = await fetch(`http://localhost:${port}/api/workspaces/${ws.id}/tickets`, { headers: authHeaders });
+  assert.equal(listRes.status, 200, 'ticket list GET should succeed');
+  const listJson = await listRes.json();
+  const card = (listJson.tickets || []).find((tk) => tk.id === ticket.id);
+  assert.ok(card, 'ticket card present in the workspace list');
+  const cardComments = card.comments || [];
+  assert.equal(cardComments.length, 2, 'card carries the comment rows (count, not bodies)');
+  for (const cc of cardComments) {
+    const keys = Object.keys(cc).sort();
     assert.deepEqual(keys, [...LIGHT_KEYS].sort(),
-      `board comment must expose ONLY the light projection keys, got: ${keys.join(',')}`);
+      `card comment must expose ONLY the light projection keys, got: ${keys.join(',')}`);
     for (const heavy of HEAVY_KEYS) {
-      assert.equal(bc[heavy], undefined,
-        `board comment must not leak heavy field "${heavy}" (perf regression)`);
+      assert.equal(cc[heavy], undefined,
+        `card comment must not leak heavy field "${heavy}" (perf regression)`);
     }
   }
 

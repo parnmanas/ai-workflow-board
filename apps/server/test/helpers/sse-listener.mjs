@@ -49,10 +49,9 @@ async function* parseSse(response) {
  * waits for future frames if nothing matches yet. Keepalive `ping` and
  * `server_meta` frames are silently dropped (they're not meaningful to tests).
  */
-export async function openSseStream(port, token, { boardId, onFrame } = {}) {
+export async function openSseStream(port, token, { onFrame } = {}) {
   const abort = new AbortController();
   const qs = new URLSearchParams({ token });
-  if (boardId) qs.set('boardId', boardId);
   const res = await fetch(`http://localhost:${port}/api/events/stream?${qs}`, {
     headers: { Accept: 'text/event-stream' },
     signal: abort.signal,

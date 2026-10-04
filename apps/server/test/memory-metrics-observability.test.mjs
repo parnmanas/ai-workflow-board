@@ -128,8 +128,10 @@ test('static: every ticket-named collection holder registers a gauge', () => {
     [['services', 'subagent-monitor.service.ts'], "register('subagent.appendLocks'"],
     // Added for ticket d1fc18ac — secondary server-side stale-key leaks; the
     // size gauges are how prod confirms the eviction/prune fixes hold.
+    // (TicketSupervisorService and its `ticketSupervisor.state` gauge went away
+    // with the board removal — the supervisor is now part of
+    // TicketDispatchService, docs/tickets.md.)
     [['modules', 'agents', 'agent-status.service.ts'], "register('agentStatus.state'"],
-    [['modules', 'agents', 'ticket-supervisor.service.ts'], "register('ticketSupervisor.state'"],
   ];
   for (const [relParts, needle] of cases) {
     assert.ok(

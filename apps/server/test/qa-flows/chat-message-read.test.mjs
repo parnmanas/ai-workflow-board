@@ -16,7 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  setupKanbanScene,
+  createWorkspace,
   createAgent,
   createApiKey,
 } from '../helpers/fixtures.mjs';
@@ -75,7 +75,7 @@ test('MCP get_chat_room_messages + search_chat_messages contract', async (t) => 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-read' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-read');
 
   const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'member', runtime: true });
   const memberKey = await createApiKey(app, getDataSourceToken, member.id, {

@@ -114,7 +114,6 @@ function makeSchedule(over = {}) {
   return {
     id: 'sch-1',
     workspace_id: 'ws-1',
-    board_id: null,
     name: 'nightly',
     scope: 'all',
     scenario_ids: null,
@@ -135,12 +134,12 @@ function svcWith(rows, batches = [], qaRunServiceOpts = {}) {
   const scheduleRepo = makeScheduleRepo(rows);
   const batchRepo = makeBatchRepo(batches);
   const qaRunService = makeQaRunService(batches, qaRunServiceOpts);
-  const svc = new QaScheduleService(scheduleRepo, batchRepo, qaRunService, noopLog, {}, noQuiesce);
+  const svc = new QaScheduleService(scheduleRepo, batchRepo, qaRunService, noopLog, noQuiesce);
   return { svc, scheduleRepo, batchRepo, qaRunService };
 }
 
 test("scope='all' due schedule dispatches startBatch({all}) and advances next_run_at", async () => {
-  const sch = makeSchedule({ scope: 'all', board_id: 'board-9' });
+  const sch = makeSchedule({ scope: 'all' });
   const { svc, qaRunService } = svcWith([sch]);
 
   const { dispatched, skipped } = await svc.runOnce(NOW);
@@ -150,7 +149,6 @@ test("scope='all' due schedule dispatches startBatch({all}) and advances next_ru
   assert.equal(qaRunService.calls.length, 1, 'startBatch called once');
   const { args } = qaRunService.calls[0];
   assert.equal(args.all, true, 'scope=all → all:true');
-  assert.equal(args.boardId, undefined, 'legacy Board ownership is not propagated');
   assert.equal(args.scenarioIds, undefined, 'no explicit id list for scope=all');
   assert.equal(args.triggeredByType, 'system');
   assert.equal(sch.last_batch_id, 'batch-1', 'last_batch_id stamped');

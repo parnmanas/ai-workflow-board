@@ -1,6 +1,8 @@
 // Behavioral tests for OutreachResolveNotifierService (ticket d86d0c24 step 8)
 // against a real in-memory sqljs DataSource. `_handleActivity` is called
-// directly with a plain {action, ticket_id} object — the same "call the
+// directly with the plain activity object TicketService.move logs for a status
+// change into done ({action:'moved', field_changed:'status', new_value:'done',
+// ticket_id}) — the same "call the
 // private handler directly, the event-bus subscription is just wiring"
 // convention this codebase already uses (see supervisor-output-liveness.test.mjs's
 // `service._tick()`, outreach-publish-behavior.test.mjs's `svc._onDeploymentReported()`).
@@ -12,6 +14,8 @@
 //     fires a second reply — idempotency rides the OutreachOutboundPost
 //     (channel_id, dedupe_key) unique index, not a ticket column.
 //   • a Done ticket with NO outreach backlink is a total no-op.
+//   • only a status change INTO done triggers it: a 'moved' to another status,
+//     or a done entry the ticket has since been moved back out of, is a no-op.
 //   • publish_policy='off' never creates a ledger row.
 //   • this hook's idempotency is independent of `Ticket.on_done_dispatched_at`
 //     (the on-ticket-done Action hook's OWN claim column, C3) — pre-setting
@@ -23,8 +27,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataSource } from 'typeorm';
 import { Workspace } from '../dist/entities/Workspace.js';
-import { Board } from '../dist/entities/Board.js';
-import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { Ticket } from '../dist/entities/Ticket.js';
 import { Comment } from '../dist/entities/Comment.js';
 import { Credential } from '../dist/entities/Credential.js';
@@ -41,7 +43,7 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 async function setupDb() {
   const dataSource = new DataSource({
     type: 'sqljs',
-    entities: [Workspace, Board, BoardColumn, Ticket, Comment, Credential, Deployment, OutreachChannel, OutreachInboundItem, OutreachOutboundPost],
+    entities: [Workspace, Ticket, Comment, Credential, Deployment, OutreachChannel, OutreachInboundItem, OutreachOutboundPost],
     synchronize: true,
     logging: false,
   });
@@ -49,27 +51,20 @@ async function setupDb() {
   return dataSource;
 }
 
-async function seedTerminalColumn(dataSource) {
+async function seedWorkspace(dataSource) {
   const wsRepo = dataSource.getRepository(Workspace);
   await wsRepo.save(wsRepo.create({ id: 'ws-1', name: 'ws-1' }));
-  const boardRepo = dataSource.getRepository(Board);
-  const board = await boardRepo.save(boardRepo.create({ workspace_id: 'ws-1', name: 'board' }));
-  const colRepo = dataSource.getRepository(BoardColumn);
-  const doneCol = await colRepo.save(colRepo.create({
-    board_id: board.id, workspace_id: 'ws-1', name: 'Done', position: 1, kind: 'terminal', is_terminal: true,
-  }));
-  return { board, doneCol };
 }
 
-async function seedDoneTicket(dataSource, doneCol, over = {}) {
+async function seedDoneTicket(dataSource, over = {}) {
   const repo = dataSource.getRepository(Ticket);
   return repo.save(repo.create({
-    column_id: doneCol.id,
+    status: 'done',
     workspace_id: 'ws-1',
     title: 'Fixed the reported bug',
     description: 'desc',
     priority: 'medium',
-    labels: '[]',
+    tags: '[]',
     channel_ids: '[]',
     position: 0,
     source_kind: 'outreach',
@@ -81,10 +76,15 @@ async function seedDoneTicket(dataSource, doneCol, over = {}) {
   }));
 }
 
+/** The ActivityLog TicketService.move writes when a ticket enters done. */
+function movedToDone(ticketId, from = 'review') {
+  return { action: 'moved', field_changed: 'status', old_value: from, new_value: 'done', ticket_id: ticketId };
+}
+
 async function seedCredential(dataSource) {
   const repo = dataSource.getRepository(Credential);
   return repo.save(repo.create({
-    workspace_id: null, board_id: null, name: 'bot', description: '', provider: 'reddit',
+    workspace_id: null, name: 'bot', description: '', provider: 'reddit',
     encrypted_data: JSON.stringify({ token: 'refresh-tok', client_id: 'cid', client_secret: 'csecret' }),
   }));
 }
@@ -93,7 +93,7 @@ async function seedChannel(dataSource, credentialId, over = {}) {
   const repo = dataSource.getRepository(OutreachChannel);
   return repo.save(repo.create({
     workspace_id: 'ws-1', kind: 'reddit', name: 'ch', targets: ['awb'], credential_id: credentialId,
-    enabled: true, publish_policy: 'approval', rate_limit_per_hour: 0, target_board_id: null,
+    enabled: true, publish_policy: 'approval', rate_limit_per_hour: 0, target_tags: [], target_project_id: null,
     poll_interval_ms: 3600000, poll_cron: null, next_poll_at: null, last_poll_at: null,
     since_cursor: '', classify_threshold: 70, deploy_post_mode: 'off', reply_thread_ref: null,
     auto_reuse_window_days: 30,
@@ -115,7 +115,7 @@ async function seedInboundItem(dataSource, channel, ticketId, over = {}) {
 async function seedGithubCredential(dataSource) {
   const repo = dataSource.getRepository(Credential);
   return repo.save(repo.create({
-    workspace_id: null, board_id: null, name: 'gh-bot', description: '', provider: 'github',
+    workspace_id: null, name: 'gh-bot', description: '', provider: 'github',
     encrypted_data: JSON.stringify({ token: 'ghp_test123' }),
   }));
 }
@@ -189,16 +189,16 @@ function installFakeGithubFetch() {
 test('publish_policy=approval: a Done backlinked ticket creates a draft reply, no external call', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval' });
-    const ticket = await seedDoneTicket(dataSource, doneCol);
+    const ticket = await seedDoneTicket(dataSource);
     await seedInboundItem(dataSource, channel, ticket.id);
     const { notifier } = makeServices(dataSource);
 
     const fake = installFakeRedditFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
@@ -215,16 +215,16 @@ test('publish_policy=approval: a Done backlinked ticket creates a draft reply, n
 test('publish_policy=auto: a Done backlinked ticket replies immediately, exactly one external call', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
-    const ticket = await seedDoneTicket(dataSource, doneCol);
+    const ticket = await seedDoneTicket(dataSource);
     await seedInboundItem(dataSource, channel, ticket.id);
     const { notifier } = makeServices(dataSource);
 
     const fake = installFakeRedditFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
@@ -238,17 +238,17 @@ test('publish_policy=auto: a Done backlinked ticket replies immediately, exactly
 test('re-entering Done for the SAME backlinked item never fires a second reply', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
-    const ticket = await seedDoneTicket(dataSource, doneCol);
+    const ticket = await seedDoneTicket(dataSource);
     await seedInboundItem(dataSource, channel, ticket.id);
     const { notifier } = makeServices(dataSource);
 
     const fake = installFakeRedditFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id }); // duplicate 'moved' for the same entry
+      await notifier._handleActivity(movedToDone(ticket.id));
+      await notifier._handleActivity(movedToDone(ticket.id)); // duplicate 'moved' for the same entry
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
@@ -260,29 +260,99 @@ test('re-entering Done for the SAME backlinked item never fires a second reply',
 test('a Done ticket with NO outreach backlink is a total no-op', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
-    const ticket = await seedDoneTicket(dataSource, doneCol);
+    await seedWorkspace(dataSource);
+    const ticket = await seedDoneTicket(dataSource);
     // No OutreachInboundItem row references this ticket.
     const { notifier } = makeServices(dataSource);
 
-    await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+    await notifier._handleActivity(movedToDone(ticket.id));
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
     assert.equal(rows.length, 0);
   } finally { await dataSource.destroy(); }
 });
 
-test('publish_policy=off never creates a ledger row', async () => {
+test('a moved activity into a status other than done is a no-op, even for a done-looking backlinked ticket', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedCredential(dataSource);
-    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'off' });
-    const ticket = await seedDoneTicket(dataSource, doneCol);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
+    const ticket = await seedDoneTicket(dataSource);
     await seedInboundItem(dataSource, channel, ticket.id);
     const { notifier } = makeServices(dataSource);
 
-    await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+    const fake = installFakeRedditFetch();
+    try {
+      await notifier._handleActivity({ action: 'moved', field_changed: 'status', old_value: 'in_progress', new_value: 'review', ticket_id: ticket.id });
+      await notifier._handleActivity({ action: 'updated', field_changed: 'title', new_value: 'done', ticket_id: ticket.id });
+    } finally { restoreFetch(); }
+
+    assert.equal((await dataSource.getRepository(OutreachOutboundPost).find()).length, 0);
+    assert.equal(fake.callCount(), 0);
+  } finally { await dataSource.destroy(); }
+});
+
+test('a done entry the ticket has since been moved back out of is a no-op (status is re-read, not trusted from the activity)', async () => {
+  const dataSource = await setupDb();
+  try {
+    await seedWorkspace(dataSource);
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'auto' });
+    // Reopened: TicketService.move clears terminal_entered_at on leaving done.
+    const ticket = await seedDoneTicket(dataSource, { status: 'todo', terminal_entered_at: null });
+    await seedInboundItem(dataSource, channel, ticket.id);
+    const { notifier } = makeServices(dataSource);
+
+    const fake = installFakeRedditFetch();
+    try {
+      await notifier._handleActivity(movedToDone(ticket.id));
+    } finally { restoreFetch(); }
+
+    assert.equal((await dataSource.getRepository(OutreachOutboundPost).find()).length, 0);
+    assert.equal(fake.callCount(), 0);
+  } finally { await dataSource.destroy(); }
+});
+
+test('reconcile skips a backlinked github candidate whose ticket is not done', async () => {
+  const dataSource = await setupDb();
+  try {
+    await seedWorkspace(dataSource);
+    const cred = await seedGithubCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, {
+      kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
+    });
+    const fixSha = 'b7'.repeat(20);
+    const ticket = await seedDoneTicket(dataSource, {
+      status: 'in_progress', terminal_entered_at: null, tags: JSON.stringify([`fix-commit:${fixSha}`]),
+    });
+    await seedInboundItem(dataSource, channel, ticket.id, {
+      external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
+    });
+    await seedDeployment(dataSource, { environment: 'prod', deployed_at: new Date('2026-06-25T13:00:00Z'), deployed_commit_sha: fixSha });
+    const { notifier } = makeServices(dataSource);
+
+    const fake = installFakeGithubFetch();
+    try {
+      await notifier._reconcileGithubResolves();
+    } finally { restoreFetch(); }
+
+    assert.equal((await dataSource.getRepository(OutreachOutboundPost).find()).length, 0, 'deployment evidence alone never resolves a ticket that is not done');
+    assert.equal(fake.comment, 0);
+  } finally { await dataSource.destroy(); }
+});
+
+test('publish_policy=off never creates a ledger row', async () => {
+  const dataSource = await setupDb();
+  try {
+    await seedWorkspace(dataSource);
+    const cred = await seedCredential(dataSource);
+    const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'off' });
+    const ticket = await seedDoneTicket(dataSource);
+    await seedInboundItem(dataSource, channel, ticket.id);
+    const { notifier } = makeServices(dataSource);
+
+    await notifier._handleActivity(movedToDone(ticket.id));
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
     assert.equal(rows.length, 0);
@@ -292,16 +362,16 @@ test('publish_policy=off never creates a ledger row', async () => {
 test('idempotency is independent of Ticket.on_done_dispatched_at — the on-done Action hook cannot starve this service', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, { publish_policy: 'approval' });
     // Simulate the on-ticket-done Action hook having ALREADY claimed this
     // terminal entry via its own column (C3's exact race concern).
-    const ticket = await seedDoneTicket(dataSource, doneCol, { on_done_dispatched_at: new Date('2026-06-25T12:00:00Z') });
+    const ticket = await seedDoneTicket(dataSource, { on_done_dispatched_at: new Date('2026-06-25T12:00:00Z') });
     await seedInboundItem(dataSource, channel, ticket.id);
     const { notifier } = makeServices(dataSource);
 
-    await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+    await notifier._handleActivity(movedToDone(ticket.id));
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
     assert.equal(rows.length, 1, 'this hook fires regardless of on_done_dispatched_at state');
@@ -309,18 +379,18 @@ test('idempotency is independent of Ticket.on_done_dispatched_at — the on-done
 });
 
 // Deployment-fact gate (ticket 31e7cd24) — kind='github' only. Reddit's
-// existing "fire on terminal arrival alone" behavior (all tests above) is
+// existing "fire on reaching done alone" behavior (all tests above) is
 // verified unchanged since none of them set target_environment.
 
 test('github kind, target_environment configured, NO matching deployment yet: no comment is posted (evidence gate holds it pending)', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
-    const ticket = await seedDoneTicket(dataSource, doneCol);
+    const ticket = await seedDoneTicket(dataSource);
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
@@ -328,7 +398,7 @@ test('github kind, target_environment configured, NO matching deployment yet: no
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
@@ -340,19 +410,19 @@ test('github kind, target_environment configured, NO matching deployment yet: no
 // Review round 1, point 1 — regression: a freshness-only match (some
 // deployment landed after Done) must NEVER be accepted as evidence, since it
 // only proves timing, not that the deployment actually includes this
-// ticket's fix. Without a fix-commit:<sha> label, this must stay pending
+// ticket's fix. Without a fix-commit:<sha> tag, this must stay pending
 // forever — not just on the first _handleActivity call, but also across
 // every later deployment-event reconcile pass (the exact misattribution the
 // review caught: an unrelated deployment must not get cited as "processed").
-test('github kind, NO fix-commit label: a deployment at/after Done does NOT satisfy the gate — freshness-only timing is never accepted as evidence', async () => {
+test('github kind, NO fix-commit tag: a deployment at/after Done does NOT satisfy the gate — freshness-only timing is never accepted as evidence', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
-    const ticket = await seedDoneTicket(dataSource, doneCol, { terminal_entered_at: new Date('2026-06-25T12:00:00Z') });
+    const ticket = await seedDoneTicket(dataSource, { terminal_entered_at: new Date('2026-06-25T12:00:00Z') });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
@@ -361,30 +431,30 @@ test('github kind, NO fix-commit label: a deployment at/after Done does NOT sati
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
       let rows = await dataSource.getRepository(OutreachOutboundPost).find();
-      assert.equal(rows.length, 0, 'no fix-commit label — an unrelated-looking deployment must not be cited as evidence');
+      assert.equal(rows.length, 0, 'no fix-commit tag — an unrelated-looking deployment must not be cited as evidence');
 
       // A LATER deployment event for the same environment must not retroactively
       // accept the same unproven timing match either.
       await notifier._onDeploymentReported({ workspace_id: 'ws-1', environment: 'prod', deployed_commit_sha: 'b'.repeat(40) });
       rows = await dataSource.getRepository(OutreachOutboundPost).find();
-      assert.equal(rows.length, 0, 'still no ledger row after a reconcile pass — remains a human-confirm candidate forever without a fix-commit label');
+      assert.equal(rows.length, 0, 'still no ledger row after a reconcile pass — remains a human-confirm candidate forever without a fix-commit tag');
       assert.equal(fake.comment, 0);
     } finally { restoreFetch(); }
   } finally { await dataSource.destroy(); }
 });
 
-test('github kind, fix-commit label + matching ancestor_shas satisfies the gate immediately (no freshness fallback needed)', async () => {
+test('github kind, fix-commit tag + matching ancestor_shas satisfies the gate immediately (no freshness fallback needed)', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
     const fixSha = 'c'.repeat(40);
-    const ticket = await seedDoneTicket(dataSource, doneCol, { labels: JSON.stringify([`fix-commit:${fixSha}`]) });
+    const ticket = await seedDoneTicket(dataSource, { tags: JSON.stringify([`fix-commit:${fixSha}`]) });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
     });
@@ -398,7 +468,7 @@ test('github kind, fix-commit label + matching ancestor_shas satisfies the gate 
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
@@ -409,17 +479,17 @@ test('github kind, fix-commit label + matching ancestor_shas satisfies the gate 
   } finally { await dataSource.destroy(); }
 });
 
-test('github kind: a deployment reported AFTER the ticket reached Done fires the previously-pending resolve once its sha matches the fix-commit label', async () => {
+test('github kind: a deployment reported AFTER the ticket reached Done fires the previously-pending resolve once its sha matches the fix-commit tag', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
     const fixSha = 'e'.repeat(40);
-    const ticket = await seedDoneTicket(dataSource, doneCol, {
-      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    const ticket = await seedDoneTicket(dataSource, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), tags: JSON.stringify([`fix-commit:${fixSha}`]),
     });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
@@ -428,7 +498,7 @@ test('github kind: a deployment reported AFTER the ticket reached Done fires the
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id }); // no deployment yet — stays a standing candidate
+      await notifier._handleActivity(movedToDone(ticket.id)); // no deployment yet — stays a standing candidate
       let rows = await dataSource.getRepository(OutreachOutboundPost).find();
       assert.equal(rows.length, 0, 'still no evidence yet');
 
@@ -450,14 +520,14 @@ test('github kind: a deployment reported AFTER the ticket reached Done fires the
 test('restart durability: a BRAND-NEW service instance (no prior _handleActivity call) still finds and fires an already-satisfied candidate via reconcile', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
     const fixSha = 'f1'.repeat(20);
-    const ticket = await seedDoneTicket(dataSource, doneCol, {
-      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    const ticket = await seedDoneTicket(dataSource, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), tags: JSON.stringify([`fix-commit:${fixSha}`]),
     });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
@@ -476,7 +546,7 @@ test('restart durability: a BRAND-NEW service instance (no prior _handleActivity
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();
-    assert.equal(rows.length, 1, 'boot-time reconcile found the terminal+backlinked+already-satisfied candidate straight from the DB');
+    assert.equal(rows.length, 1, 'boot-time reconcile found the done+backlinked+already-satisfied candidate straight from the DB');
     assert.equal(rows[0].status, 'published');
     assert.equal(fake.comment, 1);
   } finally { await dataSource.destroy(); }
@@ -485,14 +555,14 @@ test('restart durability: a BRAND-NEW service instance (no prior _handleActivity
 test('reconcile is idempotent: calling it twice against an already-published item makes no second external call', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod',
     });
     const fixSha = 'a3'.repeat(20);
-    const ticket = await seedDoneTicket(dataSource, doneCol, {
-      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    const ticket = await seedDoneTicket(dataSource, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), tags: JSON.stringify([`fix-commit:${fixSha}`]),
     });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
@@ -516,14 +586,14 @@ test('reconcile is idempotent: calling it twice against an already-published ite
 test('close_on_resolve=false (default): the issue is never closed even under publish_policy=auto', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod', close_on_resolve: false,
     });
     const fixSha = 'f'.repeat(40);
-    const ticket = await seedDoneTicket(dataSource, doneCol, {
-      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    const ticket = await seedDoneTicket(dataSource, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), tags: JSON.stringify([`fix-commit:${fixSha}`]),
     });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
@@ -533,7 +603,7 @@ test('close_on_resolve=false (default): the issue is never closed even under pub
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     assert.equal(fake.comment, 1, 'the resolve reply was posted — evidence gate satisfied');
@@ -544,14 +614,14 @@ test('close_on_resolve=false (default): the issue is never closed even under pub
 test('close_on_resolve=true + publish_policy=auto: the issue is closed after a successful resolve reply', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'auto', target_environment: 'prod', close_on_resolve: true,
     });
     const fixSha = 'a1'.repeat(20);
-    const ticket = await seedDoneTicket(dataSource, doneCol, {
-      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    const ticket = await seedDoneTicket(dataSource, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), tags: JSON.stringify([`fix-commit:${fixSha}`]),
     });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
@@ -561,7 +631,7 @@ test('close_on_resolve=true + publish_policy=auto: the issue is closed after a s
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     assert.equal(fake.comment, 1);
@@ -572,14 +642,14 @@ test('close_on_resolve=true + publish_policy=auto: the issue is closed after a s
 test('close_on_resolve=true but publish_policy=approval: the draft is never auto-published, so close is never called either', async () => {
   const dataSource = await setupDb();
   try {
-    const { doneCol } = await seedTerminalColumn(dataSource);
+    await seedWorkspace(dataSource);
     const cred = await seedGithubCredential(dataSource);
     const channel = await seedChannel(dataSource, cred.id, {
       kind: 'github', targets: ['x/y'], publish_policy: 'approval', target_environment: 'prod', close_on_resolve: true,
     });
     const fixSha = 'a2'.repeat(20);
-    const ticket = await seedDoneTicket(dataSource, doneCol, {
-      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), labels: JSON.stringify([`fix-commit:${fixSha}`]),
+    const ticket = await seedDoneTicket(dataSource, {
+      terminal_entered_at: new Date('2026-06-25T12:00:00Z'), tags: JSON.stringify([`fix-commit:${fixSha}`]),
     });
     await seedInboundItem(dataSource, channel, ticket.id, {
       external_item_id: 'issue:x/y#1', permalink: 'https://github.com/x/y/issues/1',
@@ -589,7 +659,7 @@ test('close_on_resolve=true but publish_policy=approval: the draft is never auto
 
     const fake = installFakeGithubFetch();
     try {
-      await notifier._handleActivity({ action: 'moved', ticket_id: ticket.id });
+      await notifier._handleActivity(movedToDone(ticket.id));
     } finally { restoreFetch(); }
 
     const rows = await dataSource.getRepository(OutreachOutboundPost).find();

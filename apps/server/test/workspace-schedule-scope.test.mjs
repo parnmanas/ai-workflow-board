@@ -1,9 +1,9 @@
-// board_id는 65adf0b(카탈로그 board→workspace 승격)에서 폐지된 레거시 호환
-// 컬럼으로, 부트 마이그레이션 이후에는 항상 NULL이어야 한다(WorkspaceSchedule
-// 엔티티 주석 참고). workspace-schedule-behavior.test.mjs는 스텁 기반으로
-// dispatch 시 board_id가 전파되지 않음만 검증하므로, 이 파일은 실제
-// DataSource로 (1) 신규 board-scope 스케줄 생성 거부, (2) list()의 legacy 행
-// 배제를 검증한다.
+// Workspace schedules are Workspace-scoped. The Board layer (and the legacy
+// board_id column it left behind) is gone with the board-less ticket model
+// (docs/tickets.md); workspace-schedule-behavior.test.mjs covers the tick and
+// dispatch with stubs, so this file checks the Workspace boundary against a real
+// DataSource: (1) create() refuses a schedule without a workspace, (2) list()
+// and get() never cross into another Workspace.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -13,8 +13,9 @@ import { WorkspaceScheduleService } from '../dist/modules/workspace-schedule/wor
 
 const noopLog = { info() {}, warn() {}, error() {} };
 const noQuiesce = { isQuiesced: async () => false };
+const TARGET_RUNTIME = { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
 
-describe('Workspace Schedule board-scope cleanup', () => {
+describe('Workspace Schedule workspace scope', () => {
   let dataSource;
   let service;
 
@@ -27,52 +28,50 @@ describe('Workspace Schedule board-scope cleanup', () => {
     });
     await dataSource.initialize();
     const scheduleRepo = dataSource.getRepository(WorkspaceSchedule);
-    const agentRepo = { findOne: async () => ({ id: 'agent-1', workspace_id: null }) };
-    // P4c-4: hostRepo 주입 자리 (agentRepo 다음).
-    service = new WorkspaceScheduleService(scheduleRepo, {}, {}, agentRepo, {}, {}, noopLog, {}, noQuiesce);
+    // P4c-4: target_runtime 의 manager_agent_id 는 Host 행으로 해소된다.
+    const hostRepo = { findOne: async () => ({ id: 'agent-1', workspace_id: null }) };
+    // (schedule, room, participant, host, dataSource, messaging, log, quiesce, action, actions)
+    service = new WorkspaceScheduleService(scheduleRepo, {}, {}, hostRepo, {}, {}, noopLog, noQuiesce, {}, {});
   });
 
   after(async () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  it('rejects creating a new Board-scoped Workspace schedule', async () => {
+  it('rejects creating a Workspace schedule without a workspace', async () => {
     await assert.rejects(
       service.create({
-        workspaceId: 'workspace-a',
-        boardId: 'board-a',
-        name: 'Board schedule',
-        targetRuntime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
+        name: 'Unscoped schedule',
+        targetRuntime: TARGET_RUNTIME,
         taskPrompt: 'do the thing',
         intervalMs: 60_000,
       }),
-      /no longer supported/,
+      /workspace_id is required/,
     );
   });
 
-  it('excludes a legacy Board-scoped Workspace schedule row from list() regardless of scope', async () => {
-    const repo = dataSource.getRepository(WorkspaceSchedule);
-    await repo.save(repo.create({
-      workspace_id: 'workspace-a',
-      board_id: 'board-a',
-      name: 'Legacy board-only schedule',
-      target_agent_id: 'agent-1',
-      task_prompt: 'do the thing',
-      cron: null,
-      interval_ms: 60_000,
-      enabled: true,
-    }));
-    await service.create({
+  it('list() and get() stay inside the requested Workspace', async () => {
+    const mine = await service.create({
       workspaceId: 'workspace-a',
-      name: 'Workspace schedule',
-      targetRuntime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
+      name: 'Workspace A schedule',
+      targetRuntime: TARGET_RUNTIME,
+      taskPrompt: 'do the thing',
+      intervalMs: 60_000,
+    });
+    const theirs = await service.create({
+      workspaceId: 'workspace-b',
+      name: 'Workspace B schedule',
+      targetRuntime: TARGET_RUNTIME,
       taskPrompt: 'do the thing',
       intervalMs: 60_000,
     });
 
     const rows = await service.list('workspace-a');
-    assert.equal(rows.some(row => row.name === 'Legacy board-only schedule'), false);
-    assert.ok(rows.every(row => row.board_id === null));
-    assert.ok(rows.some(row => row.name === 'Workspace schedule'));
+    assert.ok(rows.some(row => row.id === mine.id));
+    assert.equal(rows.some(row => row.id === theirs.id), false, 'another Workspace schedule never leaks in');
+    assert.ok(rows.every(row => row.workspace_id === 'workspace-a'));
+
+    assert.equal((await service.get(mine.id, 'workspace-a')).id, mine.id);
+    await assert.rejects(service.get(theirs.id, 'workspace-a'), /not found in workspace/);
   });
 });

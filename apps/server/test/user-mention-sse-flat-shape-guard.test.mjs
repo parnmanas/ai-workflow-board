@@ -7,7 +7,7 @@
 //   **봉투 전체**(`{ event_type, scope, payload, timestamp }`)를 받는다.
 //
 //   `user_mention` 의 유일한 소비자는 웹 UI(useMentions / NotificationContext)이고
-//   둘 다 `data.mention_id`, `data.source_type`, `data.preview`, `data.board_id` …
+//   둘 다 `data.mention_id`, `data.source_type`, `data.preview`, `data.ticket_id` …
 //   를 **top-level 로** 읽는다. flatten 이 빠져 있던 동안 라이브 멘션은 모든 필드가
 //   undefined 인 채로 인박스에 꽂혔다:
 //     - 행 표시가 "someone · chat · Invalid Date · (no preview)"
@@ -21,6 +21,9 @@
 //
 // 이 가드는 registry 정의를 직접 실행해 실제 wire 객체를 만들고, 봉투 키가 아니라
 // payload 필드가 top-level 에 있는지 확인한다.
+//
+// 보드가 없어진 뒤(docs/tickets.md) 코멘트 멘션의 딥링크는 워크스페이스 + ticket_id
+// 만으로 만든다(`/ws/<wsId>/tickets?ticket=…`) — payload 에 board_id 는 더 이상 없다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,7 +49,6 @@ test('flatten 결과는 웹 UI 가 읽는 필드를 top-level 로 노출한다',
     source_type: 'comment',
     source_id: 'c-1',
     ticket_id: 't-1',
-    board_id: 'b-1',
     room_id: null,
     actor_id: 'u-2',
     actor_type: 'user',
@@ -70,7 +72,6 @@ test('flatten 결과는 웹 UI 가 읽는 필드를 top-level 로 노출한다',
     'source_type',
     'source_id',
     'ticket_id',
-    'board_id',
     'room_id',
     'actor_name',
     'preview',
@@ -81,11 +82,11 @@ test('flatten 결과는 웹 UI 가 읽는 필드를 top-level 로 노출한다',
 
   assert.equal(frame.mention_id, 'm-1');
   assert.equal(frame.source_type, 'comment');
-  assert.equal(frame.board_id, 'b-1');
+  assert.equal(frame.ticket_id, 't-1');
   assert.equal(frame.preview, '@[user:u-1|나] 확인 부탁');
 });
 
-test('코멘트 멘션은 board_id 를, 채팅 멘션은 room_id 를 실어 보낸다 (딥링크 분기 근거)', () => {
+test('코멘트 멘션은 ticket_id 를, 채팅 멘션은 room_id 를 실어 보낸다 (딥링크 분기 근거)', () => {
   const chat = def.flatten({
     ...def.map({
       mention_id: 'm-2',
@@ -94,7 +95,6 @@ test('코멘트 멘션은 board_id 를, 채팅 멘션은 room_id 를 실어 보�
       source_type: 'chat_message',
       source_id: 'msg-1',
       ticket_id: null,
-      board_id: null,
       room_id: 'r-1',
       actor_id: 'u-2',
       actor_type: 'user',
@@ -108,5 +108,5 @@ test('코멘트 멘션은 board_id 를, 채팅 멘션은 room_id 를 실어 보�
 
   assert.equal(chat.source_type, 'chat_message');
   assert.equal(chat.room_id, 'r-1');
-  assert.equal(chat.board_id, null);
+  assert.equal(chat.ticket_id, null);
 });

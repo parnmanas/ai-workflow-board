@@ -35,13 +35,17 @@ function makeService({ schedule, action, dispatchImpl, saved = [] }) {
     create() { throw new Error('Action 형태는 참가자를 직접 앉히면 안 된다'); },
     save() { throw new Error('Action 형태는 참가자를 직접 앉히면 안 된다'); },
   };
-  const agentRepo = { findOne: async () => { throw new Error('Action 형태는 대상 에이전트를 직접 찾지 않는다'); } };
+  // 인라인 경로는 dataSource 로 대상 identity 를 해소한다 — Action 형태는 거기에
+  // 닿으면 안 된다.
+  const dataSource = { getRepository() { throw new Error('Action 형태는 대상 에이전트를 직접 찾지 않는다'); } };
   const messaging = { sendMessage() { throw new Error('Action 형태는 메시지를 직접 보내지 않는다'); } };
   const actions = { dispatch: dispatchImpl ?? (async () => { throw new Error('dispatch not stubbed'); }) };
 
+  // (schedule, room, participant, host, dataSource, messaging, log, quiesce,
+  // action, actions).
   const svc = new WorkspaceScheduleService(
-    scheduleRepo, roomRepo, participantRepo, agentRepo, /* hostRepo (P4c-4) */ {}, messaging, logStub,
-    /* boardRepo */ {}, notQuiesced, actionRepo, actions,
+    scheduleRepo, roomRepo, participantRepo, /* hostRepo */ {}, dataSource, messaging, logStub,
+    notQuiesced, actionRepo, actions,
   );
   return { svc, saved };
 }
@@ -63,7 +67,7 @@ test('Action 형태는 ActionsService.dispatch 로 가고 방을 직접 만들�
     },
   });
 
-  // roomRepo/agentRepo/messaging 스텁은 전부 throw 하므로, 통과한다는 사실 자체가
+  // roomRepo/dataSource/messaging 스텁은 전부 throw 하므로, 통과한다는 사실 자체가
   // "인라인 경로를 타지 않았다" 는 증거다.
   const result = await svc.runNow('sch-1', 'ws-1');
 
@@ -96,8 +100,8 @@ function makeCreator(action) {
   const savedRows = [];
   const svc = new WorkspaceScheduleService(
     { save: async (s) => { savedRows.push(s); return s; }, create: (d) => ({ ...d }), findOne: async () => null, find: async () => [] },
-    {}, {}, {}, /* hostRepo (P4c-4) */ {}, {}, logStub,
-    /* boardRepo */ {}, notQuiesced,
+    {}, {}, /* hostRepo */ {}, /* dataSource */ {}, {}, logStub,
+    notQuiesced,
     { findOne: async ({ where }) => (action && action.id === where.id ? action : null) },
     {},
   );

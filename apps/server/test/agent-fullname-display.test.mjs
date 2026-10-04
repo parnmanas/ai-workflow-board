@@ -30,10 +30,10 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
+  createWorkspace,
   createAgent,
   createUser,
   createApiKey,
-  setupKanbanScene,
   createTicket,
 } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
@@ -50,7 +50,7 @@ const ds = app.get(getDataSourceToken());
 // ── Shared scene: one workspace, a managed agent (has a manager → prefixed
 //    display), its Runtime Host identity (bare display), a human user, and
 //    a ticket to hang activity / pending state on. ────────────────────────────
-const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'fullname' });
+const ws = await createWorkspace(app, getDataSourceToken, 'fullname');
 
 const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'Mgr', type: 'manager' });
 const managed = await createAgent(app, getDataSourceToken, ws.id, {
@@ -68,10 +68,8 @@ const user = await createUser(app, getDataSourceToken, { name: 'Human' });
 const MANAGED_DISPLAY = manager.name;
 
 const ticket = await createTicket(app, getDataSourceToken, {
-  columnId: columns.todo.id,
   workspaceId: ws.id,
   title: 'fullname display',
-  assigneeId: managed.id,
 });
 
 // ─── Activity tab (READ-side resolution) ─────────────────────────────────────
@@ -91,7 +89,7 @@ test('Activity tab: actor_name re-resolves to the Host bare name from actor_id',
   // System actor: no actor_id → the stored label must survive verbatim.
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'moved',
-    field_changed: 'system', actor_id: '', actor_name: 'BacklogPromotionService',
+    field_changed: 'system', actor_id: '', actor_name: 'AWB',
   });
   // Human actor: actor_id is a User id (never an Agent) → name untouched.
   await activityService.logActivity({
@@ -120,7 +118,7 @@ test('Activity tab: actor_name re-resolves to the Host bare name from actor_id',
     'Runtime Host must NOT gain a prefix');
 
   // system + user actors keep their stored label
-  assert.equal(byField.get('system')?.actor_name, 'BacklogPromotionService',
+  assert.equal(byField.get('system')?.actor_name, 'AWB',
     'system label (no actor_id) must survive verbatim');
   assert.equal(byField.get('user')?.actor_name, user.name,
     'user actor_id (not an agent) must not be clobbered');
@@ -146,10 +144,8 @@ test('User tab: pend_ticket stamps pending_set_by as the Host bare name', async 
   after(() => { void client.close().catch(() => {}); });
 
   const pendTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'pend me',
-    assigneeId: managed.id,
   });
 
   const result = await client.callTool('pend_ticket', { ticket_id: pendTicket.id, reason: 'need a human' });
@@ -176,10 +172,8 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as the Host b
   after(() => { void client.close().catch(() => {}); });
 
   const updTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'park via update_ticket',
-    assigneeId: managed.id,
   });
 
   const result = await client.callTool('update_ticket', {
@@ -207,7 +201,8 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as the Host b
 // lands on the SSE wire. Drive it truly end-to-end through /api/events/stream.
 test('Realtime board_update SSE: actor_name is the canonical Host display', async () => {
   const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'sse-sub' });
-  // No boardId → the board_update filter (`!id.boardId || …`) delivers all.
+  // board_update has no subscriber filter (workspace scoping is the page's
+  // job), so a plain stream receives every ticket-change frame.
   const sse = await openSseStream(port, key.raw_key, {});
   after(() => sse.close());
 
@@ -233,14 +228,14 @@ test('Realtime board_update SSE: actor_name is the canonical Host display', asyn
   // the projection only touches ids that resolve to an Agent row.
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'moved',
-    field_changed: 'sse-system', actor_id: '', actor_name: 'BacklogPromotionService',
+    field_changed: 'sse-system', actor_id: '', actor_name: 'AWB',
   });
   const sysFrame = await sse.waitFor(
     'board_update',
     (d) => d.ticket_id === ticket.id && d.field_changed === 'sse-system',
     8000,
   );
-  assert.equal(sysFrame.data.actor_name, 'BacklogPromotionService',
+  assert.equal(sysFrame.data.actor_name, 'AWB',
     'system label (no actor_id) must survive the realtime path verbatim');
 });
 

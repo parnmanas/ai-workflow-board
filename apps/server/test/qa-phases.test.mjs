@@ -5,13 +5,13 @@
 // timeout reap decision, and the setPhase transition bookkeeping.
 //
 //   (a) parseQaPhases validates + normalizes + fails safe to null
-//   (b) resolveQaPhases precedence: scenario ?? board ?? null
+//   (b) resolveQaPhases: the scenario's model, or null (no board tier any more)
 //   (c) resolveLivenessPolicy auto-selects phase_timeouts when phases exist and
 //       no explicit policy is set; an explicit policy still wins
 //   (d) reaper: an active phase within its timeout is spared; past it, reaped
 //       with a reason naming the phase
 //   (e) reaper: an unset/unmatched current_phase falls back (first phase timeout)
-//   (f) a board WITH phases but a long-not-overdue phase is not reaped on age
+//   (f) a scenario WITH phases but a long-not-overdue phase is not reaped on age
 //   (g) setPhase stamps current_phase/at + appends history + closes prev left_at;
 //       rejects a terminal run
 //
@@ -62,7 +62,6 @@ function makeRun(id, overrides = {}) {
   return {
     id,
     scenario_id: 'sc-ph',
-    board_id: null,
     status: 'running',
     started_at: new Date(NOW.getTime() - 2 * HOUR),
     created_at: new Date(NOW.getTime() - 2 * HOUR),
@@ -113,34 +112,33 @@ test('(a) parseQaPhases validates, normalizes, fails safe to null', () => {
 
 // ── (b) resolve precedence ───────────────────────────────────────────────────
 
-test('(b) resolveQaPhases: scenario ?? board ?? null', () => {
-  const board = serializeQaPhases(PHASES);
+test('(b) resolveQaPhases: scenario model or null', () => {
   const scenario = serializeQaPhases({ phases: [{ id: 'only', timeout_sec: 5 }] });
 
-  assert.deepEqual(resolveQaPhases(scenario, board).phases[0].id, 'only', 'scenario wins');
-  assert.deepEqual(resolveQaPhases(null, board), PHASES, 'board used when no scenario');
-  assert.equal(resolveQaPhases(null, null), null, 'null when neither set');
-  // Malformed scenario falls through to the board.
-  assert.deepEqual(resolveQaPhases('{bogus', board), PHASES);
+  assert.deepEqual(resolveQaPhases(scenario).phases[0].id, 'only', 'scenario model used');
+  assert.deepEqual(resolveQaPhases(serializeQaPhases(PHASES)), PHASES, 'round-trips the full model');
+  assert.equal(resolveQaPhases(null), null, 'null when unset');
+  // Malformed scenario config fails safe to legacy single-running.
+  assert.equal(resolveQaPhases('{bogus'), null);
 });
 
 // ── (c) auto-selection ───────────────────────────────────────────────────────
 
 test('(c) resolveLivenessPolicy auto-selects phase_timeouts when phases exist; explicit wins', () => {
   assert.deepEqual(
-    resolveLivenessPolicy(null, null, PHASES),
+    resolveLivenessPolicy(null, PHASES),
     { type: 'phase_timeouts' },
     'phases present + no explicit policy → phase_timeouts',
   );
   assert.deepEqual(
-    resolveLivenessPolicy(null, null, null),
+    resolveLivenessPolicy(null, null),
     { type: 'zero_progress' },
     'no phases, no policy → default zero_progress',
   );
   // An explicit policy still wins over the phase model.
   const explicit = JSON.stringify({ type: 'heartbeat_deadline', deadline_sec: 60 });
   assert.deepEqual(
-    resolveLivenessPolicy(explicit, null, PHASES),
+    resolveLivenessPolicy(explicit, PHASES),
     { type: 'heartbeat_deadline', deadline_sec: 60 },
     'explicit scenario policy wins over phases',
   );
@@ -149,13 +147,13 @@ test('(c) resolveLivenessPolicy auto-selects phase_timeouts when phases exist; e
 // ── (d)+(f) reaper: active-phase timeout ─────────────────────────────────────
 
 test('(d) active phase past its timeout is reaped, reason names the phase', async () => {
-  const scenarios = [{ id: 'sc-ph', board_id: null, liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
+  const scenarios = [{ id: 'sc-ph', liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
   const run = makeRun('build-hung', {
     current_phase: 'build',
     current_phase_at: new Date(NOW.getTime() - 2000 * SEC), // 2000s > 1800s build timeout
   });
   const repo = makeRunRepo([run]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, ['build-hung'], 'build phase past timeout reaped');
@@ -168,14 +166,14 @@ test('(d) active phase past its timeout is reaped, reason names the phase', asyn
 test('(f) active phase still WITHIN its timeout is spared even when the run is hours old', async () => {
   // The run started 2h ago, which would die under the 6h... but more importantly
   // the long 'run' phase (3600s) entered 30min ago is fine — per-phase, not per-run.
-  const scenarios = [{ id: 'sc-ph', board_id: null, liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
+  const scenarios = [{ id: 'sc-ph', liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
   const run = makeRun('run-progressing', {
     current_phase: 'run',
     current_phase_at: new Date(NOW.getTime() - 30 * 60_000), // 30min < 3600s run timeout
     started_at: new Date(NOW.getTime() - 5 * HOUR),
   });
   const repo = makeRunRepo([run]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, [], 'an in-budget phase is spared regardless of overall run age');
@@ -185,7 +183,7 @@ test('(f) active phase still WITHIN its timeout is spared even when the run is h
 // ── (e) reaper: fallback for unset/unmatched phase ───────────────────────────
 
 test('(e) unset current_phase falls back to the first phase timeout from run start', async () => {
-  const scenarios = [{ id: 'sc-ph', board_id: null, liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
+  const scenarios = [{ id: 'sc-ph', liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
   // No current_phase → fallback = first phase (import, 600s) measured from start.
   const stale = makeRun('no-phase-stale', {
     current_phase: null,
@@ -198,7 +196,7 @@ test('(e) unset current_phase falls back to the first phase timeout from run sta
     started_at: new Date(NOW.getTime() - 120 * SEC), // 120s < 600s → spare
   });
   const repo = makeRunRepo([stale, fresh]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, ['no-phase-stale'], 'fallback uses the first phase timeout from start');
@@ -207,14 +205,14 @@ test('(e) unset current_phase falls back to the first phase timeout from run sta
 });
 
 test('(e2) an unmatched current_phase also falls back (stale/renamed phase id)', async () => {
-  const scenarios = [{ id: 'sc-ph', board_id: null, liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
+  const scenarios = [{ id: 'sc-ph', liveness_policy: null, qa_phases: serializeQaPhases(PHASES) }];
   const run = makeRun('ghost-phase', {
     current_phase: 'deploy', // not in the model
     current_phase_at: new Date(NOW.getTime() - 700 * SEC),
     started_at: new Date(NOW.getTime() - 700 * SEC),
   });
   const repo = makeRunRepo([run]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, ['ghost-phase'], 'unmatched phase falls back to the first phase timeout');

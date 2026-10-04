@@ -27,11 +27,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey, createUser, createTicket } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
-import { TriggerLoopService } from '../dist/modules/agents/trigger-loop.service.js';
+import { TicketDispatchService } from '../dist/modules/agents/ticket-dispatch.service.js';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
@@ -66,7 +66,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-roundtrip' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-roundtrip');
 
   const user = await createUser(app, getDataSourceToken, { name: 'human' });
   const userToken = app.get(AuthService).createSession(user.id);
@@ -157,7 +157,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   //       no impersonation vector to test (the old Test 3 case is moot).
   const createdTicket = await agentMcp.callTool('create_ticket', {
     title: 'chat artifact round-trip',
-    column_id: columns.todo.id,
+    status: 'todo',
   });
   assert.ok(createdTicket?.id, `ticket create must succeed: ${JSON.stringify(createdTicket)}`);
 
@@ -203,16 +203,12 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   });
   assert.ok(outsiderApproval.isError, 'an agent that is not a room participant cannot post an approval card');
 
-  const { ws: otherWs, columns: otherColumns } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'chat-roundtrip-other',
-  });
-  const crossWorkspaceTicket = await ds.getRepository('Ticket').save(ds.getRepository('Ticket').create({
-    workspace_id: otherWs.id,
-    board_id: otherColumns.todo.board_id,
-    column_id: otherColumns.todo.id,
+  const otherWs = await createWorkspace(app, getDataSourceToken, 'chat-roundtrip-other');
+  const crossWorkspaceTicket = await createTicket(app, getDataSourceToken, {
+    workspaceId: otherWs.id,
     title: 'other workspace pending',
-    pending_user_action: true,
-  }));
+  });
+  await ds.getRepository('Ticket').update(crossWorkspaceTicket.id, { pending_user_action: true });
   const crossWorkspaceApproval = await agentMcp.callTool('request_ticket_unpend_approval', {
     room_id: room.id,
     ticket_id: crossWorkspaceTicket.id,
@@ -230,14 +226,17 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   });
   assert.equal(agentPatch.status, 401, 'an agent API key cannot use the human-session ticket PATCH');
 
-  const triggerLoop = app.get(TriggerLoopService);
-  const originalDispatch = triggerLoop.dispatchCurrentColumn.bind(triggerLoop);
+  // Unpend wakes the assignee through the one dispatch entry point
+  // (TicketDispatchService.resumeTicket). The ticket has no assignee, so the
+  // wake is a no-op on the wire — what matters is it is asked exactly once.
+  const dispatcher = app.get(TicketDispatchService);
+  const originalResume = dispatcher.resumeTicket.bind(dispatcher);
   const unpendDispatches = [];
-  triggerLoop.dispatchCurrentColumn = async (...args) => {
+  dispatcher.resumeTicket = async (...args) => {
     if (args[1] === 'unpend') unpendDispatches.push(args);
-    return originalDispatch(...args);
+    return originalResume(...args);
   };
-  t.after(() => { triggerLoop.dispatchCurrentColumn = originalDispatch; });
+  t.after(() => { dispatcher.resumeTicket = originalResume; });
 
   const resume = () => fetch(`${base}/api/tickets/${createdTicket.id}`, {
     method: 'PATCH',
@@ -253,7 +252,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   const secondResume = await resume();
   assert.equal(secondResume.status, 200, `repeated resume must stay idempotent: ${await secondResume.text()}`);
   assert.equal(unpendDispatches.length, 1, 'true→false transition dispatches unpend exactly once');
-  assert.equal(unpendDispatches[0][2], user.id, 'dispatch actor is the authenticated user');
+  assert.equal(unpendDispatches[0][0], createdTicket.id, 'unpend wakes the resumed ticket');
   const activity = await ds.getRepository('ActivityLog').findOne({
     where: { ticket_id: createdTicket.id, field_changed: 'pending_user_action' },
     order: { created_at: 'DESC' },
@@ -331,17 +330,19 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     'the next reply carries one update artifact despite a following no-op update',
   );
 
-  // Establish canonical values (including an assignment row), drain that real
-  // update, then prove each same-value payload independently produces no ref.
+  // Establish canonical values (including an assignee RuntimeSpec), drain that
+  // real update, then prove each same-value payload independently produces no
+  // ref. The ticket was moved off todo first so assigning it does not queue a
+  // dispatch that would itself mutate the row between calls.
+  await agentMcp.callTool('move_ticket', { ticket_id: createdTicket.id, status: 'backlog' });
   await agentMcp.callTool('update_ticket', {
     ticket_id: createdTicket.id,
     title: 'chat artifact updated',
     priority: 'medium',
-    labels: ['artifact'],
+    tags: ['artifact'],
     channel_ids: [],
-    reviewer_id: responder.id,
     on_done_action_ids: [],
-    role_assignments: [{ role_slug: 'assignee', agent_id: responder.id }],
+    assignee: responder.runtime_spec,
   });
   await agentMcp.callTool('send_chat_room_message', {
     room_id: room.id,
@@ -350,11 +351,10 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   const sameValuePayloads = [
     { title: 'chat artifact updated' },
     { priority: 'medium' },
-    { labels: ['artifact'] },
+    { tags: ['artifact'] },
     { channel_ids: [] },
-    { reviewer_id: responder.id },
     { on_done_action_ids: [] },
-    { role_assignments: [{ role_slug: 'assignee', agent_id: responder.id }] },
+    { assignee: responder.runtime_spec },
   ];
   for (const [index, payload] of sameValuePayloads.entries()) {
     const updateResult = await agentMcp.callTool('update_ticket', {
@@ -378,7 +378,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   // restored onto the retry message.
   const postCommitTicket = await agentMcp.callTool('create_ticket', {
     title: 'post-commit artifact exactly once',
-    column_id: columns.todo.id,
+    status: 'todo',
   });
   const messaging = app.get(RoomMessagingService);
   const originalRoomUpdate = messaging.roomRepo.update.bind(messaging.roomRepo);

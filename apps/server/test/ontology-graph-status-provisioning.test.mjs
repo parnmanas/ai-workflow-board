@@ -52,9 +52,9 @@ process.env.NODE_ENV = 'test';
 const { AppDataSource, AppOntologyDataSource, initDb } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
 /* P4c-4: Agent 엔티티 삭제 — makeAgent 는 RuntimeHost 행을 만든다. */
 const { Ticket } = await import('file://' + path.join(DIST_ROOT, 'entities/Ticket.js'));
-const { TicketRoleAssignment } = await import('file://' + path.join(DIST_ROOT, 'entities/TicketRoleAssignment.js'));
-const { WorkspaceRole } = await import('file://' + path.join(DIST_ROOT, 'entities/WorkspaceRole.js'));
-const { Resource } = await import('file://' + path.join(DIST_ROOT, 'entities/Resource.js'));
+const { Project } = await import('file://' + path.join(DIST_ROOT, 'entities/Project.js'));
+const { ProjectsService } = await import('file://' + path.join(DIST_ROOT, 'modules/projects/projects.service.js'));
+const { runtimeIdentityKey } = await import('file://' + path.join(DIST_ROOT, 'common/runtime-spec.js'));
 const { sessionStore } = await import('file://' + path.join(DIST_ROOT, 'modules/mcp/internal/session-store.js'));
 const { OntologyGraph } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyGraph.js'));
 const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
@@ -148,34 +148,62 @@ before(async () => {
   const fakeServer = { tool(name, description, schema, handler) { tools[name] = { handler }; } };
   registerOntologyTools(fakeServer, {
     dataSource: AppDataSource, // callerCanAccessWorkspace()가 여기서 Agent를 조회한다(온톨로지 전용 DataSource가 아님)
+    projectsService: new ProjectsService(AppDataSource), // graph_refresh가 graph.resource_id(= project id)를 해소한다
     logger: capturingLogger,
     ontologyLifecycleService: lifecycleService,
     ontologyQueryService: queryService,
   });
 });
 
+// 그래프의 resource_id 는 Project id 다(저장소 Resource 가 같은 id 로 Project 로
+// 이관됨, docs/tickets.md). 티켓을 맡는 역할은 담당자(assignee) 하나뿐이고, 그
+// 정체성은 RuntimeSpec 의 runtimeIdentityKey(= ticket.assignee_key) 다 — 실제
+// 런타임 세션은 API 키 이름(`runtime:<label>:<rt-key>`)에서 같은 키를
+// runtimeKey 로 싣는다(mcp-http-auth.ts). 그래서 여기서는 세션에 runtimeKey 를
+// 직접 실어 "이 티켓의 담당자" caller 를 만든다.
+function assigneeSpec(label) {
+  return {
+    manager_agent_id: homeAgent.id, cli: 'claude', model: null, working_dir: `/work/${label}`,
+    folder_scope: 'shared', credential_id: null, cli_runtime_profile: null, label, role_prompt: '',
+    runtime_config: { strategy: 'single', permission_mode: 'strict' },
+  };
+}
+
 describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () => {
   let ticketId;
   let graphId;
   let refreshStarts;
+  let assigneeKey;
+
+  async function saveProject(workspaceId, name) {
+    return AppDataSource.getRepository(Project).save({
+      id: randomUUID(), workspace_id: workspaceId, name, repo_url: `https://example.invalid/${name}.git`,
+    });
+  }
+
+  async function saveAssignedTicket(title, projectId) {
+    const spec = assigneeSpec('graph-refresh');
+    return AppDataSource.getRepository(Ticket).save({
+      id: randomUUID(), workspace_id: WORKSPACE_ID, title, status: 'in_progress',
+      project_id: projectId, assignee: spec, assignee_key: runtimeIdentityKey(spec),
+    });
+  }
+
+  function registerAssigneeSession(extraAuth = {}) {
+    const sessionId = `session-${randomUUID()}`;
+    const cleanup = registerSession(sessionId, {
+      agentId: homeAgent.id, runtimeKey: assigneeKey, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
+      subagentTicketId: ticketId, ...extraAuth,
+    });
+    return { sessionId, cleanup };
+  }
 
   before(async () => {
-    const resource = await AppDataSource.getRepository(Resource).save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, name: 'refresh repository', type: 'repository', url: 'https://example.invalid/repo.git',
-    });
-    const ticket = await AppDataSource.getRepository(Ticket).save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, column_id: null, title: 'refresh ticket',
-      base_repo_resource_id: resource.id,
-    });
-    const role = await AppDataSource.getRepository(WorkspaceRole).save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, slug: `refresh-${randomUUID()}`, name: 'Refresh assignee',
-    });
-    await AppDataSource.getRepository(TicketRoleAssignment).save({
-      ticket_id: ticket.id, role_id: role.id, agent_id: homeAgent.id, user_id: null,
-      holder_key: `agent:${homeAgent.id}`,
-    });
+    const project = await saveProject(WORKSPACE_ID, 'refresh-repository');
+    const ticket = await saveAssignedTicket('refresh ticket', project.id);
+    assigneeKey = ticket.assignee_key;
     const graph = await graphRepo.save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: resource.id,
+      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: project.id,
       folder_path: '', status: 'error', error: 'previous build failed',
     });
     ticketId = ticket.id;
@@ -185,14 +213,11 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   });
 
   it('full-scope 에이전트 API key 세션은 자신이 맡은 티켓의 error 그래프를 1회 재시작하고 감사 로그를 남긴다', async () => {
-    const fullSessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
-    });
+    const { sessionId, cleanup } = registerAssigneeSession();
     logs.length = 0;
     const body = await callTool('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
-    }, fullSessionId);
+    }, sessionId);
     cleanup();
 
     assert.deepEqual(body, { graph_id: graphId, status: 'building', started: true });
@@ -204,13 +229,10 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
   });
 
   it('이미 building이면 즉시 started=false를 반환하고 두 번째 빌드를 시작하지 않는다', async () => {
-    const fullSessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
-    });
+    const { sessionId, cleanup } = registerAssigneeSession();
     const body = await callTool('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
-    }, fullSessionId);
+    }, sessionId);
     cleanup();
     assert.deepEqual(body, { graph_id: graphId, status: 'building', started: false });
     assert.deepEqual(refreshStarts, [graphId]);
@@ -222,103 +244,83 @@ describe('graph_refresh — 에이전트용 안전한 재빌드 트리거', () =
     });
     assert.match(readDenied.error, /full-scope/i);
 
+    // 같은 워크스페이스의 full-scope 런타임이지만 이 티켓의 assignee identity 가 아니다.
     const unassignedAgent = await makeAgent(WORKSPACE_ID);
     const fullSessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(fullSessionId, {
-      agentId: unassignedAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
+      agentId: unassignedAgent.id, runtimeKey: runtimeIdentityKey({ cli: 'claude', working_dir: '/work/someone-else', credential_id: null }),
+      workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
     });
     const assignmentDenied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
     }, fullSessionId);
     cleanup();
-    assert.match(assignmentDenied.error, /티켓에 배정된 에이전트/);
+    assert.match(assignmentDenied.error, /담당자\(assignee\) 에이전트/);
   });
 
-  it('티켓에 고정된 저장소와 다른 그래프 리소스는 거부된다', async () => {
-    const otherResource = await AppDataSource.getRepository(Resource).save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, name: 'other repository', type: 'repository', url: 'https://example.invalid/other.git',
-    });
+  it('티켓의 프로젝트와 다른 그래프 프로젝트는 거부된다', async () => {
+    const otherProject = await saveProject(WORKSPACE_ID, 'other-repository');
     const otherGraph = await graphRepo.save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: otherResource.id, folder_path: '', status: 'error',
+      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: otherProject.id, folder_path: '', status: 'error',
     });
-    const fullSessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
-    });
+    const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: otherGraph.id,
-    }, fullSessionId);
+    }, sessionId);
     cleanup();
-    assert.match(denied.error, /그래프 리소스/);
+    assert.match(denied.error, /그래프의 프로젝트/);
   });
 
   it('세션의 현재 작업 티켓이 없거나 요청 ticket_id와 다르면 거부된다', async () => {
-    const otherTicket = await AppDataSource.getRepository(Ticket).save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, column_id: null, title: '과거 작업 티켓',
-      base_repo_resource_id: (await graphRepo.findOneByOrFail({ id: graphId })).resource_id,
-    });
-    const role = await AppDataSource.getRepository(WorkspaceRole).findOneByOrFail({ workspace_id: WORKSPACE_ID });
-    await AppDataSource.getRepository(TicketRoleAssignment).save({
-      ticket_id: otherTicket.id, role_id: role.id, agent_id: homeAgent.id, user_id: null,
-      holder_key: `agent:${homeAgent.id}`,
-    });
-    const unpinnedSessionId = `session-${randomUUID()}`;
-    const cleanupUnpinned = registerSession(unpinnedSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db',
-    });
+    // 같은 assignee 가 맡은 다른 티켓 — assignee 조건은 통과하지만 세션 pin 이 다르다.
+    const otherTicket = await saveAssignedTicket('과거 작업 티켓', (await graphRepo.findOneByOrFail({ id: graphId })).resource_id);
+    const { sessionId: unpinnedSessionId, cleanup: cleanupUnpinned } = registerAssigneeSession({ subagentTicketId: undefined });
     const unpinnedDenied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: otherTicket.id, graph_id: graphId,
     }, unpinnedSessionId);
     cleanupUnpinned();
-    assert.match(unpinnedDenied.error, /티켓에 배정된 에이전트/);
+    assert.match(unpinnedDenied.error, /담당자\(assignee\) 에이전트/);
 
-    const fullSessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
-    });
+    const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: otherTicket.id, graph_id: graphId,
-    }, fullSessionId);
+    }, sessionId);
     cleanup();
-    assert.match(denied.error, /티켓에 배정된 에이전트/);
+    assert.match(denied.error, /담당자\(assignee\) 에이전트/);
   });
 
-  it('기준 저장소가 없는 티켓은 거부된다', async () => {
+  it('프로젝트가 없는 티켓은 거부된다', async () => {
     const ticket = await AppDataSource.getRepository(Ticket).findOneByOrFail({ id: ticketId });
-    const originalResourceId = ticket.base_repo_resource_id;
-    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: '' });
-    const fullSessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
-    });
+    const originalProjectId = ticket.project_id;
+    await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: null });
+    const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
       workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: graphId,
-    }, fullSessionId);
+    }, sessionId);
     cleanup();
-    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: originalResourceId });
-    assert.match(denied.error, /그래프 리소스/);
+    await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: originalProjectId });
+    assert.match(denied.error, /그래프의 프로젝트/);
   });
 
-  it('workspace_id가 null인 전역 리소스는 거부된다', async () => {
-    const globalResource = await AppDataSource.getRepository(Resource).save({
-      id: randomUUID(), workspace_id: null, name: '전역 저장소', type: 'repository', url: 'https://example.invalid/global.git',
-    });
-    const globalGraph = await graphRepo.save({
-      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: globalResource.id, folder_path: '', status: 'error',
+  // 예전의 "workspace_id가 null인 전역 저장소 Resource" 케이스 대응 — Project 는
+  // 항상 한 워크스페이스에 속하므로, 워크스페이스 밖의 저장소를 가리키는 형태는
+  // "다른 워크스페이스의 프로젝트"다. 티켓과 그래프가 둘 다 그 id 를 가리켜도
+  // 프로젝트가 요청 워크스페이스 소속이 아니면 거부해야 한다.
+  it('다른 워크스페이스의 프로젝트는 거부된다', async () => {
+    const foreignProject = await saveProject(OTHER_WORKSPACE_ID, 'foreign-repository');
+    const foreignGraph = await graphRepo.save({
+      id: randomUUID(), workspace_id: WORKSPACE_ID, resource_id: foreignProject.id, folder_path: '', status: 'error',
     });
     const ticket = await AppDataSource.getRepository(Ticket).findOneByOrFail({ id: ticketId });
-    const originalResourceId = ticket.base_repo_resource_id;
-    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: globalResource.id });
-    const fullSessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(fullSessionId, {
-      agentId: homeAgent.id, workspaceId: WORKSPACE_ID, scope: 'full', source: 'db', subagentTicketId: ticketId,
-    });
+    const originalProjectId = ticket.project_id;
+    await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: foreignProject.id });
+    const { sessionId, cleanup } = registerAssigneeSession();
     const denied = await callToolExpectError('graph_refresh', {
-      workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: globalGraph.id,
-    }, fullSessionId);
+      workspace_id: WORKSPACE_ID, ticket_id: ticketId, graph_id: foreignGraph.id,
+    }, sessionId);
     cleanup();
-    await AppDataSource.getRepository(Ticket).update(ticketId, { base_repo_resource_id: originalResourceId });
-    assert.match(denied.error, /그래프 리소스/);
+    await AppDataSource.getRepository(Ticket).update(ticketId, { project_id: originalProjectId });
+    assert.match(denied.error, /그래프의 프로젝트/);
   });
 });
 

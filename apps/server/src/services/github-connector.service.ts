@@ -568,30 +568,6 @@ export class GitHubConnectorService {
   }
 
   /**
-   * Read the tip commit SHA for a branch via the public REST endpoint.
-   * Used by `ClaimVerificationService` (ticket dcb9d661) to detect
-   * whether an assignee actually committed between trigger time and
-   * their "done" comment. Returns the empty string on any failure
-   * (missing token, missing branch, network) so the caller can degrade
-   * gracefully — the sweep is informational, not gating, on the SHA.
-   */
-  async fetchBranchTipSha(owner: string, repo: string, branch: string, credentialId?: string | null): Promise<string> {
-    // Same degrade contract as the missing-arg guard above it: an out-of-charset
-    // ref is not a usable repo, and must never reach the REST path.
-    if (!owner || !repo || !branch || !isValidRepoRef(owner, repo)) return '';
-    try {
-      const data = await this.githubFetch(
-        `/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`,
-        credentialId,
-      );
-      const sha = data?.commit?.sha;
-      return typeof sha === 'string' ? sha : '';
-    } catch {
-      return '';
-    }
-  }
-
-  /**
    * Active workflows for a repo (ticket cc1c494e — `CiHealthMonitorService`
    * needs to enumerate what to sweep without a hardcoded workflow id, since
    * one is repo-specific and this connector serves every board's repo).

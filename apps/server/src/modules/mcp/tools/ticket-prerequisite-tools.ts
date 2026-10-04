@@ -35,8 +35,8 @@ export function registerTicketPrerequisiteTools(server: McpServer, ctx: ToolCont
 
   server.tool(
     'add_ticket_prerequisites',
-    'Block this ticket until the specified prerequisite ticket(s) reach a terminal column. ' +
-      'Sets `pending_on_tickets=true` and AUTO-RESUMES (no human action needed) the moment every prereq lands on a terminal column — at which point the dependent\'s current-column role holders are re-triggered automatically. ' +
+    'Block this ticket until the specified prerequisite ticket(s) are done. ' +
+      'Sets `pending_on_tickets=true` and AUTO-RESUMES (no human action needed) the moment every prereq is done — an in_progress dependent is re-sent to its assignee, a todo one re-enters the queue. ' +
       'Prefer this over `pend_ticket` whenever the blocker is another ticket rather than a human decision. ' +
       'Guards: same-workspace only, no self-reference, no dependency cycle, no archived prereq. Idempotent per (ticket, prereq) pair.',
     {
@@ -72,7 +72,7 @@ export function registerTicketPrerequisiteTools(server: McpServer, ctx: ToolCont
 
   server.tool(
     'remove_ticket_prerequisite',
-    'Remove a single prerequisite link from a ticket. When the last open link is removed, the ticket auto-unblocks (`pending_on_tickets=false`) and its current-column role holders are re-triggered. Idempotent — removing a link that isn\'t there is a no-op.',
+    'Remove a single prerequisite link from a ticket. When the last open link is removed, the ticket auto-unblocks (`pending_on_tickets=false`) and resumes: an in_progress ticket is re-sent to its assignee, a todo one re-enters the queue. Idempotent — removing a link that isn\'t there is a no-op.',
     {
       ticket_id: z.string().describe('The dependent ticket'),
       prerequisite_ticket_id: z.string().describe('The prerequisite link to remove'),

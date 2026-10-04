@@ -5,7 +5,12 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, Table, TableColumn, TableForeignKey } from 'typeorm';
 import { ApiKey } from '../dist/entities/ApiKey.js';
 import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
-import { DropAgentTable1760000000089 } from '../dist/database/migrations/1760000000089-DropAgentTable.js';
+// The Agent-table drop used to live in migration 1760000000089-DropAgentTable.
+// That migration was deleted with the board removal (it imported board-era
+// entities); 1760000000090-AgentTemplates carries the same idempotent
+// manager → Runtime Host backfill before it drops `agents`, so that is the
+// migration under test now.
+import { AgentTemplates1760000000090 } from '../dist/database/migrations/1760000000090-AgentTemplates.js';
 import { buildDataSourceOptions } from '../dist/db.js';
 
 const MANAGER_ID = '11111111-1111-4111-8111-111111111111';
@@ -64,7 +69,7 @@ async function fixture(t) {
 
 test('Agent deletion preserves pre-P0 manager identity and key without promoting child credentials', async (t) => {
   const { ds, runner, keys, key, child } = await fixture(t);
-  const migration = new DropAgentTable1760000000089();
+  const migration = new AgentTemplates1760000000090();
   await migration.up(runner);
   assert.equal(await runner.hasTable('agents'), false);
   const host = await ds.getRepository(RuntimeHost).findOneByOrFail({ id: MANAGER_ID });
@@ -80,7 +85,7 @@ test('Agent deletion retains an existing Host identity and binds other manager k
   const { ds, runner, keys, key } = await fixture(t);
   const host = await ds.getRepository(RuntimeHost).save({ name: 'Existing host', hostname: 'configured' });
   const linked = await keys.save(keys.create({ name: 'linked', key: randomUUID(), agent_id: MANAGER_ID, host_id: host.id }));
-  await new DropAgentTable1760000000089().up(runner);
+  await new AgentTemplates1760000000090().up(runner);
   assert.equal((await keys.findOneByOrFail({ id: key.id })).host_id, host.id);
   assert.equal((await keys.findOneByOrFail({ id: linked.id })).host_id, host.id);
   assert.equal(await ds.getRepository(RuntimeHost).count(), 1);
@@ -92,6 +97,6 @@ test('conflicting manager Host bindings abort before dropping legacy identities'
   for (const hostId of ['host-a', 'host-b']) {
     await keys.save(keys.create({ name: hostId, key: randomUUID(), agent_id: MANAGER_ID, host_id: hostId }));
   }
-  await assert.rejects(new DropAgentTable1760000000089().up(runner), /conflicting Runtime Host bindings/);
+  await assert.rejects(new AgentTemplates1760000000090().up(runner), /conflicting Runtime Host bindings/);
   assert.equal(await runner.hasTable('agents'), true);
 });

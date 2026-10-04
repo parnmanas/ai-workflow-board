@@ -3,7 +3,7 @@ import { tokens } from '../../tokens';
 import { HeaderAction } from './HeaderAction';
 
 /**
- * 헤더 액션 overflow 드롭다운 (board-ux-guidelines §1.4).
+ * 헤더 액션 overflow 드롭다운.
  *
  * `⋯` 트리거를 클릭(또는 키보드 Enter/Space)하면 헤더 아래 우측 정렬로 세로
  * 리스트를 연다. 바깥 클릭 / Esc 로 닫힌다. 메뉴 항목은 동일한 HeaderAction

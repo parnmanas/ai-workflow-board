@@ -167,19 +167,12 @@ export const MENTION_SYNTAX_DOC =
   'MENTION SYNTAX — use structured `@[type:id|Display Name]` tokens so the server can notify the target. ' +
   'Plain `@Name`, `@Name#1234`, or markdown links do NOT fire notifications and render as raw text. ' +
   'Valid forms:\n' +
-  '  • `@[user:<uuid>|Alice]`          — DM-style mention of a workspace user; writes UserMention row + fires user_mention SSE\n' +
-  '  • `@[agent:<uuid>|BuildBot]`      — mention a specific agent; fires comment_mention SSE scoped to that agent\n' +
-  '  • `@[role:assignee|Alice]`        — role shortcut, expands to the ticket\'s current assignee\n' +
-  '  • `@[role:reporter|Bob]`          — role shortcut, expands to the ticket\'s reporter\n' +
-  '  • `@[role:reviewer|Carol]`        — role shortcut, expands to the ticket\'s reviewer (dropped if unset)\n' +
-  'A `@[role:slug]` shortcut fans out to EVERY current holder of that role (다중담당자 — a role may have ' +
-  'several co-holders), each notified independently.\n' +
-  'Resolve ids by calling `list_users` / `list_agents` / `get_ticket` first. The `|Display Name` segment is ' +
-  'optional but recommended — it\'s what humans read in the UI when the link target is a UUID. ' +
-  'Co-holder call & self-exclusion: `@[role:<slug>]` reaches every holder **except you** — the comment author ' +
-  'is auto-excluded server-side (and a direct `@[agent:<your-own-uuid>]` self-mention is likewise dropped), so ' +
-  'you can safely `@[role:assignee]` to summon your co-assignees for discussion without spawning yourself in a ' +
-  'loop. Discussion threading: reply with `parent_id` set to the comment you are answering (type `note`/`chat`) ' +
-  'so a phase\'s discussion stays one thread. Keep plain discussion as `note`/`chat`; consensus/vote signals are ' +
-  'a separate channel (reserved for the multi-holder consensus feature via `metadata`) — do not overload note.\n\n' +
+  '  • `@[user:<uuid>|Alice]`          — mention a workspace user; writes UserMention row + fires user_mention SSE\n' +
+  '  • `@[agent:<rt-key>|Worker]`      — mention an agent by its runtime identity key (`rt-…`). On a ticket only the ' +
+  'ticket\'s assignee (`assignee_key` from `get_ticket`) can be woken this way; in a chat room, a participant agent.\n' +
+  'Role shortcuts (`@[role:…]`) no longer exist — they render as plain text and notify nobody. ' +
+  'Resolve ids with `list_users` / `get_ticket` first. The `|Display Name` segment is optional but recommended — ' +
+  'it\'s what humans read in the UI. A mention of yourself is dropped server-side, so it never wakes you in a loop. ' +
+  'Discussion threading: reply with `parent_id` set to the comment you are answering (type `note`/`chat`) so a ' +
+  'discussion stays one thread.\n\n' +
   ARTIFACT_REF_DOC;

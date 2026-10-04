@@ -138,7 +138,6 @@ function makeSchedule(over = {}) {
   return {
     id: 'sch-1',
     workspace_id: 'ws-1',
-    board_id: null,
     name: 'nightly-task',
     target_agent_id: AGENT_UUID,
     task_prompt: 'do the thing',
@@ -158,8 +157,9 @@ function svcWith(rows, agents = [{ id: AGENT_UUID, workspace_id: 'ws-1', name: '
   const scheduleRepo = makeScheduleRepo(rows);
   const roomRepo = makeRoomRepo();
   const participantRepo = makeParticipantRepo();
-  // P4c-4: (schedule, room, participant, host, dataSource, messaging, log, board,
-  // quiesce, action). 타겟 해소는 Host 행이다.
+  // P4c-4: (schedule, room, participant, host, dataSource, messaging, log,
+  // quiesce, action, actions). 타겟 해소는 Host 행이다. Action 형태는 이 파일이
+  // 다루지 않으므로 action/actions 자리는 빈 stub 이다.
   const hostRepo = {
     async findOne({ where }) { return agents.find((a) => a.id === where.id) || null; },
     async find() { return []; },
@@ -168,12 +168,12 @@ function svcWith(rows, agents = [{ id: AGENT_UUID, workspace_id: 'ws-1', name: '
     getRepository: (entity) => (entity?.name === 'RuntimeHost' ? hostRepo : { async findOne() { return null; }, async find() { return []; } }),
   };
   const messaging = makeMessaging();
-  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, hostRepo, dataSource, messaging, noopLog, {}, noQuiesce);
+  const svc = new WorkspaceScheduleService(scheduleRepo, roomRepo, participantRepo, hostRepo, dataSource, messaging, noopLog, noQuiesce, {}, {});
   return { svc, scheduleRepo, roomRepo, participantRepo, messaging };
 }
 
 test('due schedule opens a room, seats agent + system, sends task_prompt, advances next_run_at', async () => {
-  const sch = makeSchedule({ board_id: 'board-9' });
+  const sch = makeSchedule();
   const { svc, roomRepo, participantRepo, messaging } = svcWith([sch]);
 
   const { dispatched } = await svc.runOnce(NOW);
@@ -182,11 +182,7 @@ test('due schedule opens a room, seats agent + system, sends task_prompt, advanc
   assert.equal(roomRepo.created.length, 1, 'one fresh room per run');
   assert.equal(roomRepo.created[0].workspace_id, 'ws-1');
   assert.equal(roomRepo.created[0].type, 'group');
-  // Mirrors qa-schedule-behavior.test.mjs / security-schedule-behavior.test.mjs:
-  // the schedule's legacy board_id (set above) must never reach the dispatched
-  // room — board_id is a dead column post-65adf0b, read by neither list() nor
-  // _dispatch().
-  assert.equal(roomRepo.created[0].board_id, undefined, 'legacy Board ownership is not propagated');
+  assert.equal(roomRepo.created[0].name, 'Schedule: nightly-task', 'room is named after the schedule');
   // agent + synthetic 'system' user seated
   const types = participantRepo.created.map((p) => `${p.participant_type}:${p.participant_id}`).sort();
   assert.deepEqual(types, [`agent:${AGENT_UUID}`, 'user:system']);

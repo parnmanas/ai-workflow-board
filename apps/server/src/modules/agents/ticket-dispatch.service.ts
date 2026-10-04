@@ -6,7 +6,9 @@ import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
 import { Comment } from '../../entities/Comment';
 import { User } from '../../entities/User';
+import { isUuidShapedId } from '../../utils/agent-name';
 import { ActivityLog } from '../../entities/ActivityLog';
+import { TicketDuplicateDecision } from '../../entities/TicketDuplicateDecision';
 import { ActivityService, activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -52,6 +54,7 @@ export const MAX_SUPERVISOR_REDISPATCHES = 3;
 const SWEEP_INTERVAL_MS = 30_000;
 const NACK_RETRY_BASE_MS = 60_000;
 const OFFLINE_NOTICE_COOLDOWN_MS = 60 * 60_000;
+const NACK_RETRY_STALE_MS = 24 * 60 * 60_000;
 
 /**
  * Ticket dispatch (docs/tickets.md) — the one place that decides when a
@@ -65,8 +68,9 @@ const OFFLINE_NOTICE_COOLDOWN_MS = 60 * 60_000;
  *     prerequisites resolved, CI wait resolved, reassignment or manual Run.
  *   - Supervisor: an `in_progress` ticket whose agent shows no live strand and
  *     no activity for `workspace.supervisor_stale_ms` is re-sent (force
- *     respawn) at most MAX_SUPERVISOR_REDISPATCHES times without progress,
- *     then parked for a human.
+ *     respawn), then every `supervisor_resend_ms`, at most
+ *     MAX_SUPERVISOR_REDISPATCHES times without progress; then it is parked
+ *     for a human.
  *   - Done hooks: `next_ticket_id` promotion and prerequisite dependents.
  *
  * Every state change funnels through activity events, so the dispatcher only
@@ -242,6 +246,10 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async onDone(ticket: Ticket): Promise<void> {
+    // A duplicate closed by its canonical is an audit record, not finished
+    // work — its next ticket, dependents and the rest stay untouched.
+    if (ticket.canonical_ticket_id) return;
+    await this.resolveDuplicates(ticket);
     // Chain: a backlog next ticket becomes todo, which queues it.
     if (ticket.next_ticket_id) {
       const repo = this.dataSource.getRepository(Ticket);
@@ -263,13 +271,49 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Close every open duplicate confirmed against a canonical ticket that just finished. */
+  private async resolveDuplicates(canonical: Ticket): Promise<void> {
+    const repo = this.dataSource.getRepository(Ticket);
+    const duplicates = await repo.find({ where: { canonical_ticket_id: canonical.id, status: Not('done') } });
+    for (const duplicate of duplicates) {
+      const prev = duplicate.status;
+      const claimed = await repo.update({ id: duplicate.id, status: prev }, {
+        status: 'done',
+        terminal_entered_at: canonical.terminal_entered_at || new Date(),
+        pending_user_action: false,
+        pending_on_tickets: false,
+        pending_ci_wait: false,
+        ci_wait_context: '',
+        operational_dedupe_key: null,
+        supervisor_redispatches: 0,
+      });
+      if (!claimed.affected) continue;
+      const decisions = this.dataSource.getRepository(TicketDuplicateDecision);
+      await decisions.save(decisions.create({
+        workspace_id: duplicate.workspace_id,
+        report_ticket_id: duplicate.id,
+        candidate_ticket_id: canonical.id,
+        outcome: 'resolved_from_canonical',
+        confidence: 100,
+        matched_signals: JSON.stringify(['canonical_done']),
+        actor_id: '',
+        actor_name: 'Canonical resolution',
+      }));
+      await this.activityService.logActivity({
+        entity_type: 'ticket', entity_id: duplicate.id, ticket_id: duplicate.id, workspace_id: duplicate.workspace_id,
+        action: 'moved', field_changed: 'resolved_from_canonical', old_value: prev, new_value: 'done',
+        actor_id: 'system', actor_name: 'Canonical resolution',
+      });
+    }
+  }
+
   // ── queue ─────────────────────────────────────────────────────────────
 
   private async pump(filter: { workspaceId?: string; assigneeKey?: string }): Promise<number> {
     if (await this.instanceQuiesce.isQuiesced()) return 0;
     const repo = this.dataSource.getRepository(Ticket);
     const where: any = {
-      status: 'todo', archived_at: IsNull(), parent_id: IsNull(),
+      status: 'todo', archived_at: IsNull(), parent_id: IsNull(), canonical_ticket_id: IsNull(),
       pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
       assignee_key: filter.assigneeKey ? filter.assigneeKey : Not(''),
     };
@@ -337,6 +381,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   private async blockReason(ticket: Ticket): Promise<string> {
     if (isTicketPending(ticket)) return 'pending';
     if (ticket.archived_at) return 'archived';
+    if (ticket.canonical_ticket_id) return 'duplicate';
     const ws = await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } });
     if (ws?.dispatch_paused_at) return 'workspace_paused';
     const spec = parseRuntimeSpec(ticket.assignee);
@@ -353,6 +398,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   async dispatch(ticket: Ticket, source: DispatchSource, opts: { forceRespawn?: boolean } = {}): Promise<DispatchResult> {
     if (ticket.archived_at) return { dispatched: false, reason: 'archived' };
     if (isTicketPending(ticket)) return { dispatched: false, reason: 'pending' };
+    // A confirmed duplicate is worked through its canonical ticket.
+    if (ticket.canonical_ticket_id) return { dispatched: false, reason: 'duplicate' };
     if (ticket.status !== 'in_progress' && ticket.status !== 'todo') return { dispatched: false, reason: `status_${ticket.status}` };
     const spec = parseRuntimeSpec(ticket.assignee);
     if (!spec) return { dispatched: false, reason: 'unassigned' };
@@ -499,8 +546,21 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   // ── sweep (queue backstop + supervisor) ───────────────────────────────
 
   async sweep(): Promise<void> {
+    this.pruneNotes(Date.now());
     await this.startQueued();
     await this.supervise();
+  }
+
+  /** Per-ticket notes only matter while they can still change a decision. */
+  private pruneNotes(now: number): void {
+    for (const [id, at] of this.offlineNoticeAt) {
+      if (now - at >= OFFLINE_NOTICE_COOLDOWN_MS) this.offlineNoticeAt.delete(id);
+    }
+    // A nack retry is consumed by supervise() while the ticket is in_progress;
+    // one still here a day later belongs to a ticket that left that state.
+    for (const [id, nack] of this.nackRetryAt) {
+      if (now - nack.at >= NACK_RETRY_STALE_MS) this.nackRetryAt.delete(id);
+    }
   }
 
   async supervise(now = Date.now()): Promise<void> {
@@ -508,8 +568,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     const repo = this.dataSource.getRepository(Ticket);
     const working = await repo.find({
       where: {
-        status: 'in_progress', archived_at: IsNull(), parent_id: IsNull(), assignee_key: Not(''),
-        pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
+        status: 'in_progress', archived_at: IsNull(), parent_id: IsNull(), canonical_ticket_id: IsNull(),
+        assignee_key: Not(''), pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
       },
       take: 500,
     });
@@ -534,8 +594,12 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
         latestComment.get(ticket.id) ?? 0,
         this.agentStatus.getLatestOutputLivenessForTicket(ticket.id) ?? 0,
       );
-      const staleMs = Math.max(60_000, ws.supervisor_stale_ms || 1_800_000);
-      if (now - lastSignal < staleMs) continue;
+      // First re-send after supervisor_stale_ms of silence; each further one
+      // after supervisor_resend_ms (the agent already had its long chance).
+      const waitMs = ticket.supervisor_redispatches > 0
+        ? Math.max(60_000, ws.supervisor_resend_ms || 300_000)
+        : Math.max(60_000, ws.supervisor_stale_ms || 1_800_000);
+      if (now - lastSignal < waitMs) continue;
 
       if (ticket.supervisor_redispatches >= MAX_SUPERVISOR_REDISPATCHES) {
         await this.parkStalled(ticket);
@@ -579,7 +643,8 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async isUser(actorId: string): Promise<boolean> {
-    if (!actorId) return false;
+    // Agents act under rt- runtime keys; users.id is a uuid column on Postgres.
+    if (!isUuidShapedId(actorId)) return false;
     return !!(await this.dataSource.getRepository(User).findOne({ where: { id: actorId }, select: ['id'] }));
   }
 }

@@ -26,7 +26,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { QaRerunOnFixService } from '../dist/modules/qa/qa-rerun-on-fix.service.js';
 import { Ticket } from '../dist/entities/Ticket.js';
-import { BoardColumn } from '../dist/entities/BoardColumn.js';
 import { QaScenario } from '../dist/entities/QaScenario.js';
 import { Deployment } from '../dist/entities/Deployment.js';
 
@@ -53,9 +52,9 @@ function chainable(getOneResult) {
 function makeTicket(overrides = {}) {
   return {
     id: 'fix-ticket-1',
-    column_id: 'done-col',
+    status: 'done',
     terminal_entered_at: new Date(),
-    labels: JSON.stringify(['qa-failure', 'auto', 'qa-scenario:scenario-1']),
+    tags: JSON.stringify(['qa-failure', 'auto', 'qa-scenario:scenario-1']),
     ...overrides,
   };
 }
@@ -78,7 +77,7 @@ function makeScenario(overrides = {}) {
 
 // deployment=null keeps the deployment gate unsatisfied so _gateOnDeployment
 // falls through to registering the fallback-cap timer.
-function makeDataSource({ ticket, column, scenario, deployment = null }) {
+function makeDataSource({ ticket, scenario, deployment = null }) {
   return {
     getRepository(entity) {
       if (entity === Ticket) {
@@ -86,9 +85,6 @@ function makeDataSource({ ticket, column, scenario, deployment = null }) {
           async findOne() { return ticket; },
           createQueryBuilder() { return chainable(); },
         };
-      }
-      if (entity === BoardColumn) {
-        return { async findOne() { return column; } };
       }
       if (entity === QaScenario) {
         return { async findOne() { return scenario; } };
@@ -115,15 +111,14 @@ function makeQaRunService(onStart) {
 
 test('legacy delayed rerun timer (rerun_delay_seconds > 0) fires the rerun', async () => {
   const ticket = makeTicket();
-  const column = { id: 'done-col', kind: 'terminal' };
   const scenario = makeScenario();
-  const ds = makeDataSource({ ticket, column, scenario });
+  const ds = makeDataSource({ ticket, scenario });
 
   const started = deferred();
   const qaRunService = makeQaRunService(started.resolve);
   const service = new QaRerunOnFixService(ds, qaRunService, noopLog, noQuiesce);
 
-  await service._handleActivity({ action: 'moved', ticket_id: ticket.id });
+  await service._handleActivity({ action: 'moved', field_changed: 'status', new_value: 'done', ticket_id: ticket.id });
   assert.equal(qaRunService.calls.length, 0, 'the rerun is deferred behind the timer, not fired synchronously');
 
   // Awaits the SAME promise only the timer's callback resolves — no manual
@@ -139,9 +134,8 @@ test('legacy delayed rerun timer (rerun_delay_seconds > 0) fires the rerun', asy
 test('deployment-gate fallback-cap timer (rerun_delay_seconds > 0) fires without a confirmed deploy', async () => {
   const ticket = makeTicket({
     id: 'fix-ticket-2',
-    labels: JSON.stringify(['qa-failure', 'auto', 'qa-scenario:scenario-2']),
+    tags: JSON.stringify(['qa-failure', 'auto', 'qa-scenario:scenario-2']),
   });
-  const column = { id: 'done-col', kind: 'terminal' };
   const scenario = makeScenario({
     id: 'scenario-2',
     target_environment: 'gate-env',
@@ -153,13 +147,13 @@ test('deployment-gate fallback-cap timer (rerun_delay_seconds > 0) fires without
       deployment_gate: true,
     },
   });
-  const ds = makeDataSource({ ticket, column, scenario, deployment: null });
+  const ds = makeDataSource({ ticket, scenario, deployment: null });
 
   const started = deferred();
   const qaRunService = makeQaRunService(started.resolve);
   const service = new QaRerunOnFixService(ds, qaRunService, noopLog, noQuiesce);
 
-  await service._handleActivity({ action: 'moved', ticket_id: ticket.id });
+  await service._handleActivity({ action: 'moved', field_changed: 'status', new_value: 'done', ticket_id: ticket.id });
   assert.equal(qaRunService.calls.length, 0, 'no deploy yet — the rerun is gated, not fired synchronously');
 
   await started.promise;

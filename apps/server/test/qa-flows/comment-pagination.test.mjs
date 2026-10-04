@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { createWorkspace, createTicket, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_PAGINATION_PORT || '0';
 
@@ -28,15 +28,12 @@ test('comment dynamic loading: bounded detail GET + cursor pagination', async (t
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'comment-pagination',
-  });
+  const ws = await createWorkspace(app, getDataSourceToken, 'comment-pagination');
   const user = await createUser(app, getDataSourceToken, { name: 'reader' });
   const token = app.get(AuthService).createSession(user.id);
   const authHeaders = { Authorization: `Bearer ${token}` };
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'pagination ticket',
   });

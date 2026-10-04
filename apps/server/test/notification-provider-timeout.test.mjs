@@ -354,11 +354,12 @@ test('매달린 바인딩이 섞여 있어도 dispatcher 의 Promise.all 이 정
     slack: new SlackUserProvider(noopLog),
     telegram: new TelegramUserProvider(noopLog),
   };
+  // (userChannelRepo, ticketRepo, dataSource, registry, logService) — the
+  // dataSource is only read on the ticket-activity path, not by dispatchForUser.
   const service = new UserChannelDispatcherService(
     { async find() { return bindings; } },
     { async findOne() { return null; } },
-    { async findOne() { return null; } },
-    { async find() { return []; } },
+    {},
     { get: (id) => registryProviders[id] || null },
     noopLog,
   );

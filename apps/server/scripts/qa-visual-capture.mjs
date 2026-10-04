@@ -25,7 +25,7 @@
  *   node apps/server/scripts/qa-visual-capture.mjs \
  *     --base-url https://awb.example:7700 \
  *     --email qa@awb.local --password secret \
- *     --workspace <ws-id> --board <board-id> --ticket <ticket-id> \
+ *     --workspace <ws-id> --ticket <ticket-id> \
  *     --out /tmp/qa-shots [--record-video] [--ffmpeg /path/to/ffmpeg]
  *
  * Auth: with --token <session-token> the token is injected into localStorage
@@ -50,7 +50,6 @@ function parseArgs(argv) {
       case '--password': a.password = next(); break;
       case '--token': a.token = next(); break;
       case '--workspace': a.workspace = next(); break;
-      case '--board': a.board = next(); break;
       case '--ticket': a.ticket = next(); break;
       case '--out': a.out = next(); break;
       case '--record-video': a.recordVideo = true; break;
@@ -191,12 +190,13 @@ async function main() {
   // The screens to capture. Authenticated routes need a logged-in SPA.
   const shots = [
     { name: 'login.png', url: `${a.baseUrl}/`, auth: false },
-    { name: 'board.png', url: `${a.baseUrl}/ws/${ws}/boards/${a.board}`, auth: true },
-    { name: 'ticket-detail.png', url: `${a.baseUrl}/ws/${ws}/boards/${a.board}?ticket=${a.ticket}`, auth: true },
+    { name: 'tickets.png', url: `${a.baseUrl}/ws/${ws}/tickets`, auth: true },
+    { name: 'ticket-detail.png', url: `${a.baseUrl}/ws/${ws}/tickets?ticket=${a.ticket}`, auth: true },
     { name: 'chat.png', url: `${a.baseUrl}/ws/${ws}/chat`, auth: true },
-    { name: 'qa-manager.png', url: `${a.baseUrl}/ws/${ws}/boards/${a.board}/qa`, auth: true },
+    { name: 'qa-manager.png', url: `${a.baseUrl}/ws/${ws}/qa`, auth: true },
+    { name: 'projects.png', url: `${a.baseUrl}/ws/${ws}/projects`, auth: true },
     { name: 'resources.png', url: `${a.baseUrl}/ws/${ws}/resources`, auth: true },
-    { name: 'board-submenu.png', url: `${a.baseUrl}/ws/${ws}/boards/${a.board}/settings`, auth: true },
+    { name: 'workspace-settings.png', url: `${a.baseUrl}/ws/${ws}/settings/workspace`, auth: true },
   ];
 
   const { proc, wsUrl } = await launchChrome(a);

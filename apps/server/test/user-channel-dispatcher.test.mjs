@@ -15,7 +15,11 @@
 // Also covers `_handleActivity` (ticket f57dcfbc): it used to build a
 // workspace-less `/?ticket=<id>` notification link — the same legacy
 // pattern removed from the client's admin fallbacks — instead of the
-// board-scoped shape `_buildDeepLink` already uses for mentions.
+// workspace-scoped shape `_buildDeepLink` already uses for mentions. Since
+// boards were removed that shape is the Tickets page
+// (`/ws/<wsId>/tickets?ticket=<id>`, common/artifact-ref.ts ticketPath), and
+// the recipients are the ticket's human participants (creator, commenters,
+// mentioned users — ticket-participants.ts), never the agent assignee.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,8 +49,7 @@ function makeService(UserChannelDispatcherService, { findCalls }) {
     },
   };
   const ticketRepo = { async findOne() { return null; } };
-  const colRepo = { async findOne() { return null; } };
-  const assignRepo = { async find() { return []; } };
+  const dataSource = makeParticipantDataSource({});
   const registry = { get() { return null; } };
   const logService = {
     info: () => {},
@@ -56,11 +59,27 @@ function makeService(UserChannelDispatcherService, { findCalls }) {
   return new UserChannelDispatcherService(
     userChannelRepo,
     ticketRepo,
-    colRepo,
-    assignRepo,
+    dataSource,
     registry,
     logService,
   );
+}
+
+// Stub DataSource for ticketParticipantUserIds: the Comment query answers the
+// user commenters, the UserMention query the mentioned users.
+function makeParticipantDataSource({ commenters = [], mentioned = [] }) {
+  return {
+    getRepository(entity) {
+      const rows = entity?.name === 'Comment' ? commenters : entity?.name === 'UserMention' ? mentioned : [];
+      const qb = {
+        select() { return qb; },
+        where() { return qb; },
+        andWhere() { return qb; },
+        async getRawMany() { return rows.map((id) => ({ id })); },
+      };
+      return { createQueryBuilder: () => qb };
+    },
+  };
 }
 
 test('_handleChat tolerates Set<string> member_ids and dispatches per non-sender member', async () => {
@@ -190,18 +209,13 @@ test('_handleChat skips when content is only @-mentions (delegated to mention di
   assert.equal(findCalls.length, 0, 'pure-mention message should not trigger ambient dispatch');
 });
 
-function makeActivityService(UserChannelDispatcherService, { tickets, columns, assignments, sentPayloads }) {
+function makeActivityService(UserChannelDispatcherService, { tickets, commenters = [], mentioned = [], sentPayloads }) {
   const ticketRepo = {
     async findOne({ where: { id } }) {
       return tickets[id] || null;
     },
   };
-  const colRepo = {
-    async findOne({ where: { id } }) {
-      return columns[id] || null;
-    },
-  };
-  const assignRepo = { async find() { return assignments; } };
+  const dataSource = makeParticipantDataSource({ commenters, mentioned });
   const userChannelRepo = {
     async find({ where: { user_id } }) {
       return [{ id: `uc-${user_id}`, user_id, is_active: 1, notify_ticket: 1, provider: 'stub', target: user_id, credentials: null }];
@@ -218,23 +232,27 @@ function makeActivityService(UserChannelDispatcherService, { tickets, columns, a
   return new UserChannelDispatcherService(
     userChannelRepo,
     ticketRepo,
-    colRepo,
-    assignRepo,
+    dataSource,
     registry,
     logService,
   );
 }
 
-test("_handleActivity links to the ticket's own board — not the legacy workspace-less /?ticket= fallback", async () => {
+test("_handleActivity links to the ticket on its workspace's Tickets page — not the legacy workspace-less /?ticket= fallback", async () => {
   const UserChannelDispatcherService = await loadDispatcher();
   const prevUrl = process.env.AWB_PUBLIC_URL;
   process.env.AWB_PUBLIC_URL = 'https://awb.example.com';
   try {
     const sentPayloads = [];
     const svc = makeActivityService(UserChannelDispatcherService, {
-      tickets: { 'tk-1': { id: 'tk-1', workspace_id: 'ws-1', column_id: 'col-1', parent_id: null, title: 'Fix the thing' } },
-      columns: { 'col-1': { id: 'col-1', board_id: 'board-1' } },
-      assignments: [{ user_id: 'u-alice', ticket_id: 'tk-1' }],
+      tickets: {
+        'tk-1': {
+          id: 'tk-1', workspace_id: 'ws-1', status: 'in_progress', parent_id: null, title: 'Fix the thing',
+          created_by_type: 'user', created_by_id: 'u-alice',
+        },
+      },
+      // The actor commented too — they must not be pinged about their own move.
+      commenters: ['u-other'],
       sentPayloads,
     });
 
@@ -244,29 +262,35 @@ test("_handleActivity links to the ticket's own board — not the legacy workspa
       action: 'moved',
       actor_id: 'u-other',
       actor_name: 'Other',
-      field_changed: 'column',
-      old_value: 'To Do',
-      new_value: 'In Progress',
+      field_changed: 'status',
+      old_value: 'todo',
+      new_value: 'in_progress',
     });
 
-    assert.equal(sentPayloads.length, 1);
-    assert.equal(sentPayloads[0].payload.url, 'https://awb.example.com/ws/ws-1/boards/board-1?ticket=tk-1');
+    assert.equal(sentPayloads.length, 1, 'only the creator is notified — the actor is excluded');
+    assert.equal(sentPayloads[0].target, 'u-alice');
+    assert.equal(sentPayloads[0].payload.url, 'https://awb.example.com/ws/ws-1/tickets?ticket=tk-1');
+    assert.equal(sentPayloads[0].payload.body, 'status: todo → in_progress');
   } finally {
     if (prevUrl === undefined) delete process.env.AWB_PUBLIC_URL;
     else process.env.AWB_PUBLIC_URL = prevUrl;
   }
 });
 
-test("_handleActivity omits the url when the ticket's board can't be resolved (no broken fallback link)", async () => {
+test("_handleActivity omits the url when the ticket's workspace can't be resolved (no broken fallback link)", async () => {
   const UserChannelDispatcherService = await loadDispatcher();
   const prevUrl = process.env.AWB_PUBLIC_URL;
   process.env.AWB_PUBLIC_URL = 'https://awb.example.com';
   try {
     const sentPayloads = [];
     const svc = makeActivityService(UserChannelDispatcherService, {
-      tickets: { 'tk-2': { id: 'tk-2', workspace_id: 'ws-1', column_id: null, parent_id: null, title: 'Orphan column ticket' } },
-      columns: {},
-      assignments: [{ user_id: 'u-alice', ticket_id: 'tk-2' }],
+      tickets: {
+        'tk-2': {
+          id: 'tk-2', workspace_id: '', status: 'todo', parent_id: null, title: 'Workspace-less ticket',
+          created_by_type: 'agent', created_by_id: 'rt-0123456789abcdef',
+        },
+      },
+      mentioned: ['u-alice'],
       sentPayloads,
     });
 
@@ -279,7 +303,8 @@ test("_handleActivity omits the url when the ticket's board can't be resolved (n
       field_changed: '',
     });
 
-    assert.equal(sentPayloads.length, 1);
+    assert.equal(sentPayloads.length, 1, 'the mentioned user is still notified');
+    assert.equal(sentPayloads[0].target, 'u-alice');
     assert.equal(sentPayloads[0].payload.url, undefined);
   } finally {
     if (prevUrl === undefined) delete process.env.AWB_PUBLIC_URL;

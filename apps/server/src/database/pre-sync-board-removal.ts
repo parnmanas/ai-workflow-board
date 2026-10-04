@@ -14,9 +14,9 @@ import { DataSource, DataSourceOptions, QueryRunner, Table } from 'typeorm';
  * turns the snapshots into ticket status / tags / project and projects, then
  * drops the snapshots together with the retired board tables.
  *
- * Also clears two dedupe-only states whose unique keys change shape and would
- * otherwise make synchronize fail to build the new unique index:
- * board-scoped skill assignments and CI-red alert rows.
+ * Also clears state whose unique keys change shape and would otherwise make
+ * synchronize fail to build the new unique index: board-scoped skill
+ * assignments, CI-red alert rows and colliding board-scoped workflow functions.
  *
  * Idempotent: once `tickets.column_id` is gone there is nothing to snapshot,
  * and an existing snapshot is never overwritten.
@@ -125,6 +125,25 @@ async function snapshot(runner: QueryRunner): Promise<boolean> {
   // narrower unique index synchronize builds next cannot collide.
   if (await runner.hasTable('runtime_skill_assignments') && await runner.hasColumn('runtime_skill_assignments', 'board_id')) {
     await runner.query(`DELETE FROM runtime_skill_assignments WHERE COALESCE(board_id, '') <> '' OR COALESCE(role_slug, '') <> ''`);
+    changed = true;
+  }
+
+  // Workflow functions: the board layer of the key goes away. A board-scoped
+  // row that would now collide with another row of the same workspace + key
+  // is dropped (the rest simply become workspace rows), and the two partial
+  // unique indexes whose predicates name board_id are dropped here — left to
+  // synchronize, the column drop takes them down after it has already decided
+  // they exist, and they would stay missing until the next boot.
+  if (await runner.hasTable('workflow_functions') && await runner.hasColumn('workflow_functions', 'board_id')) {
+    await runner.query(
+      `DELETE FROM workflow_functions WHERE COALESCE(board_id, '') <> '' AND EXISTS (` +
+      `SELECT 1 FROM workflow_functions o WHERE o.id <> workflow_functions.id AND o.key = workflow_functions.key ` +
+      `AND COALESCE(o.workspace_id, '') = COALESCE(workflow_functions.workspace_id, '') ` +
+      `AND (COALESCE(o.board_id, '') = '' OR CAST(o.id AS VARCHAR) < CAST(workflow_functions.id AS VARCHAR)))`,
+    );
+    await runner.query('DROP INDEX IF EXISTS "uq_workflow_functions_global_key"');
+    await runner.query('DROP INDEX IF EXISTS "uq_workflow_functions_workspace_key"');
+    await runner.query('DROP INDEX IF EXISTS "uq_workflow_functions_board_key"');
     changed = true;
   }
 

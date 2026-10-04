@@ -1,7 +1,8 @@
-// Board-pluggable QaRun liveness policy (ticket 40010b25).
+// Scenario-pluggable QaRun liveness policy (ticket 40010b25).
 //
 // Covers the proposed DoD acceptance cases for replacing the single global
-// zero-progress fuse with a registered, per-board liveness policy:
+// zero-progress fuse with a registered, per-scenario liveness policy (the board
+// tier went away with boards):
 //   (a) a progressing heartbeat token is NOT reaped even past the deadline
 //       relative to run start                                   (false-reap guard)
 //   (b) a stalled token IS reaped exactly once after the deadline
@@ -43,9 +44,9 @@ function makeRunRepo(rows) {
   };
 }
 
-// Scenario/Board repos: the reaper calls find({ where: { id: In([...]) } }) and
-// then indexes the results by id itself, so a stub that returns its full row set
-// is sufficient.
+// Scenario repo: the reaper calls find({ where: { id: In([...]) } }) and then
+// indexes the results by id itself, so a stub that returns its full row set is
+// sufficient.
 const listRepo = (rows) => ({ async find() { return rows; } });
 
 function hbPolicy(deadlineSec) {
@@ -56,7 +57,6 @@ function makeRun(id, overrides = {}) {
   return {
     id,
     scenario_id: 'sc-hb',
-    board_id: null,
     status: 'running',
     started_at: new Date(NOW.getTime() - 2 * HOUR),
     created_at: new Date(NOW.getTime() - 2 * HOUR),
@@ -71,7 +71,7 @@ function makeRun(id, overrides = {}) {
 
 const noopLog = { info() {}, warn() {}, error() {} };
 // The reaper advances any sequential batch a reaped run belonged to via
-// QaRunService.onRunFinalized (5th ctor arg). These fixtures have no batch_id, so
+// QaRunService.onRunFinalized (4th ctor arg). These fixtures have no batch_id, so
 // a no-op stub matches the real DI-injected surface.
 const noopQaRunService = { onRunFinalized: async () => {} };
 
@@ -95,21 +95,23 @@ test('parseLivenessPolicy validates and normalizes; fails safe to null', () => {
   );
 });
 
-test('resolveLivenessPolicy: scenario overrides board overrides default', () => {
+test('resolveLivenessPolicy: scenario policy overrides phases overrides default', () => {
   const scenario = hbPolicy(60);
-  const board = serializeLivenessPolicy({ type: 'zero_progress', deadline_sec: 999 });
+  const phases = { phases: [{ id: 'import', timeout_sec: 600 }] };
 
-  assert.deepEqual(resolveLivenessPolicy(scenario, board), { type: 'heartbeat_deadline', deadline_sec: 60 }, 'scenario wins');
-  assert.deepEqual(resolveLivenessPolicy(null, board), { type: 'zero_progress', deadline_sec: 999 }, 'board used when no scenario');
+  assert.deepEqual(resolveLivenessPolicy(scenario, phases), { type: 'heartbeat_deadline', deadline_sec: 60 }, 'explicit scenario policy wins');
+  assert.deepEqual(resolveLivenessPolicy(null, phases), { type: 'phase_timeouts' }, 'phase model auto-selects phase_timeouts');
   assert.deepEqual(resolveLivenessPolicy(null, null), DEFAULT_LIVENESS_POLICY, 'default when neither set');
-  // A malformed scenario policy falls through to the board, not throws.
-  assert.deepEqual(resolveLivenessPolicy('{"type":"bogus"}', board), { type: 'zero_progress', deadline_sec: 999 });
+  assert.deepEqual(resolveLivenessPolicy(null, { phases: [] }), DEFAULT_LIVENESS_POLICY, 'an empty phase model is no phase model');
+  // A malformed scenario policy falls through to the next tier, not throws.
+  assert.deepEqual(resolveLivenessPolicy('{"type":"bogus"}', null), DEFAULT_LIVENESS_POLICY);
+  assert.deepEqual(resolveLivenessPolicy('{"type":"bogus"}', phases), { type: 'phase_timeouts' });
 });
 
 // ── Reaper: heartbeat_deadline policy ────────────────────────────────────────
 
 test('(a)+(d) progressing token with empty step_results is never reaped, past start-deadline', async () => {
-  const scenarios = [{ id: 'sc-hb', board_id: null, liveness_policy: hbPolicy(180) }];
+  const scenarios = [{ id: 'sc-hb', liveness_policy: hbPolicy(180) }];
   const run = makeRun('live-progressing', {
     step_results: [],                                          // (d) empty steps
     liveness_token: 42,
@@ -117,7 +119,7 @@ test('(a)+(d) progressing token with empty step_results is never reaped, past st
     started_at: new Date(NOW.getTime() - 2 * HOUR),            // run is hours old (would die under TTL)
   });
   const repo = makeRunRepo([run]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, [], 'a live run whose token advanced within the deadline is spared');
@@ -125,13 +127,13 @@ test('(a)+(d) progressing token with empty step_results is never reaped, past st
 });
 
 test('(b) stalled token is reaped exactly once with an infra-death marker', async () => {
-  const scenarios = [{ id: 'sc-hb', board_id: null, liveness_policy: hbPolicy(180) }];
+  const scenarios = [{ id: 'sc-hb', liveness_policy: hbPolicy(180) }];
   const run = makeRun('dead-stalled', {
     liveness_token: 141,
     liveness_token_at: new Date(NOW.getTime() - 600 * SEC),    // stalled 10min > 180s
   });
   const repo = makeRunRepo([run]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const first = await svc.runOnce(NOW);
   assert.deepEqual(first.reaped, ['dead-stalled'], 'stalled token reaped');
@@ -149,21 +151,21 @@ test('(c-reaper) a stale token still reaps even when step_results is non-empty (
   // The pre-ticket fuse went permanently inactive once ANY step was recorded.
   // Under heartbeat_deadline the presence of a pending step is irrelevant —
   // only the (stalled) token decides.
-  const scenarios = [{ id: 'sc-hb', board_id: null, liveness_policy: hbPolicy(180) }];
+  const scenarios = [{ id: 'sc-hb', liveness_policy: hbPolicy(180) }];
   const run = makeRun('dead-with-pending-step', {
     step_results: [{ idx: 0, status: 'pending', log: 'heartbeat-as-step (the old anti-pattern)' }],
     liveness_token: 141,
     liveness_token_at: new Date(NOW.getTime() - 900 * SEC),    // stalled 15min
   });
   const repo = makeRunRepo([run]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, ['dead-with-pending-step'], 'a single stale pending step no longer immortalizes the run');
 });
 
 test('never-heartbeat run: grace within deadline of start, reaped once past it', async () => {
-  const scenarios = [{ id: 'sc-hb', board_id: null, liveness_policy: hbPolicy(180) }];
+  const scenarios = [{ id: 'sc-hb', liveness_policy: hbPolicy(180) }];
   const fresh = makeRun('hb-grace', {
     started_at: new Date(NOW.getTime() - 60 * SEC),            // 60s old, never heartbeat → grace
     liveness_token: null,
@@ -175,7 +177,7 @@ test('never-heartbeat run: grace within deadline of start, reaped once past it',
     liveness_token_at: null,
   });
   const repo = makeRunRepo([fresh, expired]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo([]), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, ['hb-no-first-beat'], 'first-heartbeat grace = deadline_sec from start');
@@ -184,13 +186,11 @@ test('never-heartbeat run: grace within deadline of start, reaped once past it',
 
 // ── Reaper: zero_progress default unchanged (regression-safe) ────────────────
 
-test('(e) a run on a board/scenario with no liveness_policy keeps zero_progress TTL behavior', async () => {
-  // Scenario + board both present but neither sets liveness_policy → default.
-  const scenarios = [{ id: 'sc-none', board_id: 'b-none', liveness_policy: null }];
-  const boards = [{ id: 'b-none', liveness_policy: null }];
+test('(e) a run on a scenario with no liveness_policy keeps zero_progress TTL behavior', async () => {
+  // Scenario present but sets neither liveness_policy nor phases → default.
+  const scenarios = [{ id: 'sc-none', liveness_policy: null }];
   const stale = makeRun('zp-stale', {
     scenario_id: 'sc-none',
-    board_id: 'b-none',
     started_at: new Date(NOW.getTime() - 10 * HOUR),           // > 6h TTL → reap
     // a recent heartbeat token must NOT save it under zero_progress (which ignores tokens)
     liveness_token: 99,
@@ -198,11 +198,10 @@ test('(e) a run on a board/scenario with no liveness_policy keeps zero_progress 
   });
   const fresh = makeRun('zp-fresh', {
     scenario_id: 'sc-none',
-    board_id: 'b-none',
     started_at: new Date(NOW.getTime() - 30 * 60_000),        // 30m: < 40m zero-progress window & < 6h TTL → spare
   });
   const repo = makeRunRepo([stale, fresh]);
-  const svc = new QaRunReaperService(repo, listRepo(scenarios), listRepo(boards), noopLog, noopQaRunService);
+  const svc = new QaRunReaperService(repo, listRepo(scenarios), noopLog, noopQaRunService);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, ['zp-stale'], 'zero_progress still reaps purely on age, ignoring heartbeat token');

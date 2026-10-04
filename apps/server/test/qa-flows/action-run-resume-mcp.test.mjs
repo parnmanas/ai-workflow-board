@@ -18,7 +18,8 @@
 //
 // "재개"의 관측 가능한 신호:
 //   1. complete_action_run 응답의 resumed=true + resume_emitted>=1
-//      (dispatchCurrentColumn 이 원 티켓의 현재 컬럼 role holder 를 재-dispatch)
+//      (TicketDispatchService.resumeTicket 이 in_progress 원 티켓의 assignee 에게
+//      agent_trigger 를 재전송)
 //   2. 원 티켓에 결과 감사 댓글(note) + action_run_completed ActivityLog 행
 //   3. run.status 가 succeeded/failed 로 전이(list_action_runs)
 
@@ -28,13 +29,13 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
   createAgent,
-  createBoard,
-  createColumn,
   createTicket,
   createApiKey,
   createUser,
+  runtimeHostKeyForAgent,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
+import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_ACTION_RESUME_PORT || '0';
 
@@ -53,21 +54,21 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const ds = app.get(getDataSourceToken());
 
   const ws = await createWorkspace(app, getDataSourceToken, 'actresume');
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer' });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer', runtime: true });
   // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
   const RUNTIME_SPEC = {
     manager_agent_id: agent.manager_agent_id, cli: 'claude', model: null,
     working_dir: '/srv/e2e', credential_id: null, label: 'e2e-deployer', role_prompt: '',
     runtime_config: { strategy: 'single', permission_mode: 'strict' },
   };
-  const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
-  // The source ticket lives in an ACTIVE column routed to the assignee role so
-  // the resume (dispatchCurrentColumn) has a holder to wake.
-  const col = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'In Progress',
-    position: 1,
-    workspaceId: ws.id,
-    roleRouting: ['assignee'],
+  // Source tickets are in_progress with the agent as assignee so the resume
+  // (resumeTicket) has someone to re-send them to — and the assignee's Runtime
+  // Host is connected, because dispatch never emits to an offline host.
+  const vagent = new VirtualAgent({ name: 'deployer', agentId: agent.id, apiKey: runtimeHostKeyForAgent(agent.id), port });
+  await vagent.start();
+  t.after(() => vagent.stop());
+  const blockedTicket = (title, extra = {}) => createTicket(app, getDataSourceToken, {
+    workspaceId: ws.id, title, status: 'in_progress', assignee: agent, ...extra,
   });
 
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, scope: 'full' });
@@ -117,12 +118,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   assert.ok(!existing.isError, 'save_action (existing) succeeds');
 
-  const ticket1 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
-    workspaceId: ws.id,
-    title: 'blocked on deploy',
-    assigneeId: agent.id,
-  });
+  const ticket1 = await blockedTicket('blocked on deploy');
 
   const run1 = await mcp.callTool('run_action', {
     action_id: existing.id,
@@ -196,12 +192,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     target_runtimes: [RUNTIME_SPEC],
   });
   assert.ok(!fresh.isError && fresh.id, 'new Action registered');
-  const ticket2 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
-    workspaceId: ws.id,
-    title: 'blocked on publish',
-    assigneeId: agent.id,
-  });
+  const ticket2 = await blockedTicket('blocked on publish');
   const run2 = await mcp.callTool('run_action', { action_id: fresh.id, source_ticket_id: ticket2.id });
   const done2 = await mcp.callTool('complete_action_run', {
     run_id: run2.run_id,
@@ -224,12 +215,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     prompt: 'sync-maybe',
     target_runtimes: [RUNTIME_SPEC],
   });
-  const ticket3 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
-    workspaceId: ws.id,
-    title: 'blocked on flaky deploy',
-    assigneeId: agent.id,
-  });
+  const ticket3 = await blockedTicket('blocked on flaky deploy');
   // Attempt 1 fails → server re-dispatches attempt 2 (no resume yet).
   const r3a = await mcp.callTool('run_action', { action_id: flaky.id, source_ticket_id: ticket3.id });
   const f3a = await mcp.callTool('complete_action_run', {
@@ -283,12 +269,8 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // workspace's Action run could be linked to another workspace's ticket and,
   // via complete_action_run, drive cross-workspace comments / re-dispatch.
   const otherWs = await createWorkspace(app, getDataSourceToken, 'foreignws');
-  const otherBoard = await createBoard(app, getDataSourceToken, otherWs.id, { name: 'ob' });
-  const otherCol = await createColumn(app, getDataSourceToken, otherBoard.id, {
-    name: 'In Progress', position: 1, workspaceId: otherWs.id, roleRouting: ['assignee'],
-  });
   const foreignTicket = await createTicket(app, getDataSourceToken, {
-    columnId: otherCol.id, workspaceId: otherWs.id, title: 'foreign ticket',
+    workspaceId: otherWs.id, title: 'foreign ticket', status: 'in_progress',
   });
   const crossRun = await mcp.callTool('run_action', {
     action_id: existing.id,            // action lives in `ws`
@@ -311,9 +293,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const conc = await mcp.callTool('save_action', {
     workspace_id: ws.id, name: 'Concurrent sync', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
   });
-  const ticket5 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked concurrent', assigneeId: agent.id,
-  });
+  const ticket5 = await blockedTicket('blocked concurrent');
   const run5 = await mcp.callTool('run_action', { action_id: conc.id, source_ticket_id: ticket5.id });
   const [c1, c2] = await Promise.all([
     svc.completeRun(run5.run_id, ws.id, { status: 'succeeded', summary: 'winner A' }),
@@ -341,9 +321,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   assert.ok(!hi.isError && hi.id, 'high-impact Action registered');
   assert.equal(hi.high_impact, true, 'high_impact flag round-trips through save_action');
-  const ticket6 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked on release', assigneeId: agent.id,
-  });
+  const ticket6 = await blockedTicket('blocked on release');
   // High-impact ⇒ the run needs a human approval grant (gate covered in CASE
   // 8-13); here an admin approves via the HUMAN REST path, then the agent runs
   // (no approver param) and the server consumes the grant — so we can exercise
@@ -383,9 +361,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   const keyed = await mcp.callTool('save_action', {
     workspace_id: ws.id, name: 'Keyed retry', prompt: 'x', target_runtimes: [RUNTIME_SPEC],
   });
-  const ticket7 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked keyed', assigneeId: agent.id,
-  });
+  const ticket7 = await blockedTicket('blocked keyed');
   const r7a = await mcp.callTool('run_action', { action_id: keyed.id, source_ticket_id: ticket7.id });
   const runs7a = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: keyed.id });
   const key7 = findRun(runs7a, r7a.run_id).idempotency_key;
@@ -407,9 +383,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
     workspace_id: ws.id, name: 'Ship release to production', prompt: 'ship', target_runtimes: [RUNTIME_SPEC], high_impact: true,
   });
   assert.ok(!gated.isError && gated.id, 'high-impact Action registered');
-  const ticket8 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked on ship', assigneeId: agent.id,
-  });
+  const ticket8 = await blockedTicket('blocked on ship');
   const gatedRun = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket8.id });
   assert.equal(gatedRun.isError, true, 'high-impact run without approval is rejected BEFORE execution');
   assert.match(JSON.stringify(gatedRun.error), /approval/i, 'rejection explains approval is required');
@@ -431,9 +405,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // cannot assert the approver; approval evidence is a server-side record).
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 9 — admin session grants approval → agent run consumes it → executes + records approver');
-  const ticket9 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked on approved ship', assigneeId: agent.id,
-  });
+  const ticket9 = await blockedTicket('blocked on approved ship');
   // (a) Unapproved agent run is rejected + parks the ticket (no grant yet).
   const preRun9 = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket9.id });
   assert.equal(preRun9.isError, true, 'an unapproved high-impact run is rejected');
@@ -484,9 +456,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   step('CASE 10 — non-admin session / unauthenticated / agent cannot create an approval');
   const member = await createUser(app, getDataSourceToken, { name: 'member', role: 'user' });
   const memberToken = authService.createSession(member.id);
-  const ticket10 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked unauth approve', assigneeId: agent.id,
-  });
+  const ticket10 = await blockedTicket('blocked unauth approve');
   // A non-admin authenticated user cannot approve.
   const memberAppr = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket10.id, token: memberToken });
   assert.equal(memberAppr.status, 403, 'a non-admin session cannot create an approval');
@@ -515,9 +485,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   });
   assert.ok(!misclassified.isError, 'misclassified action saves (high_impact omitted → false)');
   assert.equal(misclassified.high_impact, false, 'it is stored NOT explicitly flagged high_impact');
-  const ticket11 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked on misclassified deploy', assigneeId: agent.id,
-  });
+  const ticket11 = await blockedTicket('blocked on misclassified deploy');
   const miscRun = await mcp.callTool('run_action', { action_id: misclassified.id, source_ticket_id: ticket11.id });
   assert.equal(miscRun.isError, true, 'a deploy-named action is gated even when high_impact=false');
   assert.match(JSON.stringify(miscRun.error), /approval/i, 'the name heuristic escalates it to the approval gate');
@@ -529,9 +497,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // executes; a second run for the same (action, ticket) finds no pending grant.
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 12 — an approval grant is one-time: a reused grant is rejected');
-  const ticket12 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked one-time', assigneeId: agent.id,
-  });
+  const ticket12 = await blockedTicket('blocked one-time');
   const appr12 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket12.id, token: adminToken });
   assert.equal(appr12.status, 201, 'grant created for (gated, ticket12)');
   // First run consumes the grant and executes.
@@ -554,12 +520,8 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // ticket·action 전용 거부). It does not authorize a different ticket or action.
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 13 — a grant is bound: another ticket or another action is not authorized');
-  const ticket13a = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked bound approved', assigneeId: agent.id,
-  });
-  const ticket13b = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked bound unapproved', assigneeId: agent.id,
-  });
+  const ticket13a = await blockedTicket('blocked bound approved');
+  const ticket13b = await blockedTicket('blocked bound unapproved');
   // A second high-impact action to prove action-binding.
   const otherHi = await mcp.callTool('save_action', {
     workspace_id: ws.id, name: 'Publish to production', prompt: 'publish', target_runtimes: [RUNTIME_SPEC], high_impact: true,
@@ -586,9 +548,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // 미만료 record only). A grant past expires_at is treated as absent + retired.
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 14 — an expired approval grant is rejected + retired');
-  const ticket14 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked expired grant', assigneeId: agent.id,
-  });
+  const ticket14 = await blockedTicket('blocked expired grant');
   const appr14 = await approveViaRest({ actionId: gated.id, workspaceId: ws.id, sourceTicketId: ticket14.id, token: adminToken });
   assert.equal(appr14.status, 201, 'grant created for (gated, ticket14)');
   // Age it into the past (a real standing approval that timed out before use).
@@ -609,9 +569,7 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   // now retire A, consume B, execute, and leave the ticket un-parked.
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 15 — expired grant does not shadow a newer valid grant (single run consumes B)');
-  const ticket15 = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: ws.id, title: 'blocked expired-then-valid', assigneeId: agent.id,
-  });
+  const ticket15 = await blockedTicket('blocked expired-then-valid');
   // Grant A — created first, then forced into the past (expired) AND back-dated so
   // it is unambiguously the OLDEST pending grant the ASC-ordered consume sees first.
   // (created_at is second-precision on sqlite, so without back-dating A and B could
@@ -655,24 +613,19 @@ test('Action run → source ticket auto-resume (existing + new Action, failure/r
   assert.equal(t15.pending_user_action, false, 'the valid run does NOT re-park the ticket');
 
   // ─────────────────────────────────────────────────────────────────────────
-  // CASE 16 — terminal-column source ticket: an unapproved high-impact run is
-  // still REJECTED (the approval requirement is unrelated to column state),
+  // CASE 16 — done source ticket: an unapproved high-impact run is still
+  // REJECTED (the approval requirement is unrelated to ticket status),
   // but `_parkForApproval` must NOT set pending_user_action (ticket ec498050
   // — a ticket already Done is never revisited by a human on its User tab, so
   // parking it there just strands it invisibly).
   // ─────────────────────────────────────────────────────────────────────────
   step('CASE 16 — unapproved high-impact run on a terminal (Done) ticket rejects WITHOUT parking it');
-  const doneCol = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'Done', position: 5, workspaceId: ws.id, isTerminal: true,
-  });
-  const ticket16 = await createTicket(app, getDataSourceToken, {
-    columnId: doneCol.id, workspaceId: ws.id, title: 'already done — approval gate still trips', assigneeId: agent.id,
-  });
+  const ticket16 = await blockedTicket('already done — approval gate still trips', { status: 'done' });
   const gatedRun16 = await mcp.callTool('run_action', { action_id: gated.id, source_ticket_id: ticket16.id });
   assert.equal(gatedRun16.isError, true, 'the run is still rejected — no approval grant exists for this (action, ticket) pair');
   assert.match(JSON.stringify(gatedRun16.error), /approval/i, 'rejection still names the approval requirement');
   const t16 = await mcp.callTool('get_ticket', { ticket_id: ticket16.id });
-  assert.equal(t16.pending_user_action, false, 'a terminal-column ticket must NOT be parked by the approval gate');
+  assert.equal(t16.pending_user_action, false, 'a done ticket must NOT be parked by the approval gate');
   const parkActs16 = await ds.getRepository('ActivityLog').find({
     where: { ticket_id: ticket16.id, action: 'action_run_pending_approval' },
   });

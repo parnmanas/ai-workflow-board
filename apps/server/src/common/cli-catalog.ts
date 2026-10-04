@@ -23,7 +23,7 @@
 /** CLI 와 매니저 사이의 실행 방식. `none` = custom(운영자가 launch script 를 준다). */
 export type CliTransport = 'cli' | 'acp' | 'none';
 
-/** effort preset 이 CLI 블록 안에 실을 수 있는 키(effort-presets.ts 참조). */
+/** CLI 가 받는 launch override 키 — runtime_config · agent template · agent-manager effort 슬라이스가 읽는다. */
 export type CliEffortKey = 'model' | 'effort' | 'ultracode';
 
 /** Runtime config 협업 전략 — runtime-config.ts 의 ExecutionStrategy 와 같은 집합. */
@@ -89,7 +89,7 @@ export interface CliDescriptor {
     backend_profile: boolean;
   };
   /**
-   * effort preset 블록. null = 블록 없음(hermes / custom).
+   * launch override(effort/model) 블록. null = 블록 없음(hermes / custom).
    * `slice_key` 가 있으면 자기 블록을 갖지 않고 그 CLI 의 블록을 읽는다
    * (deepseek 는 Claude Code 바이너리로 돌기 때문에 `claude` 블록을 쓴다).
    */

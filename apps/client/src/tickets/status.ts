@@ -77,6 +77,7 @@ export function triggerReasonLabel(reason: string | null | undefined): string {
     case 'unassigned': return '담당자가 지정되지 않았습니다';
     case 'pending': return '대기(pending) 플래그가 있어 디스패치하지 않습니다';
     case 'archived': return '보관된 티켓입니다';
+    case 'duplicate': return '다른 티켓의 중복으로 확정되어 원본 티켓에서 처리합니다';
     case 'workspace_paused': return '워크스페이스의 티켓 디스패치가 일시정지되어 있습니다';
     case 'host_offline': return '담당자의 Runtime Host 가 오프라인입니다';
     case 'agent_busy': return '담당자가 동시 처리 한도만큼 다른 티켓을 처리 중입니다';

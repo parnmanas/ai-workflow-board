@@ -3,4 +3,3 @@
 # 자리가 헷갈리면 아무 데나 넣고 apps/server 에서 npm run test:suites:sort 를 돌려라.
 test/qa-flows/claude-backend-profile-pg-lock.test.mjs
 test/qa-flows/confirmed-duplicate-correction-wire.test.mjs
-test/qa-flows/prompt-audit-report-pg-cast.test.mjs

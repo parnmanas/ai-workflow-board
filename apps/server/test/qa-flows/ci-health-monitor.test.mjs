@@ -11,7 +11,8 @@
 //   1. A red streak (5 consecutive `failure` runs, ≥ CI_MONITOR_MIN_RUNS)
 //      trips on the first sweep: one `ci_red_alerts` row is written, one
 //      system chat alert is posted in the workspace's alerts room, and one
-//      Backlog ticket is auto-created carrying the CI-red
+//      `todo` ticket (tags `ci-red`, project = the watched project) is
+//      auto-created through TicketService carrying the CI-red
 //      `operational_dedupe_key`.
 //   2. (dedup) A second sweep against the SAME still-red fixture updates the
 //      existing row but creates NO second ticket and posts NO second chat
@@ -25,7 +26,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createBoard, createColumn } from '../helpers/fixtures.mjs';
+import { createWorkspace, createProject } from '../helpers/fixtures.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
@@ -93,7 +94,7 @@ function makeFakeGitHubFetchWithAuth(state) {
 
 /** Routes STRICTLY by repo name (acme/broken → 401, acme/healthy2 → the red
  *  fixture) and throws for anything else — deliberately unrouted, so a call
- *  against any OTHER already-seeded board in this suite surfaces as its own
+ *  against any OTHER already-seeded project in this suite surfaces as its own
  *  fetch failure instead of accidentally being answered by this fixture and
  *  polluting this test's alert-count assertions. */
 function makeFakeGitHubFetchMixed(state) {
@@ -113,12 +114,12 @@ function makeFakeGitHubFetchMixed(state) {
   };
 }
 
-/** Routes by Authorization header rather than by repo — both boards in the
+/** Routes by Authorization header rather than by repo — both projects in the
  *  cache-collision test point at the SAME owner/repo/branch, so the only way
- *  to tell "which board's call is this" apart is which credential's token
+ *  to tell "which project's call is this" apart is which credential's token
  *  came through. Records every header seen so a test can assert BOTH
  *  credentials' calls actually fired against GitHub (a cache keyed only by
- *  owner/repo would serve the second board's call from the first board's
+ *  owner/repo would serve the second project's call from the first project's
  *  cached promise and this header would never appear). */
 function makeFakeGitHubFetchSharedRepoByCredential(state) {
   return async (url, opts) => {
@@ -146,6 +147,23 @@ function run(id, conclusion, isoTime, event = 'push') {
   return { id, status: 'completed', conclusion, event, html_url: `https://github.com/acme/widgets/actions/runs/${id}`, created_at: isoTime, updated_at: isoTime };
 }
 
+/** A project the monitor watches: its own repo url on `main`, optionally
+ *  authenticated with its own credential (the monitor reads
+ *  Project.repo_url / default_branch / credential_id directly). */
+async function watchProject(app, getDataSourceToken, ds, wsId, { name, repoUrl, credentialId = null }) {
+  const project = await createProject(app, getDataSourceToken, wsId, { name, repoUrl, defaultBranch: 'main' });
+  if (credentialId) {
+    await ds.getRepository('Project').update(project.id, { credential_id: credentialId });
+    project.credential_id = credentialId;
+  }
+  return project;
+}
+
+function parseTags(raw) {
+  if (Array.isArray(raw)) return raw;
+  try { return JSON.parse(raw || '[]'); } catch { return []; }
+}
+
 test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery', async (t) => {
   step('Boot NestJS app on test port');
   process.env.CI_MONITOR_ENABLED = 'true';
@@ -169,23 +187,14 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   const { LogService } = await import('file://' + path.join(DIST_ROOT, 'services', 'log.service.js'));
   const logService = app.get(LogService);
 
-  step('Seed workspace + alerts room + board (Backlog/active columns) + env-configured GitHub repo');
+  step('Seed workspace + alerts room + project watching an env-token GitHub repo');
   const ws = await createWorkspace(app, getDataSourceToken, 'ci-health');
   const roomRepo = ds.getRepository('ChatRoom');
   const room = await roomRepo.save(roomRepo.create({ workspace_id: ws.id, type: 'group', name: 'qa-alerts' }));
   await ds.getRepository('Workspace').update(ws.id, { alerts_chat_room_id: room.id });
 
-  const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board' });
-  const backlog = await createColumn(app, getDataSourceToken, board.id, { name: 'Backlog', position: 0, workspaceId: ws.id }); // kind auto-resolves to 'intake'
-  await createColumn(app, getDataSourceToken, board.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
-
-  const resourceRepo = ds.getRepository('Resource');
-  const resource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: ws.id, name: 'widgets repo', type: 'repository',
-    url: 'https://github.com/acme/widgets', default_branch: 'main',
-  }));
-  await ds.getRepository('Board').update(board.id, {
-    environment_config: JSON.stringify({ repositories: [{ resource_id: resource.id }] }),
+  const project = await watchProject(app, getDataSourceToken, ds, ws.id, {
+    name: 'widgets', repoUrl: 'https://github.com/acme/widgets',
   });
 
   const NOW = new Date();
@@ -207,13 +216,13 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   const commentRepo = ds.getRepository('Comment');
   const dedupeKey = `ci_red:${ws.id}:acme/widgets:main:555`;
 
-  await t.test('1. first sweep trips the red streak: alert row + chat alert + auto-created Backlog ticket', async () => {
+  await t.test('1. first sweep trips the red streak: alert row + chat alert + auto-created todo ticket', async () => {
     const stats = await monitor.sweep(NOW);
     assert.equal(stats.alerts_created, 1);
     assert.equal(stats.tickets_created, 1);
     assert.equal(stats.delivery_failures, 0);
 
-    const alert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const alert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.ok(alert, 'CiRedAlert row must exist');
     assert.equal(alert.streak, 5);
     assert.equal(alert.first_failed_run_id, 'run-1');
@@ -231,7 +240,9 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const ticket = await ticketRepo.findOne({ where: { id: alert.created_ticket_id } });
     assert.ok(ticket, 'auto-created ticket must exist');
     assert.equal(ticket.operational_dedupe_key, dedupeKey);
-    assert.equal(ticket.column_id, backlog.id, 'ticket must land in the intake/Backlog column');
+    assert.equal(ticket.status, 'todo', 'ticket must land ready to work (todo) so the project default_assignee picks it up');
+    assert.equal(ticket.project_id, project.id, 'ticket must be filed on the watched project');
+    assert.ok(parseTags(ticket.tags).includes('ci-red'), 'ticket must carry the ci-red tag');
     assert.match(ticket.title, /CI red/);
     assert.match(ticket.title, /acme\/widgets/);
   });
@@ -242,7 +253,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     assert.equal(stats.alerts_updated, 1);
     assert.equal(stats.tickets_created, 0, 'ticket creation must not run twice for the same episode');
 
-    const alerts = await alertRepo.find({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const alerts = await alertRepo.find({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.equal(alerts.length, 1, 'still exactly one alert row');
 
     const tickets = await ticketRepo.find({ where: { operational_dedupe_key: dedupeKey } });
@@ -259,7 +270,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   // 위치가 중요하다: 3번(진짜 복구)이 행을 지우므로 반드시 그 앞에서 돌아야 한다.
 
   await t.test('2b. 같은 초에 생성된 다른 workflow 의 success 가 응답 앞자리에 섞여 와도 복구로 판정하지 않는다 (ticket 0ef405f9)', async () => {
-    const priorAlert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const priorAlert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.ok(priorAlert, '사전 조건: red alert 행이 남아 있어야 이 전이를 시험할 수 있다');
 
     // 실제 사건 모양: 푸시 1회가 CI(failure, workflow 555) 와 Publish(success, 다른
@@ -271,7 +282,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const stats = await monitor.sweep(new Date(NOW.getTime() + 500));
     assert.equal(stats.recovered, 0, '다른 workflow 의 성공은 이 workflow 의 복구가 아니다');
 
-    const alert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const alert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.ok(alert, 'alert 행이 살아 있어야 한다 — 가짜 복구는 감시 상태까지 지운다');
     assert.equal(alert.streak, 5, '스트릭이 초기화되면 안 된다');
     assert.equal(alert.created_ticket_id, priorAlert.created_ticket_id, '추적 티켓 연결이 유지돼야 한다');
@@ -281,7 +292,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   });
 
   await t.test('2c. 이 workflow 의 success 로 보이더라도 기록된 실패 run 보다 최신이 아니면 복구로 판정하지 않고 관측 가능하게 남긴다 (ticket 0ef405f9)', async () => {
-    const priorAlert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const priorAlert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.equal(priorAlert.last_run_at, redRuns[0].created_at, '하한선(last_run_at)이 red 근거 run 의 생성 시각으로 기록돼 있어야 한다');
 
     // 응답에서 최신 실패들이 빠지고 과거의 green 만 남은 모양 — workflow 필터로는 걸러낼
@@ -299,7 +310,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const rejectLog = warnAfter.find((e) => JSON.stringify(e.meta || {}).includes('run-0'));
     assert.ok(rejectLog, '어떤 run 을 왜 거부했는지 로그에서 식별할 수 있어야 한다');
 
-    const alert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const alert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.ok(alert, 'alert 행이 살아 있어야 한다');
     assert.equal(alert.streak, 5, '거부된 평가는 행을 건드리지 않는다');
     assert.equal(alert.created_ticket_id, priorAlert.created_ticket_id);
@@ -311,15 +322,15 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   });
 
   await t.test('3. recovery: newest run flips green — recovery message + ticket comment, alert row deleted, ticket left open', async () => {
-    const priorAlert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const priorAlert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     const trackedTicketId = priorAlert.created_ticket_id;
 
     fetchState.runs = [run('run-6', 'success', minutesAgo(1)), ...redRuns];
     const stats = await monitor.sweep(new Date(NOW.getTime() + 1000));
     assert.equal(stats.recovered, 1);
 
-    const alert = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
-    assert.equal(alert, null, 'alert row must be deleted on recovery (self-pruning, same as StuckTicketAlert unstuck)');
+    const alert = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    assert.equal(alert, null, 'alert row must be deleted on recovery (self-pruning)');
 
     const systemMsgs = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system');
     assert.equal(systemMsgs.length, 2, 'exactly one recovery message added');
@@ -331,7 +342,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
 
     const ticket = await ticketRepo.findOne({ where: { id: trackedTicketId } });
     assert.ok(ticket, 'ticket must still exist');
-    assert.equal(ticket.column_id, backlog.id, 'recovery must NOT move/close the ticket — that decision is left to whoever holds it');
+    assert.equal(ticket.status, 'todo', 'recovery must NOT move/close the ticket — that decision is left to whoever holds it');
   });
 
   // ─── ticket 0ef405f9 리뷰 지적: 정상 복구가 갇히지 않아야 한다 ──────────────────
@@ -341,7 +352,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
   // 양쪽 방향 — 더 작은 id 는 거부, 더 큰 id 는 복구 — 을 production 경로(sweep())에서
   // 확인한다. 3번이 행을 지운 뒤라 여기서 red 에피소드를 새로 세운다.
   await t.test('3b. 같은 workflow·같은 초 동률: run id 가 더 작은 success 는 거부하고, 더 큰 success 는 복구로 처리한다 (ticket 0ef405f9 리뷰 지적)', async () => {
-    const cleared = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const cleared = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.equal(cleared, null, '사전 조건: 3번이 행을 지운 상태에서 시작한다');
 
     // 실제 run id 모양(10진 정수)을 쓴다 — 동률 깨기는 id 의 대소 비교이므로 'run-5' 같은
@@ -356,7 +367,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const redStats = await monitor.sweep(new Date(NOW.getTime() + 2000));
     assert.equal(redStats.alerts_created, 1, '새 red 에피소드가 세워져야 한다');
 
-    const seeded = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const seeded = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.equal(seeded.last_run_id, '35939082088', '하한선 run id 가 최신 실패 run 이어야 한다');
     assert.equal(seeded.last_run_at, tieAt, '하한선 시각이 그 실패 run 의 생성 시각이어야 한다');
     const msgsAfterRed = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system').length;
@@ -366,7 +377,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const rejectStats = await monitor.sweep(new Date(NOW.getTime() + 3000));
     assert.equal(rejectStats.recovered, 0, '같은 초라도 id 가 더 작은 success 는 복구가 아니다');
     assert.equal(rejectStats.stale_green_rejected, 1, '거부는 카운터로 관측돼야 한다');
-    const stillRed = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const stillRed = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.ok(stillRed, 'alert 행이 살아 있어야 한다');
     assert.equal(stillRed.streak, 3, '거부된 평가는 행을 건드리지 않는다');
 
@@ -377,7 +388,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     assert.equal(recoverStats.recovered, 1, '같은 초에 뒤이어 만들어진 success 는 복구로 처리돼야 한다 — 거부하면 행이 갇힌다');
     assert.equal(recoverStats.stale_green_rejected, 0, '정상 복구가 거부 카운터로 집계되면 안 된다');
 
-    const recovered = await alertRepo.findOne({ where: { board_id: board.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
+    const recovered = await alertRepo.findOne({ where: { project_id: project.id, repo_full_name: 'acme/widgets', branch: 'main', workflow_id: '555' } });
     assert.equal(recovered, null, '복구 시 alert 행이 삭제돼야 한다');
 
     const msgsAfterRecovery = (await messageRepo.find({ where: { room_id: room.id } })).filter((m) => m.sender_type === 'system');
@@ -385,7 +396,7 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     assert.match(msgsAfterRecovery[msgsAfterRecovery.length - 1].content, /CI 복구|recovered|recovery/i);
   });
 
-  await t.test('4. env GITHUB_TOKEN absent but this board\'s Resource carries its own credential: sweep must still call GitHub and detect the red streak (review blocker #1 — global env-only gate must not blind the sweep to a board credential)', async () => {
+  await t.test('4. env GITHUB_TOKEN absent but this project carries its own credential: sweep must still call GitHub and detect the red streak (review blocker #1 — global env-only gate must not blind the sweep to a project credential)', async () => {
     const savedEnvToken = process.env.GITHUB_TOKEN;
     delete process.env.GITHUB_TOKEN;
     try {
@@ -395,16 +406,8 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
         encrypted_data: encrypt(JSON.stringify({ token: 'cred-only-token' })),
       }));
 
-      const board2 = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-cred' });
-      await createColumn(app, getDataSourceToken, board2.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
-      await createColumn(app, getDataSourceToken, board2.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
-
-      const resource2 = await resourceRepo.save(resourceRepo.create({
-        workspace_id: ws.id, name: 'gizmos repo', type: 'repository',
-        url: 'https://github.com/acme/gizmos', default_branch: 'main', credential_id: credential.id,
-      }));
-      await ds.getRepository('Board').update(board2.id, {
-        environment_config: JSON.stringify({ repositories: [{ resource_id: resource2.id }] }),
+      await watchProject(app, getDataSourceToken, ds, ws.id, {
+        name: 'gizmos', repoUrl: 'https://github.com/acme/gizmos', credentialId: credential.id,
       });
 
       const authState = {
@@ -420,40 +423,22 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
       const stats = await monitor.sweep(NOW);
 
       assert.ok(authState.lastAuthHeader, 'a GitHub call must actually have fired this sweep');
-      assert.equal(authState.lastAuthHeader, 'Bearer cred-only-token', 'must auth with the Resource credential, not env (which is unset for this test)');
-      assert.equal(stats.alerts_created, 1, 'sweep must not globally skip when env token is absent but a board credential resolves');
+      assert.equal(authState.lastAuthHeader, 'Bearer cred-only-token', 'must auth with the project credential, not env (which is unset for this test)');
+      assert.equal(stats.alerts_created, 1, 'sweep must not globally skip when env token is absent but a project credential resolves');
       assert.equal(stats.tickets_created, 1);
 
       const credDedupeKey = `ci_red:${ws.id}:acme/gizmos:main:777`;
       const ticket = await ticketRepo.findOne({ where: { operational_dedupe_key: credDedupeKey } });
-      assert.ok(ticket, 'auto-created ticket must exist for the credential-only board');
+      assert.ok(ticket, 'auto-created ticket must exist for the credential-only project');
     } finally {
       if (savedEnvToken === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = savedEnvToken;
     }
   });
 
-  await t.test('5. one board\'s GitHub call 401s: sweep records the failure observably and keeps monitoring the other board in the same pass (review blocker #2 — a fetch failure must not be indistinguishable from "nothing to report")', async () => {
-    const boardBroken = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-broken' });
-    await createColumn(app, getDataSourceToken, boardBroken.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
-    const resourceBroken = await resourceRepo.save(resourceRepo.create({
-      workspace_id: ws.id, name: 'broken repo', type: 'repository',
-      url: 'https://github.com/acme/broken', default_branch: 'main',
-    }));
-    await ds.getRepository('Board').update(boardBroken.id, {
-      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceBroken.id }] }),
-    });
-
-    const boardHealthy = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-healthy2' });
-    await createColumn(app, getDataSourceToken, boardHealthy.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
-    await createColumn(app, getDataSourceToken, boardHealthy.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
-    const resourceHealthy = await resourceRepo.save(resourceRepo.create({
-      workspace_id: ws.id, name: 'healthy2 repo', type: 'repository',
-      url: 'https://github.com/acme/healthy2', default_branch: 'main',
-    }));
-    await ds.getRepository('Board').update(boardHealthy.id, {
-      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceHealthy.id }] }),
-    });
+  await t.test('5. one project\'s GitHub call 401s: sweep records the failure observably and keeps monitoring the other project in the same pass (review blocker #2 — a fetch failure must not be indistinguishable from "nothing to report")', async () => {
+    await watchProject(app, getDataSourceToken, ds, ws.id, { name: 'broken', repoUrl: 'https://github.com/acme/broken' });
+    await watchProject(app, getDataSourceToken, ds, ws.id, { name: 'healthy2', repoUrl: 'https://github.com/acme/healthy2' });
 
     const mixedState = {
       workflowId: 888,
@@ -468,22 +453,22 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
     const warnLogsBefore = logService.query({ level: 'warn', category: 'CI' }).length;
     const stats = await monitor.sweep(NOW);
 
-    assert.ok(stats.fetch_failures >= 1, 'the broken board\'s 401 must be counted, not silently absorbed into "no signal"');
+    assert.ok(stats.fetch_failures >= 1, 'the broken project\'s 401 must be counted, not silently absorbed into "no signal"');
     const warnLogsAfter = logService.query({ level: 'warn', category: 'CI' });
     assert.ok(warnLogsAfter.length > warnLogsBefore, 'the fetch failure must be logged under the CI category, not silent');
     const brokenLog = warnLogsAfter.find((e) => JSON.stringify(e.meta || {}).includes('acme/broken'));
-    assert.ok(brokenLog, 'the logged failure must identify which board/repo it came from');
+    assert.ok(brokenLog, 'the logged failure must identify which project/repo it came from');
 
-    assert.equal(stats.alerts_created, 1, 'the OTHER board must still be evaluated and alerted in the same sweep');
+    assert.equal(stats.alerts_created, 1, 'the OTHER project must still be evaluated and alerted in the same sweep');
     const healthyDedupeKey = `ci_red:${ws.id}:acme/healthy2:main:888`;
     const healthyTicket = await ticketRepo.findOne({ where: { operational_dedupe_key: healthyDedupeKey } });
-    assert.ok(healthyTicket, 'the healthy board\'s ticket must still be auto-created despite the other board\'s GitHub call failing');
+    assert.ok(healthyTicket, 'the healthy project\'s ticket must still be auto-created despite the other project\'s GitHub call failing');
 
     const brokenAlert = await alertRepo.findOne({ where: { repo_full_name: 'acme/broken' } });
-    assert.equal(brokenAlert, null, 'no alert row for the board whose GitHub call failed — there was nothing to evaluate');
+    assert.equal(brokenAlert, null, 'no alert row for the project whose GitHub call failed — there was nothing to evaluate');
   });
 
-  await t.test('6. two boards watch the SAME owner/repo/branch with DIFFERENT credentials: an invalid credential on one board must not poison the sweep for the other board\'s valid credential (review blocker #3 — per-sweep cache keys must include credentialId)', async () => {
+  await t.test('6. two projects watch the SAME owner/repo/branch with DIFFERENT credentials: an invalid credential on one project must not poison the sweep for the other project\'s valid credential (review blocker #3 — per-sweep cache keys must include credentialId)', async () => {
     const credentialRepo = ds.getRepository('Credential');
     const badCred = await credentialRepo.save(credentialRepo.create({
       workspace_id: ws.id, name: 'shared repo bad cred', provider: 'github',
@@ -494,29 +479,15 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
       encrypted_data: encrypt(JSON.stringify({ token: 'shared-good-token' })),
     }));
 
-    // Created in this order deliberately — the bad-credential board must be
+    // Created in this order deliberately — the bad-credential project must be
     // the one whose (rejected) promise would land in the cache FIRST under
     // the old owner/repo-only key, so this reproduces the exact poisoning
     // order the reviewer described rather than relying on scan order luck.
-    const boardBad = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-shared-bad' });
-    await createColumn(app, getDataSourceToken, boardBad.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
-    const resourceBad = await resourceRepo.save(resourceRepo.create({
-      workspace_id: ws.id, name: 'shared repo (bad cred)', type: 'repository',
-      url: 'https://github.com/acme/shared', default_branch: 'main', credential_id: badCred.id,
-    }));
-    await ds.getRepository('Board').update(boardBad.id, {
-      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceBad.id }] }),
+    const projectBad = await watchProject(app, getDataSourceToken, ds, ws.id, {
+      name: 'shared-bad', repoUrl: 'https://github.com/acme/shared', credentialId: badCred.id,
     });
-
-    const boardGood = await createBoard(app, getDataSourceToken, ws.id, { name: 'ci-health-board-shared-good' });
-    await createColumn(app, getDataSourceToken, boardGood.id, { name: 'Backlog', position: 0, workspaceId: ws.id });
-    await createColumn(app, getDataSourceToken, boardGood.id, { name: 'To Do', position: 1, workspaceId: ws.id, kind: 'active' });
-    const resourceGood = await resourceRepo.save(resourceRepo.create({
-      workspace_id: ws.id, name: 'shared repo (good cred)', type: 'repository',
-      url: 'https://github.com/acme/shared', default_branch: 'main', credential_id: goodCred.id,
-    }));
-    await ds.getRepository('Board').update(boardGood.id, {
-      environment_config: JSON.stringify({ repositories: [{ resource_id: resourceGood.id }] }),
+    await watchProject(app, getDataSourceToken, ds, ws.id, {
+      name: 'shared-good', repoUrl: 'https://github.com/acme/shared', credentialId: goodCred.id,
     });
 
     const sharedState = {
@@ -532,19 +503,19 @@ test('CiHealthMonitorService — red streak alert + auto-ticket, dedup, recovery
 
     const stats = await monitor.sweep(NOW);
 
-    assert.ok(sharedState.authHeaders.includes('Bearer shared-bad-token'), 'the bad-credential board\'s own call must fire');
+    assert.ok(sharedState.authHeaders.includes('Bearer shared-bad-token'), 'the bad-credential project\'s own call must fire');
     assert.ok(
       sharedState.authHeaders.includes('Bearer shared-good-token'),
-      'the good-credential board\'s call must fire with ITS OWN credential — a cache keyed only by owner/repo would reuse the bad board\'s cached rejection and this header would never appear',
+      'the good-credential project\'s call must fire with ITS OWN credential — a cache keyed only by owner/repo would reuse the bad project\'s cached rejection and this header would never appear',
     );
-    assert.ok(stats.fetch_failures >= 1, 'the bad-credential board\'s failure must still be counted');
+    assert.ok(stats.fetch_failures >= 1, 'the bad-credential project\'s failure must still be counted');
 
     const goodDedupeKey = `ci_red:${ws.id}:acme/shared:main:999`;
     const goodTicket = await ticketRepo.findOne({ where: { operational_dedupe_key: goodDedupeKey } });
-    assert.ok(goodTicket, 'the good-credential board must still get its own alert/ticket despite sharing owner/repo/branch/workflow with a board whose credential 401s');
+    assert.ok(goodTicket, 'the good-credential project must still get its own alert/ticket despite sharing owner/repo/branch/workflow with a project whose credential 401s');
 
-    const badAlert = await alertRepo.findOne({ where: { repo_full_name: 'acme/shared', board_id: boardBad.id } });
-    assert.equal(badAlert, null, 'no alert row for the bad-credential board — its call genuinely failed');
+    const badAlert = await alertRepo.findOne({ where: { repo_full_name: 'acme/shared', project_id: projectBad.id } });
+    assert.equal(badAlert, null, 'no alert row for the bad-credential project — its call genuinely failed');
   });
 
 });

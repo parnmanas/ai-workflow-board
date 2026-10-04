@@ -1,8 +1,7 @@
 // Durable CI-wait resume (ticket 778b6dc7) — against a REAL sql.js
 // DataSource driven through the app's own buildDataSourceOptions() (so
 // `synchronize` actually creates Ticket.pending_ci_wait / ci_wait_context —
-// the dual-DB migration-free config-column convention). Mirrors
-// hard-budget-guard.test.mjs's bootstrap shape.
+// the dual-DB migration-free config-column convention).
 //
 // Central regressions this file exists to pin:
 //
@@ -33,8 +32,8 @@
 //   no window left to crash in for that pair. The resume DISPATCH cannot
 //   join that transaction (it crosses to agent-manager over SSE), so it is
 //   ordered strictly AFTER the transaction commits and treated as
-//   best-effort, backstopped by `DispatchReconcilerService`'s independent
-//   idle-seed sweep (see ci-wait-resume.service.ts's class docstring).
+//   best-effort, backstopped by `TicketDispatchService`'s own sweep (queue
+//   pump / supervisor — see ci-wait-resume.service.ts's class docstring).
 //
 // GitHub reads are stubbed by monkey-patching the `.github` property after
 // construction — CiWaitResumeService compiles `private readonly github` to a
@@ -74,13 +73,12 @@ process.env.SQLJS_DB_PATH = path.join(tmpDir, 'ci-wait-test.db');
 process.env.NODE_ENV = 'test';
 
 const { buildDataSourceOptions, serializeSqljsTransactions } = await import('file://' + path.join(DIST, 'db.js'));
-const { Board } = await import('file://' + path.join(DIST, 'entities', 'Board.js'));
-const { BoardColumn } = await import('file://' + path.join(DIST, 'entities', 'BoardColumn.js'));
 const { Ticket } = await import('file://' + path.join(DIST, 'entities', 'Ticket.js'));
 const { Comment } = await import('file://' + path.join(DIST, 'entities', 'Comment.js'));
-const { Resource } = await import('file://' + path.join(DIST, 'entities', 'Resource.js'));
+const { Project } = await import('file://' + path.join(DIST, 'entities', 'Project.js'));
 const { ActivityLog } = await import('file://' + path.join(DIST, 'entities', 'ActivityLog.js'));
-/* P4c-4: Agent 엔티티 삭제 — import 제거. */
+const { isTicketPending } = await import('file://' + path.join(DIST, 'common', 'ticket-status.js'));
+const { ProjectsService } = await import('file://' + path.join(DIST, 'modules', 'projects', 'projects.service.js'));
 const { ActivityService } = await import('file://' + path.join(DIST, 'services', 'activity.service.js'));
 const { isValidGitHubRunId, isValidGitSha } = await import('file://' + path.join(DIST, 'services', 'github-connector.service.js'));
 const { CiWaitService } = await import('file://' + path.join(DIST, 'modules', 'tickets', 'ci-wait.service.js'));
@@ -103,48 +101,48 @@ serializeSqljsTransactions(ds);
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const activityService = new ActivityService(ds.getRepository(ActivityLog), ds, logStub);
 const ciWaitService = new CiWaitService(ds, activityService);
+const projectsService = new ProjectsService(ds);
 
-const boardRepo = ds.getRepository(Board);
-const colRepo = ds.getRepository(BoardColumn);
 const ticketRepo = ds.getRepository(Ticket);
 const commentRepo = ds.getRepository(Comment);
-const resourceRepo = ds.getRepository(Resource);
+const projectRepo = ds.getRepository(Project);
 
+// A ticket parked on CI is one its assignee was working on — `in_progress`
+// is the status `resumeTicket` re-sends.
 async function makeTicket(overrides = {}) {
-  const board = await boardRepo.save(boardRepo.create({ name: 'B' }));
-  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
   return ticketRepo.save(ticketRepo.create({
-    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false, ...overrides,
+    title: 'T', status: 'in_progress', workspace_id: 'w1', pending_user_action: false, ...overrides,
   }));
 }
 
 /**
- * `dispatchCurrentColumn`'s stub enforces the SAME gate the real
- * trigger-loop.service.ts has: it refuses to emit while `pending_ci_wait`
- * is still true on the live ticket row. An earlier draft of `_deliver`
- * called dispatch BEFORE clearing the flag, so the real call was always a
- * silent no-op — a bug the round-2 tests never caught because their stub
- * didn't reproduce this gate. Baking the check into every test's stub
- * means any regression of the ordering fails loudly here instead of
- * silently under-reporting dispatch coverage.
+ * `resumeTicket`'s stub enforces the SAME gate the real
+ * TicketDispatchService has: `dispatch()` refuses to emit while the live
+ * ticket row is still pending (`isTicketPending`, which covers
+ * `pending_ci_wait`). An earlier draft of `_deliver` called dispatch BEFORE
+ * clearing the flag, so the real call was always a silent no-op — a bug the
+ * round-2 tests never caught because their stub didn't reproduce this gate.
+ * Baking the check into every test's stub means any regression of the
+ * ordering fails loudly here instead of silently under-reporting dispatch
+ * coverage.
  */
 function makeResumer(githubStub, dispatchCalls, dispatchImpl, ciWaitServiceOverride = ciWaitService, dataSourceOverride = ds) {
-  const fakeTriggerLoop = {
-    async dispatchCurrentColumn(ticketId, source, by) {
+  const fakeTicketDispatch = {
+    async resumeTicket(ticketId, source) {
       const live = await ticketRepo.findOne({ where: { id: ticketId } });
-      const pendingStillTrue = !!live?.pending_ci_wait;
-      dispatchCalls.push({ ticketId, source, by, pendingStillTrue });
+      const pendingStillTrue = !!live && isTicketPending(live);
+      dispatchCalls.push({ ticketId, source, pendingStillTrue });
       if (pendingStillTrue) {
         throw new Error(
-          `dispatchCurrentColumn called for ${ticketId} while pending_ci_wait was still true — ` +
-          'the real trigger-loop.service.ts gate would have silently no-op\'d this call',
+          `resumeTicket called for ${ticketId} while pending_ci_wait was still true — ` +
+          'the real TicketDispatchService pending gate would have silently no-op\'d this call',
         );
       }
-      if (dispatchImpl) return dispatchImpl(ticketId, source, by);
-      return { emitted: 1 };
+      if (dispatchImpl) return dispatchImpl(ticketId, source);
+      return { dispatched: true };
     },
   };
-  const resumer = new CiWaitResumeService(dataSourceOverride, logStub, ciWaitServiceOverride, fakeTriggerLoop);
+  const resumer = new CiWaitResumeService(dataSourceOverride, logStub, ciWaitServiceOverride, fakeTicketDispatch, projectsService);
   resumer.github = githubStub;
   return resumer;
 }
@@ -177,7 +175,7 @@ function makeThrowOnceOnCommentInsertDataSource(failTimes = 1) {
 
 function assertNoOrderingViolations(dispatchCalls) {
   const violations = dispatchCalls.filter((c) => c.pendingStillTrue);
-  assert.equal(violations.length, 0, `dispatchCurrentColumn must never be called while pending_ci_wait is still true: ${JSON.stringify(violations)}`);
+  assert.equal(violations.length, 0, `resumeTicket must never be called while pending_ci_wait is still true: ${JSON.stringify(violations)}`);
 }
 
 /**
@@ -477,7 +475,7 @@ test('sweep(): a completed successful run resolves the wait exactly once — com
 
   assertNoOrderingViolations(dispatchCalls);
   const dispatchesForTicket = dispatchCalls.filter((c) => c.ticketId === ticket.id);
-  assert.equal(dispatchesForTicket.length, 1, 'dispatchCurrentColumn must fire exactly once for this ticket, not once per racing sweep');
+  assert.equal(dispatchesForTicket.length, 1, 'resumeTicket must fire exactly once for this ticket, not once per racing sweep');
   assert.equal(dispatchesForTicket[0].source, 'ci_wait_resolved');
 
   const comments = await commentRepo.find({ where: { ticket_id: ticket.id } });
@@ -689,7 +687,7 @@ test('sweep(): dispatch throws AFTER the claim transaction already committed —
 
   // A later sweep must find nothing to do for this ticket — it already left
   // the pending_ci_wait=true candidate set for good. From here on,
-  // DispatchReconcilerService's idle-seed sweep is the sole backstop (see
+  // TicketDispatchService's own sweep is the sole backstop (see
   // ci-wait-resume.service.ts's class docstring) — this test only asserts
   // what CiWaitResumeService itself is responsible for: not retrying.
   const laterDispatchCalls = [];
@@ -736,13 +734,15 @@ test('crash recovery: outcome already recorded (phase 1 done, process died befor
 
 // ── Credential resolution (ticket 9bbe9146) — the root cause: an unresolved
 // credential made every GitHub read degrade to null and look EXACTLY like
-// "still queued", forever ────────────────────────────────────────────────
+// "still queued", forever. The ticket's own `project_id` is the one binding
+// (the same project dispatch ships as `base_repo`) — the old board
+// environment-repo fallback went away with boards. ────────────────────────
 
-test('sweep(): resolves credential_id from the ticket\'s bound Resource (same workspace) and passes it to getWorkflowRun', async () => {
-  const resource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: 'w1', name: 'repo', type: 'repository', credential_id: 'cred-abc',
+test('sweep(): resolves credential_id from the ticket\'s project (same workspace) and passes it to getWorkflowRun', async () => {
+  const project = await projectRepo.save(projectRepo.create({
+    workspace_id: 'w1', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-abc',
   }));
-  const ticket = await makeTicket({ base_repo_resource_id: resource.id });
+  const ticket = await makeTicket({ project_id: project.id });
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
 
   let seenCredentialId = 'unset';
@@ -755,14 +755,14 @@ test('sweep(): resolves credential_id from the ticket\'s bound Resource (same wo
   const resumer = makeResumer(githubStub, []);
   await resumer.sweep();
 
-  assert.equal(seenCredentialId, 'cred-abc', 'the Resource\'s credential_id must reach getWorkflowRun\'s 4th argument');
+  assert.equal(seenCredentialId, 'cred-abc', 'the project\'s credential_id must reach getWorkflowRun\'s 4th argument');
 });
 
-test('sweep(): a bound Resource in a DIFFERENT workspace never leaks its credential_id to this ticket\'s poll', async () => {
-  const resource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: 'other-workspace', name: 'repo', type: 'repository', credential_id: 'cred-should-not-leak',
+test('sweep(): a project in a DIFFERENT workspace never leaks its credential_id to this ticket\'s poll', async () => {
+  const project = await projectRepo.save(projectRepo.create({
+    workspace_id: 'other-workspace', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-should-not-leak',
   }));
-  const ticket = await makeTicket({ workspace_id: 'w1', base_repo_resource_id: resource.id });
+  const ticket = await makeTicket({ workspace_id: 'w1', project_id: project.id });
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
 
   let seenCredentialId = 'unset';
@@ -775,12 +775,12 @@ test('sweep(): a bound Resource in a DIFFERENT workspace never leaks its credent
   const resumer = makeResumer(githubStub, []);
   await resumer.sweep();
 
-  assert.equal(seenCredentialId, null, 'a cross-workspace Resource must never leak its credential_id into this poll');
+  assert.equal(seenCredentialId, null, 'a cross-workspace project must never leak its credential_id into this poll');
   await ciWaitService.cancelWait(ticket.id);
 });
 
-test('sweep(): no bound Resource degrades to a null credentialId — same env-token fallback as before this ticket', async () => {
-  const ticket = await makeTicket(); // no base_repo_resource_id
+test('sweep(): no project degrades to a null credentialId — same env-token fallback as before this ticket', async () => {
+  const ticket = await makeTicket(); // no project_id
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
 
   let seenCredentialId = 'unset';
@@ -797,111 +797,8 @@ test('sweep(): no bound Resource degrades to a null credentialId — same env-to
   await ciWaitService.cancelWait(ticket.id);
 });
 
-// ── Board-environment credential fallback (ticket 9bbe9146, review round 4 —
-// live probe) — on this board EVERY ticket's base_repo_resource_id is
-// permanently '': trigger-loop.service.ts's dispatch resolves the board's
-// environment_config repo into the SSE payload but never persists it back
-// onto the ticket row (base-repo-binding.ts's `pickBaseRepoResourceId`
-// backfill only fills the wire payload). A resolver that only reads
-// Ticket.base_repo_resource_id therefore degrades to null for every ticket on
-// such a board — reproducing this ticket's original symptom one layer down.
-// `_resolveCredentialId` must consult the SAME board-env fallback dispatch
-// uses (mergeEnvironmentConfig(workspace, board).repositories[0]) before
-// giving up. ─────────────────────────────────────────────────────────────
-
-test('sweep(): base_repo_resource_id=\'\' falls back to the board environment repo\'s credential_id', async () => {
-  const resource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: 'w1', name: 'board-env-repo', type: 'repository', credential_id: 'cred-board-env',
-  }));
-  const board = await boardRepo.save(boardRepo.create({
-    name: 'B-env',
-    environment_config: JSON.stringify({ repositories: [{ resource_id: resource.id }] }),
-  }));
-  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
-  const ticket = await ticketRepo.save(ticketRepo.create({
-    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false, base_repo_resource_id: '',
-  }));
-  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
-
-  let seenCredentialId = 'unset';
-  const githubStub = {
-    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
-      seenCredentialId = credentialId;
-      return { id: '999', status: 'completed', conclusion: 'success', html_url: '', created_at: '', updated_at: '', head_sha: '' };
-    },
-  };
-  const resumer = makeResumer(githubStub, []);
-  await resumer.sweep();
-
-  assert.equal(
-    seenCredentialId,
-    'cred-board-env',
-    'a ticket with no base_repo_resource_id of its own must still resolve the board environment repo\'s credential_id',
-  );
-});
-
-test('sweep(): a board environment repo\'s Resource in a DIFFERENT workspace never leaks its credential_id', async () => {
-  const resource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: 'other-workspace', name: 'board-env-repo', type: 'repository', credential_id: 'cred-should-not-leak-env',
-  }));
-  const board = await boardRepo.save(boardRepo.create({
-    name: 'B-env-cross-ws',
-    environment_config: JSON.stringify({ repositories: [{ resource_id: resource.id }] }),
-  }));
-  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
-  const ticket = await ticketRepo.save(ticketRepo.create({
-    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false, base_repo_resource_id: '',
-  }));
-  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
-
-  let seenCredentialId = 'unset';
-  const githubStub = {
-    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
-      seenCredentialId = credentialId;
-      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
-    },
-  };
-  const resumer = makeResumer(githubStub, []);
-  await resumer.sweep();
-
-  assert.equal(seenCredentialId, null, 'a cross-workspace board-env Resource must never leak its credential_id');
-  await ciWaitService.cancelWait(ticket.id);
-});
-
-test('sweep(): an explicit ticket-level base_repo_resource_id still wins over the board environment repo', async () => {
-  const ticketResource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: 'w1', name: 'ticket-repo', type: 'repository', credential_id: 'cred-ticket-wins',
-  }));
-  const boardResource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: 'w1', name: 'board-repo', type: 'repository', credential_id: 'cred-should-not-be-used',
-  }));
-  const board = await boardRepo.save(boardRepo.create({
-    name: 'B-precedence',
-    environment_config: JSON.stringify({ repositories: [{ resource_id: boardResource.id }] }),
-  }));
-  const col = await colRepo.save(colRepo.create({ board_id: board.id, name: 'Merging', position: 1 }));
-  const ticket = await ticketRepo.save(ticketRepo.create({
-    title: 'T', column_id: col.id, workspace_id: 'w1', pending_user_action: false,
-    base_repo_resource_id: ticketResource.id,
-  }));
-  await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
-
-  let seenCredentialId = 'unset';
-  const githubStub = {
-    async getWorkflowRun(_owner, _repo, _runId, credentialId) {
-      seenCredentialId = credentialId;
-      return { id: '999', status: 'in_progress', conclusion: null, html_url: '', created_at: '', updated_at: '', head_sha: '' };
-    },
-  };
-  const resumer = makeResumer(githubStub, []);
-  await resumer.sweep();
-
-  assert.equal(seenCredentialId, 'cred-ticket-wins', 'an explicit ticket-level binding must take precedence over the board environment fallback');
-  await ciWaitService.cancelWait(ticket.id);
-});
-
 // ── Poll-failure surfacing (ticket 9bbe9146) — the silent-degrade path that
-// let six real Merging tickets sit parked for 1-2h before a human noticed;
+// let six real tickets sit parked for 1-2h before a human noticed;
 // this is what turns that silence into an observable ticket comment ──────
 
 test('sweep(): a run that degrades to null (no throw) is tracked as a poll failure, not silently ignored', async () => {

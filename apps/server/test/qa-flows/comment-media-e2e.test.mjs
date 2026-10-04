@@ -19,7 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { setupKanbanScene, createUser, createTicket, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createTicket, createWorkspace } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_MEDIA_PORT || '0';
 
@@ -29,13 +29,12 @@ test('comment media e2e: large upload, reference-by-id, range stream, clean 413'
   const { getDataSourceToken, AuthService } = modules;
   const base = `http://127.0.0.1:${port}`;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'media-e2e' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'media-e2e');
   const user = await createUser(app, getDataSourceToken, { name: 'media-user' });
   const token = app.get(AuthService).createSession(user.id);
   const authHeaders = { Authorization: `Bearer ${token}` };
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'media e2e ticket',
   });

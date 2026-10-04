@@ -27,14 +27,19 @@ test('OnTicketDoneActionService subscribes to and detaches from activityEvents',
   );
 });
 
-test('hook fires only on terminal-column moves', () => {
+test('hook fires only on moves into done', () => {
   const src = read(SERVICE);
   assert.match(
     src,
     /log\.action\s*!==\s*['"]moved['"]/,
     'must early-return on non-moved activities',
   );
-  assert.match(src, /isTerminalColumn\(/, 'must gate on the terminal-column check');
+  // A status change logs new_value = the status id; only entering `done`
+  // completes a ticket. The constant (not a hand-typed literal) is the gate.
+  assert.match(src, /log\.new_value\s*!==\s*DONE_STATUS/, 'must gate on the move landing in done');
+  // The activity may be stale by the time the listener runs — the row is
+  // re-read and must still be done.
+  assert.match(src, /isDoneStatus\(ticket\.status\)/, 'must re-check the reloaded ticket is still done');
 });
 
 test('idempotency: once-per-terminal-entry atomic claim on on_done_dispatched_at', () => {
@@ -51,13 +56,13 @@ test('idempotency: once-per-terminal-entry atomic claim on on_done_dispatched_at
   );
 });
 
-test('recursion guard label blocks hook-origin tickets', () => {
+test('recursion guard tag blocks hook-origin tickets', () => {
   const src = read(SERVICE);
-  assert.match(src, /no-on-done-hook/, 'must define the recursion-guard label');
+  assert.match(src, /no-on-done-hook/, 'must define the recursion-guard tag');
   assert.match(
     src,
-    /labels\.includes\(\s*ON_DONE_HOOK_GUARD_LABEL\s*\)/,
-    'must skip tickets carrying the recursion-guard label',
+    /tags\.includes\(\s*ON_DONE_HOOK_GUARD_LABEL\s*\)/,
+    'must skip tickets carrying the recursion-guard tag',
   );
 });
 

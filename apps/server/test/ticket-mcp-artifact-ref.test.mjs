@@ -22,18 +22,33 @@ test('list projection uses the same named full-UUID ref contract', () => {
   const result = parseTicket({
     id: rootId,
     title: 'Listed ticket',
-    labels: '[]',
+    tags: '["ui"]',
     channel_ids: '[]',
     on_done_action_ids: '[]',
-    handoff_spec: '',
+    assignee: null,
   });
   assert.equal(result._ref, `#[ticket:${rootId}|Listed ticket]`);
   assert.doesNotMatch(result._ref, /#\[ticket:11111111\|/);
+  assert.deepEqual(result.tags, ['ui']);
 });
 
-test('representative MCP get, create, and list paths use the canonical serializers', () => {
-  const source = fs.readFileSync(new URL('../src/modules/mcp/tools/ticket-crud-tools.ts', import.meta.url), 'utf8');
-  assert.match(source, /'get_ticket'[\s\S]*?loadTicketFull\(dataSource, ticket_id\)/);
-  assert.match(source, /'create_ticket'[\s\S]*?const full = await loadTicketFull\(dataSource, ticket\.id\)/);
-  assert.match(source, /return ok\(tickets\.map\(t =>[\s\S]*?\.\.\.parseTicket\(t\)/);
+const crudSource = fs.readFileSync(new URL('../src/modules/mcp/tools/ticket-crud-tools.ts', import.meta.url), 'utf8');
+
+/** Body of one `server.tool('<name>', …)` registration, up to the next one. */
+function toolBody(name) {
+  const start = crudSource.indexOf(`'${name}',`);
+  assert.ok(start >= 0, `${name} is registered`);
+  const next = crudSource.indexOf('server.tool(', start);
+  return crudSource.slice(start, next < 0 ? undefined : next);
+}
+
+test('representative MCP get and create paths use the canonical serializer', () => {
+  assert.match(toolBody('get_ticket'), /loadTicketFull\(dataSource, ticket_id\)/);
+  assert.match(toolBody('create_ticket'), /const full = await loadTicketFull\(dataSource, ticket\.id\)/);
+});
+
+test('MCP list paths give every row the canonical ticket ref', () => {
+  for (const name of ['list_tickets', 'get_my_tickets']) {
+    assert.match(toolBody(name), /withArtifactRef\('ticket'|parseTicket\(|withTicketTreeArtifactRefs\(/, `${name} rows carry _ref`);
+  }
 });

@@ -1,6 +1,6 @@
 // Regression — security finding (authz): the legacy /api/agent/* surface never
 // enforced workspace scoping, so a workspace-scoped API key could read/mutate
-// tickets, boards and chat in ANY workspace (cross-workspace IDOR). The fix
+// tickets and chat in ANY workspace (cross-workspace IDOR). The fix
 // stamps request.currentWorkspaceId from the presented DB key and rejects a
 // scoped key whose workspace doesn't match the target resource.
 //
@@ -17,8 +17,6 @@ process.env.AGENT_DEV_MODE = 'false';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
-  createBoard,
-  createColumn,
   createTicket,
   createAgent,
   createApiKey,
@@ -38,12 +36,8 @@ test('agent-api enforces workspace scoping on the legacy /api/agent surface', as
   // Two isolated workspaces; the target ticket lives in ws_a.
   const wsA = await createWorkspace(app, getDataSourceToken, 'scope-a');
   const wsB = await createWorkspace(app, getDataSourceToken, 'scope-b');
-  const board = await createBoard(app, getDataSourceToken, wsA.id, { name: 'a-board' });
-  const col = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'To Do', position: 0, workspaceId: wsA.id,
-  });
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: col.id, workspaceId: wsA.id, title: 'secret ticket',
+    workspaceId: wsA.id, title: 'secret ticket', status: 'todo',
   });
 
   const keyA = await createApiKey(app, getDataSourceToken, null, { workspaceId: wsA.id, label: 'a' });

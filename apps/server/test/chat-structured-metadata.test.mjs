@@ -18,7 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
@@ -46,7 +46,7 @@ test('F-1: ticket-action metadata round-trips REST 201 + SSE wire + history read
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-meta' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-meta');
   const user = await createUser(app, getDataSourceToken, { name: 'human' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder' });
@@ -188,7 +188,7 @@ test('F2-4: artifact_refs + detail round-trip REST 201 + SSE wire + history; 독
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-meta-f24' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-meta-f24');
   const user = await createUser(app, getDataSourceToken, { name: 'human24' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder24' });
@@ -291,18 +291,20 @@ test('F2-4: artifact_refs + detail round-trip REST 201 + SSE wire + history; 독
   // No process.exit — the suite runs with --test-force-exit.
 });
 
-// F-3 (ticket 3ca88253): agent-status(agent_refs) + board-summary(board_refs) 카드가
-// 같은 채팅 표면(REST 201 · SSE wire · history read-back)을 다른 refs 채널과 독립적으로
-// 왕복하는지, 서버 sanitizer 가 네 배열(ticket/artifact/agent/board)을 서로 무너뜨리지
-// 않는지 고정한다. ticket_refs/artifact_refs 의 F-1/F2-4 커버리지와 동일한 3단 계약.
-test('F-3: agent_refs + board_refs round-trip REST 201 + SSE wire + history; 독립 sanitation', async (t) => {
+// F-3 (ticket 3ca88253): agent-status(agent_refs) 카드가 같은 채팅 표면(REST 201 ·
+// SSE wire · history read-back)을 다른 refs 채널과 독립적으로 왕복하는지, 서버
+// sanitizer 가 세 배열(ticket/artifact/agent)을 서로 무너뜨리지 않는지 고정한다.
+// ticket_refs/artifact_refs 의 F-1/F2-4 커버리지와 동일한 3단 계약.
+// 보드 현황 카드(board_refs)는 보드와 함께 없어졌다(docs/tickets.md) — 구 매니저가
+// 아직 실어 보내도 sanitizer 가 버리고, board_refs 만 있는 metadata 는 통째로 drop.
+test('F-3: agent_refs round-trip REST 201 + SSE wire + history; board_refs dropped; 독립 sanitation', async (t) => {
   const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-meta-f3' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'chat-meta-f3');
   const user = await createUser(app, getDataSourceToken, { name: 'human3' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder3' });
@@ -324,90 +326,84 @@ test('F-3: agent_refs + board_refs round-trip REST 201 + SSE wire + history; 독
       body: JSON.stringify(body),
     });
 
-  // ── 1. agent_refs + board_refs round-trip REST + SSE + history ─────────────
+  // ── 1. agent_refs round-trip REST + SSE + history; legacy board_refs dropped ─
   const agentRefs = [{ agent_id: 'agent-aaa', name: 'Rolf' }];
-  const boardRefs = [{ board_id: 'board-bbb', title: 'AWB' }];
   const gRes = await sendAgentMessage({
     agent_id: responder.id,
-    content: '🧑‍💻 Agent: Rolf\n📊 보드: AWB',
-    metadata: { agent_refs: agentRefs, board_refs: boardRefs },
+    content: '🧑‍💻 Agent: Rolf',
+    metadata: { agent_refs: agentRefs, board_refs: [{ board_id: 'board-bbb', title: 'AWB' }] },
   });
   const gBody = await gRes.json();
-  assert.equal(gRes.status, 201, `agent/board send should 201: ${JSON.stringify(gBody)}`);
+  assert.equal(gRes.status, 201, `agent send should 201: ${JSON.stringify(gBody)}`);
   assert.deepEqual(gBody.metadata?.agent_refs, agentRefs, 'REST return carries metadata.agent_refs');
-  assert.deepEqual(gBody.metadata?.board_refs, boardRefs, 'REST return carries metadata.board_refs');
-  assert.equal(gBody.metadata?.ticket_refs, undefined, 'agent/board-only message carries no ticket_refs key');
-  assert.equal(gBody.metadata?.artifact_refs, undefined, 'agent/board-only message carries no artifact_refs key');
+  assert.equal(gBody.metadata?.board_refs, undefined, 'legacy board_refs is not part of the contract anymore');
+  assert.equal(gBody.metadata?.ticket_refs, undefined, 'agent-only message carries no ticket_refs key');
+  assert.equal(gBody.metadata?.artifact_refs, undefined, 'agent-only message carries no artifact_refs key');
 
   const gFrame = await userStream.waitFor(
     'chat_room_message',
-    (d) => (d?.metadata?.agent_refs?.length ?? 0) === 1 && (d?.metadata?.board_refs?.length ?? 0) === 1,
+    (d) => (d?.metadata?.agent_refs?.length ?? 0) === 1,
     4000,
   );
-  assert.ok(gFrame, 'participant receives chat_room_message with metadata.agent_refs/board_refs on the SSE wire');
+  assert.ok(gFrame, 'participant receives chat_room_message with metadata.agent_refs on the SSE wire');
   const gWire = gFrame.data ?? gFrame;
   assert.equal(gWire.metadata.agent_refs[0].agent_id, 'agent-aaa', 'wire agent_refs[0] agent_id');
-  assert.equal(gWire.metadata.board_refs[0].title, 'AWB', 'wire board_refs[0] title survives');
+  assert.equal(gWire.metadata.board_refs, undefined, 'wire carries no board_refs');
 
   const gHist = await (await fetch(`${base}/api/agent/chat-rooms/${room.id}/messages`, { headers: { 'X-Agent-Key': responderKey.raw_key } })).json();
   const gRows = Array.isArray(gHist) ? gHist : (gHist?.messages ?? []);
   const gPersisted = gRows.find((m) => Array.isArray(m.metadata?.agent_refs));
   assert.ok(gPersisted, 'history read-back returns a message with parsed metadata.agent_refs');
   assert.equal(gPersisted.metadata.agent_refs.length, 1, 'agent ref persisted + read back');
-  assert.deepEqual(gPersisted.metadata.board_refs, boardRefs, 'board ref persisted + read back alongside it');
+  assert.equal(gPersisted.metadata.board_refs, undefined, 'board_refs not persisted');
 
   // ── 2. 필수 id 없는 항목은 제거; 미지의 키는 정제된다 ───────────────────────
   const mixedRes = await sendAgentMessage({
     agent_id: responder.id,
-    content: 'mixed agent/board metadata',
+    content: 'mixed agent metadata',
     metadata: {
       agent_refs: [{ agent_id: 'agent-ok', name: 'ok', bogus: 'strip-me' }, { name: 'no id' }],
-      board_refs: [{ board_id: 'board-ok', title: 'ok', bogus: 'strip-me' }, { title: 'no id' }],
     },
   });
   const mixedBody = await mixedRes.json();
-  assert.equal(mixedRes.status, 201, 'mixed agent/board metadata send succeeds');
+  assert.equal(mixedRes.status, 201, 'mixed agent metadata send succeeds');
   assert.equal(mixedBody.metadata?.agent_refs?.length, 1, 'id 없는 agent ref 는 제거');
   assert.deepEqual(mixedBody.metadata?.agent_refs?.[0], { agent_id: 'agent-ok', name: 'ok' }, '미지의 키 제거');
-  assert.equal(mixedBody.metadata?.board_refs?.length, 1, 'id 없는 board ref 는 제거');
-  assert.deepEqual(mixedBody.metadata?.board_refs?.[0], { board_id: 'board-ok', title: 'ok' }, '미지의 키 제거');
 
-  // ── 3. 독립 sanitation: 네 채널이 서로 무너뜨리지 않는다 ─────────────────────
-  // (a) agent_refs 만 malformed 여도 board_refs 는 생존.
+  // ── 3. 독립 sanitation: 세 채널이 서로 무너뜨리지 않는다 ─────────────────────
+  // (a) agent_refs 만 malformed 여도 ticket_refs 는 생존.
   const badAgentRes = await sendAgentMessage({
     agent_id: responder.id,
-    content: 'agent junk, board ok',
-    metadata: { agent_refs: 'not-an-array', board_refs: [{ board_id: 'board-solo' }] },
+    content: 'agent junk, ticket ok',
+    metadata: { agent_refs: 'not-an-array', ticket_refs: [{ action: 'move', ticket_id: 'ticket-solo' }] },
   });
   const badAgentBody = await badAgentRes.json();
   assert.equal(badAgentBody.metadata?.agent_refs, undefined, 'malformed agent_refs 드롭');
-  assert.deepEqual(badAgentBody.metadata?.board_refs, [{ board_id: 'board-solo' }], '유효한 board_refs 는 생존');
+  assert.deepEqual(badAgentBody.metadata?.ticket_refs, [{ action: 'move', ticket_id: 'ticket-solo' }], '유효한 ticket_refs 는 생존');
 
-  // (b) id 없는 항목만 있으면 metadata 자체가 drop.
+  // (b) id 없는 항목(과 더 이상 채널이 아닌 board_refs)만 있으면 metadata 자체가 drop.
   const allBadRes = await sendAgentMessage({
     agent_id: responder.id,
     content: 'all-bad metadata',
-    metadata: { agent_refs: [{ name: 'no id' }], board_refs: [{ title: 'no id' }] },
+    metadata: { agent_refs: [{ name: 'no id' }], board_refs: [{ board_id: 'board-x', title: 'x' }] },
   });
   const allBadBody = await allBadRes.json();
-  assert.equal(allBadBody.metadata, undefined, 'id 없는 ref 만 있으면 metadata drop');
+  assert.equal(allBadBody.metadata, undefined, 'id 없는 ref / board_refs 만 있으면 metadata drop');
 
-  // (c) 네 채널(ticket/artifact/agent/board) 모두 유효 → 넷 다 생존.
+  // (c) 세 채널(ticket/artifact/agent) 모두 유효 → 셋 다 생존.
   const allRes = await sendAgentMessage({
     agent_id: responder.id,
-    content: 'all four refs',
+    content: 'all three refs',
     metadata: {
-      ticket_refs: [{ action: 'move', ticket_id: 'ticket-all4' }],
+      ticket_refs: [{ action: 'move', ticket_id: 'ticket-all3' }],
       artifact_refs: [{ kind: 'deploy', title: 'staging' }],
-      agent_refs: [{ agent_id: 'agent-all4' }],
-      board_refs: [{ board_id: 'board-all4' }],
+      agent_refs: [{ agent_id: 'agent-all3' }],
     },
   });
   const allBody = await allRes.json();
   assert.equal(allBody.metadata?.ticket_refs?.length, 1, 'ticket_refs 생존');
   assert.equal(allBody.metadata?.artifact_refs?.length, 1, 'artifact_refs 생존');
   assert.equal(allBody.metadata?.agent_refs?.length, 1, 'agent_refs 생존');
-  assert.equal(allBody.metadata?.board_refs?.length, 1, 'board_refs 생존');
 
   // No process.exit — the suite runs with --test-force-exit.
 });

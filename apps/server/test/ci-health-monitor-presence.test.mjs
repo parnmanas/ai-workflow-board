@@ -10,7 +10,7 @@
 //
 // Comments are stripped before grepping so prose in module/entity headers —
 // which legitimately names tokens for documentation — doesn't false-positive
-// the call-site grep. Mirrors stuck-detector-presence.test.mjs's shape.
+// the call-site grep.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ test('CiRedAlert entity exists with the expected shape', () => {
   const src = fs.readFileSync(ENTITY, 'utf8');
   assert.match(src, /@Entity\(['"]ci_red_alerts['"]\)/, "entity must map to 'ci_red_alerts' table");
   assert.match(src, /class\s+CiRedAlert/, 'entity must export CiRedAlert');
-  assert.match(src, /@Index\([\s\S]*board_id[\s\S]*repo_full_name[\s\S]*branch[\s\S]*workflow_id[\s\S]*unique:\s*true/, 'must have a unique composite index on (board_id, repo_full_name, branch, workflow_id)');
+  assert.match(src, /@Index\([\s\S]*project_id[\s\S]*repo_full_name[\s\S]*branch[\s\S]*workflow_id[\s\S]*unique:\s*true/, 'must have a unique composite index on (project_id, repo_full_name, branch, workflow_id)');
   assert.match(src, /delivered_at/, 'must define delivered_at column (durable-delivery cooldown key)');
   assert.match(src, /delivery_attempts/, 'must define delivery_attempts column');
   assert.match(src, /created_ticket_id/, 'must define created_ticket_id column');
@@ -76,20 +76,22 @@ test('CiHealthMonitorService source defines the sweep loop, env config, and thre
   assert.match(code, /CI_MONITOR_MIN_AGE_MS/, 'must read CI_MONITOR_MIN_AGE_MS env var');
   assert.match(code, /CI_MONITOR_REALERT_MS/, 'must read CI_MONITOR_REALERT_MS env var');
   assert.match(code, /CI_MONITOR_CREATE_TICKET/, 'must read CI_MONITOR_CREATE_TICKET env var');
-  // Must route through RoomMessagingService.sendSystemMessage — the same
-  // in-process invariant StuckTicketDetectorService follows (never the MCP
-  // send_chat_room_message tool).
+  // Must route through RoomMessagingService.sendSystemMessage — the
+  // in-process path (never the MCP send_chat_room_message tool).
   assert.match(code, /sendSystemMessage\(/, 'monitor must call RoomMessagingService.sendSystemMessage (in-process path, no MCP)');
   // Ticket auto-creation must key off operational_dedupe_key, INSERT-first —
-  // never a pre-SELECT existence check (board lesson: idempotency must claim
-  // atomically via DB UNIQUE before the side effect, not before-and-after).
+  // never a pre-SELECT existence check (idempotency must claim atomically via
+  // DB UNIQUE before the side effect, not before-and-after).
   assert.match(code, /operational_dedupe_key/, 'ticket creation must set operational_dedupe_key for idempotency');
   assert.match(code, /isUniqueConstraintError/, 'must catch the unique-violation and resolve the collision, not pre-SELECT');
-  // ticket 3886473a — incident 키는 workspace 스코프여야 한다. board id 가 다시 들어가면
-  // 같은 저장소를 감시하는 보드 수만큼 실행 티켓이 열리고 같은 수정이 여러 번 dispatch 된다.
+  // ticket 3886473a — incident 키는 workspace 스코프여야 한다. project id 가 들어가면
+  // 같은 저장소를 감시하는 프로젝트 수만큼 실행 티켓이 열리고 같은 수정이 여러 번 dispatch 된다.
   assert.match(code, /export\s+function\s+ciIncidentDedupeKey\s*\(/, 'incident 키를 만드는 단일 원천 함수가 있어야 한다');
-  assert.match(code, /ciIncidentDedupeKey\(\s*board\.workspace_id/, '티켓 키는 board id 가 아니라 workspace id 로 만들어야 한다');
-  assert.doesNotMatch(code, /`ci_red:\$\{board\.id\}/, 'board id 를 incident 키에 다시 넣으면 안 된다 (ticket 3886473a 회귀)');
+  assert.match(code, /ciIncidentDedupeKey\(\s*project\.workspace_id/, '티켓 키는 project id 가 아니라 workspace id 로 만들어야 한다');
+  assert.doesNotMatch(code, /`ci_red:\$\{project\.id\}/, 'project id 를 incident 키에 다시 넣으면 안 된다 (ticket 3886473a 회귀)');
+  // 티켓 생성은 TicketService 를 거쳐야 한다 — 손으로 쓴 행은 position / activity /
+  // dispatch 부수효과를 건너뛰어 project default_assignee 에게 큐잉되지 않는다.
+  assert.match(code, /this\.tickets\.create\(/, 'incident 티켓은 TicketService.create 로 만들어야 한다');
 });
 
 test('agents.module.ts wires CiHealthMonitorService and CiRedAlert', () => {
@@ -102,8 +104,8 @@ test('agents.module.ts wires CiHealthMonitorService and CiRedAlert', () => {
   assert.match(code, /CiRedAlert/, "TypeOrmModule.forFeature must include CiRedAlert so the monitor's repo injection resolves");
   assert.match(code, /providers\s*:\s*\[[\s\S]*CiHealthMonitorService/, 'must register CiHealthMonitorService in providers');
   assert.match(code, /exports\s*:\s*\[[\s\S]*CiHealthMonitorService/, 'must export CiHealthMonitorService');
-  // Already required by StuckTicketDetectorService, but load-bearing for
-  // this service too (RoomMessagingService / TicketRoleAssignmentService).
+  // Load-bearing DI for this service: RoomMessagingService (chat alerts) and
+  // TicketService (incident ticket creation).
   assert.match(code, /ChatRoomsModule/, 'AgentsModule must import ChatRoomsModule so CiHealthMonitorService can inject RoomMessagingService');
-  assert.match(code, /WorkspaceRolesModule/, 'AgentsModule must import WorkspaceRolesModule so CiHealthMonitorService can inject TicketRoleAssignmentService');
+  assert.match(code, /providers\s*:\s*\[[\s\S]*TicketService/, 'AgentsModule must provide TicketService so CiHealthMonitorService can inject it');
 });

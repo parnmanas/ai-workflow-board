@@ -1,12 +1,12 @@
 // Credentials are the one catalog kind whose scope is mutable in place — every
-// sibling (resources, functions, prompt-templates, QA, actions) answers 400
+// sibling (resources, functions, QA, actions) answers 400
 // "scope cannot be changed after creation". This file pins the three rules that
 // make that safe: who may flip it, that a Workspace credential still cannot
 // hop straight to a different Workspace, and that narrowing a global one is
 // refused while dependents live outside the destination.
 //
-// credentials-scope.test.mjs covers the board_id legacy contract of list/create;
-// this file covers update()'s scope handling only.
+// credentials-scope.test.mjs covers the Global/Workspace contract of
+// list/create; this file covers update()'s scope handling only.
 
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
@@ -14,6 +14,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { DataSource } from 'typeorm';
 import { Credential } from '../dist/entities/Credential.js';
 import { Resource } from '../dist/entities/Resource.js';
+import { Project } from '../dist/entities/Project.js';
 import { AgentSessionCliSetting } from '../dist/entities/AgentSessionCliSetting.js';
 import { OutreachChannel } from '../dist/entities/OutreachChannel.js';
 import { CredentialsController } from '../dist/modules/credentials/credentials.controller.js';
@@ -40,7 +41,7 @@ describe('Credential scope switch (update)', () => {
   before(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [Credential, Resource, AgentSessionCliSetting, OutreachChannel],
+      entities: [Credential, Resource, Project, AgentSessionCliSetting, OutreachChannel],
       synchronize: true,
       logging: false,
     });
@@ -63,7 +64,7 @@ describe('Credential scope switch (update)', () => {
 
   beforeEach(async () => {
     audit.length = 0;
-    for (const entity of [Credential, Resource, AgentSessionCliSetting, OutreachChannel]) {
+    for (const entity of [Credential, Resource, Project, AgentSessionCliSetting, OutreachChannel]) {
       await dataSource.getRepository(entity).clear();
     }
   });
@@ -71,7 +72,6 @@ describe('Credential scope switch (update)', () => {
   async function seed(workspaceId) {
     return credRepo.save(credRepo.create({
       workspace_id: workspaceId,
-      board_id: null,
       name: 'Shared PAT',
       description: '',
       provider: 'github',
@@ -154,7 +154,7 @@ describe('Credential scope switch (update)', () => {
       const cred = await seed(null);
       const resourceRepo = dataSource.getRepository(Resource);
       await resourceRepo.save(resourceRepo.create({
-        workspace_id: 'ws-b', board_id: null, credential_id: cred.id, name: 'Other repo',
+        workspace_id: 'ws-b', credential_id: cred.id, name: 'Other repo',
       }));
       const res = response();
       await controller.update(cred.id, { workspace_id: 'ws-a', scope: 'workspace' }, adminReq, res);
@@ -163,12 +163,27 @@ describe('Credential scope switch (update)', () => {
       assert.equal((await credRepo.findOne({ where: { id: cred.id } })).workspace_id, null);
     });
 
+    // Repository Resources became Projects (same id) and keep their clone
+    // credential pointer, so a project elsewhere blocks the narrowing too.
+    it('counts a Project (former repository Resource) outside the destination as a blocker', async () => {
+      const cred = await seed(null);
+      const projectRepo = dataSource.getRepository(Project);
+      await projectRepo.save(projectRepo.create({
+        workspace_id: 'ws-b', name: 'Other project', repo_url: 'https://github.com/o/r.git', credential_id: cred.id,
+      }));
+      const res = response();
+      await controller.update(cred.id, { workspace_id: 'ws-a', scope: 'workspace' }, adminReq, res);
+      assert.equal(res.statusCode, 409);
+      assert.match(res.body.error, /1 project\(s\)/);
+      assert.equal((await credRepo.findOne({ where: { id: cred.id } })).workspace_id, null);
+    });
+
     // P4c-4: Agent 항목 제거 — instance-wide 종속은 global Resource 로 센다.
     it('counts an instance-wide dependent (NULL workspace_id) as outside', async () => {
       const cred = await seed(null);
       const resourceRepo = dataSource.getRepository(Resource);
       await resourceRepo.save(resourceRepo.create({
-        workspace_id: null, board_id: null, credential_id: cred.id, name: 'Global repo',
+        workspace_id: null, credential_id: cred.id, name: 'Global repo',
       }));
       const res = response();
       await controller.update(cred.id, { workspace_id: 'ws-a', scope: 'workspace' }, adminReq, res);
@@ -180,7 +195,11 @@ describe('Credential scope switch (update)', () => {
       const cred = await seed(null);
       const resourceRepo = dataSource.getRepository(Resource);
       await resourceRepo.save(resourceRepo.create({
-        workspace_id: 'ws-a', board_id: null, credential_id: cred.id, name: 'Same-workspace repo',
+        workspace_id: 'ws-a', credential_id: cred.id, name: 'Same-workspace repo',
+      }));
+      const projectRepo = dataSource.getRepository(Project);
+      await projectRepo.save(projectRepo.create({
+        workspace_id: 'ws-a', name: 'Same-workspace project', credential_id: cred.id,
       }));
       const settingRepo = dataSource.getRepository(AgentSessionCliSetting);
       await settingRepo.save(settingRepo.create({

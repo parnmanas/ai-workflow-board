@@ -209,6 +209,15 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/**
+ * Headers for a `/workspaces/:wsId/...` call: the server requires the path and
+ * X-Workspace-Id to name the same workspace, so the call carries its own.
+ * Callers are `async` so a failure here rejects like request() does.
+ */
+function workspaceHeaders(wsId: string): Record<string, string> {
+  return { ...getAuthHeaders(), 'X-Workspace-Id': wsId };
+}
+
 /** Error thrown by `request` — `code` is the server slug, `body` the parsed JSON error body. */
 export type ApiError = Error & { code?: string; status?: number; body?: any };
 
@@ -355,18 +364,20 @@ export const api = {
   // ─── Tickets (docs/tickets.md) ─────────────────────────
   // One workspace-wide pool. The list returns root tickets only (children are
   // nested two levels on each row) plus the tag counts of the matching set.
-  listTickets: (wsId: string, filters: TicketListQuery = {}) => {
+  listTickets: async (wsId: string, filters: TicketListQuery = {}) => {
     const qs = ticketListQueryString(filters);
     return request<TicketListResponse>(
       `/workspaces/${encodeURIComponent(wsId)}/tickets${qs ? `?${qs}` : ''}`,
+      { headers: workspaceHeaders(wsId) },
     );
   },
   /** Tag suggestions across the whole workspace pool (tag picker), most used first. */
-  listTicketTags: (wsId: string) =>
-    request<{ tags: TicketTagCount[] }>(`/workspaces/${encodeURIComponent(wsId)}/ticket-tags`),
-  createTicket: (wsId: string, data: TicketCreateInput) =>
+  listTicketTags: async (wsId: string) =>
+    request<{ tags: TicketTagCount[] }>(`/workspaces/${encodeURIComponent(wsId)}/ticket-tags`, { headers: workspaceHeaders(wsId) }),
+  createTicket: async (wsId: string, data: TicketCreateInput) =>
     request<Ticket>(`/workspaces/${encodeURIComponent(wsId)}/tickets`, {
       method: 'POST',
+      headers: workspaceHeaders(wsId),
       body: JSON.stringify(data),
     }),
   archiveTicket: async (ticketId: string) =>
@@ -738,12 +749,13 @@ export const api = {
   // ─── Projects (docs/tickets.md → Project) ─────────────
   // One git repository + what every feature needs to work on it. Replaces
   // repository Resources (same ids after migration).
-  listProjects: (wsId: string) =>
-    request<Project[]>(`/workspaces/${encodeURIComponent(wsId)}/projects`),
+  listProjects: async (wsId: string) =>
+    request<Project[]>(`/workspaces/${encodeURIComponent(wsId)}/projects`, { headers: workspaceHeaders(wsId) }),
   getProject: (id: string) => request<Project>(`/projects/${encodeURIComponent(id)}`),
-  createProject: (wsId: string, data: ProjectInput & { name: string; repo_url: string }) =>
+  createProject: async (wsId: string, data: ProjectInput & { name: string; repo_url: string }) =>
     request<Project>(`/workspaces/${encodeURIComponent(wsId)}/projects`, {
       method: 'POST',
+      headers: workspaceHeaders(wsId),
       body: JSON.stringify(data),
     }),
   updateProject: (id: string, data: ProjectInput) =>

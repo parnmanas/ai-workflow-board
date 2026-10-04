@@ -25,7 +25,7 @@ import path from 'node:path';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, setupKanbanScene } from './helpers/fixtures.mjs';
+import { createAgent, createWorkspace } from './helpers/fixtures.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_SKILL_GLOBAL_PORT || '0', 10);
 
@@ -49,8 +49,8 @@ const snapshots = app.get(RunSkillSnapshotService);
 const builtin = app.get(BuiltinSkillPackService);
 const taps = app.get(SkillTapService);
 
-const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'skill-scope' });
-const other = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'skill-scope-other' });
+const ws = await createWorkspace(app, getDataSourceToken, 'skill-scope');
+const other = await createWorkspace(app, getDataSourceToken, 'skill-scope-other');
 // P4c-4: hosted (Host 행 + api_keys 링크) — 그래야 assign 의 정체성 해소가 된다.
 const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'skilled', type: 'hermes' });
 
@@ -87,7 +87,7 @@ test('a workspace sees global + its own skills, and never another workspace\'s',
   const mine = await skills.create(ws.id, {
     slug: `ws-only-${stamp}`, name: 'Workspace only', body: '# ws only\n',
   }, 'tester', 'workspace');
-  await skills.create(other.ws.id, {
+  await skills.create(other.id, {
     slug: `other-only-${stamp}`, name: 'Other only', body: '# other only\n',
   }, 'tester', 'workspace');
 
@@ -121,7 +121,7 @@ test('a workspace skill shadows a global one with the same slug; include_shadowe
   assert.equal(globalRow.shadowed, true, 'the overridden global must be flagged shadowed');
 
   // The other workspace has no fork, so it still resolves to the global.
-  const elsewhere = await skills.list(other.ws.id);
+  const elsewhere = await skills.list(other.id);
   const theirs = elsewhere.filter((s) => s.slug === 'systematic-debugging');
   assert.equal(theirs.length, 1);
   assert.equal(theirs[0].workspace_id, null, 'a fork in one workspace must not affect another');
@@ -149,7 +149,7 @@ test('a workspace caller cannot publish into or quarantine a global skill', asyn
 });
 
 test('a workspace caller cannot publish into another workspace\'s skill', async () => {
-  const theirs = await skills.create(other.ws.id, {
+  const theirs = await skills.create(other.id, {
     slug: `theirs-${stamp}`, name: 'Theirs', body: '# theirs\n',
   }, 'tester', 'workspace');
   await assert.rejects(

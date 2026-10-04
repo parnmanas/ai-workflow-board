@@ -30,7 +30,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_RUN_LIFECYCLE_PORT || '0';
@@ -50,7 +50,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   const { getDataSourceToken } = modules;
   const { seed, prompt } = await loadQaModules();
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-run' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-run');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-runner' });
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
 
@@ -59,12 +59,13 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
 
   // ── Catalogue sanity ──────────────────────────────────────────────────────
   step('Build a scenario payload from the seed catalogue');
-  assert.ok(Array.isArray(seed.QA_SEED_SCENARIOS) && seed.QA_SEED_SCENARIOS.length >= 10,
+  // The board-premised scenarios (board pause/move, column routing, benchmarks …)
+  // left the catalogue with boards; what remains is still a meaningful set.
+  assert.ok(Array.isArray(seed.QA_SEED_SCENARIOS) && seed.QA_SEED_SCENARIOS.length >= 8,
     'seed catalogue should ship a meaningful set');
   const payloads = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
     target_runtime: qaAgent.runtime_spec,
-    board_id: board.id,
     only: ['ticket-lifecycle'],
   });
   assert.equal(payloads.length, 1, 'only-filter returns exactly the requested scenario');
@@ -96,7 +97,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
 
   // ── 2. start_qa_run ──────────────────────────────────────────────────────────
   step('start_qa_run creates a run + room and returns the rendered prompt');
-  const started = await mcp.callTool('start_qa_run', { scenario_id: scenario.id, board_id: board.id });
+  const started = await mcp.callTool('start_qa_run', { scenario_id: scenario.id });
   assert.ok(!started?.isError, `start_qa_run failed: ${JSON.stringify(started)}`);
   assert.ok(started.run_id && started.room_id, 'run_id + room_id returned');
   assert.ok(started.prompt.includes(started.run_id), 'returned prompt references the live run id');
@@ -106,7 +107,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   // The freshly started run is in `running` with empty results.
   let run = await mcp.callTool('get_qa_run', { run_id: runId, workspace_id: ws.id });
   assert.equal(run.status, 'running');
-  assert.equal(run.board_id, board.id, 'Board is stamped as execution context');
+  assert.equal(run.workspace_id, ws.id, 'Workspace is stamped as execution context');
   assert.deepEqual(run.step_results, []);
 
   // ── 3. record_qa_step ────────────────────────────────────────────────────────
@@ -167,8 +168,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   const breadth = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
     target_runtime: qaAgent.runtime_spec,
-    board_id: board.id,
-    only: ['chat-room-messaging', 'benchmark-lifecycle'],
+    only: ['chat-room-messaging', 'archive-unarchive'],
   });
   assert.equal(breadth.length, 2, 'two more representative scenarios');
 
@@ -176,7 +176,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
     const sc = await mcp.callTool('create_qa_scenario', createArgs);
     assert.ok(!sc?.isError, `create ${_key}: ${JSON.stringify(sc)}`);
 
-    const run2 = await mcp.callTool('start_qa_run', { scenario_id: sc.id, board_id: board.id });
+    const run2 = await mcp.callTool('start_qa_run', { scenario_id: sc.id });
     assert.ok(!run2?.isError && run2.run_id, `start ${_key}: ${JSON.stringify(run2)}`);
 
     for (const s of sc.steps) {

@@ -1,6 +1,6 @@
 // Behavioral test for ActionRunReaperService.runOnce() — drives the reaper
 // against an in-memory fake ActionRun repository (no DB) plus fake
-// ActionsService / TriggerLoopService collaborators, with a fixed `now`.
+// ActionsService / TicketDispatchService collaborators, with a fixed `now`.
 //
 // The reaper's OWN job is narrow: select stale 'running' rows (age gate off
 // created_at, ActionRun has no started_at) and delegate the actual completion
@@ -124,13 +124,12 @@ function makeActionsService(rows) {
   };
 }
 
-function makeTriggerLoopService() {
+function makeTicketDispatchService() {
   const calls = [];
   return {
     calls,
-    async dispatchCurrentColumn(ticketId, triggerSource, triggeredBy) {
-      calls.push({ ticketId, triggerSource, triggeredBy });
-      return { emitted: 1 };
+    async resumeTicket(ticketId, source) {
+      calls.push({ ticketId, source });
     },
   };
 }
@@ -164,8 +163,8 @@ test('zombie round-trip: a stuck ticket-driven run past the TTL is reaped and it
   ];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped, details } = await svc.runOnce(NOW);
 
@@ -177,9 +176,9 @@ test('zombie round-trip: a stuck ticket-driven run past the TTL is reaped and it
   assert.equal(actionsService.calls[0].args.status, 'failed');
   assert.match(actionsService.calls[0].args.summary, /auto-reaped by ActionRunReaperService/);
   assert.deepEqual(
-    triggerLoop.calls,
-    [{ ticketId: 'tkt-1', triggerSource: 'action_run_reaped', triggeredBy: '' }],
-    'source ticket is resumed via dispatchCurrentColumn exactly once',
+    ticketDispatch.calls,
+    [{ ticketId: 'tkt-1', source: 'action_run_reaped' }],
+    'source ticket is resumed via resumeTicket exactly once',
   );
 });
 
@@ -187,14 +186,14 @@ test('fresh run under the TTL is spared — completeRun is never called', async 
   const rows = [makeRun('fresh', { ageMs: 10 * MIN, sourceTicketId: 'tkt-2', shouldResume: true })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
   assert.deepEqual(reaped, []);
   assert.equal(actionsService.calls.length, 0, 'completeRun must not be called for a run within the TTL window');
-  assert.equal(triggerLoop.calls.length, 0);
+  assert.equal(ticketDispatch.calls.length, 0);
   assert.equal(rows[0].status, 'running', 'untouched');
 });
 
@@ -205,8 +204,8 @@ test('terminal runs are never selected regardless of age', async () => {
   ];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
   assert.deepEqual(reaped, []);
@@ -230,8 +229,8 @@ test('precedence regression: a terminal run with completion_contract_injected=tr
   ];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
@@ -243,14 +242,14 @@ test('stuck run mid-retry (shouldResume=false) is reaped but its ticket is NOT r
   const rows = [makeRun('mid-retry', { ageMs: 3 * HOUR, sourceTicketId: 'tkt-3', shouldResume: false })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
   assert.deepEqual(reaped, ['mid-retry'], 'this row is closed (completeRun already dispatched the retry run internally)');
   assert.equal(rows[0].status, 'failed');
-  assert.equal(triggerLoop.calls.length, 0, 'no resume dispatch — completeRun said shouldResume=false');
+  assert.equal(ticketDispatch.calls.length, 0, 'no resume dispatch — completeRun said shouldResume=false');
 });
 
 test('pre-fix orphan (no source ticket, no completion contract) is preserved forever, even past the TTL', async () => {
@@ -262,14 +261,14 @@ test('pre-fix orphan (no source ticket, no completion contract) is preserved for
   const rows = [makeRun('cron-stuck', { ageMs: 3 * HOUR, sourceTicketId: '', completionContractInjected: false })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
   assert.deepEqual(reaped, [], 'no source ticket and no completion contract -> never a reap candidate, regardless of age');
   assert.equal(actionsService.calls.length, 0, 'completeRun must never be called for a run that can never complete on its own');
-  assert.equal(triggerLoop.calls.length, 0, 'no source ticket to resume');
+  assert.equal(ticketDispatch.calls.length, 0, 'no source ticket to resume');
   assert.equal(rows[0].status, 'running', 'untouched');
 });
 
@@ -282,8 +281,8 @@ test('post-fix standalone run (no source ticket, but completion contract was inj
   const rows = [makeRun('standalone-stuck', { ageMs: 3 * HOUR, sourceTicketId: '', completionContractInjected: true })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped, details } = await svc.runOnce(NOW);
 
@@ -292,15 +291,15 @@ test('post-fix standalone run (no source ticket, but completion contract was inj
   assert.equal(rows[0].status, 'failed', 'completeRun closed the run as failed');
   assert.equal(actionsService.calls.length, 1);
   assert.equal(actionsService.calls[0].args.status, 'failed');
-  assert.equal(triggerLoop.calls.length, 0, 'no source ticket -> nothing to resume, even though the run was reaped');
+  assert.equal(ticketDispatch.calls.length, 0, 'no source ticket -> nothing to resume, even though the run was reaped');
 });
 
 test('fresh post-fix standalone run under the TTL is spared', async () => {
   const rows = [makeRun('standalone-fresh', { ageMs: 10 * MIN, sourceTicketId: '', completionContractInjected: true })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
@@ -322,28 +321,28 @@ test('a run completed by a real concurrent complete_action_run between SELECT an
     },
   };
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
   assert.deepEqual(reaped, [], 'previouslyCompleted runs are not counted as reaped by us');
-  assert.equal(triggerLoop.calls.length, 0, 'the real completion already owns any resume decision');
+  assert.equal(ticketDispatch.calls.length, 0, 'the real completion already owns any resume decision');
 });
 
 test('runOnce is idempotent — a second sweep reaps nothing once the row is terminal', async () => {
   const rows = [makeRun('zombie-2', { ageMs: 3 * HOUR, sourceTicketId: 'tkt-5', shouldResume: true })];
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const first = await svc.runOnce(NOW);
   assert.deepEqual(first.reaped, ['zombie-2']);
 
   const second = await svc.runOnce(NOW);
   assert.deepEqual(second.reaped, [], 'row is now status=failed, so the running-only candidate query no longer selects it');
-  assert.equal(triggerLoop.calls.length, 1, 'no duplicate resume on the second, no-op sweep');
+  assert.equal(ticketDispatch.calls.length, 1, 'no duplicate resume on the second, no-op sweep');
 });
 
 test('batch starvation regression: 200 contract-less running rows ahead of a real zombie in created_at order do not starve it out of the sweep', async () => {
@@ -366,8 +365,8 @@ test('batch starvation regression: 200 contract-less running rows ahead of a rea
 
   const runRepo = makeRunRepo(rows);
   const actionsService = makeActionsService(rows);
-  const triggerLoop = makeTriggerLoopService();
-  const svc = new ActionRunReaperService(runRepo, actionsService, triggerLoop, noopLog);
+  const ticketDispatch = makeTicketDispatchService();
+  const svc = new ActionRunReaperService(runRepo, actionsService, ticketDispatch, noopLog);
 
   const { reaped } = await svc.runOnce(NOW);
 
@@ -377,8 +376,8 @@ test('batch starvation regression: 200 contract-less running rows ahead of a rea
     'the real zombie must still be reaped even though 200 older contract-less rows precede it in created_at order',
   );
   assert.deepEqual(
-    triggerLoop.calls,
-    [{ ticketId: 'tkt-starved', triggerSource: 'action_run_reaped', triggeredBy: '' }],
+    ticketDispatch.calls,
+    [{ ticketId: 'tkt-starved', source: 'action_run_reaped' }],
     'source ticket is resumed exactly once, unblocked by the contract-less rows ahead of it',
   );
 });

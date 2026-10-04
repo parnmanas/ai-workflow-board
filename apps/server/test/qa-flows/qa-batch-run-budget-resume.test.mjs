@@ -32,7 +32,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -65,7 +65,7 @@ test('QA schedule tick resumes a batch wedged on a transient run-budget rejectio
   );
   const scheduleSvc = app.get(QaScheduleService);
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-batch-budget-resume' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-batch-budget-resume');
   // Tight run-creation-rate ceiling — scenario 0's own run consumes the
   // window's only slot, so dispatching scenario 1 trips the guard.
   await ds.getRepository('Workspace').update(ws.id, {

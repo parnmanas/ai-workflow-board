@@ -11,14 +11,14 @@
 //      계산을 검증. 서비스 레이어 로직이라 컨트롤러 없이도 완전히 검증
 //      가능.
 //  (2) OntologyController — 이 저장소의 기존 REST 컨트롤러들(예:
-//      resources.controller.ts)과 마찬가지로 HTTP 계층 자체(Express
+//      projects.controller.ts)과 마찬가지로 HTTP 계층 자체(Express
 //      app.listen 등)를 테스트하는 선례가 없다 — 컨트롤러 메서드를 직접
 //      호출하고 Express Response를 흉내내는 최소 fake만 쓴다(MCP 툴
 //      테스트가 handler를 직접 호출하는 것과 같은 자세). git-repo-cache의
 //      ensureRepoCache/countBehindAhead 자체는 free function이라 이
 //      컨트롤러 안에서 스텁으로 교체할 DI 지점이 없으므로, "커밋이
-//      비어있어 git 접근을 아예 시도하지 않는" 경로와 "리소스를 못 찾아
-//      freshness_error로 흡수하는" 경로는 실제 Resource/Credential repo로
+//      비어있어 git 접근을 아예 시도하지 않는" 경로와 "프로젝트를 못 찾아
+//      freshness_error로 흡수하는" 경로는 실제 ProjectsService/Credential repo로
 //      검증하고, "정상적으로 behind/ahead를 계산하는" 경로(인자 순서 —
 //      baseRef=HEAD, headRef=graph.commit이어야 behind가 "그래프가 HEAD보다
 //      몇 커밋 뒤처졌는가"라는 의미가 된다)는 별도로
@@ -27,7 +27,7 @@
 //      같은 자세) — ensureRepoCache는 http(s) URL만 허용해(SSH 전용 URL과
 //      같은 이유로 file:// 로컬 clone이 막힘) 실제 네트워크 없이는 그
 //      합성 경로 자체를 e2e로 돌릴 방법이 이 저장소 어디에도 없다
-//      (resources.controller.ts의 git-read 엔드포인트도 마찬가지로
+//      (projects.controller.ts의 git-read 엔드포인트도 마찬가지로
 //      미검증 상태 — 같은 한계를 그대로 인정한다).
 //
 // 컴파일된 dist/ 대상(server 계열 관례). 격리된 SQLJS_DB_PATH/
@@ -53,7 +53,7 @@ process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
 const { AppDataSource, AppOntologyDataSource, initDb, flushOntologySqljs } = await import('file://' + path.join(DIST_ROOT, 'db.js'));
-const { Resource } = await import('file://' + path.join(DIST_ROOT, 'entities/Resource.js'));
+const { ProjectsService } = await import('file://' + path.join(DIST_ROOT, 'modules/projects/projects.service.js'));
 const { Credential } = await import('file://' + path.join(DIST_ROOT, 'entities/Credential.js'));
 const { OntologyGraph } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyGraph.js'));
 const { OntologyNode } = await import('file://' + path.join(DIST_ROOT, 'entities/OntologyNode.js'));
@@ -65,7 +65,9 @@ const { countBehindAhead } = await import('file://' + path.join(DIST_ROOT, 'modu
 
 const WORKSPACE_ID = 'gf-ws';
 const OTHER_WORKSPACE_ID = 'gf-ws-other';
-const RESOURCE_ID = 'gf-resource-missing'; // 의도적으로 Resource 테이블에 행을 만들지 않음(존재하지 않는 리소스 경로 검증용)
+// 그래프의 resource_id 는 이름만 남은 것이고 값은 Project id 다(저장소 Resource 가
+// 같은 id 로 Project 로 이관됨, docs/tickets.md).
+const RESOURCE_ID = 'gf-resource-missing'; // 의도적으로 projects 테이블에 행을 만들지 않음(존재하지 않는 프로젝트 경로 검증용)
 
 function edge(id, graphId, overrides = {}) {
   return {
@@ -92,7 +94,7 @@ function fakeRes() {
   };
 }
 
-let graphRepo, nodeRepo, edgeRepo, resourceRepo, credentialRepo;
+let graphRepo, nodeRepo, edgeRepo, projectsService, credentialRepo;
 let lifecycleService, controller, logs;
 
 before(async () => {
@@ -100,7 +102,7 @@ before(async () => {
   graphRepo = AppOntologyDataSource.getRepository(OntologyGraph);
   nodeRepo = AppOntologyDataSource.getRepository(OntologyNode);
   edgeRepo = AppOntologyDataSource.getRepository(OntologyEdge);
-  resourceRepo = AppDataSource.getRepository(Resource);
+  projectsService = new ProjectsService(AppDataSource);
   credentialRepo = AppDataSource.getRepository(Credential);
 
   const fakeExtraction = { extractRepo: async () => { throw new Error('not used in this suite'); } };
@@ -116,7 +118,7 @@ before(async () => {
     info: (cat, msg, meta) => { logs.push({ cat, msg, meta }); },
     warn() {}, error() {},
   };
-  controller = new OntologyController(resourceRepo, credentialRepo, lifecycleService, capturingLogger, AppDataSource);
+  controller = new OntologyController(projectsService, credentialRepo, lifecycleService, capturingLogger, AppDataSource);
 });
 
 after(async () => {
@@ -285,10 +287,10 @@ describe('OntologyController.status', () => {
     assert.ok(res._body.graph_id);
   });
 
-  it('commit이 있는데 참조된 Resource가 없으면 freshness_error로 흡수하고 status/dirty_ratio는 그대로 반환한다', async () => {
+  it('commit이 있는데 참조된 Project가 없으면 freshness_error로 흡수하고 status/dirty_ratio는 그대로 반환한다', async () => {
     // resolveOrProvision으로 그래프를 만든 뒤, runInitialBuild가 하는 것처럼
-    // DB를 직접 ready+commit으로 갱신 — 이 그래프의 resource_id는
-    // Resource 테이블에 실존하지 않는다(RESOURCE_ID 상수 자체가 그 목적).
+    // DB를 직접 ready+commit으로 갱신 — 이 그래프의 resource_id(= project id)는
+    // projects 테이블에 실존하지 않는다(RESOURCE_ID 상수 자체가 그 목적).
     const { graph } = await lifecycleService.getOrCreateGraph({ workspaceId: WORKSPACE_ID, resourceId: RESOURCE_ID, folderPath: '' });
     await graphRepo.update({ id: graph.id }, { status: 'ready', indexed_at: new Date(), commit: 'deadbeefcafe' });
     await edgeRepo.save([edge('fe1', graph.id, { status: 'active' }), edge('fe2', graph.id, { status: 'stale' })]);

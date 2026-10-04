@@ -119,24 +119,25 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
   const def = EVENT_TYPES.find((d) => d.eventType === 'board_update');
   assert.ok(def, 'EVENT_TYPES 에 board_update 정의가 있어야 한다');
   const ctx = {
-    resolveBoardId: async () => 'board-1',
-    resolveTicketRepositoryResourceId: async () => '',
-    resolveTicketColumnSnapshot: async () => ({ id: 'col-done', name: 'Done', kind: 'done' }),
+    resolveTicketSnapshot: async () => ({
+      root_id: '44444444-4444-4444-8444-444444444444', workspace_id: 'ws-actor-sentinel', status: 'done', project_id: '',
+    }),
     resolveActorDisplayName: (actorId) => resolveAgentDisplayName(ds, actorId),
   };
 
-  // trigger-loop 의 auto-advance(moved) 와 ticket-archiver(archived, 'system') —
+  // A status move by a non-user actor and ticket-archiver(archived, 'system') —
   // agent-manager 의 worktree/workspace 회수가 이 두 프레임만 보고 돈다.
   for (const [actorId, action] of [['auto-advance', 'moved'], ['system', 'archived']]) {
     const mapped = await def.map({
       ticket_id: '44444444-4444-4444-8444-444444444444',
       entity_id: '44444444-4444-4444-8444-444444444444',
-      entity_type: 'ticket', action, field_changed: action === 'moved' ? 'column_id' : '',
+      entity_type: 'ticket', action, field_changed: action === 'moved' ? 'status' : '',
       actor_id: actorId, actor_name: actorId,
-      old_value: 'In Progress', new_value: 'Done',
+      old_value: 'in_progress', new_value: 'done',
     }, ctx);
     assert.ok(mapped, `'${actorId}' / ${action} 프레임이 real Postgres 에서 발행되어야 한다`);
     assert.equal(mapped.payload.actor_name, actorId, '저장된 actor_name 이 그대로 실린다');
     assert.equal(mapped.payload.actor_id, actorId);
+    assert.equal(mapped.payload.current_column_kind, 'terminal');
   }
 });

@@ -19,12 +19,12 @@ import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
   createWorkspace,
   createAgent,
-  createBoard,
-  createColumn,
   createTicket,
   createApiKey,
+  runtimeHostKeyForAgent,
 } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
+import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_ACTION_BUDGET_EXHAUSTION_PORT || '0';
 
@@ -44,29 +44,27 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
     hard_budget_config: JSON.stringify({ max_runs_per_window: 1, window_minutes: 60, notify: false }),
   });
 
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer' });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'deployer', runtime: true });
   // P4c-4: dispatch 는 spec 스냅샷에서만 해소된다 — E2E 액션은 spec 타겟이다.
   const RUNTIME_SPEC = {
     manager_agent_id: agent.manager_agent_id, cli: 'claude', model: null,
     working_dir: '/srv/e2e', credential_id: null, label: 'e2e-deployer', role_prompt: '',
     runtime_config: { strategy: 'single', permission_mode: 'strict' },
   };
-  const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'b' });
-  // Source ticket lives in an ACTIVE column routed to the assignee role so the
-  // resume (dispatchCurrentColumn) has a holder to wake (mirrors
+  // Source ticket is in_progress with an assignee so the resume
+  // (TicketDispatchService.resumeTicket) has someone to re-send it to (mirrors
   // action-run-resume-mcp.test.mjs's CASE 1 setup).
-  const col = await createColumn(app, getDataSourceToken, board.id, {
-    name: 'In Progress',
-    position: 1,
-    workspaceId: ws.id,
-    roleRouting: ['assignee'],
-  });
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: col.id,
     workspaceId: ws.id,
     title: 'blocked on flaky deploy step',
-    assigneeId: agent.id,
+    status: 'in_progress',
+    assignee: agent,
   });
+  // The assignee's Runtime Host must be connected for the resume to emit —
+  // dispatch never sends agent_trigger to an offline host.
+  const vagent = new VirtualAgent({ name: 'deployer', agentId: agent.id, apiKey: runtimeHostKeyForAgent(agent.id), port });
+  await vagent.start();
+  t.after(() => vagent.stop());
 
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, scope: 'full' });
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
@@ -100,6 +98,7 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   assert.equal(done.exhausted, true, 'a rejected retry is treated as exhaustion, not silently dropped (ticket a51ec6d9 plan "정정 2")');
   assert.equal(done.resumed, true, 'exhaustion still surfaces + resumes the source ticket');
   assert.ok(done.resume_emitted >= 1, 'resume actually re-dispatched the assignee');
+  await vagent.waitForTrigger((tr) => tr.ticket_id === ticket.id && tr.trigger_source === 'action_run_failed', 5000);
 
   step('Exactly one run still exists — the budget-rejected retry left no phantom row');
   const runs = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: action.id });

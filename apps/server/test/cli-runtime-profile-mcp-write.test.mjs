@@ -1,66 +1,75 @@
-// 티켓 0d2c53bf — MCP `update_agent` / `update_board` 에 cli_runtime_profile
-// 쓰기 필드가 없어서 기본 backend/runtime 프로파일을 opt-out
-// (`'none'`) 으로 핀하려면 REST/웹 UI 개입이 항상 필요했던 문제의 회귀
-// 테스트. 검증 로직은 새 헬퍼 validateCliRuntimeProfileSelection
-// (apps/server/src/common/claude-backend-registry.ts) 이 agents.controller.ts
-// PATCH 핸들러(:724-733)와 동일한 판정을 내리는지, 그리고 MCP 두 툴이 그
-// 헬퍼를 실제로 호출해 저장/거부하는지를 확인한다.
+// 티켓 0d2c53bf — 기본 backend/runtime 프로파일을 opt-out(`'none'`)으로 핀하려면
+// REST/웹 UI 개입이 항상 필요했던 문제의 회귀 테스트.
+//
+// 원래 표면이던 MCP `update_agent` / `update_board` 는 사라졌다(P4c-4 Agent
+// 테이블 제거, 보드 제거). 이제 티켓 실행 설정은 assignee RuntimeSpec 이 갖고
+// (docs/tickets.md), 프로필 핀은 그 spec 의 `cli_runtime_profile` 에 실린다 —
+// MCP `create_ticket` / `update_ticket` 의 `assignee` 가 그 쓰기 표면이다.
+// 디스패치는 ticket-dispatch.service.ts 가 `[{ source: 'agent', value:
+// spec.cli_runtime_profile }]` → 전역 기본값 순으로 해석한다.
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import os from 'node:os';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { bootApp } from './helpers/boot.mjs';
+import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { McpClient } from './helpers/mcp-client.mjs';
 
-process.env.DB_TYPE = 'sqlite';
-process.env.SQLJS_DB_PATH = path.join(
-  os.tmpdir(),
-  `awb-cli-runtime-profile-mcp-write-${process.pid}-${Date.now()}.db`,
-);
-process.env.NODE_ENV = 'test';
-
+let app;
+let port;
 let ds;
-let registerAgentTools;
-let registerBoardTools;
-let BoardsController;
-let resolveClaudeBackendProfileForDispatch;
-let tools; // name -> { handler }
+let mcp;
+let token;
 let workspace;
+let agent;
 let profile;
+let resolveClaudeBackendProfileForDispatch;
 
-function fakeRes() {
-  return {
-    statusCode: 200,
-    body: undefined,
-    status(code) { this.statusCode = code; return this; },
-    json(body) { this.body = body; return this; },
-  };
+const assigneeWith = (cli_runtime_profile) => ({ ...agent.runtime_spec, cli: 'claude', cli_runtime_profile });
+
+async function api(method, path, body) {
+  const res = await fetch(`http://localhost:${port}/api${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': workspace.id },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { json = text; }
+  return { status: res.status, body: json };
 }
 
+// backlog 티켓은 디스패치되지 않는다 — 핀 저장 경로만 본다.
+async function makeTicket(cliRuntimeProfile = null) {
+  const created = await mcp.callTool('create_ticket', {
+    workspace_id: workspace.id,
+    title: `profile pin ${randomUUID().slice(0, 8)}`,
+    status: 'backlog',
+    assignee: assigneeWith(cliRuntimeProfile),
+  });
+  assert.ok(created?.id, `create_ticket failed: ${JSON.stringify(created)}`);
+  return created;
+}
+
+const storedProfile = async (ticketId) =>
+  (await ds.getRepository('Ticket').findOneByOrFail({ id: ticketId })).assignee?.cli_runtime_profile ?? null;
+
 before(async () => {
-  const { DataSource } = await import('typeorm');
-  const { buildDataSourceOptions } = await import('../dist/db.js');
-  ({ registerAgentTools } = await import('../dist/modules/mcp/tools/agent-tools.js'));
-  ({ registerBoardTools } = await import('../dist/modules/mcp/tools/board-tools.js'));
-  ({ BoardsController } = await import('../dist/modules/boards/boards.controller.js'));
+  let modules;
+  ({ app, port, modules } = await bootApp({ port: 0 }));
+  const gdst = modules.getDataSourceToken;
+  ds = app.get(gdst());
   ({ resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js'));
+  const { AuthService } = await import('../dist/services/auth.service.js');
 
-  ds = new DataSource(buildDataSourceOptions());
-  await ds.initialize();
+  workspace = await createWorkspace(app, gdst, 'cli-profile-mcp-write');
+  const admin = await createUser(app, gdst, { name: 'admin', role: 'admin' });
+  token = app.get(AuthService).createSession(admin.id);
+  agent = await createAgent(app, gdst, workspace.id, { name: 'profile-writer', runtime: true });
+  const key = await createApiKey(app, gdst, agent.id, { workspaceId: workspace.id, label: 'profile-writer' });
+  mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
+  await mcp.initialize();
 
-  const noopLogger = { info() {}, warn() {}, error() {} };
-  tools = {};
-  const fakeServer = {
-    tool(name, description, schema, handler) {
-      tools[name] = { description, schema, handler };
-    },
-  };
-  registerAgentTools(fakeServer, { dataSource: ds, logger: noopLogger });
-  registerBoardTools(fakeServer, { dataSource: ds });
-
-  workspace = await ds.getRepository('Workspace').save(ds.getRepository('Workspace').create({
-    name: 'cli_runtime_profile MCP write workspace',
-  }));
   profile = await ds.getRepository('ClaudeBackendProfile').save(
     ds.getRepository('ClaudeBackendProfile').create({
       id: randomUUID(),
@@ -81,109 +90,68 @@ before(async () => {
       is_secret: 0,
     }),
   );
-
 });
 
 after(async () => {
-  if (ds?.isInitialized) await ds.destroy();
+  await mcp?.close().catch(() => {});
+  await app?.close();
 });
 
-async function makeBoard(overrides = {}) {
-  const repo = ds.getRepository('Board');
-  return repo.save(repo.create({
-    name: `board-${Math.random().toString(36).slice(2, 8)}`,
-    workspace_id: workspace.id,
-    routing_config: '{}',
-    ...overrides,
-  }));
-}
-
 describe('MCP cli_runtime_profile write (ticket 0d2c53bf)', () => {
-  // P4c-4: update_agent 삭제 — agent 핀 테스트 제거.
-  it("update_board stores an explicit 'none' opt-out", async () => {
-    const board = await makeBoard();
-    const result = await tools.update_board.handler(
-      { board_id: board.id, cli_runtime_profile: 'none' },
-      {},
-    );
-    assert.equal(result.isError, undefined);
-    const stored = await ds.getRepository('Board').findOneByOrFail({ id: board.id });
-    assert.equal(stored.cli_runtime_profile, 'none');
+  it("update_ticket stores an explicit 'none' opt-out on the assignee", async () => {
+    const ticket = await makeTicket();
+    const result = await mcp.callTool('update_ticket', { ticket_id: ticket.id, assignee: assigneeWith('none') });
+    assert.ok(result?.id, `update_ticket failed: ${JSON.stringify(result)}`);
+    assert.equal(await storedProfile(ticket.id), 'none');
   });
 
-  it("board-level 'none' stops dispatch from inheriting the global default (success criterion 4)", async () => {
-    const board = await makeBoard();
-    await tools.update_board.handler({ board_id: board.id, cli_runtime_profile: 'none' }, {});
-    const stored = await ds.getRepository('Board').findOneByOrFail({ id: board.id });
+  it("assignee-level 'none' stops dispatch from inheriting the global default (success criterion 4)", async () => {
+    const ticket = await makeTicket('none');
+    const pinned = await storedProfile(ticket.id);
 
-    const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, [
-      { source: 'run', value: null },
-      { source: 'agent', value: null },
-      { source: 'board', value: stored.cli_runtime_profile },
-    ]);
-    assert.equal(withOptOut, null, "board 'none' must not inherit the global default");
+    const withOptOut = await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'agent', value: pinned }]);
+    assert.equal(withOptOut, null, "assignee 'none' must not inherit the global default");
+
+    // 대조군: 핀이 없으면 같은 체인이 전역 기본값으로 떨어진다.
+    const inherited = await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'agent', value: null }]);
+    assert.equal(inherited?.id, profile.id);
   });
 
-  it('rejects a nonexistent profile id and leaves the stored value unchanged (fail-closed)', async () => {
-    const board = await makeBoard({ cli_runtime_profile: 'none' });
-
-    const boardResult = await tools.update_board.handler(
-      { board_id: board.id, cli_runtime_profile: 'does-not-exist' },
-      {},
-    );
-    assert.equal(boardResult.isError, true);
-
-    assert.equal(
-      (await ds.getRepository('Board').findOneByOrFail({ id: board.id })).cli_runtime_profile,
-      'none',
-    );
-  });
-
-  // P4c-4: agent 핀 테스트 2건 삭제 (update_agent 삭제). board 핀은 위에서 커버.
   it('전역 기본값이 비어 있으면 아무 핀도 없을 때 null 로 해석한다', async () => {
     const settings = ds.getRepository('SystemSetting');
     const saved = await settings.findOneByOrFail({ key: 'claude_backend_profiles.default' });
     try {
       await settings.update({ key: 'claude_backend_profiles.default' }, { value: '' });
-      const resolved = await resolveClaudeBackendProfileForDispatch(ds, [
-        { source: 'run', value: null },
-        { source: 'agent', value: null },
-        { source: 'board', value: null },
-      ]);
+      const resolved = await resolveClaudeBackendProfileForDispatch(ds, [{ source: 'agent', value: null }]);
       assert.equal(resolved, null, '상속 체인이 모두 비면 프로필 없이 디스패치한다');
     } finally {
       await settings.update({ key: 'claude_backend_profiles.default' }, { value: saved.value });
     }
   });
 
-  it('REST PATCH /boards/:id and the MCP update_board tool reach the same verdict for a bogus profile id', async () => {
-    const board = await makeBoard();
-    const controller = new BoardsController(
-      ds.getRepository('Board'),
-      ds.getRepository('BoardColumn'),
-      ds.getRepository('Ticket'),
-      ds.getRepository('BoardLesson'),
-      ds,
-      undefined, // promptTemplatesService — untouched by a cli_runtime_profile-only body
-      undefined, // agentWorkload
-      undefined, // workspaceMove
-      undefined, // ticketRoleAssignments
-    );
+  // TODO(board removal): server bug — ticket assignee writes do not validate
+  // `cli_runtime_profile` against the global profile list. TicketService
+  // .normalizeAssignee (src/modules/tickets/ticket.service.ts:121) only runs
+  // normalizeRuntimeSpec (shape), so a bogus id is stored and only fails later
+  // at dispatch (ticket-dispatch.service.ts buildPayload → 'build_failed').
+  // Team slots (orchestration-team.service.ts) and POST /runtime-specs/validate
+  // still reject it; validateCliRuntimeProfileSelection
+  // (common/claude-backend-registry.ts) lost its last caller. Remove `todo`
+  // once ticket create/update reject it with that helper's message.
+  it(
+    'REST PATCH /tickets/:id and MCP update_ticket reject a nonexistent profile id with the same message and leave the pin unchanged (fail-closed)',
+    async () => {
+      const ticket = await makeTicket('none');
 
-    const res = fakeRes();
-    await controller.update(board.id, { cli_runtime_profile: 'does-not-exist' }, res);
-    assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /cli_runtime_profile "does-not-exist" does not exist$/);
+      const rest = await api('PATCH', `/tickets/${ticket.id}`, { assignee: assigneeWith('does-not-exist') });
+      assert.equal(rest.status, 400, JSON.stringify(rest.body));
+      assert.match(rest.body.error, /cli_runtime_profile "does-not-exist" does not exist$/);
+      assert.equal(await storedProfile(ticket.id), 'none');
 
-    const mcpResult = await tools.update_board.handler(
-      { board_id: board.id, cli_runtime_profile: 'does-not-exist' },
-      {},
-    );
-    assert.equal(mcpResult.isError, true);
-    const mcpBody = JSON.parse(mcpResult.content[0].text);
-    assert.equal(mcpBody.error, res.body.error, 'REST and MCP must return the identical error message');
-
-    const stored = await ds.getRepository('Board').findOneByOrFail({ id: board.id });
-    assert.equal(stored.cli_runtime_profile, null, 'both rejected paths must leave the board unchanged');
-  });
+      const mcpResult = await mcp.callTool('update_ticket', { ticket_id: ticket.id, assignee: assigneeWith('does-not-exist') });
+      assert.equal(mcpResult?.isError, true, JSON.stringify(mcpResult));
+      assert.equal(mcpResult.error?.error, rest.body.error, 'REST and MCP must return the identical error message');
+      assert.equal(await storedProfile(ticket.id), 'none', 'both rejected paths must leave the pin unchanged');
+    },
+  );
 });

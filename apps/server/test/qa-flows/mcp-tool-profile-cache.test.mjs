@@ -20,7 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_MCP_TOOL_PROFILE_PORT || '0';
@@ -34,6 +34,9 @@ const FULL_FLOOR = 150;
 // hardcoding it again here would make this file break every time the
 // allowlist is deliberately re-tuned for reasons unrelated to cache keying.
 const COMPACT_CEILING = 50;
+// A tool every full session registers but COMPACT_TOOL_ALLOWLIST omits — the
+// marker that tells the two cached bodies apart.
+const COMPACT_OMITTED_TOOL = 'update_workspace';
 
 async function makeClient(baseUrl, apiKey, extraHeaders) {
   const client = new McpClient({ baseUrl, apiKey, extraHeaders });
@@ -46,7 +49,7 @@ test('MCP tool profile: compact/full tools/list cache keying survives alternatin
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'tool-profile' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'tool-profile');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'tool-profile-tester' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
     workspaceId: ws.id,
@@ -62,7 +65,7 @@ test('MCP tool profile: compact/full tools/list cache keying survives alternatin
     compactTools1.length > 0 && compactTools1.length <= COMPACT_CEILING,
     `compact session (initialized first) must get the small allowlist surface — got ${compactTools1.length} tools`,
   );
-  assert.ok(!compactTools1.some((tl) => tl.name === 'update_board'), 'compact session never sees update_board');
+  assert.ok(!compactTools1.some((tl) => tl.name === COMPACT_OMITTED_TOOL), `compact session never sees ${COMPACT_OMITTED_TOOL}`);
 
   step('a full session initializes second — must NOT inherit the compact cache entry');
   const full1 = await makeClient(baseUrl, key.raw_key, {});
@@ -72,7 +75,7 @@ test('MCP tool profile: compact/full tools/list cache keying survives alternatin
     fullTools1.length >= FULL_FLOOR,
     `full session (initialized second, no header) must not inherit the compact cache — got ${fullTools1.length} tools`,
   );
-  assert.ok(fullTools1.some((tl) => tl.name === 'update_board'), 'full session sees update_board (compact-omitted tool)');
+  assert.ok(fullTools1.some((tl) => tl.name === COMPACT_OMITTED_TOOL), `full session sees ${COMPACT_OMITTED_TOOL} (compact-omitted tool)`);
 
   step('re-querying the FIRST (compact) session must still hit its own cached body');
   const compactToolsAgain = await compact1.listTools();
@@ -98,10 +101,10 @@ test('MCP tool profile: compact/full tools/list cache keying survives alternatin
     compactTools2.length > 0 && compactTools2.length <= COMPACT_CEILING,
     `compact session (initialized second, reversed order) must still get the allowlist, not the full cache — got ${compactTools2.length} tools`,
   );
-  assert.ok(!compactTools2.some((tl) => tl.name === 'update_board'), 'compact session (reversed order) never sees update_board');
+  assert.ok(!compactTools2.some((tl) => tl.name === COMPACT_OMITTED_TOOL), `compact session (reversed order) never sees ${COMPACT_OMITTED_TOOL}`);
 
   step('an allowlist-omitted tool call on a compact session gets a clean "not found" error');
-  const omittedResult = await compact2.callTool('update_board', { board_id: 'does-not-matter' });
+  const omittedResult = await compact2.callTool(COMPACT_OMITTED_TOOL, { workspace_id: 'does-not-matter' });
   assert.equal(omittedResult?.isError, true, 'calling a compact-omitted tool must be an error result, not a silent success');
   const omittedMessage = omittedResult?.raw || JSON.stringify(omittedResult?.error || '');
   assert.match(omittedMessage, /not found/i, 'the SDK-level "not found" error, since the tool was never registered — not an AWB handler error');

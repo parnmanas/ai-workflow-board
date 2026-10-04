@@ -11,7 +11,7 @@ import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createUser } from '../helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.WS_SCHED_REST_PORT || '0';
 
@@ -37,7 +37,7 @@ test('Workspace schedule REST: create → get → run-now → update → list �
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
 
-  const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-rest' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'ws-sched-rest');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const admin = await createUser(app, getDataSourceToken, { name: 'sched-admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);

@@ -1,127 +1,103 @@
-// Regression: an agent assigned to a ticket in ANOTHER workspace must resolve
-// to its canonical display name on both role-holder read paths — never a bare
-// leaf name (ticket 0cccf9b5).
+// Regression: a ticket's assignee whose Runtime Host is registered in ANOTHER
+// workspace must still render as its canonical `<Host>/<label>` display on
+// every ticket read path — never a bare label or a raw host id (ticket
+// 0cccf9b5, originally about role holders).
 //
-// P4c-4: linked uuid → Host bare name; unresolvable uuid → id-prefix fallback
-// (holder 유지가 우선). Both resolvers run resolveAgentDisplayMap (id-only
-// lookup, no workspace filter), matching the MCP get_ticket path
-// (hydrateRoleAssignments).
+// Role holders are gone with the board model (docs/tickets.md): a ticket has
+// one assignee, a RuntimeSpec whose `manager_agent_id` names the Runtime Host.
+// The property survives unchanged — Runtime Hosts carry a `workspace_id`, so
+// the client's workspace-filtered host list cannot name a host paired in a
+// different workspace, and the server must resolve it by id with NO workspace
+// filter. Both projections do that independently, so both are covered:
+//
+//   1. Full ticket (GET /tickets/:id → loadTicketFull — also MCP get_ticket).
+//   2. Ticket cards (GET /workspaces/:wsId/tickets → TicketService.cards).
+//
+// A spec whose host no longer exists falls back to the spec's label — still
+// never the raw id (docs/runbooks/agent-display-name.md).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { bootApp, exitAfterTests, step } from './helpers/boot.mjs';
+import { randomUUID } from 'node:crypto';
+import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
   createWorkspace,
   createAgent,
-  createApiKey,
   createUser,
-  setupKanbanScene,
   createTicket,
-  addRoleHolder,
 } from './helpers/fixtures.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIST_ROOT = path.join(__dirname, '..', 'dist');
-
 const BASE_PORT = parseInt(process.env.QA_XWS_HOLDER_NAME_PORT || '0', 10);
-process.env.PORT = String(BASE_PORT);
 
-test('cross-workspace assigned agent → <Manager>/<Agent>, never a raw id', async (t) => {
-  const { app, modules } = await bootApp({ port: BASE_PORT });
+test('cross-workspace assignee host → <Host>/<label>, never a raw id', async (t) => {
+  const { app, port, modules } = await bootApp({ port: BASE_PORT });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
+  const { AuthService } = await import('../dist/services/auth.service.js');
 
-  const { TicketRoleAssignmentService } = await import(
-    'file://' + path.join(DIST_ROOT, 'modules', 'workspace-roles', 'ticket-role-assignment.service.js')
-  );
-  const svc = app.get(TicketRoleAssignmentService);
+  // The ticket lives in WS_TICKETS; the assignee's Runtime Host is registered
+  // in a DISTINCT workspace (WS_HOST) — the exact shape a workspace-filtered
+  // host list cannot resolve.
+  const wsTickets = await createWorkspace(app, getDataSourceToken, 'xws-tickets');
+  const wsHost = await createWorkspace(app, getDataSourceToken, 'xws-host');
 
-  // Board + columns live in WS_BOARD; the assigned agent lives in a DISTINCT
-  // workspace (WS_AGENT) — the exact shape the client's workspace-filtered
-  // /api/agents list cannot resolve.
-  const { ws: wsBoard, board, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'xws-board' });
-  const wsAgent = await createWorkspace(app, getDataSourceToken, 'xws-agent');
+  const crossAgent = await createAgent(app, getDataSourceToken, wsHost.id, { name: 'CoderX', runtime: true });
+  const crossSpec = { ...crossAgent.runtime_spec, label: 'CoderX' };
+  const crossHost = await ds.getRepository('RuntimeHost').findOneBy({ id: crossSpec.manager_agent_id });
+  assert.equal(crossHost.workspace_id, wsHost.id, 'precondition: the host belongs to the OTHER workspace');
+  const expectedCross = `${crossHost.name}/CoderX`;
 
-  // P4c-4: managed→manager 연결은 api_keys 페어링 링크다 (Agent 행 없음).
-  // linked uuid 는 Host bare name 으로 해소된다 (runbook agent-display-name P4c-4 단서).
-  const manager = await createAgent(app, getDataSourceToken, wsAgent.id, { name: 'MgrX', type: 'manager' });
-  const managed = await createAgent(app, getDataSourceToken, wsAgent.id, { name: 'CoderX' });
-  await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: wsAgent.id, hostId: manager.id, label: 'xws-link' });
-  const expectedManagedDisplay = manager.name;
+  // Same-workspace assignee → no regression.
+  const localAgent = await createAgent(app, getDataSourceToken, wsTickets.id, { name: 'LocalY', runtime: true });
+  const localSpec = { ...localAgent.runtime_spec, label: 'LocalY' };
+  const expectedLocal = `${localAgent.name}/LocalY`;
 
-  // Same-workspace, unmanaged agent as a second assignee holder → no regression:
-  // must still resolve to its bare name (no manager prefix, no crash).
-  const localAgent = await createAgent(app, getDataSourceToken, wsBoard.id, { name: 'LocalY' });
+  // Host that no longer exists → falls back to the spec label, not the id.
+  const orphanSpec = { ...localAgent.runtime_spec, manager_agent_id: randomUUID(), working_dir: '/tmp/qa/orphan', label: 'OrphanZ' };
 
-  // A user holder (reporter) → must still resolve to name/email.
-  const user = await createUser(app, getDataSourceToken, { name: 'UserZ' });
-
-  const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.todo.id,
-    workspaceId: wsBoard.id,
-    title: 'cross-ws holder name',
-    assigneeId: managed.id,          // cross-workspace managed agent (first assignee holder)
-    reporterId: '',
+  // backlog: never dispatched, so the fixture rows stay exactly as written.
+  const make = (title, assignee) => createTicket(app, getDataSourceToken, {
+    workspaceId: wsTickets.id, title, status: 'backlog', assignee,
   });
-  // Second assignee holder (same-workspace, unmanaged) via the multi-holder path.
-  await addRoleHolder(app, getDataSourceToken, {
-    ticketId: ticket.id, workspaceId: wsBoard.id, agentId: localAgent.id, slug: 'assignee',
-  });
-  // User holder on reporter.
-  const reporterRole = await ds.getRepository('WorkspaceRole').findOne({
-    where: { workspace_id: wsBoard.id, slug: 'reporter' },
-  });
-  await ds.getRepository('TicketRoleAssignment').save(
-    ds.getRepository('TicketRoleAssignment').create({
-      ticket_id: ticket.id, role_id: reporterRole.id, agent_id: null, user_id: user.id, holder_key: `user:${user.id}`,
-    }),
-  );
+  const crossTicket = await make('cross-ws assignee', crossSpec);
+  const localTicket = await make('local assignee', localSpec);
+  const orphanTicket = await make('orphan assignee', orphanSpec);
 
-  // ── Path 1: resolveForTicket (REST /tickets/:id/role-assignments) ──────────
-  await step('resolveForTicket returns canonical names', async () => {
-    const resolved = await svc.resolveForTicket(ticket.id);
-    const byId = new Map(resolved.filter(r => r.holder).map(r => [r.holder.id, r.holder]));
+  const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
+  const token = app.get(AuthService).createSession(admin.id);
+  const api = async (path) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api${path}`, {
+      headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': wsTickets.id },
+    });
+    const body = await res.json().catch(() => null);
+    assert.equal(res.status, 200, `GET ${path} → ${res.status} ${JSON.stringify(body)}`);
+    return body;
+  };
 
-    const managedHolder = byId.get(managed.id);
-    assert.ok(managedHolder, 'cross-workspace managed agent must appear as a holder');
-    assert.equal(managedHolder.name, expectedManagedDisplay,
-      `cross-ws managed holder must be "${expectedManagedDisplay}", got "${managedHolder.name}"`);
-    assert.notEqual(managedHolder.name, managed.id, 'must NOT leak the raw agent id');
-    assert.ok(!managedHolder.name.includes('/'), 'linked display is the bare Host name');
+  // ── Path 1: full ticket (TicketPanel, MCP get_ticket) ─────────────────────
+  await t.test('GET /tickets/:id returns the canonical assignee_name', async () => {
+    const cross = await api(`/tickets/${crossTicket.id}`);
+    assert.equal(cross.assignee_name, expectedCross,
+      `cross-ws assignee must be "${expectedCross}", got "${cross.assignee_name}"`);
+    assert.ok(!cross.assignee_name.includes(crossSpec.manager_agent_id), 'must NOT leak the raw host id');
 
-    const localHolder = byId.get(localAgent.id);
-    assert.ok(localHolder, 'same-workspace agent holder must appear');
-    // P4c-4: 어디에도 해소되지 않는 uuid 는 id 앞 8자리 폴백 (holder 유지가 우선).
-    assert.equal(localHolder.name, localAgent.id.slice(0, 8), 'unresolvable holder falls back to the id prefix');
+    const local = await api(`/tickets/${localTicket.id}`);
+    assert.equal(local.assignee_name, expectedLocal, 'same-workspace assignee resolves the same way');
 
-    const userHolder = byId.get(user.id);
-    assert.ok(userHolder, 'user holder must appear');
-    assert.equal(userHolder.type, 'user');
-    assert.equal(userHolder.name, user.name || user.email, 'user holder resolves to name/email');
+    const orphan = await api(`/tickets/${orphanTicket.id}`);
+    assert.equal(orphan.assignee_name, 'OrphanZ', 'unresolvable host falls back to the spec label');
   });
 
-  // ── Path 2: resolveGroupedForTickets (board-card role_holders projection) ──
-  await step('resolveGroupedForTickets returns canonical names', async () => {
-    const map = await svc.resolveGroupedForTickets([ticket.id]);
-    const groups = map.get(ticket.id) || [];
-    const assignee = groups.find(g => g.role.slug === 'assignee');
-    assert.ok(assignee, 'assignee role group must be present');
-    const names = new Map(assignee.holders.map(h => [h.id, h.name]));
-    assert.equal(names.get(managed.id), expectedManagedDisplay,
-      `board-card cross-ws holder must be "${expectedManagedDisplay}", got "${names.get(managed.id)}"`);
-    assert.notEqual(names.get(managed.id), managed.id, 'board card must NOT leak the raw agent id');
-    assert.equal(names.get(localAgent.id), localAgent.id.slice(0, 8), 'board-card unresolvable holder falls back to the id prefix');
+  // ── Path 2: ticket cards (Tickets page list) ──────────────────────────────
+  await t.test('GET /workspaces/:wsId/tickets cards return the canonical assignee_name', async () => {
+    const { tickets } = await api(`/workspaces/${wsTickets.id}/tickets`);
+    const names = new Map(tickets.map((c) => [c.id, c.assignee_name]));
+    assert.equal(names.get(crossTicket.id), expectedCross,
+      `card cross-ws assignee must be "${expectedCross}", got "${names.get(crossTicket.id)}"`);
+    assert.equal(names.get(localTicket.id), expectedLocal, 'card same-workspace assignee');
+    assert.equal(names.get(orphanTicket.id), 'OrphanZ', 'card unresolvable host falls back to the spec label');
   });
-
-  // The REST surfaces pass the resolver output through verbatim
-  // (tickets.controller `holder: r.holder`; boards.controller
-  // `holders: g.holders`), so the two service assertions above cover the wire
-  // shape the TicketPanel + board card consume. The endpoints sit behind
-  // AuthGuard (user session) — deliberately not re-plumbed here since the
-  // resolver, not the controller, is what this fix changed.
 });
 
 exitAfterTests();

@@ -20,7 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
+import { createWorkspace, createAgent, createApiKey, createTicket } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SILENT_EXIT_PORT || '0';
@@ -43,12 +43,10 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const { ws, columns } = await setupKanbanScene(app, getDataSourceToken, {
-    workspaceName: 'silent-exit-dedupe',
-  });
+  const ws = await createWorkspace(app, getDataSourceToken, 'silent-exit-dedupe');
   const ticket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id,
     workspaceId: ws.id,
+    status: 'in_progress',
     title: 'silent-exit dedupe test',
   });
 
@@ -136,8 +134,8 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
 
   step('A persisted exact-trigger agent comment suppresses the conditional warning');
   const raceTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id,
     workspaceId: ws.id,
+    status: 'in_progress',
     title: 'silent-exit grace race test',
   });
   const cycleStartedAt = new Date(Date.now() - 1_000);
@@ -211,12 +209,16 @@ test('silent-exit dedupe collapses identical retries into one row', async (t) =>
   );
 
   step('The typed ask_question writer shares the same Postgres serialization boundary');
+  // The writer is the ticket's assignee, authenticated with its Host-bound
+  // runtime credential — so the question is authored as the runtime identity
+  // key, which is what the manager sends back as the silent-exit `agent_id`.
+  const typedAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'typed-race-agent', runtime: true });
   const typedTicket = await createTicket(app, getDataSourceToken, {
-    columnId: columns.inProgress.id,
     workspaceId: ws.id,
+    status: 'in_progress',
     title: 'typed comment silent-exit race test',
+    assignee: typedAgent,
   });
-  const typedAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'typed-race-agent' });
   const typedKey = await createApiKey(app, getDataSourceToken, typedAgent.id, {
     workspaceId: ws.id,
     label: 'typed-race-agent',

@@ -1,13 +1,9 @@
 # test:qa:fast 스위트의 실행 목록 — 한 줄에 한 step (형식은 test/run-suite.mjs 헤더 참조).
 # 경로는 사전순, npm run 위임은 그 뒤. 새 테스트는 자기 자리에 한 줄만 넣으면 된다.
 # 자리가 헷갈리면 아무 데나 넣고 apps/server 에서 npm run test:suites:sort 를 돌려라.
-test/qa-flows/backlog-promotion-chain.test.mjs
 test/qa-flows/comment-mention.test.mjs
-test/qa-flows/comment-trigger.test.mjs
 test/qa-flows/mcp-agent-roundtrip.test.mjs
 test/qa-flows/mcp-schema-version.test.mjs
 test/qa-flows/mcp-tools-surface.test.mjs
 test/qa-flows/multi-user-chat.test.mjs
-test/qa-flows/self-improvement-remote-auth.test.mjs
-test/qa-flows/self-trigger-guard.test.mjs
 test/qa-flows/ticket-lifecycle.test.mjs

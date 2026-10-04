@@ -14,7 +14,6 @@
 //     --base-url http://localhost:7701 \
 //     --workspace <workspace_id> \
 //     --agent <target_agent_id> \
-//     [--board <board_id>] \
 //     [--resource <target_resource_id>] \
 //     [--api-key <key>] \
 //     [--only awb-self-code-review] \
@@ -48,7 +47,6 @@ async function main() {
   const baseUrl = args['base-url'] || process.env.AWB_BASE_URL || 'http://localhost:7701';
   const workspaceId = args.workspace || process.env.AWB_WORKSPACE_ID;
   const agentId = args.agent || process.env.AWB_SECURITY_AGENT_ID;
-  const boardId = args.board || process.env.AWB_BOARD_ID || null;
   const resourceId = args.resource || null;
   const apiKey = args['api-key'] || process.env.AWB_API_KEY || '';
   const only = args.only ? String(args.only).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
@@ -71,14 +69,12 @@ async function main() {
   const payloads = buildProfileCreatePayloads({
     workspace_id: workspaceId,
     target_agent_id: agentId,
-    board_id: boardId,
     target_resource_id: resourceId,
     created_by: 'seed-security-profiles',
     only,
   });
 
   console.log(`Seeding ${payloads.length} security profile(s) → workspace ${workspaceId}`
-    + (boardId ? ` board ${boardId}` : ' (workspace-scope)')
     + (only ? ` [filter: ${only.join(', ')}]` : '')
     + (args.dryRun ? '  [DRY RUN]' : ''));
 
@@ -86,8 +82,7 @@ async function main() {
   await mcp.initialize();
 
   // Existing profiles in the same scope, indexed by their key tag.
-  const listScope = boardId ? boardId : '';
-  const existing = await mcp.callTool('list_security_profiles', { workspace_id: workspaceId, board_id: listScope });
+  const existing = await mcp.callTool('list_security_profiles', { workspace_id: workspaceId });
   if (existing?.isError) throw new Error(`list_security_profiles failed: ${JSON.stringify(existing.error)}`);
   const byKey = new Map();
   for (const s of Array.isArray(existing) ? existing : []) {

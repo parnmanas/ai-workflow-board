@@ -21,16 +21,15 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, setupKanbanScene } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_STEP_GATE_PORT || '0';
 
-async function makeScenario(mcp, seedKey, { ws, board, agent, seed }) {
+async function makeScenario(mcp, seedKey, { ws, agent, seed }) {
   const [payload] = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
     target_runtime: agent.runtime_spec,
-    board_id: board.id,
     only: [seedKey],
   });
   assert.ok(payload, `seed catalogue has ${seedKey}`);
@@ -61,13 +60,13 @@ test('QA step gate: a passed run with a failed/pending step is downgraded', asyn
   const DIST = path.join(__dirname, '..', '..', 'dist');
   const seed = await import(pathToFileURL(path.join(DIST, 'modules', 'qa', 'qa-seed-scenarios.js')).href);
 
-  const { ws, board } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'qa-step-gate' });
+  const ws = await createWorkspace(app, getDataSourceToken, 'qa-step-gate');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-step-runner' });
   const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
 
-  const ctx = { ws, board, agent: qaAgent, seed };
+  const ctx = { ws, agent: qaAgent, seed };
 
   // awb-mcp scenario → evidence gate is exempt, isolating the step gate.
   const scenario = await makeScenario(mcp, 'ticket-lifecycle', ctx);
