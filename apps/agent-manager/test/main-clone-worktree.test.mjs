@@ -283,6 +283,31 @@ test('the main clone registry persists across manager restarts', async () => {
   }
 });
 
+// Git prints worktree paths resolved (symlinks on POSIX, 8.3 short names
+// expanded on Windows), while the main clone path is the operator's spelling.
+// Archive removal, snapshots and sweeps must still find the ticket's worktree.
+test('a main clone reached through a symlink still finds its worktrees', { skip: process.platform === 'win32' && 'symlinks need privileges on Windows; the 8.3 case runs in the tests above' }, async () => {
+  const fx = await makeRemote();
+  const real = join(fx.root, 'real');
+  const link = join(fx.root, 'link');
+  await fsp.mkdir(real);
+  await fsp.symlink(real, link, 'dir');
+  const mainClone = join(link, 'web');
+  try {
+    const wm = new WorktreeManager();
+    const a = await wm.resolveCwd(resolveArgs(fx, mainClone, TICKET_A));
+    const b = await wm.resolveCwd(resolveArgs(fx, mainClone, TICKET_B));
+    assert.equal(a.isWorktree && b.isWorktree, true);
+    const snapshot = await wm.snapshotWorktrees({ mainCloneDir: mainClone, liveTicketIds: new Set([TICKET_A, TICKET_B]) });
+    assert.deepEqual(snapshot.map((e) => e.slot).sort(), ['aaaaaaaa', 'bbbbbbbb']);
+    assert.equal(await wm.removeTicketWorktrees({ mainCloneDir: mainClone, ticketId: TICKET_A }), 1);
+    assert.equal(await wm.sweep({ mainCloneDir: mainClone, activeKeys: new Set() }), 1);
+    assert.equal(existsSync(a.cwd) || existsSync(b.cwd), false);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 test('a relative main_clone_dir is ignored — the managed .awb/base clone is used', async () => {
   const fx = await makeRemote();
   try {

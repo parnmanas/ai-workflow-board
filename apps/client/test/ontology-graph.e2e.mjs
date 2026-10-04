@@ -12,7 +12,7 @@ const FIXTURE_FOLDER = 'apps/client/test/fixtures/ontology-smoke-source';
 
 let app;
 let workspace;
-let resource;
+let project;
 let token;
 const dbPaths = [
   path.join(REPO_ROOT, '.ontology-smoke-primary.db'),
@@ -44,12 +44,11 @@ test.beforeAll(async () => {
     subject_type: 'user', subject_id: user.id, relation: 'admin',
     object_type: 'workspace', object_id: workspace.id,
   });
-  resource = await dataSource.getRepository('Resource').save({
+  project = await dataSource.getRepository('Project').save({
     workspace_id: workspace.id,
     name: 'AWB ontology smoke fixture',
     description: 'Two-file repository fixture',
-    type: 'repository',
-    url: 'https://github.com/parnmanas/ai-workflow-board.git',
+    repo_url: 'https://github.com/parnmanas/ai-workflow-board.git',
     default_branch: process.env.GITHUB_HEAD_REF
       || process.env.GITHUB_REF_NAME
       || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim(),
@@ -89,7 +88,7 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
 
   await page.goto(`/ws/${workspace.id}/ontology-graph`);
   await page.getByPlaceholder('repo root').fill(FIXTURE_FOLDER);
-  await page.locator('select').filter({ has: page.locator(`option[value="${resource.id}"]`) }).selectOption(resource.id);
+  await page.locator('select').filter({ has: page.locator(`option[value="${project.id}"]`) }).selectOption(project.id);
 
   await expect(page.getByText(/nodes · .*edges/)).toBeVisible({ timeout: 30_000 });
   expect(statuses).toContain('building');

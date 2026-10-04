@@ -806,6 +806,21 @@ export class WorktreeManager {
     return this.#managedRepos(opts.baseWorkingDir, opts.resourceId);
   }
 
+  /**
+   * Whether a `git worktree list` path sits under a managed worktree root.
+   * Git for Windows prints long paths where Node made 8.3 short ones
+   * (RUNNER~1), so when the text differs both sides go through native realpath;
+   * an unresolvable path keeps the plain text comparison.
+   */
+  async #isUnderRoot(worktreePath: string, root: string): Promise<boolean> {
+    if (isUnder(worktreePath, root)) return true;
+    const [w, r] = await Promise.all([
+      fsp.realpath(worktreePath).catch(() => worktreePath),
+      fsp.realpath(root).catch(() => root),
+    ]);
+    return isUnder(w, r);
+  }
+
   /** Discover only repositories owned by AWB below the working container. */
   async #managedRepos(baseWorkingDir: string, resourceId?: string): Promise<Array<{ repo: string; worktreesRoot: string }>> {
     const baseRoot = join(baseWorkingDir, '.awb', 'base');
@@ -1830,7 +1845,7 @@ export class WorktreeManager {
       // Keep only worktrees strictly under `.awb/wt` (drops the main checkout).
       const bySlot = new Map<string, WorktreeInfo>();
       for (const w of wts) {
-        if (!isUnder(w.path, worktreesRoot)) continue;
+        if (!(await this.#isUnderRoot(w.path, worktreesRoot))) continue;
         bySlot.set(lastSegment(w.path), w);
       }
       // Union of on-disk slots and registry slots — a lease pointing at a
@@ -2104,7 +2119,7 @@ export class WorktreeManager {
       const worktrees = await this.listWorktrees(entry.repo);
       let removedHere = 0;
       for (const w of worktrees) {
-        if (!isUnder(w.path, entry.worktreesRoot)) continue;
+        if (!(await this.#isUnderRoot(w.path, entry.worktreesRoot))) continue;
         const seg = lastSegment(w.path);
         if (isSharedSlotSeg(seg)) continue;
         if (seg !== ticket8 && !seg.startsWith(legacyPrefix)) continue;
@@ -2611,7 +2626,7 @@ export class WorktreeManager {
       const worktrees = await this.listWorktrees(entry.repo);
       let removedHere = 0;
       for (const w of worktrees) {
-        if (!isUnder(w.path, entry.worktreesRoot)) continue;
+        if (!(await this.#isUnderRoot(w.path, entry.worktreesRoot))) continue;
         const slug = lastSegment(w.path);
         if (isSharedSlotSeg(slug) || activeKeys.has(slug)) continue;
         const status = await git(w.path, ['status', '--porcelain']);
