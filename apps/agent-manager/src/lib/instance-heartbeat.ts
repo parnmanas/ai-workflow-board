@@ -293,6 +293,11 @@ export interface AgentSessionHeartbeatEntry {
   cli: string;
   session_id: string;
   status: string;
+  /**
+   * 그 세션 프로세스의 MCP 연결이 `X-AWB-Session-Id` 로 보내는 참조값 — 세션 id 와 다를 때만(새로 만든 세션은
+   * id 를 알기 전에 연결이 고정된다). 서버 `AgentSessionsService.resolveMcpSessionRef` 가 읽는다. server 공동 contract.
+   */
+  mcp_session_ref?: string;
 }
 
 export interface InstanceHeartbeatPayload {

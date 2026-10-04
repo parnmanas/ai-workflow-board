@@ -207,6 +207,11 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
   → `AgentSessionRunner.liveStates()`). 서버는 매 하트비트(30초)마다 그 목록으로 메모리를 맞춘다 — 보고된 세션은 그 상태로,
   보고에 없는 진행 중 세션은 idle 로(`reason:'heartbeat'`). 매니저 업데이트·재부팅·연결 단절·프로세스 사망 어느 경우든 30초
   안에 화면이 실제와 같아진다. 비어 있어도 `[]` 를 보내는 이유가 이것이다(구버전 매니저는 필드가 없어 아무것도 바꾸지 않는다).
+- **MCP 연결의 세션 식별** — 매니저가 세션 프로세스에 주입하는 AWB MCP 연결은 `X-AWB-Session-Id` 를 싣는다(operator 판정의
+  근거, `docs/voice-operator.md` "권한"). 불러온 세션은 세션 id 를 그대로 싣지만, **새 세션은 프로세스를 띄울 때 id 를 아직
+  모른다** — 매니저는 고유 참조값(`pending-<uuid>`)을 싣고, 하트비트 `agent_sessions[].mcp_session_ref` 로 "이 참조는 이 세션"
+  을 알린다. 서버는 그 대응으로 바꿔 본다(`AgentSessionsService.resolveMcpSessionRef`). 예전 매니저는 글자 그대로 `'new'` 를
+  실어, AWB 에서 새로 연 세션은 Restart 전까지 어느 세션의 연결인지 알 수 없었다(실측: 운영 operator 가 도구를 못 썼다).
 - 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
   턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
 - **driver 도 메모리에만 있다 — 그래서 세션을 읽는 것 자체가 driver 를 (다시) 잡는다.** 서버가 재시작하면 driver 가
@@ -441,7 +446,7 @@ cache_write` 로 계산한다.
 
 ## agent-manager contract 변경 규칙
 
-`agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id`·`force` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`
+`agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id`·`force` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`·`agent_sessions[]`(`mcp_session_ref` 포함)
 는 서버와 agent-manager 가 같은 contract 를 본다 — 변경은 **같은 PR**. 버전은 손으로 올리지 않는다.
 `usage` 이벤트 payload 의 키도 같은 계약이다(서버 `common/types/agent-sessions.ts` 의 주석 ↔ 매니저
 `session-usage.ts` 의 `usageEventPayload`) — 키를 늘리면 화면(`sessionTranscript.logic.ts`)까지 한 PR 로 묶는다.

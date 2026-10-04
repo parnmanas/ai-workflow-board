@@ -57,6 +57,7 @@ import { ClassificationBridgeService } from '../outreach/classifier/classificati
 import { OntologyLifecycleService } from '../ontology/ontology-lifecycle.service';
 import { OntologyQueryService } from '../ontology/ontology-query.service';
 import { OperatorDecisionService } from '../voice/operator-decision.service';
+import { AgentSessionsService } from '../agent-sessions/agent-sessions.service';
 
 // Module-level log reference, set from McpController.onModuleInit
 let logService: LogService | null = null;
@@ -180,6 +181,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly instanceQuiesceService: InstanceQuiesceService,
     // 말로 답하기 — operator-tools.ts (VoiceModule).
     private readonly operatorDecisionService: OperatorDecisionService,
+    // operator 세션의 연결을 알아본다 — 새로 만든 세션의 MCP 참조값 → 세션 id.
+    private readonly agentSessionsService: AgentSessionsService,
   ) {}
 
   onModuleInit() {
@@ -315,7 +318,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
 
       // Operator(고정된 Agent Session)의 연결은 워크스페이스에 묶지 않는다 — 사이트 전체를 관리한다.
       // 조건·신뢰 경계는 voice/operator-config.ts `isOperatorConnection`.
-      if (mcpAuthInfo.workspaceId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers)) {
+      if (mcpAuthInfo.workspaceId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers,
+        (managerId, ref) => this.agentSessionsService.resolveMcpSessionRef(managerId, ref))) {
         if (req.method === 'POST' && req.body?.method === 'initialize') {
           this._logService.info('MCP', 'operator session connected with site-wide scope', {
             host_id: mcpAuthInfo.agentId,

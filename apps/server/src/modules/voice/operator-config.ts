@@ -300,10 +300,18 @@ export interface OperatorConnectionAuth {
   workspaceId?: string;
 }
 
+/**
+ * MCP 연결의 `X-AWB-Session-Id` → 세션 id. 새로 만든 세션의 연결은 세션 id 대신 매니저가 정한 참조값을 보내므로
+ * (프로세스를 띄울 때 id 를 아직 모른다) 매니저가 하트비트로 알려 준 대응으로 바꾼다
+ * (`AgentSessionsService.resolveMcpSessionRef`). 모르는 값이면 받은 값 그대로.
+ */
+export type McpSessionResolver = (managerId: string | undefined, sessionRef: string) => string | null;
+
 export async function isOperatorConnection(
   dataSource: DataSource,
   auth: OperatorConnectionAuth,
   headers: Record<string, string | string[] | undefined>,
+  resolveSession?: McpSessionResolver,
 ): Promise<boolean> {
   if (auth.source !== 'db' || !auth.agentId || auth.scope !== 'full') return false;
   const header = (name: string) => {
@@ -311,8 +319,9 @@ export async function isOperatorConnection(
     return String(Array.isArray(v) ? v[0] : v ?? '').trim();
   };
   if (header('x-awb-client-type').toLowerCase() !== 'agent-session') return false;
-  const sessionId = header('x-awb-session-id');
-  if (!sessionId) return false;
+  const sessionRef = header('x-awb-session-id');
+  if (!sessionRef) return false;
+  const sessionId = resolveSession?.(auth.agentId, sessionRef) ?? sessionRef;
   const operators = await cachedOperators(dataSource);
   return operators.some((op) => op.session_id === sessionId && op.manager_id === auth.agentId);
 }

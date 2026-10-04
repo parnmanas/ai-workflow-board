@@ -168,8 +168,17 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
         taken();
         this.#reportTurns.add(turn_id);
         this.#inflight.set(operatorId, { turnId: turn_id, reports: batch, userId, sentAt: Date.now() });
+        // 이 경로가 실제로 돌았는지 운영에서 볼 수 있게 — 보고는 화면 밖에서 일어난다.
+        this.logService.info('Voice', `reported ${batch.length} session update(s) to operator "${operator.name}"`, {
+          operator_id: operator.id, turn_id, user_id: userId,
+          reports: batch.map((r) => `${r.kind} ${r.session.manager_name}/${r.session.cli}/${r.session.session_id.slice(0, 8)}`),
+        });
       } catch (err: any) {
-        if (err?.code === 'session_busy') return; // 사용자와 대화 중이거나 다른 일을 하는 중 — 그 턴이 끝나면 보낸다
+        if (err?.code === 'session_busy') {
+          // 사용자와 대화 중이거나 다른 일을 하는 중 — 그 턴이 끝나면 보낸다.
+          this.logService.debug('Voice', `operator "${operator.name}" is busy — ${queue.length} report(s) wait`);
+          return;
+        }
         taken();
         this.logService.warn('Voice', `report to operator "${operator.name}" not delivered: ${err?.message ?? err}`);
         await this.reroute(batch, operatorId, String(err?.message || err));
@@ -202,6 +211,7 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
       const answer = reason === 'turn_finished' && finished?.stopReason !== 'cancelled' ? (finished?.answer || '').trim() : '';
       if (answer) {
         const summary: OperatorSummary = { operator, userId: inflight.userId, answer, reports: inflight.reports };
+        this.logService.info('Voice', `operator "${operator.name}" summarised ${inflight.reports.length} report(s)`, { operator_id: operator.id, turn_id: inflight.turnId });
         for (const listener of this.#summaryListeners) listener(summary);
       } else {
         this.undeliverable(inflight.reports, reason === 'turn_failed' ? `operator "${operator.name}" failed the report turn` : `operator "${operator.name}" gave no answer`);

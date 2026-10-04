@@ -2,6 +2,8 @@
 //   1. InstanceHeartbeat 는 agentSessionsProvider 가 배선되면 비어 있어도 `agent_sessions: []` 를 보낸다
 //      ("살아 있는 세션 없음" 이 정보다). 배선되지 않으면 필드를 생략한다(구버전 서버/매니저 호환).
 //   2. AgentSessionRunner.liveStates() 는 살아 있는 세션과 서버 contract 의 status 를 준다.
+//   3. 새로 만든 세션의 MCP 연결은 세션 id 를 아직 모르므로 고유 참조값(`pending-<uuid>`)으로 붙고, 하트비트가 그
+//      참조를 싣는다 — 서버가 그 연결이 어느 세션인지(operator 인지) 안다. 예전엔 글자 그대로 'new' 였다.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
@@ -83,12 +85,15 @@ test('AgentSessionRunner.liveStates lists open sessions with their status and fo
   await mkdir(cwd, { recursive: true });
   const calls = [];
   stubFetch(t, { capture: (url, body) => calls.push({ url, body }) });
+  const mcpRefs = [];
   const runner = new AgentSessionRunner(
     { url: 'http://127.0.0.1:0', apiKey: 'manager-key' },
     {
       getManagerId: () => 'manager-1',
       store: new AgentSessionStore({ claudeHome: join(root, 'claude'), codexHome: join(root, 'codex'), indexPath: join(root, 'index.json') }),
       commandResolver: async () => ({ command: process.execPath, args: [fixture] }),
+      // MCP 연결이 X-AWB-Session-Id 로 보낼 값을 엿본다(기본 서버 대신 빈 목록).
+      mcpServers: (ref) => { mcpRefs.push(ref); return []; },
       flushIntervalMs: 10, idleMinutes: 0, permissionTimeoutMs: 5000, requestTimeoutMs: 10_000, promptTimeoutMs: 20_000,
     },
   );
@@ -98,7 +103,10 @@ test('AgentSessionRunner.liveStates lists open sessions with their status and fo
   await runner.handle(request('open', { request_id: 'rpc-open', session_id: null, cwd, title: 'hb' }));
   const opened = calls.find((c) => c.url.endsWith('/api/agent/sessions/rpc/rpc-open')).body;
   const sid = opened.result.session_id;
-  assert.deepEqual(runner.liveStates(), [{ cli: 'claude', session_id: sid, status: 'ready' }]);
+  const [ref] = mcpRefs;
+  assert.match(ref, /^pending-[0-9a-f-]{36}$/, 'the MCP connection is fixed before session/new names the session — a unique ref, never "new"');
+  assert.deepEqual(runner.liveStates(), [{ cli: 'claude', session_id: sid, status: 'ready', mcp_session_ref: ref }],
+    'the heartbeat tells the server which session that ref is');
   const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-1', text: 'hello' }));
   const started = Date.now();
   while (runner.liveStates()[0]?.status !== 'awaiting_permission' && Date.now() - started < 8000) await new Promise((r) => setTimeout(r, 20));
@@ -109,4 +117,21 @@ test('AgentSessionRunner.liveStates lists open sessions with their status and fo
   assert.equal(runner.liveStates()[0]?.status, 'ready');
   await runner.handle(request('close', { session_id: sid }));
   assert.deepEqual(runner.liveStates(), [], 'closed sessions are not reported');
+});
+
+test('heartbeat forwards the MCP session ref of a newly created session', async (t) => {
+  const payloadPromise = stubFetch(t);
+  const heartbeat = heartbeatWith({
+    agentSessionsProvider: () => [
+      { cli: 'claude', session_id: 's-new', status: 'ready', mcp_session_ref: 'pending-3c1d' },
+      { cli: 'codex', session_id: 's-loaded', status: 'busy' },
+    ],
+  });
+  t.after(() => heartbeat.stop());
+  heartbeat.start();
+  const payload = await payloadPromise;
+  assert.deepEqual(payload.agent_sessions, [
+    { cli: 'claude', session_id: 's-new', status: 'ready', mcp_session_ref: 'pending-3c1d' },
+    { cli: 'codex', session_id: 's-loaded', status: 'busy' },
+  ]);
 });

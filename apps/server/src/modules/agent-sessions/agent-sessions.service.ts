@@ -330,6 +330,8 @@ function normalizeCommands(input: unknown): AgentSessionCommand[] {
 export class AgentSessionsService implements OnModuleDestroy {
   private readonly pending = new Map<string, PendingRpc>();
   private readonly live = new Map<string, LiveState>();
+  /** 매니저 → (MCP 연결 참조값 → 세션 id). 새로 만든 세션의 MCP 연결은 세션 id 대신 참조값을 보낸다. */
+  private readonly mcpRefs = new Map<string, Map<string, string>>();
   /** 세션 → 사용자의 답을 기다리는 요청들(`PendingSessionInteraction`). */
   private readonly awaiting = new Map<string, Map<string, PendingSessionInteraction>>();
 
@@ -1574,7 +1576,14 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 연결 단절로 마지막 패치를 못 받은 유령). `starting` 은 open 이 끝나기 전 하트비트가 먼저 올 수
    * 있으므로 open 타임아웃 동안 지킨다.
    */
-  reconcileWithHeartbeat(managerId: string, reported: Array<{ cli: string; session_id: string; status: string }>): number {
+  reconcileWithHeartbeat(managerId: string, reported: Array<{ cli: string; session_id: string; status: string; mcp_session_ref?: string }>): number {
+    // 새로 만든 세션의 MCP 연결 참조값 — 살아 있는 세션 목록 전체라 그대로 갈아 끼운다(죽은 세션의 참조는 사라진다).
+    const refs = new Map<string, string>();
+    for (const e of reported) {
+      if (e && typeof e.mcp_session_ref === 'string' && e.mcp_session_ref && typeof e.session_id === 'string') refs.set(e.mcp_session_ref, e.session_id);
+    }
+    if (refs.size) this.mcpRefs.set(managerId, refs);
+    else this.mcpRefs.delete(managerId);
     const byKey = new Map<string, string>();
     for (const e of reported) {
       if (e && typeof e.session_id === 'string' && typeof e.cli === 'string' && STATUS_SET.has(e.status)) byKey.set(liveKey(managerId, e.cli, e.session_id), e.status);
@@ -1590,8 +1599,19 @@ export class AgentSessionsService implements OnModuleDestroy {
     return changed;
   }
 
+  /**
+   * MCP 연결이 `X-AWB-Session-Id` 로 보낸 값 → 그 연결의 세션 id. 불러온 세션은 세션 id 를 그대로 보내고, 새로 만든
+   * 세션은 프로세스를 띄울 때 id 를 몰라 참조값(`pending-…`)을 보낸다 — 매니저가 하트비트로 알려 준 대응을 찾는다.
+   * 모르는 값이면 null(호출자는 받은 값을 세션 id 로 본다).
+   */
+  resolveMcpSessionRef(managerId: string | undefined, ref: string | undefined): string | null {
+    if (!managerId || !ref) return null;
+    return this.mcpRefs.get(managerId)?.get(ref) ?? null;
+  }
+
   /** 이 Runtime Host 의 프로세스가 모두 사라졌다 — 진행 중이던 세션을 idle 로 되돌린다. */
   markHostOffline(managerId: string): number {
+    this.mcpRefs.delete(managerId);
     let changed = 0;
     for (const [key, state] of this.live) {
       if (state.manager_id !== managerId) continue;

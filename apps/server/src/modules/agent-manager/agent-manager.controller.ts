@@ -563,7 +563,13 @@ export class AgentManagerController {
       ? body.agent_sessions
         .filter((e: any) => e && typeof e === 'object' && typeof e.cli === 'string' && typeof e.session_id === 'string' && typeof e.status === 'string')
         .slice(0, 500)
-        .map((e: any) => ({ cli: String(e.cli).slice(0, 32), session_id: String(e.session_id).slice(0, 200), status: String(e.status).slice(0, 32) }))
+        .map((e: any) => ({
+          cli: String(e.cli).slice(0, 32),
+          session_id: String(e.session_id).slice(0, 200),
+          status: String(e.status).slice(0, 32),
+          // 새로 만든 세션의 MCP 연결 참조값(그 연결이 어느 세션인지 — AgentSessionsService.resolveMcpSessionRef).
+          ...(typeof e.mcp_session_ref === 'string' && e.mcp_session_ref ? { mcp_session_ref: String(e.mcp_session_ref).slice(0, 200) } : {}),
+        }))
       : undefined;
 
     // Terminal(Runtime Host 셸) — 이 장비에서 띄울 수 있는 셸. 비어 있으면 터미널을 못 여는 장비다.

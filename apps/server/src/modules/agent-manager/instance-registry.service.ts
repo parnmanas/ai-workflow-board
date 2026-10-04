@@ -323,6 +323,8 @@ export interface AgentSessionHeartbeatEntry {
   cli: string;
   session_id: string;
   status: string;
+  /** 그 프로세스의 MCP 연결이 `X-AWB-Session-Id` 로 보내는 참조값 — 세션 id 와 다를 때만(새로 만든 세션). */
+  mcp_session_ref?: string;
 }
 
 /**

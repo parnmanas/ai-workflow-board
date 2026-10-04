@@ -212,6 +212,8 @@ type CommandPatch = { name: string; description: string; input_hint?: string };
 interface LiveSession {
   cli: string;
   sessionId: string;
+  /** 이 프로세스의 MCP 연결이 `X-AWB-Session-Id` 로 보내는 값 — 불러온 세션은 세션 id, 새 세션은 `pending-<uuid>`. */
+  mcpSessionRef: string;
   cwd: string;
   title: string;
   /** Only a newly created session may derive its initial title from a prompt. */
@@ -513,11 +515,19 @@ export class AgentSessionRunner {
     return this._snapshot().filter((s) => s.busy).length;
   }
 
-  /** 하트비트용 — 살아 있는 세션 전체와 서버 contract 의 status. 닫히는 중/죽은 것은 뺀다. */
-  liveStates(): Array<{ cli: string; session_id: string; status: string }> {
+  /**
+   * 하트비트용 — 살아 있는 세션 전체와 서버 contract 의 status. 닫히는 중/죽은 것은 뺀다. MCP 연결이 세션 id 가
+   * 아닌 참조값으로 붙은 세션(새로 만든 세션)은 그 참조도 싣는다 — 서버가 그 연결이 어느 세션인지 안다.
+   */
+  liveStates(): Array<{ cli: string; session_id: string; status: string; mcp_session_ref?: string }> {
     return Array.from(this.#live.values())
-      .filter((live) => !live.exited && !live.closing)
-      .map((live) => ({ cli: live.cli, session_id: live.sessionId, status: this.#statusOf(live) }));
+      .filter((live) => !live.exited && !live.closing && !!live.sessionId)
+      .map((live) => ({
+        cli: live.cli,
+        session_id: live.sessionId,
+        status: this.#statusOf(live),
+        ...(live.mcpSessionRef && live.mcpSessionRef !== live.sessionId ? { mcp_session_ref: live.mcpSessionRef } : {}),
+      }));
   }
 
   #ref(cli: string, sessionId: string): AgentSessionRef {
@@ -801,12 +811,17 @@ export class AgentSessionRunner {
       const caps = (initialized?.agentCapabilities ?? {}) as Record<string, unknown>;
       const loadSupported = caps.loadSession === true;
       const authMethods = Array.isArray(initialized?.authMethods) ? initialized.authMethods : [];
-      const sessionIdForMcp = requestedSessionId || 'new';
+      // MCP 헤더(`X-AWB-Session-Id`)는 프로세스를 띄울 때 고정되는데, 새 세션의 id 는 session/new 가 끝나야 나온다.
+      // 그래서 새 세션은 고유한 참조값으로 연결하고, 하트비트(`agent_sessions[].mcp_session_ref`)로 서버에 "이 참조는
+      // 이 세션" 을 알린다 — 서버가 operator 세션의 연결을 알아보는 근거다(server `operator-config.ts`). 예전에는
+      // 글자 그대로 'new' 를 보내서, AWB 에서 새로 연 세션은 다시 띄우기 전까지 어느 세션의 연결인지 알 수 없었다.
+      const sessionIdForMcp = requestedSessionId || `pending-${randomUUID()}`;
       const mcpServers = this.#options.mcpServers ? this.#options.mcpServers(sessionIdForMcp) : this.#defaultMcpServers(sessionIdForMcp);
 
       live = {
         cli,
         sessionId: requestedSessionId,
+        mcpSessionRef: sessionIdForMcp,
         cwd,
         title,
         allowPromptTitle: !requestedSessionId,

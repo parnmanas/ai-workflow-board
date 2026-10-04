@@ -67,4 +67,20 @@ test('registered operator sessions manage other workspaces; nothing else on the 
   assert.equal(unpin.status, 200);
   assert.ok(denied(await touchOther(operator, 'after')), 'unregistering binds the connection again');
   assert.ok(!denied(await touchOther(bystander, 'still friday')), 'the other operator stays lifted');
+
+  // 5. 새로 만든 세션의 연결은 세션 id 대신 매니저가 정한 참조값으로 붙는다 — 하트비트가 대응을 알려 주면 그
+  //    세션(여기서는 friday)의 연결로 알아보고 묶음을 푼다.
+  const freshFriday = sessionClient('pending-11111111-2222-4333-8444-555555555555');
+  assert.ok(denied(await touchOther(freshFriday, 'unknown ref')), 'an unmapped ref is no session at all');
+  const hb = await fetch(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: { 'X-Agent-Key': hostKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instance_id: 'inst-scope', agent_id: manager.id, host_id: manager.id, mode: 'manager', hostname: 'rolf', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 1, started_at: new Date().toISOString(),
+      agent_sessions: [{ cli: 'claude', session_id: 's-other', status: 'ready', mcp_session_ref: 'pending-11111111-2222-4333-8444-555555555555' }],
+    }),
+  });
+  assert.ok(hb.status < 300, await hb.text());
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!denied(await touchOther(freshFriday, 'mapped ref')), 'once the host maps the ref, the operator is recognised');
 });
