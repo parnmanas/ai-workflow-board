@@ -62,7 +62,7 @@ export default function DeclareRuntimeSection({ workspaceId, onResolved, initial
     <div style={{ border: `1px dashed ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: 10 }}>
       <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
         <input type="checkbox" checked={open} onChange={(e) => setOpen(e.target.checked)} />
-        실행 설정 · Agent 템플릿 선택
+        실행 설정
       </label>
       {open && (
         <div style={{ marginTop: 10 }}>

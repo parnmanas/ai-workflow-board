@@ -14,7 +14,7 @@ export default function HostsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
         title="HOSTS"
-        description="Runtime Host 연결, 매니저 버전, CLI와 ACP 어댑터를 관리합니다."
+        description="Agent 템플릿 등록과 Runtime Host 연결, 매니저 버전, CLI와 ACP 어댑터를 관리합니다."
       />
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 24, background: tokens.colors.surface }}>
         {canManage ? (

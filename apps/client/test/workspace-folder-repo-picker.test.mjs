@@ -85,7 +85,7 @@ function optionLabels(select) {
 /** DeclareRuntimeSection 에 Host/CLI/dir 을 채워 Resolve 한다 (P4c-4 대상 선언). */
 async function declareRuntime(container) {
   const toggle = [...container.querySelectorAll('label')]
-    .find((l) => l.textContent.includes('실행 설정 · Agent 템플릿 선택'));
+    .find((l) => l.textContent.includes('실행 설정'));
   assert.ok(toggle, 'runtime 선언 토글이 없다');
   click(toggle.querySelector('input[type="checkbox"]'));
   await flush();
