@@ -219,10 +219,17 @@ async function fetchOk(path: string, init: RequestInit & { contentType?: string 
       localStorage.removeItem('auth_token');
       window.dispatchEvent(new Event('auth-expired'));
     }
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    const error = new Error(err.message || err.error || 'Request failed') as Error & { code?: string; status?: number };
-    if (err.code) error.code = err.code;
-    else if (typeof err.error === 'string') error.code = err.error;
+    const err = await res.json().catch(() => null);
+    // Proxies can return an HTML error page. Only expose a short API message, never the response body.
+    const detail = err?.message || err?.error;
+    const fallback = res.status === 504
+      ? '서버 응답 시간이 초과되었습니다 (HTTP 504). 잠시 후 다시 시도해 주세요.'
+      : `요청에 실패했습니다 (HTTP ${res.status}). 잠시 후 다시 시도해 주세요.`;
+    const message = typeof detail === 'string' && !/<[!/?a-z][^>]*>/i.test(detail)
+      ? detail.slice(0, 300) : fallback;
+    const error = new Error(message) as Error & { code?: string; status?: number };
+    if (typeof err?.code === 'string') error.code = err.code;
+    else if (typeof err?.error === 'string') error.code = err.error;
     error.status = res.status;
     throw error;
   }
@@ -2129,11 +2136,7 @@ export const api = {
   getHostSessionImage: async (managerId: string, cli: string, sessionId: string, imageRef: string): Promise<Blob> => {
     const path = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
       + `/sessions/${encodeURIComponent(sessionId)}/image/${encodeURIComponent(imageRef)}`;
-    const resp = await fetch(`${BASE}${path}`, { headers: getAuthHeaders() });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
-      throw new Error(text || `image fetch failed (${resp.status})`);
-    }
+    const resp = await fetchOk(path);
     return resp.blob();
   },
   /** 에이전트가 답에 **경로로** 적은 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`) — 그 Runtime Host 의 매니저가 읽어 준다.
@@ -2142,11 +2145,7 @@ export const api = {
     const query = new URLSearchParams({ path, ...(cwd ? { cwd } : {}) });
     const url = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
       + `/sessions/${encodeURIComponent(sessionId)}/local-image?${query.toString()}`;
-    const resp = await fetch(`${BASE}${url}`, { headers: getAuthHeaders() });
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => null);
-      throw new Error(body?.message || body?.error || `image fetch failed (${resp.status})`);
-    }
+    const resp = await fetchOk(url);
     return resp.blob();
   },
   /** 세션 프롬프트 — 텍스트 + 이미지 첨부. 이미지는 base64 그대로 실어 보내고 서버는 저장하지 않고
