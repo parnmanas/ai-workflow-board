@@ -659,7 +659,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         if (isFillerUtterance(heard)) return null;
         const match = matchWake(heard, wakeRefs.current.operators);
         if (!match) return heard;
-        if (match.operator.id === id) return match.rest || null; // 깨어 있는데 또 불렀다 — 이름만 뗀다
+        if (match.operator.id === id) {
+          // 깨어 있는데 또 불렀다 — 이름만 떼고 보낸다. 이름만 불렀으면 듣고 있다고 신호음으로 답한다.
+          if (!match.rest) playEarcon('wake');
+          return match.rest || null;
+        }
         // 다른 operator 를 불렀다 — 그쪽이 깨어난다.
         playEarcon('wake');
         wakeStore.wake(match.operator.id, match.rest || null);
