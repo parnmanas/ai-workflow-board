@@ -29,14 +29,16 @@ export type BuildMode = 'cold_then_warm' | 'always_cold' | 'always_warm';
 export type RunFreshness = 'cold' | 'warm';
 
 /**
- * Where to get the repo for a run. When null, the run reuses the board /
- * workspace `environment_config` repo (the existing provisioning infra).
- *  - resource_id: a checked-in repo Resource id (preferred, carries auth).
- *  - url:         a raw git URL (escape hatch when there is no Resource).
- *  - branch:      branch/ref to check out; omitted = the repo's default.
+ * Where to get the repo for a run. When null the run has NO repo — the
+ * provisioner only ensures the folder exists (there is no board/workspace repo
+ * to inherit any more, docs/tickets.md).
+ *  - project_id: a Project id (preferred — url, default branch, credential and
+ *                clone policy come from the Project).
+ *  - url:        a raw git URL (escape hatch when there is no Project).
+ *  - branch:     branch/ref to check out; omitted = the repo's default.
  */
 export interface WorkspaceFolderRepoRef {
-  resource_id?: string;
+  project_id?: string;
   url?: string;
   branch?: string;
 }
@@ -138,16 +140,20 @@ export function normalizeBuildMode(input: any): BuildMode {
 
 /**
  * Normalize the loose `repo_ref` input into a clean ref (or null). An object
- * with no usable key collapses to null — i.e. "inherit the board/workspace
- * environment_config repo".
+ * with no usable key collapses to null — i.e. "no repo".
+ *
+ * A legacy `resource_id` is read as `project_id`: repository Resources were
+ * migrated to Projects with the SAME id, so an older caller that still sends
+ * `resource_id` names the right project.
  */
 export function normalizeRepoRef(input: any): WorkspaceFolderRepoRef | null {
   if (input == null || typeof input !== 'object') return null;
   const out: WorkspaceFolderRepoRef = {};
-  if (input.resource_id != null && String(input.resource_id).trim()) out.resource_id = String(input.resource_id).trim();
+  const projectId = input.project_id ?? input.resource_id;
+  if (projectId != null && String(projectId).trim()) out.project_id = String(projectId).trim();
   if (input.url != null && String(input.url).trim()) out.url = String(input.url).trim();
   if (input.branch != null && String(input.branch).trim()) out.branch = String(input.branch).trim();
-  return out.resource_id || out.url || out.branch ? out : null;
+  return out.project_id || out.url || out.branch ? out : null;
 }
 
 /**
@@ -200,18 +206,18 @@ export function decideRunFreshness(input: RunFreshnessInput): RunFreshness {
 
 /**
  * A repo the agent-manager provisioner can clone for a run, after the server has
- * already expanded a `repo_ref` (resource_id / board-environment_config) into a
- * concrete url. `branch` omitted = the repo's default branch.
+ * already expanded a `repo_ref` (project_id / url) into a concrete url.
+ * `branch` omitted = the repo's default branch.
  *
  * `credential` (optional) carries the https auth the manager's run-provisioner
  * feeds through its shared `repo-credential` helper to clone/fetch a PRIVATE
  * repo — the exact `{ username?, token }` wire shape the worktree path's
- * `bootstrapRepo.credential` uses. The server decrypts the repo Resource's
+ * `bootstrapRepo.credential` uses. The server decrypts the Project's
  * Credential row here (`resolveRunRepo`) and ships it inline; the manager side
  * (`RunRepoSpec.credential`, shipped forward-compat in ticket 622bc350) already
  * consumes it, so this is the "서버측 wiring 잔여" that lights private-repo runs
  * up with a SERVER-ONLY change — no manager redeploy needed. Absent = anonymous
- * clone (a public repo / a Resource with no credential), byte-for-byte the old
+ * clone (a public repo / a Project with no credential), byte-for-byte the old
  * behavior. The token is transient (never persisted — see room-messaging
  * sendMessage) and is stripped from non-agent SSE recipients in events.controller
  * so it only ever reaches an agent (machine-key-authenticated) recipient — never
@@ -223,9 +229,9 @@ export interface RunRepoSpec {
   branch?: string;
   credential?: { username?: string; token: string } | null;
   /**
-   * Resolved clone policy for this repo (ticket bddb63ee) — the Repo Resource's
-   * `clone_policy` merged over the workspace default. Only a Resource-sourced
-   * repo can carry one (a direct url has no Resource row to read it from), and
+   * Resolved clone policy for this repo (ticket bddb63ee) — the Project's
+   * `clone_policy` merged over the workspace default. Only a Project-sourced
+   * repo can carry one (a direct url has no Project row to read it from), and
    * it is absent/null when neither layer configures anything, in which case
    * agent-manager falls back to its own system defaults (clone timeout 60분).
    */
@@ -317,10 +323,10 @@ export function renderWorkspaceFolderBlock(input: WorkspaceFolderPromptInput): s
   let repoLine: string;
   if (ref?.url) {
     repoLine = `Cloned from \`${ref.url}\`${branchSuffix}.`;
-  } else if (ref?.resource_id) {
-    repoLine = `Repo Resource \`${ref.resource_id}\`${branchSuffix} (git URL / credentials resolved from AWB).`;
+  } else if (ref?.project_id) {
+    repoLine = `Project \`${ref.project_id}\`${branchSuffix} (git URL / credentials resolved from AWB).`;
   } else {
-    repoLine = `The repo configured for this board / workspace (\`environment_config\`)${branchSuffix}.`;
+    repoLine = `None configured — nothing was cloned; the folder holds only what earlier runs left there.`;
   }
 
   const buildLabel =
@@ -353,12 +359,12 @@ export function renderWorkspaceFolderBlock(input: WorkspaceFolderPromptInput): s
 
 export const repoRefSchema = z
   .object({
-    resource_id: z.string().optional().describe('Checked-in repo Resource id (preferred)'),
-    url: z.string().optional().describe('Raw git URL (escape hatch when there is no Resource)'),
+    project_id: z.string().optional().describe('Project id (preferred — url, branch, credential come from the Project)'),
+    url: z.string().optional().describe('Raw git URL (escape hatch when there is no Project)'),
     branch: z.string().optional().describe('Branch/ref to check out; omit for the repo default'),
   })
   .describe(
-    'Repo to run against. Omit/null to reuse the board/workspace environment_config repo.',
+    'Repo to run against. Omit/null for no repo (the run folder is only created, nothing is cloned).',
   );
 
 export const checkoutModeSchema = z

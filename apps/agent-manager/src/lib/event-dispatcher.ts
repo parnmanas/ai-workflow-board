@@ -15,7 +15,7 @@ import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
   fetchTicketContext,
   fetchChatRoomHistory,
-  fetchOrdinaryWorkBoardCandidates,
+  fetchOrdinaryWorkCandidates,
   fetchAgentRecord,
   fetchRepositoryCredentialStatus,
   hasNewAgentComment,
@@ -27,13 +27,14 @@ import {
 } from './rest.js';
 import { ensureCliHomeDir, readApiKey, readMcpConfigServerNames, writeApiKey, writeMcpConfig } from './managed-agent-store.js';
 import { recordEvent } from './event-log-recorder.js';
-import type { AwbConfig } from './rest.js';
+import type { AwbConfig, OrdinaryWorkBoardCandidate, OrdinaryWorkCandidates } from './rest.js';
 import type { RunSessionBinding } from './base-session-manager.js';
 import type { ManagedAgentContextRegistry } from './managed-agent-context.js';
 import type { TicketRepositoryContext, WorktreeManager, WorktreeMode } from './worktree-manager.js';
 import { prepareChatAttachments } from './chat-attachment-prep.js';
 import { injectWorkFolder, repositoryContextInstructions, worktreeInstructionsFor } from './prompts.js';
 import { AGENT_CONTEXT_VERSION, AgentContextPreflightError } from './agent-context-contract.js';
+import { TERMINAL_TICKET_STATUS, isBoardlessTicket, isTicketStatusMove, parseTicketStatus } from './ticket-status.js';
 import type { ChatReplyMode } from './prompts.js';
 import { DispatchBlockerTracker, DispatchBlockTracker, InflightDispatchTracker, PendingDispatchRetry, RoleSpawnSuppressor, classifyWorktreeOutcome, decideCliAuthReadiness, decideCliTrustReadiness, isSafeTicketProvisioningFallback, managedWorktreePath, provisioningPendReason } from './dispatch-preflight.js';
 import {
@@ -83,25 +84,25 @@ import {
 } from './skills/skill-materializer.js';
 
 /**
- * 일반 작업 보드 후보는 non-native 일반 채팅의 ticket-first 라우팅에만 필요하다.
- * Action room은 capability-first 실행 경로이므로 후보 API의 장애가 실행을 막지 않게
- * 조회 자체를 생략한다.
+ * 일반 작업 티켓 후보(프로젝트·태그)는 non-native 일반 채팅의 ticket-first 라우팅에만
+ * 필요하다. Action room은 capability-first 실행 경로이므로 후보 API의 장애가 실행을
+ * 막지 않게 조회 자체를 생략한다(null).
  */
-export async function ordinaryWorkBoardsForChat(
+export async function ordinaryWorkCandidatesForChat(
   config: AwbConfig,
   usesNativeMcp: boolean,
   isActionRoom: boolean,
-) {
+): Promise<OrdinaryWorkCandidates | null> {
   return usesNativeMcp || isActionRoom
-    ? []
-    : fetchOrdinaryWorkBoardCandidates(config);
+    ? null
+    : fetchOrdinaryWorkCandidates(config);
 }
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
- * event (ticket e9c7a896). The server ships the resolved board/workspace
- * harness as a JSON object (or omits it — older servers / unconfigured
- * boards). Accepts an object or a JSON string, keeps only the known keys
+ * event (ticket e9c7a896). The server ships the resolved workspace (older
+ * servers: board ⊕ workspace) harness as a JSON object (or omits it — older
+ * servers / unconfigured workspaces). Accepts an object or a JSON string, keeps only the known keys
  * with the right runtime types, and degrades to null on anything else —
  * a malformed harness must never block the dispatch it rides on.
  */
@@ -343,7 +344,7 @@ export function resolveRoomBroadcastRuntimeProfile(
  *  survives) so a malformed level can never reach the CLI flag. */
 const EFFORT_LEVELS = new Set<EffortLevel>(['low', 'medium', 'high', 'max']);
 
-/** Retired effort levels that may still sit in stale board settings, mapped to
+/** Retired effort levels that may still sit in stale effort settings, mapped to
  *  their nearest live tier. The claude CLI dropped its old top tier `xhigh` in
  *  favour of `max` (ticket 3188fd1b); a stale `xhigh` preset is folded to `max`
  *  before validation so it survives as a valid level instead of being silently
@@ -388,7 +389,11 @@ export const PI_TICKET_DISPATCH_BLOCK_COMMENT =
  *
  * A preset with no usable `id` is dropped (the id is the stable slug every
  * downstream consumer keys on). Unknown effort levels are stripped rather than
- * rejecting the whole preset, so a board can still ship `model` / `ultracode`.
+ * rejecting the whole preset, so a preset can still ship `model` / `ultracode`.
+ *
+ * Board-less servers send `effort_preset: null`; effort then rides the trigger's
+ * RuntimeSpec (`runtime.runtime_config.extra.effort`), which the spawn sites read
+ * from `agentContext.runtime_config` (see BaseSessionManager / SubagentManager).
  */
 export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
   let obj: any = raw;
@@ -427,7 +432,7 @@ export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
  * Defensive parse of the `environment_config` field on a flattened agent_trigger
  * event (ticket 354d336b). The server ships the resolved environment setup —
  * repositories with concrete urls, env_vars, setup_commands — as a JSON object
- * (or omits it for older servers / unconfigured boards). Accepts an object or a
+ * (or omits it for older servers / unconfigured workspaces). Accepts an object or a
  * JSON string, keeps only the known keys with the right runtime types, and
  * degrades to null on anything else — a malformed environment_config must never
  * block the dispatch it rides on (mirror parseHarnessConfig). A repository
@@ -454,7 +459,10 @@ export function parseEnvironmentConfig(raw: unknown): ResolvedEnvironmentConfig 
       const target_dir = typeof r.target_dir === 'string' && r.target_dir.trim() ? r.target_dir.trim() : '';
       if (!target_dir) continue;
       repositories.push({
-        resource_id: typeof r.resource_id === 'string' ? r.resource_id.trim() : '',
+        // board-less servers may name the repository by project (same id space).
+        resource_id: typeof r.resource_id === 'string' && r.resource_id.trim()
+          ? r.resource_id.trim()
+          : typeof r.project_id === 'string' ? r.project_id.trim() : '',
         url,
         target_dir,
         branch: typeof r.branch === 'string' ? r.branch.trim() : '',
@@ -490,14 +498,27 @@ export function parseEnvironmentConfig(raw: unknown): ResolvedEnvironmentConfig 
   };
 }
 
+/** A `main_clone_dir` usable as the base repository: a non-empty ABSOLUTE path
+ *  (POSIX, drive-letter or UNC). Anything else → null, i.e. the managed
+ *  `<working_dir>/.awb/base/<slug>` clone as before. */
+export function parseMainCloneDir(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const dir = raw.trim();
+  if (!dir) return null;
+  const absolute = dir.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\');
+  return absolute ? dir : null;
+}
+
 /** Select the checkout used to bootstrap an empty managed-agent working_dir.
- * Ticket binding is authoritative; the board environment's first repository
- * is the fallback when the ticket deliberately inherits board settings. */
+ * Ticket binding (board-less: the ticket's project) is authoritative; the
+ * environment's first repository is the fallback when the ticket names none.
+ * `mainCloneDir` is the project's folder on this host (docs/tickets.md) — when
+ * set, it replaces the managed `.awb/base/<slug>` clone as the base repository. */
 export function resolveBootstrapRepository(
   baseRepo: unknown,
   baseBranch: unknown,
   environment: ResolvedEnvironmentConfig | null,
-): { resourceId: string; url: string; branch: string; defaultBranch: string | null } | null {
+): { resourceId: string; url: string; branch: string; defaultBranch: string | null; name?: string; mainCloneDir?: string } | null {
   const repo = baseRepo && typeof baseRepo === 'object' ? baseRepo as any : null;
   const ticketUrl = typeof repo?.url === 'string' ? repo.url.trim() : '';
   if (ticketUrl) {
@@ -506,15 +527,41 @@ export function resolveBootstrapRepository(
     const defaultBranch = typeof repo?.default_branch === 'string' && repo.default_branch.trim()
       ? repo.default_branch.trim()
       : null;
-    return { resourceId: typeof repo?.id === 'string' ? repo.id : '', url: ticketUrl, branch, defaultBranch };
+    const mainCloneDir = parseMainCloneDir(repo?.main_clone_dir);
+    if (!mainCloneDir && typeof repo?.main_clone_dir === 'string' && repo.main_clone_dir.trim()) {
+      log(`resolveBootstrapRepository: ignoring non-absolute main_clone_dir '${repo.main_clone_dir.trim().slice(0, 120)}'`);
+    }
+    return {
+      resourceId: typeof repo?.id === 'string' ? repo.id : '',
+      url: ticketUrl,
+      branch,
+      defaultBranch,
+      ...(typeof repo?.name === 'string' && repo.name ? { name: repo.name } : {}),
+      ...(mainCloneDir ? { mainCloneDir } : {}),
+    };
   }
-  const boardRepo = environment?.repositories[0];
-  return boardRepo ? { resourceId: boardRepo.resource_id || '', url: boardRepo.url, branch: boardRepo.branch, defaultBranch: null } : null;
+  const envRepo = environment?.repositories[0];
+  return envRepo ? { resourceId: envRepo.resource_id || '', url: envRepo.url, branch: envRepo.branch, defaultBranch: null } : null;
+}
+
+/** The ticket's `base_repo` as the prompt/contract should see it after the
+ *  dispatcher resolved the checkout — keeps the wire's name/main_clone_dir. */
+function dispatchedBaseRepo(selectedRepo: NonNullable<ReturnType<typeof resolveBootstrapRepository>>): {
+  id: string; name: string; url: string; default_branch: string; main_clone_dir?: string;
+} {
+  return {
+    id: selectedRepo.resourceId,
+    name: selectedRepo.name || '',
+    url: selectedRepo.url,
+    default_branch: selectedRepo.defaultBranch || selectedRepo.branch,
+    ...(selectedRepo.mainCloneDir ? { main_clone_dir: selectedRepo.mainCloneDir } : {}),
+  };
 }
 
 /**
- * Parse the board worktree placement mode off the flattened agent_trigger
- * event (worktree 규약 ②). Returns the concrete enum only for a recognized
+ * Parse the worktree placement mode off the flattened agent_trigger event
+ * (worktree 규약 ②). Board-less servers always send `per_ticket`; `shared` is
+ * kept for older (board) servers. Returns the concrete enum only for a recognized
  * value; anything else (absent / typo / pre-② server) → undefined, which makes
  * WorktreeManager.resolveCwd fall back to its per_ticket default. Never throws.
  */
@@ -523,13 +570,13 @@ export function parseWorktreeMode(raw: unknown): WorktreeMode | undefined {
 }
 
 export function buildDispatchEnvVars(
-  boardEnv: Record<string, string> | null | undefined,
+  environmentEnv: Record<string, string> | null | undefined,
   cwd: string | undefined,
   worktreeMode: WorktreeMode | undefined,
   ticketId: unknown,
 ): Record<string, string> {
   return {
-    ...(boardEnv ?? {}),
+    ...(environmentEnv ?? {}),
     ...(cwd ? { AWB_WORK_FOLDER: cwd } : {}),
     AWB_WORKTREE_MODE: worktreeMode ?? 'per_ticket',
     AWB_TICKET_ID: String(ticketId || ''),
@@ -668,8 +715,8 @@ export interface SubagentSpawnArgs {
   isActionRoom?: boolean;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
-  /** Resolved board/workspace harness from the trigger event (e9c7a896).
-   *  Null/absent → spawn exactly as before. */
+  /** Resolved workspace harness from the trigger event (e9c7a896; older
+   *  servers: board ⊕ workspace). Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
   runtimeProfile?: RuntimeProfileSpec | null;
   /** Ticket-level abstract effort preset, resolved server-side and shipped on
@@ -679,7 +726,7 @@ export interface SubagentSpawnArgs {
   effortPreset?: ResolvedEffortPreset | null;
   /** Per-spawn lifetime override for unusually long initialization work. */
   ttlMinutes?: number;
-  /** Non-secret env vars from the board environment_config (ticket 354d336b),
+  /** Non-secret env vars from the workspace environment_config (ticket 354d336b),
    *  injected into the spawned CLI's environment. Applied on every spawn (not
    *  persisted on disk like the cloned repos). Absent → none. */
   envVars?: Record<string, string>;
@@ -813,6 +860,8 @@ export interface ChatSessionManager {
 export interface ColumnPrompt {
   name?: string;
   content?: string;
+  /** Board-less servers: `builtin:ticket-work-order` (the single-agent work order). */
+  template_id?: string;
 }
 
 export interface TicketTriggerArgs {
@@ -828,14 +877,14 @@ export interface TicketTriggerArgs {
   triggerSource?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
-  /** Per-board cap for distinct active tickets per agent. Server's
+  /** Per-workspace cap (older servers: per-board) for distinct active tickets per agent. Server's
    *  TriggerLoopService already enforces this; the manager keeps a
    *  defensive drop in case two triggers raced past the server gate
    *  before the first set_current_task arrived. Defaults to 1 when the
    *  server didn't include it (older server). */
   maxConcurrentTicketsPerAgent?: number;
-  /** Resolved board/workspace harness from the trigger event (e9c7a896).
-   *  Applied at SESSION CREATION only — a live session's CLI flags are
+  /** Resolved workspace harness from the trigger event (e9c7a896; older
+   *  servers: board ⊕ workspace). Applied at SESSION CREATION only — a live session's CLI flags are
    *  fixed at spawn; follow-up turns into an existing pid keep the
    *  harness the session was born with. Null/absent → spawn as before. */
   harness?: HarnessSpec | null;
@@ -844,7 +893,7 @@ export interface TicketTriggerArgs {
    *  applied at SESSION CREATION only — a live session's `--effort` flag is
    *  fixed at spawn. Null/absent → no effort override. */
   effortPreset?: ResolvedEffortPreset | null;
-  /** Non-secret env vars from the board environment_config (ticket 354d336b),
+  /** Non-secret env vars from the workspace environment_config (ticket 354d336b),
    *  injected into the spawned CLI's environment at SESSION CREATION. A live
    *  session keeps the env it was born with. Absent → none. */
   envVars?: Record<string, string>;
@@ -1052,7 +1101,7 @@ export interface PromptComposer {
     roomName?: string,
     isActionRoom?: boolean,
     workFolder?: string,
-    ordinaryWorkBoards?: Array<{ id: string; name: string; description?: string }>,
+    ordinaryWork?: OrdinaryWorkCandidates | OrdinaryWorkBoardCandidate[] | null,
   ): string;
   composeCommentMentionPrompt(
     ticket: any,
@@ -1409,7 +1458,7 @@ export class EventDispatcher {
     role: string | undefined,
     mode: WorktreeMode | undefined,
     poolSize: number | undefined,
-    bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null; clonePolicy?: CloneWirePolicy | null } | null,
+    bootstrapRepo: { resourceId?: string; url: string; branch?: string; credential?: { username?: string; token: string } | null; clonePolicy?: CloneWirePolicy | null; mainCloneDir?: string | null } | null,
   ): Promise<{ ok: boolean; reason?: string; blockerKind?: string; detail?: string; path?: string; coldSharedWorktree?: boolean; repositoryContext?: TicketRepositoryContext; recoveryInstructions?: string }> {
     const requiredError = validateWorktreeProvisioningInputs({
       mode,
@@ -1423,10 +1472,11 @@ export class EventDispatcher {
     if (!agentContext || !this.#worktreeManager || !ticketId || !role) return { ok: true };
     try {
       // worktree 규약 ②: the manager fixes the root at `<working_dir>/.awb/wt`
-      // internally, so no worktreesRoot is passed. mode (per_ticket|shared) is
-      // the board setting the server flattened onto the trigger event. poolSize
-      // (규약 ⑥, shared mode only) = the board concurrency the server also
-      // flattened on — sizes the warm-pool at N = max_concurrent_tickets_per_agent.
+      // (or `<main_clone_dir>/.awb/wt` for a project with a main clone folder on
+      // this host) internally, so no worktreesRoot is passed. mode is what the
+      // server flattened onto the trigger (board-less: always per_ticket; older
+      // board servers may send shared). poolSize (규약 ⑥, shared mode only) = the
+      // concurrency the server also flattened on — N = max_concurrent_tickets_per_agent.
       const res = await this.#worktreeManager.resolveCwd({
         baseWorkingDir: agentContext.cwd,
         ticketId,
@@ -1471,6 +1521,9 @@ export class EventDispatcher {
         );
         if (isSafeTicketProvisioningFallback(gate.reason)) {
           const detail = res.detail ? `\n- 재현 정보: ${res.detail}` : '';
+          const managedFolders = bootstrapRepo?.mainCloneDir
+            ? `main clone 폴더(${bootstrapRepo.mainCloneDir}) 아래 .awb/wt 와 그 저장소의 원격 상태만 진단하고(main clone 자체의 checkout/reset/clean 금지)`
+            : '현재 working_dir 아래 기존 .awb/base 및 .awb/wt만 진단하고';
           return {
             ok: true,
             reason: gate.reason,
@@ -1479,9 +1532,9 @@ export class EventDispatcher {
             recoveryInstructions:
               `AWB 저장소 준비 fallback(본 작업 전에 해결):\n` +
               `- 실패 단계/원인: ${gate.reason}${detail}\n` +
-              `- 원래 의도: 연결된 Repository Resource를 최신 원격 base에서 티켓 전용 worktree/feature branch로 준비\n` +
+              `- 원래 의도: 연결된 저장소(project)를 최신 원격 base에서 티켓 전용 worktree/feature branch로 준비\n` +
               `- 기대 결과: 준비를 복구한 뒤 같은 티켓 본 작업을 계속 수행\n` +
-              `- 허용 범위: 현재 working_dir 아래 기존 .awb/base 및 .awb/wt만 진단하고, 비파괴 fetch/worktree/branch 준비만 재시도\n` +
+              `- 허용 범위: ${managedFolders}, 비파괴 fetch/worktree/branch 준비만 재시도\n` +
               `- 금지: credential 원문 요청·출력, 기존 dirty 변경 초기화, 강제 삭제, 다른 작업 폴더 생성\n` +
               `- 권한/비밀/파괴 조치가 필요하면 즉시 중단하고 최소 승인만 요청\n` +
               `- 복구 뒤 재발 방지 가치가 있는 구조적 결함을 발견한 경우에만 기존 개선 티켓을 먼저 검색하고, 동일 항목이 없을 때 최대 1건만 등록하세요. 일회성 오류나 중복 항목은 등록하지 마세요.`,
@@ -1557,7 +1610,6 @@ export class EventDispatcher {
    */
   async #cleanupTerminalTicketWorktrees(ticketId: string): Promise<void> {
     if (!this.#worktreeManager) return;
-    if (!this.#managedAgentContexts) return;
     // 아래 두 문장 사이에 await 가 없어야 한다 — 그래야 읽기와 등록이 원자적이고
     // 두 이벤트가 같은 선행 실행을 보고 각각 체인을 만드는 일이 없다.
     const previous = this.#terminalCleanupInFlight.get(ticketId);
@@ -1576,18 +1628,41 @@ export class EventDispatcher {
     }
   }
 
+  /** Main clone folders (docs/tickets.md) that may hold this ticket's worktree:
+   *  every folder this manager provisioned from (persisted registry) plus the
+   *  one the REST ticket names, if any. Deduped; never throws. */
+  async #mainCloneDirsFor(ticket: any): Promise<string[]> {
+    const dirs = new Map<string, string>();
+    const add = (dir: string | null | undefined) => {
+      if (dir) dirs.set(dir.replace(/[/\\]+$/, ''), dir);
+    };
+    try {
+      for (const dir of (await this.#worktreeManager?.knownMainClones?.()) ?? []) add(dir);
+    } catch (err: any) {
+      log(`[worktree] main clone registry read failed: ${err?.message ?? err}`);
+    }
+    add(parseMainCloneDir(ticket?.base_repo?.main_clone_dir));
+    return [...dirs.values()];
+  }
+
   async #runTerminalTicketCleanup(ticketId: string): Promise<void> {
-    if (!this.#worktreeManager || !this.#managedAgentContexts) return;
+    if (!this.#worktreeManager) return;
     try {
       const ticket = await fetchTicketContext(this.#config, ticketId);
       // terminal_entered_at is null whenever the ticket is NOT currently in a
-      // terminal column — that's our gate. A failed fetch (null ticket) is
-      // treated as "unknown → skip" so a transient REST error can't nuke a
-      // live ticket's worktree.
-      if (!ticket || !ticket.terminal_entered_at) return;
-      const runKey = `${ticketId}:${ticket.terminal_entered_at}`;
+      // terminal column / `done` status — that's our gate. A failed fetch (null
+      // ticket) is treated as "unknown → skip" so a transient REST error can't
+      // nuke a live ticket's worktree. A board-less ticket (no board_id) whose
+      // REST status is `done` also counts — its status is authoritative (the
+      // legacy root status of a board ticket is not).
+      const terminalAt = ticket?.terminal_entered_at
+        || (isBoardlessTicket(ticket) && parseTicketStatus(ticket.status) === TERMINAL_TICKET_STATUS
+          ? `status:${TERMINAL_TICKET_STATUS}:${ticket.updated_at || ''}`
+          : '');
+      if (!ticket || !terminalAt) return;
+      const runKey = `${ticketId}:${terminalAt}`;
       if (this.#terminalCleanupDone.has(runKey)) {
-        log(`[worktree] terminal cleanup already done ticket=${ticketId.slice(0, 8)} entered=${ticket.terminal_entered_at} — 재실행 생략`);
+        log(`[worktree] terminal cleanup already done ticket=${ticketId.slice(0, 8)} entered=${terminalAt} — 재실행 생략`);
         return;
       }
       let total = 0;
@@ -1595,19 +1670,28 @@ export class EventDispatcher {
       const benignHolds: string[] = [];
       const benignHeldBranches: string[] = [];
       const remainingBranches: string[] = [];
+      const baseBranch = ticket.base_branch || ticket.base_repo?.default_branch || 'main';
+      const repositoryResourceId = ticket.base_repo?.id || ticket.project_id || undefined;
+      // Each target is either an agent working_dir (`.awb/base/*` clones) or a
+      // project main clone folder (`<main>/.awb/wt`).
+      const targets: Array<{ baseWorkingDir?: string; mainCloneDir?: string }> = [];
       const seenDirs = new Set<string>();
-      for (const ctx of this.#managedAgentContexts.list()) {
+      for (const ctx of this.#managedAgentContexts?.list() ?? []) {
         if (!ctx.working_dir) continue;
         // worktree 규약 ②: the worktree root is derived from working_dir
         // (`<working_dir>/.awb/wt`) inside the manager, so agents sharing one
         // working_dir dedupe on that alone.
         if (seenDirs.has(ctx.working_dir)) continue;
         seenDirs.add(ctx.working_dir);
+        targets.push({ baseWorkingDir: ctx.working_dir });
+      }
+      for (const mainCloneDir of await this.#mainCloneDirsFor(ticket)) targets.push({ mainCloneDir });
+      for (const target of targets) {
         const cleanup = await this.#worktreeManager.cleanupTerminalTicketGit({
-          baseWorkingDir: ctx.working_dir,
+          ...target,
           ticketId,
-          baseBranch: ticket.base_branch || ticket.base_repo?.default_branch || 'main',
-          repositoryResourceId: ticket.base_repo?.id,
+          baseBranch,
+          repositoryResourceId,
         });
         total += cleanup.removedWorktrees;
         // home 마다 코멘트를 쓰지 않고 한 번에 모은다 — 매니저가 여러 agent home 을
@@ -1620,7 +1704,7 @@ export class EventDispatcher {
         benignHeldBranches.push(...(cleanup.benignHeldBranches ?? []));
         remainingBranches.push(...(cleanup.remainingBranches ?? []));
       }
-      await this.#reportTerminalCleanup(ticketId, ticket.terminal_entered_at, {
+      await this.#reportTerminalCleanup(ticketId, terminalAt, {
         heldReasons: [...new Set(heldReasons)],
         benignHolds: [...new Set(benignHolds)],
         benignHeldBranches: [...new Set(benignHeldBranches)],
@@ -1716,14 +1800,27 @@ export class EventDispatcher {
    * dirs are already gone (e.g. the worktree was reclaimed at Done). Best-effort,
    * fire-and-forget; never throws.
    */
-  async #cleanupArchivedTicketWorkspace(ticketId: string, repositoryResourceId?: string): Promise<void> {
+  async #cleanupArchivedTicketWorkspace(
+    ticketId: string,
+    repositoryResourceId?: string,
+    mainCloneHint?: string | null,
+  ): Promise<void> {
     if (!this.#worktreeManager) return;
-    if (!this.#managedAgentContexts) return;
     try {
       let worktrees = 0;
       let runDirs = 0;
+      // Project main clone folders first (board-less): `<main>/.awb/wt/<ticket8>`.
+      // No REST gate here (see above), so the candidates are the persisted set of
+      // main clones this manager provisioned from plus the event's own hint.
+      for (const mainCloneDir of await this.#mainCloneDirsFor({ base_repo: { main_clone_dir: mainCloneHint } })) {
+        worktrees += await this.#worktreeManager.removeTicketWorktrees({
+          mainCloneDir,
+          ticketId,
+          repositoryResourceId,
+        });
+      }
       const seenDirs = new Set<string>();
-      for (const ctx of this.#managedAgentContexts.list()) {
+      for (const ctx of this.#managedAgentContexts?.list() ?? []) {
         if (!ctx.working_dir) continue;
         // The worktree + run-workspace roots both derive from working_dir
         // (`<working_dir>/.awb/{wt,qa}`), so agents sharing one working_dir
@@ -2559,7 +2656,29 @@ export class EventDispatcher {
     } catch {
       return;
     }
-    const emittedColumnId = String(parsed?.current_column_id || '');
+    // board-less trigger: the status it was emitted for is the freshness key
+    // (the REST ticket's status is authoritative there; its column is derived).
+    const emittedStatus = parseTicketStatus(parsed?.status);
+    if (emittedStatus) {
+      let currentStatus: string | null = null;
+      try {
+        const ticket = await fetchTicketContext(this.#config, ticketId);
+        currentStatus = parseTicketStatus(ticket?.status);
+      } catch (err: any) {
+        log(
+          `[dispatch] status replay freshness lookup failed — replaying anyway: ` +
+            `ticket=${ticketId.slice(0, 8)} role=${role || '_'} err=${err?.message ?? err}`,
+        );
+      }
+      if (currentStatus && currentStatus !== emittedStatus) {
+        log(
+          `[dispatch] suppressed trigger replay skipped — ticket status changed: ` +
+            `ticket=${ticketId.slice(0, 8)} role=${role || '_'} emitted_status=${emittedStatus} current_status=${currentStatus}`,
+        );
+        return;
+      }
+    }
+    const emittedColumnId = emittedStatus ? '' : String(parsed?.current_column_id || '');
     if (emittedColumnId) {
       // "Fails toward replaying" must be enforced HERE, not inherited (review
       // round 1). `fetchTicketContext` is total today — it catches every
@@ -3000,10 +3119,11 @@ export class EventDispatcher {
     // ticket 9f26f091: route this ticket into its own git worktree so a branch
     // switch here can't contaminate another ticket sharing the agent's
     // working_dir. worktree 규약 ②: the worktree lands under
-    // `<working_dir>/.awb/wt/`, per_ticket|shared picked from the board mode the
-    // server flattened onto the event. Both the persistent ticket-session and
-    // one-shot subagent fallback below read agentContext.cwd, so one rewrite
-    // covers both paths.
+    // `<working_dir>/.awb/wt/` — or `<main_clone_dir>/.awb/wt/` when the project
+    // has a main clone folder on this host (docs/tickets.md) — per_ticket|shared
+    // picked from the mode the server flattened onto the event. Both the
+    // persistent ticket-session and one-shot subagent fallback below read
+    // agentContext.cwd, so one rewrite covers both paths.
     const selectedRepo = resolveBootstrapRepository(ev.base_repo, ev.base_branch, envConfig);
     // 선택 결과뿐 아니라 trigger 자체의 저장소 계약도 요구 근거로 보존한다.
     // malformed/부분 payload가 resolve 단계에서 null이 되더라도 "저장소 없음"
@@ -3032,6 +3152,7 @@ export class EventDispatcher {
         // ticket bddb63ee — 서버가 해석한 clone 정책을 flattened event 에서 그대로
         // 넘긴다. 필드가 없는(구버전) 서버면 undefined → 매니저 시스템 기본값.
         clonePolicy: parseClonePolicy(ev.clone_policy),
+        mainCloneDir: selectedRepo.mainCloneDir ?? null,
       } : null,
     );
     let worktreeProvision = await applyWorktree();
@@ -3127,7 +3248,9 @@ export class EventDispatcher {
         const content =
           `⚠️ **티켓 worktree 준비 실패** — 유효한 Git 체크아웃을 확보하지 못해 에이전트를 실행하지 않고 디스패치를 중단했습니다.\n\n` +
           `원인: \`${worktreeProvision.reason || 'unknown error'}\`${detailLine}${pathLine}\n\n` +
-          `repository resource, credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n` +
+          (selectedRepo?.mainCloneDir
+            ? `project 저장소·credential과 이 호스트의 main clone 폴더(\`${selectedRepo.mainCloneDir}\` — 해당 project 의 git clone 이거나 빈 폴더여야 한다)를 확인한 뒤 다시 트리거하세요.\n\n`
+            : `repository(project), credential과 working_dir 아래 AWB 관리 폴더(\`.awb/base\`, \`.awb/wt\`)를 확인한 뒤 다시 트리거하세요.\n\n`) +
           `_동일 오류로 인한 supervisor 자동 재트리거는 백오프로 억제됩니다 — 환경을 고친 뒤 코멘트/수동 트리거로 재개하세요._`;
         await fireAndForgetTool(this.#config, 'add_comment', {
           ticket_id: ev.ticket_id,
@@ -3178,14 +3301,14 @@ export class EventDispatcher {
       return;
     }
 
-    // Board/workspace harness resolved server-side and flattened onto the
-    // event (e9c7a896). Parsed here (ahead of its original single use-site
+    // Workspace harness (older servers: board ⊕ workspace) resolved server-side
+    // and flattened onto the event (e9c7a896). Parsed here (ahead of its original single use-site
     // below) so the ticket 48aeab6e CLI-readiness gate immediately below can
     // also read harness.permission_mode.
     const harness = parseHarnessConfig(ev.harness_config);
 
     // ticket 5851e435: 이 디스패치의 effective permission policy. Agent trust
-    // (`runtime_config.permission_mode`)가 board/workspace harness
+    // (`runtime_config.permission_mode`)가 workspace harness
     // `permission_mode` 를 이긴다. spawn 사이트(SubagentManager /
     // BaseSessionManager)는 같은 함수로 같은 값을 다시 계산하므로, 게이트 ·
     // 컨텍스트 계약 · 실제 argv 가 한 규칙을 공유한다.
@@ -3385,7 +3508,13 @@ export class EventDispatcher {
       ev.action === 'assignee'
       && ev.ticket_id && selectedRepo?.url && this.#worktreeManager && agentContext?.cwd
     ) {
-      const readiness = await this.#worktreeManager.verifyPushReadiness(agentContext.cwd, selectedRepo.url);
+      // A main clone is the operator's checkout and may push over its own remote
+      // (e.g. ssh) — probe what the worktree will actually push to (its origin),
+      // not the project's https URL, or an ssh-only host is falsely blocked.
+      const readiness = await this.#worktreeManager.verifyPushReadiness(
+        agentContext.cwd,
+        selectedRepo.mainCloneDir ? undefined : selectedRepo.url,
+      );
       if (!readiness.ok) {
         const blockerKind = readiness.reason || 'push_credential_unavailable';
         // ticket d34075b5: durable server-visible signal — count the push-credential
@@ -3483,29 +3612,34 @@ export class EventDispatcher {
     // server resolves the matched preset and flattens it onto the event as
     // `effort_preset`; both spawn paths below pick the per-CLI slice at their
     // spawn site (claude → --effort + ultracode keyword; codex/antigravity →
-    // model-only).
+    // model-only). Board-less servers send null — effort then rides the
+    // RuntimeSpec (`runtime.runtime_config.extra.effort` → agentContext), which
+    // the same spawn sites already apply ahead of any preset slice.
     const effortPreset = parseEffortPreset(ev.effort_preset);
+    const runtimeEffort = typeof agentContext?.runtime_config?.extra?.effort === 'string'
+      ? agentContext.runtime_config.extra.effort as string
+      : null;
     if (effortPreset) {
       log(
         `Trigger carries effort_preset: id=${effortPreset.id}${effortPreset.label ? ` (${effortPreset.label})` : ''} ticket=${ev.ticket_id}`,
       );
     }
 
-    // Board environment variables are process-only. Repository checkout is
+    // Environment variables are process-only. Repository checkout is
     // exclusively owned by WT/QA provisioning and never happens here.
     //
     // Also expose the manager-resolved folder contract to child processes.
     // Prompts alone are not a reliable machine-readable boundary: project build
     // scripts can otherwise create a second `_compilecheck_*` worktree and throw
     // away the shared slot's warm Unity Library. Reserved AWB_* keys are layered
-    // last so a board env cannot spoof the actual provisioned cwd/mode.
+    // last so an environment config cannot spoof the actual provisioned cwd/mode.
     const envVars = buildDispatchEnvVars(
       envConfig?.env_vars,
       agentContext?.cwd,
       worktreeMode,
       ev.ticket_id,
     );
-    // 티켓 41e69c91: per_ticket(보드 기본값)에는 지금까지 폴더 경계 정책이
+    // 티켓 41e69c91: per_ticket(기본값)에는 지금까지 폴더 경계 정책이
     // 전혀 전달되지 않았다 — prompts.ts 호출은 'shared'에만 있었다. 두 모드
     // 모두 worktreeInstructionsFor를 거치게 해서, leaf 문구 함수뿐 아니라
     // 모드 선택 로직 자체도 테스트로 검증되게 한다.
@@ -3532,6 +3666,12 @@ export class EventDispatcher {
       ticket.current_column_id = ev.current_column_id || ticket.current_column_id || '';
       ticket.current_column_name = ev.current_column_name || ticket.current_column_name || '';
       ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
+      // board-less 서버(docs/tickets.md): trigger 의 status 가 정본이다. REST 티켓의
+      // `status` 는 구버전 서버에서 legacy 값이라 직접 믿지 않고, trigger 값만 표식으로
+      // 남긴다(ticket-status.ts → ticketWorkflowStatus). project 요약도 같은 출처.
+      const triggerStatus = parseTicketStatus(ev.status);
+      if (triggerStatus) ticket.__awb_status = triggerStatus;
+      if (ev.project && typeof ev.project === 'object') ticket.__awb_project = ev.project;
       ticket.__awb_role = ev.action || '';
       ticket.__awb_enforce_context_contract = true;
       ticket.__awb_repository_context = worktreeProvision.repositoryContext;
@@ -3549,7 +3689,7 @@ export class EventDispatcher {
       ticket.__awb_harness = harness;
       ticket.__awb_runtime_profile = runtimeProfile;
       ticket.__awb_session_mode = sessionMode;
-      ticket.__awb_effort = effortPreset?.id ?? null;
+      ticket.__awb_effort = effortPreset?.id ?? runtimeEffort ?? null;
       ticket.__awb_context_metadata = {
         remoteUrl: selectedRepo?.url ?? null,
         defaultBranch: selectedRepo?.defaultBranch ?? worktreeProvision.repositoryContext?.defaultBranch ?? null,
@@ -3603,12 +3743,7 @@ export class EventDispatcher {
           ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
         }
         if (ticket && selectedRepo) {
-          ticket.base_repo = {
-            id: selectedRepo.resourceId,
-            name: '',
-            url: selectedRepo.url,
-            default_branch: selectedRepo.branch,
-          };
+          ticket.base_repo = dispatchedBaseRepo(selectedRepo);
           ticket.base_branch = selectedRepo.branch;
         }
         const rolePrompt = ev.role_prompt || '';
@@ -3700,7 +3835,7 @@ export class EventDispatcher {
           ticket.current_column_kind = ev.current_column_kind || ticket.current_column_kind || '';
         }
         if (ticket && selectedRepo) {
-          ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
+          ticket.base_repo = dispatchedBaseRepo(selectedRepo);
           ticket.base_branch = selectedRepo.branch;
         }
         const rolePrompt = ev.role_prompt || '';
@@ -3792,7 +3927,7 @@ export class EventDispatcher {
       try {
         const ticket = attachContextContract(await fetchTicketContext(this.#config, ev.ticket_id), 'stateless');
         if (ticket && selectedRepo) {
-          ticket.base_repo = { id: selectedRepo.resourceId, name: '', url: selectedRepo.url, default_branch: selectedRepo.branch };
+          ticket.base_repo = dispatchedBaseRepo(selectedRepo);
           ticket.base_branch = selectedRepo.branch;
         }
         const rolePrompt = ev.role_prompt || '';
@@ -4726,8 +4861,13 @@ export class EventDispatcher {
       // tsbuildinfo / database dir), so a done/merged ticket's tree would never
       // be reclaimed and worktrees would accumulate unbounded. Fire-and-forget
       // so the live-session forward below stays synchronous.
-      if (ev.entity_type === 'ticket' && ev.action === 'moved' && ev.ticket_id) {
-        // ticket d34075b5: a move (to ANY column) invalidates a queued
+      // board-less servers (docs/tickets.md) keep `board_update` as the ticket-change
+      // event and add `status`; a status change may arrive as `moved`,
+      // `status_changed` or an `updated` of `status` (isTicketStatusMove). Entering
+      // `done` carries current_column_kind 'terminal' — either way the cleanup
+      // below re-reads the ticket and gates on terminal_entered_at / done.
+      if (isTicketStatusMove(ev) && ev.ticket_id) {
+        // ticket d34075b5: a move (to ANY column/status) invalidates a queued
         // pool_exhausted retry for THIS ticket — the trigger targeted the pre-move
         // column. Cancel it synchronously here (covers "이동" incl. lateral moves,
         // for which there's no terminal_entered_at). Slots freed by a terminal move
@@ -4755,7 +4895,11 @@ export class EventDispatcher {
         this.#poolRetry.cancelByTicket(ev.ticket_id, 'ticket archived');
         this.#sessionDefer.cancelByTicket(ev.ticket_id, 'ticket archived');
         this.#forgetTriggerRawForTicket(ev.ticket_id); // ticket 467f714a blocker #1
-        void this.#cleanupArchivedTicketWorkspace(ev.ticket_id, ev.repository_resource_id);
+        void this.#cleanupArchivedTicketWorkspace(
+          ev.ticket_id,
+          ev.repository_resource_id || ev.project_id || undefined,
+          parseMainCloneDir(ev.main_clone_dir ?? ev.base_repo?.main_clone_dir),
+        );
       }
 
       if (this.#ticketSessionManager && ev.ticket_id) {
@@ -5186,7 +5330,7 @@ export class EventDispatcher {
           { fetchImages: false },
         );
         const rolePrompt = p.role_prompt || '';
-        const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
+        const ordinaryWork = await ordinaryWorkCandidatesForChat(
           this.#config,
           false,
           !!p.is_action_room,
@@ -5206,7 +5350,7 @@ export class EventDispatcher {
             typeof p.room_name === 'string' ? p.room_name : '',
             !!p.is_action_room,
             provisionedWorkFolder,
-            ordinaryWorkBoards,
+            ordinaryWork,
           ) ?? `[chat_room] ${p.content || ''}`;
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
@@ -5344,7 +5488,7 @@ export class EventDispatcher {
         // the persistent path above). Match the reply-channel instruction to
         // whether this CLI can call the AWB MCP tool itself.
         const usesNativeMcp = createRuntimeCliAdapter(agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
-        const ordinaryWorkBoards = await ordinaryWorkBoardsForChat(
+        const ordinaryWork = await ordinaryWorkCandidatesForChat(
           this.#config,
           usesNativeMcp,
           !!p.is_action_room,
@@ -5367,7 +5511,7 @@ export class EventDispatcher {
             '',
             !!p.is_action_room,
             provisionedWorkFolder,
-            ordinaryWorkBoards,
+            ordinaryWork,
           ) ?? `[chat_room] ${p.content || ''}`;
 
         const result = await this.#subagentManager.spawn({

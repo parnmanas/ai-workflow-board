@@ -263,7 +263,6 @@ export class CliLoginSessionService {
       const credential = await this.credRepo.save(
         this.credRepo.create({
           workspace_id: session.is_global ? null : session.workspace_id,
-          board_id: null,
           name: session.credential_name,
           description: session.cli_provider
             ? `Automatically created via CLI device-auth login (${session.cli} / ${session.cli_provider}).`

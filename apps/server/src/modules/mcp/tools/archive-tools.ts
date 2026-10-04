@@ -11,14 +11,11 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Board } from '../../../entities/Board';
-import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { ok, err, safeJsonParse } from '../shared/helpers';
 import { loadTicketFull } from '../shared/ticket-parsing';
 import { getCallerAgent } from '../shared/session-auth';
-import { isTerminalColumn, buildArchiveCursor, parseArchiveCursor } from '../shared/archive-helpers';
-import { emitFocusReleased } from '../../agents/focus-eligibility';
+import { buildArchiveCursor, parseArchiveCursor } from '../shared/archive-helpers';
 import type { ToolContext } from './context';
 
 export function registerArchiveTools(server: McpServer, ctx: ToolContext): void {
@@ -26,28 +23,24 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
 
   server.tool(
     'list_archived_tickets',
-    'List archived (soft-deleted) tickets for a board. Pagination via cursor + limit; optional q filters by title / id / label (case-insensitive). ' +
-      'Returns rows with archived_at set + their original column id/name so the UI can show "Originally in Done". Lookup-only — use unarchive_ticket to restore.',
+    'List archived (soft-deleted) tickets of a workspace. Pagination via cursor + limit; optional q filters by title / id / tag (case-insensitive). ' +
+      'Rows keep their status so the UI can show "archived from Done". Lookup-only — use unarchive_ticket to restore.',
     {
-      board_id: z.string().describe('Board ID to list archived tickets for'),
+      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
       cursor: z.string().optional().describe('Pagination cursor returned by a previous call as next_cursor (opaque compound `<isoTimestamp>|<id>`). Bare ISO timestamps from older callers still work.'),
       limit: z.number().int().min(1).max(200).optional().default(50).describe('Max rows per page (1..200, default 50)'),
-      q: z.string().optional().describe('Optional case-insensitive substring filter on title / exact id match / label name'),
+      q: z.string().optional().describe('Optional case-insensitive substring filter on title / exact id match / tag name'),
     },
-    async ({ board_id, cursor, limit, q }) => {
-      const colRepo = dataSource.getRepository(BoardColumn);
+    async ({ workspace_id, cursor, limit, q }, extra: { sessionId?: string }) => {
+      const ws = workspace_id || getCallerAgent(extra)?.workspaceId || '';
+      if (!ws) return err('workspace_id is required');
       const ticketRepo = dataSource.getRepository(Ticket);
-      const cols = await colRepo.find({ where: { board_id } });
-      if (cols.length === 0) return ok({ tickets: [], next_cursor: null });
-
-      const colIds = cols.map(c => c.id);
       // Compound (archived_at DESC, id DESC) sort — the archiver stamps a
       // whole batch with the same archived_at, so an archived_at-only cursor
-      // would drop the rest of that batch on the next page. Matches the
-      // REST surface (`GET /api/boards/:id/archived-tickets`) so cursors
-      // are interchangeable between the two.
+      // would drop the rest of that batch on the next page.
       let qb = ticketRepo.createQueryBuilder('t')
-        .where('t.column_id IN (:...colIds)', { colIds })
+        .where('t.workspace_id = :ws', { ws })
+        .andWhere('t.parent_id IS NULL')
         .andWhere('t.archived_at IS NOT NULL')
         .orderBy('t.archived_at', 'DESC')
         .addOrderBy('t.id', 'DESC')
@@ -67,14 +60,14 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
         }
       }
       if (q) {
-        // Match title (substring), id (exact), or label (substring of the
-        // JSON-encoded labels column — `["foo","bar"]`).
+        // Match title (substring), id (exact), or tag (substring of the
+        // JSON-encoded tags column — `["foo","bar"]`).
         qb = qb.andWhere(
-          '(LOWER(t.title) LIKE :q OR t.id = :exactId OR LOWER(t.labels) LIKE :labelQ)',
+          '(LOWER(t.title) LIKE :q OR CAST(t.id AS VARCHAR) = :exactId OR LOWER(t.tags) LIKE :tagQ)',
           {
             q: `%${q.toLowerCase()}%`,
             exactId: q,
-            labelQ: `%"${q.toLowerCase()}"%`,
+            tagQ: `%"${q.toLowerCase()}"%`,
           },
         );
       }
@@ -82,14 +75,13 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
       const rows = await qb.getMany();
       const hasMore = rows.length > limit;
       const page = hasMore ? rows.slice(0, limit) : rows;
-      const colById = new Map(cols.map(c => [c.id, c]));
 
       return ok({
         tickets: page.map(t => ({
           ...t,
-          labels: safeJsonParse(t.labels, []),
+          tags: safeJsonParse(t.tags, []),
           channel_ids: safeJsonParse(t.channel_ids, []),
-          column_name: colById.get(t.column_id || '')?.name ?? '',
+          assignee: t.assignee ?? null,
         })),
         next_cursor: hasMore && page.length > 0
           ? buildArchiveCursor(page[page.length - 1].archived_at!, page[page.length - 1].id)
@@ -100,8 +92,8 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
 
   server.tool(
     'archive_ticket',
-    'Archive a ticket. Sets archived_at=now; the ticket is excluded from board GET / SSE / supervisor / focus selector by default. ' +
-      'Allowed from any column — typically used on Done tickets manually, but operators can archive non-terminal tickets too (e.g. obsolete / superseded work). ' +
+    'Archive a ticket. Sets archived_at=now; the ticket is excluded from the ticket list and from dispatch. ' +
+      'Allowed from any status — typically used on done tickets, but obsolete / superseded open work can be archived too. ' +
       'Activity log records the actor for audit. Restore via unarchive_ticket.',
     {
       ticket_id: z.string().describe('Ticket ID to archive'),
@@ -117,42 +109,26 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
 
       const caller = getCallerAgent(extra);
 
-      // Warn but don't reject if the ticket isn't on a terminal column —
-      // manual archive of obsolete-but-open work is a valid operator action.
-      let isTerminal = false;
-      if (ticket.column_id) {
-        const col = await dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
-        isTerminal = isTerminalColumn(col);
-        if (!isTerminal) {
-          logger.info('Archiver', 'manual archive on non-terminal column', {
-            ticket_id: ticket.id, column_id: ticket.column_id, column_name: col?.name,
-          });
-        }
+      const isTerminal = ticket.status === 'done';
+      if (!isTerminal) {
+        logger.info('Archiver', 'manual archive of an open ticket', { ticket_id: ticket.id, status: ticket.status });
       }
 
       ticket.archived_at = new Date();
-      // terminal 진입 시 비우는 applyTerminalEnteredAtForMove(archive-helpers.ts)와 대칭 —
-      // 비터미널 상태에서 아카이브된 티켓이 키를 계속 쥐고 있으면 outreach-ingest.service.ts의
-      // dedupe winner 조회가 이 비가시 티켓을 승자로 골라버릴 수 있다(티켓 a565b657). 이미
-      // terminal이었다면 키는 이미 null이므로 no-op.
+      // 아카이브된 티켓이 키를 계속 쥐고 있으면 outreach-ingest.service.ts의 dedupe
+      // winner 조회가 이 비가시 티켓을 승자로 골라버릴 수 있다(티켓 a565b657).
       ticket.operational_dedupe_key = null;
       await ticketRepo.save(ticket);
 
       await activityService.logActivity({
         entity_type: 'ticket', entity_id: ticket.id, action: 'archived',
         ticket_id: ticket.id,
+        workspace_id: ticket.workspace_id,
         actor_id: caller?.agentId,
         actor_name: caller?.agentName || 'manual',
         field_changed: 'archived_at',
         new_value: new Date(ticket.archived_at).toISOString(),
       });
-
-      // active 컬럼 티켓을 아카이브하면 그 자리에서 focus 슬롯이 풀린다
-      // (ticket 2cc54fde). 저장이 끝난 뒤 알려 backlog 승격이 즉시 다음
-      // 티켓을 올리게 한다 — 없으면 다음 `agent_idle` 이나 기본 5분 level
-      // sweep 까지 보드가 멈춰 있다. terminal/intake 컬럼에서의 아카이브는
-      // 잡고 있던 슬롯이 없으므로 헬퍼 안에서 no-op 이 된다.
-      await emitFocusReleased(dataSource, ticket, 'archived');
 
       const full = await loadTicketFull(dataSource, ticket.id);
       return ok({ ...full, manual: true, on_terminal: isTerminal });
@@ -162,7 +138,7 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
   server.tool(
     'unarchive_ticket',
     'Restore an archived ticket. Clears archived_at AND resets terminal_entered_at so the archiver does not immediately re-eat the ticket on the next tick. ' +
-      'The ticket reappears in board GET / SSE / supervisor candidate sets. Activity log records the restore.',
+      'The ticket reappears in the ticket list and dispatch. Activity log records the restore.',
     {
       ticket_id: z.string().describe('Ticket ID to unarchive'),
     },
@@ -174,20 +150,11 @@ export function registerArchiveTools(server: McpServer, ctx: ToolContext): void 
 
       const caller = getCallerAgent(extra);
 
-      // Re-resolve current column to decide what terminal_entered_at should be.
-      // If the ticket still sits on a terminal column (the common case — it was
-      // archived from Done), stamp it to "now" so the archiver's grace window
-      // restarts. If somehow the column changed underneath while archived
-      // (unusual; mutation gate normally prevents it), clear instead.
-      let isTerminalNow = false;
-      if (ticket.column_id) {
-        const col = await dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
-        isTerminalNow = isTerminalColumn(col);
-      }
-
+      // A done ticket gets a fresh terminal stamp so the archiver's grace
+      // window restarts instead of re-archiving it on the next tick.
       const wasArchivedAt = ticket.archived_at;
       ticket.archived_at = null;
-      ticket.terminal_entered_at = isTerminalNow ? new Date() : null;
+      ticket.terminal_entered_at = ticket.status === 'done' ? new Date() : null;
       await ticketRepo.save(ticket);
 
       await activityService.logActivity({

@@ -46,7 +46,6 @@ function scenarioToJson(s: QaScenario) {
   return {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     description: s.description,
     steps: s.steps ?? [],
@@ -71,7 +70,7 @@ function scenarioToJson(s: QaScenario) {
     built_at: s.built_at ?? null,
     // Normalized policy object (or null) so the client never sees raw JSON text.
     liveness_policy: parseLivenessPolicy(s.liveness_policy),
-    // Normalized phase model object (or null) — scenario override of the board's
+    // Normalized phase model object (or null) — the scenario's own phase model
     // qa_phases (multi-phase QA, ticket 90cc22f7).
     qa_phases: parseQaPhases(s.qa_phases),
     created_at: s.created_at,
@@ -84,7 +83,6 @@ function runToJson(r: QaRun) {
     id: r.id,
     scenario_id: r.scenario_id,
     workspace_id: r.workspace_id,
-    board_id: r.board_id,
     status: r.status,
     room_id: r.room_id,
     step_results: r.step_results ?? [],
@@ -124,7 +122,6 @@ function batchToJson(b: QaRunBatch) {
   return {
     id: b.id,
     workspace_id: b.workspace_id,
-    board_id: b.board_id,
     scenario_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -152,22 +149,19 @@ const stepSchema = z.object({
 
 // On-failure auto-ticket policy. When enabled, a failed/errored QaRun of the
 // scenario auto-files a fix ticket carrying the failure evidence. Pass null to
-// clear. Optional fields fall back at dispatch (board → run/scenario board,
-// column → first active non-terminal column, priority → "high",
-// assignee → scenario.target_agent_id,
-// labels → ['qa-failure','auto'], dedupe → 'per_open_ticket').
+// clear. Optional fields fall back at dispatch (status → todo, priority →
+// "high", assignee → scenario target runtime → project default assignee,
+// tags → ['qa-failure','auto'], dedupe → 'per_open_ticket').
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch — when false (or the whole object null) no ticket is filed'),
-  board_id: z.string().optional().describe('Board to file on; defaults to the run Board when present'),
-  column_id: z.string().optional().describe('Rename-safe target column id (preferred over column_name)'),
-  column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
+  project_id: z.string().optional().describe('Project the fix ticket is about (its default assignee applies when no assignee is configured)'),
+  status: z.enum(['todo', 'backlog']).optional().describe('Initial status of the fix ticket (default todo = queued for its assignee)'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Ticket priority (default high)'),
-  assignee_id: z.string().optional().describe('Agent for all 3 roles (default scenario.target_agent_id)'),
   assignee_runtime: z.record(z.string(), z.any()).optional().describe('Runtime settings for the fix ticket; defaults to the scenario/profile runtime'),
-  labels: z.array(z.string()).optional().describe("Ticket labels (default ['qa-failure','auto'])"),
+  tags: z.array(z.string()).optional().describe("Ticket tags (default ['qa-failure','auto'])"),
   dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_open_ticket (DEFAULT) = comment on the scenario\'s existing open fix ticket instead of filing a new one, so a flaky scenario converges to ONE ticket (a green run then auto-closes it); per_run = opt back into 1 ticket per failed run'),
   title_template: z.string().optional().describe('Title override; {{scenario.name}} is substituted (default "QA 실패: {{scenario.name}}")'),
-  rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket reaches a terminal column, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
+  rerun_on_fix: z.boolean().optional().describe('Opt-in: when the auto-filed fix ticket is done, the server re-runs THIS scenario (QA→fix→QA closed loop). Default false. Scoped to tickets carrying the qa-failure/auto/qa-scenario markers.'),
   max_rerun_attempts: z.number().optional().describe('Convergence cap: max automatic reruns before the loop halts with a "human intervention needed" comment (default 3; 0 disables reruns)'),
   rerun_delay_seconds: z.number().optional().describe('Fixed-delay fallback, superseded by deployment_gate (below) but deliberately retained. Defers each rerun by N seconds (best-effort, in-process; a server restart drops a deferred rerun). Default 0 = fire immediately. Its role depends on the gate. Gate OFF — or ON but the scenario has no target_environment, which leaves the gate inert — this is the ONLY deploy-timing mechanism: a time guess that re-breaks whenever the real deploy lag drifts. Gate ACTIVE: this becomes an OPTIONAL safety-net cap, timed from the fix ticket reaching Done, that fires the rerun without a confirmed deploy if no deployment signal ever arrives; 0 (the default) means NO cap, so a gated rerun waits indefinitely. Prefer deployment_gate + target_environment and set this only as that cap. See docs/qa-rerun-on-fix.md.'),
   deployment_gate: z.boolean().optional().describe('Deployment-FACT gate (ticket 8ce72b18): when true AND the scenario has a target_environment, a rerun waits until that environment actually deploys the fix commit (deployed_commit includes it, or deployed_at ≥ the fix Done when no fix-commit label) and fires the instant a matching report_deployment lands — instead of a fixed time delay. rerun_delay_seconds still applies as a best-effort fallback cap. Default false.'),
@@ -187,8 +181,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     async ({ workspace_id }) => {
       const repo = dataSource.getRepository(QaScenario);
       const qb = repo.createQueryBuilder('s')
-        .where('s.workspace_id = :ws', { ws: workspace_id })
-        .andWhere('s.board_id IS NULL');
+        .where('s.workspace_id = :ws', { ws: workspace_id });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return ok(rows.map(scenarioToJson));
     },
@@ -235,10 +228,10 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
         .describe('Reaper liveness policy override for this scenario\'s runs. ' +
           '{ "type": "zero_progress", "deadline_sec"?: N } (default: reap when run age > deadline, default the global TTL) or ' +
           '{ "type": "heartbeat_deadline", "deadline_sec": N } (reap only when the monotonic qa_run_heartbeat token has not strictly advanced within N seconds). ' +
-          'Overrides the board policy; omit/null to inherit the board (then the built-in zero_progress default).'),
+          'Omit/null for the built-in zero_progress default.'),
       qa_phases: QaPhasesSchema.nullable().optional()
         .describe('QA multi-phase model override for this scenario: { "phases": [ { "id": "import", "label"?: "Import", "timeout_sec": 600 }, ... ] }. ' +
-          'Array order = phase order; ids unique; timeout_sec a positive integer. Overrides the board qa_phases; omit/null to inherit the board (then legacy single-running). ' +
+          'Array order = phase order; ids unique; timeout_sec a positive integer. Omit/null for legacy single-running. ' +
           'Drives the phase_timeouts reaper detector — each phase is judged against its own timeout_sec from when the run entered it (set_qa_phase).'),
     },
     async (args, extra: { sessionId?: string }) => {
@@ -247,7 +240,6 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       try {
         const row = await qaService.create({
           workspace_id: args.workspace_id,
-          board_id: null,
           name: args.name,
           description: args.description,
           steps: args.steps,
@@ -296,13 +288,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_qa_scenario). "" resets to the qa/<scenario_id> default.'),
       build_target: z.string().optional().describe('Build & Artifact Registry target (see create_qa_scenario). "" resets to the qa_driver fallback.'),
       target_environment: z.string().optional().describe('Deployment-awareness target environment (see create_qa_scenario). "" clears the env binding.'),
-      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear and inherit the board/workspace env repo.'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_qa_scenario). Pass null to clear (no repo).'),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),
       liveness_policy: LivenessPolicySchema.nullable().optional()
-        .describe('Reaper liveness policy override (see create_qa_scenario). Pass null to clear and inherit the board policy.'),
+        .describe('Reaper liveness policy (see create_qa_scenario). Pass null to clear (built-in default).'),
       qa_phases: QaPhasesSchema.nullable().optional()
-        .describe('QA multi-phase model override (see create_qa_scenario). Pass null to clear and inherit the board qa_phases.'),
+        .describe('QA multi-phase model (see create_qa_scenario). Pass null to clear (legacy single-running).'),
     },
     async ({ scenario_id, workspace_id, liveness_policy, qa_phases, ...patch }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
@@ -347,18 +339,15 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'with the same scenario to re-run — a fresh QaRun is stacked, preserving history.',
     {
       scenario_id: z.string().describe('QaScenario ID to run'),
-      board_id: z.string().optional()
-        .describe('Optional execution Board context; does not change or filter the Workspace-owned scenario'),
       initial_phase: z.string().optional()
         .describe('Optional phase id to stamp on the new run at dispatch (multi-phase QA). Seeds current_phase / current_phase_at and the first phase_history entry so the phase_timeouts reaper measures the opening phase from run start. Typically the first id in the resolved qa_phases (e.g. "import"). Omit for legacy single-running.'),
     },
-    async ({ scenario_id, board_id, initial_phase }, extra: { sessionId?: string }) => {
+    async ({ scenario_id, initial_phase }, extra: { sessionId?: string }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const result = await qaRunService.startQaRun({
           scenarioId: scenario_id,
-          boardId: board_id,
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
           initialPhase: initial_phase,
@@ -405,7 +394,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'qa_run_heartbeat',
     'Emit a lightweight liveness heartbeat for a running QaRun — SEPARATE from record_qa_step. ' +
     'Liveness ≠ "recorded a step": under the heartbeat_deadline policy a run stays alive only while ' +
-    'its monotonic progress_token keeps STRICTLY increasing within the board/scenario deadline. ' +
+    'its monotonic progress_token keeps STRICTLY increasing within the scenario deadline. ' +
     'Re-sending the same token (or a lower one) is accepted but does NOT extend the deadline — so a ' +
     'dead drive that keeps replaying the same token (e.g. artifact_count frozen at 141) is still reaped. ' +
     'What the token counts (disk artifact count, frame counter, request count…) is the client\'s ' +
@@ -552,18 +541,16 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'get_qa_batch for progress.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Optional execution Board context; does not filter reusable scenario definitions'),
       scenario_ids: z.array(z.string()).optional().describe('Ordered scenario ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled scenario in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
     },
-    async ({ workspace_id, board_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+    async ({ workspace_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const batch = await qaRunService.startBatch({
           workspaceId: workspace_id,
-          boardId: board_id,
           scenarioIds: scenario_ids,
           all: !!all,
           stopOnFail: !!stop_on_fail,

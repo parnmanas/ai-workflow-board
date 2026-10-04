@@ -5,7 +5,6 @@ import { SecurityProfile, SecurityChecklistItem, SecurityScopeMode, SecurityOnFa
 import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
@@ -16,6 +15,7 @@ import {
   normalizeBuildMode,
   normalizeRepoRef,
 } from '../../common/workspace-folder-options';
+import { normalizeTags as normalizeTicketTags } from '../tickets/ticket.service';
 import { SecurityRunService } from './security-run.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -66,18 +66,20 @@ const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
  * Normalize the loose `on_failure_ticket` input into a clean config (or null).
  * `undefined` means "don't touch" upstream; an explicit `null` clears it. A
  * value without `enabled:true` is stored disabled. `min_severity` defaults to
- * 'high' (the severity gate), `dedupe` to 'per_run'.
+ * 'high' (the severity gate), `dedupe` to 'per_run'. A `labels` input (the
+ * pre-board-removal name) is accepted as `tags`; the removed
+ * board/column/assignee_id keys are dropped.
  */
 function normalizeOnFailureTicket(cfg: any): SecurityOnFailureTicketConfig | null {
   if (cfg === null) return null;
   if (cfg === undefined || typeof cfg !== 'object') return null;
   const out: SecurityOnFailureTicketConfig = { enabled: !!cfg.enabled };
-  if (cfg.board_id != null && String(cfg.board_id).trim()) out.board_id = String(cfg.board_id).trim();
-  if (cfg.column_name != null && String(cfg.column_name).trim()) out.column_name = String(cfg.column_name).trim();
+  if (cfg.project_id != null && String(cfg.project_id).trim()) out.project_id = String(cfg.project_id).trim();
+  if (cfg.status === 'backlog' || cfg.status === 'todo') out.status = cfg.status;
   if (VALID_PRIORITIES.includes(cfg.priority)) out.priority = cfg.priority;
-  if (cfg.assignee_id != null && String(cfg.assignee_id).trim()) out.assignee_id = String(cfg.assignee_id).trim();
   if (cfg.assignee_runtime) out.assignee_runtime = normalizeRuntimeSpec(cfg.assignee_runtime, 'Failure ticket runtime');
-  if (Array.isArray(cfg.labels)) out.labels = cfg.labels.map((l: any) => String(l)).filter(Boolean);
+  const rawTags = cfg.tags ?? cfg.labels;
+  if (rawTags !== undefined && rawTags !== null) out.tags = normalizeTicketTags(rawTags);
   out.min_severity = VALID_SEVERITIES.includes(cfg.min_severity) ? cfg.min_severity : 'high';
   out.dedupe = cfg.dedupe === 'per_open_ticket' ? 'per_open_ticket' : 'per_run';
   if (cfg.title_template != null && String(cfg.title_template).trim()) out.title_template = String(cfg.title_template);
@@ -100,7 +102,6 @@ export interface SecurityProfileListItem extends Omit<SecurityProfile, 'refreshR
 
 export interface CreateProfileInput {
   workspace_id: string;
-  board_id?: string | null;
   name: string;
   description?: string;
   checklist?: any;
@@ -108,6 +109,7 @@ export interface CreateProfileInput {
   target_agent_id?: string;
   /** P4c-3b: spec-direct target (service resolveTarget이 처리). */
   target_runtime?: unknown;
+  /** Project to inspect (column name predates projects — ids are the same). */
   target_resource_id?: string | null;
   scan_driver?: string;
   scan_driver_config?: Record<string, any> | null;
@@ -126,8 +128,8 @@ export interface CreateProfileInput {
 }
 
 /**
- * Owns SecurityProfile CRUD. Mirrors QaService's CRUD half (workspace/board
- * scope checks, target-agent validation). Run dispatch + finding recording live
+ * Owns SecurityProfile CRUD. Mirrors QaService's CRUD half (workspace scope
+ * checks, target-agent validation). Run dispatch + finding recording live
  * in SecurityRunService.
  */
 @Injectable()
@@ -137,15 +139,13 @@ export class SecurityProfileService {
     @InjectRepository(SecurityRun) private readonly runRepo: Repository<SecurityRun>,
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly runService: SecurityRunService,
   ) {}
 
   async list(workspaceId: string): Promise<SecurityProfileListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.profileRepo.createQueryBuilder('p')
-      .where('p.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('p.board_id IS NULL');
+      .where('p.workspace_id = :ws', { ws: workspaceId });
     const profiles = await qb.orderBy('p.name', 'ASC').getMany();
     return this._attachLastRun(profiles);
   }
@@ -226,13 +226,8 @@ export class SecurityProfileService {
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     const target = await this.resolveTarget(input.workspace_id, input.target_agent_id, input.target_runtime);
 
-    if (input.board_id) {
-      throw makeError(400, 'Board-scoped Security profiles are no longer supported; create the profile in its Workspace');
-    }
-
     const created = this.profileRepo.create({
       workspace_id: input.workspace_id,
-      board_id: null,
       name: input.name.trim(),
       description: input.description ?? '',
       checklist: normalizeChecklist(input.checklist),
@@ -277,11 +272,6 @@ export class SecurityProfileService {
       );
       existing.target_agent_id = target.target_agent_id;
       existing.target_runtime = target.target_runtime;
-    }
-    if (patch.board_id !== undefined) {
-      if ((patch.board_id || null) !== existing.board_id) {
-        throw makeError(400, 'scope cannot be changed after creation');
-      }
     }
     if (patch.target_resource_id !== undefined) existing.target_resource_id = patch.target_resource_id || null;
     if (patch.scan_driver !== undefined) existing.scan_driver = patch.scan_driver ?? 'code-review';

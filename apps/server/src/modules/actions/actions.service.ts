@@ -12,20 +12,20 @@ import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ApiKey } from '../../entities/ApiKey';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
+import { Project } from '../../entities/Project';
 import { User } from '../../entities/User';
 import { Comment } from '../../entities/Comment';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { prependBoardLanguageInstruction } from '../../common/harness-config';
-import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../mcp/shared/terminal-pend-gate';
+import { isDoneStatus } from '../../common/ticket-status';
+import { ProjectsService } from '../projects/projects.service';
 import { renderActionPrompt, buildRenderContext, ActionTicketContext } from './action-prompt';
 import { enforceRunBudget } from '../../common/run-budget-guard';
 import { normalizeWorkspaceFolder, normalizeCheckoutMode, normalizeRepoRef } from '../../common/workspace-folder-options';
@@ -378,17 +378,16 @@ export class ActionsService {
     @InjectRepository(ChatRoomMessage) private readonly messageRepo: Repository<ChatRoomMessage>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(ActivityLog) private readonly activityRepo: Repository<ActivityLog>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(BoardColumn) private readonly columnRepo: Repository<BoardColumn>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly membership: RoomMembershipService,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
+    private readonly projects: ProjectsService,
   ) {}
 
   // ── CRUD ────────────────────────────────────────────────────────────────
@@ -396,8 +395,7 @@ export class ActionsService {
   async list(workspaceId: string): Promise<Action[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.actionRepo.createQueryBuilder('a')
-      .where('a.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('a.board_id IS NULL');
+      .where('a.workspace_id = :ws', { ws: workspaceId });
     return qb.orderBy('a.name', 'ASC').getMany();
   }
 
@@ -411,10 +409,6 @@ export class ActionsService {
 
     const specTargets = normalizeSpecTargets(input.target_runtimes);
     if (!specTargets?.length) throw makeError(400, 'target_runtimes is required; Agent references are no longer supported');
-
-    if (input.board_id) {
-      throw makeError(400, 'Board-scoped Actions are no longer supported; create the Action in its Workspace');
-    }
 
     // 크론은 더 이상 Action 이 들고 있지 않다 — Workspace Schedule 이 `action_id` 로
     // 이 Action 을 가리켜 예약한다. 조용히 무시하면 "예약했는데 안 돈다" 가 되므로
@@ -433,7 +427,6 @@ export class ActionsService {
 
     const created = this.actionRepo.create({
       workspace_id: input.workspace_id,
-      board_id: null,
       name: input.name.trim(),
       description: input.description ?? '',
       prompt: input.prompt ?? '',
@@ -470,11 +463,6 @@ export class ActionsService {
       existing.target_runtimes = (await this._resolveSpecTargets(specs, workspaceId)).map((r) => ({ ...r.spec }));
     } else if (patch.target_agent_id !== undefined || patch.target_agent_ids !== undefined) {
       throw makeError(400, 'Use target_runtimes; Agent references are no longer supported');
-    }
-    if (patch.board_id !== undefined) {
-      if ((patch.board_id || null) !== existing.board_id) {
-        throw makeError(400, 'scope cannot be changed after creation');
-      }
     }
     if (patch.schedule_cron !== undefined && (patch.schedule_cron || '').trim()) {
       throw makeError(400, SCHEDULE_CRON_MOVED);
@@ -579,11 +567,11 @@ export class ActionsService {
    *     retry run owns the next outcome. At the cap the failure is surfaced and
    *     the ticket IS resumed so the assignee decides.
    *
-   * The actual re-dispatch of the source ticket's role holders
-   * (`dispatchCurrentColumn`) lives in the MCP `complete_action_run` tool,
-   * which already holds `TriggerLoopService` — keeping this service free of a
-   * cross-module trigger dependency. This method returns `shouldResume` telling
-   * the caller whether to fire that resume.
+   * The actual re-dispatch of the source ticket's assignee
+   * (`TicketDispatchService.resumeTicket`) lives in the MCP
+   * `complete_action_run` tool and ActionRunReaperService — keeping this
+   * service free of a cross-module dispatch dependency. This method returns
+   * `shouldResume` telling the caller whether to fire that resume.
    */
   async completeRun(runId: string, workspaceId: string, args: CompleteRunArgs): Promise<CompleteRunResult> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
@@ -997,7 +985,7 @@ export class ActionsService {
   /**
    * Audit row for a run completion. Written directly (not via ActivityService)
    * with a bespoke `action` string so it does NOT re-enter the trigger loop as
-   * a comment/update event — the explicit `dispatchCurrentColumn` resume is the
+   * a comment/update event — the explicit `resumeTicket` resume is the
    * single, deliberate wake, and this row is audit-only.
    */
   private async _logRunActivity(
@@ -1040,22 +1028,18 @@ export class ActionsService {
    * must still surface the rejection error to the caller.
    */
   private async _parkForApproval(ticketId: string, action: Action, byAgentId: string): Promise<void> {
-    // Terminal-aware gate (ticket ec498050): a ticket already Done never gets
-    // a human looking at its User tab again, so pending it here would strand
-    // it — the run rejection above (thrown to the caller) already blocks the
+    // Done-aware gate (ticket ec498050): a ticket already Done never gets a
+    // human looking at its User tab again, so pending it here would strand it —
+    // the run rejection above (thrown to the caller) already blocks the
     // unapproved execution regardless of whether we park the ticket too.
-    // Must actually LOAD the ticket first — the loader resolves column_id off
-    // whatever ticket-shaped object it's given, and this method only starts
-    // with a bare id string.
     try {
       const ticketForGate = await this.ticketRepo.findOne({ where: { id: ticketId } });
-      const col = ticketForGate ? await loadTicketColumnForPendGate(this.ticketRepo, this.columnRepo, ticketForGate) : null;
-      if (!evaluateTerminalPendGate(col).allowed) {
-        this.logService.info('Actions', 'park-for-approval skipped, ticket already terminal', { ticket_id: ticketId });
+      if (ticketForGate && isDoneStatus(ticketForGate.status)) {
+        this.logService.info('Actions', 'park-for-approval skipped, ticket already done', { ticket_id: ticketId });
         return;
       }
     } catch (e: any) {
-      this.logService.warn('Actions', `terminal-pend-gate column resolution failed (failing open) for ticket ${ticketId}: ${e?.message || e}`);
+      this.logService.warn('Actions', `done-gate ticket lookup failed (failing open) for ticket ${ticketId}: ${e?.message || e}`);
     }
 
     const reason =
@@ -1455,8 +1439,10 @@ export class ActionsService {
     // the template, which is friendlier than failing the whole Run.
     // 배치 공통 조각이라 루프 밖에서 한 번만 읽는다(대상 N개여도 쿼리는 1회씩).
     const workspace = await this.workspaceRepo.findOne({ where: { id: action.workspace_id } });
-    const board = args.ticketContext?.board_id
-      ? await this.boardRepo.findOne({ where: { id: args.ticketContext.board_id } })
+    // The finished ticket's project, for `{{project.*}}` on hook runs. Scoped to
+    // the Action's workspace so a foreign id never leaks another workspace's repo.
+    const project = args.ticketContext?.project_id
+      ? await this.projects.getInWorkspace(args.ticketContext.project_id, action.workspace_id)
       : null;
     const user = args.triggeredByType === 'user' && args.triggeredById
       ? await this.userRepo.findOne({ where: { id: args.triggeredById } })
@@ -1485,7 +1471,7 @@ export class ActionsService {
       const agent = agents[i];
       try {
         runs.push(await this._dispatchOne({
-          action, agent, args, workspace, board, user,
+          action, agent, args, workspace, project, user,
           runId: runIds[i],
           batchId,
           sourceTicketId,
@@ -1609,7 +1595,7 @@ export class ActionsService {
     agent: DispatchPseudoAgent;
     args: DispatchActionArgs;
     workspace: Workspace | null;
-    board: Board | null;
+    project: Project | null;
     user: User | null;
     runId: string;
     batchId: string;
@@ -1619,7 +1605,7 @@ export class ActionsService {
     /** 이 Action의 대상이 2개 이상인가 — 작업폴더를 에이전트별로 가를지 판단. */
     fanOut: boolean;
   }): Promise<DispatchedRun> {
-    const { action, agent, args, workspace, board, user, runId, batchId, sourceTicketId, approval, highImpact, fanOut } = input;
+    const { action, agent, args, workspace, project, user, runId, batchId, sourceTicketId, approval, highImpact, fanOut } = input;
 
     // run 단위 예산 계수 (티켓 fc3906c5). `dispatch()` 헤드 체크는 승인 소모
     // 전 fail-fast 용이고, 실제 계수는 여기서 run 하나당 한 번 일어난다 —
@@ -1635,7 +1621,9 @@ export class ActionsService {
 
     const ctx = buildRenderContext({
       workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
-      board: board ? { id: board.id, name: board.name } : null,
+      project: project
+        ? { id: project.id, name: project.name, repo_url: project.repo_url, default_branch: project.default_branch }
+        : null,
       user: user ? { id: user.id, name: user.name, email: user.email } : null,
       agent: { id: agent.id, name: agent.name },
       action: { id: action.id, name: action.name },
@@ -1647,11 +1635,9 @@ export class ActionsService {
     // checkout_mode를 QA/security와 똑같은 방식으로(buildRunProvision) 구체적인
     // RunProvision으로 해석해서, agent-manager가 run subagent를 스폰하기 전에
     // `.awb/act/<leaf>`를 미리 준비하도록 한다 — working_dir 루트에서 그냥
-    // 실행되던 것 대신. Action 자체는 고유한 board_id가 없지만(레거시로 항상
-    // null — Action 엔티티 참고), 티켓 완료 훅(ticket-done-hook) 디스패치는
-    // 위에서 여전히 `board`를 해석해두므로, 그 id를 넘기면 repo_ref가 비어있을
-    // 때 그 board의 environment_config repo를 티켓 트리거와 동일하게 상속받을
-    // 수 있다.
+    // 실행되던 것 대신. repo는 Action 의 repo_ref 만 본다 — 비어 있으면 clone
+    // 없이 폴더만 준비된다(board/workspace environment_config 상속은 board 와
+    // 함께 사라졌다).
     //
     // fan-out 작업폴더 분리 (티켓 fc3906c5): 기본 폴더는 `.awb/act/<action8>`로
     // **action 단위**라, 같은 매니저 아래 두 에이전트가 fan-out되면 둘이 같은
@@ -1666,14 +1652,19 @@ export class ActionsService {
       id: action.id,
       runId,
       workspaceId: action.workspace_id,
-      boardId: board?.id ?? null,
       workspaceFolder,
       repoRef: action.repo_ref,
       checkoutMode: action.checkout_mode,
     });
 
     const renderedPrompt = renderActionPrompt(action.prompt || '', ctx);
-    const withLanguage = prependBoardLanguageInstruction(renderedPrompt, board?.language);
+    // Output language came from the finished ticket's board; it is a workspace
+    // setting now. Only ticket-driven hook runs carry it, as before — manual /
+    // cron runs never had a language instruction.
+    const withLanguage = prependBoardLanguageInstruction(
+      renderedPrompt,
+      args.ticketContext ? workspace?.language : null,
+    );
     // Every run gets a completion contract appended so the target agent reports
     // its outcome via `complete_action_run` — without this, `status` never
     // leaves 'running' no matter how the run actually ended (ticket b273d603).

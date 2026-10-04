@@ -3,8 +3,9 @@
 // 빌드/배포 tool 결과는 티켓 row 를 바꾸지 않아 ticket_refs 에 못 들어간다. 대신
 // 별도 artifact_refs 로 캡처된다. 이 테스트가 세 tool(register_build_artifact ·
 // report_build_failure · report_deployment)의 실제 결과 shape → ArtifactRef 매핑,
-// fail-closed(에러/미인식 shape → 카드 없음), 그리고 propose_move 의 detail(승인 카드
-// 배지) 캡처를 고정한다. tool-surface 분류는 tool-surface-parity.test 가 별도로 본다.
+// fail-closed(에러/미인식 shape → 카드 없음)를 고정한다. tool-surface 분류는
+// tool-surface-parity.test 가 별도로 본다. (propose_move 의 detail 배지 캡처는
+// board-less 전환으로 tool 과 함께 삭제됐다.)
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -107,18 +108,9 @@ test('formatArtifactRefsContent: 메타 못 읽는 표면용 한글 텍스트 �
   );
 });
 
-// ── F2-4 ⓑ: propose_move 의 target_column.name → 승인 카드 배지용 detail ──────
-test('resolveTicketRef propose: target_column.name 을 detail 로 싣는다(승인 카드 배지)', () => {
-  const ctx = trackedTicketTool('mcp__awb__propose_move', { ticket_id: 'T-8', target_column_name: 'Review' });
-  const ref = resolveTicketRef(ctx, { proposal: { id: 'CMT-p' }, target_column: { id: 'c-2', name: 'Review' }, consensus: {} }, false, () => '제안 티켓');
-  assert.deepEqual(ref, { action: 'propose', ticket_id: 'T-8', title: '제안 티켓', detail: 'Review' });
-  // target_column 없거나 name 이 비면 detail 은 생략(카드 본체는 그대로).
-  const noCol = resolveTicketRef(ctx, { proposal: { id: 'CMT-p' } }, false, () => '제안 티켓');
-  assert.deepEqual(noCol, { action: 'propose', ticket_id: 'T-8', title: '제안 티켓' });
-});
-
-test('resolveTicketRef: propose 아닌 action 은 detail 을 싣지 않는다', () => {
-  const ctx = trackedTicketTool('mcp__awb__record_agreement', { ticket_id: 'T-9', status: 'agree' });
-  const ref = resolveTicketRef(ctx, { comment: { id: 'CMT-a' }, target_column: { name: 'Done' }, consensus: {} }, false);
-  assert.deepEqual(ref, { action: 'consensus', ticket_id: 'T-9' }, 'consensus 는 target_column 있어도 detail 없음');
+// board-less: 티켓 카드는 move(status 이동)를 포함해 detail 을 싣지 않는다.
+test('resolveTicketRef: move 결과에 column/status 가 있어도 detail 없이 카드만 낸다', () => {
+  const ctx = trackedTicketTool('mcp__awb__move_ticket', { ticket_id: 'T-9', status: 'done' });
+  const ref = resolveTicketRef(ctx, { id: 'T-9', status: 'done', target_column: { name: 'Done' } }, false);
+  assert.deepEqual(ref, { action: 'move', ticket_id: 'T-9' });
 });

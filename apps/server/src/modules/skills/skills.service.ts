@@ -206,15 +206,13 @@ export class SkillsService {
       throw httpError(404, 'host_not_found', 'Runtime Host not found');
     }
     const runtimeKey = runtimeIdentityKey(spec);
-    const boardId = String(body.board_id || '');
-    const roleSlug = String(body.role_slug || '');
+    // One assignment per (workspace, runtime identity, skill) — re-assigning
+    // re-pins the version in place.
     const existing = await this.assignments.findOne({
       where: {
         workspace_id: workspaceId,
         runtime_key: runtimeKey,
         skill_id: skillId,
-        board_id: boardId,
-        role_slug: roleSlug,
       },
     });
     return this.assignments.save(this.assignments.create({
@@ -223,8 +221,6 @@ export class SkillsService {
       runtime_key: runtimeKey,
       skill_id: skillId,
       skill_version_id: version.id,
-      board_id: boardId,
-      role_slug: roleSlug,
       assigned_by: actorId,
     }));
   }

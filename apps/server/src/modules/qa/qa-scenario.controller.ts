@@ -39,7 +39,6 @@ function batchToJson(b: QaRunBatch) {
   return {
     id: b.id,
     workspace_id: b.workspace_id,
-    board_id: b.board_id,
     scenario_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -66,7 +65,6 @@ function scheduleToJson(s: QaSchedule) {
   return {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     scope: s.scope,
     scenario_ids: s.scenario_ids ?? [],
@@ -89,7 +87,7 @@ function scheduleToJson(s: QaSchedule) {
  *
  * NOTE: distinct from the existing self-test harness at `api/admin/qa`
  * (qa.controller.ts) which runs AWB's own integration flows. This controller
- * is the first-class, board-facing QA feature: scenario CRUD + run dispatch +
+ * is the first-class, user-facing QA feature: scenario CRUD + run dispatch +
  * history. Mirrors ActionsController. Run-result recording (record step,
  * complete) is agent-driven via MCP tools, so it is intentionally not exposed
  * over REST. Reuses MANAGE_ACTIONS permission (same automation-authoring
@@ -183,7 +181,6 @@ export class QaScenarioController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const result = await this.qaRunService.startQaRun({
         scenarioId: id,
-        boardId: body?.board_id,
         triggeredByType: 'user',
         triggeredById: user?.id || '',
       });
@@ -251,7 +248,7 @@ export class QaScenarioController {
 
   // ── Batches (sequential multi-scenario runs) ────────────────────────────────
 
-  // Start a sequential batch. Body: { workspace_id, board_id?, scenario_ids?[],
+  // Start a sequential batch. Body: { workspace_id, scenario_ids?[],
   // all?, stop_on_fail? }. Only index 0 dispatches now; the rest are dispatched
   // one-at-a-time as each run finalizes (see QaRunService.onRunFinalized).
   @Post('batches')
@@ -260,7 +257,6 @@ export class QaScenarioController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const batch = await this.qaRunService.startBatch({
         workspaceId: body?.workspace_id,
-        boardId: body?.board_id ?? undefined,
         scenarioIds: Array.isArray(body?.scenario_ids) ? body.scenario_ids : undefined,
         all: !!body?.all,
         stopOnFail: !!body?.stop_on_fail,
@@ -313,7 +309,6 @@ export class QaScenarioController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const row = await this.qaScheduleService.create({
         workspaceId: body?.workspace_id,
-        boardId: body?.board_id ?? undefined,
         name: body?.name,
         scope: body?.scope,
         scenarioIds: body?.scenario_ids,
@@ -333,7 +328,6 @@ export class QaScenarioController {
   async updateSchedule(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
       const row = await this.qaScheduleService.update(id, body?.workspace_id, {
-        boardId: body?.board_id,
         name: body?.name,
         scope: body?.scope,
         scenarioIds: body?.scenario_ids,

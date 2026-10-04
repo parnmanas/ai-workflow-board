@@ -182,7 +182,7 @@ export interface SpawnOpts {
    *  selectEffortSlice; claude maps it to `--effort` + the ultracode keyword
    *  in the first turn. Applied at session CREATION only. */
   effortPreset?: ResolvedEffortPreset | null;
-  /** Non-secret env vars from the board environment_config (ticket 354d336b).
+  /** Non-secret env vars from the workspace environment_config (ticket 354d336b).
    *  Merged into the spawned CLI's environment after process.env but BEFORE
    *  auth / cli-home / credential / harness env so those always win. Applied
    *  at session CREATION only. */
@@ -715,7 +715,7 @@ export class BaseSessionManager {
       return null;
     }
     // Ticket-level effort preset (parallel channel to harness) — pick this
-    // CLI's slice. slice.model is the board-level effort intent and WINS the
+    // CLI's slice. slice.model is the preset-level effort intent and WINS the
     // model precedence over the harness model and the per-agent Agent.model
     // default. effort / ultracode only survive for claude and ride into
     // buildSessionSpawn (other adapters ignore them). Like harness, this is
@@ -747,10 +747,12 @@ export class BaseSessionManager {
       ? agentContext.runtime_config.extra.effort
       : resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
     const ultracode = !!slice?.ultracode;
-    if (slice && (effortFlag || ultracode || slice.model)) {
+    // board-less 서버는 effort_preset 이 null 이고 effort 는 RuntimeSpec 의
+    // runtime_config.extra.effort 로만 온다 — preset slice 가 없어도 기록한다.
+    if (effortFlag || ultracode || slice?.model) {
       log(
         `${this.#logTag} effort applied: ${this.#keyField}=${sessionKey} cli=${adapter.cliType} ` +
-          `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice.model ?? '-'}`,
+          `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice?.model ?? '-'}`,
       );
     }
     // 폴백 모델 체인 (ticket 61f4dd18). 체인은 effectiveModel(=주 모델) +

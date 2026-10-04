@@ -3,25 +3,25 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Action } from '../../entities/Action';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
-import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { DONE_STATUS, isDoneStatus } from '../../common/ticket-status';
+import { parseRuntimeSpec } from '../../common/runtime-spec';
+import { parseTags } from '../tickets/ticket.service';
 import { ActionsService } from './actions.service';
 import { ActionTicketContext } from './action-prompt';
 
 // The `Action.trigger` value that opts an Action into the on-ticket-done hook.
 export const ON_TICKET_DONE_TRIGGER = 'on_ticket_done';
 
-// Recursion guard label (ticket 16a6339c requirement 4). A finished ticket
-// carrying this label is NEVER eligible for the on-ticket-done hook. This is
-// the same label-convention the self-improvement post-done review uses
-// (TriggerLoopService checks `self-improvement`): a hook Action that files a
-// follow-up ticket should stamp this label on what it creates so the follow-up
-// reaching Done can't recursively re-fire the hook. Documented in
-// docs/on-ticket-done-action-hook.md.
+// Recursion guard tag (ticket 16a6339c requirement 4). A finished ticket
+// carrying this tag is NEVER eligible for the on-ticket-done hook: a hook
+// Action that files a follow-up ticket should stamp this tag on what it
+// creates so the follow-up reaching Done can't recursively re-fire the hook.
+// Documented in docs/on-ticket-done-action-hook.md. (The constant keeps its
+// historical `_LABEL` name — tags replaced labels with the same encoding.)
 export const ON_DONE_HOOK_GUARD_LABEL = 'no-on-done-hook';
 
 function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T {
@@ -35,20 +35,19 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
 /**
  * On-ticket-done Action hook (ticket 16a6339c).
  *
- * Subscribes to the same `activityEvents` 'activity' stream that
- * TriggerLoopService listens on — deliberately a SEPARATE listener in the
- * actions module rather than a call inside TriggerLoopService, so the actions
- * module doesn't take a dependency on the agents module (and vice versa). When
- * a ticket lands on a terminal column, this service dispatches every Action
- * bound to that completion, with the finished ticket exposed to the prompt as
- * `{{ticket.*}}`.
+ * Subscribes to the `activityEvents` 'activity' stream — deliberately a
+ * SEPARATE listener in the actions module rather than a call inside the ticket
+ * move path, so ticket status changes don't take a dependency on Actions. When
+ * a ticket enters `done` (a 'moved' activity whose new_value is the done
+ * status), this service dispatches every Action bound to that completion, with
+ * the finished ticket exposed to the prompt as `{{ticket.*}}` and its project
+ * as `{{project.*}}`.
  *
  * Binding (union of two methods, deduped by action id):
  *   (a) per-ticket — `Ticket.on_done_action_ids` lists explicit Action ids.
- *   (b) board/label policy — `Action.trigger='on_ticket_done'` scoped by the
- *       Action's `board_id` (NULL = any board in the workspace) and
- *       `trigger_label` (empty = any label; else the finished ticket must carry
- *       that label).
+ *   (b) tag policy — `Action.trigger='on_ticket_done'`, workspace-wide, narrowed
+ *       by `trigger_label` (empty = any ticket; else the finished ticket's tags
+ *       must include that exact tag).
  *
  * Guarantees:
  *   - enabled=false Actions are skipped (manual run_action only) — both methods.
@@ -56,7 +55,7 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  *     `Ticket.on_done_dispatched_at` vs `terminal_entered_at`. Re-entry (leave
  *     Done then return) re-stamps terminal_entered_at and fires again; a reorder
  *     within Done does not (terminal_entered_at is untouched).
- *   - Recursion guard: a ticket labelled `no-on-done-hook` is never eligible.
+ *   - Recursion guard: a ticket tagged `no-on-done-hook` is never eligible.
  */
 @Injectable()
 export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy {
@@ -72,8 +71,8 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
   ) {}
 
   onModuleInit() {
-    // Mirror TriggerLoopService's listener bookkeeping so integration test rigs
-    // that build/tear down the Nest module per spec don't leak listeners.
+    // Listener bookkeeping so integration test rigs that build/tear down the
+    // Nest module per spec don't leak listeners.
     this._activityListener = (log: ActivityLog) => {
       this._handleActivity(log).catch((e: unknown) => {
         this.logService.error('Actions', 'OnTicketDoneActionService _handleActivity error', { err: e });
@@ -100,39 +99,31 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     // the claim, so the door is left open if some future path re-evaluates it.
     if (await this.instanceQuiesce.isQuiesced()) return;
 
-    // Only column moves can land a ticket on a terminal column. Everything else
-    // (comments, field updates, archives) is irrelevant to this hook.
-    if (log.action !== 'moved' || !log.ticket_id) return;
+    // Only a status change into `done` completes a ticket. Everything else
+    // (comments, field updates, archives, other moves) is irrelevant here.
+    if (log.action !== 'moved' || log.new_value !== DONE_STATUS || !log.ticket_id) return;
 
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
-    if (!ticket || !ticket.column_id) return;
+    // Re-check the row: it may have left `done` again before this ran.
+    if (!ticket || !isDoneStatus(ticket.status)) return;
 
-    const col = await this.dataSource
-      .getRepository(BoardColumn)
-      .findOne({ where: { id: ticket.column_id } });
-    if (!isTerminalColumn(col)) return;
-
-    // Defensive: the move path stamps terminal_entered_at on a non-terminal →
-    // terminal crossing. Without it the idempotency comparison below has no
-    // anchor, so bail (a board move that lands terminal-from-terminal won't
-    // re-fire, which is the intended "same entry" semantics).
+    // Defensive: the move path stamps terminal_entered_at on entering `done`.
+    // Without it the idempotency comparison below has no anchor, so bail.
     if (!ticket.terminal_entered_at) return;
 
     // Recursion guard (requirement 4) — a hook-origin ticket never re-fires.
-    const labels = safeJsonParse<string[]>(ticket.labels, []);
-    if (Array.isArray(labels) && labels.includes(ON_DONE_HOOK_GUARD_LABEL)) {
-      this.logService.info('Actions', 'on_ticket_done hook skipped (recursion guard label)', {
-        ticket_id: ticket.id, guard_label: ON_DONE_HOOK_GUARD_LABEL,
+    const tags = parseTags(ticket.tags);
+    if (tags.includes(ON_DONE_HOOK_GUARD_LABEL)) {
+      this.logService.info('Actions', 'on_ticket_done hook skipped (recursion guard tag)', {
+        ticket_id: ticket.id, guard_tag: ON_DONE_HOOK_GUARD_LABEL,
       });
       return;
     }
 
-    const boardId = col!.board_id;
-
     // Collect eligible Actions BEFORE claiming so a ticket reaching Done with no
-    // bound hook doesn't churn a write on every completion across every board.
-    const actions = await this._collectEligibleActions(ticket, boardId, labels);
+    // bound hook doesn't churn a write on every completion in the workspace.
+    const actions = await this._collectEligibleActions(ticket, tags);
     if (actions.length === 0) return;
 
     // Atomic, once-per-terminal-entry claim. The WHERE guard is the real
@@ -159,7 +150,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
       return;
     }
 
-    const ticketContext = this._buildTicketContext(ticket, boardId, labels);
+    const ticketContext = this._buildTicketContext(ticket, tags);
 
     let dispatched = 0;
     for (const action of actions) {
@@ -186,14 +177,14 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     }
 
     this.logService.info('Actions', 'on_ticket_done hook complete', {
-      ticket_id: ticket.id, board_id: boardId,
+      ticket_id: ticket.id, project_id: ticket.project_id,
       eligible: actions.length, dispatched,
     });
   }
 
   /**
-   * Union of method (a) explicit per-ticket ids and method (b) board/label
-   * policy Actions, deduped by id. enabled=false is filtered out of both.
+   * Union of method (a) explicit per-ticket ids and method (b) tag policy
+   * Actions, deduped by id. enabled=false is filtered out of both.
    *
    * ORDER (ticket 59afc55a, criterion c): explicit per-ticket ids dispatch in
    * their saved `on_done_action_ids` array order — that order is the user's
@@ -202,17 +193,13 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
    * order is always the leading prefix even when a bound Action also happens to
    * be an on_ticket_done policy Action. `Map` preserves insertion order.
    */
-  private async _collectEligibleActions(
-    ticket: Ticket,
-    boardId: string,
-    labels: string[],
-  ): Promise<Action[]> {
+  private async _collectEligibleActions(ticket: Ticket, tags: string[]): Promise<Action[]> {
     const actionRepo = this.dataSource.getRepository(Action);
     const byId = new Map<string, Action>();
 
     // (a) Explicit per-ticket ids FIRST, in array order. These fire regardless
     // of the Action's own `trigger` field (the binding is the ticket's, not a
-    // board policy), but still honour enabled=false and workspace scope.
+    // policy), but still honour enabled=false and workspace scope.
     const explicitIds = safeJsonParse<string[]>(ticket.on_done_action_ids, []);
     if (Array.isArray(explicitIds)) {
       for (const id of explicitIds) {
@@ -220,45 +207,43 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
         const a = await actionRepo.findOne({ where: { id } });
         if (!a) continue;
         if (a.workspace_id !== ticket.workspace_id) continue;
-        if (a.board_id !== null) continue;
         if (!a.enabled) continue;
         byId.set(a.id, a);
       }
     }
 
-    // (b) Board/label-scoped policy Actions, appended after the explicit ones.
-    // Scope board in SQL, label in JS (labels live as a JSON string — keep the
-    // query DB-portable).
+    // (b) Tag-scoped policy Actions, appended after the explicit ones. Tag
+    // match in JS (tags live as a JSON string — keep the query DB-portable).
     const qb = actionRepo
       .createQueryBuilder('a')
       .where('a.workspace_id = :ws', { ws: ticket.workspace_id })
       .andWhere('a.trigger = :trig', { trig: ON_TICKET_DONE_TRIGGER })
-      .andWhere('a.enabled = :en', { en: true })
-      .andWhere('a.board_id IS NULL');
+      .andWhere('a.enabled = :en', { en: true });
     const policyActions = await qb.getMany();
     for (const a of policyActions) {
       if (byId.has(a.id)) continue;
-      const labelOk = !a.trigger_label || (Array.isArray(labels) && labels.includes(a.trigger_label));
-      if (labelOk) byId.set(a.id, a);
+      const tagOk = !a.trigger_label || tags.includes(a.trigger_label);
+      if (tagOk) byId.set(a.id, a);
     }
 
     return [...byId.values()];
   }
 
-  private _buildTicketContext(ticket: Ticket, boardId: string, labels: string[]): ActionTicketContext {
+  private _buildTicketContext(ticket: Ticket, tags: string[]): ActionTicketContext {
+    const tagList = tags.join(', ');
+    const projectId = ticket.project_id || '';
     return {
       id: ticket.id,
       title: ticket.title,
-      board_id: boardId,
-      column_id: ticket.column_id,
       priority: ticket.priority,
       status: ticket.status,
       description: ticket.description,
+      project_id: projectId,
       base_branch: ticket.base_branch,
-      base_repo_id: ticket.base_repo_resource_id,
-      labels: Array.isArray(labels) ? labels.join(', ') : '',
-      assignee: ticket.assignee,
-      reporter: ticket.reporter,
+      tags: tagList,
+      assignee: parseRuntimeSpec(ticket.assignee)?.label || '',
+      labels: tagList,
+      base_repo_id: projectId,
     };
   }
 }

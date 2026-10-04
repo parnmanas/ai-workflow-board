@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { BuildArtifact, BuildArtifactStatus } from '../../entities/BuildArtifact';
-import { BuildRepoRef, buildRepoKey } from '../../common/build-artifact-options';
+import { BuildRepoRef, buildRepoKey, buildRepoProjectId } from '../../common/build-artifact-options';
 import { LogService } from '../../services/log.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -13,7 +13,6 @@ function makeError(status: number, message: string): Error & { status: number } 
 
 export interface RegisterBuildArtifactInput {
   workspaceId: string;
-  boardId?: string | null;
   repo: BuildRepoRef;
   target: string;
   commitSha: string;
@@ -29,7 +28,6 @@ export interface RegisterBuildArtifactInput {
 
 export interface ReportBuildFailureInput {
   workspaceId: string;
-  boardId?: string | null;
   repo: BuildRepoRef;
   target: string;
   commitSha?: string;
@@ -60,7 +58,7 @@ export interface GetLatestArtifactResult {
 
 /**
  * BuildArtifactService — the registry authority for the Build & Artifact model
- * (ticket 80d52250). Stateless over the DataSource (mirrors BenchmarkService),
+ * (ticket 80d52250). Stateless over the DataSource,
  * so the standalone MCP context can `new BuildArtifactService(dataSource, log)`
  * without NestJS DI.
  *
@@ -85,7 +83,7 @@ export class BuildArtifactService {
   /** Resolve + validate the repo share key, or throw a 400. */
   private resolveKey(repo: BuildRepoRef): string {
     const key = buildRepoKey(repo);
-    if (!key) throw makeError(400, 'repo must carry a resource_id or url so the artifact has a stable key');
+    if (!key) throw makeError(400, 'repo must carry a project_id or url so the artifact has a stable key');
     return key;
   }
 
@@ -107,8 +105,7 @@ export class BuildArtifactService {
     const host = (input.host || '').trim();
 
     const row = await this.upsert(workspaceId, repoKey, target, commitSha, host, {
-      board_id: input.boardId ?? null,
-      repo_resource_id: (input.repo.resource_id || '').trim(),
+      repo_resource_id: buildRepoProjectId(input.repo),
       repo_url: (input.repo.url || '').trim(),
       status,
       artifact_path: input.artifactPath ?? '',
@@ -148,8 +145,7 @@ export class BuildArtifactService {
     const host = (input.host || '').trim();
 
     const row = await this.upsert(workspaceId, repoKey, target, commitSha, host, {
-      board_id: input.boardId ?? null,
-      repo_resource_id: (input.repo.resource_id || '').trim(),
+      repo_resource_id: buildRepoProjectId(input.repo),
       repo_url: (input.repo.url || '').trim(),
       status: 'failed',
       builder_agent_id: input.builderAgentId ?? '',

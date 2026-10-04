@@ -1,16 +1,12 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, IsNull } from 'typeorm';
+import { DataSource, In, IsNull } from 'typeorm';
 import { WorkflowFunction } from '../../entities/WorkflowFunction';
 import { WorkflowFunctionRun } from '../../entities/WorkflowFunctionRun';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
-import { ActivityLog } from '../../entities/ActivityLog';
-import { Comment } from '../../entities/Comment';
 import { ActionsService } from '../actions/actions.service';
-import { assertCatalogBoardScope, catalogScopeOf, canUseCatalogItem, normalizeCatalogScope } from '../../common/catalog-scope';
-import { Board } from '../../entities/Board';
-import { computeReport } from '../../common/prompt-audit-report';
+import { catalogScopeOf, canUseCatalogItem, normalizeCatalogScope } from '../../common/catalog-scope';
+import { isDoneStatus } from '../../common/ticket-status';
 import { guardedFetch, sanitizeOutboundHeaders } from '../../common/ssrf-guard';
 
 const EXECUTORS = new Set(['builtin', 'pipeline', 'http', 'agent_action']);
@@ -41,7 +37,6 @@ export interface FunctionExecutionArgs {
   functionId?: string;
   functionKey?: string;
   workspaceId: string;
-  boardId?: string;
   ticketId?: string;
   inputs?: Record<string, any>;
   idempotencyKey?: string;
@@ -67,7 +62,7 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
   {
     key: 'workflow.ticket_snapshot',
     name: 'Ticket snapshot',
-    description: 'Returns the current ticket and column state used as execution evidence.',
+    description: 'Returns the current ticket state (status, project, parent) used as execution evidence.',
     executor_type: 'builtin',
     config: stringifyJson({ handler: 'workflow.ticket_snapshot' }),
     input_schema: stringifyJson({ type: 'object' }),
@@ -77,7 +72,7 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
   {
     key: 'workflow.verify_children_complete',
     name: 'Verify child tickets complete',
-    description: 'Fails closed when any direct child is not in a terminal column.',
+    description: 'Fails closed when any direct child ticket is not done.',
     executor_type: 'builtin',
     config: stringifyJson({ handler: 'workflow.verify_children_complete' }),
     input_schema: stringifyJson({ type: 'object' }),
@@ -94,27 +89,11 @@ const BUILTIN_DEFINITIONS: Array<Partial<WorkflowFunction> & { key: string; name
     output_schema: stringifyJson({ type: 'object', required: ['passed'] }),
     risk_level: 'read',
   },
-  {
-    key: 'prompt_audit.measure_effect',
-    name: 'Prompt audit effect report',
-    description: 'Computes the 4 prompt-audit metrics (start_rate, unnecessary_questions, pending_misclassification_rate, completion_rate) over a time window for the calling workspace, via the shared computeReport() formula (see src/common/prompt-audit-report.ts). Read-only. Lets an agent measure production data through MCP instead of needing direct DB credentials (ticket f3fc298a). Caution: completion_rate is right-censored when `until` is close to real time (e.g. a before/after comparison where the after-window\'s `until` = now) — tickets created near the tail of the window have had little time to complete and read as unfinished regardless of process quality. Pass `maturation_buffer_hours` to exclude tickets created less than that many hours before `until` from the completion_rate denominator (apply the same buffer to both windows of a comparison) (ticket c936cee7).',
-    executor_type: 'builtin',
-    config: stringifyJson({ handler: 'prompt_audit.measure_effect' }),
-    input_schema: stringifyJson({
-      type: 'object',
-      properties: {
-        since: { type: 'string' },
-        until: { type: 'string' },
-        maturation_buffer_hours: { type: 'number', minimum: 0 },
-      },
-    }),
-    output_schema: stringifyJson({
-      type: 'object',
-      required: ['window', 'start_rate', 'unnecessary_questions', 'pending_misclassification_rate', 'completion_rate'],
-    }),
-    risk_level: 'read',
-  },
 ];
+
+// Built-in keys whose definition was removed; their seeded rows are deleted on
+// boot. prompt_audit.measure_effect computed its report from board columns.
+const RETIRED_BUILTIN_KEYS = ['prompt_audit.measure_effect'];
 
 @Injectable()
 export class WorkflowFunctionsService implements OnModuleInit {
@@ -125,12 +104,14 @@ export class WorkflowFunctionsService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
+    // A retired built-in has no handler left, so its seeded row would stay
+    // listed yet always fail — and users cannot delete built-ins themselves.
+    await repo.delete({ workspace_id: IsNull(), builtin: true, key: In(RETIRED_BUILTIN_KEYS) });
     for (const definition of BUILTIN_DEFINITIONS) {
       const existing = await repo.findOne({ where: { workspace_id: IsNull(), key: definition.key } });
       if (existing) continue;
       await repo.save(repo.create({
         workspace_id: null,
-        board_id: null,
         version: 1,
         description: '',
         executor_type: 'builtin',
@@ -174,16 +155,14 @@ export class WorkflowFunctionsService implements OnModuleInit {
   ): Promise<Record<string, any>[]> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
     if (!workspaceId) {
-      const rows = await repo.find({ where: { workspace_id: IsNull(), board_id: IsNull() }, order: { key: 'ASC' } });
+      const rows = await repo.find({ where: { workspace_id: IsNull() }, order: { key: 'ASC' } });
       return rows.map(row => this.toView(row));
     }
-    let qb = repo.createQueryBuilder('f')
+    const rows = await repo.createQueryBuilder('f')
       .where('f.workspace_id IS NULL OR f.workspace_id = :workspaceId', { workspaceId })
-      .andWhere('f.board_id IS NULL')
       .orderBy('f.key', 'ASC')
       .addOrderBy('f.workspace_id', 'ASC')
-      .addOrderBy('f.board_id', 'ASC');
-    const rows = await qb.getMany();
+      .getMany();
     if (includeShadowed) return rows.map(row => this.toView(row));
     const resolved = new Map<string, WorkflowFunction>();
     for (const row of rows) {
@@ -204,9 +183,9 @@ export class WorkflowFunctionsService implements OnModuleInit {
 
   async resolve(key: string, workspaceId: string): Promise<WorkflowFunction> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
-    const local = await repo.findOne({ where: { key, workspace_id: workspaceId, board_id: IsNull() } });
+    const local = await repo.findOne({ where: { key, workspace_id: workspaceId } });
     if (local) return local;
-    const global = await repo.findOne({ where: { key, workspace_id: IsNull(), board_id: IsNull() } });
+    const global = await repo.findOne({ where: { key, workspace_id: IsNull() } });
     if (!global) throw httpError(404, `Function "${key}" not found`);
     return global;
   }
@@ -246,15 +225,10 @@ export class WorkflowFunctionsService implements OnModuleInit {
   async create(input: any): Promise<Record<string, any>> {
     const repo = this.dataSource.getRepository(WorkflowFunction);
     const scope = normalizeCatalogScope(input);
-    await assertCatalogBoardScope(
-      async (boardId, workspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: boardId, workspace_id: workspaceId } }),
-      scope,
-    );
     const normalized = this.normalize(input);
     const duplicate = await repo.findOne({
       where: {
         workspace_id: scope.workspace_id === null ? IsNull() : scope.workspace_id,
-        board_id: scope.board_id === null ? IsNull() : scope.board_id,
         key: normalized.key!,
       },
     });
@@ -274,7 +248,6 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (!current) throw httpError(404, 'Function not found');
     if (
       (input.workspace_id !== undefined && (input.workspace_id || null) !== current.workspace_id)
-      || (input.board_id !== undefined && (input.board_id || null) !== current.board_id)
       || (input.scope !== undefined && input.scope !== catalogScopeOf(current))
     ) {
       throw httpError(400, 'Function scope cannot be changed; create a new override instead');
@@ -284,7 +257,6 @@ export class WorkflowFunctionsService implements OnModuleInit {
       const duplicate = await repo.findOne({
         where: {
           workspace_id: current.workspace_id === null ? IsNull() : current.workspace_id,
-          board_id: current.board_id === null ? IsNull() : current.board_id,
           key: normalized.key!,
         },
       });
@@ -316,9 +288,9 @@ export class WorkflowFunctionsService implements OnModuleInit {
       const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
       if (actual !== property.type) throw httpError(400, `Input "${field}" must be ${property.type}`);
       // NaN/Infinity are `typeof 'number'` but not usable arithmetic inputs — left to
-      // per-handler Number.isFinite() checks (e.g. executePromptAuditMeasureEffect)
-      // rather than rejected here generically, since `NaN < minimum` / `Infinity <
-      // minimum` are both false and would otherwise slip past this check silently.
+      // per-handler Number.isFinite() checks rather than rejected here generically,
+      // since `NaN < minimum` / `Infinity < minimum` are both false and would
+      // otherwise slip past this check silently.
       if (property.type === 'number' && typeof property.minimum === 'number' && value < property.minimum) {
         throw httpError(400, `Input "${field}" must be >= ${property.minimum}`);
       }
@@ -335,7 +307,6 @@ export class WorkflowFunctionsService implements OnModuleInit {
     if (fn.workspace_id !== null && fn.workspace_id !== args.workspaceId) {
       throw httpError(403, 'Function belongs to a different workspace');
     }
-    if (fn.board_id !== null) throw httpError(409, 'Board-scoped Function has not been migrated to Workspace scope');
     if (!fn.enabled) throw httpError(409, 'Function is disabled');
     if (fn.approval_policy === 'admin' && args.actorRole !== 'admin') {
       throw httpError(403, 'This Function requires an authenticated admin execution');
@@ -360,7 +331,6 @@ export class WorkflowFunctionsService implements OnModuleInit {
       function_key: fn.key,
       function_version: fn.version,
       workspace_id: args.workspaceId,
-      board_id: args.boardId || null,
       ticket_id: args.ticketId || null,
       parent_run_id: args.parentRunId || null,
       actor_type: args.actorType || 'system',
@@ -503,36 +473,29 @@ export class WorkflowFunctionsService implements OnModuleInit {
     config: Record<string, any>,
   ): Promise<any> {
     if (handler === 'system.noop') return inputs;
-    if (handler === 'prompt_audit.measure_effect') return this.executePromptAuditMeasureEffect(args, inputs);
     if (!args.ticketId) throw httpError(400, `${handler} requires ticket_id`);
     const ticketRepo = this.dataSource.getRepository(Ticket);
-    const columnRepo = this.dataSource.getRepository(BoardColumn);
     const ticket = await ticketRepo.findOne({ where: { id: args.ticketId } });
     if (!ticket || ticket.workspace_id !== args.workspaceId) throw httpError(404, 'Ticket not found in workspace');
-    const column = ticket.column_id ? await columnRepo.findOne({ where: { id: ticket.column_id } }) : null;
     if (handler === 'workflow.ticket_snapshot') {
       return {
         ticket: {
           id: ticket.id,
           title: ticket.title,
           status: ticket.status,
+          is_done: isDoneStatus(ticket.status),
           workspace_id: ticket.workspace_id,
-          column_id: ticket.column_id,
+          project_id: ticket.project_id,
           parent_id: ticket.parent_id,
           version: ticket.version,
         },
-        column: column && { id: column.id, name: column.name, kind: column.kind, is_terminal: column.is_terminal },
       };
     }
     if (handler === 'workflow.verify_children_complete') {
       const children = await ticketRepo.find({ where: { parent_id: ticket.id } });
-      const incomplete: any[] = [];
-      for (const child of children) {
-        const childColumn = child.column_id ? await columnRepo.findOne({ where: { id: child.column_id } }) : null;
-        if (!childColumn?.is_terminal && childColumn?.kind !== 'terminal') {
-          incomplete.push({ id: child.id, title: child.title, column_id: child.column_id, column: childColumn?.name || '' });
-        }
-      }
+      const incomplete = children
+        .filter((child) => !isDoneStatus(child.status))
+        .map((child) => ({ id: child.id, title: child.title, status: child.status }));
       if (incomplete.length) throw httpError(409, `${incomplete.length} child ticket(s) are not complete`);
       return { passed: true, child_count: children.length, incomplete: [] };
     }
@@ -551,29 +514,6 @@ export class WorkflowFunctionsService implements OnModuleInit {
       return { passed: true, required, missing: [] };
     }
     throw httpError(400, `Unknown built-in handler: ${handler}`);
-  }
-
-  // 위 workflow.* builtin들과 달리 ticket 스코프가 아니다 — 항상 호출한
-  // Function-execution 자체의 workspaceId로만 스코프하고 inputs로 넘어온
-  // override는 받지 않는다. workspace A로 인가된 호출이 workspace B의 집계
-  // 통계를 읽지 못하게 하기 위함.
-  private async executePromptAuditMeasureEffect(args: FunctionExecutionArgs, inputs: Record<string, any>): Promise<any> {
-    const since = inputs?.since !== undefined ? new Date(String(inputs.since)) : undefined;
-    const until = inputs?.until !== undefined ? new Date(String(inputs.until)) : undefined;
-    if (since && Number.isNaN(since.getTime())) throw httpError(400, 'inputs.since must be an ISO 8601 timestamp');
-    if (until && Number.isNaN(until.getTime())) throw httpError(400, 'inputs.until must be an ISO 8601 timestamp');
-    let maturationBufferHours: number | undefined;
-    if (inputs?.maturation_buffer_hours !== undefined) {
-      maturationBufferHours = Number(inputs.maturation_buffer_hours);
-      if (!Number.isFinite(maturationBufferHours)) throw httpError(400, 'inputs.maturation_buffer_hours must be a number');
-      if (maturationBufferHours < 0) throw httpError(400, 'inputs.maturation_buffer_hours must be >= 0');
-    }
-    try {
-      return await computeReport(this.dataSource, { ActivityLog, Comment, Ticket, BoardColumn, Board }, { since, until, workspaceId: args.workspaceId, maturationBufferHours });
-    } catch (e: any) {
-      if (e?.message?.startsWith('maturationBufferHours')) throw httpError(400, e.message);
-      throw e;
-    }
   }
 
   async listRuns(workspaceId: string, functionId?: string, ticketId?: string, limit = 50): Promise<Record<string, any>[]> {

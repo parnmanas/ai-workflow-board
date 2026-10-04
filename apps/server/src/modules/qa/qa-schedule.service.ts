@@ -3,7 +3,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { QaSchedule, QaScheduleScope } from '../../entities/QaSchedule';
 import { QaRunBatch } from '../../entities/QaRunBatch';
-import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
@@ -30,7 +29,6 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
 
 export interface CreateScheduleInput {
   workspaceId: string;
-  boardId?: string | null;
   name: string;
   scope?: QaScheduleScope;
   scenarioIds?: string[] | null;
@@ -89,7 +87,6 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(QaRunBatch) private readonly batchRepo: Repository<QaRunBatch>,
     private readonly qaRunService: QaRunService,
     private readonly logService: LogService,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesce: InstanceQuiesceService,
@@ -122,8 +119,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
   async list(workspaceId: string): Promise<QaSchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('s.board_id IS NULL');
+      .where('s.workspace_id = :ws', { ws: workspaceId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
@@ -135,7 +131,6 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateScheduleInput): Promise<QaSchedule> {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const scope: QaScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
     const scenarioIds = this._validateScope(scope, input.scenarioIds);
@@ -144,7 +139,6 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
 
     const draft = this.scheduleRepo.create({
       workspace_id: input.workspaceId,
-      board_id: null,
       name: input.name.trim(),
       scope,
       scenario_ids: scenarioIds,
@@ -168,9 +162,6 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
       schedule.name = patch.name.trim();
-    }
-    if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
-      throw makeError(400, 'scope cannot be changed after creation');
     }
     if (patch.stopOnFail !== undefined) schedule.stop_on_fail = !!patch.stopOnFail;
     if (patch.triggeredByType !== undefined) schedule.triggered_by_type = patch.triggeredByType || 'user';
@@ -357,12 +348,6 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
       triggeredByType: 'system',
       triggeredById,
     });
-  }
-
-  private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
-    if (boardId) {
-      throw makeError(400, 'Board-scoped QA schedules are no longer supported; create the schedule in its Workspace');
-    }
   }
 
   private _validateScope(scope: QaScheduleScope, scenarioIds: string[] | null | undefined): string[] | null {

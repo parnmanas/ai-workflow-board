@@ -26,7 +26,7 @@ import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.s
 import type { ToolContext } from './context';
 
 export function registerTicketPrerequisiteTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, triggerLoopService, logger } = ctx;
+  const { dataSource, activityService, ticketDispatchService, logger } = ctx;
   // Reuse the DI singleton in the integrated server; construct a thin instance
   // in standalone mode (the service is stateless over dataSource + activity).
   const svc =
@@ -91,11 +91,9 @@ export function registerTicketPrerequisiteTools(server: McpServer, ctx: ToolCont
           actorName: caller?.agentName,
         });
 
-        if (result.removed && wasPending && !result.pending_on_tickets && triggerLoopService) {
+        if (result.removed && wasPending && !result.pending_on_tickets && ticketDispatchService) {
           try {
-            await triggerLoopService.dispatchCurrentColumn(
-              ticket_id, 'prerequisite_resolved', caller?.agentId || '',
-            );
+            await ticketDispatchService.resumeTicket(ticket_id, 'prerequisite_resolved');
           } catch (e) {
             logger.warn('MCP', 'remove_ticket_prerequisite unblock dispatch failed (continuing)', {
               err: String(e), ticket_id,

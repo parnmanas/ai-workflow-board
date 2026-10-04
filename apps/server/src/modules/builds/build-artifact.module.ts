@@ -8,8 +8,8 @@ import { BuildArtifactService } from './build-artifact.service';
  * so the MCP module can inject it into the ToolContext for register_build_artifact
  * / get_latest_artifact / report_build_failure.
  *
- * The service is stateless over the DataSource (uses @InjectDataSource, mirroring
- * BenchmarkService), so the standalone (non-DI) MCP path constructs it directly.
+ * The service is stateless over the DataSource (uses @InjectDataSource), so the
+ * standalone (non-DI) MCP path constructs it directly.
  * LogService is @Global, so no extra import is needed for it.
  */
 @Module({

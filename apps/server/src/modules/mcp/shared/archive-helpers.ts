@@ -1,96 +1,19 @@
 /**
  * Helpers for the ticket auto-archive feature (ticket 9b44526b).
  *
- * Responsibilities:
+ *   - `assertTicketActive(ticket)` — throws a tagged Error when an archived
+ *     ticket reaches a mutation path. The error.status is 409 and message is
+ *     stable so REST controllers + MCP tools can map it to a consistent reply.
+ *   - archive cursor helpers + `getRootArchivedAt` for subtasks.
  *
- *   1. `isTerminalColumn(col)` — single source of truth for "is this a
- *      terminal column?". Reads kind='terminal' OR is_terminal=true. Both
- *      forms are written by different code paths; checking either keeps the
- *      archive logic forward- and backward-compatible.
- *
- *   2. `deriveRootTicketStatus(col)` — the Ticket.status a ROOT ticket should
- *      carry given its column (ticket 35b43ee9). Root workflow state is
- *      column-driven (see get_ticket's legacy_status projection); this keeps
- *      the underlying stored value from silently diverging from the
- *      column's terminal/non-terminal meaning across create and move.
- *      Child/subtask status is independent and NOT covered here.
- *
- *   3. `applyTerminalEnteredAtForMove(repo, ticketId, sourceColumn, destColumn)`
- *      — stamps or clears Ticket.terminal_entered_at when a move changes the
- *      column's terminal status (left alone when a move doesn't cross the
- *      terminal boundary), and re-derives root `status` from the destination
- *      column on EVERY move, boundary-crossing or not.
- *
- *   4. `assertTicketActive(ticket)` — throws a tagged Error when an archived
- *      ticket reaches a mutation path. The error.status is 409 and message is
- *      stable so REST controllers + MCP tools can map it to a consistent
- *      reply.
+ * Status transitions (and `terminal_entered_at`) are owned by
+ * TicketService.move — see docs/tickets.md.
  */
 
-import type { DataSource, EntityManager, Repository } from 'typeorm';
-import { BoardColumn } from '../../../entities/BoardColumn';
+import type { DataSource, EntityManager } from 'typeorm';
 import { Ticket } from '../../../entities/Ticket';
-import { assertCompletionVerificationsPassed } from './completion-verification-gate';
 
 type RepoScope = DataSource | EntityManager;
-
-export function isTerminalColumn(col: BoardColumn | null | undefined): boolean {
-  if (!col) return false;
-  return (col as any).is_terminal === true || (col as any).kind === 'terminal';
-}
-
-export function deriveRootTicketStatus(col: BoardColumn | null | undefined): string {
-  return isTerminalColumn(col) ? 'done' : 'todo';
-}
-
-/**
- * Update Ticket.terminal_entered_at (and, for root tickets, status) to
- * reflect a column transition.
- *
- *   - moving INTO a terminal column from a non-terminal one → stamp `now`,
- *     status → 'done'
- *   - moving OUT of a terminal column → null, status → 'todo'
- *   - terminal → terminal (e.g. position reorder within Done) → leave
- *     terminal_entered_at alone, but still re-derive status
- *   - non-terminal → non-terminal → leave terminal_entered_at alone, but
- *     still re-derive status
- *
- * `status` is re-derived on EVERY move, not just boundary crossings (ticket
- * 35b43ee9 review): a row that drifted out of sync some other way (pre-fix
- * data, a manual edit, a bug in a path this helper doesn't cover) would
- * otherwise stay wrong forever once it stops crossing terminal boundaries —
- * e.g. reordering within Done never used to touch status. Re-deriving is a
- * cheap, idempotent no-op when status already matches, so this also acts as
- * a self-healing backfill for any root ticket that moves again.
- *
- * Child tickets never reach this path (column_id is always null for them),
- * so overwriting `status` here is safe — it only ever touches root rows.
- *
- * The repo is whichever Repository<Ticket> the caller already has (transaction
- * manager's repo for atomic move flows, the bare repo elsewhere).
- */
-export async function applyTerminalEnteredAtForMove(
-  ticketRepo: Repository<Ticket>,
-  ticketId: string,
-  sourceColumn: BoardColumn | null | undefined,
-  destColumn: BoardColumn | null | undefined,
-): Promise<void> {
-  // 모든 이동 표면이 공유하는 트랜잭션 경계에서 검증해 등록/판정과 Done
-  // 이동 사이의 TOCTOU 및 크래시 창을 닫는다.
-  await assertCompletionVerificationsPassed(ticketRepo.manager, ticketId, destColumn);
-  const wasTerminal = isTerminalColumn(sourceColumn);
-  const isTerminal = isTerminalColumn(destColumn);
-  const status = deriveRootTicketStatus(destColumn);
-  if (wasTerminal === isTerminal) {
-    await ticketRepo.update(ticketId, { status });
-    return;
-  }
-  await ticketRepo.update(ticketId, {
-    terminal_entered_at: isTerminal ? new Date() : null,
-    status,
-    ...(isTerminal ? { operational_dedupe_key: null } : {}),
-  });
-}
 
 export class TicketArchivedError extends Error {
   status = 409;
@@ -99,46 +22,6 @@ export class TicketArchivedError extends Error {
   constructor(ticketId: string) {
     super(`Ticket ${ticketId} is archived — call unarchive_ticket to mutate it`);
     this.name = 'TicketArchivedError';
-  }
-}
-
-/**
- * True when a move would drag a ticket OUT of a terminal column back into a
- * non-terminal one (ticket ad0eb567).
- *
- * On a board where one agent holds assignee+reviewer+reporter, every column
- * transition fires a fresh role-trigger to the same agent, so multiple strands
- * run concurrently. A strand spawned while the ticket was still in
- * Review/Merging reads that stale snapshot; by the time its `move_ticket`
- * lands, a sibling strand may have already merged the ticket into Done. The
- * stale call then re-opens the completed merge (observed on tickets e163c952
- * and 9f507f5c). This is the exact transition to refuse by default — forward
- * moves into terminal and reorders within terminal are unaffected.
- */
-export function isTerminalReopen(
-  sourceColumn: BoardColumn | null | undefined,
-  destColumn: BoardColumn | null | undefined,
-): boolean {
-  return isTerminalColumn(sourceColumn) && !isTerminalColumn(destColumn);
-}
-
-/**
- * Thrown / surfaced when a move is rejected because it would reopen a ticket
- * out of a terminal column without an explicit override. Callers that genuinely
- * mean to reopen (a human dragging a Done card, or an automated caller passing
- * `force`) bypass the guard; everyone else gets a stable, greppable rejection.
- */
-export class TerminalReopenError extends Error {
-  status = 409;
-  code = 'terminal_reopen_blocked';
-  hint = 'Pass force=true to intentionally reopen a ticket out of a terminal column';
-  constructor(ticketId: string, sourceName: string, destName: string) {
-    super(
-      `Ticket ${ticketId} is in terminal column "${sourceName}" — refusing to move it back to non-terminal "${destName}". ` +
-      `This is almost always a stale concurrent strand acting on an out-of-date snapshot of an already-completed ticket. ` +
-      `Pass force=true if you really mean to reopen it.`,
-    );
-    this.name = 'TerminalReopenError';
   }
 }
 
@@ -159,7 +42,7 @@ export function assertTicketActive<T extends { id: string; archived_at: Date | n
 /**
  * Compound cursor for archived-ticket pagination — `<isoTimestamp>|<id>`.
  *
- * The archiver stamps every ticket in a per-board batch with the same
+ * The archiver stamps every ticket in a batch with the same
  * `archived_at` (single `new Date()` reused across the loop). A cursor that
  * only carries the timestamp and filters `archived_at < cursor` would skip
  * the rest of that batch when the page boundary lands inside it.
@@ -191,8 +74,7 @@ export function parseArchiveCursor(cursor: string | null | undefined): { ts: Dat
 /**
  * Walk from a ticket up to its root and return the root's archived_at.
  * Used by child-ticket mutation paths so a subtask can't be edited while
- * its parent is archived — the root is the only ticket carrying the flag
- * because archive is a board-level concept and subtasks have no column.
+ * its parent is archived — the root is the only ticket carrying the flag.
  *
  * Bounded by the 2-level depth cap; worst case 2 reads. Returns null when
  * walking fails (orphan row) so the caller treats it as "not archived"

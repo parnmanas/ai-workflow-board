@@ -1,5 +1,5 @@
 /**
- * Small DB helpers shared between ticket/board/column tools.
+ * Small DB helpers shared between the ticket tools.
  *
  * All functions take an explicit DataSource so they work uniformly in the
  * NestJS-integrated and standalone MCP contexts.
@@ -8,8 +8,6 @@
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 import { In } from 'typeorm';
 import { resolveCallerIdentityRow } from './authz';
-import { Board } from '../../../entities/Board';
-import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
 import { Comment } from '../../../entities/Comment';
 import { Resource } from '../../../entities/Resource';
@@ -22,24 +20,6 @@ import { TicketAttachment } from '../../../entities/TicketAttachment';
  * connection.
  */
 export type RepoScope = DataSource | EntityManager;
-
-/** Case-insensitive column lookup by name, scoped to a board. */
-export async function findColumnByName(scope: RepoScope, boardId: string, columnName: string) {
-  return scope.getRepository(BoardColumn)
-    .createQueryBuilder('col')
-    .where('col.board_id = :boardId AND LOWER(col.name) = LOWER(:name)', { boardId, name: columnName })
-    .getOne();
-}
-
-/** Next free `position` value at the end of a column (root tickets only). */
-export async function maxTicketPosition(scope: RepoScope, columnId: string): Promise<number> {
-  const result = await scope.getRepository(Ticket)
-    .createQueryBuilder('t')
-    .select('COALESCE(MAX(t.position), -1)', 'max')
-    .where('t.column_id = :columnId AND t.parent_id IS NULL', { columnId })
-    .getRawOne();
-  return (result?.max ?? -1) + 1;
-}
 
 /** Next free `position` value at the end of a parent's child list. */
 export async function maxChildPosition(scope: RepoScope, parentId: string): Promise<number> {
@@ -172,60 +152,19 @@ export async function resolveAgentIdAndName(
 }
 
 /**
- * Backfill `ticket.workspace_id` from its column → board when the row was
- * saved with the empty default (`Ticket.workspace_id` defaults to '' so MCP
- * create paths that don't supply it land empty). Mutates the in-memory
- * ticket and persists the new value via a targeted UPDATE so the very next
- * `syncBuiltinTrio` / `setHolder` call has the workspace context it needs
- * to find the workspace's WorkspaceRole rows.
- *
- * No-op when workspace_id is already set, or when the column / board lookup
- * misses (e.g. transient race during column delete) — failing here would
- * cascade into a confusing assignment-sync skip; the caller's later read
- * will discover the empty workspace_id and degrade gracefully on its own.
- *
- * Mirrors the REST controller's previous private `_refreshWorkspaceId`
- * helper (`tickets.controller.ts`); extracted here so MCP and REST share a
- * single implementation. The MCP `create_ticket` path historically skipped
- * this step entirely, which silently broke the v0.34 trigger loop for
- * every ticket created via MCP.
- */
-export async function refreshTicketWorkspaceId(
-  scope: RepoScope,
-  ticket: Ticket,
-): Promise<void> {
-  if (ticket.workspace_id) return;
-  if (!ticket.column_id) return;
-  const col = await scope.getRepository(BoardColumn)
-    .findOne({ where: { id: ticket.column_id } })
-    .catch(() => null);
-  if (!col) return;
-  const board = await scope.getRepository(Board)
-    .findOne({ where: { id: col.board_id } })
-    .catch(() => null);
-  if (!board?.workspace_id) return;
-  ticket.workspace_id = board.workspace_id;
-  await scope.getRepository(Ticket)
-    .update(ticket.id, { workspace_id: board.workspace_id })
-    .catch(() => { /* persist failure is non-fatal — caller still has the value in-memory */ });
-}
-
-/**
  * Validate a `next_ticket_id` candidate before persisting it on a ticket:
  *   - empty / null / undefined  → returns null (clears the link)
  *   - same id as the ticket itself → throws (no self-link)
  *   - target row missing → throws
  *   - target lives in a different workspace → throws
  *
- * Mirrors the `base_repo_resource_id` workspace guard so a guessed id from
- * another workspace can never wire a cross-workspace trigger here.
+ * A guessed id from another workspace can never wire a cross-workspace chain.
  *
  * `currentTicketId` is the ticket being updated (or null when creating, in
  * which case the self-link check is skipped — a new ticket can't reference
  * itself before it has an id). `currentWorkspaceId` is the workspace the
  * link is being established in; when empty, only the existence + self-link
- * checks run (workspace guard skipped to keep parity with refreshTicketWorkspaceId
- * deferred backfill — same posture as base_repo_resource_id).
+ * checks run.
  */
 export async function validateNextTicketId(
   scope: RepoScope,
@@ -252,8 +191,8 @@ export async function validateNextTicketId(
 /**
  * Shift sibling ticket positions within a scope.
  *
- *   scope: { column_id }  → root tickets in a board column (parent_id IS NULL).
- *   scope: { parent_id }  → children of the given parent.
+ *   scope: { parent_id }  → children of the given parent (root tickets are
+ *   ordered per status lane by TicketService.reposition).
  *
  *   delta = -1: close the gap left by a removed ticket (position > fromPos).
  *   delta = +1: open a slot for an inserted ticket (position >= fromPos, when `inclusive`).
@@ -263,7 +202,7 @@ export async function validateNextTicketId(
  */
 export async function shiftTicketPositions(
   ticketRepo: Repository<Ticket>,
-  scope: { column_id: string } | { parent_id: string },
+  scope: { parent_id: string },
   fromPos: number,
   delta: 1 | -1,
   options: { inclusive?: boolean; excludeId?: string } = {},
@@ -274,13 +213,8 @@ export async function shiftTicketPositions(
 
   const qb = ticketRepo.createQueryBuilder().update().set({ position: () => expr });
 
-  if ('column_id' in scope) {
-    qb.where(`column_id = :colId AND position ${cmp} :pos AND parent_id IS NULL`,
-      { colId: scope.column_id, pos: fromPos });
-  } else {
-    qb.where(`parent_id = :parentId AND position ${cmp} :pos`,
-      { parentId: scope.parent_id, pos: fromPos });
-  }
+  qb.where(`parent_id = :parentId AND position ${cmp} :pos`,
+    { parentId: scope.parent_id, pos: fromPos });
 
   if (excludeId) qb.andWhere('id != :excludeId', { excludeId });
 

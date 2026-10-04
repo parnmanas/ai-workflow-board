@@ -17,7 +17,7 @@ export interface NotifyPayload {
   title: string;
   /** Plain-text body. Providers strip / down-format markdown as needed. */
   body: string;
-  /** Optional deep-link back into AWB (board / ticket / chat-room view). */
+  /** Optional deep-link back into AWB (ticket / chat-room view). */
   url?: string;
   /** Free-form actor display name shown in the body. */
   actor?: string;

@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import {
   AGENT_MANAGER_HOME,
   CONFIG_PATH,
+  MAIN_CLONES_PATH,
   MANAGED_AGENTS_DIR,
   OUTBOX_PATH,
   SESSION_DEFER_PATH,
@@ -722,8 +723,9 @@ async function runRuntime(
       log(`[runtime:hermes:${agentId.slice(0, 8)}] ${line}`);
     },
   });
-  // Ticket execution always uses an isolated checkout below the storage root.
-  const worktreeManager = new WorktreeManager();
+  // Ticket execution always uses an isolated checkout below the storage root
+  // (or below a project's main clone folder on this host — remembered on disk).
+  const worktreeManager = new WorktreeManager({ mainCloneRegistryPath: MAIN_CLONES_PATH });
   // Construct the session managers BEFORE the command handler so stop_agent /
   // restart_agent can force-kill an agent's live chat / ticket children
   // through them. Without this wiring, a credential rotation only rewrote
@@ -1421,6 +1423,10 @@ async function runRuntime(
           activeKeys,
         });
       }
+      // Project main clone folders (`<main>/.awb/wt/<ticket8>`) — same rule.
+      for (const mainCloneDir of await worktreeManager.knownMainClones()) {
+        total += await worktreeManager.sweep({ mainCloneDir, activeKeys });
+      }
       if (total > 0) log(`[worktree] sweep reclaimed ${total} idle clean worktree(s)`);
     } catch (err: any) {
       log(`[worktree] sweep failed: ${err?.message ?? err}`);
@@ -1486,6 +1492,9 @@ async function runRuntime(
           baseWorkingDir: ctx.working_dir,
           liveTicketIds,
         });
+      }
+      for (const mainCloneDir of await worktreeManager.knownMainClones()) {
+        total += await worktreeManager.reconcilePoolLeases({ mainCloneDir, liveTicketIds });
       }
       if (total > 0) {
         log(`[worktree] pool reclaim (${trigger}) reclaimed ${total} orphaned lease(s)`);
@@ -1744,6 +1753,23 @@ async function runRuntime(
           for (const e of entries) {
             out.push({
               working_dir: ctx.working_dir,
+              path: e.path,
+              slot: e.slot,
+              mode: e.mode,
+              ticket_id: e.ticketId,
+              branch: e.branch,
+              state: e.state,
+              live: e.live,
+            });
+          }
+        }
+        // Project main clone folders: their worktrees report the main clone as
+        // the folder they live in (`working_dir` of the heartbeat row).
+        for (const mainCloneDir of await worktreeManager.knownMainClones()) {
+          const entries = await worktreeManager.snapshotWorktrees({ mainCloneDir, liveTicketIds });
+          for (const e of entries) {
+            out.push({
+              working_dir: mainCloneDir,
               path: e.path,
               slot: e.slot,
               mode: e.mode,

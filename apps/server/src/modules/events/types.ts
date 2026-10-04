@@ -6,15 +6,13 @@ import { StreamEvent } from '../../common/types/stream-events';
 
 /**
  * Subscriber identity resolved by the SSE stream handler from the auth token
- * or API key, plus any connection-scoped query params (e.g. boardId).
+ * or API key.
  */
 export interface SubscriberIdentity {
   type: 'user' | 'agent';
   name: string;
   agentId?: string;
   userId?: string;
-  /** boardId query param, scoping board_update delivery. */
-  boardId?: string;
   /** Server-generated UUID for this SSE connection. */
   sseSessionId?: string;
   /**
@@ -39,15 +37,18 @@ export interface SubscriberIdentity {
 
 /**
  * Helpers an EventDefinition.map() can call when it needs data beyond the raw
- * emitter payload (e.g., board_update resolves ticket → board_id via the DB).
+ * emitter payload (e.g., board_update resolves the ticket's root via the DB).
  */
 export interface EventMapContext {
-  resolveBoardId(ticketId: string, entityId: string): Promise<string | null>;
-  resolveTicketRepositoryResourceId(ticketId: string): Promise<string>;
-  resolveTicketColumnSnapshot(ticketId: string, entityId: string): Promise<{
-    id: string;
-    name: string;
-    kind: string;
+  /**
+   * The ROOT ticket behind an activity (subtasks walk up to their root):
+   * workspace, status and project. null when the ticket is gone.
+   */
+  resolveTicketSnapshot(ticketId: string, entityId: string): Promise<{
+    root_id: string;
+    workspace_id: string;
+    status: string;
+    project_id: string;
   } | null>;
   /**
    * Canonical `<Manager>/<Agent>` display for an actor id, so a live

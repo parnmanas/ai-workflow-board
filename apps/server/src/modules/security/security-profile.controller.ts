@@ -20,7 +20,6 @@ function batchToJson(b: SecurityRunBatch) {
   return {
     id: b.id,
     workspace_id: b.workspace_id,
-    board_id: b.board_id,
     profile_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -47,7 +46,6 @@ function scheduleToJson(s: SecuritySchedule) {
   return {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     kind: s.kind ?? 'scan',
     scope: s.scope,
@@ -169,7 +167,6 @@ export class SecurityProfileController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const result = await this.runService.startRun({
         profileId: id,
-        boardId: body?.board_id,
         triggeredByType: 'user',
         triggeredById: user?.id || '',
       });
@@ -210,7 +207,7 @@ export class SecurityProfileController {
 
   // ── Batches (수동 전체 점검 — sequential multi-profile runs) ───────────────────
 
-  // Start a sequential batch. Body: { workspace_id, board_id?, profile_ids?[],
+  // Start a sequential batch. Body: { workspace_id, profile_ids?[],
   // all?, stop_on_fail? }. Only index 0 dispatches now; the rest are dispatched
   // one-at-a-time as each run finalizes (see SecurityRunService.onRunFinalized).
   @Post('batches')
@@ -219,7 +216,6 @@ export class SecurityProfileController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const batch = await this.runService.startBatch({
         workspaceId: body?.workspace_id,
-        boardId: body?.board_id ?? undefined,
         profileIds: Array.isArray(body?.profile_ids) ? body.profile_ids : undefined,
         all: !!body?.all,
         stopOnFail: !!body?.stop_on_fail,
@@ -272,7 +268,6 @@ export class SecurityProfileController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const row = await this.scheduleService.create({
         workspaceId: body?.workspace_id,
-        boardId: body?.board_id ?? undefined,
         name: body?.name,
         kind: body?.kind,
         scope: body?.scope,
@@ -293,7 +288,6 @@ export class SecurityProfileController {
   async updateSchedule(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
       const row = await this.scheduleService.update(id, body?.workspace_id, {
-        boardId: body?.board_id,
         name: body?.name,
         kind: body?.kind,
         scope: body?.scope,

@@ -1,15 +1,15 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { activityEvents } from '../activity.service';
 import { LogService } from '../log.service';
 import { decrypt } from '../encryption.service';
 import { UserChannel } from '../../entities/UserChannel';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
+import { ticketPath } from '../../common/artifact-ref';
 import { NotificationProviderRegistry } from './registry.service';
+import { ticketParticipantUserIds } from './ticket-participants';
 import { NotifyPayload } from './types';
 
 interface UserMentionEvent {
@@ -19,7 +19,6 @@ interface UserMentionEvent {
   source_type: 'comment' | 'chat_message';
   source_id: string;
   ticket_id: string | null;
-  board_id: string | null;
   room_id: string | null;
   actor_id: string;
   actor_type: string;
@@ -64,8 +63,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
   constructor(
     @InjectRepository(UserChannel) private readonly userChannelRepo: Repository<UserChannel>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
-    @InjectRepository(TicketRoleAssignment) private readonly assignRepo: Repository<TicketRoleAssignment>,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly registry: NotificationProviderRegistry,
     private readonly logService: LogService,
   ) {}
@@ -230,10 +228,11 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Ticket activity → notify role-assigned humans (assignee/reporter/reviewer)
-   * with `notify_ticket=1`. Comment activity is intentionally skipped here
-   * since the comment-mention path already covers the pinged users; a
-   * future setting could surface "all comments on tickets I own".
+   * Ticket activity → notify the ticket's human participants (creator,
+   * commenters, mentioned users — see ticketParticipantUserIds) with
+   * `notify_ticket=1`. The assignee is an agent, so it is never a recipient.
+   * Comment activity is intentionally skipped here since the comment-mention
+   * path already covers the pinged users.
    */
   private async _handleActivity(log: ActivityLog): Promise<void> {
     if (log.entity_type !== 'ticket') return;
@@ -245,15 +244,12 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } }).catch(() => null);
     if (!ticket) return;
 
-    const assignments = await this.assignRepo.find({ where: { ticket_id: ticketId } }).catch(() => [] as TicketRoleAssignment[]);
-    const userIds = Array.from(new Set(
-      assignments.map((a) => a.user_id).filter((id): id is string => !!id && id !== log.actor_id),
-    ));
+    const participants = await ticketParticipantUserIds(this.dataSource, ticket).catch(() => [] as string[]);
+    const userIds = participants.filter((id) => id !== log.actor_id);
     if (userIds.length === 0) return;
 
-    const boardId = await this._resolveBoardId(ticket);
-    const url = process.env.AWB_PUBLIC_URL && boardId
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/ws/${ticket.workspace_id}/boards/${boardId}?ticket=${ticketId}`
+    const url = process.env.AWB_PUBLIC_URL && ticket.workspace_id
+      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}${ticketPath(ticket.workspace_id, ticketId)}`
       : undefined;
 
     const action = log.action.replace('_', ' ');
@@ -308,35 +304,8 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
       const params = new URLSearchParams({ room: ev.room_id, message: ev.source_id });
       return `${base}/ws/${ev.workspace_id}/chat?${params.toString()}`;
     }
-    if (ev.ticket_id && ev.board_id) {
-      const params = new URLSearchParams({ ticket: ev.ticket_id, comment: ev.source_id });
-      return `${base}/ws/${ev.workspace_id}/boards/${ev.board_id}?${params.toString()}`;
-    }
-    return null;
-  }
-
-  /**
-   * Root tickets carry column_id directly; child/grandchild tickets store it
-   * on the nearest ancestor (same walk as EventsController.resolveBoardId).
-   */
-  private async _resolveBoardId(ticket: Ticket): Promise<string | null> {
-    if (ticket.column_id) {
-      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-      return col?.board_id || null;
-    }
-    if (ticket.parent_id) {
-      const parent = await this.ticketRepo.findOne({ where: { id: ticket.parent_id } });
-      if (parent?.column_id) {
-        const col = await this.colRepo.findOne({ where: { id: parent.column_id } });
-        return col?.board_id || null;
-      }
-      if (parent?.parent_id) {
-        const grandparent = await this.ticketRepo.findOne({ where: { id: parent.parent_id } });
-        if (grandparent?.column_id) {
-          const col = await this.colRepo.findOne({ where: { id: grandparent.column_id } });
-          return col?.board_id || null;
-        }
-      }
+    if (ev.ticket_id) {
+      return `${base}${ticketPath(ev.workspace_id, ev.ticket_id, { comment: ev.source_id })}`;
     }
     return null;
   }

@@ -3,7 +3,7 @@ import { InstanceRegistryService } from './instance-registry.service';
 
 /**
  * ticket c3b767c6 — InstanceRegistryService extracted into its own @Global()
- * module so the dispatch-capability gate (TriggerLoopService in AgentsModule,
+ * module so the dispatch-capability gate (TicketDispatchService in AgentsModule,
  * RoomMessagingService in ChatRoomsModule) can inject it directly, the same
  * way AgentConnectivityRegistry (services/shared-services.module.ts) reaches
  * both its producer (EventsController) and consumer (AgentAutostartService)

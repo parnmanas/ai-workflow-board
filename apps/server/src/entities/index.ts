@@ -1,18 +1,15 @@
 export { Workspace } from './Workspace';
-export { Board } from './Board';
-export { BoardColumn } from './BoardColumn';
 export { Ticket } from './Ticket';
-export { TicketCompletionVerification } from './TicketCompletionVerification';
-export { TicketCompletionVerificationAttempt } from './TicketCompletionVerificationAttempt';
+// Projects (docs/tickets.md) — one repository + its main clone folder per Runtime Host.
+export { Project } from './Project';
+export { ProjectHostFolder } from './ProjectHostFolder';
 export { Comment } from './Comment';
-export { CommentSummaryRun } from './CommentSummaryRun';
 export { User } from './User';
 // Runtime Host — 실행 정체성. manager Agent 행은 P4c-4 로 제거됐다.
 export { RuntimeHost } from './RuntimeHost';
 export { Channel } from './Channel';
 export { ActivityLog } from './ActivityLog';
 export { ApiKey } from './ApiKey';
-export { PromptTemplate } from './PromptTemplate';
 export { RelationTuple } from './RelationTuple';
 export { ChatRoom } from './ChatRoom';
 export { ChatRoomParticipant } from './ChatRoomParticipant';
@@ -25,8 +22,6 @@ export { AgentErrorLog } from './AgentErrorLog';
 export { UserMention } from './UserMention';
 export { UserChannel } from './UserChannel';
 export { TicketReadState } from './TicketReadState';
-export { WorkspaceRole } from './WorkspaceRole';
-export { TicketRoleAssignment } from './TicketRoleAssignment';
 export { TicketAttachment } from './TicketAttachment';
 export { Subagent } from './Subagent';
 export { SubagentLogLine } from './SubagentLogLine';
@@ -37,32 +32,11 @@ export { AgentUsageDailyRollup } from './AgentUsageDailyRollup';
 export { Action } from './Action';
 export { ActionRun } from './ActionRun';
 export { ActionApproval } from './ActionApproval';
-export { StuckTicketAlert } from './StuckTicketAlert';
-// CI red-streak dedup + delivery-state row (ticket cc1c494e) — sibling of
-// StuckTicketAlert, see that entity's docstring for the durable-delivery
-// contract. Auto-DDL'd by TypeORM `synchronize` (D-01) exactly like the other
-// tables in this comment block; no hand-written migration needed.
+// CI red-streak dedup + delivery-state row (ticket cc1c494e). Auto-DDL'd by
+// TypeORM `synchronize` (D-01); no hand-written migration needed.
 export { CiRedAlert } from './CiRedAlert';
-// Durable dispatch outbox (ticket e7c87517) — one row per owed agent_trigger,
-// driven to `resolved` only by real forward progress. The table is auto-DDL'd
-// on EVERY backend (sqlite + Postgres) by TypeORM `synchronize`, which db.ts
-// hardcodes ON in all branches (D-01, never NODE_ENV-gated) — so no hand-written
-// migration is needed, exactly like the sibling StuckTicketAlert (`stuck_alerts`).
-export { DispatchIntent } from './DispatchIntent';
-// Review-episode drift tracking (ticket 59efbde9) — one row per ticket while a
-// Review episode is open. Auto-DDL'd by TypeORM `synchronize` (D-01) exactly
-// like the two sibling tables above; no hand-written migration needed.
-export { ReviewDriftState } from './ReviewDriftState';
-// 저장소별 랜딩 lease 큐 (ticket e630b530) — Merging 의 "CI 검증 → 랜딩" 구간을
-// 직렬화해 고빈도 base 에서도 재검증 루프가 유한하게 끝나게 한다. 위 두 형제
-// 테이블과 마찬가지로 TypeORM `synchronize`(D-01)가 auto-DDL 하므로 손으로 쓴
-// 스키마 마이그레이션은 필요 없다(D-02: 마이그레이션은 DATA 전용).
-export { MergeLease } from './MergeLease';
-export type { DriftClassification } from './ReviewDriftState';
-export { ColumnRolePolicy } from './ColumnRolePolicy';
 export { TicketPrerequisite } from './TicketPrerequisite';
 export { TicketDuplicateDecision } from './TicketDuplicateDecision';
-export { BenchmarkScore } from './BenchmarkScore';
 export { BuildArtifact } from './BuildArtifact';
 export { QaScenario } from './QaScenario';
 export { QaRun } from './QaRun';
@@ -77,10 +51,6 @@ export { WorkflowFunction } from './WorkflowFunction';
 export { WorkflowFunctionRun } from './WorkflowFunctionRun';
 // Deployment awareness (ticket 8ce72b18) — the current live commit per environment.
 export { Deployment } from './Deployment';
-export { Feature } from './Feature';
-// Board knowledge base (ticket 9d0d6ac4) — per-board Lessons/Runbook entries
-// injected into dispatch prompts.
-export { BoardLesson } from './BoardLesson';
 export { ClaudeBackendProfile } from './ClaudeBackendProfile';
 export { Skill } from './Skill';
 export { SkillVersion } from './SkillVersion';
@@ -92,7 +62,7 @@ export { ChildRun } from './ChildRun';
 // External-channel outreach intake pipeline (ticket 2500fea3) — OutreachChannel
 // (poll config + cursor) and OutreachInboundItem (dedupe ledger + noise/held
 // audit + ticket backlink). Auto-DDL'd by TypeORM `synchronize` (D-01) exactly
-// like DispatchIntent/ReviewDriftState; no hand-written migration needed.
+// like the other tables here; no hand-written migration needed.
 export { OutreachChannel } from './OutreachChannel';
 export type { OutreachChannelKind, OutreachPublishPolicy } from './OutreachChannel';
 export { OutreachInboundItem } from './OutreachInboundItem';

@@ -6,7 +6,13 @@ import { LogService } from './log.service';
 import { Comment } from '../entities/Comment';
 import { Ticket } from '../entities/Ticket';
 import { ActivityLog } from '../entities/ActivityLog';
-import { WorkspaceRole } from '../entities/WorkspaceRole';
+import { TICKET_STATUS_LABELS, isTicketStatus } from '../common/ticket-status';
+
+/** Status id → its board-less label ("in_progress" → "In Progress"). */
+function statusLabel(value: string | null | undefined): string {
+  if (!value) return 'Unknown';
+  return isTicketStatus(value) ? TICKET_STATUS_LABELS[value] : value;
+}
 
 @Injectable()
 export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
@@ -15,7 +21,6 @@ export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(WorkspaceRole) private readonly roleRepo: Repository<WorkspaceRole>,
     private readonly logService: LogService,
   ) {}
 
@@ -75,28 +80,8 @@ export class SystemCommentService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (log.entity_type === 'ticket') {
-      if (log.action === 'moved' && log.field_changed === 'column') {
-        return `📋 Ticket moved from **${log.old_value || 'Unknown'}** to **${log.new_value || 'Unknown'}**${actor}`;
-      }
-      if (log.action === 'updated' && log.field_changed) {
-        // Role-assignment field_changed values are workspace role slugs.
-        // Look the role up so the comment shows the human-readable name and
-        // not the raw slug ("QA Reviewer changed from …" not "qa-reviewer
-        // changed from …"). Built-in slugs (assignee/reporter/reviewer)
-        // resolve via the same path now that they live in workspace_roles.
-        const ticket = await this.ticketRepo.findOne({ where: { id: log.ticket_id! } });
-        if (ticket?.workspace_id) {
-          const role = await this.roleRepo.findOne({
-            where: { workspace_id: ticket.workspace_id, slug: log.field_changed },
-          });
-          if (role) {
-            const icon = role.slug === 'assignee' ? '👤'
-              : role.slug === 'reporter' ? '📝'
-              : role.slug === 'reviewer' ? '🔍'
-              : '🎭';
-            return `${icon} ${role.name} changed from **${log.old_value || 'Unassigned'}** to **${log.new_value || 'Unassigned'}**${actor}`;
-          }
-        }
+      if (log.action === 'moved' && log.field_changed === 'status') {
+        return `📋 Ticket moved from **${statusLabel(log.old_value)}** to **${statusLabel(log.new_value)}**${actor}`;
       }
     }
 

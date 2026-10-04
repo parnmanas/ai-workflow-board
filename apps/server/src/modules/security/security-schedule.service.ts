@@ -3,7 +3,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { SecuritySchedule, SecurityScheduleScope, SecurityScheduleKind, normalizeScheduleKind } from '../../entities/SecuritySchedule';
 import { SecurityRunBatch } from '../../entities/SecurityRunBatch';
-import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
@@ -33,7 +32,6 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
 
 export interface CreateSecurityScheduleInput {
   workspaceId: string;
-  boardId?: string | null;
   name: string;
   kind?: SecurityScheduleKind;
   scope?: SecurityScheduleScope;
@@ -108,7 +106,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(SecurityRunBatch) private readonly batchRepo: Repository<SecurityRunBatch>,
     private readonly runService: SecurityRunService,
     private readonly logService: LogService,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesce: InstanceQuiesceService,
@@ -141,8 +138,7 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
   async list(workspaceId: string): Promise<SecuritySchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('s.board_id IS NULL');
+      .where('s.workspace_id = :ws', { ws: workspaceId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
@@ -154,7 +150,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateSecurityScheduleInput): Promise<SecuritySchedule> {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const kind = normalizeScheduleKind(input.kind);
     const scope: SecurityScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
@@ -164,7 +159,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
 
     const draft = this.scheduleRepo.create({
       workspace_id: input.workspaceId,
-      board_id: null,
       name: input.name.trim(),
       kind,
       scope,
@@ -189,9 +183,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
       schedule.name = patch.name.trim();
-    }
-    if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
-      throw makeError(400, 'scope cannot be changed after creation');
     }
     if (patch.kind !== undefined) schedule.kind = normalizeScheduleKind(patch.kind);
     if (patch.stopOnFail !== undefined) schedule.stop_on_fail = !!patch.stopOnFail;
@@ -410,12 +401,6 @@ export class SecurityScheduleService implements OnModuleInit, OnModuleDestroy {
       triggeredByType: 'system',
       triggeredById,
     });
-  }
-
-  private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
-    if (boardId) {
-      throw makeError(400, 'Board-scoped Security schedules are no longer supported; create the schedule in its Workspace');
-    }
   }
 
   private _validateScope(scope: SecurityScheduleScope, profileIds: string[] | null | undefined): string[] | null {

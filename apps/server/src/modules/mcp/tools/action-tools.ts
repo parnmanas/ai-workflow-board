@@ -32,7 +32,6 @@ function actionToJson(a: Action) {
   return withArtifactRef('action', {
     id: a.id,
     workspace_id: a.workspace_id,
-    board_id: a.board_id,
     name: a.name,
     description: a.description,
     prompt: a.prompt,
@@ -57,7 +56,7 @@ function actionToJson(a: Action) {
 }
 
 export function registerActionTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, actionsService, triggerLoopService, logger } = ctx;
+  const { dataSource, actionsService, ticketDispatchService, logger } = ctx;
 
   server.tool(
     'list_actions',
@@ -68,8 +67,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     async ({ workspace_id }) => {
       const repo = dataSource.getRepository(Action);
       const qb = repo.createQueryBuilder('a')
-        .where('a.workspace_id = :ws', { ws: workspace_id })
-        .andWhere('a.board_id IS NULL');
+        .where('a.workspace_id = :ws', { ws: workspace_id });
       const rows = await qb.orderBy('a.name', 'ASC').getMany();
       return ok(rows.map(actionToJson));
     },
@@ -91,11 +89,11 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'Create or update an action. Provide `id` to update an existing action; omit it to create. ' +
     'The `target_agent_id` must reference an agent in the same workspace (or a global agent). ' +
     '`schedule_cron` accepts a 5-field cron expression with `*` and integer values; leave empty for manual-only. ' +
-    "`trigger='on_ticket_done'` opts the action into the lifecycle hook — it runs once when a ticket lands on a " +
-    'terminal column (Done), scoped within the workspace and optionally narrowed by trigger_label ' +
-    '(empty = any label). The finished ticket is exposed to the prompt as {{ticket.id}}/{{ticket.title}}/{{ticket.board_id}} etc. ' +
+    "`trigger='on_ticket_done'` opts the action into the lifecycle hook — it runs once when a ticket enters " +
+    "status 'done', scoped within the workspace and optionally narrowed by trigger_label " +
+    '(a ticket tag; empty = any ticket). The finished ticket is exposed to the prompt as {{ticket.id}}/{{ticket.title}}/{{ticket.status}} etc. ' +
     'enabled=false skips the hook too (manual run_action only). ' +
-    'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,board,user,agent,ticket,date,time,datetime}.',
+    'Prompt supports `{{var.path}}` interpolation against {action,run,workspace,user,agent,ticket,date,time,datetime}.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       id: z.string().optional().describe('Action ID — omit to create, provide to update'),
@@ -106,8 +104,8 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
       target_agent_ids: z.array(z.string()).optional().describe('Target agent IDs. One trigger fans out to an INDEPENDENT run per agent, each in its own room. Takes precedence over `target_agent_id` when both are given; the first entry is mirrored back into `target_agent_id`. Every id must be an agent in this workspace (or a global agent) — one bad id rejects the whole save.'),
       target_runtimes: z.array(z.record(z.string(), z.any())).optional().describe('RuntimeSpec array declaring execution without Agent rows (P4c-3b). Takes precedence over both id forms; each entry is normalized and identity-keyed.'),
       schedule_cron: z.string().optional().describe('5-field cron (e.g. "0 9 * * 1" for Mon 9am); empty = manual'),
-      trigger: z.string().optional().describe("Lifecycle trigger: '' (cron/manual, default) or 'on_ticket_done' (run when a ticket reaches a terminal column)"),
-      trigger_label: z.string().optional().describe("For trigger='on_ticket_done': only fire when the finished ticket carries this label. Empty = any label."),
+      trigger: z.string().optional().describe("Lifecycle trigger: '' (cron/manual, default) or 'on_ticket_done' (run when a ticket enters status 'done')"),
+      trigger_label: z.string().optional().describe("For trigger='on_ticket_done': only fire when the finished ticket carries this tag. Empty = any ticket."),
       enabled: z.boolean().optional().describe('When false, scheduler/hook skips this action (manual run still works)'),
       high_impact: z.boolean().optional().describe('Mark deploy/publish/release Actions whose failure may mean a partial external effect. High-impact ticket-driven runs are NOT auto-retried on failure — the failure surfaces to the source ticket for a human decision (bounded retry is not operation idempotency).'),
       max_runs: z.number().optional().describe('FIFO prune budget (default 10)'),
@@ -126,7 +124,6 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
             target_agent_id,
             target_agent_ids,
             target_runtimes,
-            board_id: null,
             schedule_cron,
             trigger,
             trigger_label,
@@ -147,7 +144,6 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
         }
         const created = await actionsService.create({
           workspace_id,
-          board_id: null,
           name,
           description: description ?? '',
           prompt: prompt ?? '',
@@ -257,7 +253,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     'Report the outcome of an Action Run and close the loop back to the ticket that ' +
     'dispatched it. The target agent that performed the Run calls this ONCE when done. ' +
     'On `succeeded`, the run\'s `source_ticket_id` (if any) is AUTO-RESUMED — the ticket\'s ' +
-    'current-column role holders are re-dispatched so work continues on the same ticket — ' +
+    'assignee is re-dispatched so work continues on the same ticket — ' +
     'and the summary is posted to the ticket\'s audit trail. On `failed`, the run is retried ' +
     'automatically up to a bounded cap (fresh run, same source ticket); once the cap is ' +
     'reached the failure is surfaced and the ticket is resumed so the assignee can decide. ' +
@@ -280,22 +276,21 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
           actorName: caller?.agentName ?? '',
         });
 
-        // Auto-resume: re-dispatch the source ticket's current-column role
-        // holders so work continues in place. Only when the service says so
-        // (success, or a failure that exhausted retries) — a retry defers the
-        // resume to the retry run. Goes through the focus/pending/strand gates
-        // in _emitTrigger, so it stays silent if the ticket isn't the holder's
-        // current focus. Best-effort: a resume miss must not fail the call —
-        // the outcome is already recorded on the run + ticket audit trail.
+        // Auto-resume: re-dispatch the source ticket's assignee so work
+        // continues in place. Only when the service says so (success, or a
+        // failure that exhausted retries) — a retry defers the resume to the
+        // retry run. resumeTicket() re-checks status/pending/capacity, so it
+        // stays silent if the ticket can't take a dispatch right now.
+        // Best-effort: a resume miss must not fail the call — the outcome is
+        // already recorded on the run + ticket audit trail.
         let resumeEmitted = 0;
-        if (result.shouldResume && result.sourceTicketId && triggerLoopService) {
+        if (result.shouldResume && result.sourceTicketId && ticketDispatchService) {
           try {
-            const dispatched = await triggerLoopService.dispatchCurrentColumn(
+            const dispatched = await ticketDispatchService.resumeTicket(
               result.sourceTicketId,
               status === 'succeeded' ? 'action_run_succeeded' : 'action_run_failed',
-              caller?.agentId || '',
             );
-            resumeEmitted = dispatched?.emitted ?? 0;
+            resumeEmitted = dispatched?.dispatched ? 1 : 0;
           } catch (e: any) {
             logger?.warn?.('MCP', 'complete_action_run resume dispatch failed (continuing)', {
               err: String(e), ticket_id: result.sourceTicketId, run_id,
@@ -385,8 +380,7 @@ export function registerActionTools(server: McpServer, ctx: ToolContext): void {
     async ({ workspace_id, query, limit }) => {
       const repo = dataSource.getRepository(Action);
       const qb = repo.createQueryBuilder('a')
-        .where('a.workspace_id = :ws', { ws: workspace_id })
-        .andWhere('a.board_id IS NULL');
+        .where('a.workspace_id = :ws', { ws: workspace_id });
       const pattern = `%${query.toLowerCase()}%`;
       qb.andWhere('(LOWER(a.name) LIKE :q OR LOWER(a.description) LIKE :q OR LOWER(a.prompt) LIKE :q)', { q: pattern });
       qb.orderBy('a.name', 'ASC').limit(Math.min(limit ?? 20, 100));

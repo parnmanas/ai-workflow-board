@@ -16,7 +16,7 @@ import { ADAPTER_CAPABILITIES, type ParseResult, type TurnImage } from './cli-ad
 import { cliDispatch } from './clis/index.js';
 import { DEFAULT_CLI_ID } from './constants.js';
 import { createRuntimeCliAdapter } from './runtime/runtime-registry.js';
-import { fetchChatRoomHistory, fetchOrdinaryWorkBoardCandidates, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
+import { fetchChatRoomHistory, fetchOrdinaryWorkCandidates, postChatRoomMessage, postChatRoomSessionStatus } from './rest.js';
 import { log } from './logging.js';
 import { classifyCliError, hasUntrustedWorkspaceWarning } from './cli-error-signatures.js';
 import { callMcpTool, fireAndForgetTool, unwrapToolResult } from './mcp-client.js';
@@ -26,24 +26,16 @@ import {
   parseStreamToolResult,
   harvestTicketTitles,
   resolveTicketRef,
-  resolveBatchTicketRefs,
-  resolveRejectHandoffRefs,
   formatTicketRefsContent,
   chunkTicketRefs,
   trackedArtifactTool,
   resolveArtifactRef,
   chunkArtifactRefs,
   formatArtifactRefsContent,
-  trackedBoardTool,
-  resolveBoardRef,
-  chunkBoardRefs,
-  formatBoardRefsContent,
   type TicketToolContext,
   type TicketRef,
   type ArtifactToolContext,
   type ArtifactRef,
-  type BoardToolContext,
-  type BoardRef,
 } from './ticket-ref-capture.js';
 import { findLiveBackgroundTasks, reapProcessTrees, type ProcNode } from './process-tree.js';
 import { chatFollowupPolicy, composeChatRoomPrompt } from './prompts.js';
@@ -118,12 +110,6 @@ const PROGRESS_SUMMARY_MAX = 80;
  *  with the server's per-message MAX_TICKET_REFS (chat-rooms/room-messaging.service.ts)
  *  so every chunk survives the sanitizer whole. */
 const TICKET_REFS_PER_MESSAGE = 20;
-/** Agent/board refs per emitted card message (F-3 ticket 3ca88253). The server caps
- *  these at MAX_AGENT_REFS/MAX_BOARD_REFS = 10 — half of MAX_TICKET_REFS/MAX_ARTIFACT_REFS
- *  (chat-rooms/room-messaging.service.ts) — so chunking agent/board refs at
- *  TICKET_REFS_PER_MESSAGE (20) would let the server sanitizer silently drop refs 11-20
- *  of an oversized chunk, breaking the same "누락 없이" guarantee ticket/artifact refs get. */
-const AGENT_BOARD_REFS_PER_MESSAGE = 10;
 /** Bound on the per-manager ticket_id→title cache learned from tool results. */
 const TICKET_TITLE_CACHE_MAX = 500;
 
@@ -179,11 +165,7 @@ export class ChatSessionManager
   // pending/captured 이중 맵 — 티켓 ref 와 독립적으로 누적돼 flush 시 artifact_refs 로 방출.
   #pendingArtifactTools = new Map<number, Map<string, ArtifactToolContext>>();
   #capturedArtifactRefs = new Map<number, ArtifactRef[]>();
-  // F-3 (ticket 3ca88253): board-summary 카드 캡처. 동일한 pid 키
-  // pending/captured 이중 맵 패턴 — 다른 ref 채널과 독립적으로 누적돼 flush 시
-  // board_refs 로 방출. (agent-status 채널은 P4c-4 로 get_agent 와 함께 제거.)
-  #pendingBoardTools = new Map<number, Map<string, BoardToolContext>>();
-  #capturedBoardRefs = new Map<number, BoardRef[]>();
+  // (board-summary 카드 채널은 board 개념 제거와 함께 삭제 — docs/tickets.md.)
 
   constructor(config: SessionAwareConfig) {
     super(config, {
@@ -399,9 +381,9 @@ export class ChatSessionManager
       canEmitImages,
     );
     const usesNativeMcp = createRuntimeCliAdapter(spec.agentContext?.cli).has(ADAPTER_CAPABILITIES.NATIVE_MCP);
-    const ordinaryWorkBoards = usesNativeMcp || spec.isActionRoom
-      ? []
-      : await fetchOrdinaryWorkBoardCandidates(this._config);
+    const ordinaryWork = usesNativeMcp || spec.isActionRoom
+      ? null
+      : await fetchOrdinaryWorkCandidates(this._config);
     const firstTurnText = composeChatRoomPrompt(
       spec.roomId,
       history,
@@ -416,7 +398,7 @@ export class ChatSessionManager
       spec.roomName || '',
       spec.isActionRoom || false,
       spec.provisionedWorkFolder || '',
-      ordinaryWorkBoards,
+      ordinaryWork,
     );
     // Vision blocks: history images first (chronological), current turn last
     // so the freshest image is the most salient.
@@ -1048,18 +1030,7 @@ export class ChatSessionManager
         this.#pendingArtifactTools.set(pid, apend);
       }
       apend.set(block.id, actx);
-      return;
     }
-    // F-3 (ticket 3ca88253): 결과물 tool 도 아니면 board-summary tool 인지
-    // 확인해 별도 추적. (agent-status 채널은 P4c-4 로 제거.)
-    const bctx = trackedBoardTool(block?.name, block?.input);
-    if (!bctx) return;
-    let bpend = this.#pendingBoardTools.get(pid);
-    if (!bpend) {
-      bpend = new Map();
-      this.#pendingBoardTools.set(pid, bpend);
-    }
-    bpend.set(block.id, bctx);
   }
 
   #consumeTicketToolResult(pid: number, block: any): void {
@@ -1091,28 +1062,16 @@ export class ChatSessionManager
         if (remaining.length > 0) this.#capturedTicketRefs.set(pid, remaining);
         else this.#capturedTicketRefs.delete(pid);
       }
-      // Not a tracked ticket action — try the other tracked channels (each is a
-      // no-op if useId isn't in ITS pending map, so calling all three is safe: a
-      // given tool_use_id can only ever be pending in at most one of them).
+      // Not a tracked ticket action — try the artifact channel (a no-op if
+      // useId isn't in ITS pending map).
       this.#consumeArtifactToolResult(pid, useId, result, isError);
-      this.#consumeBoardToolResult(pid, useId, result, isError);
       return;
     }
     pend.delete(useId);
 
     const lookup = (id: string) => this.#ticketTitleCache.get(id);
-    // batch_operations and reject_handoff each fan ONE result out to many refs;
-    // every other tracked tool resolves to at most one. Push each through the same
-    // dedup + per-turn cap so a multi-ref call can't blow the coalesced card past
-    // the bound.
-    if (ctx.batchOps) {
-      for (const ref of resolveBatchTicketRefs(ctx, result, isError, lookup)) this.#pushCapturedRef(pid, ref);
-    } else if (ctx.rejectHandoff) {
-      for (const ref of resolveRejectHandoffRefs(ctx, result, isError, lookup)) this.#pushCapturedRef(pid, ref);
-    } else {
-      const ref = resolveTicketRef(ctx, result, isError, lookup);
-      if (ref) this.#pushCapturedRef(pid, ref);
-    }
+    const ref = resolveTicketRef(ctx, result, isError, lookup);
+    if (ref) this.#pushCapturedRef(pid, ref);
   }
 
   /** Append one captured ref to the turn's coalesced set, collapsing duplicate
@@ -1148,51 +1107,26 @@ export class ChatSessionManager
     this.#capturedArtifactRefs.set(pid, refs);
   }
 
-  /** F-3 (ticket 3ca88253): get_board_summary tool_result 를 소비해 BoardRef 로
-   *  캡처한다. pending board 맵에 매칭될 때만 방출(fail-closed). */
-  #consumeBoardToolResult(pid: number, useId: string | undefined, result: any, isError: boolean): void {
-    const bpend = this.#pendingBoardTools.get(pid);
-    const bctx = bpend && useId ? bpend.get(useId) : undefined;
-    if (!bctx || !bpend || !useId) return; // not a tracked board tool
-    bpend.delete(useId);
-    const ref = resolveBoardRef(bctx, result, isError);
-    if (ref) this.#pushCapturedBoardRef(pid, ref);
-  }
-
-  /** Append a captured board ref, collapsing duplicate board_id so asking about the
-   *  same board twice in one turn renders one card. */
-  #pushCapturedBoardRef(pid: number, ref: BoardRef): void {
-    const refs = this.#capturedBoardRefs.get(pid) ?? [];
-    if (refs.some((r) => r.board_id === ref.board_id)) return;
-    refs.push(ref);
-    this.#capturedBoardRefs.set(pid, refs);
-  }
-
-  /** Flush the turn's captured ticket-action + artifact + agent + board refs as
-   *  structured card message(s). The server bounds each message's ticket_refs /
-   *  artifact_refs at TICKET_REFS_PER_MESSAGE and agent_refs / board_refs at the lower
-   *  AGENT_BOARD_REFS_PER_MESSAGE, so a turn with more successful actions than that is
+  /** Flush the turn's captured ticket-action + artifact refs as structured card
+   *  message(s). The server bounds each message's ticket_refs / artifact_refs at
+   *  TICKET_REFS_PER_MESSAGE, so a turn with more successful actions than that is
    *  split across MULTIPLE cards (never truncated — acceptance #1 "누락 없이"). Non-empty
    *  Korean content is the fallback for surfaces
    *  that don't render metadata (history replay, notifications, legacy clients); the
-   *  metadata.{ticket_refs,artifact_refs,agent_refs,board_refs} drives the rich card.
+   *  metadata.{ticket_refs,artifact_refs} drives the rich card.
    *  Every channel flushes independently — any subset present is enough to emit.
    *  Fire-and-forget; clears per-pid state so it is idempotent (a second call after
    *  turn-end is a no-op). */
   #flushTicketRefs(sess: SessionRecord): void {
     const refs = this.#capturedTicketRefs.get(sess.pid);
     const artifactRefs = this.#capturedArtifactRefs.get(sess.pid);
-    const boardRefs = this.#capturedBoardRefs.get(sess.pid);
     this.#capturedTicketRefs.delete(sess.pid);
     this.#pendingTicketTools.delete(sess.pid);
     this.#capturedArtifactRefs.delete(sess.pid);
     this.#pendingArtifactTools.delete(sess.pid);
-    this.#capturedBoardRefs.delete(sess.pid);
-    this.#pendingBoardTools.delete(sess.pid);
     const hasTicket = !!refs && refs.length > 0;
     const hasArtifact = !!artifactRefs && artifactRefs.length > 0;
-    const hasBoard = !!boardRefs && boardRefs.length > 0;
-    if (!hasTicket && !hasArtifact && !hasBoard) return;
+    if (!hasTicket && !hasArtifact) return;
     const roomId: string | undefined = sess.roomId;
     const agentId: string | undefined = sess.agentId;
     if (!roomId || !agentId) return;
@@ -1223,12 +1157,6 @@ export class ChatSessionManager
       for (const chunk of chunkArtifactRefs(artifactRefs!, TICKET_REFS_PER_MESSAGE)) {
         const content = formatArtifactRefsContent(chunk);
         void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { artifact_refs: chunk } });
-      }
-    }
-    if (hasBoard) {
-      for (const chunk of chunkBoardRefs(boardRefs!, AGENT_BOARD_REFS_PER_MESSAGE)) {
-        const content = formatBoardRefsContent(chunk);
-        void postChatRoomMessage(cfg, roomId, agentId, content, { metadata: { board_refs: chunk } });
       }
     }
   }

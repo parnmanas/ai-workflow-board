@@ -256,11 +256,65 @@ export async function fetchChatRoomHistory(
 export interface OrdinaryWorkBoardCandidate {
   id: string;
   name: string;
-  description: string;
+  description?: string;
+}
+
+/** Board-less ticket destinations for chat "ordinary work" (docs/tickets.md):
+ *  projects + the workspace's tags. `boards` is set only when the server predates
+ *  the board-less model (its candidate endpoint 404s) — the prompt then keeps the
+ *  legacy "pick an existing board" wording. */
+export interface OrdinaryWorkCandidates {
+  projects: Array<{ id: string; name: string; repo_url?: string }>;
+  tags: Array<{ tag: string; count?: number }>;
+  boards?: OrdinaryWorkBoardCandidate[];
 }
 
 /**
- * non-native 채팅 런타임이 임의 UUID 대신 실제 기존 보드만 고르도록 후보를 조회한다.
+ * non-native 채팅 런타임이 임의 UUID 대신 실제 프로젝트·태그만 고르도록 후보를 조회한다.
+ * 조회 실패를 빈 목록으로 축약하지 않고 전파한다(ticket-first 작업이 direct-chat 으로
+ * 조용히 강등되지 않도록). board-less 엔드포인트가 404 인 구버전 서버만 종전 보드 후보로
+ * 폴백한다.
+ */
+export async function fetchOrdinaryWorkCandidates(
+  config: AwbConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OrdinaryWorkCandidates> {
+  const workspaceQuery = config.workspace_id
+    ? `?workspace_id=${encodeURIComponent(config.workspace_id)}`
+    : '';
+  const url = `${trimSlash(config.url)}/api/agent/ordinary-work-candidates${workspaceQuery}`;
+  const resp = await fetchImpl(url, {
+    headers: { 'X-Agent-Key': config.apiKey },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (resp.status === 404) {
+    return { projects: [], tags: [], boards: await fetchOrdinaryWorkBoardCandidates(config, fetchImpl) };
+  }
+  if (!resp.ok) {
+    throw new Error(`일반 작업 티켓 후보 조회 실패: HTTP ${resp.status}`);
+  }
+  const data = await resp.json() as any;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.projects)) {
+    throw new Error('일반 작업 티켓 후보 조회 실패: 응답에 projects 배열이 없습니다');
+  }
+  return {
+    projects: data.projects
+      .filter((p: any) => p && typeof p.id === 'string' && p.id)
+      .map((p: any) => ({
+        id: p.id,
+        name: typeof p.name === 'string' ? p.name : '',
+        ...(typeof p.repo_url === 'string' && p.repo_url ? { repo_url: p.repo_url } : {}),
+      })),
+    tags: Array.isArray(data.tags)
+      ? data.tags
+        .filter((t: any) => t && typeof t.tag === 'string' && t.tag)
+        .map((t: any) => ({ tag: t.tag, ...(typeof t.count === 'number' ? { count: t.count } : {}) }))
+      : [],
+  };
+}
+
+/**
+ * 구버전(board 모델) 서버의 보드 후보 — fetchOrdinaryWorkCandidates 의 404 폴백 전용.
  * 빈 배열은 서버가 정상 응답한 실제 빈 목록만 뜻한다. 조회 실패를 빈 목록으로
  * 축약하면 ticket-first 작업이 direct-chat 예외로 잘못 강등되므로 반드시 전파한다.
  */
@@ -750,7 +804,12 @@ export interface RepositoryCredentialStatus {
   failure: string | null;
 }
 
-/** 자격 증명 부재(204)와 조회 실패를 구분하되 비밀 원문은 호출자에게만 반환한다. */
+/** 자격 증명 부재(204)와 조회 실패를 구분하되 비밀 원문은 호출자에게만 반환한다.
+ *
+ *  board-less 서버는 저장소를 Project 로 옮기고(옛 resource 와 **같은 id**)
+ *  `/projects/:id/git-credential` 을 정본으로 둔다. 그 경로가 404 인 구버전 서버만
+ *  `/resources/:id/git-credential` 로 다시 묻는다 — 신 서버는 옛 경로도 alias 로
+ *  유지하지만, 정본을 먼저 물어야 project 전용 조회 실패가 alias 에 가려지지 않는다. */
 export async function fetchRepositoryCredentialStatus(
   config: AwbConfig,
   resourceId: string,
@@ -760,11 +819,14 @@ export async function fetchRepositoryCredentialStatus(
   if (!resourceId || !agentId) return { credential: null, failure: 'credential_lookup_not_applicable' };
   try {
     const workspaceQuery = workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : '';
-    const url = `${trimSlash(config.url)}/api/agent-manager/resources/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${workspaceQuery}`;
-    const resp = await fetch(url, {
+    const credentialUrl = (collection: 'projects' | 'resources') =>
+      `${trimSlash(config.url)}/api/agent-manager/${collection}/${encodeURIComponent(resourceId)}/git-credential?agent_id=${encodeURIComponent(agentId)}${workspaceQuery}`;
+    const request = (url: string) => fetch(url, {
       headers: { 'X-Agent-Key': config.apiKey, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    let resp = await request(credentialUrl('projects'));
+    if (resp.status === 404) resp = await request(credentialUrl('resources'));
     if (resp.status === 204) return { credential: null, failure: null };
     if (!resp.ok) {
       log(`repository credential fetch failed: ${resp.status} (resource=${resourceId.slice(0, 8)})`);

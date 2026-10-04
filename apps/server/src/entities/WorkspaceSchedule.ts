@@ -65,12 +65,6 @@ export class WorkspaceSchedule {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
-  // Board-scoped schedules are rejected at create() — always NULL going
-  // forward; _dispatch() never reads it.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   @Column({ type: 'varchar' })
   name: string;
 

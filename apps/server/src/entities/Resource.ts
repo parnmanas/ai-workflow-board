@@ -1,24 +1,20 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
-// Resource pickers list by (workspace_id, board_id IS NULL) on every open; the
-// table holds large file_data/content blobs so an unindexed scan is expensive
-// — perf ticket b3812637. The board_id half of the index still matches the
-// query (see board_id's own comment below), even though every row now has it
-// NULL.
+// Resource pickers list by workspace_id on every open; the table holds large
+// file_data/content blobs so an unindexed scan is expensive — perf ticket
+// b3812637.
+//
+// Repositories are no longer Resources: `type='repository'` rows were migrated
+// to Projects (entities/Project.ts) with the same id, and the controller/MCP
+// reject new ones.
 @Entity('resources')
-@Index('idx_resources_workspace_board', ['workspace_id', 'board_id'])
+@Index('idx_resources_workspace', ['workspace_id'])
 export class Resource {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
-
-  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
-  // Board-scoped Resources are rejected at create() — always NULL going
-  // forward; Resources are Global/Workspace-owned only.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;
@@ -34,21 +30,6 @@ export class Resource {
 
   @Column({ type: 'varchar', default: '' })
   url: string;
-
-  // For type='repository': the branch tickets default to when no per-ticket
-  // base_branch is set. Empty leaves the choice to git's `origin/HEAD`. Stored
-  // alongside the repo so the same default applies across every ticket that
-  // points at this resource.
-  @Column({ type: 'varchar', default: '' })
-  default_branch: string;
-
-  // For type='repository': per-repo clone policy (ticket bddb63ee). JSON text,
-  // same convention as Workspace/Board `harness_config` — see
-  // common/clone-policy.ts for the schema and the Resource → Workspace →
-  // system-default key-level precedence. null (the default for every existing
-  // row) = no override, so the clone runs on the system defaults.
-  @Column({ type: 'text', nullable: true, default: null })
-  clone_policy: string | null;
 
   @Column({ type: 'text', default: '' })
   content: string;

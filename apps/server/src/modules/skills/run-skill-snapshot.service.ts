@@ -30,22 +30,18 @@ export class RunSkillSnapshotService {
     workspaceId: string;
     runId: string;
     agentId: string;
-    boardId?: string;
-    roleSlug?: string;
   }): Promise<RunSkillSnapshot> {
     const existing = await this.snapshots.findOne({
       where: { workspace_id: args.workspaceId, run_id: args.runId },
     });
     if (existing) return existing;
 
-    const allAssignments = await this.assignments.find({
+    // Assignments are keyed by (workspace, runtime identity, skill) only — the
+    // board / role narrowing went away with boards.
+    const assignments = await this.assignments.find({
       where: { workspace_id: args.workspaceId, runtime_key: args.agentId },
     });
-    const selected = allAssignments.filter((assignment) =>
-      (!assignment.board_id || assignment.board_id === (args.boardId || ''))
-      && (!assignment.role_slug || assignment.role_slug === (args.roleSlug || '')),
-    );
-    const versionIds = selected.map((assignment) => assignment.skill_version_id);
+    const versionIds = assignments.map((assignment) => assignment.skill_version_id);
     // Scope-free lookup by id. The assignment row is already workspace-scoped
     // and its skill_version_id was validated at assign time, so re-filtering by
     // workspace here adds no authorization — it only DROPS global skills

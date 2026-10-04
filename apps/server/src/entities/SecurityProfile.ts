@@ -46,11 +46,6 @@ export class SecurityProfile {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // Legacy compatibility column. Boot migration clears it; definitions are
-  // Global/Workspace-owned and Board context belongs to SecurityRun.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   @Column({ type: 'varchar' })
   name: string;
 
@@ -70,8 +65,9 @@ export class SecurityProfile {
   @Column({ type: 'simple-json', nullable: true, default: null })
   target_runtime: Record<string, any> | null;
 
-  // The repo Resource to inspect. null = AWB's own codebase (the agent's own
-  // worktree). A non-null Resource id points the agent at a checked-out repo.
+  // The repo to inspect. null = AWB's own codebase (the agent's own worktree).
+  // Holds a PROJECT id: repository Resources became Projects with the same id,
+  // so the column kept its name rather than take a rename migration.
   @Column({ type: 'varchar', nullable: true, default: null })
   target_resource_id: string | null;
 
@@ -128,9 +124,10 @@ export class SecurityProfile {
   @Column({ type: 'varchar', default: '' })
   workspace_folder: string;
 
-  // Repo to run against. null = reuse the board/workspace environment_config
-  // repo. simple-json (serializes automatically); the create/update/projection
-  // paths still pass it through explicitly.
+  // Repo to run against (`project_id` or a raw `url`). null = no repo — the
+  // run folder is only created, nothing is cloned. simple-json (serializes
+  // automatically); the create/update/projection paths still pass it through
+  // explicitly.
   @Column({ type: 'simple-json', nullable: true, default: null })
   repo_ref: WorkspaceFolderRepoRef | null;
 
@@ -205,16 +202,16 @@ export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
  */
 export interface SecurityOnFailureTicketConfig {
   enabled: boolean;
-  /** Board to file on. Falls back to run.board_id → profile.board_id. */
-  board_id?: string;
-  /** Stable target column identifier. Preferred over column_name. */
-  column_id?: string;
-  /** Legacy/user-friendly target selector; otherwise the first active column is used. */
-  column_name?: string;
+  /** Project the fix ticket belongs to (also its default assignee source). */
+  project_id?: string;
+  /** Status the ticket is filed in. Default 'todo' (queued for its assignee). */
+  status?: 'todo' | 'backlog';
   priority?: 'low' | 'medium' | 'high' | 'critical';
-  /** Assignee for the fix ticket; falls back to the profile's target agent. */
-  assignee_id?: string;
+  /** Assignee for the fix ticket → else the profile's target_runtime → else the project's default_assignee. */
   assignee_runtime?: Record<string, any>;
+  /** Default ['security','auto']. */
+  tags?: string[];
+  /** @deprecated pre-board-removal name of `tags`; read as a fallback only. */
   labels?: string[];
   /**
    * Severity gate. A ticket is filed only if the run has a finding whose

@@ -14,7 +14,8 @@ import { Repository, DataSource } from 'typeorm';
 import { OutreachChannel, OutreachChannelKind, OutreachPublishPolicy, OutreachDeployPostMode } from '../../entities/OutreachChannel';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { Credential } from '../../entities/Credential';
-import { Board } from '../../entities/Board';
+import { Project } from '../../entities/Project';
+import { normalizeTags } from '../tickets/ticket.service';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
@@ -42,7 +43,10 @@ export interface CreateChannelInput {
   enabled?: boolean;
   publishPolicy?: OutreachPublishPolicy;
   rateLimitPerHour?: number;
-  targetBoardId?: string | null;
+  /** Tags every ticket this channel files carries (on top of the provenance tags). */
+  targetTags?: string[] | null;
+  /** Project those tickets are about — its default assignee picks them up. */
+  targetProjectId?: string | null;
   pollIntervalMs?: number;
   pollCron?: string | null;
   classifyThreshold?: number;
@@ -77,7 +81,6 @@ export class OutreachChannelService {
     @InjectRepository(OutreachChannel) private readonly channelRepo: Repository<OutreachChannel>,
     @InjectRepository(OutreachInboundItem) private readonly itemRepo: Repository<OutreachInboundItem>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly pollingService: OutreachPollingService,
   ) {}
@@ -101,7 +104,7 @@ export class OutreachChannelService {
     if (!VALID_KINDS.includes(input.kind)) throw makeError(400, `kind must be one of: ${VALID_KINDS.join(', ')}`);
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     await this._assertCredentialScope(input.credentialId ?? null, input.workspaceId);
-    const targetBoardId = await this._assertBoardScope(input.targetBoardId ?? null, input.workspaceId);
+    const targetProjectId = await this._assertProjectScope(input.targetProjectId ?? null, input.workspaceId);
     const classifierRuntime = await this._validateClassifierRuntime(input.classifierRuntime ?? null, input.workspaceId);
     const deployPostMode = this._validateDeployPostMode(input.deployPostMode);
     const replyThreadRef = this._sanitizeThreadRef(input.replyThreadRef);
@@ -116,7 +119,8 @@ export class OutreachChannelService {
       enabled: input.enabled !== false,
       publish_policy: this._validatePolicy(input.publishPolicy),
       rate_limit_per_hour: this._validateRateLimit(input.rateLimitPerHour),
-      target_board_id: targetBoardId,
+      target_tags: normalizeTags(input.targetTags ?? []),
+      target_project_id: targetProjectId,
       poll_interval_ms: this._validateInterval(input.pollIntervalMs),
       poll_cron: this._validateCron(input.pollCron ?? null),
       next_poll_at: null,
@@ -150,8 +154,9 @@ export class OutreachChannelService {
       await this._assertCredentialScope(patch.credentialId || null, channel.workspace_id);
       channel.credential_id = patch.credentialId || null;
     }
-    if (patch.targetBoardId !== undefined) {
-      channel.target_board_id = await this._assertBoardScope(patch.targetBoardId || null, channel.workspace_id);
+    if (patch.targetTags !== undefined) channel.target_tags = normalizeTags(patch.targetTags ?? []);
+    if (patch.targetProjectId !== undefined) {
+      channel.target_project_id = await this._assertProjectScope(patch.targetProjectId || null, channel.workspace_id);
     }
     if (patch.publishPolicy !== undefined) channel.publish_policy = this._validatePolicy(patch.publishPolicy);
     if (patch.rateLimitPerHour !== undefined) channel.rate_limit_per_hour = this._validateRateLimit(patch.rateLimitPerHour);
@@ -228,29 +233,28 @@ export class OutreachChannelService {
 
   /** Mirrors ResourcesController.assertCredentialScope — a GLOBAL credential
    *  (workspace_id=null) or one scoped to the SAME workspace is available; a
-   *  legacy Board-scoped or cross-workspace credential is rejected. */
+   *  cross-workspace credential is rejected. */
   private async _assertCredentialScope(credentialId: string | null, workspaceId: string): Promise<void> {
     if (!credentialId) return;
     const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
     if (!credential) throw makeError(400, 'credential not found');
-    const available = credential.workspace_id === null
-      || (credential.workspace_id === workspaceId && credential.board_id === null);
+    const available = credential.workspace_id === null || credential.workspace_id === workspaceId;
     if (!available) throw makeError(400, 'credential is not available in this workspace scope');
   }
 
-  /** A configured target_board_id must resolve inside the channel's own
-   *  workspace — caught here at save time instead of failing silently into
-   *  the "earliest board" fallback at ticket-creation time. */
-  private async _assertBoardScope(boardId: string | null, workspaceId: string): Promise<string | null> {
-    if (!boardId) return null;
-    const board = await this.boardRepo.findOne({ where: { id: boardId, workspace_id: workspaceId } });
-    if (!board) throw makeError(400, 'target_board_id must reference a board in this workspace');
-    return board.id;
+  /** A configured target_project_id must resolve inside the channel's own
+   *  workspace — caught here at save time instead of every filed ticket
+   *  failing project validation later. */
+  private async _assertProjectScope(projectId: string | null, workspaceId: string): Promise<string | null> {
+    if (!projectId) return null;
+    const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId, workspace_id: workspaceId } });
+    if (!project) throw makeError(400, 'target_project_id must reference a project in this workspace');
+    return project.id;
   }
 
   /** A configured classifier_runtime must be visible in the channel's own
    *  workspace — same "caught at save time, not silently ignored" contract
-   *  as _assertBoardScope, reusing the same agent-workspace-visibility rule
+   *  as _assertProjectScope, reusing the same agent-workspace-visibility rule
    *  SecurityProfile.target_agent_id (and 15+ other call sites) already
    *  standardize on: a workspace-scoped agent must match, but a global
    *  agent (workspace_id null/'') is visible everywhere. */

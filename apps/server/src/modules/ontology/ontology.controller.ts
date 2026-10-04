@@ -6,10 +6,10 @@
  * 얇은 래퍼일 뿐, 별도 인가/생명주기 로직을 두지 않는다(OntologyModule에는
  * 지금까지 컨트롤러가 없었다 — ontology.module.ts 코멘트 참고).
  *
- * 권한: resources.controller.ts의 git-read 엔드포인트(_prepRepo 등)와 같은
- * 자세로 PermissionGuard + MANAGE_RESOURCES를 쓴다 — 둘 다 결국 같은 종류의
- * 작업(리포지토리 clone/read, 여기서는 그 위에 신선도 계산까지)이라 같은
- * 게이트를 재사용한다. `Sidebar.tsx`의 Knowledge 항목 자체는 다른 항목들과
+ * 권한: PermissionGuard + MANAGE_RESOURCES — 저장소가 Resource 였던 시절
+ * git-read 엔드포인트를 지키던 권한이고, 저장소가 Project 로 옮겨간 지금도
+ * projects.controller.ts 가 저장소 편집에 같은 권한을 쓴다(리포지토리
+ * clone/read, 여기서는 그 위에 신선도 계산까지). `Sidebar.tsx`의 Knowledge 항목 자체는 다른 항목들과
  * 마찬가지로 라우트 레벨 가드가 없다 — 실제 접근 제어는 이 컨트롤러가 진다
  * (Resources/Prompt Templates가 이미 이 자세다).
  */
@@ -19,12 +19,11 @@ import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DataSource } from 'typeorm';
-import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
+import { ProjectsService } from '../projects/projects.service';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
-import { findOrFail } from '../../common/find-or-fail';
 import { resolveGitCredential } from '../mcp/shared/git-branches';
 import { ensureRepoCache, countBehindAhead } from '../mcp/shared/git-repo-cache';
 import { OntologyLifecycleService, GraphRefResolutionError } from './ontology-lifecycle.service';
@@ -43,7 +42,7 @@ const GRAPH_EDGE_LIMIT = 10_000;
 @RequirePermission(PERMISSIONS.MANAGE_RESOURCES)
 export class OntologyController {
   constructor(
-    @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
+    private readonly projects: ProjectsService,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     private readonly lifecycleService: OntologyLifecycleService,
     private readonly logService: LogService,
@@ -54,28 +53,20 @@ export class OntologyController {
     return AppOntologyDataSource ?? this.dataSource;
   }
 
-  /** 그래프가 참조하는 Resource의 캐시 클론 경로 — 프레시니스(behind/ahead)
-   *  계산 전용, resources.controller.ts._prepRepo와 같은 검증. 이 호출의
-   *  실패는 호출부에서 항상 `freshness_error`로만 흡수한다(그래프 자체의
-   *  status/indexed_at/commit은 DB에만 의존하므로 git 접근 실패가 전체
-   *  응답을 깨서는 안 된다). */
-  private async resolveRepoPath(resourceId: string, workspaceId: string): Promise<string> {
-    const resource = await findOrFail(
-      this.resourceRepo,
-      { where: { id: resourceId } },
-      'Resource not found in workspace',
-    );
-    if (resource.workspace_id !== null && resource.workspace_id !== workspaceId) {
-      throw new Error('Resource not found in workspace');
+  /** 그래프가 참조하는 저장소의 캐시 클론 경로 — 프레시니스(behind/ahead)
+   *  계산 전용, projects.controller.ts 의 prepRepo 와 같은 검증. 그래프의
+   *  `resource_id` 는 Project id 다(저장소 Resource 가 같은 id 로 Project 로
+   *  이관됐다). 이 호출의 실패는 호출부에서 항상 `freshness_error`로만
+   *  흡수한다(그래프 자체의 status/indexed_at/commit은 DB에만 의존하므로 git
+   *  접근 실패가 전체 응답을 깨서는 안 된다). */
+  private async resolveRepoPath(projectId: string, workspaceId: string): Promise<string> {
+    const project = await this.projects.getInWorkspace(projectId, workspaceId);
+    if (!project) throw new Error('Project not found in workspace');
+    if (!project.repo_url) {
+      throw new Error("project has no repo_url — set the project's repository URL before checking freshness");
     }
-    if (resource.type !== 'repository') {
-      throw new Error(`resource type must be 'repository' (got '${resource.type}')`);
-    }
-    if (!resource.url) {
-      throw new Error("resource has no URL — set the repository's URL before checking freshness");
-    }
-    const credential = await resolveGitCredential(this.credentialRepo, resource.credential_id, workspaceId);
-    return ensureRepoCache({ resourceId, url: resource.url, credential });
+    const credential = await resolveGitCredential(this.credentialRepo, project.credential_id, workspaceId);
+    return ensureRepoCache({ resourceId: project.id, url: project.repo_url, credential });
   }
 
   // graph_status MCP 툴과 동일한 계약(graph_id 또는 resource_id[+folder_path])
@@ -84,17 +75,23 @@ export class OntologyController {
   // 행을 만들고 빌드를 킥오프한다 — "Build Graph"/"Refresh Graph" 액션도
   // 이 동일한 엔드포인트를 다시 부르는 것뿐이다(DESIGN.md 축 5: "같은
   // provisioning helper가 Build/Refresh 둘 다를 지원한다").
+  //
+  // `resource_id` 는 Project id 다(예전 저장소 Resource id 와 같은 값). 이름은
+  // 호환을 위해 유지하고, `project_id` 도 같은 뜻의 별칭으로 받는다.
   @Get('status')
   async status(
     @Query('workspace_id') workspaceId: string,
     @Query('graph_id') graphId: string | undefined,
-    @Query('resource_id') resourceId: string | undefined,
+    @Query('resource_id') resourceIdParam: string | undefined,
     @Query('folder_path') folderPath: string | undefined,
     @Res() res: Response,
+    // 맨 뒤에 둔다 — 핸들러를 위치 인자로 직접 부르는 호출부(테스트)가 밀리지 않게.
+    @Query('project_id') projectIdParam?: string,
   ) {
     if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    const resourceId = resourceIdParam || projectIdParam || undefined;
     if (!graphId && !resourceId) {
-      return res.status(400).json({ error: 'graph_id or resource_id is required' });
+      return res.status(400).json({ error: 'graph_id or resource_id (project id) is required' });
     }
 
     let graph;
@@ -257,7 +254,7 @@ export class OntologyController {
     const user = (req as any).currentUser;
     this.logService.info('Ontology', 'graph view opened', {
       workspace_id: workspaceId,
-      resource_id: body?.resource_id || null,
+      resource_id: body?.resource_id || body?.project_id || null,
       folder_path: typeof body?.folder_path === 'string' ? body.folder_path : '',
       user_id: user?.id || null,
     });

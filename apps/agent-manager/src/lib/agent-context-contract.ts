@@ -1,7 +1,8 @@
 import type { HarnessSpec, RuntimeProfileSpec } from './cli-adapters/base.js';
 import type { TicketRepositoryContext } from './worktree-manager.js';
+import { columnFromStatus, ticketWorkflowStatus } from './ticket-status.js';
 
-export const AGENT_CONTEXT_VERSION = '1.2';
+export const AGENT_CONTEXT_VERSION = '1.3';
 export const AGENT_CONTEXT_MAX_CHARS = 16_000;
 const CONTRACT_JSON_MAX_CHARS = 15_900;
 const COLLECTION_MAX_ITEMS = 20;
@@ -112,7 +113,17 @@ function redactRemoteUrl(value: unknown): string | null {
 export function buildAgentContextContract(input: AgentContextContractInput) {
   const ticket = input.ticket;
   if (!ticket?.id) throw new AgentContextPreflightError('ticket', 'ticket.id가 없습니다');
-  if (!ticket.current_column_id || !ticket.current_column_name) {
+  // board-less 서버(docs/tickets.md)는 status 가 정본이다. column 필드는 구버전
+  // 매니저 호환용 파생값이라 빠져 있어도 status 에서 다시 만든다. status 가 없는
+  // (column 모델) 티켓만 column 누락을 실행 전 오류로 막는다.
+  const status = ticketWorkflowStatus(ticket);
+  const derivedColumn = status ? columnFromStatus(status) : null;
+  const column = {
+    id: ticket.current_column_id || derivedColumn?.id || '',
+    name: ticket.current_column_name || derivedColumn?.name || '',
+    kind: ticket.current_column_kind || derivedColumn?.kind || '',
+  };
+  if (!column.id || !column.name) {
     throw new AgentContextPreflightError('column', '현재 column 확정값이 없습니다');
   }
   const repositoryComplete = Boolean(
@@ -127,19 +138,20 @@ export function buildAgentContextContract(input: AgentContextContractInput) {
 
   const comments = Array.isArray(ticket.comments) ? ticket.comments.slice(-5) : [];
   const metadata = ticket.__awb_context_metadata || {};
+  const boardId = compact(ticket.board_id || ticket.board?.id, 256);
+  const projectId = compact(ticket.project_id || ticket.project?.id || ticket.__awb_project?.id, 256);
   return enforceContextBudget({
     version: AGENT_CONTEXT_VERSION,
     authority: ['system_policy', 'role_instructions', 'project_instructions', 'task', 'prior_progress'],
     assignment: {
       workspaceId: compact(ticket.workspace_id, 256),
-      boardId: compact(ticket.board_id || ticket.board?.id, 256),
+      // board-less 서버의 REST 티켓에는 board_id 가 없다 — 빈 값을 싣지 않고 생략한다.
+      ...(boardId ? { boardId } : {}),
       ticketId: compact(ticket.id, 256),
       role: compact(input.role, 120),
-      column: {
-        id: ticket.current_column_id,
-        name: ticket.current_column_name,
-        kind: ticket.current_column_kind || '',
-      },
+      ...(status ? { status } : {}),
+      ...(projectId ? { projectId } : {}),
+      column,
     },
     repository: input.repository ? {
       resourceId: input.repository.resourceId,

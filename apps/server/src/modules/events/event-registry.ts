@@ -49,6 +49,7 @@ import {
 import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
 import { EventDefinition, SubscriberIdentity } from './types';
+import { isTicketStatus, statusColumnProjection, TICKET_STATUS_LABELS } from '../../common/ticket-status';
 
 // ── Helpers used by multiple filter functions ─────────────────────────────
 
@@ -102,56 +103,58 @@ function chatRoomUpdateFilter(envelope: StreamEvent<any>, identity: SubscriberId
 
 export const EVENT_TYPES: EventDefinition[] = [
   // ───────── board_update ─────────
-  // activityEvents emits 'activity' for every entity change. We resolve board_id from
-  // the ticket chain (ticket → column → board, or parent chain for subtasks). If no
-  // board can be resolved we skip emission.
+  // activityEvents emits 'activity' for every ticket/comment change. The name
+  // predates board removal and is kept for wire compatibility — this IS the
+  // ticket-change event. We resolve the root ticket (subtasks walk up) and skip
+  // emission when it is gone. `current_column_*` are the status projection
+  // (statusColumnProjection) for agent-managers that predate board removal.
   {
     eventType: 'board_update',
     emitterEvent: 'activity',
     async map(activity: any, ctx) {
-      const boardId = await ctx.resolveBoardId(activity.ticket_id, activity.entity_id);
-      if (!boardId) return null;
+      const snapshot = await ctx.resolveTicketSnapshot(activity.ticket_id, activity.entity_id);
+      if (!snapshot) return null;
       // Project the actor to the canonical `<Manager>/<Agent>` display keyed by
       // actor_id — the SAME rule ActivityService applies on the durable read
       // path — so a realtime consumer and a later refetch never disagree on the
-      // name. Several write paths stamp the bare leaf `actor_name`; resolving
-      // here (rather than mutating the emitted ActivityLog) keeps every other
-      // internal 'activity' listener on the untouched persisted entity. Falls
-      // back to the stored name for non-agent actors (user / system labels,
-      // whose actor_id is empty or resolves to no Agent row).
+      // name. Falls back to the stored name for non-agent actors.
       const canonicalActor = activity.actor_id
         ? await ctx.resolveActorDisplayName(activity.actor_id)
         : null;
-      const currentColumn = await ctx.resolveTicketColumnSnapshot(
-        activity.ticket_id,
-        activity.entity_id,
-      );
+      const status = isTicketStatus(snapshot.status) ? snapshot.status : null;
+      const projection = status ? statusColumnProjection(status) : null;
+      const isStatusMove = activity.action === 'moved' && activity.field_changed === 'status';
+      const label = (value: string) => (isTicketStatus(value) ? TICKET_STATUS_LABELS[value] : value || '');
       const payload: BoardUpdatePayload = {
         ticket_id: activity.ticket_id,
-        repository_resource_id: await ctx.resolveTicketRepositoryResourceId(activity.ticket_id),
+        repository_resource_id: snapshot.project_id || '',
+        status: status || '',
         entity_type: activity.entity_type,
         action: activity.action,
         field_changed: activity.field_changed || '',
         actor_name: canonicalActor || activity.actor_name || '',
         actor_id: activity.actor_id || '',
-        current_column_id: currentColumn?.id || '',
-        current_column_name: currentColumn?.name || '',
-        current_column_kind: currentColumn?.kind || '',
-        previous_column_name: activity.action === 'moved' ? activity.old_value || '' : '',
-        new_column_name: activity.action === 'moved' ? activity.new_value || '' : '',
+        current_column_id: projection?.current_column_id || '',
+        current_column_name: projection?.current_column_name || '',
+        current_column_kind: projection?.current_column_kind || '',
+        previous_column_name: isStatusMove ? label(activity.old_value || '') : '',
+        new_column_name: isStatusMove ? label(activity.new_value || '') : '',
       };
-      return { payload, scope: { board_id: boardId } };
+      return { payload, scope: { workspace_id: snapshot.workspace_id } };
     },
-    // D-07: deliver when subscriber requested this board, or when they subscribed to all.
-    filter: (env, id) => !id.boardId || env.scope.board_id === id.boardId,
+    // Workspace scoping happens at the page (REST) level — the flattened frame
+    // carries workspace_id for the client to compare; every subscriber gets it.
+    filter: () => true,
     // Runtime Hosts read ticket_id/action/field_changed/actor_name at the top level.
     flatten: (env) => {
       const p = env.payload as BoardUpdatePayload;
       return {
-        board_id: env.scope.board_id || '',
+        board_id: '',
+        workspace_id: env.scope.workspace_id || '',
         event_type: 'board_update',
         ticket_id: p.ticket_id,
         repository_resource_id: p.repository_resource_id || '',
+        status: p.status || '',
         entity_type: p.entity_type,
         action: p.action,
         field_changed: p.field_changed || '',
@@ -225,6 +228,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: event.role_prompt || '',
         ticket_prompt: event.ticket_prompt || '',
         trigger_source: event.trigger_source || '',
+        status: event.status || undefined,
+        workspace_id: event.workspace_id || undefined,
+        project: event.project ?? null,
         current_column_id: event.current_column_id || '',
         current_column_name: event.current_column_name || '',
         current_column_kind: event.current_column_kind || '',
@@ -237,11 +243,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         clone_policy: event.clone_policy ?? null,
         harness_config: event.harness_config ?? null,
         cli_runtime_profile: event.cli_runtime_profile ?? null,
-        // Resolved abstract effort preset (board catalog × ticket effort_preset);
-        // agent-manager maps it onto per-CLI options at spawn. Null = no override.
-        // Previously DROPPED by this field-by-field reconstruction (and by flatten
-        // below), so board effort presets silently no-op'd on the SSE wire — the
-        // exact "one cell missed" class the parity guard test now prevents.
+        // Always null since board removal (effort rides the runtime spec);
+        // kept on the wire for older agent-managers.
         effort_preset: event.effort_preset ?? null,
         // Resolved environment setup (ticket 354d336b); agent-manager provisions
         // the working env (clone/update repos, setup commands, env_vars) before
@@ -299,6 +302,11 @@ export const EVENT_TYPES: EventDefinition[] = [
         role_prompt: p.role_prompt,
         ticket_prompt: p.ticket_prompt,
         trigger_source: p.trigger_source,
+        // Board-less model (docs/tickets.md): the status the column fields
+        // below are projected from, the workspace, and the project summary.
+        status: p.status || '',
+        workspace_id: p.workspace_id || '',
+        project: p.project ?? null,
         current_column_id: p.current_column_id || '',
         current_column_name: p.current_column_name || '',
         current_column_kind: p.current_column_kind || '',
@@ -819,7 +827,6 @@ export const EVENT_TYPES: EventDefinition[] = [
         source_type: event.source_type,
         source_id: event.source_id,
         ticket_id: event.ticket_id ?? null,
-        board_id: event.board_id ?? null,
         room_id: event.room_id ?? null,
         actor_id: event.actor_id || '',
         actor_type: event.actor_type || 'user',
@@ -839,7 +846,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     // MUST stay flat. Every consumer of this event is the web UI
     // (useMentions + NotificationContext), and both read `mention_id`,
-    // `source_type`, `ticket_id`, `board_id`, `room_id`, `preview` … at the
+    // `source_type`, `ticket_id`, `room_id`, `preview` … at the
     // top level — the same shape the sibling UI-only events (consensus_update,
     // orchestration_update) ship.
     //
@@ -869,7 +876,6 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: TicketReadsClearedPayload = {
         user_id: event.user_id,
         workspace_id: event.workspace_id,
-        board_id: event.board_id ?? null,
         updated: event.updated,
         read_at: event.read_at,
       };
@@ -884,7 +890,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       return env.scope.user_id === identity.userId;
     },
     // user_mention과 동일하게 flat 유지 — NotificationContext가 payload
-    // 필드(user_id/board_id/…)를 최상위에서 그대로 읽는다.
+    // 필드(user_id/workspace_id/…)를 최상위에서 그대로 읽는다.
     flatten: (env) => ({
       event_type: 'ticket_reads_cleared',
       ...(env.payload as object),

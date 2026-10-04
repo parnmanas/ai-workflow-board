@@ -7,21 +7,15 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { IsNull } from 'typeorm';
+import { deleteWorkspaceContent } from '../../workspaces/workspace-cleanup';
 import { z } from 'zod';
 import { Workspace } from '../../../entities/Workspace';
-import { Board } from '../../../entities/Board';
-import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
-import { WorkspaceRole } from '../../../entities/WorkspaceRole';
-import { DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING } from '../../../db';
-import { DEFAULT_PROMPT_TEMPLATES } from '../../../database/default-prompt-templates';
-import { PromptTemplate } from '../../../entities/PromptTemplate';
 import { ok, err } from '../shared/helpers';
 import { HarnessConfigSchema, serializeHarnessConfig } from '../../../common/harness-config';
 import { EnvironmentConfigSchema, validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../../common/environment-config';
 import { HardBudgetConfigSchema, serializeHardBudgetConfig } from '../../../common/hard-budget-config';
 import { ClonePolicySchema, serializeClonePolicy } from '../../../common/clone-policy';
-import { writeRoutingConfigThrough } from '../../boards/routing-config.helper';
 import { getCallerAgent } from '../shared/session-auth';
 import { resolveCallerDisplayName } from '../shared/ticket-helpers';
 import { callerCanAccessWorkspace, requireWorkspaceScopedFullAccess } from '../shared/authz';
@@ -38,8 +32,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
     async () => {
       const workspaces = await dataSource.getRepository(Workspace).find({ order: { created_at: 'DESC' } });
       const result = await Promise.all(workspaces.map(async ws => {
-        const boardCount = await dataSource.getRepository(Board).count({ where: { workspace_id: ws.id } });
-        return { ...ws, board_count: boardCount };
+        const ticketCount = await dataSource.getRepository(Ticket).count({ where: { workspace_id: ws.id, archived_at: IsNull(), parent_id: IsNull() } });
+        return { ...ws, ticket_count: ticketCount };
       }));
       return ok(result);
     }
@@ -47,137 +41,65 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'get_workspace',
-    'Get a workspace with its boards, columns, and ticket counts',
+    'Get a workspace with its settings and open-ticket counts per status',
     { workspace_id: z.string().describe('Workspace ID') },
     async ({ workspace_id }) => {
       const ws = await dataSource.getRepository(Workspace).findOne({ where: { id: workspace_id } });
       if (!ws) return err('Workspace not found');
-
-      const boards = await dataSource.getRepository(Board).find({
-        where: { workspace_id },
-        order: { created_at: 'ASC' },
-      });
-
-      const boardsSummary = await Promise.all(boards.map(async board => {
-        const columns = await dataSource.getRepository(BoardColumn).find({
-          where: { board_id: board.id },
-          order: { position: 'ASC' },
-        });
-        const colsSummary = await Promise.all(columns.map(async col => {
-          // Archive exclusion (ticket 9b44526b): mirror get_board / get_board_summary
-          // — archived tickets are not part of the active workspace surface and
-          // should not inflate the column ticket_count default callers see.
-          const ticketCount = await dataSource.getRepository(Ticket).count({
-            where: { column_id: col.id, archived_at: IsNull() },
-          });
-          return { id: col.id, name: col.name, position: col.position, color: col.color, ticket_count: ticketCount };
-        }));
-        return { ...board, columns: colsSummary };
-      }));
-
-      return ok({ ...ws, boards: boardsSummary });
+      const rows = await dataSource.getRepository(Ticket).createQueryBuilder('t')
+        .select('t.status', 'status')
+        .addSelect('COUNT(*)', 'n')
+        .where('t.workspace_id = :ws AND t.parent_id IS NULL AND t.archived_at IS NULL', { ws: workspace_id })
+        .groupBy('t.status')
+        .getRawMany();
+      const ticket_counts: Record<string, number> = {};
+      for (const r of rows) ticket_counts[r.status] = Number(r.n);
+      return ok({ ...ws, ticket_counts });
     }
   );
 
   server.tool(
     'create_workspace',
-    'Create a new workspace with a default board, columns (Backlog, To Do, Plan, In Progress, Review, Merging, Done) and the planner→assignee→reviewer routing preset',
+    'Create a new workspace (an empty ticket pool; add projects with save_project)',
     {
       name: z.string().describe('Workspace name'),
       description: z.string().optional().default('').describe('Workspace description'),
     },
     async ({ name, description }) => {
       const wsRepo = dataSource.getRepository(Workspace);
-      const boardRepo = dataSource.getRepository(Board);
-      const colRepo = dataSource.getRepository(BoardColumn);
-
       const ws = await wsRepo.save(wsRepo.create({ name, description }));
-      const board = await boardRepo.save(boardRepo.create({
-        workspace_id: ws.id,
-        name: `${name} Board`,
-        description: '',
-        routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
-      }));
-
-      const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
-      const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
-      // v0.41 — fan board.routing_config into per-column role_routing.
-      await writeRoutingConfigThrough(dataSource, board.id);
-
-      // v0.34: seed built-in role preset (planner/assignee/reporter/reviewer).
-      const roleRepo = dataSource.getRepository(WorkspaceRole);
-      await roleRepo.save(BUILTIN_ROLES.map(def => roleRepo.create({
-        workspace_id: ws.id,
-        slug: def.slug,
-        name: def.name,
-        role_prompt: def.role_prompt,
-        description: def.description,
-        position: def.position,
-        is_builtin: true,
-      })));
-
-      // Default workflow prompt templates + auto-link to columns by name.
-      // Same registry feeds the REST + first-run + MCP paths so all three
-      // produce identical output for a fresh workspace.
-      const tplRepo = dataSource.getRepository(PromptTemplate);
-      const seededTemplates = await tplRepo.save(DEFAULT_PROMPT_TEMPLATES.map(def =>
-        tplRepo.create({
-          workspace_id: ws.id,
-          name: def.name,
-          description: def.description,
-          content: def.content,
-          category: def.category,
-        })));
-      const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
-      const colPrompts: Record<string, string> = {};
-      for (const col of savedCols) {
-        // SEED-ONLY name match (create_workspace MCP path). Runtime
-        // dispatch never reads column names — see ticket 47a90ea3 AC #3.
-        // TODO: migrate `column_match` to a `kind_match` enum so the
-        // last seed hardcode goes away.
-        const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
-        if (!def) continue;
-        const tplId = tplIdByName.get(def.name);
-        if (tplId) colPrompts[col.id] = tplId;
-      }
-      if (Object.keys(colPrompts).length > 0) {
-        await boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
-      }
-
-      const result = await wsRepo.findOne({ where: { id: ws.id } });
-      return ok(result);
+      return ok(await wsRepo.findOne({ where: { id: ws.id } }));
     }
   );
 
   server.tool(
     'update_workspace',
-    'Update a workspace name, description, trigger-loop cadence settings (supervisor_stale_ms / supervisor_resend_ms / dispatch_queue_depth), claim-verification settings (claim_verification_enabled / claim_verification_grace_ms), the chat-workspace-folder opt-in (chat_workspace_folder_enabled), the default agent harness (harness_config), or the default hard-budget ceiling (hard_budget_config)',
+    'Update a workspace: name, description, ticket dispatch settings (max_concurrent_tickets_per_agent, dispatch_paused, language, auto_archive_days, supervisor_stale_ms / supervisor_resend_ms), the chat-workspace-folder opt-in, the agent harness (harness_config), environment env vars, clone policy, or the run hard-budget ceiling',
     {
       workspace_id: z.string().describe('Workspace ID'),
       name: z.string().optional().describe('New name'),
       description: z.string().optional().describe('New description'),
       supervisor_stale_ms: z.number().positive().optional()
-        .describe('Time-since-last-update before TicketSupervisor considers an allocation stale. Default 1800000 (30 min).'),
+        .describe('An in_progress ticket whose agent shows no life for this long is re-dispatched by the supervisor. Default 1800000 (30 min).'),
       supervisor_resend_ms: z.number().positive().optional()
-        .describe('Cooldown between supervisor force-respawn re-pushes. Default 300000 (5 min).'),
-      dispatch_queue_depth: z.number().positive().optional()
-        .describe('Per-agent dispatch queue depth cap. When full, the lowest-priority pending item is dropped. Default 100.'),
-      claim_verification_enabled: z.boolean().optional()
-        .describe('Enable the claim-verification sweep (ticket dcb9d661): when an assignee comments in an active column without committing or moving the ticket within the grace window, auto-park it for human review. Default false.'),
-      claim_verification_grace_ms: z.number().positive().optional()
-        .describe('Grace window in ms before the claim-verification sweep auto-pends an idle assignee claim. Default 600000 (10 min).'),
+        .describe('Cooldown between supervisor re-dispatches. Default 300000 (5 min).'),
+      max_concurrent_tickets_per_agent: z.number().int().min(1).max(50).optional()
+        .describe('How many in_progress tickets one agent identity works at once. Default 1.'),
+      dispatch_paused: z.boolean().optional().describe('true pauses all ticket dispatch in the workspace; false resumes.'),
+      language: z.string().nullable().optional().describe('Language every agent writes in (e.g. "Korean"); null = agent default.'),
+      auto_archive_days: z.number().int().min(1).max(365).nullable().optional().describe('Archive done tickets idle this many days; null disables.'),
       chat_workspace_folder_enabled: z.boolean().optional()
         .describe('Opt-in (ticket 9fd27487): when true, an ordinary chat room (not an Action Run / Orchestration Mission room) dispatches inside `.awb/chat/<room8>` instead of the agent working_dir root. Default false — off by default because the manager agent\'s own operational chat also rides this path.'),
       harness_config: HarnessConfigSchema.nullable().optional()
-        .describe('Workspace-wide default agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? }. Boards override it per key via their own harness_config. Pass null to clear.'),
+        .describe('Workspace agent harness: { system_prompt_append?, allowed_tools?, disallowed_tools?, model?, permission_mode? } — shipped on every ticket dispatch. Pass null to clear.'),
       environment_config: EnvironmentConfigSchema.nullable().optional()
-        .describe('Workspace-wide default environment setup — a repository-Resource picker: { repositories?: [{ resource_id }] }. Only repositories[].resource_id is used (server expands it to url / default_branch / credential); legacy keys (per-repo url/branch/target_dir/post_clone_commands, and top-level env_vars/setup_commands/setup_timeout_seconds/version) are accepted for backward compatibility but ignored on save. Boards override this per top-level key via their own environment_config. Pass null to clear.'),
+        .describe('Workspace environment setup (env vars for ticket agents). Repositories come from each ticket\'s project, not from here. Pass null to clear.'),
       clone_policy: ClonePolicySchema.nullable().optional()
-        .describe('Workspace-wide default repository clone policy: { clone_timeout_seconds?, clone_idle_timeout_seconds?, clone_depth?, clone_filter?, single_branch? }. A repository Resource overrides it per key via save_resource.clone_policy; unset keys fall through to the system defaults (clone timeout 3600s = 60min, idle timeout DISABLED, full clone). Pass null to clear.'),
+        .describe('Workspace-wide default repository clone policy: { clone_timeout_seconds?, clone_idle_timeout_seconds?, clone_depth?, clone_filter?, single_branch? }. A project overrides it per key via save_project.clone_policy; unset keys fall through to the system defaults (clone timeout 3600s = 60min, idle timeout DISABLED, full clone). Pass null to clear.'),
       hard_budget_config: HardBudgetConfigSchema.nullable().optional()
-        .describe('Workspace-wide default hard-budget ceiling: { enabled?, max_auto_responses?, window_minutes?, max_dispatches_per_window?, max_tokens_per_window?, max_runs_per_window?, auto_pend?, notify? }. Boards override the ticket-scoped keys per key via their own hard_budget_config; max_runs_per_window has no board layer — it is the sole ceiling on new QA/Action/Orchestration run creations, scoped to this workspace. Pass null to clear.'),
+        .describe('Workspace hard-budget ceiling for new QA/Action/Orchestration run creations ({ enabled?, max_runs_per_window?, window_minutes?, … }). Pass null to clear.'),
     },
-    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth, claim_verification_enabled, claim_verification_grace_ms, chat_workspace_folder_enabled, harness_config, environment_config, hard_budget_config, clone_policy }, extra: { sessionId?: string }) => {
+    async ({ workspace_id, name, description, supervisor_stale_ms, supervisor_resend_ms, max_concurrent_tickets_per_agent, dispatch_paused, language, auto_archive_days, chat_workspace_folder_enabled, harness_config, environment_config, hard_budget_config, clone_policy }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       // getCallerAgent was previously consulted only for the audit rows
       // below, never as a gate — any authenticated key could rewrite any
@@ -197,8 +119,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       const cadenceBefore = {
         supervisor_stale_ms: ws.supervisor_stale_ms,
         supervisor_resend_ms: ws.supervisor_resend_ms,
-        dispatch_queue_depth: ws.dispatch_queue_depth,
-        claim_verification_grace_ms: ws.claim_verification_grace_ms,
+        max_concurrent_tickets_per_agent: ws.max_concurrent_tickets_per_agent,
+        dispatch_paused_at: ws.dispatch_paused_at ? new Date(ws.dispatch_paused_at).toISOString() : '',
       };
 
       if (name !== undefined) ws.name = name;
@@ -208,16 +130,16 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       // parse means we can floor and assign without re-validating.
       if (supervisor_stale_ms !== undefined) ws.supervisor_stale_ms = Math.floor(supervisor_stale_ms);
       if (supervisor_resend_ms !== undefined) ws.supervisor_resend_ms = Math.floor(supervisor_resend_ms);
-      if (dispatch_queue_depth !== undefined) ws.dispatch_queue_depth = Math.floor(dispatch_queue_depth);
-      if (claim_verification_enabled !== undefined) ws.claim_verification_enabled = claim_verification_enabled ? 1 : 0;
-      if (claim_verification_grace_ms !== undefined) ws.claim_verification_grace_ms = Math.floor(claim_verification_grace_ms);
+      if (max_concurrent_tickets_per_agent !== undefined) ws.max_concurrent_tickets_per_agent = Math.floor(max_concurrent_tickets_per_agent);
+      if (dispatch_paused !== undefined) ws.dispatch_paused_at = dispatch_paused ? (ws.dispatch_paused_at || new Date()) : null;
+      if (language !== undefined) ws.language = language && language.trim() ? language.trim() : null;
+      if (auto_archive_days !== undefined) ws.auto_archive_days = auto_archive_days;
       if (chat_workspace_folder_enabled !== undefined) ws.chat_workspace_folder_enabled = chat_workspace_folder_enabled ? 1 : 0;
       // Default harness (ticket 7122600c) — strict-validated by the arg
       // schema; empty objects collapse to null via the serializer.
       if (harness_config !== undefined) ws.harness_config = serializeHarnessConfig(harness_config);
-      // Default environment setup (ticket 354d336b) — validateEnvironmentConfig-
-      // Input normalises to repositories[].resource_id only; legacy keys are
-      // accepted but dropped (8fbe90e9), then serialize (empty configs → null).
+      // Environment setup (ticket 354d336b) — validated, then serialized
+      // (empty configs → null).
       if (environment_config !== undefined) {
         if (environment_config === null) {
           ws.environment_config = null;
@@ -239,7 +161,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       // per changed cadence knob, actor from the MCP session, source=mcp. In
       // standalone mode getCallerAgent returns undefined (empty actor), but the
       // row still records the change + source.
-      const auditFields = ['supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms'];
+      const auditFields = ['supervisor_stale_ms', 'supervisor_resend_ms', 'max_concurrent_tickets_per_agent', 'dispatch_paused_at'];
 
       // Persist the settings change + its config_changed rows ATOMICALLY
       // (reviewer AC): ONE transaction, so an audit-write failure rolls the
@@ -253,7 +175,8 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
           const rows: any[] = [];
           for (const field of auditFields) {
             const oldVal = (cadenceBefore as any)[field];
-            const newVal = (ws as any)[field];
+            const rawNew = (ws as any)[field];
+            const newVal = rawNew instanceof Date ? rawNew.toISOString() : (rawNew ?? '');
             if (oldVal === newVal) continue;
             rows.push(await activityService.logActivityTx(manager, {
               entity_type: 'workspace',
@@ -283,7 +206,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'delete_workspace',
-    'Delete a workspace and all its boards, columns, tickets (cannot delete the last workspace)',
+    'Delete a workspace and all its tickets and projects (cannot delete the last workspace)',
     { workspace_id: z.string().describe('Workspace ID') },
     async ({ workspace_id }, extra: { sessionId?: string }) => {
       // requireFullScopeCaller alone only proves "some live, full-scope
@@ -302,6 +225,7 @@ export function registerWorkspaceTools(server: McpServer, ctx: ToolContext): voi
       const count = await wsRepo.count();
       if (count <= 1) return err('Cannot delete the last workspace');
 
+      await deleteWorkspaceContent(dataSource, ws.id);
       await wsRepo.delete(ws.id);
       return ok({ success: true });
     }

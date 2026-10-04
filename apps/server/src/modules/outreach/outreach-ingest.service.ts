@@ -25,11 +25,11 @@
  * loop already treats as "suppress independent dispatch" for every intake
  * path — no outreach-specific dispatch change needed here.
  *
- * Ticket creation mirrors QaFailureTicketService._createTicket (the
- * established "a background service, not an MCP tool call, creates a Ticket
- * row directly" precedent) rather than re-entering the MCP create_ticket tool,
- * which is tightly coupled to an MCP session/caller-agent context this
- * service doesn't have.
+ * Ticket creation goes through TicketService.create (docs/tickets.md) — the
+ * same mutation layer REST, MCP and the other background producers use, so
+ * position, activity, project default assignee and dispatch behave exactly
+ * as for a ticket a human filed. The channel decides the ticket's tags
+ * (`target_tags` + provenance tags) and project (`target_project_id`).
  *
  * Stale-claim lease fencing (review 4th pass): a claim can be reclaimed by
  * another poll once STALE_CLAIM_LEASE_MS elapses (see that constant), which
@@ -46,8 +46,8 @@
  * This makes "at most one open ticket per external item" a DB-enforced
  * invariant instead of something a post-hoc compensating delete has to
  * maintain: whichever _createTicket() call commits first wins the key; every
- * other caller's INSERT fails fast — before any role-assignment/activity side
- * effect runs, since those only fire after the transaction commits — and the
+ * other caller's INSERT fails fast — before any audit/activity side effect
+ * runs, since those only fire after the INSERT succeeds — and the
  * loser looks up the winner's ticket by the same key and links its own claim
  * to it instead of building a duplicate. It also self-heals a ticket that
  * committed but then failed to link (claim→ticket_id UPDATE throws): nothing
@@ -56,11 +56,8 @@
  * retry-forever, no separate cleanup state to keep durable.
  *
  * Archived winners (ticket a565b657): "open" above means archived_at IS
- * NULL, not just "non-terminal column". A ticket can be manually archived
- * while still non-terminal (archive_ticket / REST archive) — a separate
- * action from the terminal-column transition archive-helpers.ts already
- * clears the key on. Both archive surfaces now clear operational_dedupe_key
- * on archive too, so a freshly-archived ticket drops out of the dedupe-key
+ * NULL. Both archive surfaces (archive_ticket / REST archive) clear
+ * operational_dedupe_key on archive, so a freshly-archived ticket drops out of the dedupe-key
  * collision space immediately. But the unique index itself is NOT scoped to
  * open tickets (`uq_tickets_operational_dedupe_open` indexes the raw
  * column — see Ticket.ts), so a legacy archived row from before that clear
@@ -79,19 +76,13 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, IsNull, Repository } from 'typeorm';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
+import { Project } from '../../entities/Project';
 import { Comment } from '../../entities/Comment';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { OutreachInboundItem, OutreachItemStatus } from '../../entities/OutreachInboundItem';
 import { LogService } from '../../services/log.service';
-import { ActivityService } from '../../services/activity.service';
-import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
-import { TicketDuplicateService } from '../tickets/ticket-duplicate.service';
-import { maxTicketPosition } from '../mcp/shared/ticket-helpers';
-import { isTerminalColumn } from '../mcp/shared/archive-helpers';
-import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { TicketService, normalizeTags, type TicketActor } from '../tickets/ticket.service';
 import { InboundItem, OutreachConnector } from './connectors/types';
 import { OUTREACH_CLASSIFIER, OutreachCategory, OutreachClassifier } from './classifier/types';
 
@@ -110,6 +101,8 @@ export interface PollResult {
 }
 
 const TICKETABLE: ReadonlySet<OutreachCategory> = new Set(['bug', 'feature_request']);
+
+const OUTREACH_ACTOR: TicketActor = { id: '', name: 'Outreach', type: 'system' };
 
 // How long a claim (status='ticketed', ticket_id=null) may sit unlinked
 // before a later/racing poll is allowed to treat it as abandoned rather than
@@ -151,8 +144,7 @@ export class OutreachIngestService {
     @InjectRepository(OutreachInboundItem) private readonly itemRepo: Repository<OutreachInboundItem>,
     @InjectRepository(OutreachChannel) private readonly channelRepo: Repository<OutreachChannel>,
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly roleAssignmentService: TicketRoleAssignmentService,
-    private readonly activityService: ActivityService,
+    private readonly tickets: TicketService,
     private readonly logService: LogService,
     @Inject(OUTREACH_CLASSIFIER) private readonly classifier: OutreachClassifier,
   ) {}
@@ -570,133 +562,56 @@ export class OutreachIngestService {
   }
 
   private async _createTicket(channel: OutreachChannel, item: InboundItem, category: OutreachCategory, dedupeKey: string): Promise<string> {
-    const board = await this._resolveBoard(channel);
-    if (!board) {
-      throw new Error(`no board available for outreach channel ${channel.id} in workspace ${channel.workspace_id}`);
-    }
-    const column = await this._resolveColumn(board.id);
-    if (!column) {
-      // Deliberately does NOT fall back to a terminal column (unlike
-      // QaFailureTicketService's last-resort cols[0]) — a ticket landing in a
-      // terminal column is invisible to every dispatch path (the same trap
-      // create_ticket's own terminal-column guard exists to prevent). Better
-      // to error (retried next poll) than to silently file a dead ticket.
-      throw new Error(`board ${board.id} has no active column for outreach ticket creation`);
-    }
+    // Channel classification first, then the provenance tags every outreach
+    // ticket carries (qa-rerun-style consumers and the resolve notifier key
+    // off `outreach` / `source:<kind>`, so those are never optional).
+    const tags = normalizeTags([...(channel.target_tags ?? []), 'outreach', `source:${channel.kind}`]);
+    const projectId = await this._resolveProjectId(channel);
 
-    const title = this._buildTitle(channel, item);
-    const description = this._buildDescription(channel, item);
-    const labels = ['outreach', `source:${channel.kind}`];
-
-    // source_chat_room_id doubles as a generic source-scope id (see
-    // TicketDuplicateService.assess()) — reusing the channel id here is what
-    // lets the `same_channel` anchor (ticket ebe97316) actually fire for
-    // outreach reports. related_ticket_id is still not passed explicitly
-    // (ticket 2500fea3 D3): no inbound signal populates it today, so assess()
-    // falls through to its description-regex fallback (normally a no-op) —
-    // nothing here blocks a future connector from passing one directly.
-    const duplicateService = new TicketDuplicateService(this.dataSource);
-    const duplicateAssessment = await duplicateService.assess(channel.workspace_id, {
-      title, description, labels, source_kind: channel.kind, source_chat_room_id: channel.id,
-    });
-
-    // Ticket 생성, duplicate 감사 기록(Decision/Comment), creation Activity를
-    // 한 트랜잭션으로 묶는다(리뷰 지적 — 7cf4f936 3차 리뷰). 이전에는 Ticket
-    // INSERT가 먼저 단독 커밋된 뒤 record()가 트랜잭션 밖에서 별도 실행돼,
-    // record()만 실패해도 이미 커밋된 Ticket이 operational_dedupe_key를 쥔
-    // 채 영구히 남았다 — 다음 poll은 그 키로 "winner" 티켓을 찾아 재사용할
-    // 뿐 나머지 후처리(감사 기록/역할 배정/Activity)를 다시 실행하지 않으므로
-    // 결손이 영구화됐다. 지금은 record()/activity 기록까지 실패하면 Ticket
-    // INSERT 자체가 롤백되므로, 다음 poll의 _createTicket() 호출은 dedupe
-    // key 충돌 없이 처음부터 다시 시도해 전체 후처리를 정상적으로 완주한다.
-    // (activity의 SSE emit만은 트랜잭션 밖에서 커밋 후 실행 — logActivityTx
-    // 자체가 이미 그 패턴을 강제한다, activity.service.ts 참고.)
-    const { ticket, activityLog } = await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const position = await maxTicketPosition(manager, column.id);
-      const savedTicket = await tRepo.save(tRepo.create({
-        column_id: column.id,
-        workspace_id: channel.workspace_id,
-        title,
-        description,
-        priority: category === 'bug' ? 'high' : 'medium',
-        labels: JSON.stringify(labels),
-        channel_ids: '[]',
-        position,
-        source_kind: duplicateAssessment.source_kind,
-        source_chat_room_id: duplicateAssessment.source_chat_room_id,
-        related_ticket_id: duplicateAssessment.related_ticket_id,
-        canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
-        // ambiguous(복수/애매 후보) 케이스만 사람 확인 큐로 보낸다 — 무인
-        // 파이프라인이라는 이유로 자동억제 범위를 confidence 100로 좁히지
-        // 않는다: pending_user_action은 이미 hard-budget-guard/claim-verification/
-        // action-approval-gate 등 사람이 실시간으로 보고 있지 않은 백그라운드
-        // 경로에서도 범용으로 쓰는 "사람이 나중에 확인" 큐이므로 outreach도
-        // 그대로 재사용한다.
-        pending_user_action: duplicateAssessment.ambiguous,
-        pending_reason: duplicateAssessment.ambiguous
-          ? `Confirm whether this ${channel.kind} report duplicates one of the suggested tickets.`
-          : '',
-        pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-        pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
-        created_by: 'Outreach',
-        created_by_type: 'system',
-        created_by_id: '',
-        operational_dedupe_key: dedupeKey,
-      }));
-      await duplicateService.recordTx(manager, savedTicket, duplicateAssessment, 'Outreach', '');
-      const savedActivity = await this.activityService.logActivityTx(manager, {
-        entity_type: 'ticket',
-        entity_id: savedTicket.id,
-        action: 'created',
-        ticket_id: savedTicket.id,
-        actor_name: 'Outreach',
-      });
-      return { ticket: savedTicket, activityLog: savedActivity };
-    });
-    this.activityService.emitLogged([activityLog]);
-
-    // Board default role holders only (mirrors QaFailureTicketService) — an
-    // outreach channel names no assignee, so an unstaffed role stays vacant
-    // unless the board configures a default_role_assignments backfill.
-    try {
-      const defaults = parseDefaultRoleAssignments(board.default_role_assignments);
-      if (Object.keys(defaults).length > 0) {
-        await this.roleAssignmentService.applyBoardDefaults(ticket.id, channel.workspace_id, defaults);
-      }
-    } catch {
-      /* non-fatal — degrade to "no defaults" */
-    }
-
+    // TicketService.create runs the same cross-report duplicate gate every
+    // other intake path does: source_chat_room_id doubles as a generic
+    // source-scope id (see TicketDuplicateService.assess()) — reusing the
+    // channel id here is what lets the `same_channel` anchor (ticket
+    // ebe97316) fire for outreach reports, and an ambiguous match parks the
+    // ticket on pending_user_action for a human. related_ticket_id is still
+    // not passed (ticket 2500fea3 D3): no inbound signal populates it today.
+    //
+    // The operational_dedupe_key INSERT is the idempotency point: a racing
+    // or retried call fails on the unique index before any side effect, and
+    // _resolveDedupeCollision() hands back the winner. The duplicate audit
+    // rows and the creation activity are written right after the INSERT —
+    // not in one transaction with it — so a crash in between leaves a ticket
+    // that the next poll re-links through the same key, minus those rows.
+    // Assignee: omitted on purpose so the target project's default_assignee
+    // (if any) picks the ticket up; no project → unassigned, never dispatched.
+    const { ticket } = await this.tickets.create(channel.workspace_id, {
+      title: this._buildTitle(channel, item),
+      description: this._buildDescription(channel, item),
+      priority: category === 'bug' ? 'high' : 'medium',
+      tags,
+      project_id: projectId,
+      operational_dedupe_key: dedupeKey,
+      source_kind: channel.kind,
+      source_chat_room_id: channel.id,
+    }, OUTREACH_ACTOR);
     return ticket.id;
   }
 
-  /** Explicit `target_board_id` → else the workspace's earliest-created board
-   *  (mirrors agent-api.controller.ts's `operational-capability-ticket`
-   *  fallback), so registering a channel never requires wiring a board id
-   *  up front. */
-  private async _resolveBoard(channel: OutreachChannel): Promise<Board | null> {
-    if (channel.target_board_id) {
-      const explicit = await this.dataSource.getRepository(Board).findOne({
-        where: { id: channel.target_board_id, workspace_id: channel.workspace_id },
-      });
-      if (explicit) return explicit;
-    }
-    return this.dataSource.getRepository(Board).findOne({
-      where: { workspace_id: channel.workspace_id },
-      order: { created_at: 'ASC' },
+  /** The channel's target project, if it still exists in the channel's
+   *  workspace. A project force-deleted after the channel was saved files
+   *  the ticket without a project (the same thing the delete did to that
+   *  project's existing tickets) and says so in the log, instead of failing
+   *  every poll of the channel until someone edits it. */
+  private async _resolveProjectId(channel: OutreachChannel): Promise<string | null> {
+    if (!channel.target_project_id) return null;
+    const project = await this.dataSource.getRepository(Project).findOne({
+      where: { id: channel.target_project_id, workspace_id: channel.workspace_id },
     });
-  }
-
-  /** First active, non-terminal column (position order); null if none. */
-  private async _resolveColumn(boardId: string): Promise<BoardColumn | null> {
-    const cols = await this.dataSource.getRepository(BoardColumn).find({
-      where: { board_id: boardId },
-      order: { position: 'ASC' },
+    if (project) return project.id;
+    this.logService.warn('Outreach', `channel ${channel.id} targets missing project ${channel.target_project_id}; filing without a project`, {
+      channel_id: channel.id, target_project_id: channel.target_project_id,
     });
-    return cols.find((c) => c.kind === 'active' && !isTerminalColumn(c))
-      || cols.find((c) => !isTerminalColumn(c))
-      || null;
+    return null;
   }
 
   private _buildTitle(channel: OutreachChannel, item: InboundItem): string {

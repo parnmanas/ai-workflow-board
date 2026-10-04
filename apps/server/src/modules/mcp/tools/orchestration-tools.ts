@@ -52,6 +52,9 @@ import { ok, err } from '../shared/helpers';
 import { callerHoldsId, getCallerAgent } from '../shared/session-auth';
 import type { OrchestrationCaller } from '../../orchestration/orchestration.constants';
 import { isInFlight } from '../../orchestration/orchestration.constants';
+import { loadMissionProject, projectFolderForHost } from '../../orchestration/orchestration-project';
+import { parseTeamAgentSpec } from '../../../common/orchestration-member-spec';
+import { repoRefSchema } from '../../../common/workspace-folder-options';
 import {
   GRAPH_TEMPLATE_NAMES,
   listGraphTemplates,
@@ -582,7 +585,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
     'complete_orchestration_mission',
     'End a mission you orchestrate. Use status "completed" once the acceptance criteria are actually met ' +
       '(verify them — do not take a member\'s word for it), or "failed" when the objective cannot be ' +
-      'delivered. THE MISSION NEVER ENDS ON ITS OWN: until you call this, it stays open and the board shows ' +
+      'delivered. THE MISSION NEVER ENDS ON ITS OWN: until you call this, it stays open and the mission screen shows ' +
       'it as in progress. Completing requires no step to be in flight, and — when the mission defines ' +
       'structured completion criteria — every one of them marked met via update_orchestration_criteria first; ' +
       'a rejection names which keys are still unmet. Any post-completion Actions the mission defines are ' +
@@ -658,6 +661,12 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         }
         const all = await svc.listSteps(mission.id);
         const depKeys = Array.isArray(step.depends_on) ? step.depends_on : [];
+        // The work order's project block, for a member that lost it: the main
+        // clone folder is the one on the host THIS step runs on (hosts differ).
+        // Best-effort — a failed lookup must not block re-reading the work order.
+        const project = await loadMissionProject(ctx.projectsService, mission).catch(() => null);
+        const stepHostId = parseTeamAgentSpec(step.assignee_spec)?.manager_agent_id ?? null;
+        const mainClone = project ? projectFolderForHost(project, stepHostId) : null;
         return ok({
           step_id: step.id,
           step_key: step.step_key,
@@ -681,6 +690,24 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
             context: mission.context,
             acceptance_criteria: mission.acceptance_criteria,
           },
+          project: project
+            ? {
+                project_id: project.id,
+                name: project.name,
+                repo_url: project.repo_url,
+                branch: project.branch,
+                instructions: project.instructions,
+                main_clone_folder: mainClone,
+                note: mainClone
+                  ? 'main_clone_folder is this project\'s checkout on the host this step runs on. Never reset, ' +
+                    'clean or switch branches in it unless the step says so.'
+                  : stepHostId
+                    ? 'No main clone folder is registered for this project on the host this step runs on — do not ' +
+                      'guess one or use a path from another host.'
+                    : 'This step carries no runtime spec, so its host (and the project\'s folder there) is unknown — ' +
+                      'do not guess a folder; use the work order\'s working folder.',
+              }
+            : null,
           dependencies: all
             .filter((s) => depKeys.includes(s.step_key))
             .map((s) => ({
@@ -963,14 +990,13 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         .string()
         .optional()
         .describe('working_dir-relative root for every step\'s isolated working folder (default: `.awb/orch/<mission id8>`)'),
-      repo_ref: z
-        .object({
-          resource_id: z.string().optional(),
-          url: z.string().optional(),
-          branch: z.string().optional(),
-        })
+      repo_ref: repoRefSchema
         .optional()
-        .describe('Repo every step checks out. Omit to reuse the board/workspace environment_config repo.'),
+        .describe(
+          'The project this mission works on — { project_id (preferred), url (raw git URL escape hatch), branch }. ' +
+            'Isolated steps get their own checkout of it, and every brief and work order names the project\'s ' +
+            'main clone folder on each member\'s host. Omit = no repo (nothing is checked out).',
+        ),
       checkout_mode: z
         .enum(['reuse', 'fresh'])
         .optional()
@@ -1065,7 +1091,7 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         }
 
         // Guard: one open mission per team on this path, substituting for a
-        // budget gate this entity has no board_id/ticket to hang one off of.
+        // per-ticket budget gate — a mission has no ticket to hang one off of.
         // `?? 1`, not `|| 1` — 0 is a valid operator-set "no agent-created
         // missions for this team" value and must not be silently promoted to 1.
         const cap = team.max_open_missions ?? 1;

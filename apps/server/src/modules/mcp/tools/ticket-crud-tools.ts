@@ -1,510 +1,209 @@
 /**
- * Ticket CRUD MCP tools.
+ * Ticket CRUD MCP tools (docs/tickets.md).
  *
- * Tools: get_ticket, create_ticket, update_ticket, delete_ticket, get_my_tickets
+ * Tools: get_ticket, list_tickets, create_ticket, update_ticket,
+ * decide_ticket_duplicate, correct_confirmed_ticket_duplicate, pend_ticket,
+ * unpend_ticket, delete_ticket, get_my_tickets
  *
- * Split out of the legacy monolithic `ticket-tools.ts` (565 lines · 11 tools).
- * Siblings: ticket-child-tools.ts (hierarchy), ticket-workflow-tools.ts
- * (state transitions). The auto-discovery loader in `tools/index.ts` picks
- * each sibling up by filename convention — no index edit needed.
+ * Every mutation goes through TicketService so MCP, REST and the automatic
+ * ticket producers share one set of side effects (activity, terminal stamp,
+ * dispatch). Siblings: ticket-child-tools.ts (hierarchy), ticket-workflow-tools.ts
+ * (status moves).
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { Board } from '../../../entities/Board';
-import { BoardColumn } from '../../../entities/BoardColumn';
-import { Resource } from '../../../entities/Resource';
 import { Ticket } from '../../../entities/Ticket';
-import { WorkspaceRole } from '../../../entities/WorkspaceRole';
-import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
-import { ok, err, safeJsonParse, sanitizeHarnessMarkers } from '../shared/helpers';
+import { ok, err, sanitizeHarnessMarkers } from '../shared/helpers';
 import { evaluatePendActionGate, type PendActionCandidate } from '../shared/pend-action-gate';
 import { loadPendActionCandidates } from '../shared/pend-action-scope';
-import { evaluateTerminalPendGate, loadTicketColumnForPendGate } from '../shared/terminal-pend-gate';
-import { loadTicketFull, parseTicket } from '../shared/ticket-parsing';
-import {
-  findColumnByName,
-  maxTicketPosition,
-  refreshTicketWorkspaceId,
-  resolveAgentId,
-  resolveAgentIdAndName,
-  resolveCallerDisplayName,
-  shiftTicketPositions,
-  deleteCommentAttachmentsForTicket,
-  validateNextTicketId,
-} from '../shared/ticket-helpers';
-import { getCallerAgent, HUMAN_ONLY_UNPEND_MESSAGE } from '../shared/session-auth';
-import { resolveCallerIdentityRow } from '../shared/authz';
-import { isTerminalColumn, deriveRootTicketStatus, TicketArchivedError } from '../shared/archive-helpers';
-import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../../common/default-role-assignments-config';
-import { validateHandoffSpecInput } from '../../../common/handoff-spec-config';
-import type { ToolContext } from './context';
+import { loadTicketFull } from '../shared/ticket-parsing';
+import { shiftTicketPositions, deleteCommentAttachmentsForTicket, resolveCallerDisplayName } from '../shared/ticket-helpers';
+import { getCallerAgent, HUMAN_ONLY_UNPEND_MESSAGE, type McpAgentContext } from '../shared/session-auth';
+import { TicketArchivedError } from '../shared/archive-helpers';
 import { TicketDuplicateService } from '../../tickets/ticket-duplicate.service';
+import { TicketInputError, type TicketActor } from '../../tickets/ticket.service';
+import { DONE_STATUS, parseTicketStatus, TICKET_STATUSES, type TicketStatus } from '../../../common/ticket-status';
+import type { ToolContext } from './context';
 
-/**
- * Stable projection of the mutable ticket state that can produce an update
- * artifact. TypeORM may execute an UPDATE for an idempotent payload, and the
- * request-level `changes` list is also used for audit wording, so neither is a
- * reliable mutation signal. Compare the canonical persisted projection,
- * including holder identities, before recording the chat ref.
- */
-function ticketArtifactState(ticket: any): string {
-  if (!ticket) return '';
-  const roles = Array.isArray(ticket.role_assignments)
-    ? ticket.role_assignments
-      .map((entry: any) => ({
-        role_id: entry?.role_id || '',
-        slug: entry?.slug || '',
-        holder_type: entry?.holder?.type || '',
-        holder_id: entry?.holder?.id || '',
-      }))
-      .sort((a: any, b: any) =>
-        `${a.role_id}\0${a.holder_type}\0${a.holder_id}`.localeCompare(
-          `${b.role_id}\0${b.holder_type}\0${b.holder_id}`,
-        ))
-    : [];
-  return JSON.stringify({
-    title: ticket.title ?? '',
-    description: ticket.description ?? '',
-    priority: ticket.priority ?? '',
-    assignee_id: ticket.assignee_id ?? '',
-    reporter_id: ticket.reporter_id ?? '',
-    reviewer_id: ticket.reviewer_id ?? '',
-    labels: Array.isArray(ticket.labels) ? ticket.labels : safeJsonParse(ticket.labels),
-    channel_ids: Array.isArray(ticket.channel_ids) ? ticket.channel_ids : safeJsonParse(ticket.channel_ids),
-    base_repo_resource_id: ticket.base_repo_resource_id ?? '',
-    base_branch: ticket.base_branch ?? '',
-    next_ticket_id: ticket.next_ticket_id ?? '',
-    on_done_action_ids: Array.isArray(ticket.on_done_action_ids)
-      ? ticket.on_done_action_ids
-      : safeJsonParse(ticket.on_done_action_ids),
-    effort_preset: ticket.effort_preset ?? '',
-    handoff_spec: ticket.handoff_spec ?? '',
-    pending_user_action: !!ticket.pending_user_action,
-    pending_reason: ticket.pending_reason ?? '',
-    roles,
-  });
+/** The MCP caller as a ticket actor — runtime key first, it is what `assignee_key` holds. */
+export function callerActor(caller: McpAgentContext | undefined): TicketActor {
+  return {
+    id: caller?.runtimeKey || caller?.agentId || '',
+    name: caller?.agentName || 'agent',
+    type: 'agent',
+  };
 }
 
-/**
- * Cross-board handoff relay spec accepted by create/update tools (ticket
- * ac21a745). Shape doc only — the authoritative validation/normalization is
- * `validateHandoffSpecInput` (common/handoff-spec-config.ts), which the handlers
- * run at write time so there's a single source of truth. `.passthrough()` keeps
- * the tool schema forgiving; a bad shape is rejected by the validator, not here.
- */
-const HandoffHopInputSchema = z.object({
-  target_board_id: z.string().describe('Board the follow-up ticket is created on when this ticket completes'),
-  target_column_name: z.string().optional().describe('Target column (omit → first routed non-terminal column)'),
-  title_template: z.string().optional().describe('Follow-up title; supports {{source_title}}'),
-  description_template: z.string().optional().describe('Follow-up body; supports {{source_title}}/{{source_link}}/{{source_id}}/{{handoff_note}}/{{attachments}}. Carried context is always appended.'),
-  assignee_id: z.string().optional(),
-  reporter_id: z.string().optional(),
-  reviewer_id: z.string().optional(),
-  labels: z.array(z.string()).optional(),
-  priority: z.string().optional(),
-  effort_preset: z.string().optional(),
-  carry_attachments: z.boolean().optional().describe('Carry every source-ticket attachment onto the follow-up'),
-  carry_attachment_ids: z.array(z.string()).optional().describe('Carry only these specific resource ids'),
-}).passthrough();
-const HandoffSpecInputSchema = z.object({ hops: z.array(HandoffHopInputSchema) }).passthrough().nullable();
+const RuntimeSpecInput = z.record(z.string(), z.any()).describe(
+  'RuntimeSpec of the agent that does the ticket: { manager_agent_id (Runtime Host id), cli, model?, working_dir (absolute path on that host), folder_scope?, credential_id?, cli_runtime_profile?, runtime_config?, label?, role_prompt? }. ' +
+  'Tip: a project\'s main clone folder on that host is the natural working_dir (get_project → host_folders).',
+);
 
-/**
- * Schema for the per-ticket `role_assignments[]` payload accepted by
- * create/update tools. Each entry pins a workspace-scoped role (by slug —
- * planner, assignee, reviewer, or any custom role the workspace defines)
- * onto the ticket. Pass `agent_id`/`user_id` to set, both empty/null to
- * clear the slot. Mutually exclusive — the helper rejects rows that supply
- * both. Unknown slug returns an explicit error so silent typos don't hide.
- *
- * MULTI-HOLDER (다중담당자 T1): repeat the same `role_slug` across multiple
- * entries to give one role several holders (e.g. two assignees). Entries are
- * grouped by slug and applied as a whole set.
- */
-const RoleAssignmentInputSchema = z.object({
-  role_slug: z.string().describe('Workspace role slug (e.g. "assignee", "reporter", "reviewer", "planner", or any custom slug)'),
-  agent_id: z.string().optional().describe('Agent ID holding the role (mutually exclusive with user_id / runtime)'),
-  user_id: z.string().optional().describe('User ID holding the role (mutually exclusive with agent_id / runtime)'),
-  // P4c-2b: spec-direct holder — RuntimeSpec object (manager_agent_id, cli,
-  // model, working_dir, ...). No Agent row needed; dispatch resolves it.
-  // Mutually exclusive with agent_id / user_id.
-  runtime: z.record(z.string(), z.any()).optional().describe('RuntimeSpec declaring execution without an Agent row (mutually exclusive with agent_id / user_id)'),
-});
+const STATUS_HELP = `One of ${TICKET_STATUSES.join(', ')}`;
 
-/**
- * Apply a `role_assignments[]` array onto a ticket. Resolves each slug
- * against the ticket's workspace WorkspaceRole row and writes the holder(s)
- * via TicketRoleAssignmentService. Empty `role_slug` is silently skipped;
- * unknown slug throws so callers can fix typos. Mutual exclusion of
- * agent_id / user_id is enforced by the service.
- *
- * MULTI-HOLDER (다중담당자 T1): entries that repeat the SAME `role_slug` are
- * grouped into one holder set — so `[{role_slug:'assignee',agent_id:'a'},
- * {role_slug:'assignee',agent_id:'b'}]` pins BOTH a and b as assignees. We
- * therefore group-by-slug and call `setHolders()` (whole-set replace) once
- * per slug instead of `setHolder()` per entry, which would otherwise clobber
- * same-slug siblings. A slug whose entries are all empty (e.g. a single
- * `{agent_id:''}`) clears the slot — preserving the legacy "empty clears"
- * contract.
- *
- * Returns the list of (slug, role_id, holder) entries actually applied so
- * the caller can include them in activity logs / debug output.
- */
-async function applyRoleAssignments(
-  ctx: ToolContext,
-  ticketId: string,
-  workspaceId: string,
-  assignments: Array<z.infer<typeof RoleAssignmentInputSchema>> | undefined,
-): Promise<Array<{ slug: string; role_id: string; agent_id: string | null; user_id: string | null }>> {
-  if (!assignments || assignments.length === 0) return [];
-  if (!ctx.ticketRoleAssignmentService) {
-    throw new Error('role_assignments require the integrated server (TicketRoleAssignmentService not wired)');
-  }
-  if (!workspaceId) {
-    throw new Error('Cannot apply role_assignments — ticket has no workspace_id (column → board lookup failed)');
-  }
-  const roleRepo = ctx.dataSource.getRepository(WorkspaceRole);
-
-  // Group holders by slug (first-seen order) so repeated same-slug entries
-  // become a multi-holder set rather than clobbering each other.
-  // P4c-2b: runtime entries ride along untouched — setHolders normalizes them.
-  const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null; runtime?: unknown }>>();
-  for (const a of assignments) {
-    const slug = (a.role_slug || '').trim();
-    if (!slug) continue;
-    const holder = { agent_id: a.agent_id || null, user_id: a.user_id || null, runtime: (a as any).runtime };
-    const list = bySlug.get(slug);
-    if (list) list.push(holder);
-    else bySlug.set(slug, [holder]);
-  }
-
-  const applied: Array<{ slug: string; role_id: string; agent_id: string | null; user_id: string | null }> = [];
-  for (const [slug, holders] of bySlug) {
-    const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
-    if (!role) {
-      throw new Error(`Unknown role slug "${slug}" in workspace ${workspaceId}`);
-    }
-    // setHolders drops all-empty entries → an all-empty group clears the slot.
-    const rows = await ctx.ticketRoleAssignmentService.setHolders(ticketId, role.id, holders);
-    if (rows.length === 0) {
-      applied.push({ slug, role_id: role.id, agent_id: null, user_id: null });
-    } else {
-      for (const r of rows) {
-        applied.push({ slug, role_id: role.id, agent_id: r.agent_id, user_id: r.user_id });
-      }
-    }
-  }
-  return applied;
-}
-
-/**
- * MCP 전용 호환성 투영. Ticket.status는 보드 컬럼보다 먼저 생긴 저장 값이며
- * 루트 티켓의 워크플로 상태가 아니다. API 경계에서 이름을 바꾸되
- * child/subtask의 status는 그대로 유지한다.
- */
-export function projectTicketForGetTicket(ticket: any): any {
-  if (!ticket || ticket.parent_id) return ticket;
-  const { status, ...root } = ticket;
-  return { ...root, legacy_status: status };
+function mapError(e: any) {
+  if (e instanceof TicketInputError || e instanceof TicketArchivedError) return err(e.message);
+  return err(e?.message || String(e));
 }
 
 export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, activityService, logger, ticketRoleAssignmentService, triggerLoopService, ticketPrerequisitesService } = ctx;
+  const { dataSource, activityService, logger, ticketService, ticketPrerequisitesService } = ctx;
 
   server.tool(
     'get_ticket',
-    'Get a single ticket with its children and comments. For a root ticket, workflow state is column-driven: use current_column_id, current_column_name, and current_column_kind only. legacy_status is retained for diagnostics/backward compatibility and MUST NOT be interpreted as the current workflow column. Child ticket status semantics are unchanged.',
+    'Get a single ticket with its children, comments, project (incl. main clone folder per host), assignee and prerequisites. `status` is the ticket\'s workflow state (backlog / todo / in_progress / review / done).',
     { ticket_id: z.string().describe('Ticket ID') },
     async ({ ticket_id }) => {
       const ticket = await loadTicketFull(dataSource, ticket_id);
       if (!ticket) return err('Ticket not found');
-      return ok(projectTicketForGetTicket(ticket));
-    }
+      return ok(ticket);
+    },
+  );
+
+  server.tool(
+    'list_tickets',
+    'List root tickets of a workspace, filtered by status / tags (AND) / project / assignee / text. Returns `{ tickets, tags }` where `tags` counts each tag across the filtered set. Use this to find related or duplicate work before starting.',
+    {
+      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
+      status: z.array(z.string()).optional().describe(`Statuses to include (${TICKET_STATUSES.join(', ')}); omit for all`),
+      tags: z.array(z.string()).optional().describe('Every listed tag must be present (case-insensitive)'),
+      project_id: z.string().optional(),
+      assignee_key: z.string().optional().describe('Runtime identity key of the assignee (rt-…)'),
+      query: z.string().optional().describe('Case-insensitive substring of title or description'),
+      include_archived: z.boolean().optional().default(false),
+      limit: z.number().int().min(1).max(500).optional().default(100),
+    },
+    async ({ workspace_id, status, tags, project_id, assignee_key, query, include_archived, limit }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const ws = workspace_id || caller?.workspaceId || '';
+      if (!ws) return err('workspace_id is required');
+      const statuses: TicketStatus[] = [];
+      for (const raw of status || []) {
+        const parsed = parseTicketStatus(raw);
+        if (!parsed) return err(`Unknown status "${raw}" — ${STATUS_HELP}`);
+        statuses.push(parsed);
+      }
+      const result = await ticketService.list(ws, {
+        status: statuses, tags, project_id, assignee_key, q: query, include_archived, limit,
+      });
+      // Compact rows — the full thread is get_ticket's job.
+      return ok({
+        tickets: result.tickets.map((t: any) => ({
+          id: t.id, title: t.title, status: t.status, priority: t.priority, tags: t.tags,
+          project: t.project ?? null, assignee_name: t.assignee_name, assignee_key: t.assignee_key,
+          pending_user_action: t.pending_user_action, pending_on_tickets: t.pending_on_tickets,
+          updated_at: t.updated_at, children: (t.children || []).length,
+        })),
+        tags: result.tags,
+      });
+    },
   );
 
   server.tool(
     'create_ticket',
-    'Create a new ticket. You can specify either column_id (numeric) or column_name + board_id to find the column by name. ' +
-    'If you omit both column_id and column_name but pass board_id, the ticket lands on that board\'s first non-terminal column — ' +
-    'new work should never need to name a column just to avoid accidentally landing on a terminal one.\n\n' +
-    'Role assignment: prefer the generalized `role_assignments` array (`[{role_slug, agent_id?, user_id?}]`) — it can pin any workspace role including `planner` and custom roles. The legacy `assignee_id` / `reporter_id` / `reviewer_id` fields still work and continue to populate the matching builtin slugs. Name fields (`assignee`, `reporter`) are deprecated; ID-based identification is required because workspaces commonly host multiple agents with the same display name.',
+    'Create a ticket. A ticket is done end-to-end by ONE agent (`assignee`); classify it with free-form `tags` and, when it is about a repository, a `project_id`. ' +
+    'Omitting `assignee` applies the project\'s default assignee (if any); pass `assignee: null` for an unassigned ticket. ' +
+    'Status defaults to `todo`, which queues it for the assignee immediately — use `backlog` for work that is not ready. ' +
+    'Follow-ups you discover while working: create them with status `backlog`, the same project/tags, and a description that links back to your ticket.',
     {
+      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
       title: z.string().describe('Ticket title'),
       description: z.string().optional().default('').describe('Ticket description'),
-      priority: z.enum(['low', 'medium', 'high', 'critical']).optional().default('medium').describe('Priority level'),
-      assignee: z.string().optional().default('').describe('DEPRECATED — pass assignee_id instead. Name lookup throws when 2+ agents share the name (manager + subagent collision is common).'),
-      reporter: z.string().optional().default('').describe('DEPRECATED — pass reporter_id instead. Same multi-match risk as `assignee`.'),
-      assignee_id: z.string().optional().default('').describe('Assignee agent ID (preferred over `assignee` name)'),
-      reporter_id: z.string().optional().default('').describe('Reporter agent ID (preferred over `reporter` name)'),
-      reviewer_id: z.string().optional().default('').describe('Reviewer agent ID'),
-      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use this to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied for the same slug. Repeat the same role_slug across entries to assign MULTIPLE holders to one role (다중담당자).'),
-      labels: z.array(z.string()).optional().default([]).describe('Labels'),
+      prompt_text: z.string().optional().describe('Extra instructions for the agent (shown in the work order)'),
+      status: z.string().optional().describe(`Initial status (default todo). ${STATUS_HELP}`),
+      priority: z.enum(['low', 'medium', 'high', 'critical']).optional().default('medium'),
+      tags: z.array(z.string()).optional().default([]).describe('Free-form classification tags'),
+      project_id: z.string().optional().describe('Project (repository) the work is about'),
+      base_branch: z.string().optional().describe('Branch to start from; empty = the project default branch'),
+      assignee: RuntimeSpecInput.nullable().optional(),
       channel_ids: z.array(z.string()).optional().default([]).describe('Notification channel IDs'),
-      column_id: z.string().optional().describe('Column ID (use this OR column_name)'),
-      column_name: z.string().optional().describe('Column name (case-insensitive, requires board_id)'),
-      board_id: z.string().optional().describe('Board ID (used with column_name; alone, without column_id/column_name, selects the board\'s first non-terminal column)'),
-      subtasks: z.array(z.string()).optional().default([]).describe('List of subtask titles to create inline'),
-      next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace; cleared when omitted or empty.'),
-      effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty/omitted = board default preset. Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
-      handoff_spec: HandoffSpecInputSchema.optional().describe('Cross-board handoff relay (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, title_template?, description_template?, assignee_id?, reporter_id?, reviewer_id?, labels?, priority?, effort_preset?, carry_attachments?, carry_attachment_ids? }] }`. When this ticket lands on a terminal column, HandoffService creates a follow-up ticket on the first hop\'s board (carrying this ticket\'s deliverable context) and hands the remaining hops to the follow-up — driving a multi-board relay (기획→그래픽→클라→QA) with zero human intervention. Omit / null / empty hops = no handoff.'),
-      skip_default_assignments: z.boolean().optional().default(false).describe('DEFAULT (false) already means "let the board default_role_assignments auto-staff any role I leave unassigned" (ticket d94a1b87) — do NOT set this true just to ask for that; false already does it. This flag is the opposite: an escape hatch to force a TRUE, PERMANENT zero-holder ticket (e.g. a QA orphan probe that specifically needs no holder) by SUPPRESSING the board-default backfill entirely, even if the board has one configured. Misreading it as "skip assigning myself, let the default handle it" produces the opposite of the intended result — a ticket invisible to BacklogPromotionService that never promotes. Explicitly-assigned roles (assignee_id/reporter_id/reviewer_id/role_assignments) are unaffected either way.'),
-      created_by: z.string().optional().default('').describe('Creator name (user or agent)'),
-      created_by_type: z.enum(['user', 'agent']).optional().default('agent').describe('Creator type'),
-      created_by_id: z.string().optional().default('').describe('Creator ID'),
+      subtasks: z.array(z.string()).optional().default([]).describe('Checklist items to create as child tickets'),
+      next_ticket_id: z.string().optional().describe('Ticket to move from backlog to todo once this one is done (same workspace)'),
       source_kind: z.enum(['chat']).optional().describe('Durable source kind. Set for chat-originated reports.'),
       source_chat_room_id: z.string().optional().describe('Source chat room id for duplicate matching.'),
       related_ticket_id: z.string().optional().describe('Related/reproduced ticket id for duplicate matching.'),
     },
-    async ({ title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, column_id, column_name, board_id, subtasks, next_ticket_id, effort_preset, handoff_spec, skip_default_assignments, created_by, created_by_type, created_by_id, source_kind, source_chat_room_id, related_ticket_id }, extra: { sessionId?: string }) => {
-      const __createSanitizeCaller = getCallerAgent(extra);
-      // Validate the handoff relay spec up front (throws → clean err) so a typo
-      // surfaces as a 400 instead of a silently-dropped relay.
-      let handoffSpecJson = '';
-      if (handoff_spec !== undefined) {
-        try { handoffSpecJson = validateHandoffSpecInput(handoff_spec); }
-        catch (e: any) { return err(e?.message || 'handoff_spec rejected'); }
-      }
-      description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: __createSanitizeCaller?.agentId });
-      let resolvedColumnId = column_id;
-      if (!resolvedColumnId && column_name) {
-        if (!board_id) return err('board_id is required when using column_name');
-        const col = await findColumnByName(dataSource, board_id, column_name);
-        if (!col) return err(`Column "${column_name}" not found in board ${board_id}`);
-        resolvedColumnId = col.id;
-      }
-      if (!resolvedColumnId && board_id) {
-        // Neither column_id nor column_name given — default to the board's
-        // first non-terminal column (position order) instead of erroring, so
-        // filing new work never requires naming a column just to dodge a
-        // terminal one (ticket 35b43ee9). Mirrors the operational-capability
-        // -ticket fallback in agent-api.controller.ts.
-        const candidates = await dataSource.getRepository(BoardColumn).find({ where: { board_id }, order: { position: 'ASC' } });
-        const fallback = candidates.find((c) => !isTerminalColumn(c));
-        if (!fallback) return err(`Board ${board_id} has no active (non-terminal) column to default into — specify column_id or column_name`);
-        resolvedColumnId = fallback.id;
-      }
-      if (!resolvedColumnId) return err('Either column_id, column_name, or board_id is required');
-
-      const col = await dataSource.getRepository(BoardColumn).findOne({ where: { id: resolvedColumnId } });
-      if (!col) return err('Column not found');
-
-      // Resolve the destination column's workspace upfront — needed by the
-      // next_ticket_id workspace-guard which has to run before save (the
-      // freshly-created Ticket row's workspace_id is set by
-      // refreshTicketWorkspaceId AFTER save).
-      let prospectiveWorkspaceId = '';
-      try {
-        const board = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-        prospectiveWorkspaceId = board?.workspace_id || '';
-      } catch { /* validateNextTicketId will skip the workspace guard if empty */ }
-      const duplicateService = new TicketDuplicateService(dataSource);
-      const duplicateAssessment = await duplicateService.assess(prospectiveWorkspaceId, {
-        title, description, labels, source_kind, source_chat_room_id, related_ticket_id,
-      });
-
-      // Guard (ticket 35b43ee9): a ticket carrying related_ticket_id is
-      // explicitly a follow-up/correction to other work — i.e. new,
-      // actionable work. Landing that directly in a terminal column leaves
-      // it invisible to every dispatch path (push trigger, focus-ticket
-      // polling, reconciler seed all exclude terminal columns by design) with
-      // status still reading non-terminal — exactly the reported repro.
-      // Direct terminal creation WITHOUT related_ticket_id (e.g. an operator
-      // filing a retroactive/already-done record) is unaffected.
-      if (duplicateAssessment.related_ticket_id && isTerminalColumn(col)) {
-        return err(
-          `Refusing to create a follow-up ticket (related_ticket_id=${duplicateAssessment.related_ticket_id}) directly in terminal column "${(col as any).name || col.id}" — ` +
-          'it would never dispatch. Point it at a non-terminal column, or omit column_id/column_name (keep board_id) to use the board default.'
-        );
-      }
-
-      let resolvedNextTicketId: string | null = null;
-      if (next_ticket_id !== undefined) {
-        try {
-          // currentTicketId=null on create — see validateNextTicketId notes.
-          resolvedNextTicketId = await validateNextTicketId(dataSource, next_ticket_id, null, prospectiveWorkspaceId);
-        } catch (e: any) {
-          return err(e?.message || 'next_ticket_id rejected');
-        }
-      }
-
-      // Auto-fill creator from authenticated agent if not provided
+    async (args, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
-      const creatorName = created_by || (caller?.agentName) || reporter || assignee || '';
-      const creatorType = created_by ? created_by_type : (caller?.agentId ? 'agent' : (reporter ? 'agent' : ''));
-      const creatorId = created_by_id || (caller?.agentId) || (reporter ? await resolveAgentId(dataSource, '', reporter, logger) : '');
-
-      // Board default role holders (ticket d94a1b87). Parse the destination
-      // board's config up front so it can (a) let a board-configured default
-      // reporter take precedence over the generic creator→reporter auto-fill
-      // below, and (b) backfill every role the caller left vacant AFTER the
-      // explicit assignments are written. skip_default_assignments opts the
-      // whole create out (true zero-holder — e.g. QA orphan probes, the
-      // 519fad18 trap) which also suppresses the creator→reporter auto-fill so
-      // no holder sneaks in.
-      let boardDefaults: DefaultRoleAssignments = {};
-      if (!skip_default_assignments) {
-        try {
-          const defBoard = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-          boardDefaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
-        } catch { /* non-fatal — degrade to "no defaults" */ }
-      } else if ((col as any).kind === 'intake') {
-        // Diagnostic only (ticket bb5b9aed problem 3) — skip_default_assignments=true
-        // on an intake-column ticket, on a board that WOULD have auto-staffed it, is
-        // exactly the shape the 519fad18-trap misreading produces ("skip [my own]
-        // assignments, let the default handle it" — the opposite of what the flag
-        // does). A ticket created this way sits permanently zero-holder and
-        // structurally unpromotable with nothing in the DB distinguishing it from a
-        // deliberate QA orphan probe. Warn so this is visible at creation time
-        // instead of only surfacing hours later as a promotion-delay alert. Never
-        // fails the create — this flag's documented use is legitimate.
-        try {
-          const defBoard = await dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-          const wouldHaveDefaulted = Object.keys(parseDefaultRoleAssignments(defBoard?.default_role_assignments)).length > 0;
-          if (wouldHaveDefaulted) {
-            logger.warn('MCP', 'create_ticket: skip_default_assignments=true on an intake-column ticket with board defaults configured — this produces a permanent zero-holder ticket unless intentional (e.g. a QA orphan probe); false already auto-staffs unassigned roles from the board default', {
-              board_id: col.board_id, column_id: col.id,
-            });
-          }
-        } catch { /* diagnostic-only — never block the create */ }
-      }
-      const hasDefaultReporter = Array.isArray(boardDefaults['reporter']) && boardDefaults['reporter'].length > 0;
-
-      const ticket = await dataSource.transaction(async (manager) => {
-        const tRepo = manager.getRepository(Ticket);
-
-        // Backfill name↔id from the Agent table whichever side the caller
-        // omitted, and re-format the name as `Manager/Agent` so TicketCard,
-        // activity log, and system comments all show the same string. The
-        // helper logs a deprecation warn on name-only lookup and throws on
-        // multi-match — see `resolveAgentIdAndName` (B3 in role-assignment fix).
-        const assigneeResolved = await resolveAgentIdAndName(dataSource, assignee_id, assignee, logger);
-        const reporterResolved = await resolveAgentIdAndName(dataSource, reporter_id, reporter, logger);
-        let resolvedAssigneeId = assigneeResolved.id;
-        let resolvedAssignee = assigneeResolved.name;
-        let resolvedReporterId = reporterResolved.id;
-        let resolvedReporter = reporterResolved.name;
-        // Default Reporter to the ticket's creator when none was supplied —
-        // mirrors the REST controller so an agent that calls create_ticket
-        // ends up listed as Reporter automatically. Suppressed when the caller
-        // opted out (skip_default_assignments → genuine zero-holder ticket) or
-        // when the board defines a default reporter (that configured holder
-        // should win over the generic creator fallback — applyBoardDefaults
-        // fills it below).
-        if (!resolvedReporter && !resolvedReporterId && creatorId && !skip_default_assignments && !hasDefaultReporter) {
-          resolvedReporter = creatorName;
-          resolvedReporterId = creatorId;
+      const ws = args.workspace_id || caller?.workspaceId || '';
+      if (!ws) return err('workspace_id is required');
+      const description = sanitizeHarnessMarkers(args.description, { logger, toolName: 'create_ticket', fieldName: 'description', agentId: caller?.agentId });
+      try {
+        const { ticket, duplicate_candidates } = await ticketService.create(ws, {
+          ...args,
+          description,
+          ...(args.assignee === undefined ? {} : { assignee: args.assignee }),
+        }, callerActor(caller));
+        // Inline checklist items.
+        const repo = dataSource.getRepository(Ticket);
+        for (let i = 0; i < (args.subtasks || []).length; i += 1) {
+          const title = String(args.subtasks[i] || '').trim();
+          if (!title) continue;
+          await repo.save(repo.create({
+            parent_id: ticket.id, depth: 1, title, status: 'todo', position: i,
+            workspace_id: ticket.workspace_id, tags: '[]', channel_ids: '[]',
+            created_by: caller?.agentName || '', created_by_type: 'agent', created_by_id: caller?.runtimeKey || caller?.agentId || '',
+          }));
         }
-        const position = await maxTicketPosition(dataSource, resolvedColumnId!);
-        // Stamp terminal_entered_at when the destination column is already
-        // terminal (e.g. an agent files a ticket directly into Done). Without
-        // this stamp the archiver's `terminal_entered_at IS NOT NULL` guard
-        // would silently skip the row forever. `col` is the already-loaded
-        // destination column from line 141.
-        const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
-        const t = await tRepo.save(tRepo.create({
-          column_id: resolvedColumnId!, title, description, priority,
-          assignee: resolvedAssignee, reporter: resolvedReporter,
-          assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId, reviewer_id,
-          labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
-          next_ticket_id: resolvedNextTicketId,
-          // Abstract effort preset id (trim → empty becomes null). Resolved
-          // against the board catalog at dispatch; null = board default.
-          effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
-          terminal_entered_at: terminalEnteredAt,
-          // Derive status from the destination column's terminality (ticket
-          // 35b43ee9) instead of leaving the 'todo' entity default — keeps a
-          // ticket created straight into a terminal column from showing a
-          // contradictory non-terminal status forever.
-          status: deriveRootTicketStatus(col),
-          // Cross-board handoff relay spec (validated above; '' = no handoff).
-          handoff_spec: handoffSpecJson,
-          workspace_id: prospectiveWorkspaceId,
-          source_kind: duplicateAssessment.source_kind,
-          source_chat_room_id: duplicateAssessment.source_chat_room_id,
-          related_ticket_id: duplicateAssessment.related_ticket_id,
-          canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
-          pending_user_action: duplicateAssessment.ambiguous,
-          pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
-          pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-          pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
-          created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
-        }));
+        const full = await loadTicketFull(dataSource, ticket.id);
+        if (full) ctx.pendingTicketRefs?.record({ action: 'create', ticket_id: ticket.id, title: full.title || ticket.title });
+        return ok(full ? { ...full, duplicate_candidates } : full);
+      } catch (e: any) {
+        return mapError(e);
+      }
+    },
+  );
 
-        if (subtasks.length > 0) {
-          const stEntities = subtasks.map((stTitle, idx) =>
-            tRepo.create({
-              parent_id: t.id, depth: 1, column_id: null as any, title: stTitle, position: idx, status: 'todo',
-              created_by: creatorName, created_by_type: creatorType, created_by_id: creatorId,
-            })
-          );
-          await tRepo.save(stEntities);
+  server.tool(
+    'update_ticket',
+    'Update a root ticket\'s fields: title, description, prompt_text, priority, tags, project_id, base_branch, assignee, channel_ids, next_ticket_id, on_done_action_ids. ' +
+    'To change the status use move_ticket. Pass `assignee: null` to unassign. Changing the assignee of an in-progress ticket hands the running work to the new agent.',
+    {
+      ticket_id: z.string().describe('Ticket ID'),
+      title: z.string().optional(),
+      description: z.string().optional(),
+      prompt_text: z.string().optional(),
+      priority: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+      tags: z.array(z.string()).optional().describe('Replaces the tag set'),
+      project_id: z.string().nullable().optional(),
+      base_branch: z.string().optional(),
+      assignee: RuntimeSpecInput.nullable().optional(),
+      channel_ids: z.array(z.string()).optional(),
+      next_ticket_id: z.string().nullable().optional(),
+      on_done_action_ids: z.array(z.string()).optional().describe('Actions to run once when this ticket is done'),
+      pending_user_action: z.boolean().optional().describe('true parks the ticket (same as pend_ticket); false is rejected — only a human can unpend'),
+      pending_reason: z.string().optional(),
+    },
+    async (args, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const existing = await dataSource.getRepository(Ticket).findOne({ where: { id: args.ticket_id } });
+      if (!existing) return err('Ticket not found');
+      if (args.pending_user_action === false && existing.pending_user_action) return err(HUMAN_ONLY_UNPEND_MESSAGE);
+      const body: any = { ...args };
+      delete body.ticket_id;
+      if (body.description !== undefined) {
+        body.description = sanitizeHarnessMarkers(body.description, { logger, toolName: 'update_ticket', fieldName: 'description', agentId: caller?.agentId });
+      }
+      try {
+        const actor = callerActor(caller);
+        if (args.pending_user_action === true) await ticketService.pend(existing.id, args.pending_reason ?? existing.pending_reason ?? '', actor);
+        const before = JSON.stringify(await loadTicketFull(dataSource, existing.id));
+        await ticketService.update(existing.id, body, actor);
+        const updated = await loadTicketFull(dataSource, existing.id);
+        if (updated && JSON.stringify(updated) !== before) {
+          ctx.pendingTicketRefs?.record({ action: 'update', ticket_id: existing.id, title: updated.title || existing.title });
         }
-
-        return t;
-      });
-      await duplicateService.record(ticket, duplicateAssessment, creatorName, creatorId);
-
-      // B1: backfill workspace_id from column → board so the v0.34
-      // assignment-table sync below actually fires. The Ticket row's
-      // `workspace_id` defaults to '' and the MCP create path doesn't pass
-      // it; without this step the next guard (`ticket.workspace_id`) is
-      // falsy, the sync silently skips, and the trigger loop / mention
-      // resolution never see the new ticket. Mirrors REST controller's
-      // pre-existing `_refreshWorkspaceId` step.
-      await refreshTicketWorkspaceId(dataSource, ticket);
-
-      // v0.34: mirror builtin trio onto TicketRoleAssignment so the trigger
-      // loop / mention resolution / allocation see the new ticket.
-      if (ticketRoleAssignmentService && ticket.workspace_id) {
-        await ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, {
-          assignee_id: ticket.assignee_id || '',
-          reporter_id: ticket.reporter_id || '',
-          reviewer_id: ticket.reviewer_id || '',
-        });
+        return ok(updated);
+      } catch (e: any) {
+        return mapError(e);
       }
-
-      // B2: apply generalized `role_assignments[]` (planner / arbitrary
-      // workspace custom roles). Runs AFTER syncBuiltinTrio so a payload
-      // that supplies both `assignee_id` (legacy) and a `role_assignments`
-      // entry for slug=`assignee` lands on the role-assignment value as the
-      // final write — explicit slug wins over the legacy mirror.
-      await applyRoleAssignments(ctx, ticket.id, ticket.workspace_id, role_assignments);
-
-      // Board defaults (d94a1b87): fill roles still VACANT after the explicit
-      // trio + role_assignments with the board's default holders. Priority is
-      // explicit holder > board default > unassigned — applyBoardDefaults only
-      // writes a role that currently has NO holder, so nothing above is
-      // clobbered. Empty config / opt-out → boardDefaults is {} → no-op.
-      if (ticketRoleAssignmentService && ticket.workspace_id && Object.keys(boardDefaults).length > 0) {
-        await ticketRoleAssignmentService.applyBoardDefaults(ticket.id, ticket.workspace_id, boardDefaults);
-      }
-
-      await activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'created',
-        ticket_id: ticket.id, actor_name: creatorName || reporter || assignee,
-      });
-
-      const full = await loadTicketFull(dataSource, ticket.id);
-      if (full) {
-        ctx.pendingTicketRefs?.record({
-          action: 'create',
-          ticket_id: ticket.id,
-          title: full.title || ticket.title,
-        });
-      } else {
-        logger.error('TicketArtifact', 'Created ticket could not be projected for chat artifact', {
-          ticket_id: ticket.id,
-          session_id: extra?.sessionId,
-          stage: 'create_result_projection',
-        });
-      }
-      return ok(full ? { ...full, duplicate_candidates: duplicateAssessment.candidates } : full);
-    }
+    },
   );
 
   server.tool(
     'decide_ticket_duplicate',
-    'Resolve an ambiguous chat-ticket match. Link it to a listed canonical candidate, or keep it independent and allow one normal dispatch.',
+    'Resolve an ambiguous chat-ticket match. Link it to a listed canonical candidate, or keep it independent so it is worked normally.',
     {
       ticket_id: z.string().describe('Ambiguous report ticket id'),
       action: z.enum(['link', 'keep_independent']),
@@ -521,9 +220,7 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
           caller?.agentName || '',
           caller?.agentId || '',
         );
-        if (action === 'keep_independent' && triggerLoopService) {
-          await triggerLoopService.dispatchCurrentColumn(ticket.id, 'duplicate_rejected', caller?.agentId || '');
-        }
+        if (action === 'keep_independent') await ctx.ticketDispatchService?.resumeTicket(ticket.id, 'duplicate_rejected');
         return ok(await loadTicketFull(dataSource, ticket.id));
       } catch (e: any) {
         return err(e?.message || 'Duplicate decision rejected');
@@ -533,64 +230,21 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
 
   server.tool(
     'correct_confirmed_ticket_duplicate',
-    'Correct a previously confirmed false-positive canonical link. Atomically clears the link and resolves the stale dispatch intent regardless of which column the ticket sits in — unlinking is a data correction, not a dispatch.\n\n' +
-    'Re-dispatch is BEST-EFFORT on top of that: when the current column routes the selected role (non-terminal column, role has a holder, ticket not pending) the call also opens one fresh intent and emits exactly one wire trigger. Otherwise it unlinks only and reports `dispatch_skipped_reason` — typically for a ticket still sitting in an intake column, which resumes through normal backlog promotion instead (the call nudges that re-evaluation immediately). The canonical ticket is never modified.',
-    {
-      ticket_id: z.string().describe('Incorrectly linked report ticket id'),
-      role: z.literal('assignee').optional().default('assignee').describe('Role to redispatch when the current column routes it (currently assignee). A non-routing column unlinks only.'),
-    },
-    async ({ ticket_id, role }, extra: { sessionId?: string }) => {
-      if (!triggerLoopService) return err('Duplicate correction requires the integrated dispatch service');
+    'Correct a previously confirmed false-positive canonical link: clears the link (an audited data correction) and, when the ticket is queued or in progress, wakes its assignee. The canonical ticket is never modified.',
+    { ticket_id: z.string().describe('Incorrectly linked report ticket id') },
+    async ({ ticket_id }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       try {
         const duplicateService = new TicketDuplicateService(dataSource);
-        const corrected = await duplicateService.correctConfirmedLink(
-          ticket_id,
-          role,
-          caller?.agentName || '',
-          caller?.agentId || '',
-        );
-        // 해제만 된 경우 — 열린 intent 가 없으므로 깨울 대상도, 기록할
-        // trigger 도 없다. 승격 재평가 신호는 서비스가 커밋 직후 이미 쐈다.
-        if (!corrected.intentId) {
-          return ok({
-            ticket: await loadTicketFull(dataSource, corrected.ticket.id),
-            previous_canonical_ticket_id: corrected.previousCanonicalId,
-            dispatch_intent_id: null,
-            dispatch_attempted: 0,
-            dispatch_landed: 0,
-            dispatch_trigger_ids: [],
-            dispatch_generation: 0,
-            dispatch_skipped_reason: corrected.dispatchSkippedReason,
-          });
-        }
-        const triggerId = await triggerLoopService.emitAgentTrigger(
-          corrected.ticket,
-          corrected.agentId,
-          role,
-          'duplicate_correction',
-          caller?.agentId || '',
-          { intentAlreadyClaimed: true },
-        );
-        const recorded = await dataSource.getRepository('DispatchIntent').createQueryBuilder()
-          .update()
-          .set({ last_trigger_id: triggerId })
-          .where('id = :id', { id: corrected.intentId })
-          .andWhere('dispatch_generation = :generation', { generation: corrected.generation })
-          .andWhere('lease_owner = :owner', { owner: corrected.leaseOwner })
-          .execute();
-        if ((recorded.affected ?? 0) !== 1) {
-          throw new Error('Duplicate correction dispatch claim was lost before trigger recording');
-        }
+        const corrected = await duplicateService.correctConfirmedLink(ticket_id, caller?.agentName || '', caller?.agentId || '');
+        const dispatch = ctx.ticketDispatchService
+          ? await ctx.ticketDispatchService.resumeTicket(corrected.ticket.id, 'duplicate_correction')
+          : { dispatched: false, reason: 'standalone' };
         return ok({
           ticket: await loadTicketFull(dataSource, corrected.ticket.id),
           previous_canonical_ticket_id: corrected.previousCanonicalId,
-          dispatch_intent_id: corrected.intentId,
-          dispatch_attempted: 1,
-          dispatch_landed: triggerId ? 1 : 0,
-          dispatch_trigger_ids: triggerId ? [triggerId] : [],
-          dispatch_generation: corrected.generation,
-          dispatch_skipped_reason: '',
+          dispatched: dispatch.dispatched,
+          dispatch_skipped_reason: dispatch.dispatched ? '' : dispatch.reason || '',
         });
       } catch (e: any) {
         return err(e?.message || 'Confirmed duplicate correction rejected');
@@ -599,380 +253,57 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
   );
 
   server.tool(
-    'update_ticket',
-    'Update a root ticket\'s fields (title, description, priority, assignee, reporter, reviewer_id, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, role_assignments).\n\n' +
-    'NOTE: this tool does NOT change `status` and is intended for ROOT tickets. ' +
-    'Status on a root ticket is driven by which column it sits in — use move_ticket to advance it. ' +
-    'For SUBTASKS (depth > 0), use update_child_ticket — that\'s also where you mark a finished subtask ' +
-    'with status="done".\n\n' +
-    'Role assignment: prefer `role_assignments` (`[{role_slug, agent_id?, user_id?}]`) — handles `planner` and any workspace custom role. Legacy `assignee_id` / `reporter_id` / `reviewer_id` still apply for those three slugs. Pass `agent_id: ""` (empty string) inside `role_assignments` to clear a slot.\n\n' +
-    'Base repo & branch: pass `base_repo_resource_id` (a workspace/board Resource of type="repository") together with ' +
-    '`base_branch` to pin the branch the ticket\'s feature branch should be cut from. Empty strings clear the binding.',
-    {
-      ticket_id: z.string().describe('Ticket ID'),
-      title: z.string().optional().describe('New title'),
-      description: z.string().optional().describe('New description'),
-      priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('New priority'),
-      assignee: z.string().optional().describe('DEPRECATED — pass assignee_id instead.'),
-      reporter: z.string().optional().describe('DEPRECATED — pass reporter_id instead.'),
-      assignee_id: z.string().optional().describe('New assignee agent ID'),
-      reporter_id: z.string().optional().describe('New reporter agent ID'),
-      reviewer_id: z.string().optional().describe('Reviewer agent ID'),
-      role_assignments: z.array(RoleAssignmentInputSchema).optional().describe('Per-role assignments (slug → agent/user). Use to set planner or any workspace custom role. Builtin slugs (assignee/reporter/reviewer) here override the legacy fields above when both are supplied. Repeat the same role_slug across entries to assign MULTIPLE holders to one role (다중담당자).'),
-      labels: z.array(z.string()).optional().describe('New labels array'),
-      channel_ids: z.array(z.string()).optional().describe('New notification channel IDs'),
-      base_repo_resource_id: z.string().optional().describe('Resource ID (type=repository) the ticket builds against. Empty string clears.'),
-      base_branch: z.string().optional().describe('Branch the agent should treat as the base when starting work. Empty string clears.'),
-      next_ticket_id: z.string().optional().describe('Optional pointer to the ticket TriggerLoopService should auto-trigger once this one lands on a terminal column. Must live in the same workspace and cannot self-link. Empty string clears.'),
-      on_done_action_ids: z.array(z.string()).optional().describe('Action ids to dispatch once when this ticket lands on a terminal column (on-ticket-done hook, method "a"). The finished ticket is exposed to each Action prompt as {{ticket.*}}. enabled=false actions are skipped. Empty array clears the per-ticket binding.'),
-      effort_preset: z.string().optional().describe('Abstract effort preset id (NOT a CLI flag) referencing one of the board\'s effort_presets[].id. Empty string clears (board default preset applies). Resolved against the board catalog at dispatch; agent-manager maps the matched preset onto per-CLI options.'),
-      handoff_spec: HandoffSpecInputSchema.optional().describe('Cross-board handoff relay (ticket ac21a745). `{ hops: [{ target_board_id, target_column_name?, ... }] }` — on terminal-column entry HandoffService creates a follow-up on the first hop\'s board carrying this ticket\'s deliverable context and passes remaining hops down (multi-board relay). null / { hops: [] } clears the handoff.'),
-      pending_user_action: z.boolean().optional().describe('Set true to self-park the ticket for user intervention (same effect as pend_ticket). While true, TriggerLoopService drops every agent_trigger for this ticket, AgentWorkloadService.getFocusTicket skips it, and BacklogPromotionService refuses to promote into its column slot. Pair with `pending_reason` so the user can see why. Setting `false` to CLEAR an existing park is HUMAN ONLY — always rejected while the ticket is pending, since MCP has no authenticated user session to prove a human made that call (ticket b2e88390); clear it via the AWB web UI or REST PATCH /api/tickets/:id instead. Prefer the dedicated `pend_ticket` tool when only parking is needed.'),
-      pending_reason: z.string().optional().describe('Free-text explanation rendered verbatim on the ticket detail panel\'s "User" tab. Cleared automatically when pending_user_action transitions to false.'),
-    },
-    async ({ ticket_id, title, description, priority, assignee, reporter, assignee_id, reporter_id, reviewer_id, role_assignments, labels, channel_ids, base_repo_resource_id, base_branch, next_ticket_id, on_done_action_ids, effort_preset, handoff_spec, pending_user_action, pending_reason }, extra: { sessionId?: string }) => {
-      const ticketRepo = dataSource.getRepository(Ticket);
-      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
-      if (!ticket) return err('Ticket not found');
-      if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
-
-      // HUMAN ONLY (ticket b2e88390): clearing pending_user_action asserts "a
-      // human made the call" — MCP has no authenticated user session to prove
-      // that (see unpend_ticket, which always rejects for the same reason).
-      // Reject the false-flip attempt outright, before any other field in
-      // this same call is applied, so an agent can't smuggle the clear in
-      // alongside an innocuous field edit. Setting it TRUE (self-park) is
-      // unaffected — that's the normal pend_ticket path.
-      if (pending_user_action === false && ticket.pending_user_action) {
-        return err(HUMAN_ONLY_UNPEND_MESSAGE);
-      }
-
-      const caller = getCallerAgent(extra);
-      const artifactStateBefore = ticketArtifactState(await loadTicketFull(dataSource, ticket.id));
-
-      // Track old values before updating
-      const oldAssignee = ticket.assignee;
-      const oldReporter = ticket.reporter;
-      const oldBaseRepoId = ticket.base_repo_resource_id;
-      const oldBaseBranch = ticket.base_branch;
-      const oldNextTicketId = ticket.next_ticket_id;
-
-      const changes: string[] = [];
-      if (title !== undefined) { ticket.title = title; changes.push('title'); }
-      if (description !== undefined) {
-        ticket.description = sanitizeHarnessMarkers(description, { logger, toolName: 'update_ticket', fieldName: 'description', agentId: caller?.agentId });
-        changes.push('description');
-      }
-      if (priority !== undefined) { ticket.priority = priority; changes.push('priority'); }
-      // When the caller updates either side of the (id, name) pair, backfill
-      // the other from the Agent table. Without this, an agent that calls
-      // update_ticket with only `assignee_id` clears nothing but also leaves
-      // the legacy `assignee` text column at its previous (stale) value, and
-      // a caller that only swaps `assignee` keeps the old `assignee_id`
-      // pointing at the previous holder.
-      //
-      // Pass empty strings for the omitted side so `resolveAgentIdAndName`
-      // actually does a DB lookup — pre-filling from `ticket.assignee` /
-      // `ticket.assignee_id` makes both helper args truthy and the helper's
-      // `if (id && name) return { id, name }` short-circuit fires, which
-      // skips the lookup and silently re-saves the previous holder's name.
-      // The existing row only kicks in as a last-resort fallback when the
-      // lookup misses (id points at a User row or stale agent).
-      if (assignee !== undefined || assignee_id !== undefined) {
-        const resolved = await resolveAgentIdAndName(
-          dataSource,
-          assignee_id !== undefined ? assignee_id : '',
-          assignee !== undefined ? assignee : '',
-          logger,
-        );
-        ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-        // Canonical Manager/Agent display wins over any bare leaf name the
-        // caller might pass alongside the id — keeps TicketCard consistent
-        // with the role_assignments view.
-        if (resolved.id) {
-          ticket.assignee = resolved.name;
-        } else if (assignee !== undefined) {
-          ticket.assignee = assignee;
-        }
-        if (ticket.assignee !== oldAssignee) changes.push('assignee');
-      }
-      if (reporter !== undefined || reporter_id !== undefined) {
-        const resolved = await resolveAgentIdAndName(
-          dataSource,
-          reporter_id !== undefined ? reporter_id : '',
-          reporter !== undefined ? reporter : '',
-          logger,
-        );
-        ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-        if (resolved.id) {
-          ticket.reporter = resolved.name;
-        } else if (reporter !== undefined) {
-          ticket.reporter = reporter;
-        }
-        if (ticket.reporter !== oldReporter) changes.push('reporter');
-      }
-      if (reviewer_id !== undefined) { ticket.reviewer_id = reviewer_id; changes.push('reviewer'); }
-      if (labels !== undefined) { ticket.labels = JSON.stringify(labels); changes.push('labels'); }
-      if (channel_ids !== undefined) { ticket.channel_ids = JSON.stringify(channel_ids); changes.push('channel_ids'); }
-      if (base_repo_resource_id !== undefined) {
-        const next = base_repo_resource_id || '';
-        if (next && ticket.workspace_id) {
-          // Mirror the REST guard: pin only repos that live in the ticket's
-          // workspace so a guessed cross-workspace id can't bleed url/name
-          // into the SSE prompt.
-          const repoExists = await dataSource.getRepository(Resource).findOne({ where: { id: next } });
-          if (!repoExists || (repoExists.workspace_id !== null && repoExists.workspace_id !== ticket.workspace_id)) {
-            return err('base_repo_resource_id not found in this workspace');
-          }
-        }
-        ticket.base_repo_resource_id = next;
-        // Skip the activity-feed entry on idempotent writes — matches REST
-        // semantics so a no-op `update_ticket` doesn't spam the log.
-        if (next !== (oldBaseRepoId || '')) changes.push('base_repo');
-      }
-      if (base_branch !== undefined) {
-        const next = base_branch || '';
-        ticket.base_branch = next;
-        if (next !== (oldBaseBranch || '')) changes.push('base_branch');
-      }
-      if (next_ticket_id !== undefined) {
-        try {
-          ticket.next_ticket_id = await validateNextTicketId(
-            dataSource,
-            next_ticket_id,
-            ticket.id,
-            ticket.workspace_id || '',
-          );
-        } catch (e: any) {
-          return err(e?.message || 'next_ticket_id rejected');
-        }
-        if ((ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
-      }
-      if (on_done_action_ids !== undefined) {
-        // On-ticket-done hook binding (method "a"). Stored as a JSON string like
-        // labels / channel_ids. Dedupe + drop blanks so the array stays clean.
-        const cleaned = Array.from(new Set(on_done_action_ids.filter((s) => typeof s === 'string' && s)));
-        ticket.on_done_action_ids = JSON.stringify(cleaned);
-        changes.push('on_done_action_ids');
-      }
-      if (handoff_spec !== undefined) {
-        // Cross-board handoff relay spec (ticket ac21a745). Validate → canonical
-        // JSON string ('' clears). Throws on a bad shape so a typo is loud.
-        try {
-          const nextSpec = validateHandoffSpecInput(handoff_spec);
-          if ((ticket.handoff_spec || '') !== nextSpec) {
-            ticket.handoff_spec = nextSpec;
-            changes.push('handoff_spec');
-          }
-        } catch (e: any) {
-          return err(e?.message || 'handoff_spec rejected');
-        }
-      }
-      if (effort_preset !== undefined) {
-        // Abstract effort preset id — stored as-is (trim; empty → null).
-        // Resolved against the board catalog at dispatch; null = board default.
-        const next = typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null;
-        if ((ticket.effort_preset || '') !== (next || '')) {
-          ticket.effort_preset = next;
-          changes.push('effort_preset');
-        }
-      }
-
-      // Pending-user-action toggle (ticket a57517be). Tracked separately so
-      // the activity log says "pending" instead of being lumped into a
-      // generic `updated`. Only a false→true (self-park) transition can
-      // reach here — the guard above already rejected true→false (the
-      // human-only clear), so `next` is always `true` whenever it differs
-      // from `oldPending`.
-      const oldPending = !!ticket.pending_user_action;
-      if (pending_user_action !== undefined) {
-        const next = !!pending_user_action;
-        if (next !== oldPending) {
-          ticket.pending_user_action = next;
-          ticket.pending_set_at = new Date();
-          ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
-          if (pending_reason !== undefined) {
-            ticket.pending_reason = pending_reason || '';
-          }
-          changes.push('pending_user_action');
-        } else if (next && pending_reason !== undefined && pending_reason !== ticket.pending_reason) {
-          // Updating reason without toggling the flag: keep stamps, refresh
-          // the text. Still log so the audit trail shows the new wording.
-          ticket.pending_reason = pending_reason || '';
-          changes.push('pending_reason');
-        }
-      } else if (pending_reason !== undefined && oldPending && pending_reason !== ticket.pending_reason) {
-        ticket.pending_reason = pending_reason || '';
-        changes.push('pending_reason');
-      }
-
-      await ticketRepo.save(ticket);
-
-      // B1: backfill workspace_id if the row was created via the legacy
-      // (pre-fix) MCP path that left the column empty. Without this an
-      // update_ticket call on such a ticket can't reach the assignment
-      // table either, so the trigger loop stays blind even after the bug
-      // moves to the maintenance phase.
-      await refreshTicketWorkspaceId(dataSource, ticket);
-
-      // v0.34: assignment-table sync. Only synced fields the caller actually
-      // included; undefined slots preserve their existing assignment.
-      if (ticketRoleAssignmentService && ticket.workspace_id) {
-        const trio: { assignee_id?: string; reporter_id?: string; reviewer_id?: string } = {};
-        if (assignee !== undefined || assignee_id !== undefined) trio.assignee_id = ticket.assignee_id || '';
-        if (reporter !== undefined || reporter_id !== undefined) trio.reporter_id = ticket.reporter_id || '';
-        if (reviewer_id !== undefined) trio.reviewer_id = ticket.reviewer_id || '';
-        if (Object.keys(trio).length > 0) {
-          await ticketRoleAssignmentService.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
-        }
-      }
-
-      // B2: apply role_assignments[] (planner / arbitrary custom roles).
-      // Same explicit-slug-wins policy as create_ticket — `role_assignments`
-      // for a builtin slug overrides the legacy `*_id` mirror above.
-      const appliedRoles = await applyRoleAssignments(ctx, ticket.id, ticket.workspace_id, role_assignments);
-      if (appliedRoles.length > 0) changes.push('role_assignments');
-
-      // Log assignee/reporter changes separately for system comment generation.
-      // Trigger off the post-save name (which now reflects backfilled lookups)
-      // so a caller passing only `assignee_id` still produces a legible
-      // activity entry instead of an empty `→` arrow.
-      if ((assignee !== undefined || assignee_id !== undefined) && ticket.assignee !== oldAssignee) {
-        await activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: 'assignee', old_value: oldAssignee || '', new_value: ticket.assignee || '',
-          ticket_id: ticket.id, actor_id: caller?.agentId, actor_name: caller?.agentName,
-        });
-      }
-      if ((reporter !== undefined || reporter_id !== undefined) && ticket.reporter !== oldReporter) {
-        await activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: 'reporter', old_value: oldReporter || '', new_value: ticket.reporter || '',
-          ticket_id: ticket.id, actor_id: caller?.agentId, actor_name: caller?.agentName,
-        });
-      }
-
-      // Log other field changes (excluding assignee/reporter which are logged separately above)
-      const otherChanges = changes.filter(c => c !== 'assignee' && c !== 'reporter');
-      if (otherChanges.length > 0) {
-        await activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: otherChanges.join(', '), ticket_id: ticket.id,
-          actor_id: caller?.agentId, actor_name: caller?.agentName,
-        });
-      }
-
-      const updated = await loadTicketFull(dataSource, ticket.id);
-      const actuallyMutated = !!updated && ticketArtifactState(updated) !== artifactStateBefore;
-      if (actuallyMutated && updated) {
-        ctx.pendingTicketRefs?.record({
-          action: 'update',
-          ticket_id: ticket.id,
-          title: updated.title || ticket.title,
-        });
-      } else if (changes.length > 0 && !updated) {
-        logger.error('TicketArtifact', 'Updated ticket could not be projected for chat artifact', {
-          ticket_id: ticket.id,
-          session_id: extra?.sessionId,
-          stage: 'update_result_projection',
-        });
-      }
-      return ok(updated);
-    }
-  );
-
-  server.tool(
     'pend_ticket',
     'Use ONLY when human input is required AND no registered Action can resolve the blocker. ' +
     'Before parking for something an Action could do (deploy, publish, merge-to-production, run a scripted task), discover + run an Action instead (`list_actions` → `run_action`, or `save_action` → `run_action`) and resume the ticket in place. ' +
-    'For waiting on another ticket, use `add_ticket_prerequisites` instead (it auto-resumes when the blocker finishes — no human needed). ' +
-    'Parks a ticket for user intervention: sets `pending_user_action=true` plus a `reason` rendered on the ticket detail panel\'s "User" tab. While pending, the trigger loop drops every agent_trigger for this ticket, the focus selector skips it (so the agent\'s focus moves to another ticket), and BacklogPromotionService refuses to promote into this column slot. Use when a decision genuinely needs a human — typically because the ticket would otherwise loop between System and Agent columns, or because the work has to be split into a follow-up ticket. Pair with `create_ticket` when the right move is to spin up a separate ticket for a scoped follow-up. ' +
-    'ACTION GATE (ticket 524bb434): while runnable Actions exist in this ticket\'s scope, the call is REJECTED unless `no_action_reason` is supplied — the error lists the candidate Actions so you run/register one instead of parking.',
+    'For waiting on another ticket, use `add_ticket_prerequisites` instead (it auto-resumes when the blocker is done — no human needed). ' +
+    'Parks a ticket for user intervention: sets `pending_user_action=true` plus a `reason` rendered on the ticket panel. While pending the ticket is never dispatched and frees its agent\'s capacity slot; a human resumes it. ' +
+    'ACTION GATE (ticket 524bb434): while runnable Actions exist in this ticket\'s workspace, the call is REJECTED unless `no_action_reason` is supplied — the error lists the candidate Actions so you run/register one instead of parking.',
     {
       ticket_id: z.string().describe('Ticket ID to park'),
-      reason: z.string().describe('Why human intervention is needed. Surfaced verbatim on the User tab so the user can act without reading the comment log. Keep it specific (e.g. "credentials needed for prod DB migration" beats "stuck").'),
-      no_action_reason: z.string().optional().describe('Why no registered Action can resolve this blocker (e.g. "prod approval needs a human signer — no Action covers the sign-off"). REQUIRED when runnable Actions exist in the ticket\'s scope — the server otherwise rejects the pend and lists the candidate Actions so you can run/register one. Recorded on the ticket audit trail.'),
+      reason: z.string().describe('Why human intervention is needed. Keep it specific (e.g. "credentials needed for prod DB migration" beats "stuck").'),
+      no_action_reason: z.string().optional().describe('Why no registered Action can resolve this blocker. REQUIRED when runnable Actions exist in the ticket\'s workspace.'),
     },
     async ({ ticket_id, reason, no_action_reason }, extra: { sessionId?: string }) => {
-      const ticketRepo = dataSource.getRepository(Ticket);
-      const ticket = await ticketRepo.findOne({ where: { id: ticket_id } });
+      const ticket = await dataSource.getRepository(Ticket).findOne({ where: { id: ticket_id } });
       if (!ticket) return err('Ticket not found');
       if (ticket.archived_at) return err(new TicketArchivedError(ticket.id).message);
       const caller = getCallerAgent(extra);
 
-      // ── Action gate (ticket 524bb434) ───────────────────────────────────
-      // Pending is for what an Action cannot do. Gather the ticket-scoped
-      // runnable Actions (enabled + workspace-level OR this ticket's board)
-      // and force the caller to justify (`no_action_reason`) parking past
-      // them. Scope resolution failing fails OPEN — the gate is an
-      // enhancement, never a reason a legitimate pend cannot land.
+      // ── Action gate (ticket 524bb434) — fails OPEN on scope errors ──
       let candidates: PendActionCandidate[] = [];
       try {
         candidates = await loadPendActionCandidates(dataSource, ticket);
       } catch (e) {
-        logger.warn('MCP', 'pend_ticket action-gate scope resolution failed (failing open)', {
-          err: String(e), ticket_id: ticket.id,
-        });
-        candidates = [];
+        logger.warn('MCP', 'pend_ticket action-gate scope resolution failed (failing open)', { err: String(e), ticket_id: ticket.id });
       }
       const gate = evaluatePendActionGate(candidates, no_action_reason);
       if (!gate.allowed) return err(gate.message!);
 
-      // ── Terminal-aware gate (ticket ec498050) ───────────────────────────
-      // Pending is "wait for a human to look at this still-active ticket" —
-      // a ticket already in a terminal (Done) column is never revisited by
-      // the dispatch loop, so the park would just strand it invisibly.
-      // Scope: this agent-facing tool only — the human REST PATCH path
-      // (tickets.controller.ts) is untouched, since a human may deliberately
-      // want to flag/reopen an already-Done ticket.
-      let terminalCol: Awaited<ReturnType<typeof loadTicketColumnForPendGate>> = null;
-      try {
-        terminalCol = await loadTicketColumnForPendGate(ticketRepo, dataSource.getRepository(BoardColumn), ticket);
-      } catch (e) {
-        logger.warn('MCP', 'pend_ticket terminal-gate column resolution failed (failing open)', {
-          err: String(e), ticket_id: ticket.id,
-        });
-      }
-      const terminalGate = evaluateTerminalPendGate(terminalCol);
-      if (!terminalGate.allowed) {
+      // A done ticket is never revisited — parking it would strand the ask invisibly.
+      if (ticket.status === DONE_STATUS) {
         return err(
-          `pend_ticket blocked: ticket ${ticket.id} is already in a terminal (Done) column. ` +
-          `Pending only matters for a still-active ticket the dispatch loop will revisit — a terminal ` +
-          `ticket's User tab is never surfaced again, so this would strand the park invisibly. If a human ` +
-          `genuinely needs to look at this closed ticket, say so in a comment and mention them instead.`,
+          `pend_ticket blocked: ticket ${ticket.id} is already done. Pending only matters for a ticket that is still being worked — ` +
+          'if a human genuinely needs to look at this closed ticket, say so in a comment and mention them instead.',
         );
       }
-
-      const wasPending = !!ticket.pending_user_action;
-      ticket.pending_user_action = true;
-      ticket.pending_reason = reason || '';
-      if (!wasPending) {
-        ticket.pending_set_at = new Date();
-        ticket.pending_set_by = await resolveCallerDisplayName(dataSource, caller);
+      try {
+        const actor = { ...callerActor(caller), name: await resolveCallerDisplayName(dataSource, caller) };
+        await ticketService.pend(ticket.id, reason, actor);
+        const noActionReason = (no_action_reason ?? '').trim();
+        if (gate.candidateCount > 0 && noActionReason) {
+          await activityService.logActivity({
+            entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
+            field_changed: 'pend_no_action_reason', old_value: '', new_value: noActionReason,
+            ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+            actor_id: caller?.agentId, actor_name: caller?.agentName,
+          });
+        }
+      } catch (e: any) {
+        return mapError(e);
       }
-      await ticketRepo.save(ticket);
-      await activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'pending_user_action',
-        old_value: wasPending ? 'true' : 'false', new_value: 'true',
-        ticket_id: ticket.id,
-        actor_id: caller?.agentId, actor_name: caller?.agentName,
-      });
-      // Audit the "no Action applies" justification when the caller parked past
-      // runnable Actions, so scope-6 (구체적 이유 기록) stays reconstructable.
-      const noActionReason = (no_action_reason ?? '').trim();
-      if (gate.candidateCount > 0 && noActionReason) {
-        await activityService.logActivity({
-          entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-          field_changed: 'pend_no_action_reason',
-          old_value: '', new_value: noActionReason,
-          ticket_id: ticket.id,
-          actor_id: caller?.agentId, actor_name: caller?.agentName,
-        });
-      }
-      const updated = await loadTicketFull(dataSource, ticket.id);
-      return ok(updated);
-    }
+      return ok(await loadTicketFull(dataSource, ticket.id));
+    },
   );
 
   server.tool(
@@ -980,13 +311,10 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     'HUMAN ONLY — this call always rejects over MCP. Clearing a ticket\'s `pending_user_action` flag ' +
     'asserts "a human made the call"; MCP is an agent-only connection surface with no authenticated ' +
     'user session to prove that (ticket b2e88390). A human clears the park from the AWB web UI ' +
-    '(ticket panel → User tab → Resume) or an authenticated REST call to PATCH /api/tickets/:id — ' +
-    'never this tool. If a human already left their answer as a comment, do not call this: stop and ' +
-    'wait, the dispatch loop wakes you once they (or an operator) unpend it.',
-    {
-      ticket_id: z.string().describe('Ticket ID (unused — this call always rejects; see tool description)'),
-    },
-    async () => err(HUMAN_ONLY_UNPEND_MESSAGE)
+    '(ticket panel → Resume) or an authenticated REST call to PATCH /api/tickets/:id — never this tool. ' +
+    'If a human already left their answer as a comment, do not call this: stop and wait, AWB wakes you once they unpend it.',
+    { ticket_id: z.string().describe('Ticket ID (unused — this call always rejects; see tool description)') },
+    async () => err(HUMAN_ONLY_UNPEND_MESSAGE),
   );
 
   server.tool(
@@ -995,154 +323,74 @@ export function registerTicketCrudTools(server: McpServer, ctx: ToolContext): vo
     { ticket_id: z.string().describe('Ticket ID') },
     async ({ ticket_id }, extra: { sessionId?: string }) => {
       const ticketRepo = dataSource.getRepository(Ticket);
-      const ticket = await ticketRepo.findOne({
-        where: { id: ticket_id },
-        relations: ['children', 'comments'],
-      });
+      const ticket = await ticketRepo.findOne({ where: { id: ticket_id }, relations: ['children', 'comments'] });
       if (!ticket) return err('Ticket not found');
       const linkedDuplicates = await ticketRepo.count({ where: { canonical_ticket_id: ticket.id } });
       if (linkedDuplicates > 0) {
         return err(`canonical_has_duplicates: ${linkedDuplicates} linked report(s) must be relinked first`);
       }
-
       const caller = getCallerAgent(extra);
-      const columnId = ticket.column_id;
-      const position = ticket.position;
-
-      // Prereq cascade (ticket 48d14fff): drop every link pointing AT this
-      // ticket and re-evaluate the dependents BEFORE the row is removed — once
-      // remove() runs the FK ON DELETE CASCADE wipes the link rows and we'd
-      // have nothing left to read. `onPrerequisiteRemoved` returns the
-      // dependents that just lost their last open prereq so we can wake them.
+      const { position, parent_id: parentId, workspace_id: workspaceId } = ticket;
+      // Prereq cascade (ticket 48d14fff): re-evaluate dependents BEFORE the row
+      // is removed — the FK ON DELETE CASCADE would wipe the link rows first.
       let unblockedDependents: string[] = [];
       if (ticketPrerequisitesService) {
         try {
           unblockedDependents = await ticketPrerequisitesService.onPrerequisiteRemoved(ticket.id);
         } catch (e) {
-          logger.warn('MCP', 'delete_ticket prereq cascade failed (continuing)', {
-            err: String(e), ticket_id: ticket.id,
-          });
+          logger.warn('MCP', 'delete_ticket prereq cascade failed (continuing)', { err: String(e), ticket_id: ticket.id });
         }
       }
-
       await deleteCommentAttachmentsForTicket(dataSource, ticket.id);
       await ticketRepo.remove(ticket);
-
-      await shiftTicketPositions(ticketRepo, { column_id: columnId }, position, -1);
-
+      if (parentId) await shiftTicketPositions(ticketRepo, { parent_id: parentId }, position, -1);
       await activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'deleted',
-        ticket_id: ticket.id, actor_id: caller?.agentId, actor_name: caller?.agentName,
+        entity_type: 'ticket', entity_id: ticket_id, action: 'deleted',
+        ticket_id, workspace_id: workspaceId, actor_id: caller?.agentId, actor_name: caller?.agentName,
       });
-
-      // Wake the now-unblocked dependents on their current column.
-      if (triggerLoopService) {
-        for (const depId of unblockedDependents) {
-          try {
-            await triggerLoopService.dispatchCurrentColumn(depId, 'prerequisite_resolved', caller?.agentId || '');
-          } catch (e) {
-            logger.warn('MCP', 'delete_ticket unblock dispatch failed (continuing)', {
-              err: String(e), ticket_id: depId,
-            });
-          }
+      for (const depId of unblockedDependents) {
+        try {
+          await ctx.ticketDispatchService?.resumeTicket(depId, 'prerequisite_resolved');
+        } catch (e) {
+          logger.warn('MCP', 'delete_ticket unblock dispatch failed (continuing)', { err: String(e), ticket_id: depId });
         }
       }
-
       return ok({ success: true, deleted_ticket_id: ticket_id, unblocked_dependents: unblockedDependents });
-    }
+    },
   );
-
-  // ─── Child ticket tools ─────────────────────────────────────
 
   server.tool(
     'get_my_tickets',
-    'Get tickets where this agent is assignee, reporter, or reviewer within the workspace. Each row includes `my_roles` — the role slug(s) the agent holds on that ticket — so an agent juggling multiple roles can see at a glance which hat to wear per ticket. status="in_progress" is resolved against the root ticket\'s actual column (col.kind=\'active\') rather than the legacy status text column, since root workflow state is column-driven and Ticket.status is only ever derived as \'todo\'/\'done\' for root tickets — never \'in_progress\'. Other status values, and all child/subtask tickets, still match the raw status column.',
+    'Tickets assigned to the calling agent (its runtime identity), newest first. Archived tickets are excluded.',
     {
-      agent_id: z.string().describe('Calling agent ID'),
-      workspace_id: z.string().describe('Workspace to scope results'),
-      status: z.string().optional().describe('Filter by ticket status (optional, e.g. "todo", "in_progress", "done"). For root tickets, "in_progress" matches the actual active-kind column placement, not the legacy status column.'),
+      workspace_id: z.string().optional().describe('Workspace (defaults to the caller\'s workspace)'),
+      status: z.string().optional().describe(`Filter by status. ${STATUS_HELP}`),
+      assignee_key: z.string().optional().describe('Runtime identity key to look up instead of the caller (rt-…)'),
     },
-    async ({ agent_id, workspace_id, status }) => {
-      // P4: Agent 행 또는 Host 행 — 둘 다 조회 주체로 인정한다.
-      const agent = await resolveCallerIdentityRow(dataSource, agent_id);
-      if (!agent) return err('Agent not found');
-
-      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspace_id)) {
-        return err('Agent does not belong to the requested workspace');
+    async ({ workspace_id, status, assignee_key }, extra: { sessionId?: string }) => {
+      const caller = getCallerAgent(extra);
+      const key = assignee_key || caller?.runtimeKey || '';
+      if (!key) return err('This session has no runtime identity — pass assignee_key');
+      const ws = workspace_id || caller?.workspaceId || '';
+      let statuses: TicketStatus[] = [];
+      if (status) {
+        const parsed = parseTicketStatus(status);
+        if (!parsed) return err(`Unknown status "${status}" — ${STATUS_HELP}`);
+        statuses = [parsed];
       }
-
-      const ticketRepo = dataSource.getRepository(Ticket);
-      let qb = ticketRepo.createQueryBuilder('t')
-        .innerJoin('columns', 'col', 'col.id = t.column_id')
-        .innerJoin('boards', 'b', 'b.id = col.board_id')
-        .where('b.workspace_id = :workspaceId', { workspaceId: workspace_id })
-        .andWhere('(t.assignee_id = :agentId OR t.reporter_id = :agentId OR t.reviewer_id = :agentId)', { agentId: agent_id })
-        // Archived tickets drop out of the agent's active list by default —
-        // they're not actionable workflow items, just history. The Archive
-        // UI / list_archived_tickets tool covers explicit lookup.
-        .andWhere('t.archived_at IS NULL');
-
-      if (status === 'in_progress') {
-        // Root workflow state is column-driven (see get_ticket's legacy_status
-        // projection): deriveRootTicketStatus (archive-helpers.ts) only ever
-        // writes 'todo' or 'done' onto a root ticket's Ticket.status, derived
-        // purely from the column's terminal/non-terminal-ness — it never
-        // derives 'in_progress'. So a root ticket actually sitting in an
-        // active-kind column (To Do / Plan / In Progress) can carry a
-        // permanently stale status='todo', and `t.status = 'in_progress'`
-        // would never match any root ticket, no matter where it actually sits.
-        // Resolve root tickets against the already-joined column's kind
-        // instead. Child tickets keep matching the raw status column exactly
-        // as before — spelled out explicitly here rather than relying on the
-        // innerJoin's incidental exclusion of column_id=null rows, so this
-        // predicate stays correct even if that join is ever loosened.
-        qb = qb.andWhere(
-          '(t.parent_id IS NULL AND col.kind = :activeKind) OR (t.parent_id IS NOT NULL AND t.status = :status)',
-          { activeKind: 'active', status },
-        );
-      } else if (status) {
-        qb = qb.andWhere('t.status = :status', { status });
-      }
-
-      const tickets = await qb.orderBy('t.created_at', 'DESC').getMany();
-
-      // Resolve role slugs the agent holds per ticket. Prefer
-      // TicketRoleAssignment (handles workspace-custom roles); fall back to
-      // the legacy assignee_id / reporter_id / reviewer_id columns when the
-      // assignment service is unavailable (standalone MCP server mode) or
-      // returns nothing for a row.
-      const rolesByTicket = new Map<string, string[]>();
-      if (ticketRoleAssignmentService) {
-        for (const t of tickets) {
-          try {
-            const resolved = await ticketRoleAssignmentService.resolveForTicket(t.id);
-            const slugs = resolved
-              .filter(r => r.holder?.type === 'agent' && r.holder.id === agent_id)
-              .map(r => r.role.slug);
-            if (slugs.length > 0) rolesByTicket.set(t.id, slugs);
-          } catch { /* fall through to legacy lookup */ }
-        }
-      }
-
-      return ok(tickets.map(t => {
-        let myRoles = rolesByTicket.get(t.id);
-        if (!myRoles || myRoles.length === 0) {
-          const legacy: string[] = [];
-          if (t.assignee_id === agent_id) legacy.push('assignee');
-          if (t.reporter_id === agent_id) legacy.push('reporter');
-          if (t.reviewer_id === agent_id) legacy.push('reviewer');
-          myRoles = legacy;
-        }
-        return {
-          ...parseTicket(t),
-          labels: safeJsonParse(t.labels, []),
-          channel_ids: safeJsonParse(t.channel_ids, []),
-          my_roles: myRoles,
-        };
-      }));
-    }
+      const qb = dataSource.getRepository(Ticket).createQueryBuilder('t')
+        .where('t.assignee_key = :key', { key })
+        .andWhere('t.archived_at IS NULL')
+        .andWhere('t.parent_id IS NULL');
+      if (ws) qb.andWhere('t.workspace_id = :ws', { ws });
+      if (statuses.length) qb.andWhere('t.status IN (:...statuses)', { statuses });
+      const rows = await qb.orderBy('t.updated_at', 'DESC').take(200).getMany();
+      return ok((await ticketService.cards(rows)).map((t: any) => ({
+        id: t.id, title: t.title, status: t.status, priority: t.priority, tags: t.tags,
+        project: t.project ?? null, pending_user_action: t.pending_user_action,
+        pending_on_tickets: t.pending_on_tickets, pending_ci_wait: t.pending_ci_wait,
+        updated_at: t.updated_at,
+      })));
+    },
   );
-
-  // ─── Ticket locking ─────────────────────────────────────
-
 }

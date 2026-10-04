@@ -266,6 +266,55 @@ test('ticket-session: reused trigger and non-move update name the authoritative 
   assert.match(mgr.followUps[1].turnText, /Current column: Review \(kind: review, id: column-review\)/);
 });
 
+// board-less servers (docs/tickets.md): `board_update` keeps its name and adds
+// `status`; a status change may arrive as `moved`, `status_changed` or an
+// `updated` of `status`. None of those wake the live session — the dispatcher
+// re-triggers the assignee itself — while other updates name the status.
+test('ticket-session: a board-less status change does not wake the live session (any action shape)', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  await mgr.dispatchTrigger({
+    ticketId: 'ticket-status', role: 'assignee', triggerId: 'trigger-1',
+    agentId: 'agent-1', rolePrompt: '', ticketPrompt: '', columnPrompt: null,
+    ticket: { id: 'ticket-status', title: 'Status ticket', __awb_status: 'in_progress' },
+    forceRespawn: false, maxConcurrentTicketsPerAgent: 5,
+  });
+  for (const ev of [
+    { entity_type: 'ticket', action: 'moved', status: 'review', current_column_id: 'status:review', current_column_kind: 'active' },
+    { entity_type: 'ticket', action: 'status_changed', status: 'done', current_column_kind: 'terminal' },
+    { entity_type: 'ticket', action: 'updated', field_changed: 'status', status: 'todo' },
+  ]) {
+    assert.equal(mgr.forwardBoardUpdate('ticket-status', ev), false, `${ev.action} must not wake the session`);
+  }
+  assert.equal(mgr.followUps.length, 0);
+});
+
+test('ticket-session: board-less reused trigger and non-move update name the status, not a column', async () => {
+  const mgr = new FakeTicketMgr(makeConfig(), 5);
+  const base = {
+    ticketId: 'ticket-s2', role: 'assignee', agentId: 'agent-1', rolePrompt: '',
+    ticketPrompt: '', forceRespawn: false, maxConcurrentTicketsPerAgent: 5,
+    columnPrompt: { template_id: 'builtin:ticket-work-order', name: 'Ticket work order', content: 'Do the whole ticket.' },
+    ticket: {
+      id: 'ticket-s2', title: 'Own it', __awb_status: 'in_progress',
+      current_column_id: 'status:in_progress', current_column_name: 'In Progress', current_column_kind: 'active',
+    },
+  };
+  await mgr.dispatchTrigger({ ...base, triggerId: 'trigger-1' });
+  await mgr.dispatchTrigger({ ...base, triggerId: 'trigger-2' });
+  const turn = mgr.followUps[0].turnText;
+  assert.match(turn, /Status: In Progress \(in_progress\)/);
+  assert.match(turn, /Ticket work order:\nDo the whole ticket\./);
+  assert.doesNotMatch(turn, /Current column:|Column workflow guide/);
+  assert.match(turn, /move_ticket to `done`/);
+  mgr.forwardBoardUpdate('ticket-s2', {
+    entity_type: 'comment', action: 'created', status: 'in_progress',
+    current_column_id: 'status:in_progress', current_column_name: 'In Progress', current_column_kind: 'active',
+  });
+  assert.match(mgr.followUps[1].turnText, /\[Ticket Update\]/);
+  assert.match(mgr.followUps[1].turnText, /Status: In Progress \(in_progress\)/);
+  assert.doesNotMatch(mgr.followUps[1].turnText, /Current column:/);
+});
+
 test('ticket-session: force-respawn (ticket_done_review) terminates a drifted-key twin sibling, spares a distinct co-holder (ticket 7e7e23bf)', async () => {
   // The reviewer-twin gap: a lingering same-(ticket, role) strand survives under
   // a DRIFTED sessionKey (the unknown-agent `_` bucket) while the Done

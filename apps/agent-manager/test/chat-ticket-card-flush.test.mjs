@@ -65,7 +65,7 @@ function driveTurn(mgr, sess, actions) {
 const cardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.ticket_refs));
 // F2-4 ⓒ: 결과물 카드 post 는 metadata.artifact_refs 를 싣는다(ticket_refs 와 독립).
 const artifactCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.artifact_refs));
-// F-3 (ticket 3ca88253): agent-status / board-summary 카드 post 는 각각 독립 채널.
+// agent-status(P4c-4) / board-summary(board-less) 카드 채널은 제거됐다 — 방출되면 안 된다.
 const agentCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.agent_refs));
 const boardCardPosts = () => posts.filter((p) => Array.isArray(p.body?.metadata?.board_refs));
 // Let the fire-and-forget postChatRoomMessage promises settle.
@@ -297,33 +297,16 @@ test('실패한 결과물(에러 result)은 카드로 방출되지 않는다(fai
   assert.equal(artifactCardPosts().length, 0, '에러/미인식 shape → 결과물 카드 없음');
 });
 
-// ── F-3 (ticket 3ca88253): board-summary 카드 FLUSH (agent-status 채널은
-// P4c-4 로 get_agent 와 함께 제거) ──────────────────────────────────────────
-// get_board_summary 는 티켓 row 를 안 바꾸므로 ticket_refs 가 아니라
-// metadata.board_refs 로 독립 방출된다. 아래는 실제 stream-json glue 를 태워
-// 방출되는 실 wire payload로 이를 고정한다.
+// ── board-less (docs/tickets.md): board-summary 카드 채널 제거 ─────────────────
+// get_board_summary 는 서버에서 삭제됐고 board_refs 카드 채널도 함께 없어졌다. 혹시
+// 구버전 서버에 붙어 그 tool 결과가 흘러와도 카드로 방출되지 않아야 한다.
 
 const boardAction = (id, name) => ({
   tool: 'get_board_summary', input: { board_id: id },
   result: { board: name, description: '', columns: [] },
 });
 
-// (agent_refs 방출 테스트 2건은 P4c-4 로 get_agent 와 함께 제거.)
-
-test('get_board_summary tool → board_refs 카드 방출(실 wire payload)', async () => {
-  const mgr = new ChatSessionManager(makeConfig());
-  const sess = makeSess();
-  driveTurn(mgr, sess, [boardAction('B-1', 'AWB')]);
-  await settle();
-
-  const cards = boardCardPosts();
-  assert.equal(cards.length, 1, '한 turn 의 board 조회는 하나의 카드로 합쳐진다');
-  assert.deepEqual(cards[0].body.metadata.board_refs, [{ board_id: 'B-1', title: 'AWB' }]);
-  assert.equal(cards[0].body.content.split('\n').length, 1, 'content lines == board refs');
-  assert.equal(agentCardPosts().length, 0);
-});
-
-test('티켓·결과물·board 가 한 turn 에 섞이면 세 카드로 독립 방출', async () => {
+test('board-summary 결과는 더 이상 board_refs 카드를 만들지 않는다(티켓·결과물 채널만)', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeSess();
   driveTurn(mgr, sess, [
@@ -335,32 +318,27 @@ test('티켓·결과물·board 가 한 turn 에 섞이면 세 카드로 독립 �
 
   assert.equal(cardPosts().length, 1, 'ticket_refs 카드 1개');
   assert.equal(artifactCardPosts().length, 1, 'artifact_refs 카드 1개');
-  assert.equal(boardCardPosts().length, 1, 'board_refs 카드 1개');
+  assert.equal(boardCardPosts().length, 0, 'board_refs 채널 제거됨 — 카드 없음');
   assert.equal(agentCardPosts().length, 0, 'agent 채널 제거됨 — 카드 없음');
-  // 세 카드는 서로 metadata 를 섞지 않는다(독립 flush).
-  const [tCard] = cardPosts();
-  const [bCard] = boardCardPosts();
-  assert.equal(tCard.body.metadata.agent_refs, undefined);
-  assert.equal(bCard.body.metadata.ticket_refs, undefined);
 });
 
-// 서버의 MAX_BOARD_REFS(room-messaging.service.ts)는 10 — ticket/artifact
-// 의 MAX_TICKET_REFS/MAX_ARTIFACT_REFS(20)의 절반이다. 위 21-ticket 테스트와 같은 회귀를
-// board 채널에서도 고정한다: TICKET_REFS_PER_MESSAGE(20)로 청킹했다면 11번째~20번째
-// ref가 서버 sanitizer 에서 조용히 잘렸을 것 — chunkBoardRefs 호출부가
-// AGENT_BOARD_REFS_PER_MESSAGE(10)를 쓰는지 실 flush 경로로 고정한다.
-// (agent 채널 11개 분할 테스트는 P4c-4 로 get_agent 와 함께 제거.)
-test('11개의 get_board_summary 조회가 한 turn 에 있으면 2개 카드(10 + 1)로 분할, 누락 없이', async () => {
+// list_tickets(board-less 티켓 풀 조회)는 read 지만 `{ tickets: [...] }` 결과가 제목
+// 캐시를 채워, 같은 turn 의 제목 없는 액션(add_comment) 카드가 제목으로 렌더된다.
+test('list_tickets 결과의 제목이 뒤따르는 add_comment 카드 라벨이 된다', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeSess();
-  driveTurn(mgr, sess, Array.from({ length: 11 }, (_, i) => boardAction(`B-${i}`, `board-${i}`)));
+  driveTurn(mgr, sess, [
+    {
+      tool: 'list_tickets', input: { status: ['in_progress'] },
+      result: { tickets: [{ id: 'T-list-1', title: '로그인 오류 수정' }], tags: [] },
+    },
+    { tool: 'add_comment', input: { ticket_id: 'T-list-1', content: '진행 상황' }, result: { id: 'C-1' } },
+  ]);
   await settle();
 
-  const cards = boardCardPosts();
-  assert.equal(cards.length, 2, '11번째 board 조회가 두 번째 카드를 강제한다(서버 MAX_BOARD_REFS=10 초과 방지)');
-  const lens = cards.map((c) => c.body.metadata.board_refs.length).sort((a, b) => b - a);
-  assert.deepEqual(lens, [10, 1], 'refs 는 10 + 1 로 분할되어 서버 per-message bound 를 지킨다');
-
-  const ids = cards.flatMap((c) => c.body.metadata.board_refs.map((r) => r.board_id));
-  assert.equal(new Set(ids).size, 11, '11개 서로 다른 board_id 모두 생존');
+  const cards = cardPosts();
+  assert.equal(cards.length, 1, 'list_tickets(read) 는 카드가 아니고 add_comment 만 카드');
+  assert.deepEqual(cards[0].body.metadata.ticket_refs, [
+    { action: 'comment', ticket_id: 'T-list-1', title: '로그인 오류 수정' },
+  ]);
 });

@@ -11,10 +11,10 @@
 // *-tools.ts — the exact files the convention loader in tools/index.ts discovers)
 // and asserts each one is classified EXACTLY once in ticket-ref-capture:
 //   EMIT     — TICKET_ACTION_TOOLS
-//   BATCH    — BATCH_TICKET_TOOL
-//   REJECT   — REJECT_HANDOFF_TOOL
 //   ARTIFACT — ARTIFACT_ACTION_TOOLS (F2-4 ⓒ 결과물 카드; EXCLUDE 아님)
 //   EXCLUDE  — TICKET_TOOL_EXCLUSIONS (with a per-tool reason)
+// (The board model's BATCH / REJECT / BOARD buckets went away with
+// batch_operations / reject_handoff / get_board_summary — docs/tickets.md.)
 // A newly-added server tool therefore fails THIS test until someone decides whether
 // it emits a card or is deliberately excluded — the silent gap can no longer recur.
 
@@ -26,10 +26,7 @@ import { dirname, join } from 'node:path';
 
 import {
   TICKET_ACTION_TOOLS,
-  BATCH_TICKET_TOOL,
-  REJECT_HANDOFF_TOOL,
   ARTIFACT_ACTION_TOOLS,
-  BOARD_ACTION_TOOLS,
   TICKET_TOOL_EXCLUSIONS,
   classifiedToolNames,
 } from '../dist/lib/ticket-ref-capture.js';
@@ -65,10 +62,7 @@ test('classification buckets are disjoint (no tool classified twice)', () => {
     seen.set(name, bucket);
   };
   for (const n of emit) put(n, 'emit');
-  put(BATCH_TICKET_TOOL, 'batch');
-  put(REJECT_HANDOFF_TOOL, 'reject');
   for (const n of Object.keys(ARTIFACT_ACTION_TOOLS)) put(n, 'artifact');
-  for (const n of Object.keys(BOARD_ACTION_TOOLS)) put(n, 'board');
   for (const n of exclude) put(n, 'exclude');
   // classifiedToolNames() must equal the union with no dupes swallowed.
   assert.equal(classifiedToolNames().size, seen.size, 'classifiedToolNames drops or dupes a bucket');
@@ -103,9 +97,9 @@ test('the emit surface actually contains the ticket-mutation tools reviewers fla
   // Regression floor: the specific omissions caught across the three review rounds
   // must stay emitters (this test fails if a refactor drops them from the map).
   for (const t of [
-    'update_child_ticket', 'batch_operations', 'ask_question', 'answer_question',
-    'record_decision', 'reject_handoff', 'add_ticket_prerequisites', 'handoff_to_agent',
-    'propose_move', 'record_agreement', 'decide_ticket_duplicate', 'correct_confirmed_ticket_duplicate',
+    'update_child_ticket', 'ask_question', 'answer_question',
+    'record_decision', 'add_ticket_prerequisites',
+    'decide_ticket_duplicate', 'correct_confirmed_ticket_duplicate',
   ]) {
     const classified = classifiedToolNames();
     assert.ok(classified.has(t), `${t} must be classified`);

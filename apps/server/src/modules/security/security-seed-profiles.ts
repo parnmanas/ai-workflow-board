@@ -8,7 +8,7 @@ import type { CreateProfileInput } from './security-profile.service';
  * empty catalogue — `list_security_profiles` returns []. This module is the
  * single source of truth for a starter set; it mirrors qa-seed-scenarios.ts.
  *
- * Each entry is **scope-agnostic data** (no workspace/agent/board ids baked in):
+ * Each entry is **scope-agnostic data** (no workspace/agent ids baked in):
  * it carries the `checklist[]` rendered into the run prompt, a `scan_driver`, and
  * the `scope_mode`. buildProfileCreatePayloads() stamps the env-specific scope on
  * at seed time, so the catalogue is reproducible across environments.
@@ -294,9 +294,7 @@ export const SECURITY_SEED_PROFILES: SeedProfile[] = [
 export interface BuildProfileOptions {
   workspace_id: string;
   target_agent_id: string;
-  /** null/'' → workspace-scoped; <uuid> → pinned to that board. */
-  board_id?: string | null;
-  /** <uuid> → inspect that repo Resource; omit → AWB's own codebase. */
+  /** <uuid> → inspect that Project; omit → AWB's own codebase. */
   target_resource_id?: string | null;
   created_by?: string;
   /** Only seed profiles whose `key` is in this list (default: all). */
@@ -309,7 +307,7 @@ export function keyTag(key: string): string {
 }
 
 /**
- * Stamp the env-specific scope (workspace/board/agent) onto each template and
+ * Stamp the env-specific scope (workspace/agent) onto each template and
  * return ready-to-create payloads. The stable `key` is preserved both as the
  * leading tag (`key:<key>`) and on `_key`, so an idempotent seeder can
  * match-and-update instead of duplicating.
@@ -319,7 +317,6 @@ export function buildProfileCreatePayloads(opts: BuildProfileOptions): Array<Cre
   return SECURITY_SEED_PROFILES.filter((p) => !wanted || wanted.has(p.key)).map((p) => ({
     _key: p.key,
     workspace_id: opts.workspace_id,
-    board_id: opts.board_id ?? null,
     name: p.name,
     description: p.description,
     checklist: p.checklist,

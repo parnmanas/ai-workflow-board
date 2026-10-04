@@ -22,9 +22,6 @@ export class QaRun {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   // pending → running → passed | failed | error | build_failed
   // `build_failed` is a first-class build death (ticket 80d52250): the build step
   // itself failed, distinct from a functional `failed` or an infra `error`. It is
@@ -88,7 +85,7 @@ export class QaRun {
   // the original failure run). When QaRerunOnFixService re-runs a scenario after
   // its fix ticket reaches Done, it stamps generation = (fix-ticket generation
   // + 1) here. If this run also fails, QaFailureTicketService carries the value
-  // onto the new fix ticket as a `qa-rerun:<n>` label, so the next Done→rerun
+  // onto the new fix ticket as a `qa-rerun:<n>` tag, so the next Done→rerun
   // edge reads it back and the QA↔fix loop converges at max_rerun_attempts.
   @Column({ type: 'int', default: 0 })
   rerun_generation: number;
@@ -111,7 +108,7 @@ export class QaRun {
   @Column({ type: Date, nullable: true, default: null })
   finished_at: Date | null;
 
-  // ── Liveness heartbeat (board-pluggable reaper policy, ticket 40010b25) ──────
+  // ── Liveness heartbeat (scenario-pluggable reaper policy, ticket 40010b25) ───
   // A run under the `heartbeat_deadline` liveness_policy must keep a monotonic
   // progress token advancing. `qa_run_heartbeat` ingestion records the latest
   // token here (high-water mark) and stamps `liveness_token_at` ONLY when the
@@ -130,7 +127,7 @@ export class QaRun {
   // ── Multi-phase QA model (ticket 90cc22f7) ───────────────────────────────────
   // A run can move through several phases (e.g. Unity import → build → run), each
   // with its own timeout. `current_phase` is the active phase id (matched against
-  // the resolved qa_phases config — scenario ?? board, see resolveQaPhases). null =
+  // the scenario's qa_phases config, see resolveQaPhases). null =
   // legacy single-running run that never set a phase (regression-safe: the
   // phase_timeouts detector falls back to a sane default and the default
   // zero_progress / heartbeat_deadline policies ignore these fields entirely).

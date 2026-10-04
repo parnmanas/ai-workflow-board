@@ -18,7 +18,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'list_functions',
-    'List executable Functions resolved by Board → Workspace → Global key precedence.',
+    'List executable Functions resolved by Workspace → Global key precedence.',
     {
       workspace_id: z.string().describe('Workspace ID used to resolve inherited overrides'),
     },
@@ -110,7 +110,6 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
       workspace_id: z.string(),
       function_key: z.string().optional(),
       function_id: z.string().optional(),
-      board_id: z.string().optional(),
       ticket_id: z.string().optional(),
       inputs: z.record(z.string(), z.any()).optional(),
       idempotency_key: z.string().optional(),
@@ -125,7 +124,6 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
           functionKey: input.function_key,
           functionId: input.function_id,
           workspaceId: input.workspace_id,
-          boardId: input.board_id,
           ticketId: input.ticket_id,
           inputs: input.inputs,
           idempotencyKey: input.idempotency_key,

@@ -3,34 +3,34 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { QaScenario, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import { Deployment } from '../../entities/Deployment';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
-import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { DONE_STATUS, isDoneStatus } from '../../common/ticket-status';
+import { parseTags } from '../tickets/ticket.service';
 import { QaRunService } from './qa-run.service';
-import { RERUN_LABEL_PREFIX } from './qa-failure-ticket.service';
+import { QA_AUTO_CLOSE_ACTOR, RERUN_TAG_PREFIX } from './qa-failure-ticket.service';
 import { deploymentIncludesCommit, findLatestDeployment, resolveFixCommitLabel } from '../../common/deployment-options';
 import { DEPLOYMENT_REPORTED_EVENT, DeploymentReportedSignal } from '../deployments/deployment.service';
 
-// The marker labels QaFailureTicketService stamps on every fix ticket it files.
+// The marker tags QaFailureTicketService stamps on every fix ticket it files.
 // A ticket must carry ALL of these to be eligible for an automatic rerun — this
-// is the scope guard that stops a human-labelled ticket from firing a run.
+// is the scope guard that stops a human-tagged ticket from firing a run.
 //
-// ⚠️ Coupling: these mirror QaFailureTicketService.DEFAULT_LABELS, but that
-// service only applies the defaults when `on_failure_ticket.labels` is unset —
-// a scenario that customises `cfg.labels` and drops 'auto' would file fix
+// ⚠️ Coupling: these mirror QaFailureTicketService.DEFAULT_TAGS, but that
+// service only applies the defaults when `on_failure_ticket.tags` is unset —
+// a scenario that customises `cfg.tags` and drops 'auto' would file fix
 // tickets that this guard silently REJECTS (no rerun, no error). The two
-// anchors that are ALWAYS present regardless of cfg.labels are the
+// anchors that are ALWAYS present regardless of cfg.tags are the
 // `qa-scenario:<id>` marker (added unconditionally) and the `rerun_on_fix`
-// opt-in gate (checked below) — those are the real scope. Treat the label
-// match as belt-and-suspenders: if you customise cfg.labels, keep 'qa-failure'
+// opt-in gate (checked below) — those are the real scope. Treat the tag
+// match as belt-and-suspenders: if you customise cfg.tags, keep 'qa-failure'
 // + 'auto' in the list, or relax this constant to the scenario marker alone.
-const REQUIRED_LABELS = ['qa-failure', 'auto'];
-const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
+const REQUIRED_TAGS = ['qa-failure', 'auto'];
+const SCENARIO_TAG_PREFIX = 'qa-scenario:';
 
 // Default convergence cap when the scenario doesn't set max_rerun_attempts.
 const DEFAULT_MAX_RERUN_ATTEMPTS = 3;
@@ -50,19 +50,11 @@ interface PendingRerun {
   scenarioName: string;
   workspaceId: string | null;
   environment: string;
-  /** '' when no `fix-commit:` label → the gate uses deploy-freshness ordering. */
+  /** '' when no `fix-commit:` tag → the gate uses deploy-freshness ordering. */
   fixCommitSha: string;
   /** The fix ticket's terminal_entered_at — the freshness-ordering baseline. */
   notBefore: Date | null;
   fallbackTimer?: ReturnType<typeof setTimeout>;
-}
-
-function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T {
-  try {
-    return JSON.parse(val || JSON.stringify(fallback)) as T;
-  } catch {
-    return fallback;
-  }
 }
 
 /**
@@ -73,7 +65,7 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  * inside the actions module, so neither module takes a dependency on the other.
  *
  * When a QA-failure fix ticket (filed by QaFailureTicketService, so it carries
- * `qa-failure` + `auto` + `qa-scenario:<id>`) lands on a terminal (Done) column
+ * the `qa-failure` + `auto` + `qa-scenario:<id>` tags) enters `done`
  * AND its scenario opted into `on_failure_ticket.rerun_on_fix`, this service
  * re-runs the SAME scenario by calling QaRunService.startQaRun directly — no
  * agent prompt parsing, fully server-side and deterministic.
@@ -82,10 +74,11 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  * `terminal_entered_at` (the SAME edge-claim pattern as the on-done hook, but a
  * dedicated stamp column so the two hooks don't starve each other). At most one
  * rerun per terminal ENTRY; a leave-and-return re-stamps terminal_entered_at and
- * fires again, a reorder within Done does not.
+ * fires again, a reorder within Done does not. The on-pass auto-close
+ * (QA_AUTO_CLOSE_ACTOR) never fires a rerun — the scenario already passed.
  *
  * Convergence: each rerun carries a generation (read from the Done ticket's
- * `qa-rerun:<n>` label; absent = 0). When the generation reaches
+ * `qa-rerun:<n>` tag; absent = 0). When the generation reaches
  * `max_rerun_attempts` (default 3) the loop HALTS — it posts a "human
  * intervention needed" comment instead of re-running. Otherwise it starts the
  * run at generation + 1; if that run also fails, QaFailureTicketService files a
@@ -102,7 +95,7 @@ function safeJsonParse<T = any>(val: string | null | undefined, fallback: T): T 
  *   • Deployment-fact gate (DoD 3) — when `deployment_gate` is set and the
  *     scenario has a `target_environment`, the rerun instead WAITS until that
  *     environment's live deployment actually includes the fix commit (or, absent
- *     a `fix-commit:<sha>` label, until a deploy lands at/after the fix's Done),
+ *     a `fix-commit:<sha>` tag, until a deploy lands at/after the fix's Done),
  *     firing the instant a matching `report_deployment` / self-report arrives
  *     (DEPLOYMENT_REPORTED_EVENT). `rerun_delay_seconds` still applies as a
  *     best-effort fallback cap. Not time-hardcoded — this is the DoD path.
@@ -162,25 +155,24 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async _handleActivity(log: ActivityLog): Promise<void> {
-    // Only column moves can land a ticket on a terminal column.
-    if (log.action !== 'moved' || !log.ticket_id) return;
+    // Only a status change into `done` can make a fix ticket eligible.
+    if (log.action !== 'moved' || log.new_value !== DONE_STATUS || !log.ticket_id) return;
+    // The on-pass auto-close moved it: the scenario is already green.
+    if (log.actor_id === QA_AUTO_CLOSE_ACTOR.id) return;
 
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const ticket = await ticketRepo.findOne({ where: { id: log.ticket_id } });
-    if (!ticket || !ticket.column_id) return;
-
-    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
-    if (!isTerminalColumn(col)) return;
+    // Re-check the row: it may have left `done` again before this ran.
+    if (!ticket || !isDoneStatus(ticket.status)) return;
     // Without a terminal-entry anchor the edge-claim predicate has nothing to
     // compare against — bail (matches the on-done hook's "same entry" semantics).
     if (!ticket.terminal_entered_at) return;
 
     // ── Scope guard (cheap, pre-claim) ──────────────────────────────────────
-    // Only a QA-failure fix ticket carrying ALL marker labels is eligible.
-    const labels = safeJsonParse<string[]>(ticket.labels, []);
-    if (!Array.isArray(labels)) return;
-    if (!REQUIRED_LABELS.every((l) => labels.includes(l))) return;
-    const scenarioId = this._parseScenarioId(labels);
+    // Only a QA-failure fix ticket carrying ALL marker tags is eligible.
+    const tags = parseTags(ticket.tags);
+    if (!REQUIRED_TAGS.every((t) => tags.includes(t))) return;
+    const scenarioId = this._parseScenarioId(tags);
     if (!scenarioId) return;
 
     const scenario = await this.dataSource.getRepository(QaScenario).findOne({ where: { id: scenarioId } });
@@ -192,7 +184,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     const maxAttempts = this._resolveMaxAttempts(cfg.max_rerun_attempts);
     if (maxAttempts <= 0) return; // reruns explicitly disabled.
 
-    const currentGen = this._parseGeneration(labels);
+    const currentGen = this._parseGeneration(tags);
 
     // ── Atomic once-per-terminal-entry claim ────────────────────────────────
     // Claim BEFORE acting in BOTH branches (rerun and halt) so a duplicate
@@ -274,7 +266,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     generation: number,
     environment: string,
   ): Promise<void> {
-    const fixSha = resolveFixCommitLabel(ticket.labels);
+    const fixSha = resolveFixCommitLabel(ticket.tags);
     const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), scenario.workspace_id, environment);
     if (this._deploymentSatisfies(dep, fixSha, ticket.terminal_entered_at)) {
       this.logService.info('QA', 'rerun-on-fix deployment gate already satisfied — firing now', {
@@ -357,7 +349,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
   /**
    * Does `dep` prove the fix is live? With a known fix commit → the deployment
    * must INCLUDE it (the deployed commit itself or a known ancestor). Without one
-   * (no `fix-commit:` label) → deploy-freshness ordering: a deployment that went
+   * (no `fix-commit:` tag) → deploy-freshness ordering: a deployment that went
    * live at/after the fix ticket's Done instant is treated as carrying it.
    */
   private _deploymentSatisfies(dep: Deployment | null, fixSha: string, fixDoneAt: Date | null): boolean {
@@ -395,20 +387,20 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** First `qa-scenario:<uuid>` label → the scenario id, or null. */
-  private _parseScenarioId(labels: string[]): string | null {
-    const marker = labels.find((l) => typeof l === 'string' && l.startsWith(SCENARIO_LABEL_PREFIX));
+  /** First `qa-scenario:<uuid>` tag → the scenario id, or null. */
+  private _parseScenarioId(tags: string[]): string | null {
+    const marker = tags.find((t) => typeof t === 'string' && t.startsWith(SCENARIO_TAG_PREFIX));
     if (!marker) return null;
-    const id = marker.slice(SCENARIO_LABEL_PREFIX.length).trim();
+    const id = marker.slice(SCENARIO_TAG_PREFIX.length).trim();
     return id || null;
   }
 
-  /** Highest `qa-rerun:<n>` label value (absent = generation 0). */
-  private _parseGeneration(labels: string[]): number {
+  /** Highest `qa-rerun:<n>` tag value (absent = generation 0). */
+  private _parseGeneration(tags: string[]): number {
     let gen = 0;
-    for (const l of labels) {
-      if (typeof l !== 'string' || !l.startsWith(RERUN_LABEL_PREFIX)) continue;
-      const n = parseInt(l.slice(RERUN_LABEL_PREFIX.length), 10);
+    for (const t of tags) {
+      if (typeof t !== 'string' || !t.startsWith(RERUN_TAG_PREFIX)) continue;
+      const n = parseInt(t.slice(RERUN_TAG_PREFIX.length), 10);
       if (Number.isFinite(n) && n > gen) gen = n;
     }
     return gen;

@@ -1,28 +1,26 @@
-import { parseRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
-import { BoardColumn } from '../../entities/BoardColumn';
-import { Board } from '../../entities/Board';
 import { Resource } from '../../entities/Resource';
-import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { SecurityProfile, SecurityOnFailureTicketConfig, SecuritySeverity } from '../../entities/SecurityProfile';
 import { SecurityRun, SecurityFinding } from '../../entities/SecurityRun';
 import { LogService } from '../../services/log.service';
-import { ActivityService } from '../../services/activity.service';
-import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
-import { findColumnByName, maxTicketPosition, resolveAgentIdAndName, refreshTicketWorkspaceId } from '../mcp/shared/ticket-helpers';
-import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { ProjectsService } from '../projects/projects.service';
+import { TicketService, normalizeTags, type TicketActor } from '../tickets/ticket.service';
+import { DONE_STATUS } from '../../common/ticket-status';
+import { parseRuntimeSpec } from '../../common/runtime-spec';
 
-// Internal traceability label so per_open_ticket dedupe can find the profile's
+// Internal traceability tag so per_open_ticket dedupe can find the profile's
 // own open security ticket without a metadata column on Ticket. Homologous to
 // QA's `qa-scenario:<id>` back-ref.
-const PROFILE_LABEL_PREFIX = 'security-profile:';
-const DEFAULT_LABELS = ['security', 'auto'];
+const PROFILE_TAG_PREFIX = 'security-profile:';
+const DEFAULT_TAGS = ['security', 'auto'];
 const DEFAULT_PRIORITY = 'high';
 const DEFAULT_MIN_SEVERITY: SecuritySeverity = 'high';
+
+const SECURITY_ACTOR: TicketActor = { id: '', name: 'Security', type: 'system' };
 
 // Severity rank for the min_severity gate: higher = more severe.
 const SEVERITY_RANK: Record<SecuritySeverity, number> = {
@@ -46,11 +44,18 @@ const SEVERITY_RANK: Record<SecuritySeverity, number> = {
  * and deterministic (the test can assert the ticket exists right after
  * complete_security_run returns).
  *
+ * The ticket goes through TicketService.create into the run's workspace pool
+ * (docs/tickets.md → "QA / Security failure tickets"): tags from the policy,
+ * optional project, status `todo` (or `backlog`), and an assignee resolved as
+ * `assignee_runtime` → profile `target_runtime` → the project's
+ * default_assignee (TicketService applies that last one when we omit
+ * `assignee`).
+ *
  * Idempotency is two-layered (same shape as QA):
  *   1. run.auto_ticket_id — set once per run; a re-finalize of the SAME run is a
  *      no-op (returns the existing id). This is the run-level guard.
  *   2. dedupe='per_open_ticket' — across DIFFERENT runs of the same profile, if
- *      an open (non-terminal, non-archived) security ticket already exists,
+ *      an open (not done, non-archived) security ticket already exists,
  *      append a recurrence comment instead of filing a new one.
  *
  * Loop safety: the filed ticket is an ordinary ticket — it never re-triggers a
@@ -62,8 +67,8 @@ const SEVERITY_RANK: Record<SecuritySeverity, number> = {
 export class SecurityFailureTicketService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly roleAssignmentService: TicketRoleAssignmentService,
-    private readonly activityService: ActivityService,
+    private readonly ticketService: TicketService,
+    private readonly projects: ProjectsService,
     private readonly logService: LogService,
   ) {}
 
@@ -89,21 +94,15 @@ export class SecurityFailureTicketService {
     }
 
     try {
-      const boardId = cfg.board_id || run.board_id || profile.board_id || '';
-      if (!boardId) {
-        this.logService.warn('Security', `on_failure_ticket enabled for profile ${profile.id} but no board_id resolvable (cfg/run/profile all empty) — skipping`);
-        return null;
-      }
-
-      const column = await this._resolveColumn(boardId, cfg.column_id, cfg.column_name);
-      if (!column) {
-        this.logService.warn('Security', `on_failure_ticket: no usable column in board ${boardId} for profile ${profile.id} — skipping`);
+      const workspaceId = run.workspace_id || profile.workspace_id;
+      if (!workspaceId) {
+        this.logService.warn('Security', `on_failure_ticket enabled for profile ${profile.id} but run ${run.id} has no workspace — skipping`);
         return null;
       }
 
       // per_open_ticket: reuse an existing open ticket if present.
       if ((cfg.dedupe || 'per_run') === 'per_open_ticket') {
-        const existing = await this._findOpenFailureTicket(profile, run.workspace_id);
+        const existing = await this._findOpenFailureTicket(profile, workspaceId);
         if (existing) {
           await this._appendRecurrenceComment(existing, run, profile, qualifying, minSeverity);
           await this._stampRunTicket(run.id, existing.id);
@@ -112,7 +111,7 @@ export class SecurityFailureTicketService {
         }
       }
 
-      const ticketId = await this._createTicket(run, profile, cfg, column, qualifying, minSeverity);
+      const ticketId = await this._createTicket(run, profile, cfg, workspaceId, qualifying, minSeverity);
       await this._stampRunTicket(run.id, ticketId);
       this.logService.info('Security', `on_failure_ticket: filed ticket ${ticketId} for failed run ${run.id} (profile ${profile.id}, ${qualifying.length} finding(s) >= ${minSeverity})`);
       return ticketId;
@@ -138,130 +137,47 @@ export class SecurityFailureTicketService {
       .sort((a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0));
   }
 
-  /** Explicit column id/name → first active non-terminal → first non-terminal. */
-  private async _resolveColumn(boardId: string, columnId?: string, columnName?: string): Promise<BoardColumn | null> {
-    if (columnId) {
-      const byId = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: columnId, board_id: boardId } });
-      if (byId) return byId;
-    }
-    if (columnName) {
-      const byName = await findColumnByName(this.dataSource, boardId, columnName);
-      if (byName) return byName;
-    }
-    const cols = await this.dataSource.getRepository(BoardColumn).find({
-      where: { board_id: boardId },
-      order: { position: 'ASC' },
-    });
-    if (cols.length === 0) return null;
-    return cols.find((c) => c.kind === 'active' && !isTerminalColumn(c))
-      || cols.find((c) => !isTerminalColumn(c))
-      || cols[0];
-  }
-
   private async _findOpenFailureTicket(profile: SecurityProfile, workspaceId: string): Promise<Ticket | null> {
-    const marker = `${PROFILE_LABEL_PREFIX}${profile.id}`;
-    // Match the JSON-string label list (`labels` is a JSON string column). LIKE
+    const marker = `${PROFILE_TAG_PREFIX}${profile.id}`;
+    // Match the JSON-string tag list (`tags` is a JSON string column). LIKE
     // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
-    const rows = await this.dataSource.getRepository(Ticket).createQueryBuilder('t')
+    return this.dataSource.getRepository(Ticket).createQueryBuilder('t')
       .where('t.workspace_id = :ws', { ws: workspaceId })
       .andWhere('t.depth = 0')
       .andWhere('t.archived_at IS NULL')
-      .andWhere('t.labels LIKE :marker', { marker: `%${marker}%` })
+      .andWhere('t.status <> :done', { done: DONE_STATUS })
+      .andWhere('t.tags LIKE :marker', { marker: `%${marker}%` })
       .orderBy('t.created_at', 'DESC')
-      .getMany();
-    if (rows.length === 0) return null;
-    // Only count a ticket "open" while it sits in a non-terminal column.
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    for (const t of rows) {
-      if (!t.column_id) continue;
-      const col = await colRepo.findOne({ where: { id: t.column_id } });
-      if (col && !isTerminalColumn(col)) return t;
-    }
-    return null;
+      .getOne();
   }
 
   private async _createTicket(
     run: SecurityRun,
     profile: SecurityProfile,
     cfg: SecurityOnFailureTicketConfig,
-    column: BoardColumn,
+    workspaceId: string,
     qualifying: SecurityFinding[],
     minSeverity: SecuritySeverity,
   ): Promise<string> {
-    const workspaceId = profile.workspace_id;
-    const runtime = parseRuntimeSpec(cfg.assignee_runtime || (!cfg.assignee_id ? profile.target_runtime : null));
-    const assigneeId = runtime ? runtimeIdentityKey(runtime) : cfg.assignee_id || profile.target_agent_id || '';
-    const resolved = runtime ? { id: assigneeId, name: runtime.label } : await resolveAgentIdAndName(this.dataSource, assigneeId, '', this.logService);
-
-    const labels = this._buildLabels(cfg, profile.id);
-    const title = this._buildTitle(cfg, profile, qualifying);
-    const description = await this._buildBody(run, profile, column.board_id, qualifying, minSeverity);
-    const priority = cfg.priority || DEFAULT_PRIORITY;
-
-    const ticket = await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const position = await maxTicketPosition(manager, column.id);
-      return tRepo.save(tRepo.create({
-        column_id: column.id,
-        title,
-        description,
-        priority,
-        assignee: resolved.name,
-        reporter: resolved.name,
-        assignee_id: resolved.id || assigneeId,
-        reporter_id: resolved.id || assigneeId,
-        reviewer_id: resolved.id || assigneeId,
-        labels: JSON.stringify(labels),
-        channel_ids: '[]',
-        position,
-        // To Do is non-terminal; never stamp terminal_entered_at here.
-        created_by: 'Security',
-        created_by_type: 'system',
-        created_by_id: '',
-      }));
-    });
-
-    // Backfill workspace_id (column → board) then mirror the role trio onto
-    // TicketRoleAssignment so the trigger loop / focus selector see the ticket
-    // and the assignee loop actually dispatches.
-    await refreshTicketWorkspaceId(this.dataSource, ticket);
-    const wsId = ticket.workspace_id || workspaceId;
-    if (wsId && runtime) {
-      await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, {
-        assignee: [{ runtime }], reporter: [{ runtime }], reviewer: [{ runtime }],
-      });
-    } else if (wsId && (resolved.id || assigneeId)) {
-      const holderId = resolved.id || assigneeId;
-      await this.roleAssignmentService.syncBuiltinTrio(ticket.id, wsId, {
-        assignee_id: holderId,
-        reporter_id: holderId,
-        reviewer_id: holderId,
-      });
+    // A project id that no longer resolves in this workspace must not swallow
+    // the finding report — file it without a project and say so in the log.
+    let projectId: string | null = (cfg.project_id || '').trim() || null;
+    if (projectId && !(await this.projects.getInWorkspace(projectId, workspaceId))) {
+      this.logService.warn('Security', `on_failure_ticket: project ${projectId} not found in workspace ${workspaceId} (profile ${profile.id}) — filing without a project`);
+      projectId = null;
     }
+    // assignee_runtime → profile target_runtime → (omitted) project default_assignee.
+    const assignee = parseRuntimeSpec(cfg.assignee_runtime) || parseRuntimeSpec(profile.target_runtime);
 
-    // Board default role holders (ticket d94a1b87): fill any role still VACANT
-    // after the explicit trio above from the board's default_role_assignments.
-    // When the profile names no assignee the trio sync is skipped, so this is
-    // what lets a board-configured default pick the auto-ticket up. Only ever
-    // fills vacant roles; never clobbers an explicit one.
-    if (wsId) {
-      try {
-        const defBoard = await this.dataSource.getRepository(Board).findOne({ where: { id: column.board_id } });
-        const defaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
-        if (Object.keys(defaults).length > 0) {
-          await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, defaults);
-        }
-      } catch { /* non-fatal — degrade to "no defaults" */ }
-    }
-
-    await this.activityService.logActivity({
-      entity_type: 'ticket',
-      entity_id: ticket.id,
-      action: 'created',
-      ticket_id: ticket.id,
-      actor_name: 'Security',
-    });
-
+    const { ticket } = await this.ticketService.create(workspaceId, {
+      title: this._buildTitle(cfg, profile, qualifying),
+      description: await this._buildBody(run, profile, workspaceId, qualifying, minSeverity),
+      priority: cfg.priority || DEFAULT_PRIORITY,
+      status: cfg.status === 'backlog' ? 'backlog' : 'todo',
+      tags: this._buildTags(cfg, profile.id),
+      project_id: projectId,
+      ...(assignee ? { assignee } : {}),
+    }, SECURITY_ACTOR);
     return ticket.id;
   }
 
@@ -298,9 +214,12 @@ export class SecurityFailureTicketService {
     await this.dataSource.getRepository(SecurityRun).update({ id: runId }, { auto_ticket_id: ticketId });
   }
 
-  private _buildLabels(cfg: SecurityOnFailureTicketConfig, profileId: string): string[] {
-    const base = cfg.labels && cfg.labels.length ? cfg.labels.slice() : DEFAULT_LABELS.slice();
-    const marker = `${PROFILE_LABEL_PREFIX}${profileId}`;
+  private _buildTags(cfg: SecurityOnFailureTicketConfig, profileId: string): string[] {
+    // `labels` is the pre-board-removal name of `tags` — still honoured for
+    // policies the migration did not rewrite (e.g. written by an older client).
+    const configured = normalizeTags(cfg.tags ?? cfg.labels);
+    const base = configured.length ? configured : DEFAULT_TAGS.slice();
+    const marker = `${PROFILE_TAG_PREFIX}${profileId}`;
     if (!base.includes(marker)) base.push(marker);
     return base;
   }
@@ -346,12 +265,11 @@ export class SecurityFailureTicketService {
   private async _buildBody(
     run: SecurityRun,
     profile: SecurityProfile,
-    boardId: string | null,
+    workspaceId: string,
     qualifying: SecurityFinding[],
     minSeverity: SecuritySeverity,
   ): Promise<string> {
-    const wsId = profile.workspace_id;
-    const securityDetailLink = boardId ? `/ws/${wsId}/boards/${boardId}/security` : `/ws/${wsId}/security`;
+    const securityDetailLink = `/ws/${workspaceId}/security`;
 
     const allFindings = Array.isArray(run.findings) ? run.findings : [];
     const belowGate = allFindings.filter((f) => !qualifying.includes(f));

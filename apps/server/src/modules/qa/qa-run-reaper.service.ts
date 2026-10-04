@@ -1,6 +1,6 @@
 /**
  * QaRunReaperService — background sweep that fails QaRuns whose driver died
- * without ever calling complete_qa_run, so the board can't display a run as
+ * without ever calling complete_qa_run, so the UI can't display a run as
  * `running` forever.
  *
  * Why this exists: a QaRun is created with status='running' and only moves to
@@ -11,19 +11,18 @@
  * build had already timed out and been killed). This is the QaRun analogue of
  * the orphan-worktree / stale-job-sentinel rot fixed on the GameClient side by
  * Reconcile-StaleJobs.ps1: the same "a job died and nothing closed the record"
- * class, here on the board's own DB.
+ * class, here on AWB's own DB.
  *
- * Pattern mirrors TicketArchiverService / StuckTicketDetectorService: OnModuleInit
+ * Pattern mirrors TicketArchiverService: OnModuleInit
  * plants a plain setInterval (no @Cron, no scheduler dep), torn down on destroy.
  *
  * Pluggable liveness (ticket 40010b25): a single global "age > TTL" rule broke
- * both ways across boards (false-reaped live-but-slow runs; let dead drives sit
- * `running` once a single token was recorded). "Dead" is board-specific, so the
- * per-run reap decision is now delegated to a registered LivenessDetector
- * (qa-liveness-policy.ts) resolved from the run's scenario- then board-level
- * `liveness_policy`. A run with no policy resolves to the built-in
- * `zero_progress` detector — whose behavior is identical to the pre-ticket
- * reaper, so every existing board is regression-safe.
+ * both ways across workloads (false-reaped live-but-slow runs; let dead drives
+ * sit `running` once a single token was recorded). "Dead" is workload-specific,
+ * so the per-run reap decision is delegated to a registered LivenessDetector
+ * (qa-liveness-policy.ts) resolved from the run's scenario `liveness_policy`.
+ * A run with no policy resolves to the built-in `zero_progress` detector —
+ * whose behavior is identical to the pre-ticket reaper.
  *
  * The default `zero_progress` detector keeps the pre-ticket TWO FUSES (a run is
  * reaped when EITHER trips):
@@ -33,16 +32,16 @@
  *     recorded ≥1 step is treated as progressing and waits for the TTL below.
  *   • 6h-TTL (absolute) — age past QA_RUN_TTL_MS (default 6h) regardless of step
  *     count; the backstop for a run that DID make progress then stalled.
- * Boards that need a different liveness signal (e.g. GameClient's disk-artifact
- * heartbeat) opt into the `heartbeat_deadline` policy instead.
+ * Scenarios that need a different liveness signal (e.g. GameClient's
+ * disk-artifact heartbeat) opt into the `heartbeat_deadline` policy instead.
  *
  * Per-tick mechanics:
  *   1. Select NON-TERMINAL QaRuns (status IN ('running','pending')), oldest
  *      first, capped at QA_RUN_REAPER_BATCH.
- *   2. Bulk-resolve each run's liveness policy (one scenario + one board query
- *      for the whole batch), then ask its detector whether the run is dead.
+ *   2. Bulk-resolve each run's liveness policy (one scenario query for the
+ *      whole batch), then ask its detector whether the run is dead.
  *   3. For each run the detector condemns, stamp status='error', finished_at=now,
- *      prepend the detector's reason as a clear marker so the board row reads as
+ *      prepend the detector's reason as a clear marker so the run row reads as
  *      a reaped run (distinguishing "infra death" from a tested failure), and —
  *      if the run belonged to a sequential batch — advance that batch.
  *
@@ -63,7 +62,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { QaRun } from '../../entities/QaRun';
 import { QaScenario } from '../../entities/QaScenario';
-import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { QaRunService } from './qa-run.service';
 import {
@@ -104,7 +102,6 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(QaRun) private readonly runRepo: Repository<QaRun>,
     @InjectRepository(QaScenario) private readonly scenarioRepo: Repository<QaScenario>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly logService: LogService,
     private readonly qaRunService: QaRunService,
   ) {}
@@ -168,7 +165,7 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
       try {
         const { policy, phases } = resolveForRun(run);
         // Unknown type can only happen if a registered detector was removed after
-        // a board stored its policy; fall back to zero_progress so the run is
+        // a scenario stored its policy; fall back to zero_progress so the run is
         // still subject to the TTL backstop rather than becoming immortal.
         const detector = getLivenessDetector(policy.type) ?? getLivenessDetector('zero_progress');
         // Per-run ctx: phases is the only per-run field (the `phase_timeouts`
@@ -208,12 +205,9 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Bulk-resolve the liveness policy AND QA phase model for every candidate run
-   * with a single scenario query + single board query (no per-run N+1). The phase
-   * model (scenario.qa_phases ?? board.qa_phases) is resolved alongside the policy
-   * so the `phase_timeouts` detector can be auto-selected when phases are defined
-   * and no explicit liveness_policy overrides it. The board is taken from the
-   * run's own board_id, falling back to the scenario's board_id (workspace-scoped
-   * runs carry a null board_id but their scenario may still be board-pinned).
+   * with a single scenario query (no per-run N+1). The phase model is resolved
+   * alongside the policy so the `phase_timeouts` detector can be auto-selected
+   * when phases are defined and no explicit liveness_policy overrides it.
    */
   private async _buildPolicyResolver(
     runs: QaRun[],
@@ -224,22 +218,10 @@ export class QaRunReaperService implements OnModuleInit, OnModuleDestroy {
       : [];
     const scenarioById = new Map(scenarios.map((s) => [s.id, s]));
 
-    const boardIds = new Set<string>();
-    for (const r of runs) if (r.board_id) boardIds.add(r.board_id);
-    for (const s of scenarios) if (s.board_id) boardIds.add(s.board_id);
-    const boards = boardIds.size ? await this.boardRepo.find({ where: { id: In([...boardIds]) } }) : [];
-    const boardById = new Map(boards.map((b) => [b.id, b]));
-
     return (run: QaRun): { policy: LivenessPolicy; phases: QaPhasesConfig | null } => {
       const scenario = scenarioById.get(run.scenario_id);
-      const boardId = run.board_id ?? scenario?.board_id ?? null;
-      const board = boardId ? boardById.get(boardId) : undefined;
-      const phases = resolveQaPhases(scenario?.qa_phases ?? null, board?.qa_phases ?? null);
-      const policy = resolveLivenessPolicy(
-        scenario?.liveness_policy ?? null,
-        board?.liveness_policy ?? null,
-        phases,
-      );
+      const phases = resolveQaPhases(scenario?.qa_phases ?? null);
+      const policy = resolveLivenessPolicy(scenario?.liveness_policy ?? null, phases);
       return { policy, phases };
     };
   }

@@ -38,7 +38,6 @@ function profileToJson(p: SecurityProfile) {
   return {
     id: p.id,
     workspace_id: p.workspace_id,
-    board_id: p.board_id,
     name: p.name,
     description: p.description,
     checklist: p.checklist ?? [],
@@ -70,7 +69,6 @@ function runToJson(r: SecurityRun) {
     id: r.id,
     profile_id: r.profile_id,
     workspace_id: r.workspace_id,
-    board_id: r.board_id,
     status: r.status,
     room_id: r.room_id,
     findings: r.findings ?? [],
@@ -93,7 +91,6 @@ function batchToJson(b: SecurityRunBatch) {
   return {
     id: b.id,
     workspace_id: b.workspace_id,
-    board_id: b.board_id,
     profile_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -125,13 +122,11 @@ const checklistItemSchema = z.object({
 
 const onFailureTicketSchema = z.object({
   enabled: z.boolean().describe('Master switch for the on-failure auto-ticket policy'),
-  board_id: z.string().optional().describe('Board to file the fix ticket on (falls back to the run Board when present)'),
-  column_id: z.string().optional().describe('Rename-safe target column id (preferred over column_name)'),
-  column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
+  project_id: z.string().optional().describe('Project the fix ticket is about (its default assignee applies when no assignee is configured)'),
+  status: z.enum(['todo', 'backlog']).optional().describe('Initial status of the fix ticket (default todo = queued for its assignee)'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Fix ticket priority (default high)'),
-  assignee_id: z.string().optional().describe('Assignee for the fix ticket (falls back to the profile target agent)'),
   assignee_runtime: z.record(z.string(), z.any()).optional().describe('Runtime settings for the fix ticket; defaults to the scenario/profile runtime'),
-  labels: z.array(z.string()).optional().describe('Extra labels (security-profile:<id> back-ref is always added)'),
+  tags: z.array(z.string()).optional().describe('Extra tags (security-profile:<id> back-ref is always added)'),
   min_severity: severityEnum.optional().describe('Severity gate (default "high"): a ticket is filed only when the run has a finding at or above this. critical>high>medium>low>info'),
   dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_run (default) files one ticket per failed run; per_open_ticket appends a recurrence comment to an existing open security ticket for this profile instead'),
   title_template: z.string().optional().describe('Title override; {{profile.name}} is substituted. Default "보안 점검 실패: {{profile.name}}"'),
@@ -163,8 +158,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     async ({ workspace_id }) => {
       const repo = dataSource.getRepository(SecurityProfile);
       const qb = repo.createQueryBuilder('p')
-        .where('p.workspace_id = :ws', { ws: workspace_id })
-        .andWhere('p.board_id IS NULL');
+        .where('p.workspace_id = :ws', { ws: workspace_id });
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return ok(rows.map(profileToJson));
     },
@@ -216,7 +210,6 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       try {
         const row = await securityProfileService.create({
           workspace_id: args.workspace_id,
-          board_id: null,
           name: args.name,
           description: args.description,
           checklist: args.checklist,
@@ -266,7 +259,7 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
       max_runs: z.number().optional(),
       on_failure_ticket: onFailureTicketSchema.nullable().optional().describe('Severity-gated on-failure auto-ticket policy; pass null to clear it'),
       workspace_folder: z.string().optional().describe('agent-home-relative working folder (see create_security_profile). "" resets to the security/<profile_id> default.'),
-      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_security_profile). Pass null to clear and inherit the board/workspace env repo.'),
+      repo_ref: repoRefSchema.nullable().optional().describe('Repo to run against (see create_security_profile). Pass null to clear (no repo).'),
       checkout_mode: checkoutModeSchema.optional(),
       build_mode: buildModeSchema.optional(),
     },
@@ -309,16 +302,13 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'profile to re-run — a fresh SecurityRun is stacked, preserving history.',
     {
       profile_id: z.string().describe('SecurityProfile ID to run'),
-      board_id: z.string().optional()
-        .describe('Optional execution Board context; does not change or filter the Workspace-owned profile'),
     },
-    async ({ profile_id, board_id }, extra: { sessionId?: string }) => {
+    async ({ profile_id }, extra: { sessionId?: string }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const result = await securityRunService.startRun({
           profileId: profile_id,
-          boardId: board_id,
           triggeredByType: caller?.agentId ? 'agent' : 'system',
           triggeredById: caller?.agentId ?? '',
         });
@@ -475,18 +465,16 @@ export function registerSecurityTools(server: McpServer, ctx: ToolContext): void
     'get_security_batch for progress.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      board_id: z.string().optional().describe('Optional execution Board context; does not filter reusable profile definitions'),
       profile_ids: z.array(z.string()).optional().describe('Ordered profile ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled profile in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
     },
-    async ({ workspace_id, board_id, profile_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+    async ({ workspace_id, profile_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
       if (!securityRunService) return err('security run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const batch = await securityRunService.startBatch({
           workspaceId: workspace_id,
-          boardId: board_id,
           profileIds: profile_ids,
           all: !!all,
           stopOnFail: !!stop_on_fail,

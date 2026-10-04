@@ -14,29 +14,48 @@ export interface OperationalFallbackRequest {
 export interface OperationalFallbackSource {
   room_id: string;
   message_id: string;
-  board_id?: string;
 }
 
+/** Ordinary-work ticket request a non-native chat runtime emits as
+ *  `AWB_ORDINARY_WORK_FALLBACK: {...}` (docs/tickets.md). Board-less servers take
+ *  `tags` + `project_id`; `board_id` survives only for a pre-board-less server
+ *  whose candidate API still handed out boards (the prompt asks for it there). */
 export interface OrdinaryWorkFallbackRequest {
-  board_id: string;
   title: string;
   description?: string;
   original_request?: string;
+  tags?: string[];
+  project_id?: string | null;
+  board_id?: string;
 }
+
+const MAX_FALLBACK_TAGS = 20;
 
 export function parseOrdinaryWorkFallback(text: string): OrdinaryWorkFallbackRequest | null {
   const line = text.split(/\r?\n/).find((value) => value.trim().startsWith(ORDINARY_WORK_FALLBACK_PREFIX));
   if (!line) return null;
   try {
     const value = JSON.parse(line.slice(line.indexOf(ORDINARY_WORK_FALLBACK_PREFIX) + ORDINARY_WORK_FALLBACK_PREFIX.length).trim());
-    if (!value || typeof value.board_id !== 'string' || !value.board_id.trim()
-      || typeof value.title !== 'string' || !value.title.trim()) return null;
-    return {
-      board_id: value.board_id.trim(),
+    if (!value || typeof value.title !== 'string' || !value.title.trim()) return null;
+    const request: OrdinaryWorkFallbackRequest = {
       title: value.title.trim().slice(0, 200),
       description: typeof value.description === 'string' ? value.description.trim() : '',
       original_request: typeof value.original_request === 'string' ? value.original_request.trim() : '',
     };
+    if (Array.isArray(value.tags)) {
+      const tags = [...new Set(value.tags
+        .filter((tag: unknown): tag is string => typeof tag === 'string')
+        .map((tag: string) => tag.trim())
+        .filter(Boolean))] as string[];
+      request.tags = tags.slice(0, MAX_FALLBACK_TAGS);
+    }
+    if (typeof value.project_id === 'string' && value.project_id.trim()) {
+      request.project_id = value.project_id.trim();
+    } else if (value.project_id === null) {
+      request.project_id = null;
+    }
+    if (typeof value.board_id === 'string' && value.board_id.trim()) request.board_id = value.board_id.trim();
+    return request;
   } catch {
     return null;
   }

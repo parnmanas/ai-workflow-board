@@ -18,31 +18,36 @@ const AWB_WORK_FOLDER_PATH = 'AWB_WORK_FOLDER';
 
 // Finished-ticket context exposed to on-ticket-done hook Actions (ticket
 // 16a6339c). Lets the hook prompt reference the ticket that just completed via
-// `{{ticket.id}}`, `{{ticket.title}}`, `{{ticket.board_id}}`, etc. Only the
-// hook dispatch path populates this; cron / manual runs leave it undefined so
-// those tokens render empty.
+// `{{ticket.id}}`, `{{ticket.title}}`, `{{ticket.status}}`, `{{ticket.tags}}`,
+// etc. Only the hook dispatch path populates this; cron / manual runs leave it
+// undefined so those tokens render empty.
 export interface ActionTicketContext {
   id?: string;
   title?: string;
-  board_id?: string;
-  column_id?: string;
   priority?: string;
   status?: string;
   description?: string;
   // Repo / branch the ticket built against — the closest thing to a PR/diff
   // pointer the server holds without a GitHub round-trip.
+  project_id?: string;
   base_branch?: string;
-  base_repo_id?: string;
-  // Comma-joined labels (the raw column is a JSON string; flattened here so
-  // `{{ticket.labels}}` renders human-readably).
-  labels?: string;
+  // Comma-joined tags (the raw column is a JSON string; flattened here so
+  // `{{ticket.tags}}` renders human-readably).
+  tags?: string;
+  // Assignee label (the RuntimeSpec's display label), '' when unassigned.
   assignee?: string;
-  reporter?: string;
+  // Pre-board-removal spellings, kept so saved hook prompts that still say
+  // `{{ticket.labels}}` / `{{ticket.base_repo_id}}` keep rendering: same
+  // values as `tags` / `project_id` (repository ids became project ids).
+  labels?: string;
+  base_repo_id?: string;
 }
 
 export interface ActionRenderContext {
   workspace?: { id?: string; name?: string };
-  board?: { id?: string; name?: string } | null;
+  // The finished ticket's project (hook runs only) — `{{project.name}}`,
+  // `{{project.repo_url}}`, `{{project.default_branch}}`.
+  project?: { id?: string; name?: string; repo_url?: string; default_branch?: string } | null;
   user?: { id?: string; name?: string; email?: string } | null;
   agent?: { id?: string; name?: string } | null;
   action?: { id?: string; name?: string };
@@ -86,7 +91,7 @@ export function renderActionPrompt(template: string, ctx: ActionRenderContext): 
 // for the same inputs.
 export function buildRenderContext(args: {
   workspace?: { id?: string; name?: string } | null;
-  board?: { id?: string; name?: string } | null;
+  project?: { id?: string; name?: string; repo_url?: string; default_branch?: string } | null;
   user?: { id?: string; name?: string; email?: string } | null;
   agent?: { id?: string; name?: string } | null;
   action: { id: string; name: string };
@@ -98,7 +103,9 @@ export function buildRenderContext(args: {
   const iso = now.toISOString();
   return {
     workspace: args.workspace ? { id: args.workspace.id, name: args.workspace.name } : undefined,
-    board: args.board ? { id: args.board.id, name: args.board.name } : null,
+    project: args.project
+      ? { id: args.project.id, name: args.project.name, repo_url: args.project.repo_url, default_branch: args.project.default_branch }
+      : null,
     user: args.user ? { id: args.user.id, name: args.user.name, email: args.user.email } : null,
     agent: args.agent ? { id: args.agent.id, name: args.agent.name } : null,
     action: { id: args.action.id, name: args.action.name },

@@ -27,9 +27,6 @@ export class QaRunBatch {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   // Ordered scenario ids to run, one after another.
   @Column({ type: 'simple-json', nullable: true, default: null })
   scenario_ids: string[] | null;

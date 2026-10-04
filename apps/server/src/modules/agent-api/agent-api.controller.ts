@@ -3,8 +3,6 @@ import { Controller, Get, Post, Body, Param, Query, Req, Res, UseGuards } from '
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager, IsNull, MoreThanOrEqual } from 'typeorm';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
@@ -24,28 +22,12 @@ import {
 } from '../chat-rooms/room-messaging.service';
 import { LogService } from '../../services/log.service';
 import { ActivityService, activityEvents } from '../../services/activity.service';
-import {
-  findColumnByName,
-  maxTicketPosition,
-  maxChildPosition,
-  shiftTicketPositions,
-} from '../mcp/shared/ticket-helpers';
 import { loadTicketFull } from '../mcp/shared/ticket-parsing';
-import {
-  applyTerminalEnteredAtForMove,
-  deriveRootTicketStatus,
-  getRootArchivedAt,
-  isTerminalColumn,
-  isTerminalReopen,
-  TerminalReopenError,
-  TicketArchivedError,
-} from '../mcp/shared/archive-helpers';
-import { releaseMergeLeaseForMove } from '../mcp/shared/merge-lease-move';
-import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
-import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
+import { getRootArchivedAt, TicketArchivedError } from '../mcp/shared/archive-helpers';
+import { TicketService, normalizeTags } from '../tickets/ticket.service';
+import { Project } from '../../entities/Project';
 import { findOrFail } from '../../common/find-or-fail';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
-import { enforceAutoResponseBudget } from '../../common/hard-budget-guard';
 import { lockTicketCommentWrites } from '../../common/ticket-comment-write-lock';
 import { setChatRoomSessionStatus } from './chat-session-status.store';
 import { createHash } from 'node:crypto';
@@ -56,8 +38,6 @@ import { createHash } from 'node:crypto';
 @UseGuards(AgentAuthGuard)
 export class AgentApiController {
   constructor(
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -65,6 +45,7 @@ export class AgentApiController {
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
     private readonly activityService: ActivityService,
+    private readonly tickets: TicketService,
   ) {}
 
   @Post('tickets/:id/mention-audit-runs/start')
@@ -312,8 +293,8 @@ export class AgentApiController {
     });
   }
 
-  // Resolve the owning workspace for a ticket id, climbing child → root because
-  // subtasks carry column_id=null and the root row owns the column/board.
+  // Resolve the owning workspace for a ticket id, climbing child → root (the
+  // root row is authoritative for workspace membership).
   private async resolveTicketWorkspaceId(
     db: DataSource | EntityManager,
     ticketId: string,
@@ -321,22 +302,10 @@ export class AgentApiController {
     const tRepo = db.getRepository(Ticket);
     let t = await tRepo.findOne({ where: { id: ticketId } });
     let guard = 0;
-    while (t && !t.column_id && t.parent_id && guard++ < 20) {
+    while (t && t.parent_id && guard++ < 20) {
       t = await tRepo.findOne({ where: { id: t.parent_id } });
     }
-    if (!t || !t.column_id) return null;
-    const col = await db.getRepository(BoardColumn).findOne({ where: { id: t.column_id } });
-    if (!col) return null;
-    const board = await db.getRepository(Board).findOne({ where: { id: col.board_id } });
-    return board?.workspace_id ?? null;
-  }
-
-  private async resolveBoardWorkspaceId(
-    db: DataSource | EntityManager,
-    boardId: string,
-  ): Promise<string | null> {
-    const board = await db.getRepository(Board).findOne({ where: { id: boardId } });
-    return board?.workspace_id ?? null;
+    return t?.workspace_id || null;
   }
 
   private async resolveRoomWorkspaceId(roomId: string): Promise<string | null> {
@@ -621,88 +590,6 @@ export class AgentApiController {
     return JSON.stringify({ reason, exit_code: exitCode, author_role: authorRole });
   }
 
-  @Get('board-summary')
-  async boardSummaryDefault(@Req() req: Request, @Res() res: Response) {
-    return this.boardSummary('1', req, res);
-  }
-
-  @Get('board-summary/:boardId')
-  async boardSummary(@Param('boardId') boardId: string, @Req() req: Request, @Res() res: Response) {
-    const id = boardId || '1';
-    const board = await findOrFail(this.boardRepo, { where: { id } }, 'Board not found');
-    if (this.scopeRejects(req, board.workspace_id ?? null)) return this.denyScope(res);
-
-    const columns = await this.colRepo.find({ where: { board_id: board.id }, order: { position: 'ASC' } });
-    const summary = {
-      board: board.name,
-      description: board.description,
-      columns: await Promise.all(columns.map(async col => {
-        // Mirror REST GET /api/boards/:id — archived tickets drop out by
-        // default. Legacy agent-api has no opt-in flag; if a caller needs
-        // the full set they should migrate to the MCP get_board tool with
-        // include_archived=true (or hit the archive endpoint directly).
-        const tickets = await this.ticketRepo.find({
-          where: { column_id: col.id, archived_at: IsNull() },
-          relations: ['children'],
-          order: { position: 'ASC' },
-        });
-        return {
-          name: col.name,
-          ticketCount: tickets.length,
-          tickets: tickets.map(t => {
-            const children = t.children || [];
-            const done = children.filter(c => c.status === 'done').length;
-            return { id: t.id, title: t.title, priority: t.priority, assignee: t.assignee || 'unassigned', subtasks: `${done}/${children.length} done` };
-          }),
-        };
-      })),
-    };
-    return res.json(summary);
-  }
-
-  @Post('create-ticket')
-  async createTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { boardId, column, title, description = '', priority = 'medium', assignee = '', subtasks = [] } = body;
-    if (!column || !title) return res.status(400).json({ error: 'column and title are required' });
-
-    const col = await findColumnByName(this.dataSource, boardId, column);
-    if (!col) return res.status(404).json({ error: `Column "${column}" not found` });
-    if (this.scopeRejects(req, await this.resolveBoardWorkspaceId(this.dataSource, col.board_id))) {
-      return this.denyScope(res);
-    }
-
-    const ticket = await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-
-      const position = await maxTicketPosition(manager, col.id);
-      // Stamp terminal_entered_at when the destination column is already
-      // terminal so the archiver can later pick this row up. The archiver
-      // requires terminal_entered_at IS NOT NULL.
-      const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
-      const t = await tRepo.save(tRepo.create({
-        column_id: col.id, title, description, priority, assignee, labels: '[]', position,
-        terminal_entered_at: terminalEnteredAt,
-        status: deriveRootTicketStatus(col),
-      }));
-
-      if (subtasks.length > 0) {
-        const stEntities = subtasks.map((st: string | { title: string }, idx: number) => {
-          const stTitle = typeof st === 'string' ? st : st.title;
-          return tRepo.create({ parent_id: t.id, depth: 1, column_id: null as any, title: stTitle, position: idx, status: 'todo' });
-        });
-        await tRepo.save(stEntities);
-      }
-
-      return t;
-    });
-
-    const full = await this.ticketRepo.findOne({
-      where: { id: ticket.id },
-      relations: ['children'],
-    });
-    return res.status(201).json({ ...full, labels: JSON.parse(full!.labels || '[]') });
-  }
-
   /** Atomic manager fallback for chat runtimes without native MCP.  The unique
    * key is cleared when a ticket becomes terminal, so only open work dedupes. */
   @Post('operational-capability-ticket')
@@ -713,481 +600,105 @@ export class AgentApiController {
       return res.status(400).json({ error: 'workspace_id, dedupe_key, operation and missing_capability are required' });
     }
     if (scope && scope !== workspaceId) return this.denyScope(res);
+    const dedupeKey = String(body.dedupe_key);
     const recurrenceKey = createHash('sha256').update(
-      `${String(body.dedupe_key)}\n${String(body.room_id || '')}\n${String(body.message_id || '')}`,
+      `${dedupeKey}\n${String(body.room_id || '')}\n${String(body.message_id || '')}`,
     ).digest('hex');
-    const recordRecurrence = async (manager: EntityManager, ticketId: string) => {
+    const recordRecurrence = async (ticketId: string) => {
       // INSERT .. ON CONFLICT DO NOTHING is the retry policy: the exact same
       // source message is stored once, while distinct room/message recurrences
-      // each remain traceable. This also closes the create unique-race window.
-      await manager.getRepository(Comment).createQueryBuilder().insert().values({
+      // each remain traceable.
+      await this.dataSource.getRepository(Comment).createQueryBuilder().insert().values({
         ticket_id: ticketId,
         author_type: 'system', author: 'Agent Manager', type: 'system',
         content: `반복 운영 요청 감지: room=${body.room_id || ''} message=${body.message_id || ''}`,
         operational_recurrence_key: recurrenceKey,
       }).orIgnore().execute();
     };
+    const existingOpen = () => this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
+    const found = await existingOpen();
+    if (found) {
+      await recordRecurrence(found.id);
+      return res.status(200).json({ id: found.id, title: found.title, reused: true });
+    }
     try {
-      const result = await this.dataSource.transaction(async manager => {
-        const tickets = manager.getRepository(Ticket);
-        let ticket = await tickets.findOne({ where: { operational_dedupe_key: String(body.dedupe_key), archived_at: IsNull() } });
-        if (ticket) {
-          await recordRecurrence(manager, ticket.id);
-          return { ticket, reused: true };
-        }
-        const board = body.board_id
-          ? await manager.getRepository(Board).findOne({ where: { id: String(body.board_id), workspace_id: workspaceId } })
-          : await manager.getRepository(Board).findOne({ where: { workspace_id: workspaceId }, order: { created_at: 'ASC' } });
-        if (!board) throw new Error('no board available for operational fallback');
-        const column = await manager.getRepository(BoardColumn).findOne({ where: { board_id: board.id, is_terminal: false }, order: { position: 'ASC' } });
-        if (!column) throw new Error('no active column available for operational fallback');
-        const title = `[운영 자동화] ${String(body.operation).slice(0, 120)}용 MCP/Action capability 추가`;
-        ticket = tickets.create({
-          workspace_id: workspaceId, column_id: column.id, title,
-          description: `원 요청: ${body.original_request || body.operation}\n정규화 operation: ${body.operation}\n누락 capability: ${body.missing_capability}\nsource room/message: ${body.room_id || ''}/${body.message_id || ''}\n\nAction 검색 후에도 실행 수단이 없었습니다. capability 구현 후 원 대화에 결과를 회신하고, 안전·권한 조건을 포함한 idempotent Action으로 등록합니다.`,
-          labels: JSON.stringify(['automation', 'mcp', 'mcp-missing', 'source:chat']),
-          priority: 'medium', position: await maxTicketPosition(manager, column.id),
-          operational_dedupe_key: String(body.dedupe_key),
-        });
-        ticket = await tickets.save(ticket);
-        return { ticket, reused: false };
-      });
-      return res.status(result.reused ? 200 : 201).json({ id: result.ticket.id, title: result.ticket.title, reused: result.reused });
+      const { ticket } = await this.tickets.create(workspaceId, {
+        title: `[운영 자동화] ${String(body.operation).slice(0, 120)}용 MCP/Action capability 추가`,
+        description: `원 요청: ${body.original_request || body.operation}\n정규화 operation: ${body.operation}\n누락 capability: ${body.missing_capability}\nsource room/message: ${body.room_id || ''}/${body.message_id || ''}\n\nAction 검색 후에도 실행 수단이 없었습니다. capability 구현 후 원 대화에 결과를 회신하고, 안전·권한 조건을 포함한 idempotent Action으로 등록합니다.`,
+        tags: ['automation', 'mcp', 'mcp-missing', 'source:chat'],
+        status: 'backlog',
+        operational_dedupe_key: dedupeKey,
+      }, { id: '', name: 'Agent Manager', type: 'system' });
+      return res.status(201).json({ id: ticket.id, title: ticket.title, reused: false });
     } catch (error: any) {
-      // A racing transaction won the unique key: read and reuse its open row.
-      const existing = await this.ticketRepo.findOne({ where: { operational_dedupe_key: String(body.dedupe_key), archived_at: IsNull() } });
+      // A racing request won the unique key: reuse its open row.
+      const existing = await existingOpen();
       if (existing) {
-        // The losing transaction is already rolled back. Record its source in
-        // a fresh transaction; the recurrence unique key makes this safe to
-        // retry if the caller did not receive the 200 response.
-        await this.dataSource.transaction(manager => recordRecurrence(manager, existing.id));
+        await recordRecurrence(existing.id);
         return res.status(200).json({ id: existing.id, title: existing.title, reused: true });
       }
       return res.status(503).json({ error: 'operational_fallback_failed', message: error?.message || String(error) });
     }
   }
 
-  /** non-native 채팅 런타임이 선택한 기존 보드에 일반 작업을 한 번만 승격한다. */
+  /** non-native 채팅 런타임이 일반 작업을 티켓으로 한 번만 승격한다(docs/tickets.md). */
   @Post('ordinary-work-ticket')
   async ordinaryWorkTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const scope = this.requestScope(req);
     const workspaceId = String(body.workspace_id || scope || '');
-    const boardId = String(body.board_id || '');
     const roomId = String(body.room_id || '');
     const messageId = String(body.message_id || '');
     const dedupeKey = `ordinary:${String(body.dedupe_key || '')}`;
-    if (!workspaceId || !boardId || !roomId || !messageId || !body.title || dedupeKey === 'ordinary:') {
-      return res.status(400).json({ error: 'workspace_id, board_id, room_id, message_id, dedupe_key and title are required' });
+    if (!workspaceId || !roomId || !messageId || !body.title || dedupeKey === 'ordinary:') {
+      return res.status(400).json({ error: 'workspace_id, room_id, message_id, dedupe_key and title are required' });
     }
     if (scope && scope !== workspaceId) return this.denyScope(res);
-
-    const board = await this.boardRepo.findOne({ where: { id: boardId, workspace_id: workspaceId } });
-    if (!board) return res.status(404).json({ error: 'suitable existing board not found' });
-    const column = await this.colRepo.findOne({
-      where: { board_id: board.id, is_terminal: false },
-      order: { position: 'ASC' },
+    const projectId = body.project_id ? String(body.project_id) : '';
+    if (projectId) {
+      const project = await this.dataSource.getRepository(Project).findOne({ where: { id: projectId } });
+      if (!project || project.workspace_id !== workspaceId) return res.status(404).json({ error: 'project not found in this workspace' });
+    }
+    const existingOpen = () => this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
+    const reply = (ticket: Ticket, reused: boolean) => res.status(reused ? 200 : 201).json({
+      id: ticket.id, title: ticket.title, source_chat_room_id: ticket.source_chat_room_id, reused,
     });
-    if (!column) return res.status(409).json({ error: 'board has no active workflow column' });
-
-    let committed = false;
+    const found = await existingOpen();
+    if (found) return reply(found, true);
     try {
-      const result = await this.dataSource.transaction(async manager => {
-        const tickets = manager.getRepository(Ticket);
-        let ticket = await tickets.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
-        if (ticket) {
-          const activity = await manager.getRepository(ActivityLog).findOne({
-            where: { ticket_id: ticket.id, entity_type: 'ticket', entity_id: ticket.id, action: 'created' },
-          });
-          if (!activity) throw new Error('ordinary work ticket is missing its durable creation activity');
-          return { ticket, activity, reused: true };
-        }
-        ticket = tickets.create({
-          workspace_id: workspaceId,
-          column_id: column.id,
-          title: String(body.title).trim().slice(0, 200),
-          description: String(body.description || body.original_request || '').trim(),
-          labels: JSON.stringify(['source:chat']),
-          priority: 'medium',
-          position: await maxTicketPosition(manager, column.id),
-          status: deriveRootTicketStatus(column),
-          source_kind: 'chat',
-          source_chat_room_id: roomId,
-          operational_dedupe_key: dedupeKey,
-        });
-        ticket = await tickets.save(ticket);
-        const activity = await this.activityService.logActivityTx(manager, {
-          entity_type: 'ticket', entity_id: ticket.id, action: 'created',
-          ticket_id: ticket.id, workspace_id: workspaceId, actor_name: 'Agent Manager',
-          field_changed: 'workflow_dispatch', new_value: 'pending',
-        });
-        return { ticket, activity, reused: false };
-      });
-      committed = true;
-      // 생성과 함께 저장된 pending intent만 방출한다. 정상 재시도는 dispatched를
-      // 보고 건너뛰며, 저장 직후 중단/리스너 실패 때만 같은 activity를 복구 방출한다.
-      if (result.activity.new_value !== 'dispatched') {
-        this.activityService.emitLogged([result.activity]);
-        await this.dataSource.getRepository(ActivityLog).update(result.activity.id, { new_value: 'dispatched' });
-      }
-      return res.status(result.reused ? 200 : 201).json({
-        id: result.ticket.id,
-        title: result.ticket.title,
-        source_chat_room_id: result.ticket.source_chat_room_id,
-        reused: result.reused,
-      });
+      const { ticket } = await this.tickets.create(workspaceId, {
+        title: String(body.title).trim().slice(0, 200),
+        description: String(body.description || body.original_request || '').trim(),
+        tags: normalizeTags([...(Array.isArray(body.tags) ? body.tags : []), 'source:chat']),
+        project_id: projectId || undefined,
+        status: 'todo',
+        source_kind: 'chat',
+        source_chat_room_id: roomId,
+        operational_dedupe_key: dedupeKey,
+      }, { id: '', name: 'Agent Manager', type: 'system' });
+      return reply(ticket, false);
     } catch (error: any) {
-      // 이미 커밋된 뒤의 방출 실패를 생성 경쟁으로 오인해 성공 처리하지 않는다.
-      // 호출자가 같은 dedupe key로 재시도하면 durable activity를 다시 방출한다.
-      if (committed) {
-        return res.status(503).json({ error: 'ordinary_work_dispatch_failed', message: error?.message || String(error) });
-      }
-      const existing = await this.ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
-      if (existing) return res.status(200).json({
-        id: existing.id, title: existing.title,
-        source_chat_room_id: existing.source_chat_room_id, reused: true,
-      });
+      const existing = await existingOpen();
+      if (existing) return reply(existing, true);
       return res.status(503).json({ error: 'ordinary_work_fallback_failed', message: error?.message || String(error) });
     }
   }
 
-  /** agent-manager가 non-native 프롬프트에 주입할 현재 workspace의 실제 보드 후보. */
-  @Get('ordinary-work-board-candidates')
-  async ordinaryWorkBoardCandidates(@Req() req: Request, @Res() res: Response) {
+  /** agent-manager가 non-native 프롬프트에 주입할 현재 workspace의 project · 자주 쓰는 tag 후보. */
+  @Get('ordinary-work-candidates')
+  async ordinaryWorkCandidates(@Req() req: Request, @Res() res: Response) {
     const scope = this.requestScope(req);
     const workspaceId = String(req.query.workspace_id || scope || '');
     if (!workspaceId) return res.status(400).json({ error: 'workspace scope is required' });
     if (scope && scope !== workspaceId) return this.denyScope(res);
-    const boards = await this.boardRepo.createQueryBuilder('board')
-      .innerJoin(BoardColumn, 'column',
-        'column.board_id = board.id AND column.is_terminal = :isTerminal',
-        { isTerminal: false })
-      .where('board.workspace_id = :workspaceId', { workspaceId })
-      .andWhere('board.archived_at IS NULL')
-      .andWhere('board.paused_at IS NULL')
-      .distinct(true)
-      .orderBy('board.created_at', 'ASC')
-      .getMany();
-    return res.json(boards.map(board => ({
-      id: board.id,
-      name: board.name,
-      description: board.description || '',
-    })));
-  }
-
-  @Post('move-ticket')
-  async moveTicket(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { boardId, ticketId, toColumn, position, force } = body;
-    if (!ticketId || !toColumn) return res.status(400).json({ error: 'ticketId and toColumn are required' });
-
-    const ticket = await findOrFail(this.ticketRepo, { where: { id: ticketId } }, 'Ticket not found');
-    if (this.scopeRejects(req, await this.resolveTicketWorkspaceId(this.dataSource, ticketId))) {
-      return this.denyScope(res);
-    }
-    if (ticket.archived_at) {
-      return res.status(409).json({
-        error: 'ticket_archived',
-        hint: 'Call unarchive first',
-        message: new TicketArchivedError(ticket.id).message,
-      });
-    }
-
-    const col = await findColumnByName(this.dataSource, boardId, toColumn);
-    if (!col) return res.status(404).json({ error: `Column "${toColumn}" not found` });
-
-    // Terminal-reopen guard (ticket ad0eb567) — same protection as the MCP
-    // move_ticket tool: a stale automated caller must not drag an already-
-    // terminal ticket back into a non-terminal column without force=true.
-    const sourceColForGuard = ticket.column_id
-      ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
-      : null;
-    if (!force && isTerminalReopen(sourceColForGuard, col)) {
-      const e = new TerminalReopenError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), col.name);
-      return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
-    }
-
-    // Review→Merging approval gate (ticket a3d25202) — the legacy move surface
-    // is an automated caller too, so it must not become a backdoor that crosses
-    // the review gate without a reviewer-authored comment. force=true overrides.
-    if (!force && isReviewToMerging(sourceColForGuard, col) && !(await hasReviewerApproval(this.dataSource, ticket.id))) {
-      const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), col.name);
-      return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
-    }
-
-    // 머지 게이트(티켓 c806bad3) — 이 legacy 자동 이동 표면도 백도어가 되지 않게
-    // MCP/REST 와 동일한 검증. board opt-in(merge_gate_config) 시에만 동작, 해석 실패는
-    // 통과(availability-first). force=true 우회.
-    if (!force) {
-      const mg = await evaluateMergeGate(this.dataSource, ticket, sourceColForGuard, col);
-      if (mg.blocked) {
-        const e = new MergeGateBlockedError(mg);
-        return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
-      }
-    }
-
-    await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const sourceColumnId = ticket.column_id;
-
-      await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, ticket.position, -1);
-
-      const destCount = await tRepo.createQueryBuilder('t')
-        .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: ticket.id }).getCount();
-      const pos = position ?? destCount;
-
-      await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
-
-      await tRepo.update(ticket.id, { column_id: col.id, position: pos });
-
-      // Keep terminal_entered_at honest on the legacy surface too — without
-      // this stamp the archiver would never see tickets moved into Done via
-      // this endpoint and would silently skip them forever.
-      const colRepoTx = manager.getRepository(BoardColumn);
-      const sourceCol = sourceColumnId
-        ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
-        : null;
-      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, col);
-      await releaseMergeLeaseForMove(tRepo, ticket.id, sourceCol, col);
+    const projects = await this.dataSource.getRepository(Project).find({
+      where: { workspace_id: workspaceId },
+      order: { name: 'ASC' },
     });
-
-    return res.json({ success: true, ticketId, movedTo: toColumn });
-  }
-
-  @Post('batch')
-  async batch(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { operations } = body;
-    if (!Array.isArray(operations)) return res.status(400).json({ error: 'operations array is required' });
-
-    const results: any[] = [];
-    // Workspace scope for this batch (null = env/admin/manager key → full
-    // scope). Each op below verifies its target workspace against this before
-    // mutating, so a scoped key can't reach across tenants via the batch loop.
-    const batchScope = this.requestScope(req);
-    const scopeDenied = { error: 'workspace_scope_denied' };
-
-    // Stable rejection payload for archived-ticket mutations on the batch
-    // surface. Mirrors the single-shot `/api/agent/move-ticket` response so
-    // operators wiring batch consumers see the same `ticket_archived` code
-    // they would see from the non-batch path — the policy is "archived
-    // tickets are read-only except lookup, unarchive, and delete" and the
-    // batch loop must not become a backdoor around it.
-    const archivedRejection = (ticketId: string) => ({
-      error: 'ticket_archived',
-      hint: 'Call unarchive first',
-      message: new TicketArchivedError(ticketId).message,
-      ticketId,
+    const tags = await this.tickets.tagSuggestions(workspaceId);
+    return res.json({
+      projects: projects.map((p) => ({ id: p.id, name: p.name, repo_url: p.repo_url })),
+      tags: tags.slice(0, 50),
     });
-
-    // 머지 게이트(티켓 c806bad3) — batch move-ticket 도 자동 이동 표면이라
-    // stale-base(Review→Merging)·부분머지(Merging→Done)를 서버가 막아야 한다.
-    // ⚠️ evaluateMergeGate 의 기본 prober 는 forceFetch git fetch 를 수행하므로,
-    // single move 핸들러(트랜잭션 밖 평가)와 동일하게 **트랜잭션 진입 전**에
-    // 미리 평가한다. 트랜잭션 안에서 git I/O 를 돌리면 fetch 동안 DB 트랜잭션을
-    // 붙잡는다(sql.js 는 전역 단일 연결이라 서버 전체를 막는다). 차단 결과를 op
-    // 인덱스로 캐싱해 아래 루프에서는 조회만 한다. board opt-in·해석 실패 통과는
-    // evaluateMergeGate 가 처리하고, 루프에서 merge gate 보다 먼저 거부되는
-    // op(scope/archived/review-approval)는 여기서도 건너뛰어 single 핸들러와 동일한
-    // 순서·부작용(차단 코멘트)을 유지한다. op.force 는 여기서 걸러진다.
-    const mergeGateBlocks = new Map<number, MergeGateBlockedError>();
-    for (let i = 0; i < operations.length; i++) {
-      const op = operations[i];
-      if (!op || op.action !== 'move-ticket' || op.force) continue;
-      const col = await findColumnByName(this.dataSource, String(op.boardId), op.toColumn);
-      if (!col) continue;
-      const t = await this.ticketRepo.findOne({ where: { id: String(op.ticketId) } });
-      if (!t) continue;
-      if (batchScope && (await this.resolveTicketWorkspaceId(this.dataSource, t.id)) !== batchScope) continue;
-      if (t.archived_at) continue;
-      const sourceCol = t.column_id
-        ? await this.colRepo.findOne({ where: { id: t.column_id } })
-        : null;
-      // review-approval 은 루프에서 merge gate 보다 먼저 거부하므로 여기서도 건너뛴다
-      // (불필요한 git fetch + 오해 소지 있는 차단 코멘트 방지).
-      if (isReviewToMerging(sourceCol, col) && !(await hasReviewerApproval(this.dataSource, t.id))) continue;
-      const mg = await evaluateMergeGate(this.dataSource, t, sourceCol, col);
-      if (mg.blocked) mergeGateBlocks.set(i, new MergeGateBlockedError(mg));
-    }
-
-    await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const cRepo = manager.getRepository(Comment);
-      const colRepoTx = manager.getRepository(BoardColumn);
-
-      let opIndex = -1;
-      for (const op of operations) {
-        opIndex++;
-        try {
-          switch (op.action) {
-            case 'create-ticket': {
-              const col = await findColumnByName(manager, String(op.boardId), op.column);
-              if (!col) { results.push({ error: `Column "${op.column}" not found` }); continue; }
-              if (batchScope && (await this.resolveBoardWorkspaceId(manager, col.board_id)) !== batchScope) {
-                results.push(scopeDenied); continue;
-              }
-              const pos = await maxTicketPosition(manager, col.id);
-              // Stamp terminal_entered_at when landing directly on a terminal
-              // column — same rationale as the single-shot create-ticket above.
-              const terminalEnteredAt = isTerminalColumn(col) ? new Date() : null;
-              const r = await tRepo.save(tRepo.create({
-                column_id: col.id, title: op.title, description: op.description || '',
-                priority: op.priority || 'medium', assignee: op.assignee || '', labels: '[]', position: pos,
-                terminal_entered_at: terminalEnteredAt,
-                status: deriveRootTicketStatus(col),
-              }));
-              results.push({ success: true, ticketId: r.id });
-              break;
-            }
-            case 'move-ticket': {
-              const col = await findColumnByName(manager, String(op.boardId), op.toColumn);
-              if (!col) { results.push({ error: `Column "${op.toColumn}" not found` }); continue; }
-              const t = await tRepo.findOne({ where: { id: String(op.ticketId) } });
-              if (!t) { results.push({ error: 'Ticket not found' }); continue; }
-              if (batchScope && (await this.resolveTicketWorkspaceId(manager, t.id)) !== batchScope) {
-                results.push(scopeDenied); continue;
-              }
-              if (t.archived_at) { results.push(archivedRejection(t.id)); continue; }
-
-              const sourceColumnId = t.column_id;
-
-              // Terminal-reopen guard (ticket ad0eb567) — the batch surface is
-              // an automated caller too, so it must not become a backdoor that
-              // drags an already-terminal ticket back out without op.force.
-              const sourceColForGuard = sourceColumnId
-                ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
-                : null;
-              if (!op.force && isTerminalReopen(sourceColForGuard, col)) {
-                const e = new TerminalReopenError(t.id, sourceColForGuard?.name ?? String(sourceColumnId), col.name);
-                results.push({ error: e.code, hint: e.hint, message: e.message, ticketId: t.id });
-                continue;
-              }
-
-              // Review→Merging approval gate (ticket a3d25202) — the batch loop
-              // is another automated move surface; keep it from bypassing review
-              // independence. Uses the transaction manager as scope. op.force
-              // overrides, mirroring the terminal-reopen guard above.
-              if (!op.force && isReviewToMerging(sourceColForGuard, col) && !(await hasReviewerApproval(manager, t.id))) {
-                const e = new ReviewApprovalRequiredError(t.id, sourceColForGuard?.name ?? String(sourceColumnId), col.name);
-                results.push({ error: e.code, hint: e.hint, message: e.message, ticketId: t.id });
-                continue;
-              }
-
-              // 머지 게이트(티켓 c806bad3) — 이 이동은 트랜잭션 진입 전(batch() 상단)에
-              // 미리 평가해 op 인덱스로 캐싱했다(git fetch 동안 DB 트랜잭션을 잡지 않기
-              // 위함 — single 핸들러와 동일 의도). 여기서는 조회만; op.force 는 pre-pass
-              // 에서 이미 걸러졌고, review-approval 등 앞선 가드도 pre-pass 가 미러링한다.
-              const mgBlock = mergeGateBlocks.get(opIndex);
-              if (mgBlock) {
-                results.push({ error: mgBlock.code, hint: mgBlock.hint, message: mgBlock.message, ticketId: t.id });
-                continue;
-              }
-
-              await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, t.position, -1);
-
-              const cnt = await tRepo.createQueryBuilder('t')
-                .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: col.id, id: t.id }).getCount();
-              const pos = op.position ?? cnt;
-
-              await shiftTicketPositions(tRepo, { column_id: col.id }, pos, +1, { inclusive: true, excludeId: t.id });
-
-              await tRepo.update(t.id, { column_id: col.id, position: pos });
-
-              // Mirror the single-shot move-ticket handler — without this
-              // stamp the archiver candidate query (`terminal_entered_at IS
-              // NOT NULL`) would never see tickets moved into Done through
-              // the batch surface, so auto-archive would silently skip
-              // them forever.
-              const sourceCol = sourceColumnId
-                ? await colRepoTx.findOne({ where: { id: sourceColumnId } })
-                : null;
-              await applyTerminalEnteredAtForMove(tRepo, t.id, sourceCol, col);
-              await releaseMergeLeaseForMove(tRepo, t.id, sourceCol, col);
-
-              results.push({ success: true, ticketId: op.ticketId, movedTo: op.toColumn });
-              break;
-            }
-            case 'add-child':
-            case 'add-subtask': {
-              const parentId = String(op.ticketId);
-              const parent = await tRepo.findOne({ where: { id: parentId } });
-              if (!parent) { results.push({ error: 'Parent ticket not found' }); continue; }
-              if (batchScope && (await this.resolveTicketWorkspaceId(manager, parent.id)) !== batchScope) {
-                results.push(scopeDenied); continue;
-              }
-              // Walk to the root — subtasks have no column and carry no
-              // archived_at of their own; the root carries the flag.
-              const rootArchived = await getRootArchivedAt(manager, parent);
-              if (rootArchived) { results.push(archivedRejection(parent.id)); continue; }
-
-              const position = await maxChildPosition(manager, parentId);
-              const r = await tRepo.save(tRepo.create({
-                parent_id: parentId, depth: 1, column_id: null as any,
-                title: op.title, position, status: 'todo',
-              }));
-              results.push({ success: true, ticketId: r.id });
-              break;
-            }
-            case 'update-child':
-            case 'update-subtask': {
-              const updates: any = {};
-              if (op.done !== undefined) updates.status = op.done ? 'done' : 'todo';
-              if (op.title !== undefined) updates.title = op.title;
-              if (op.status !== undefined) updates.status = String(op.status);
-              const ticketId = String(op.subtaskId || op.ticketId);
-              const sub = await tRepo.findOne({ where: { id: ticketId } });
-              if (!sub) { results.push({ error: 'Ticket not found' }); continue; }
-              if (batchScope && (await this.resolveTicketWorkspaceId(manager, sub.id)) !== batchScope) {
-                results.push(scopeDenied); continue;
-              }
-              const rootArchived = await getRootArchivedAt(manager, sub);
-              if (rootArchived) { results.push(archivedRejection(ticketId)); continue; }
-              await tRepo.update(ticketId, updates);
-              results.push({ success: true, ticketId });
-              break;
-            }
-            case 'add-comment': {
-              const ticketId = String(op.ticketId);
-              const t = await tRepo.findOne({ where: { id: ticketId } });
-              if (!t) { results.push({ error: 'Ticket not found' }); continue; }
-              if (batchScope && (await this.resolveTicketWorkspaceId(manager, t.id)) !== batchScope) {
-                results.push(scopeDenied); continue;
-              }
-              if (t.archived_at) { results.push(archivedRejection(ticketId)); continue; }
-              // Hard-budget guard (ticket a940d75b). This batch surface
-              // defaults author_type to 'agent' and — unlike the MCP
-              // add_comment tool — has neither the ping-pong guard nor a
-              // pending_user_action check, so it was a wide-open bypass of
-              // any per-ticket auto-response ceiling. Reads against
-              // this.dataSource (not the batch's transaction manager),
-              // mirroring the merge-gate pre-pass above — a hard-budget trip
-              // is a fact about the ticket's accumulated history, independent
-              // of whether other ops in this same batch call commit or roll back.
-              const authorType = op.authorType || 'agent';
-              if (authorType === 'agent') {
-                const budget = await enforceAutoResponseBudget(
-                  { dataSource: this.dataSource, activityService: this.activityService, roomMessagingService: this.messaging, logger: this.logService },
-                  t,
-                );
-                if (budget.blocked) { results.push({ suppressed: true, reason: budget.reason }); continue; }
-              }
-              const r = await cRepo.save(cRepo.create({
-                ticket_id: ticketId,
-                author_type: authorType,
-                author_id: String(op.authorId || ''),
-                author: op.author || '',
-                content: op.content,
-              }));
-              results.push({ success: true, commentId: r.id });
-              break;
-            }
-            default:
-              results.push({ error: `Unknown action: ${op.action}` });
-          }
-        } catch (opErr: any) {
-          results.push({ error: opErr.message });
-        }
-      }
-    });
-
-    return res.json({ results });
   }
 
   /**

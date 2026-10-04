@@ -9,9 +9,9 @@ import { LogService } from './log.service';
  * Periodic pruner for tables that grow unbounded and have no natural
  * retention story baked in elsewhere:
  *
- *   - `activity_logs` — every column move / claim / release / comment
+ *   - `activity_logs` — every status move / claim / release / comment
  *     / trigger_emitted / backlog_promotion_* writes a row. User-driven
- *     rows (column moves the operator initiated, comments, manual
+ *     rows (status moves the operator initiated, comments, manual
  *     triggers) are part of the audit trail and stay forever; the system
  *     emits its OWN audit rows (`trigger_emitted`,
  *     `backlog_promoted`, `backlog_promotion_skipped_focus_held`,
@@ -56,13 +56,14 @@ const DEFAULT_TICK_MS = 24 * 60 * 60_000; // 24h
 const MIN_TICK_MS = 60 * 60_000;          // 1h (lowest sensible)
 const MAX_TICK_MS = 7 * 24 * 60 * 60_000; // 1 week
 
-// Actions emitted by SYSTEM (TriggerLoopService, BacklogPromotionService,
-// TicketSupervisorService) that exist purely as observability rows for
-// post-mortems. None of them carry information a user might want to
-// inspect months later — the per-ticket audit lives in `moved` /
-// `updated` / `created` rows written by humans/agents, which we leave
-// alone. Keep this list in sync with the writers in
-// trigger-loop.service.ts and backlog-promotion.service.ts.
+// Actions emitted by SYSTEM (TicketDispatchService today; TriggerLoopService,
+// BacklogPromotionService and TicketSupervisorService before the board
+// removal) that exist purely as observability rows for post-mortems. None of
+// them carry information a user might want to inspect months later — the
+// per-ticket audit lives in `moved` / `updated` / `created` rows written by
+// humans/agents, which we leave alone. Only `trigger_emitted` is still
+// written (ticket-dispatch.service.ts); the other three are kept so rows left
+// by the retired writers still age out.
 const SYSTEM_AUDIT_ACTIONS = [
   'trigger_emitted',
   'trigger_dispatched',

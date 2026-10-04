@@ -168,7 +168,7 @@ export function partitionHarness(
  * in priority order. Empty/blank entries are dropped and duplicates collapse
  * (a fallback equal to the primary or to an earlier fallback adds no attempt).
  * `null` (CLI's own default) is a valid head — kept as the first element so a
- * board that only lists fallbacks still tries the CLI default first.
+ * harness that only lists fallbacks still tries the CLI default first.
  *
  * A chain of length 1 == current behaviour (single spawn, no fallback).
  */
@@ -234,9 +234,10 @@ export interface EffortSlice {
   ultracode?: boolean;
 }
 
-/** The single matched/board-default preset shipped on the trigger event. Null
- *  on the wire (or after a defensive parse) means "no effort override — spawn
- *  exactly as before", mirroring the harness null-safe contract.
+/** The single matched/default preset shipped on the trigger event (older board
+ *  servers). Null on the wire (or after a defensive parse) means "no effort
+ *  override — spawn exactly as before", mirroring the harness null-safe contract.
+ *  Board-less servers always send null; effort rides `runtime_config.extra.effort`.
  *
  *  Per-CLI slices are keyed by the CLI's effort slice key (`claude`, `codex`,
  *  …) — which keys exist and what each may carry is declared by the CLI
@@ -272,7 +273,7 @@ export function pickEffortSlice(
 }
 
 /** One-line summary of an applied harness for spawn-site logs — the
- *  operator-visible proof (acceptance criterion of e9c7a896) that a board's
+ *  operator-visible proof (acceptance criterion of e9c7a896) that a workspace's
  *  harness actually reached the CLI flags. */
 export function describeHarness(harness: HarnessSpec): string {
   const parts: string[] = [];

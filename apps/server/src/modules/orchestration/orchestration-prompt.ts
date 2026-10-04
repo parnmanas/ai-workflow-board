@@ -50,7 +50,44 @@ export interface RosterEntry {
     folder_scope: 'shared' | 'isolated';
     /** Other members in the same folder on the same host. */
     folder_mates: string[];
+    /**
+     * The mission project's main clone folder on this member's host. Absent
+     * when the mission has no project; null when it has one but this host has
+     * no main clone folder registered for it.
+     */
+    project_folder?: string | null;
   } | null;
+}
+
+/** The mission's project as the prompts state it (resolved by the services). */
+export interface PromptProject {
+  id: string;
+  name: string;
+  repo_url: string;
+  /** '' = the repository's default branch. */
+  branch: string;
+  instructions: string;
+}
+
+/**
+ * `- Repository / - Branch` lines plus the project instructions, shared by the
+ * brief and the work order so both describe the project identically.
+ */
+function projectFacts(project: PromptProject): { head: string[]; instructions: string } {
+  return {
+    head: [
+      `- Repository: ${project.repo_url || '(no repository URL)'}`,
+      `- Branch: ${project.branch ? `\`${project.branch}\`` : 'the repository default'}`,
+    ],
+    instructions: project.instructions.trim()
+      ? `\n### Project instructions\n${project.instructions.trim()}`
+      : '',
+  };
+}
+
+/** Same folder, ignoring a trailing separator (`/srv/awb/` vs `/srv/awb`). */
+function sameFolder(a: string, b: string): boolean {
+  return a.replace(/[\\/]+$/, '') === b.replace(/[\\/]+$/, '');
 }
 
 function section(title: string, body: string): string {
@@ -81,6 +118,19 @@ function renderRoster(roster: RosterEntry[]): string {
           );
         } else {
           bits.push(`  - each step gets its own isolated scratch folder under that path`);
+        }
+        // Per host, not per mission: two members on different machines have
+        // the project in different places, and the orchestrator writes paths
+        // into their instructions.
+        if (rt.project_folder !== undefined) {
+          bits.push(
+            rt.project_folder
+              ? `  - project main clone on this host: \`${rt.project_folder}\`` +
+                  (rt.folder_scope === 'shared' && sameFolder(rt.project_folder, rt.working_dir)
+                    ? ' — the same folder this member works in'
+                    : '')
+              : `  - project main clone on this host: **none registered** — do not hand this member a path from another host`,
+          );
         }
       }
       return bits.join('\n');
@@ -131,6 +181,13 @@ export function renderMissionPrompt(args: {
   teamPrompt: string;
   roster: RosterEntry[];
   replan?: boolean;
+  /**
+   * The mission's project. `own_host` is where the orchestrator itself runs
+   * (null when its slot has no spec); the members' folders ride the roster.
+   */
+  project?: (PromptProject & {
+    own_host: { host_name: string; main_clone_folder: string | null } | null;
+  }) | null;
 }): string {
   const { mission, teamName, teamPrompt, roster } = args;
   const lines: string[] = [];
@@ -174,6 +231,8 @@ export function renderMissionPrompt(args: {
   if (mission.graph_enabled) {
     lines.push(section('User confirmation gates', renderConfirmPolicyGuidance(mission.confirm_policy)));
   }
+
+  if (args.project) lines.push(section(`Project: ${args.project.name}`, renderBriefProject(args.project)));
 
   lines.push(section('Your team', renderRoster(roster)));
 
@@ -240,6 +299,30 @@ export function renderMissionPrompt(args: {
   );
 
   return lines.filter((l) => l !== '').join('\n');
+}
+
+function renderBriefProject(
+  project: PromptProject & { own_host: { host_name: string; main_clone_folder: string | null } | null },
+): string {
+  const facts = projectFacts(project);
+  const own = project.own_host;
+  const lines = [`- Project id: \`${project.id}\``, ...facts.head];
+  if (own) {
+    lines.push(
+      own.main_clone_folder
+        ? `- Main clone on your host (**${own.host_name}**): \`${own.main_clone_folder}\``
+        : `- Your host (**${own.host_name}**) has no main clone folder registered for this project.`,
+    );
+  }
+  lines.push(
+    '',
+    'Every Runtime Host keeps its own main clone of this project, at a path that differs from host to host.',
+    'The roster below lists the folder on each member\'s host (or says that host has none), and each work',
+    'order repeats it for the member that receives it. When your step instructions point into the project,',
+    'use paths relative to the project root — never an absolute path taken from another member\'s host.',
+  );
+  if (facts.instructions) lines.push(facts.instructions);
+  return lines.join('\n');
 }
 
 /**
@@ -366,6 +449,19 @@ export function renderStepPrompt(args: {
    * 주기 위한 값이다 — "이 방" 이라고만 쓰면 모델이 다른 방 id 를 집는 일이 있다.
    */
   roomId?: string | null;
+  /**
+   * 미션의 프로젝트와, **이 멤버가 도는 Host** 에서의 main clone 폴더(docs/tickets.md).
+   * Host 마다 경로가 다르므로 다른 멤버의 경로를 넘겨짚지 않도록 자기 Host 의 값(또는
+   * "등록 없음")을 명시한다. null/생략이면 미션에 프로젝트가 없다.
+   */
+  project?: (PromptProject & {
+    /** '' when the slot's host could not be named. */
+    host_name: string;
+    /** Absolute path on the member's host; null = none registered there. */
+    main_clone_folder: string | null;
+    /** isolated step: the provisioner checked the repository out into the step's working folder. */
+    checked_out_in_workspace_folder: boolean;
+  }) | null;
 }): string {
   const { mission, step, teamName, orchestratorName, dependencies } = args;
   const lines: string[] = [];
@@ -421,6 +517,7 @@ export function renderStepPrompt(args: {
     ].join('\n');
     lines.push(section('Shared working folder (read this before you touch anything)', body));
   }
+  if (args.project) lines.push(section(`Project: ${args.project.name}`, renderStepProject(args)));
   lines.push(section('Your task', step.instructions));
   if (step.acceptance_criteria) lines.push(section('Done when', step.acceptance_criteria));
 
@@ -524,7 +621,7 @@ export function renderStepPrompt(args: {
       `Verification you can *see* is worth more than a sentence saying "verified". When a screenshot or a`,
       `short screen recording shows the result — a page rendering, a test run, build output, a game scene —`,
       `post it into **this step's chat room**${args.roomId ? ` (room_id: \`${args.roomId}\`)` : ''}. The mission`,
-      `board shows every image and video from this room as this step's verification evidence, and that is`,
+      `screen shows every image and video from this room as this step's verification evidence, and that is`,
       `where the operator reviews it.`,
       ``,
       `1. \`mcp__awb__add_chat_message_attachment\` with \`room_id\`, \`file_name\`, base64 \`file_data\` and`,
@@ -582,7 +679,7 @@ export function renderStepPrompt(args: {
           ]
         : []),
       ``,
-      `For long work, call \`mcp__awb__report_orchestration_progress\` along the way so the mission board shows`,
+      `For long work, call \`mcp__awb__report_orchestration_progress\` along the way so the mission screen shows`,
       `you are alive — it does not end the step.`,
       ``,
       `**Nothing downstream of you can start until you make that report call.** Do not end your turn without`,
@@ -591,6 +688,56 @@ export function renderStepPrompt(args: {
   );
 
   return lines.filter((l) => l !== '').join('\n');
+}
+
+/**
+ * The work order's project block. The point is the main clone line: it names
+ * the folder on THIS member's host, says how it relates to the working folder
+ * the member was just given, or states that the host has none — so a member
+ * never borrows a path from the brief or from a teammate on another machine.
+ */
+function renderStepProject(args: Parameters<typeof renderStepPrompt>[0]): string {
+  const project = args.project!;
+  const facts = projectFacts(project);
+  const onHost = project.host_name ? `your host (**${project.host_name}**)` : 'your host';
+  const folder = project.main_clone_folder;
+  const lines = [...facts.head];
+
+  if (folder) {
+    lines.push(`- Main clone on ${onHost}: \`${folder}\` — the canonical checkout of this project on this machine.`);
+    if (args.sharedFolder && sameFolder(args.sharedFolder.working_dir, folder)) {
+      lines.push('  That is the shared working folder you are in (above).');
+    } else if (args.sharedFolder) {
+      lines.push(
+        '  It is not your working folder above. When your task refers to the project\'s files on this machine,',
+        '  they are there. Never reset, clean or switch branches in it unless your task says so.',
+      );
+    } else if (args.workspaceFolder) {
+      lines.push(
+        project.checked_out_in_workspace_folder
+          ? '  Do the work in your working folder above — it has this step\'s own checkout of the repository.'
+          : '  Your working folder above is this step\'s own scratch folder; nothing was checked out into it.',
+        '  Read from the main clone if you need to, but never reset, clean or switch branches in it.',
+      );
+    }
+  } else {
+    lines.push(
+      `- **No main clone folder is registered for this project on your host**` +
+        `${project.host_name ? ` (${project.host_name})` : ''}. Do not guess one, and do not use a path`,
+      '  from another host — that folder is on a different machine.',
+    );
+    if (args.workspaceFolder) {
+      lines.push(
+        project.checked_out_in_workspace_folder
+          ? '  Your working folder above has this step\'s own checkout of the repository; work there.'
+          : '  Nothing was checked out into your working folder above; say so in your report if the task needs the code.',
+      );
+    } else if (args.sharedFolder) {
+      lines.push('  Work in your shared working folder above.');
+    }
+  }
+  if (facts.instructions) lines.push(facts.instructions);
+  return lines.join('\n');
 }
 
 /**

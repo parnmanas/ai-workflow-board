@@ -14,10 +14,11 @@ import {
   parseStreamToolResult,
   harvestTicketTitles,
   resolveTicketRef,
-  resolveBatchTicketRefs,
-  resolveRejectHandoffRefs,
   formatTicketRefsContent,
   chunkTicketRefs,
+  TICKET_ACTION_TOOLS,
+  TICKET_TOOL_EXCLUSIONS,
+  classifiedToolNames,
 } from '../dist/lib/ticket-ref-capture.js';
 
 test('bareToolName strips the MCP server prefix, tolerating any prefix', () => {
@@ -30,7 +31,7 @@ test('trackedTicketTool: mutating ticket tools tracked, reads/other tools ignore
   const create = trackedTicketTool('mcp__awb__create_ticket', { title: 'New', priority: 'high' });
   assert.deepEqual(create, { action: 'create', fromResult: true, inputTicketId: undefined, inputTitle: 'New' });
 
-  const move = trackedTicketTool('mcp__awb__move_ticket', { ticket_id: 'T-1', target_column_name: 'Review' });
+  const move = trackedTicketTool('mcp__awb__move_ticket', { ticket_id: 'T-1', status: 'review' });
   assert.deepEqual(move, { action: 'move', fromResult: false, inputTicketId: 'T-1', inputTitle: undefined });
 
   // Reads + non-ticket + the final reply tool must NOT be tracked (no card noise).
@@ -63,6 +64,11 @@ test('harvestTicketTitles collects {id,title} from ticket / array / children sha
     harvestTicketTitles({ id: 'P', title: 'parent', children: [{ id: 'C', title: 'child' }] }),
     [{ id: 'P', title: 'parent' }, { id: 'C', title: 'child' }],
   );
+  // board-less list_tickets → `{ tickets: [...], tags }` listing.
+  assert.deepEqual(
+    harvestTicketTitles({ tickets: [{ id: 'L-1', title: 'listed' }, { id: 'L-2' }], tags: [{ tag: 'bug', count: 1 }] }),
+    [{ id: 'L-1', title: 'listed' }],
+  );
   // A comment result ({id, ticket_id, content} — no title) must NOT pollute the cache.
   assert.deepEqual(harvestTicketTitles({ id: 'CMT-1', ticket_id: 'T-9', content: 'hi' }), []);
   assert.deepEqual(harvestTicketTitles('str'), []);
@@ -85,7 +91,7 @@ test('resolveTicketRef add_comment: uses INPUT ticket_id, never the comment resu
 
 test('resolveTicketRef move: input ticket_id authoritative, title from result', () => {
   const ctx = trackedTicketTool('mcp__awb__move_ticket', { ticket_id: 'T-7' });
-  const ref = resolveTicketRef(ctx, { id: 'T-7', title: 'Moved', column_id: 'c' }, false);
+  const ref = resolveTicketRef(ctx, { id: 'T-7', title: 'Moved', status: 'done' }, false);
   assert.deepEqual(ref, { action: 'move', ticket_id: 'T-7', title: 'Moved' });
 });
 
@@ -123,21 +129,19 @@ test('formatTicketRefsContent renders Korean action labels as the text fallback'
 // ── F-1 재요청 대응 (ticket 24694916): MCP 티켓-mutation surface 완결 분류 ──────
 // 리뷰어 지적 — allowlist 가 9개뿐이라 update_child_ticket(status="done") 등 흔한
 // mutation 이 카드 없이 조용히 누락(수용기준 #1 "누락 없이" 위배). 아래 테스트가
-// 확장된 지원 표면·의도적 제외·신규 성공 경로·batch 다중-ref 를 고정한다.
+// 확장된 지원 표면·의도적 제외·신규 성공 경로를 고정한다(batch 다중-ref 는 board-less
+// 전환으로 batch_operations 와 함께 삭제).
 
 test('trackedTicketTool: expanded ticket-mutation surface is fully tracked', () => {
   const cases = [
     ['update_child_ticket', { ticket_id: 'C-1', status: 'done' }, 'update', 'C-1'],
     ['decide_ticket_duplicate', { ticket_id: 'T-1', action: 'keep_independent' }, 'update', 'T-1'],
     ['correct_confirmed_ticket_duplicate', { ticket_id: 'T-1' }, 'update', 'T-1'],
-    ['move_ticket_to_board', { ticket_id: 'T-2', target_board_id: 'B-9' }, 'move', 'T-2'],
     ['release_ticket', { ticket_id: 'T-3', agent_id: 'A-1' }, 'release', 'T-3'],
     ['unarchive_ticket', { ticket_id: 'T-4' }, 'unarchive', 'T-4'],
     ['add_ticket_prerequisites', { ticket_id: 'T-5', prerequisite_ticket_ids: ['P'] }, 'prereq', 'T-5'],
     ['remove_ticket_prerequisite', { ticket_id: 'T-6', prerequisite_ticket_id: 'P' }, 'prereq', 'T-6'],
-    ['handoff_to_agent', { ticket_id: 'T-7', target_agent_id: 'A-2' }, 'handoff', 'T-7'],
-    ['propose_move', { ticket_id: 'T-8', target_column_name: 'Review' }, 'propose', 'T-8'],
-    ['record_agreement', { ticket_id: 'T-9', status: 'agree' }, 'consensus', 'T-9'],
+    ['await_ci_run', { ticket_id: 'T-7', run_url: 'https://ci.example/1' }, 'ci_wait', 'T-7'],
   ];
   for (const [tool, input, action, ticketId] of cases) {
     const ctx = trackedTicketTool(`mcp__awb__${tool}`, input);
@@ -158,12 +162,40 @@ test('trackedTicketTool: documented exclusions never emit a card', () => {
   // The assistant's own reply + the focus seat are not ticket-row mutations.
   assert.equal(trackedTicketTool('mcp__awb__send_chat_room_message', { room_id: 'R' }), null);
   assert.equal(trackedTicketTool('mcp__awb__set_current_task', { ticket_id: 'T-1' }), null);
-  // create_remote_improvement_ticket files on ANOTHER instance → off-instance 404.
-  assert.equal(trackedTicketTool('mcp__awb__create_remote_improvement_ticket', { source_ticket_id: 'T-1' }), null);
-  // Reads + non-ticket tools stay ignored.
+  // Reads + non-ticket tools stay ignored (incl. the board-less list_tickets / project tools).
   assert.equal(trackedTicketTool('mcp__awb__get_ticket', { ticket_id: 'T-1' }), null);
+  assert.equal(trackedTicketTool('mcp__awb__list_tickets', { status: ['todo'] }), null);
   assert.equal(trackedTicketTool('mcp__awb__list_ticket_prerequisites', { ticket_id: 'T-1' }), null);
-  assert.equal(trackedTicketTool('mcp__awb__create_board', { name: 'B' }), null);
+  assert.equal(trackedTicketTool('mcp__awb__save_project', { name: 'P' }), null);
+  assert.equal(trackedTicketTool('mcp__awb__get_project', { project_id: 'P-1' }), null);
+});
+
+// board-less (docs/tickets.md): the board / column / consensus / handoff / batch /
+// merge-lease tools were deleted from the server, so the classification must not
+// track them any more (a stale entry would fail tool-surface-parity).
+test('removed board-model tools are no longer classified; board-less tools are', () => {
+  const removed = [
+    'list_boards', 'get_board', 'get_board_summary', 'create_board', 'update_board', 'delete_board',
+    'move_board_to_workspace', 'create_column', 'update_column', 'delete_column', 'add_board_lesson',
+    'list_board_lessons', 'update_board_lesson', 'list_prompt_templates', 'save_prompt_template',
+    'delete_prompt_template', 'move_ticket_to_board', 'propose_move', 'record_agreement',
+    'handoff_to_agent', 'reject_handoff', 'get_handoff_pipeline', 'create_benchmark_run',
+    'submit_benchmark_score', 'get_benchmark_leaderboard', 'submit_feature_request',
+    'propose_feature_chain', 'approve_feature', 'reject_feature', 'list_features', 'get_feature',
+    'create_remote_improvement_ticket', 'check_review_drift', 'await_merge_lease',
+    'release_merge_lease', 'get_allocated_tickets', 'batch_operations',
+    'register_completion_verification', 'record_completion_verification',
+  ];
+  const classified = classifiedToolNames();
+  for (const tool of removed) {
+    assert.ok(!classified.has(tool), `${tool} was removed from the server — must not stay classified`);
+    assert.equal(trackedTicketTool(`mcp__awb__${tool}`, { ticket_id: 'T-1' }), null, `${tool} must not track`);
+  }
+  for (const tool of ['list_tickets', 'list_projects', 'get_project', 'save_project']) {
+    assert.ok(classified.has(tool), `${tool} must be classified`);
+    assert.ok(!TICKET_ACTION_TOOLS[tool], `${tool} is not a ticket mutation card`);
+  }
+  assert.equal(TICKET_TOOL_EXCLUSIONS.list_tickets, 'read');
 });
 
 test('resolveTicketRef: newly-supported success paths each emit a card (누락 없이)', () => {
@@ -180,71 +212,12 @@ test('resolveTicketRef: newly-supported success paths each emit a card (누락 �
     resolveTicketRef(prereq, { ticket_id: 'T-5', prerequisites: [{ prerequisite_ticket_id: 'P' }] }, false, () => '의존 티켓'),
     { action: 'prereq', ticket_id: 'T-5', title: '의존 티켓' },
   );
-  // handoff_to_agent — result is the handoff comment; ticket comes from input.
-  const handoff = trackedTicketTool('mcp__awb__handoff_to_agent', { ticket_id: 'T-7', target_agent_id: 'A-2', content: 'x' });
+  // await_ci_run — blocking-flag mutation; ticket from input.
+  const ci = trackedTicketTool('mcp__awb__await_ci_run', { ticket_id: 'T-7', run_url: 'https://ci.example/1' });
   assert.deepEqual(
-    resolveTicketRef(handoff, { id: 'CMT-h', ticket_id: 'T-7', type: 'handoff' }, false),
-    { action: 'handoff', ticket_id: 'T-7' },
+    resolveTicketRef(ci, { ok: true, ticket_id: 'T-7' }, false),
+    { action: 'ci_wait', ticket_id: 'T-7' },
   );
-  // propose_move — result is the proposal comment; ticket from input.
-  const propose = trackedTicketTool('mcp__awb__propose_move', { ticket_id: 'T-8', target_column_name: 'Review' });
-  assert.deepEqual(
-    resolveTicketRef(propose, { comment: { id: 'CMT-p' } }, false, () => '제안 티켓'),
-    { action: 'propose', ticket_id: 'T-8', title: '제안 티켓' },
-  );
-  // record_agreement — result is {comment, consensus, moved}; ticket from input.
-  const agree = trackedTicketTool('mcp__awb__record_agreement', { ticket_id: 'T-9', status: 'agree' });
-  assert.deepEqual(
-    resolveTicketRef(agree, { comment: { id: 'CMT-a' }, consensus: {}, moved: false }, false),
-    { action: 'consensus', ticket_id: 'T-9' },
-  );
-});
-
-test('batch_operations: one call fans out to MANY refs, zipped with results[]', () => {
-  const ctx = trackedTicketTool('mcp__awb__batch_operations', {
-    operations: [
-      { action: 'create-ticket', column: 'To Do', title: '배치 생성' },
-      { action: 'move-ticket', ticketId: 'T-move', toColumn: 'Review' },
-      { action: 'update-child', ticketId: 'C-done', status: 'done' },
-      { action: 'add-comment', ticketId: 'T-cmt', author: 'a', content: 'hi' },
-      { action: 'add-child', ticketId: 'P-1', title: '새 하위' },
-      { action: 'move-ticket', ticketId: 'T-fail', toColumn: 'Nope' }, // fails on server
-      { action: 'reindex-magic' },                                     // untracked op
-    ],
-  });
-  assert.equal(ctx.action, 'batch');
-  assert.ok(Array.isArray(ctx.batchOps) && ctx.batchOps.length === 7);
-
-  const result = {
-    results: [
-      { success: true, ticketId: 'T-created' },              // create → NEW id
-      { success: true, ticketId: 'T-move', movedTo: 'Review' },
-      { success: true, ticketId: 'C-done' },
-      { success: true, commentId: 'CMT-1' },                 // add-comment → only commentId
-      { success: true, ticketId: 'CH-1' },                   // add-child → NEW child id
-      { error: 'Column "Nope" not found' },                  // failed → no ref
-      { error: 'Unknown action: reindex-magic' },            // untracked → no ref
-    ],
-  };
-  const refs = resolveBatchTicketRefs(ctx, result, false, (id) => (id === 'T-cmt' ? '코멘트 대상' : undefined));
-  assert.deepEqual(refs, [
-    { action: 'create', ticket_id: 'T-created', title: '배치 생성' }, // title from op
-    { action: 'move', ticket_id: 'T-move' },
-    { action: 'update', ticket_id: 'C-done' },
-    { action: 'comment', ticket_id: 'T-cmt', title: '코멘트 대상' },  // ticket from INPUT, title from cache
-    { action: 'create', ticket_id: 'CH-1', title: '새 하위' },        // add-child NEW id, title from op
-  ]);
-});
-
-test('resolveBatchTicketRefs: whole-tool error or malformed result yields nothing', () => {
-  const ctx = trackedTicketTool('mcp__awb__batch_operations', {
-    operations: [{ action: 'create-ticket', title: 'X' }],
-  });
-  // A tool_result flagged is_error → emit nothing even if a stray results[] is present.
-  assert.deepEqual(resolveBatchTicketRefs(ctx, { results: [{ success: true, ticketId: 'T' }] }, true), []);
-  // No results[] array (an error string / unexpected shape) → nothing.
-  assert.deepEqual(resolveBatchTicketRefs(ctx, { error: 'boom' }, false), []);
-  assert.deepEqual(resolveBatchTicketRefs(ctx, 'nope', false), []);
 });
 
 test('formatTicketRefsContent: expanded action labels render in Korean', () => {
@@ -252,21 +225,18 @@ test('formatTicketRefsContent: expanded action labels render in Korean', () => {
     { action: 'release', ticket_id: 'T-1', title: '해제' },
     { action: 'unarchive', ticket_id: 'T-2' },
     { action: 'prereq', ticket_id: 'T-3', title: '의존' },
-    { action: 'handoff', ticket_id: 'T-4' },
-    { action: 'propose', ticket_id: 'T-5' },
-    { action: 'consensus', ticket_id: 'T-6' },
+    { action: 'ci_wait', ticket_id: 'T-4' },
   ]);
   assert.equal(
     content,
-    '📋 티켓 클레임 해제: 해제\n📋 티켓 아카이브 해제: T-2\n📋 티켓 선행조건: 의존\n📋 티켓 핸드오프: T-4\n📋 티켓 이동 제안: T-5\n📋 티켓 합의: T-6',
+    '📋 티켓 클레임 해제: 해제\n📋 티켓 아카이브 해제: T-2\n📋 티켓 선행조건: 의존\n📋 티켓 CI 대기: T-4',
   );
 });
 
-// ── 2차 재요청 대응 (ticket 24694916): typed-comment mutations + reject_handoff ──
+// ── 2차 재요청 대응 (ticket 24694916): typed-comment mutations ──
 // 리뷰어 지적 — ask_question / answer_question / record_decision 은 comment row 를
-// 만들거나 질문 상태를 바꾸는 성공 mutation 인데 미분류라 카드가 조용히 누락됐고,
-// reject_handoff 는 "비표준 키" 라는 이유로 제외됐지만 실제로는 defect 티켓을 생성하는
-// 명백한 mutation. 아래 테스트가 세 comment 경로와 reject_handoff 다중-ref 를 고정한다.
+// 만들거나 질문 상태를 바꾸는 성공 mutation 인데 미분류라 카드가 조용히 누락됐다.
+// (reject_handoff 다중-ref 경로는 board-less 전환으로 tool 과 함께 삭제됐다.)
 
 test('trackedTicketTool: typed-comment mutations (ask/answer/decision) are tracked', () => {
   // ask_question / record_decision carry an INPUT ticket_id (authoritative).
@@ -302,48 +272,15 @@ test('resolveTicketRef: comment-mutation success paths each emit a card (누락 
   );
 });
 
-test('reject_handoff: one result → defect (reject) + re-blocked follow-up (prereq)', () => {
-  const ctx = trackedTicketTool('mcp__awb__reject_handoff', { followup_ticket_id: 'F-1', reason: '결함' });
-  assert.equal(ctx.action, 'reject');
-  assert.equal(ctx.rejectHandoff, true);
-  assert.equal(ctx.inputTicketId, 'F-1');
-  // Real result shape: HandoffService.rejectHandoff → {defect_ticket_id, defect_board_id,
-  // source_ticket_id, followup_pending_on_tickets} spread + {followup: <full ticket>}.
-  const result = {
-    defect_ticket_id: 'D-9',
-    defect_board_id: 'B-src',
-    source_ticket_id: 'S-1',
-    followup_pending_on_tickets: true,
-    followup: { id: 'F-1', title: '후속 작업', column_id: 'c' },
-  };
-  const refs = resolveRejectHandoffRefs(ctx, result, false, (id) => (id === 'D-9' ? '반려 결함 티켓' : undefined));
-  assert.deepEqual(refs, [
-    { action: 'reject', ticket_id: 'D-9', title: '반려 결함 티켓' }, // defect: title from cache
-    { action: 'prereq', ticket_id: 'F-1', title: '후속 작업' },      // follow-up: title from result
-  ]);
-  // Fail-closed: an errored tool_result, or a shape with no defect id, emits nothing
-  // relevant. A missing followup still yields the defect ref alone.
-  assert.deepEqual(resolveRejectHandoffRefs(ctx, result, true), []);
-  assert.deepEqual(resolveRejectHandoffRefs(ctx, { message: 'not a handoff relay' }, false), []);
-  assert.deepEqual(
-    resolveRejectHandoffRefs(
-      trackedTicketTool('mcp__awb__reject_handoff', { followup_ticket_id: 'F-2' }),
-      { defect_ticket_id: 'D-2' }, false,
-    ),
-    [{ action: 'reject', ticket_id: 'D-2' }, { action: 'prereq', ticket_id: 'F-2' }],
-  );
-});
-
-test('formatTicketRefsContent: comment + reject action labels render in Korean', () => {
+test('formatTicketRefsContent: comment action labels render in Korean', () => {
   const content = formatTicketRefsContent([
     { action: 'question', ticket_id: 'T-1', title: '질문' },
     { action: 'answer', ticket_id: 'T-2' },
     { action: 'decision', ticket_id: 'T-3', title: '결정문' },
-    { action: 'reject', ticket_id: 'D-9', title: '반려 결함' },
   ]);
   assert.equal(
     content,
-    '📋 티켓 질문: 질문\n📋 티켓 답변: T-2\n📋 티켓 결정: 결정문\n📋 티켓 반려: 반려 결함',
+    '📋 티켓 질문: 질문\n📋 티켓 답변: T-2\n📋 티켓 결정: 결정문',
   );
 });
 

@@ -23,10 +23,8 @@ export type OutreachDeployPostMode = 'new_post' | 'reply_to_existing' | 'auto' |
  * workspace-scope guard (global credential OR same-workspace; a mismatched
  * workspace throws rather than silently resolving to no token).
  *
- * `target_board_id` is null-friendly the same way
- * agent-api.controller.ts's `operational-capability-ticket` fallback is:
- * null resolves to the workspace's earliest-created board at ticket-creation
- * time, so registering a channel never requires wiring a board id up front.
+ * Tickets filed from a channel get `target_tags` (plus the provenance tags the
+ * ingest adds) and `target_project_id`; both optional.
  */
 @Entity('outreach_channels')
 @Index(['workspace_id', 'enabled'])
@@ -66,10 +64,13 @@ export class OutreachChannel {
   @Column({ type: 'int', default: 0 })
   rate_limit_per_hour: number;
 
-  // Destination board for bug/feature_request tickets. null → resolved to the
-  // workspace's earliest-created board at creation time (see class docstring).
+  // Classification of the bug/feature_request tickets this channel files.
+  @Column({ type: 'simple-json', default: '[]' })
+  target_tags: string[];
+
+  // Project those tickets are about (and whose default assignee picks them up). null = none.
   @Column({ type: 'varchar', nullable: true, default: null })
-  target_board_id: string | null;
+  target_project_id: string | null;
 
   @Column({ type: 'int', default: 3600000 })
   poll_interval_ms: number;

@@ -50,9 +50,10 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'sync_github_resource',
-    'Sync a GitHub repository into a resource. Fetches repo metadata, README, and file tree, ' +
-    'stores them as resource content, and auto-embeds for vector search. ' +
+    'Sync a GitHub repository\'s README + file tree into a searchable document resource. Fetches repo metadata, README, and file tree, ' +
+    'stores them as resource content (type=document), and auto-embeds for vector search. ' +
     'If resource_id is provided, updates the existing resource; otherwise creates a new one. ' +
+    'This is a knowledge snapshot only — to register the repository for ticket work (clone, branches, host folders), use save_project. ' +
     'Auth precedence: explicit credential_id → (when updating) the target resource\'s stored ' +
     'credential → the global GitHub token.',
     {
@@ -98,10 +99,13 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
         tags.push(info.language.toLowerCase());
       }
 
+      // type='document', not 'repository': repositories are Projects now
+      // (docs/tickets.md). The snapshot is reference material for search;
+      // it never drives a clone.
       if (existing) {
         existing.name = info.full_name;
         existing.description = info.description;
-        existing.type = 'repository';
+        existing.type = 'document';
         existing.url = info.html_url;
         existing.content = content;
         existing.tags = JSON.stringify(tags);
@@ -116,11 +120,10 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
 
       const created = resourceRepo.create({
         workspace_id,
-        board_id: null,
         credential_id: credential_id || null,
         name: info.full_name,
         description: info.description,
-        type: 'repository',
+        type: 'document',
         url: info.html_url,
         content,
         file_data: '',

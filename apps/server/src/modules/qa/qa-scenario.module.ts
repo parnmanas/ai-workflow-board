@@ -9,8 +9,6 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { Resource } from '../../entities/Resource';
@@ -23,7 +21,9 @@ import { QaFailureTicketService } from './qa-failure-ticket.service';
 import { QaRerunOnFixService } from './qa-rerun-on-fix.service';
 import { QaScheduleService } from './qa-schedule.service';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
-import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
+// TicketService (failure tickets, on-pass auto-close) lives in AgentsModule.
+// No cycle: AgentsModule does not import this module.
+import { AgentsModule } from '../agents/agents.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
@@ -35,9 +35,9 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([QaScenario, QaRun, QaRunBatch, QaSchedule, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Board, BoardColumn, Ticket, Comment, Resource]),
+    TypeOrmModule.forFeature([QaScenario, QaRun, QaRunBatch, QaSchedule, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Ticket, Comment, Resource]),
     ChatRoomsModule,
-    WorkspaceRolesModule,
+    AgentsModule,
     SharedServicesModule,
   ],
   controllers: [QaScenarioController],

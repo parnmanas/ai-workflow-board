@@ -8,11 +8,9 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { Board } from '../../entities/Board';
 import { Workspace } from '../../entities/Workspace';
 import { User } from '../../entities/User';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Comment } from '../../entities/Comment';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { ActionsController } from './actions.controller';
@@ -23,15 +21,15 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
-// ActionRunReaperService needs TriggerLoopService.dispatchCurrentColumn to
-// resume a stuck run's source ticket — same precedent TicketsModule /
-// FeaturesModule / BenchmarksModule use to reach TriggerLoopService from
-// outside AgentsModule. No cycle: AgentsModule does not import ActionsModule.
+// ActionRunReaperService needs TicketDispatchService.resumeTicket to resume a
+// stuck run's source ticket — same precedent TicketsModule uses to reach the
+// dispatcher from outside AgentsModule. No cycle: AgentsModule does not import
+// ActionsModule.
 import { AgentsModule } from '../agents/agents.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Action, ActionRun, ActionApproval, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Board, Workspace, User, Ticket, BoardColumn, Comment, ActivityLog]),
+    TypeOrmModule.forFeature([Action, ActionRun, ActionApproval, ChatRoom, ChatRoomParticipant, ChatRoomMessage, TicketAttachment, RuntimeHost, Workspace, User, Ticket, Comment, ActivityLog]),
     ChatRoomsModule,
     SharedServicesModule,
     AgentsModule,

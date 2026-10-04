@@ -6,48 +6,32 @@ import { Ticket } from '../../entities/Ticket';
 import { Subagent } from '../../entities/Subagent';
 import { SubagentLogLine } from '../../entities/SubagentLogLine';
 import { AgentUsageDailyRollup } from '../../entities/AgentUsageDailyRollup';
-import { StuckTicketAlert } from '../../entities/StuckTicketAlert';
 import { CiRedAlert } from '../../entities/CiRedAlert';
-import { DispatchIntent } from '../../entities/DispatchIntent';
 import { ChildRun } from '../../entities/ChildRun';
 import { FsBrowserController } from './fs-browser.controller';
 import { SubagentMonitorController } from './subagent-monitor.controller';
 import { AgentConnectionService } from './agent-connection.service';
-import { TriggerLoopService } from './trigger-loop.service';
 import { AgentStatusService } from './agent-status.service';
-import { AllocationService } from './allocation.service';
-import { TicketSupervisorService } from './ticket-supervisor.service';
-import { AgentWorkloadService } from './agent-workload.service';
-import { BacklogPromotionService } from './backlog-promotion.service';
-import { ClaimVerificationService } from './claim-verification.service';
-import { StuckTicketDetectorService } from './stuck-ticket-detector.service';
 import { CiHealthMonitorService } from './ci-health-monitor.service';
 import { CiWaitResumeService } from './ci-wait-resume.service';
-import { MergeLeaseSweepService } from './merge-lease-sweep.service';
-import { RespawnStormDetectorService } from './respawn-storm-detector.service';
 import { AgentUsageService } from './agent-usage.service';
-import { DispatchIntentService } from './dispatch-intent.service';
-import { DispatchReconcilerService } from './dispatch-reconciler.service';
 import { AgentAutostartService } from './agent-autostart.service';
 import { ChildRunService } from './child-run.service';
-import { CompletionVerificationResumeService } from './completion-verification-resume.service';
-import { TicketCompletionVerification } from '../../entities/TicketCompletionVerification';
 import { AgentChildRunsController, ChildRunsController } from './child-runs.controller';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
-import { MergeLeaseService } from '../tickets/merge-lease.service';
+import { TicketService } from '../tickets/ticket.service';
+import { TicketDuplicateService } from '../tickets/ticket-duplicate.service';
+import { TicketDispatchService } from './ticket-dispatch.service';
 import { FsBrowserService } from '../../services/fs-browser.service';
 import { SubagentMonitorService } from '../../services/subagent-monitor.service';
-import { WorkspaceMoveService } from '../../services/workspace-move.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
-import { ColumnPoliciesModule } from '../column-policies/column-policies.module';
 import { SkillsModule } from '../skills/skills.module';
-import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 
 @Module({
   // forwardRef avoids the AgentsModule ↔ AgentManagerModule cycle:
@@ -55,23 +39,13 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
   // and now AgentsModule needs InstanceRegistryService from AgentManagerModule
   // to enrich /api/agents responses with live heartbeat data.
   imports: [
-    TypeOrmModule.forFeature([RuntimeHost, ApiKey, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, StuckTicketAlert, CiRedAlert, DispatchIntent, ChildRun, TicketCompletionVerification]),
+    TypeOrmModule.forFeature([RuntimeHost, ApiKey, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, CiRedAlert, ChildRun]),
     forwardRef(() => AgentManagerModule),
     // ChatRoomsModule is the home of RoomMessagingService, which
-    // StuckTicketDetectorService uses to post in-process alerts via
-    // its sendSystemMessage helper. Direct import — no cycle (chat-rooms
-    // does not depend on agents).
+    // CiHealthMonitorService uses to post in-process alerts. No cycle
+    // (chat-rooms does not depend on agents).
     ChatRoomsModule,
-    // ColumnPoliciesModule exports ColumnRolePolicyService — read-only
-    // consumer inside the stuck detector sweep (ticket f886ada7).
-    ColumnPoliciesModule,
     SkillsModule,
-    // WorkspaceRolesModule exports TicketRoleAssignmentService — BacklogPromotionService
-    // uses applyBoardDefaults to auto-backfill a vacant role after the ticket bb5b9aed
-    // threshold, and TriggerLoopService reuses the same backfillVacantRoleFromBoardDefaults
-    // core for an immediate halt-policy backfill (ticket 1e002acb). No cycle:
-    // WorkspaceRolesModule only imports TypeOrmModule.
-    WorkspaceRolesModule,
   ],
   controllers: [
     // P4c-4: AgentsController (Agent-row CRUD) removed with the Agent table.
@@ -82,45 +56,30 @@ import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module'
   ],
   providers: [
     AuthGuard, PermissionGuard, AgentAuthGuard, AdminGuard,
-    AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
-    TicketSupervisorService,
-    BacklogPromotionService,
-    AgentWorkloadService,
-    StuckTicketDetectorService,
+    AgentConnectionService, AgentStatusService,
+    TicketDispatchService,
+    TicketService,
+    TicketDuplicateService,
     CiHealthMonitorService,
     CiWaitService,
     CiWaitResumeService,
-    MergeLeaseService,
-    MergeLeaseSweepService,
-    RespawnStormDetectorService,
     AgentUsageService,
-    ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
-    WorkspaceMoveService,
-    DispatchIntentService,
-    DispatchReconcilerService,
     AgentAutostartService,
     ChildRunService,
-    CompletionVerificationResumeService,
   ],
   exports: [
-    AgentConnectionService, TriggerLoopService, AgentStatusService, AllocationService,
-    BacklogPromotionService,
-    AgentWorkloadService,
-    StuckTicketDetectorService,
+    AgentConnectionService, AgentStatusService,
+    TicketDispatchService,
+    TicketService,
+    TicketDuplicateService,
     CiHealthMonitorService,
     CiWaitService,
     CiWaitResumeService,
-    MergeLeaseService,
-    MergeLeaseSweepService,
-    RespawnStormDetectorService,
     AgentUsageService,
-    ClaimVerificationService,
     TicketPrerequisitesService,
     FsBrowserService, SubagentMonitorService,
-    DispatchIntentService,
-    DispatchReconcilerService,
     ChildRunService,
   ],
 })

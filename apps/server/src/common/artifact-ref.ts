@@ -1,7 +1,9 @@
+// `board` was dropped with boards (docs/tickets.md) — an old `#[board:…]`
+// token in stored text no longer matches and stays plain text (the client's
+// utils/artifactRef.ts renders it the same way).
 export const ARTIFACT_REF_TYPES = [
   'ticket',
   'agent',
-  'board',
   'action',
   'function',
   'schedule',
@@ -28,6 +30,16 @@ export const UUID_RE = new RegExp(`^${UUID_PATTERN}$`, 'i');
 
 function cleanLabel(value: string): string {
   return value.replace(/[\]\r\n|]+/g, ' ').trim();
+}
+
+/**
+ * In-app path that opens one ticket — the workspace ticket pool with the
+ * ticket's detail panel open. `extra` adds query params (e.g. `comment`).
+ * Relative; prefix AWB_PUBLIC_URL for links that leave the app.
+ */
+export function ticketPath(workspaceId: string, ticketId: string, extra: Record<string, string> = {}): string {
+  const params = new URLSearchParams({ ticket: ticketId, ...extra });
+  return `/ws/${workspaceId}/tickets?${params.toString()}`;
 }
 
 export function formatArtifactRef(type: ArtifactRefType, id: string, name: string): string {
@@ -68,10 +80,9 @@ export function parseArtifactRefs(text: string): ArtifactRef[] {
 export const ARTIFACT_REF_DOC =
   'ARTIFACT REFERENCES — whenever naming an AWB entity, use the non-notifying clickable token ' +
   '`#[type:<full-uuid>|Human-readable name]`; never identify an entity only by a shortened id. ' +
-  'Supported types: ticket, agent, board, action, function, schedule. Examples:\n' +
+  'Supported types: ticket, agent, action, function, schedule. Examples:\n' +
   '  • `#[ticket:<uuid>|Fix checkout race]`\n' +
   '  • `#[agent:<uuid>|BuildBot]`\n' +
-  '  • `#[board:<uuid>|Platform Board]`\n' +
   '  • `#[action:<uuid>|Deploy staging]`\n' +
   '  • `#[function:<uuid>|release_notes]`\n' +
   '  • `#[schedule:<uuid>|Nightly QA]`\n' +

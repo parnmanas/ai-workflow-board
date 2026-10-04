@@ -1,8 +1,8 @@
 /**
- * TicketArchiverService — background sweep that soft-archives Done-column
- * tickets older than each board's `auto_archive_days` setting.
+ * TicketArchiverService — background sweep that soft-archives `done` tickets
+ * older than their workspace's `auto_archive_days` setting.
  *
- * Pattern mirrors `TicketSupervisorService`: `OnModuleInit` plants a plain
+ * `OnModuleInit` plants a plain
  * `setInterval`, no `@Cron`, no external scheduler dependency. Default tick
  * cadence is 1 hour — operationally cheap and the archive grace window is
  * configured in days, so a single missed tick doesn't change the user-
@@ -10,10 +10,9 @@
  *
  * Per-tick mechanics:
  *
- *   1. Find every board with `auto_archive_days IS NOT NULL` and not paused.
- *   2. For each, look up the terminal column(s) (`is_terminal=true` or
- *      `kind='terminal'`) and select tickets where:
- *        - `column_id IN (terminal_col_ids)`
+ *   1. Find every workspace with `auto_archive_days IS NOT NULL`.
+ *   2. For each, select tickets where:
+ *        - `status = 'done'`
  *        - `archived_at IS NULL`
  *        - `parent_id IS NULL` (subtasks travel with the parent — not
  *          archivable on their own)
@@ -30,22 +29,22 @@
  *          which spell `GREATEST`/`MAX` differently): `terminal_entered_at`
  *          and `updated_at` compared directly, plus a `NOT EXISTS` over
  *          `comments` for any row newer than the cutoff.
- *      Capped at ARCHIVER_BATCH_LIMIT per board so the first archiver tick
- *      after enabling auto-archive on a board with 10k Done tickets doesn't
+ *      Capped at ARCHIVER_BATCH_LIMIT per workspace so the first archiver tick
+ *      after enabling auto-archive on a workspace with 10k done tickets doesn't
  *      issue 10k writes in a single transaction.
  *   3. For each candidate, stamp `archived_at = now` and emit an activity_log
  *      `action='archived'` row (`actor_name='TicketArchiverService'`) so the
  *      audit trail records the sweep.
  *
- * Idempotent: re-running the tick on a board with nothing to archive is a
+ * Idempotent: re-running the tick on a workspace with nothing to archive is a
  * single empty SELECT. Stops cleanly on module destroy.
  */
 
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
+import { Workspace } from '../../entities/Workspace';
+import { DONE_STATUS } from '../../common/ticket-status';
 import { Ticket } from '../../entities/Ticket';
 import { ActivityService } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
@@ -94,67 +93,43 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
   /**
    * One archive sweep. Exposed publicly so tests + the operator-triggered
    * admin endpoint can drive it deterministically without waiting for the
-   * setInterval. Returns the per-board archive counts.
+   * setInterval. Returns the per-workspace archive counts.
    */
-  async runOnce(): Promise<{ archived_total: number; per_board: Array<{ board_id: string; count: number }> }> {
-    const boardRepo = this.dataSource.getRepository(Board);
-    const boards = await boardRepo.createQueryBuilder('b')
-      .where('b.auto_archive_days IS NOT NULL')
-      .andWhere('b.archived_at IS NULL')
+  async runOnce(): Promise<{ archived_total: number; per_workspace: Array<{ workspace_id: string; count: number }> }> {
+    const workspaces = await this.dataSource.getRepository(Workspace).createQueryBuilder('w')
+      .where('w.auto_archive_days IS NOT NULL')
       .getMany();
-
-    if (boards.length === 0) {
-      return { archived_total: 0, per_board: [] };
-    }
-
-    const perBoard: Array<{ board_id: string; count: number }> = [];
+    const perWorkspace: Array<{ workspace_id: string; count: number }> = [];
     let total = 0;
-    for (const board of boards) {
-      // Pausing a board pauses its archiver too — the operator likely paused
-      // the board for an active investigation, so don't disturb its Done
-      // column underneath them.
-      if (board.paused_at) continue;
+    for (const ws of workspaces) {
       try {
-        const count = await this.archiveBoard(board);
-        perBoard.push({ board_id: board.id, count });
+        const count = await this.archiveWorkspace(ws);
+        perWorkspace.push({ workspace_id: ws.id, count });
         total += count;
       } catch (e) {
-        this.logService.error('Archiver', 'board archive failed (continuing)', {
-          err: String(e), board_id: board.id,
+        this.logService.error('Archiver', 'workspace archive failed (continuing)', {
+          err: String(e), workspace_id: ws.id,
         });
       }
     }
-
     if (total > 0) {
       this.logService.info('Archiver', 'tick complete', {
-        boards_processed: boards.length,
+        workspaces_processed: workspaces.length,
         archived_total: total,
-        per_board: perBoard,
+        per_workspace: perWorkspace,
       });
     }
-    return { archived_total: total, per_board: perBoard };
+    return { archived_total: total, per_workspace: perWorkspace };
   }
 
-  private async archiveBoard(board: Board): Promise<number> {
-    const days = board.auto_archive_days;
+  private async archiveWorkspace(ws: Workspace): Promise<number> {
+    const days = ws.auto_archive_days;
     if (days === null || days === undefined) return 0;
-
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    const cols = await colRepo.createQueryBuilder('c')
-      .where('c.board_id = :boardId', { boardId: board.id })
-      // Both forms of the terminal flag are checked; some legacy migrations
-      // set kind without is_terminal and vice versa.
-      .andWhere('(c.is_terminal = :trueVal OR c.kind = :kindTerminal)', {
-        trueVal: true, kindTerminal: 'terminal',
-      })
-      .getMany();
-    if (cols.length === 0) return 0;
-    const terminalColIds = cols.map(c => c.id);
-
     const cutoff = new Date(Date.now() - days * 86_400_000);
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const candidates = await ticketRepo.createQueryBuilder('t')
-      .where('t.column_id IN (:...colIds)', { colIds: terminalColIds })
+      .where('t.workspace_id = :ws', { ws: ws.id })
+      .andWhere('t.status = :done', { done: DONE_STATUS })
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.parent_id IS NULL')
       // Idle-since gate: every activity signal must predate the cutoff. The
@@ -169,7 +144,6 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
       .orderBy('t.terminal_entered_at', 'ASC')
       .take(ARCHIVER_BATCH_LIMIT)
       .getMany();
-
     if (candidates.length === 0) return 0;
 
     const now = new Date();
@@ -182,9 +156,9 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
           entity_id: t.id,
           action: 'archived',
           ticket_id: t.id,
-          // Sentinel non-'system' actor so the audit row is greppable and
-          // distinguishable from manual archives without being treated as a
-          // system-comment that TriggerLoopService would silently drop.
+          workspace_id: t.workspace_id,
+          // Sentinel actor so the audit row is greppable and distinguishable
+          // from manual archives.
           actor_id: 'system',
           actor_name: 'TicketArchiverService',
           field_changed: 'archived_at',
@@ -193,14 +167,12 @@ export class TicketArchiverService implements OnModuleInit, OnModuleDestroy {
         });
       } catch (e) {
         this.logService.warn('Archiver', 'per-ticket archive failed (continuing)', {
-          err: String(e), ticket_id: t.id, board_id: board.id,
+          err: String(e), ticket_id: t.id, workspace_id: ws.id,
         });
       }
     }
-
-    this.logService.info('Archiver', 'board sweep archived tickets', {
-      board_id: board.id,
-      board_name: board.name,
+    this.logService.info('Archiver', 'workspace sweep archived tickets', {
+      workspace_id: ws.id,
       auto_archive_days: days,
       archived: candidates.length,
       hit_batch_limit: candidates.length >= ARCHIVER_BATCH_LIMIT,

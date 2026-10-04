@@ -2,9 +2,9 @@
 
 **AI Workflow Board (AWB)**
 
-AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티켓을 처리하는 칸반 기반 워크플로우 자동화 플랫폼이다. Agent가 역할(Assignee/Reporter/Reviewer)별로 티켓을 수신하고, subagent를 통해 실제 작업을 수행한 뒤, 결과를 comment로 남기고 티켓 상태를 이동시키는 자동화 루프를 제공한다.
+AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티켓을 처리하는 워크플로우 자동화 플랫폼이다. 티켓 하나는 **한 Agent(assignee)** 가 처음부터 끝까지 맡아(혼자 하든, 자기 subagent 들에게 나눠 하든) 처리하고, 결과를 comment 로 남긴 뒤 상태를 `done`(또는 사람 확인용 `review`)으로 옮긴다. 보드는 없다 — 티켓은 워크스페이스 단위 풀이고 **tag** 와 **project** 로 분류·필터링한다.
 
-**Core Value:** Agent가 MCP로 연결되어 티켓을 자율 처리하고, 완료된 티켓이 다음 역할의 Agent에게 자동 트리거되는 연속 자동화 루프.
+**Core Value:** Agent가 MCP로 연결되어 티켓을 자율 처리하고, 큐에 쌓인 다음 티켓이 그 Agent 에게 자동으로 이어지는 연속 자동화 루프.
 
 ### Constraints
 
@@ -12,7 +12,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **MCP 호환**: @modelcontextprotocol/sdk 기반 Streamable HTTP 유지
 - **DB 호환**: SQLite(개발) + PostgreSQL(운영) 이중 지원 유지
 - **Agent 독립성**: AWB는 Agent의 내부 구현에 의존하지 않음 — MCP 인터페이스만 사용
-- **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (workspace root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `docs/runbooks/agent-manager-release.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Board/Workspace 별 CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
+- **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (workspace root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `docs/runbooks/agent-manager-release.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Workspace CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 와 `status` / `project` / `base_repo.main_clone_dir` (docs/tickets.md) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
 
 ## Technology Stack
 
@@ -104,25 +104,25 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 ## Conventions
 
 ## Naming Patterns
-- Entity files: PascalCase (e.g., `Board.ts`, `User.ts`) - located in `apps/server/src/entities/`
-- Controller files: kebab-case with `.controller.ts` suffix (e.g., `boards.controller.ts`) - located in `apps/server/src/modules/{feature}/`
+- Entity files: PascalCase (e.g., `Project.ts`, `User.ts`) - located in `apps/server/src/entities/`
+- Controller files: kebab-case with `.controller.ts` suffix (e.g., `projects.controller.ts`) - located in `apps/server/src/modules/{feature}/`
 - Service files: kebab-case with `.service.ts` suffix (e.g., `auth.service.ts`) - located in `apps/server/src/services/`
-- Module files: kebab-case with `.module.ts` suffix (e.g., `boards.module.ts`)
-- React components: PascalCase (e.g., `Board.tsx`, `TicketCard.tsx`) - located in `apps/client/src/components/`
-- Hooks: camelCase with `use` prefix (e.g., `useBoard.ts`) - located in `apps/client/src/hooks/`
+- Module files: kebab-case with `.module.ts` suffix (e.g., `projects.module.ts`)
+- React components: PascalCase (e.g., `TicketsPage.tsx`, `TicketCard.tsx`) - located in `apps/client/src/components/`
+- Hooks: camelCase with `use` prefix (e.g., `useWorkspaces.ts`) - located in `apps/client/src/hooks/`
 - Context files: PascalCase with `Context.tsx` suffix (e.g., `AuthContext.tsx`) - located in `apps/client/src/contexts/`
 - Guards: kebab-case with `.guard.ts` suffix (e.g., `auth.guard.ts`) - located in `apps/server/src/common/guards/`
 - Decorators: kebab-case with `.decorator.ts` suffix (e.g., `current-user.decorator.ts`) - located in `apps/server/src/common/decorators/`
 - Async functions: camelCase (e.g., `async login(email, password)`, `async refresh()`)
 - NestJS handlers: camelCase with method name (e.g., `@Get() list(...)`, `@Post() create(...)`)
-- React hooks: camelCase starting with `use` (e.g., `useBoard`, `useAuth`)
+- React hooks: camelCase starting with `use` (e.g., `useWorkspaces`, `useAuth`)
 - Private methods: camelCase prefixed with underscore (e.g., `private _resolveAgentId(...)`)
 - Helper functions: camelCase (e.g., `parseTicket()`, `parseComments()`)
 - Constants: UPPER_SNAKE_CASE (e.g., `MAX_IMAGE_SIZE`, `SESSION_TTL_MS`, `SALT_ROUNDS`)
-- Local variables: camelCase (e.g., `boardId`, `currentUser`, `showToast`)
+- Local variables: camelCase (e.g., `projectId`, `currentUser`, `showToast`)
 - Database/API fields: snake_case (e.g., `workspace_id`, `created_at`, `channel_ids`)
 - TypeScript/React state: camelCase (e.g., `isAuthenticated`, `currentWorkspaceId`, `selectedChannelIds`)
-- Interfaces: PascalCase, often plural for collections (e.g., `User`, `Board`, `TicketDetailProps`)
+- Interfaces: PascalCase, often plural for collections (e.g., `User`, `Project`, `TicketDetailProps`)
 - Types: PascalCase (e.g., `CurrentUserData`)
 - Enum values: UPPER_SNAKE_CASE
 - Generic type parameters: Single uppercase letter (e.g., `<T>`, `<R>`)
@@ -136,7 +136,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **TypeScript configuration:**
 ## Import Organization
 - No explicit path aliases configured (no baseUrl/paths in tsconfig)
-- Relative imports use `../` navigation (e.g., `../../entities/Board`)
+- Relative imports use `../` navigation (e.g., `../../entities/Project`)
 ## Error Handling
 - **Server (NestJS):**
 - **Client (React):**
@@ -165,14 +165,14 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Dependent parameters extracted via `@Param()`
 - Use object destructuring for multiple parameters
 - Controllers return Express `Response` objects with explicit status codes and JSON
-- Services return typed data (User, Board, Ticket, etc.) or null on failure
-- Async functions return Promises with generic types (e.g., `Promise<Board>`)
+- Services return typed data (User, Project, Ticket, etc.) or null on failure
+- Async functions return Promises with generic types (e.g., `Promise<Project>`)
 - Example pattern: `async function loadTicketFull(ticketRepo: Repository<Ticket>, id: string): Promise<Ticket | null>`
 ## Module Design
 - Barrel exports in `index.ts` files (e.g., `apps/server/src/entities/index.ts`)
 - NestJS modules use `@Module({ imports: [...], controllers: [...], providers: [...] })`
 - Services provided to modules via `providers` array for dependency injection
-- Example from `boards.module.ts`:
+- Example from `projects.module.ts`:
 - `apps/server/src/entities/index.ts` exports all entity types
 - 단, 엔티티 배럴은 **혼자 완결되지 않는다** — 이관 레지스트리 등록이 한 쌍으로 따라온다. 아래 "Entity Naming (Database)" 참고.
 - Each module has its own file structure without explicit barrel files (imports done directly)
@@ -184,7 +184,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - `@ManyToOne()`, `@OneToMany()` for relationships
 - `@JoinColumn()` for foreign key specification
 - **배럴 export 와 이관 레지스트리 등록은 한 쌍이다.** `apps/server/src/entities/index.ts` 에 `export { Foo } from './Foo';` 를 넣었으면 **같은 커밋에서** `apps/server/src/modules/migration/migration-entity-registry.ts` 의 `MIGRATION_ENTITY_ORDER` 에도 클래스명을 추가하라. 빠뜨리면 (1) **동일 빌드끼리도** migration preflight 가 항상 실패해 main CI 가 red 가 되고, (2) `resolveMigrationEntity()` 가 그 이름을 거부해 해당 테이블이 인스턴스 이관에서 **조용히** 빠진다.
-- 배치 위치는 FK 위상 순서(부모 먼저)를 따른다. 실제 DB FK 는 11개뿐이고 그 목록은 레지스트리 파일 상단 주석에 있다 — `@ManyToOne`/`@JoinColumn` 없이 평문 varchar 로만 참조하는 엔티티라면 순서는 사실상 자유다.
+- 배치 위치는 FK 위상 순서(부모 먼저)를 따른다. 실제 DB FK 는 7개뿐이고 그 목록은 레지스트리 파일 상단 주석에 있다 — `@ManyToOne`/`@JoinColumn` 없이 평문 varchar 로만 참조하는 엔티티라면 순서는 사실상 자유다.
 - ⚠️ `MIGRATION_CONTROL_ENTITY_REASONS` 는 **도피처가 아니다.** 누락 엔티티를 여기 넣으면 preflight 는 green 이 되지만(`comparePreflight()` 가 CONTROL 이름을 소스 쪽에서 먼저 걸러낸다) 그 테이블은 이관에서 **영구히** 빠진다. 이관 기능 자신의 제어 상태이고 도착지에서 재생성되는 테이블에만 쓰고, 사유를 함께 적어라.
 - 이 한 쌍은 `apps/server/test/migration-registry-completeness.test.mjs` 가 배럴 ↔ 레지스트리 양방향 차집합으로 강제한다(CONTROL 집합은 핀으로 고정). 누락 시 엔티티 이름·소스 파일·조치법을 그 실패 메시지가 찍어 준다. 온톨로지 그래프 테이블(`ontology_` 접두)만 의도적 제외 대상이다.
 
@@ -198,7 +198,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Real-time activity logging and notifications
 - Multi-workspace organization with hierarchical tickets (root → child → grandchild)
 ## Layers
-- Purpose: Expose endpoints for board operations, authentication, and user management
+- Purpose: Expose endpoints for tickets, projects, authentication, and user management
 - Location: `apps/server/src/modules/*/` (16 feature modules)
 - Contains: Controllers (one per module) and request/response handling
 - Depends on: Services (shared and module-specific), Guards, Filters
@@ -219,7 +219,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Depends on: User repositories, session management
 - Used by: Controllers via @UseGuards decorator
 - Purpose: UI components and user interactions
-- Location: `apps/client/src/components/` (admin and board components)
+- Location: `apps/client/src/components/` (admin, tickets and projects components)
 - Contains: React functional components, drag-and-drop, forms
 - Depends on: Context providers, hooks, API client
 - Used by: Routes, other components
@@ -233,11 +233,11 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Frontend: AuthContext (user/token), LoadingContext (loading states), ToastContext (notifications), local component state
 - Persistence: All data to database, auth token to localStorage, no Redux/Zustand
 ## Key Abstractions
-- Purpose: Represent domain objects (User, Board, Ticket, etc.)
+- Purpose: Represent domain objects (User, Project, Ticket, etc.)
 - Examples: `apps/server/src/entities/Ticket.ts`, `apps/server/src/entities/User.ts`
 - Pattern: TypeORM @Entity classes with relationships (@OneToMany, @ManyToOne)
 - Purpose: Feature organization and dependency injection
-- Examples: `BoardsModule`, `TicketsModule`, `AuthModule` in `apps/server/src/modules/`
+- Examples: `ProjectsModule`, `TicketsModule`, `AuthModule` in `apps/server/src/modules/`
 - Pattern: NestJS @Module with imports, controllers, providers, exports
 - Purpose: Enforce authentication and authorization
 - Examples: `AuthGuard` (checks token), `PermissionGuard` (checks permissions), `AdminGuard` (admin-only)
@@ -256,7 +256,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Triggers: `npm run dev` or build via `npm run build`
 - Responsibilities: Render React app into DOM, wrap with BrowserRouter
 - Location: `apps/client/src/App.tsx`
-- Routes: "/" (Board), "/admin/*" (AdminPage), auth guards before routes
+- Routes: "/ws/:wsId/tickets" (Tickets), "/ws/:wsId/projects" (Projects), "/admin/*" (AdminPage), auth guards before routes
 - Responsibilities: Check auth state, render login or main interface
 ## Error Handling
 - Backend: AllExceptionsFilter (in `apps/server/src/common/filters/http-exception.filter.ts`) catches all exceptions, logs via LogService, returns HTTP 500
@@ -270,11 +270,21 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Owns the SSE pipeline (`EventStream` → `EventDispatcher`), subagent supervision (`SubagentManager`), persistent ticket/chat sessions, fs-browser reverse-RPC, instance heartbeat, agent lockfile
 - Bootstraps via one-time pairing token minted from AWB admin UI; persists `config.json` at `$AWB_AGENT_MANAGER_HOME` (default `~/.config/awb-agent-manager/`). **redeem은 RuntimeHost 행만 만든다 (manager Agent 행 Mint 중단, P4c-4)**: 응답 `agent_id` 자리에는 Host id 가 들어가고 키는 `agent_id NULL + host_id` 바인딩이다. heartbeat는 host-first 해소 (`body.host_id` → 키 `host_id` → Host 행, Agent 행은 best-effort), `registry.host_id` 스탬프, `AgentAuthGuard.currentAgentId = agent_id || host_id` + `currentHostId`. 소유권 검사는 직접 uuid 또는 `api_keys` 페어링 링크 둘 다 인정 (`callerOwnsAgent`, legacy managed 자식 브릿지). 회귀: `test/pair-redeem-host-only.test.mjs`, `test/runtime-host-heartbeat.test.mjs`, `test/manager-ownership-host-bridge.test.mjs`.
 - AWB → manager control surface: SSE event `agent_manager_command` — payload 필드는 `command_id`/`instance_id`/`agent_id`/`command`/`args`/`issued_by`/`issued_at`(`AgentManagerCommandPayload`, `apps/agent-manager/src/lib/agent-manager-commands.ts` 및 `apps/server/src/common/types/stream-events.ts`에 동일 이름으로 정의). verb 목록은 여기 하드코딩하지 말고 그 파일의 `CommandKind`/`KNOWN_COMMANDS`를 근거로 볼 것 — "5 verbs"로 개수를 적어뒀다가 stale해진 전례가 있어 개수 표현 자체를 없앰(리뷰 지적: 소스 티켓에서 verb 추가가 예정돼 있어 개수를 다시 적으면 병합 순서에 따라 즉시 또 stale해짐). ack via `POST /api/agent-manager/command/ack`
-- `action`→role / `field_changed`→trigger_id / `actor_name`→agent_id 매핑은 `agent_manager_command`가 아니라 **`agent_trigger`(티켓 dispatch) SSE 계열** 전용 필드 별칭이다 — `apps/agent-manager/src/lib/event-dispatcher.ts`의 트리거 처리부(`dispatchTrigger`/`#ackDispatch`) 참조.
+- `action`→role(항상 `assignee`) / `field_changed`→trigger_id / `actor_name`→agent_id 매핑은 `agent_manager_command`가 아니라 **`agent_trigger`(티켓 dispatch) SSE 계열** 전용 필드 별칭이다 — `apps/agent-manager/src/lib/event-dispatcher.ts`의 트리거 처리부(`dispatchTrigger`/`#ackDispatch`) 참조.
 - **모델 목록은 한 경로로만 읽고 갱신한다**: 매니저 하트비트 `available_models` + `available_models_at`(재열거 시각; server·agent-manager 공동 contract) → 서버 `HostModelsService`(`GET/POST /api/agent-manager/hosts/:managerAgentId/models[/refresh]`) → 클라이언트 `src/cli/hostModels.ts` 의 `useHostModels()`. 모델을 보여주는 화면(Agent 다이얼로그·팀 슬롯·세션 설정·새 세션·Runtime Hosts)은 전부 이 훅을 쓰고, 열릴 때 오래된/빈 목록을 스스로 재열거한다. `available_models` 를 직접 읽거나 `refresh_available_models` 를 화면에서 직접 보내지 말 것. 상세: `docs/cli-modules.md` → "모델 목록". **서버 쪽도 마찬가지다**: `HostModelsService.modelsFor()/modelsByCli()` 가 유일한 답이고, 하트비트 `available_models` 를 직접 읽어 자기만의 합집합을 만들지 말 것 — 오케스트레이션 로스터가 "하트비트 + 기존 agent 행에 핀된 모델, 알파벳 재정렬" 로 따로 계산해서 같은 호스트의 목록이 mission 과 session/chat 에서 **내용도 순서도** 달랐다(2026-09-27). ACP 어댑터가 보고한 모델은 반대로 그 출처로 흘려보낸다 — 살아 있는 세션은 `noteObservedModels()`, 이미 영속된 것(`agent_session_cli_settings.known_config_options`)은 `HostModelsService` 가 부팅·조회 시 직접 읽는다. **영속본을 빠뜨리면 "이 프로세스에서 세션을 한 번 열었는가"에 따라 목록이 갈린다**(실측: Ralf opencode = ACP 108개 vs 하트비트 짧은 목록). **ACP 보고가 있으면 그것만 쓰고 하트비트와 합치지 않는다**(라이브 → 가장 최근 영속본 → 하트비트 순으로 처음 비지 않은 하나) — 하트비트는 CLI 바이너리 스캔이라 `claude-sonnet-5-5` 같은 id 가 섞이고, 합집합이던 동안 새 세션·팀 슬롯에는 있고 세션 안에는 없었다(2026-10-02 ragnar). 이름(`labels`)도 같은 출처에서 내려간다. 회귀: `apps/server/test/host-models-single-source.test.mjs`(세 경로의 결과가 글자 그대로 같은지), `apps/client/test/mission-slot-model-list.test.mjs`(팀 슬롯 dropdown 이 스토어만 읽는지).
 - **CLI 별 지식은 `src/lib/clis/<id>/index.ts` 의 `CliModule` 한 곳에 있다** (바이너리 경로 · credential provider · device-auth 로그인 · Agent Session 스캐너 · effort 슬라이스 · 디스패치 게이트). 소비자(`cli-login.ts`, `agent-session-*.ts`, `cli-resolver.ts`, `agent-manager-commands.ts`, `event-dispatcher.ts`)는 `clis/index.ts` 로 조회만 한다 — `if (cli === 'claude')` 를 새로 쓰지 말 것. 서버 `cli-catalog.ts` 와의 일치는 `test/cli-catalog-contract.test.mjs` 가 강제한다. 상세: `docs/cli-modules.md`.
 - **버전은 두 개다**: 실행 중(`plugin_version`, 부팅 때 `setRunningVersion`)과 디스크 설치본(`installed_version`, `dist/package.json`). 프로세스 밖에서 `npm i -g awb-agent-manager` 를 돌리면 둘이 갈리고 하트비트가 `restart_required` 를 광고한다 — 그때 `update_manager` 는 설치 없이 재기동만 한다. 세션/셸에서 매니저 바이너리를 직접(`--force`) 띄우면 감독 중인 서비스를 죽이지 않고 SIGUSR2 로 재기동을 넘긴다(`docs/agent-manager.md` → Self-update policy).
 - Reference: `docs/agent-manager.md` (internals), `apps/agent-manager/README.md` (quickstart)
+
+## Tickets & Projects (보드 없는 모델)
+
+- **보드·컬럼·워크스페이스 역할·컬럼 role 라우팅·prompt template·board lesson·합의(consensus)·cross-board handoff·benchmark·feature chain·merge lease/gate 는 전부 제거됐다.** 다시 들이지 말 것 — 계약 문서는 `docs/tickets.md`.
+- 티켓 상태는 고정 집합 `backlog → todo → in_progress → review → done` (`apps/server/src/common/ticket-status.ts` 가 단일 원천 — 상태 문자열을 다른 곳에 손으로 쓰지 말 것). 분류는 `tags`(자유 문자열 배열)와 `project_id`.
+- 티켓마다 **assignee 한 명**(RuntimeSpec, `Ticket.assignee` + `assignee_key = runtimeIdentityKey(spec)`). 디스패치는 `TicketDispatchService`(`modules/agents/ticket-dispatch.service.ts`) **한 곳**이다: `todo` 큐 → 용량(`workspace.max_concurrent_tickets_per_agent`)이 나면 `in_progress` 로 옮기며 `agent_trigger`, 사람 코멘트/unpend/선행 완료/CI 대기 해제/수동 Run 에 재전송, 죽은 agent 는 supervisor 가 최대 3회 재전송 후 pend. 다른 경로에서 `agent_trigger` 를 직접 emit 하지 말 것 — "막혔던 게 풀렸다" 는 `resumeTicket(id, source)` 하나로 부른다.
+- 티켓 쓰기(생성·수정·이동·pend/unpend)는 `TicketService`(`modules/tickets/ticket.service.ts`) 를 거친다 — REST·MCP·QA/Security 실패 티켓·CI red·outreach·채팅 fallback 이 같은 부수효과(terminal stamp, activity, dispatch)를 공유해야 한다. 티켓 행을 직접 `save` 해 상태를 바꾸지 말 것.
+- **Project = 저장소 1개 + 호스트별 main clone 폴더**(`Project`, `ProjectHostFolder`). repository Resource 를 **같은 id 로** 이관했으므로 저장된 repo id(`repo_ref.project_id`, 온톨로지 graph 의 `resource_id`)는 project id 다. 티켓 dispatch 는 assignee 호스트의 main clone 을 `base_repo.main_clone_dir` 로 실어 보내고, 매니저는 거기서 `<main_clone>/.awb/wt/<ticket8>` worktree 를 뜬다(main clone 자체는 절대 reset/clean 하지 않는다). 미션 step 지시문도 각 멤버 호스트의 project 폴더를 명시한다.
+- `board_update` SSE 이름은 wire 호환 때문에 유지한다(티켓 변경 이벤트다). `current_column_*` 는 `statusColumnProjection(status)` 로 채워 구버전 매니저가 계속 dispatch 한다 — 새 필드는 `status`.
+- 데이터 이관: `database/pre-sync-board-removal.ts`(synchronize 전 스냅샷) + 마이그레이션 `1760000000091-BoardlessTickets`(컬럼→상태, 보드 이름→tag, repo→project, 보드 설정→워크스페이스, 구 테이블 drop). 운영 배포 전 DB 백업 필수 — down 은 없다.
 
 ## Orchestration mode (팀 기반 자율 업무 오케스트레이션)
 
@@ -296,7 +306,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 
 - `AgentTemplate` is a reusable preference in Hosts, with host/cli/model/effort/runtime_config only. Never put working_dir, lifecycle or execution identity on templates.
 - `RuntimeSelectionFields` is the shared selection UI. Loading a template copies preferences; inline RuntimeSpecs and session folders own execution settings independently.
-- The legacy Agent table, key/assistant references, duplicate Action/QA/Security/Schedule/Feature target columns and per-Agent skill bindings are retired. Response/SSE `agent_id` names on execution records are runtime identity keys, not template IDs.
+- The legacy Agent table, key/assistant references, duplicate Action/QA/Security/Schedule target columns and per-Agent skill bindings are retired. Response/SSE `agent_id` names on execution records are runtime identity keys, not template IDs.
 - `preSyncAgentCleanup` preserves Host pairing aliases before synchronize; migration 1760000000090 performs the same idempotent cleanup. New skills bind to `RuntimeSkillAssignment.runtime_key`; classifiers use `OutreachChannel.classifier_runtime`.
 
 ## Agent Sessions (CLI 직접 세션)

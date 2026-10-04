@@ -29,7 +29,6 @@ function scheduleToJson(s: WorkspaceSchedule) {
   return withArtifactRef('schedule', {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     target_agent_id: s.target_agent_id,
     task_prompt: s.task_prompt,

@@ -26,12 +26,12 @@
  * `ActionRun`은 QaRun/SecurityRun/OrchestrationStep과 달리 "나를 디스패치한
  * 티켓을 재개시킨다"는 진짜 계약(`source_ticket_id` + completeRun의
  * `shouldResume`)을 갖는 유일한 Run 엔터티다. 그래서 다른 리퍼들과 달리
- * `shouldResume`이 true로 돌아오면 `TriggerLoopService.dispatchCurrentColumn`을
+ * `shouldResume`이 true로 돌아오면 `TicketDispatchService.resumeTicket`을
  * 호출해 소스 티켓을 재개시킨다 — `complete_action_run` MCP 툴
  * (action-tools.ts)이 에이전트가 직접 보고한 완료에 대해 하는 일을 리퍼
- * 컨텍스트에서 그대로 반복하는 것뿐이다. TriggerLoopService를 얻으려고
- * AgentsModule을 직접 import하는 것도 TicketsModule/FeaturesModule/
- * BenchmarksModule이 이미 쓰는 선례와 동일한 패턴이다(순환 의존 없음).
+ * 컨텍스트에서 그대로 반복하는 것뿐이다. TicketDispatchService를 얻으려고
+ * AgentsModule을 직접 import하는 것도 TicketsModule 이 이미 쓰는 선례와 동일한
+ * 패턴이다(순환 의존 없음).
  *
  * 패턴은 형제 리퍼들과 동일: OnModuleInit이 평범한 setInterval을 심고(별도
  * 스케줄러 의존 없음), 부팅 즉시 1회 스윕, `runOnce()`는 수동/테스트 트리거용
@@ -69,7 +69,7 @@ import { Repository } from 'typeorm';
 import { ActionRun } from '../../entities/ActionRun';
 import { LogService } from '../../services/log.service';
 import { ActionsService } from './actions.service';
-import { TriggerLoopService } from '../agents/trigger-loop.service';
+import { TicketDispatchService } from '../agents/ticket-dispatch.service';
 
 const DEFAULT_SWEEP_MS = 15 * 60_000; // 15 minutes
 const MIN_SWEEP_MS = 60_000;          // 1 minute
@@ -97,7 +97,7 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(ActionRun) private readonly runRepo: Repository<ActionRun>,
     private readonly actionsService: ActionsService,
-    private readonly triggerLoopService: TriggerLoopService,
+    private readonly ticketDispatch: TicketDispatchService,
     private readonly logService: LogService,
   ) {}
 
@@ -210,8 +210,8 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
           // shouldResume=false로 내려와 티켓을 조기 재개하지 않고, 그 배치의
           // 마지막 run이 종료될 때 한 번만 재개된다.
           if (result.shouldResume && result.sourceTicketId) {
-            await this.triggerLoopService
-              .dispatchCurrentColumn(result.sourceTicketId, 'action_run_reaped', '')
+            await this.ticketDispatch
+              .resumeTicket(result.sourceTicketId, 'action_run_reaped')
               .catch((e: unknown) =>
                 this.logService.warn('ActionReaper', 'resume dispatch failed (continuing)', {
                   err: String(e), run_id: run.id, ticket_id: result.sourceTicketId,

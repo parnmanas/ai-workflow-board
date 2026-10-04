@@ -32,8 +32,7 @@ export interface OutreachCredential {
 
 /** Accepts a GLOBAL credential (workspace_id=NULL) or one scoped to
  *  `workspaceId`; throws (never silently degrades) for a missing row, a
- *  cross-workspace row, a legacy Board-scoped row, or an unreadable/empty
- *  token. Returns null only when `credentialId` itself is empty — "this
+ *  cross-workspace row, or an unreadable/empty token. Returns null only when `credentialId` itself is empty — "this
  *  channel has no credential configured" is a valid, callable-safe state. */
 export async function resolveOutreachCredential(
   credRepo: Repository<Credential>,
@@ -45,9 +44,6 @@ export async function resolveOutreachCredential(
   if (!cred) throw new OutreachCredentialResolutionError(`Selected credential ${credentialId} does not exist`);
   if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
     throw new OutreachCredentialResolutionError('Selected credential belongs to a different workspace');
-  }
-  if (cred.board_id !== null && cred.board_id !== undefined) {
-    throw new OutreachCredentialResolutionError('Selected credential has not been migrated to Workspace scope');
   }
   try {
     const data = JSON.parse(decryptStrict(cred.encrypted_data));

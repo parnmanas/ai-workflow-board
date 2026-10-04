@@ -1,6 +1,6 @@
 /**
  * SecurityRunReaperService — background sweep that fails SecurityRuns whose
- * inspection agent died without ever calling complete_security_run, so the board
+ * inspection agent died without ever calling complete_security_run, so the UI
  * can't display a run as `running` forever.
  *
  * Direct analogue of QaRunReaperService (see qa-run-reaper.service.ts). A
@@ -15,7 +15,7 @@
  *   1. Select SecurityRuns with status IN ('running','pending') whose age —
  *      measured from started_at, falling back to created_at — exceeds the TTL.
  *   2. Stamp status='error', finished_at=now, and prepend a clear marker to the
- *      summary so the board row reads as a reaped run, not a genuine failure.
+ *      summary so the run row reads as a reaped run, not a genuine failure.
  *   3. Capped at SECURITY_RUN_REAPER_BATCH per tick.
  *
  * Idempotent: a reaped run is terminal, so the next sweep's SELECT skips it.

@@ -4,11 +4,11 @@
 // filter branch exists, NO emit producer. This is the explicit D-08 scope.
 
 import type { HarnessConfig } from '../harness-config';
-import type { ResolvedEffortPreset } from '../effort-presets';
 import type { ResolvedEnvironmentConfig } from '../environment-config';
 import type { ResolvedClonePolicy } from '../clone-policy';
 import type { RunProvision } from '../workspace-folder-options';
 import type { WorktreeMode } from '../worktree-config';
+import type { TicketStatus } from '../ticket-status';
 import type { CliRuntimeProfile } from '../cli-runtime-profiles';
 import type { TerminalOutputChunk, TerminalSummary } from './terminals';
 import type { RuntimeSpec } from '../runtime-spec';
@@ -54,6 +54,7 @@ export type StreamEventType =
   | 'voice_announcement';    // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
 
 export interface StreamEventScope {
+  /** Legacy scope key — only `__trigger__`-style sentinels on flattened events still carry it. */
   board_id?: string;
   agent_id?: string;
   user_id?: string;
@@ -73,9 +74,14 @@ export interface StreamEvent<P = unknown> {
 
 // ── Payload shapes ─────────────────────────────────────────
 
+// `board_update` keeps its name for wire compatibility — it is the ticket-change
+// event. `current_column_*` / `*_column_name` are derived from `status`
+// (statusColumnProjection) for agent-managers that predate board removal.
 export interface BoardUpdatePayload {
   ticket_id: string;
+  /** Project id of the ticket (was the repository Resource id — same ids). */
   repository_resource_id?: string;
+  status?: TicketStatus | '';
   entity_type: string;
   action: string;
   field_changed?: string;
@@ -109,22 +115,33 @@ export interface AgentTriggerPayload {
   // 매니저는 당분간 agent_id를 읽고 P3에서 이쪽으로 전환한다. 미해결(행 삭제
   // 등) 시 null — 그때는 기존 필드로만 동작한다.
   runtime?: RuntimeSpec | null;
+  /** Always 'assignee' — the ticket's one agent (docs/tickets.md). */
   role: string;
-  role_prompt: string;      // D-20 — populated by trigger-loop in Task 3
-  ticket_prompt: string;    // D-20 — populated by trigger-loop in Task 3
+  /** The assignee RuntimeSpec's role_prompt. */
+  role_prompt: string;
+  ticket_prompt: string;
   trigger_source: string;
+  /** Ticket status at dispatch (in_progress for every start / re-send). */
+  status?: TicketStatus;
+  workspace_id?: string;
+  /** Project summary when the ticket is about a repository. */
+  project?: { id: string; name: string; repo_url: string; default_branch: string } | null;
+  // Legacy column projection of `status` (statusColumnProjection) — managers
+  // that predate board removal require these to dispatch.
   current_column_id?: string;
   current_column_name?: string;
   current_column_kind?: string;
-  // phase12 — board column → prompt-template content; null when no template wired
+  // The built-in single-agent work order (common/ticket-work-order.ts,
+  // template_id `builtin:ticket-work-order`). Rides this slot because every
+  // manager version already renders it.
   column_prompt: { template_id: string; name: string; content: string } | null;
-  // Ticket's configured base repository (Resource of type='repository') and
-  // base branch — agent-manager renders these into the in-progress prompt so
-  // the agent fetches + branches off the right ref. Both null/empty when the
-  // ticket leaves them unset (pure-discussion / non-code work).
-  base_repo: { id: string; name: string; url: string; default_branch: string } | null;
+  // The ticket's project as a repository + base branch. `main_clone_dir` is the
+  // project's main clone folder on the assignee's host (ProjectHostFolder) —
+  // the manager cuts the ticket worktree from it; null = the manager keeps its
+  // own clone under the working_dir. Null when the ticket has no project.
+  base_repo: { id: string; name: string; url: string; default_branch: string; main_clone_dir?: string | null } | null;
   base_branch: string;
-  // Resolved clone policy for `base_repo` (ticket bddb63ee): the Repo Resource's
+  // Resolved clone policy for `base_repo` (ticket bddb63ee): the project's
   // own `clone_policy` merged key-by-key over the workspace default
   // (resolveClonePolicy). agent-manager applies it to the container base clone —
   // wall-clock budget, idle-stall budget, and the shallow/partial/single-branch
@@ -136,11 +153,9 @@ export interface AgentTriggerPayload {
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.
   force_respawn?: boolean;
-  // Per-board cap on distinct active tickets per agent. Server's
-  // TriggerLoopService is the primary enforcer; this field is forwarded so
-  // the manager can keep a defensive drop in case two triggers raced past
-  // the server gate (set_current_task lags the trigger by the spawn
-  // round-trip). Defaults to 1 in the manager when absent.
+  // Workspace cap on distinct active tickets per agent. TicketDispatchService
+  // is the primary enforcer; forwarded so the manager can keep a defensive
+  // drop. Defaults to 1 in the manager when absent.
   max_concurrent_tickets_per_agent?: number;
   // Immutable skill bundle selected for this logical run. Runtime Hosts must
   // verify both the snapshot digest and every per-skill digest before exposing
@@ -158,42 +173,24 @@ export interface AgentTriggerPayload {
       support_files: Array<{ path: string; content: string }>;
     }>;
   } | null;
-  // Resolved harness config (ticket e9c7a896): workspace default merged with
-  // the board override via resolveHarnessConfig(). agent-manager maps the
+  // Workspace harness config (ticket e9c7a896) plus the workspace language
+  // instruction. agent-manager maps the
   // keys onto subagent CLI flags at spawn time (--append-system-prompt /
   // --allowedTools / --disallowedTools / --model / --permission-mode).
   // Null when neither layer configures a harness — the manager must treat
   // null as "spawn exactly as before".
   harness_config?: HarnessConfig | null;
-  // Resolved Agent > Board > Workspace Claude backend profile. It remains a
+  // Resolved assignee > global Claude backend profile. It remains a
   // public, declarative snapshot: credential_ref is an id and no secret value
   // is serialized onto REST/SSE.
   cli_runtime_profile?: CliRuntimeProfile | null;
-  // Resolved abstract effort preset: the board's effort_presets catalog
-  // matched against the ticket's effort_preset id (or the catalog default).
-  // agent-manager maps this onto per-CLI options at spawn — for claude the
-  // `claude.effort` block becomes the `--effort` flag and `claude.ultracode`
-  // appends the literal "ultracode" PROMPT KEYWORD to the task turn (not a
-  // flag); codex/antigravity/pi/opencode take model-only and gracefully skip the rest.
-  // Null when the board has no presets or resolution fails — treat as "no
-  // effort override, spawn exactly as before".
-  effort_preset?: ResolvedEffortPreset | null;
-  // Resolved environment setup (ticket 354d336b): workspace default merged
-  // with the board override via mergeEnvironmentConfig(), then each repository's
-  // resource_id expanded to a concrete url/branch. agent-manager provisions
-  // the working environment just before spawning the subagent — clone/update
-  // repos under the agent home, run setup commands, inject env_vars — guarded
-  // by a per-(agent,board) fingerprint marker so a prepared environment is not
-  // re-provisioned. Null when neither layer configures an environment (or
-  // nothing resolves to a cloneable/runnable step) — the manager must treat
-  // null as "no provisioning, spawn exactly as before".
+  // Always null since board removal — effort rides
+  // `runtime.runtime_config.extra.effort`. Kept on the wire for old managers.
+  effort_preset?: Record<string, unknown> | null;
+  // Workspace environment setup (ticket 354d336b) — env vars / setup only;
+  // repositories come from the ticket's project (base_repo). Null = none.
   environment_config?: ResolvedEnvironmentConfig | null;
-  // Resolved board worktree placement mode (worktree 규약 ②, board option ①).
-  // 'per_ticket' → one worktree per ticket at `<working_dir>/.awb/wt/<ticket8>`;
-  // 'shared' → one reused worktree at `<working_dir>/.awb/wt/shared`. agent-manager's
-  // WorktreeManager.resolveCwd reads this to pick the worktree slug at spawn.
-  // Absent/undefined → the manager defaults to 'per_ticket' (DEFAULT_WORKTREE_MODE),
-  // so a pre-② server that never sets the field keeps today's per-ticket behaviour.
+  // Always 'per_ticket' since board removal; kept for old managers.
   worktree_mode?: WorktreeMode;
   // Working_dir-relative worktree folder AWB assigns this ticket (worktree 규약 ④):
   // `.awb/wt/<ticket8>` (per_ticket) or `.awb/wt/shared` (shared) — computed from
@@ -378,17 +375,6 @@ export interface ChatMessageAgentRef {
   // 표시용 라벨(있으면). 없으면 카드가 agent_id 를 보여주다가 상세 fetch 후 갱신.
   name?: string;
 }
-// F-3 (ticket 3ca88253) — board 현황 카드: get_board_summary(LLM 용 압축 보드 요약)
-// 결과를 캡처해 채팅 응답에 보드 UI 를 축약한 카드를 붙인다. agent_refs 와 동일하게
-// id(+title)만 싣고, 클라이언트가 열람 시 GET /api/boards/:id 로 전체 컬럼/티켓을
-// 다시 받아 Board 화면과 같은 데이터로 렌더한다. get_board(전체 상세)는 다른 목적으로도
-// 쓰이는 범용 조회라 캡처 대상에서 제외 — get_board_summary 만 "보드 현황" 질문의
-// 전용 tool 이다.
-export interface ChatMessageBoardRef {
-  board_id: string;
-  // 보드 이름(있으면). get_board_summary 결과의 `board` 필드.
-  title?: string;
-}
 export interface ChatMessageTicketAction {
   kind: 'unpend';
   ticket_id: string;
@@ -399,9 +385,8 @@ export interface ChatRoomMessageMetadata {
   // F2-4 ⓒ: 빌드/배포 결과물 카드. ticket_refs 와 독립적으로 존재 가능 —
   // 한쪽만 있어도 metadata 는 유지된다(sanitizer 독립 처리).
   artifact_refs?: ChatMessageArtifactRef[];
-  // F-3: agent/board 상태 카드. 다른 refs 와 독립적으로 존재 가능.
+  // F-3: agent 상태 카드. 다른 refs 와 독립적으로 존재 가능.
   agent_refs?: ChatMessageAgentRef[];
-  board_refs?: ChatMessageBoardRef[];
   // Human-session action card. This is display data, not an authorization
   // credential: the click still goes through the guarded ticket PATCH.
   ticket_action?: ChatMessageTicketAction;
@@ -574,8 +559,8 @@ export interface CommentMentionPayload {
   // depth reaches its cap so an agent-mention ping-pong auto-terminates —
   // the chain resets once a human comments.
   agent_chain_depth?: number;
-  // 티켓 71532b4f: agent_trigger와 동일한 ticket > agent > board 우선순위로
-  // 해석된 dispatch 부가값. 이전에는 comment_mention이 이 셋을 전혀 나르지
+  // 티켓 71532b4f: agent_trigger와 같은 workspace 레이어로 해석된 dispatch
+  // 부가값. 이전에는 comment_mention이 이 셋을 전혀 나르지
   // 않아, 코멘트 멘션으로 깨운 세션이 agent에 명시 핀된 cli_runtime_profile을
   // 무시하고 순정 Claude로 조용히 돌았다 — agent-manager의 handleCommentMention이
   // resolveTriggerRuntimeProfile / parseHarnessConfig / parseEffortPreset로
@@ -583,10 +568,11 @@ export interface CommentMentionPayload {
   // null = 적용할 override 없음(매니저는 기존처럼 CLI 기본값으로 spawn).
   harness_config: HarnessConfig | null;
   cli_runtime_profile: CliRuntimeProfile | null;
-  effort_preset: ResolvedEffortPreset | null;
+  /** Always null since board removal — effort rides the runtime spec. */
+  effort_preset: Record<string, unknown> | null;
   // Same ticket 71532b4f expansion as the three fields above — env_vars-only
   // (repositories always empty; see mention-dispatch-profile.ts's resolveMentionDispatchExtras
-  // doc comment for why) and the board worktree mode, so agent-manager's
+  // doc comment for why) and the worktree mode, so agent-manager's
   // buildDispatchEnvVars() produces the same envVars a column trigger would.
   environment_config: ResolvedEnvironmentConfig | null;
   worktree_mode: WorktreeMode;
@@ -632,12 +618,9 @@ export interface UserMentionPayload {
   workspace_id: string;
   source_type: 'comment' | 'chat_message';
   source_id: string;
+  // Comment mentions deep-link to /ws/<wsId>/tickets?ticket=<id>&comment=<id>;
+  // chat mentions use room_id instead.
   ticket_id: string | null;
-  // Resolved board for comment mentions so the inbox can build a
-  // /ws/<wsId>/boards/<boardId>?ticket=<id>&comment=<id> deep link
-  // without a second round-trip. Null for chat mentions (deep link
-  // uses room_id instead).
-  board_id: string | null;
   room_id: string | null;
   actor_id: string;
   actor_type: 'user' | 'agent';
@@ -648,11 +631,10 @@ export interface UserMentionPayload {
 
 // 티켓 628f4b39 — 티켓 코멘트 일괄 읽음("모두 읽음") 처리 결과. 처리한 본인의
 // 다른 탭/기기 세션에만 전달되어, BroadcastChannel(같은 브라우저 탭 전용)이
-// 닿지 않는 다른 기기의 사이드바/보드 뱃지도 재조회 없이 즉시 수렴시킨다.
+// 닿지 않는 다른 기기의 사이드바/티켓 뱃지도 재조회 없이 즉시 수렴시킨다.
 export interface TicketReadsClearedPayload {
   user_id: string;           // 처리를 실행한 사용자
   workspace_id: string;
-  board_id: string | null;   // 보드 스코프 지정 시 해당 보드, 생략(워크스페이스 전체)이면 null
   updated: number;           // TicketReadState 로 upsert 된 티켓 수
   read_at: string;           // ISO-8601
 }

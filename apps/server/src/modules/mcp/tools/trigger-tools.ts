@@ -1,63 +1,34 @@
 /**
- * Agent allocation + event-subscription MCP tools.
- *
- * v0.25.0: AgentTrigger table + manual/get_pending/acknowledge tools removed.
- * Plugin-side 5-minute polling of get_allocated_tickets replaces the pending
- * trigger retry path.
+ * Event-subscription MCP tool.
  *
  * Tools:
- *   - get_allocated_tickets: tickets whose current column's routing_config
- *     assigns a role the calling agent holds AND the column is not terminal.
- *     Each row carries `my_last_update_at` — max of (this agent's latest
- *     comment on the ticket, this agent's latest ActivityLog entry on the
- *     ticket) — so the plugin can detect silent subagents and respawn them.
- *   - subscribe_events: pull activity log slice (time-cursor paginated)
+ *   - subscribe_events: pull activity log slice (time-cursor paginated),
+ *     optionally narrowed to a workspace / tag set / the caller's tickets.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ActivityLog } from '../../../entities/ActivityLog';
-import { BoardColumn } from '../../../entities/BoardColumn';
 import { Ticket } from '../../../entities/Ticket';
-import { ok, err } from '../shared/helpers';
+import { ok } from '../shared/helpers';
+import { parseTags } from '../../tickets/ticket.service';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 export function registerTriggerTools(server: McpServer, ctx: ToolContext): void {
-  const { dataSource, allocationService } = ctx;
-
-  server.tool(
-    'get_allocated_tickets',
-    'Return tickets currently allocated to the calling agent: tickets whose ' +
-    'column\'s routing_config assigns a role the agent holds AND whose column ' +
-    'is not marked terminal (is_terminal=false). Each row carries column_position ' +
-    'and priority_index for client-side sorting, plus my_last_update_at = MAX(' +
-    'latest comment by this agent, latest ActivityLog actor=this agent) so the ' +
-    'plugin can detect silent subagents. Purely routing_config-driven.',
-    {
-      agent_id: z.string().describe('Calling agent ID'),
-      workspace_id: z.string().describe('Workspace to scope results'),
-    },
-    async ({ agent_id, workspace_id }) => {
-      if (!allocationService) {
-        return err('get_allocated_tickets is unavailable in standalone MCP server mode — use the NestJS-integrated server.');
-      }
-      const result = await allocationService.getAllocatedTickets(agent_id, workspace_id);
-      if ('error' in result) return err(result.error);
-      return ok(result);
-    }
-  );
+  const { dataSource } = ctx;
 
   server.tool(
     'subscribe_events',
-    'Subscribe to board events. Returns recent events since the given cursor (ISO timestamp or event ID). Events include ticket creation, updates, moves, comments, and agent assignments. Poll periodically to receive updates.',
+    'Subscribe to ticket events. Returns recent events since the given cursor (ISO timestamp or event ID). Events include ticket creation, updates, moves, comments, and agent assignments. Poll periodically to receive updates.',
     {
-      board_id: z.string().optional().describe('Filter events by board ID (omit for all boards)'),
+      workspace_id: z.string().optional().describe('Filter events by workspace (omit for all)'),
+      tags: z.array(z.string()).optional().describe('Only events of tickets carrying every one of these tags'),
       since: z.string().optional().describe('ISO timestamp or activity log ID cursor — returns events after this point. Omit for last 10 minutes.'),
       limit: z.number().optional().default(50).describe('Max events to return'),
       assigned_to_me: z.boolean().optional().default(false).describe('Only return events for tickets assigned to the authenticated agent'),
     },
-    async ({ board_id, since, limit, assigned_to_me }, extra: { sessionId?: string }) => {
+    async ({ workspace_id, tags, since, limit, assigned_to_me }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const repo = dataSource.getRepository(ActivityLog);
 
@@ -82,32 +53,24 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
 
       let events = await query.getMany();
 
-      if (board_id) {
-        const ticketIds = new Set<string>();
-        const tickets = await dataSource.getRepository(Ticket)
-          .createQueryBuilder('t')
-          .innerJoin(BoardColumn, 'col', 'col.id = t.column_id')
-          .where('col.board_id = :board_id', { board_id })
-          .select('t.id')
-          .getMany();
-        tickets.forEach(t => ticketIds.add(t.id));
-
-        if (ticketIds.size > 0) {
-          const children = await dataSource.getRepository(Ticket)
-            .createQueryBuilder('t')
-            .where('t.parent_id IN (:...ids)', { ids: Array.from(ticketIds) })
-            .select('t.id')
-            .getMany();
-          children.forEach(c => ticketIds.add(c.id));
-        }
-
+      if (workspace_id || (tags && tags.length)) {
+        const qb = dataSource.getRepository(Ticket).createQueryBuilder('t').select(['t.id', 't.parent_id', 't.tags']);
+        if (workspace_id) qb.where('t.workspace_id = :ws', { ws: workspace_id });
+        const rows = await qb.getMany();
+        const wanted = (tags || []).map((t) => t.toLowerCase());
+        const rootOk = new Set(rows
+          .filter((t) => !t.parent_id)
+          .filter((t) => wanted.every((tag) => parseTags(t.tags).some((have) => have.toLowerCase() === tag)))
+          .map((t) => t.id));
+        const ticketIds = new Set<string>(rootOk);
+        for (const t of rows) if (t.parent_id && rootOk.has(t.parent_id)) ticketIds.add(t.id);
         events = events.filter(e => e.ticket_id && ticketIds.has(e.ticket_id));
       }
 
-      if (assigned_to_me && caller?.agentId) {
+      if (assigned_to_me && caller?.runtimeKey) {
         const myTickets = await dataSource.getRepository(Ticket)
           .createQueryBuilder('t')
-          .where('t.assignee_id = :agentId', { agentId: caller.agentId })
+          .where('t.assignee_key = :key', { key: caller.runtimeKey })
           .select('t.id')
           .getMany();
         const myTicketIds = new Set(myTickets.map(t => t.id));

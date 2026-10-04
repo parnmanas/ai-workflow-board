@@ -3,22 +3,22 @@
  *
  * The old reaper judged whether a run was alive with a SINGLE global heuristic
  * (non-terminal + age > TTL → reap). That single proxy broke both ways on
- * different boards: it false-reaped live-but-slow runs and let dead drives sit
- * `running` forever once a single token had been recorded. "Dead" is defined
- * differently per board and cannot be inferred from the board's own record of
- * step count — so detection has to be PLUGGABLE per board (optionally per
- * scenario), not one hardcoded rule.
+ * different workloads: it false-reaped live-but-slow runs and let dead drives
+ * sit `running` forever once a single token had been recorded. "Dead" is
+ * defined differently per workload and cannot be inferred from AWB's own record
+ * of step count — so detection has to be PLUGGABLE per scenario, not one
+ * hardcoded rule.
  *
  * This file is that registry. Each policy `type` maps to a `LivenessDetector`
  * that, given a run + the resolved policy + a clock, returns either a reason
  * string (→ reap, embedded in the run summary) or null (→ spare). The reaper
- * core just dispatches on `policy.type`; a new board "death signal" is a new
+ * core just dispatches on `policy.type`; a new workload "death signal" is a new
  * detector registered here, with NO change to the reaper.
  *
  * Built-in detectors:
  *   - `zero_progress`      — the legacy default. Reaps on TWO fuses (whichever
  *                            trips first), identical to the pre-ticket reaper so
- *                            a board with no policy is fully regression-safe:
+ *                            a scenario with no policy is fully regression-safe:
  *                            (1) 6h-TTL absolute backstop — age
  *                            (started_at ?? created_at) exceeds the deadline
  *                            (defaults to the global QA_RUN_TTL_MS), regardless
@@ -57,7 +57,7 @@ export interface LivenessEvalContext {
   /** Global QA_RUN_ZERO_PROGRESS_MS — the fast fuse window for `zero_progress` (0-step runs only). */
   defaultZeroProgressMs: number;
   /**
-   * Resolved per-run QA phase model (scenario ?? board, see resolveQaPhases).
+   * Resolved per-run QA phase model (the scenario's, see resolveQaPhases).
    * Only the `phase_timeouts` detector reads it; built once per run by the reaper.
    * null/undefined when the run's scope defines no phases.
    */
@@ -83,7 +83,7 @@ const zeroProgressDetector: LivenessDetector = {
     const startedAt = run.started_at ?? run.created_at;
     if (!startedAt) return null;
     const age = ctx.now.getTime() - new Date(startedAt).getTime();
-    // Absolute backstop: a board may tune the deadline via deadline_sec, else
+    // Absolute backstop: a scenario may tune the deadline via deadline_sec, else
     // the global QA_RUN_TTL_MS (default 6h). Applies regardless of step count.
     const ttlMs =
       policy.type === 'zero_progress' && policy.deadline_sec ? policy.deadline_sec * 1000 : ctx.defaultTtlMs;
@@ -177,7 +177,7 @@ const phaseTimeoutsDetector: LivenessDetector = {
 };
 
 /**
- * The detector registry — the extension point. Register a new board's death
+ * The detector registry — the extension point. Register a new workload's death
  * signal here (or via registerLivenessDetector) and the reaper picks it up by
  * `policy.type` without any core change.
  */
@@ -202,7 +202,7 @@ registerLivenessDetector(phaseTimeoutsDetector);
 export const DEFAULT_LIVENESS_POLICY: LivenessPolicy = { type: 'zero_progress' };
 
 /**
- * Zod schema for the WRITE path (MCP update_board / create|update_qa_scenario).
+ * Zod schema for the WRITE path (MCP create|update_qa_scenario).
  * A discriminated union keyed on `type`: zero_progress's deadline is optional
  * (falls back to the global TTL), heartbeat_deadline's is mandatory and must be
  * a positive integer (a deadline with no number is meaningless).
@@ -235,7 +235,7 @@ function numOrUndef(v: unknown): number | undefined {
 /**
  * Parse a stored liveness_policy JSON string into a validated descriptor.
  * Returns null for empty/unparseable/unknown-type/bad-params input — we FAIL
- * SAFE to null (never throw mid-sweep) so one malformed board config can't break
+ * SAFE to null (never throw mid-sweep) so one malformed scenario config can't break
  * reaping for every other run. Used both by the reaper (read path) and by the
  * JSON projection so the client sees the normalized object.
  */
@@ -266,21 +266,20 @@ export function parseLivenessPolicy(raw: string | null | undefined): LivenessPol
 }
 
 /**
- * Resolve the effective policy for a run. An EXPLICIT liveness_policy always
- * wins (scenario-level over board-level) — an operator who set heartbeat_deadline
- * keeps it even if phases are defined. When neither scope sets an explicit policy
- * BUT a QA phase model is resolved for the run, auto-select `phase_timeouts` so
- * defining phases is enough to get per-phase timeouts (no separate policy write).
- * Otherwise fall back to the built-in `zero_progress` default. Each scope's raw
- * JSON is parsed independently so a malformed scenario policy falls through to the
- * board, then to the phase/default tiers.
+ * Resolve the effective policy for a run. The scenario's EXPLICIT
+ * liveness_policy always wins — an operator who set heartbeat_deadline keeps it
+ * even if phases are defined. Without one, BUT with a QA phase model resolved
+ * for the run, auto-select `phase_timeouts` so defining phases is enough to get
+ * per-phase timeouts (no separate policy write). Otherwise fall back to the
+ * built-in `zero_progress` default. A malformed policy falls through to the
+ * phase/default tiers. (There is no board layer any more — policies are
+ * scenario-level only.)
  */
 export function resolveLivenessPolicy(
   scenarioRaw: string | null | undefined,
-  boardRaw: string | null | undefined,
   phases?: QaPhasesConfig | null,
 ): LivenessPolicy {
-  const explicit = parseLivenessPolicy(scenarioRaw) ?? parseLivenessPolicy(boardRaw);
+  const explicit = parseLivenessPolicy(scenarioRaw);
   if (explicit) return explicit;
   if (phases && phases.phases.length > 0) return { type: 'phase_timeouts' };
   return DEFAULT_LIVENESS_POLICY;

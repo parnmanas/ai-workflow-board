@@ -2,18 +2,17 @@
  * 마이그레이션 테이블 순서 레지스트리 (ticket 0f638509).
  *
  * FK 위상 순서 — 부모가 자식보다 먼저 와야 삽입 시 FK 위반이 나지 않는다.
- * 전체 78개 엔티티를 전수 조사한 결과, 실제 DB 레벨 FK 제약은 정확히
- * 10개뿐이고 나머지는 앱이 관례로 지키는 평문 id 컬럼(FK
- * 미강제)이다 — 그래서 이 순서는 그 10개 제약만 정확히 지키면 되고, 나머지
- * 62개는 "대략 의존 방향"으로만 배치했다(정확도가 필요 없음 — sqlite/dev는
- * 기본적으로 FK 자체를 강제하지 않고, Postgres도 이 62개엔 제약이 없다).
+ * 전체 64개 이관 대상 엔티티를 전수 조사한 결과, 실제 DB 레벨 FK 제약은
+ * 정확히 7개뿐이고 나머지는 앱이 관례로 지키는 평문 id 컬럼(FK
+ * 미강제)이다 — 그래서 이 순서는 그 7개 제약만 정확히 지키면 되고, 나머지는
+ * "대략 의존 방향"으로만 배치했다(정확도가 필요 없음 — sqlite/dev는
+ * 기본적으로 FK 자체를 강제하지 않고, Postgres도 나머지엔 제약이 없다).
  *
- * 실제 FK 10개 (P4c-4: ApiKey.agent_id → Agent 실FK가 Agent 테이블과 함께 제거됨):
- *   Board.workspace_id → Workspace
- *   BoardColumn.board_id → Board
+ * 실제 FK 7개 (P4c-4: ApiKey.agent_id → Agent 실FK가 Agent 테이블과 함께,
+ * 보드 제거: Board.workspace_id · BoardColumn.board_id · Ticket.column_id 가
+ * 보드 테이블과 함께 제거됨. Project / ProjectHostFolder 는 평문 varchar 참조뿐):
  *   (ApiKey.agent_id 는 평문 varchar audit 컬럼으로 남고, host_id 가 유일한 바인딩이다)
  *   ChatRoomParticipant.room_id → ChatRoom
- *   Ticket.column_id → BoardColumn (nullable)
  *   Ticket.parent_id → Ticket (self, nullable) — ★ 아래 특별 처리 참고
  *   Comment.ticket_id → Ticket
  *   TicketAttachment.ticket_id → Ticket (nullable)
@@ -67,7 +66,7 @@ export const MIGRATION_CONTROL_ENTITY_NAMES = new Set(Object.keys(MIGRATION_CONT
 // 지배하는 두 테이블.
 export const ATTACHMENT_ENTITIES = ['TicketAttachment', 'ResourceEmbedding'];
 
-// 복합 PK 엔티티 — 전체 79개 중 유일. 제네릭 단일 컬럼 keyset pagination이
+// 복합 PK 엔티티 — 전체 중 유일. 제네릭 단일 컬럼 keyset pagination이
 // 아니라 (ticket_id, prerequisite_ticket_id) 튜플 페이지네이션이 필요하다.
 export const COMPOSITE_PK_ENTITIES = ['TicketPrerequisite'];
 
@@ -76,33 +75,34 @@ export const SELF_FK_BACKFILL: Record<string, string> = {
   Ticket: 'parent_id',
 };
 
-// 부모 → 자식 순서. 위 11개 실FK만 정확히 지키면 되고, 나머지는 참고용 배치.
+// 부모 → 자식 순서. 위 7개 실FK만 정확히 지키면 되고, 나머지는 참고용 배치.
 export const MIGRATION_ENTITY_ORDER: string[] = [
   // 독립 루트
   'Workspace', 'User', 'SystemSetting', 'ClaudeBackendProfile', 'SkillTap', 'Skill',
-  'WorkspaceRole', 'Channel', 'Credential', 'WorkflowFunction', 'Resource',
-  'PromptTemplate',
+  'Channel', 'Credential', 'WorkflowFunction', 'Resource',
+  // (연성) Workspace·Credential 의존. 옛 저장소 Resource 와 같은 id 로 이관된 행.
+  'Project',
 
   // Workspace/Credential에 의존
   // P4c-4: Agent 테이블 삭제 — 해당 항목 제거. ApiKey.agent_id 실FK도 함께 제거됨.
   // (주의: 이 배열 본문 안의 주석에 따옴표로 감싼 엔티티명을 쓰지 말 것 —
   // completeness 테스트가 본문의 모든 따옴표 문자열을 등록명으로 파싱한다.)
   'RuntimeHost',
+  // (연성) Project·RuntimeHost 의존 — 호스트별 main clone 폴더.
+  'ProjectHostFolder',
   'AgentTemplate',
   'ApiKey',
   'AgentErrorLog', 'AgentUsageDailyRollup',
 
-  // Board 계열
-  'Board', // FK: Workspace
-  'BoardColumn', // FK: Board
-  'ColumnRolePolicy', 'BoardLesson', 'UserChannel', 'Deployment',
+  // Workspace 하위 설정
+  'UserChannel', 'Deployment',
   'OrchestrationTeam', 'Action', 'QaScenario', 'SecurityProfile', 'OutreachChannel',
   'CliLoginSession',
   // Agent Session(CLI 직접 세션)의 Runtime Host × CLI 설정. 세션 내용은 장비의
   // CLI 홈이 원본이라 저장하지 않지만 이 바인딩은 설정이라 이관 대상이다.
   // @ManyToOne/@JoinColumn 이 없어(workspace_id/manager_id/cli/credential_id 전부
   // 평문 varchar) 실FK 가 없으므로 위 11개 제약과 무관하다 — (연성) 의존하는
-  // Workspace·Agent·Credential 이 모두 앞에 있으니 여기 둔다.
+  // Workspace·RuntimeHost·Credential 이 모두 앞에 있으니 여기 둔다.
   'AgentSessionCliSetting',
   'ResourceEmbedding', // (연성) Resource 의존, 위에서 이미 삽입됨
 
@@ -117,15 +117,14 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'OrchestrationTeamMember', 'OrchestrationMission', 'OrchestrationStep', 'OrchestrationEvent',
 
   // Ticket 및 그 자식들
-  'Ticket', // FK: BoardColumn; self-FK parent_id → 별도 backfill 패스
+  'Ticket', // self-FK parent_id → 별도 backfill 패스
   'ChatRoomMessage',
   'Comment', // FK: Ticket
   'TicketAttachment', // FK: Ticket (skippable)
   'TicketPrerequisite', // FK: Ticket ×2, 복합 PK
-  'TicketCompletionVerification', 'TicketCompletionVerificationAttempt',
-  'TicketReadState', 'TicketRoleAssignment', 'StuckTicketAlert', 'ReviewDriftState',
-  'UserMention', 'BenchmarkScore', 'CiRedAlert', 'DispatchIntent', 'MergeLease', 'ActionRun',
-  'ActionApproval', 'Feature', 'WorkflowFunctionRun', 'CommentSummaryRun',
+  'TicketReadState',
+  'UserMention', 'CiRedAlert', 'ActionRun',
+  'ActionApproval', 'WorkflowFunctionRun',
   'Subagent',
   'SubagentLogLine', // FK: Subagent
   'ChildRun', 'QaRun', 'SecurityRun', 'BuildArtifact', 'OutreachInboundItem',

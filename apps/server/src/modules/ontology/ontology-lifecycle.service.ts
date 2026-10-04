@@ -19,8 +19,8 @@ import { LogService } from '../../services/log.service';
 import { OntologyExtractionService } from './ontology-extraction.service';
 import { OntologyResolverService } from './ontology-resolver.service';
 
-// outreach-ingest.service.ts의 isUniqueConstraintError()와 동일한 패턴(board
-// lesson: 외부 입력 idempotency는 부수효과 전에 DB 유니크 제약으로 선점) —
+// outreach-ingest.service.ts의 isUniqueConstraintError()와 동일한 패턴(운영
+// 교훈: 외부 입력 idempotency는 부수효과 전에 DB 유니크 제약으로 선점) —
 // (workspace_id, resource_id, folder_path) 유니크 인덱스가 동시 최초-참조
 // 호출 중 정확히 하나만 승자가 되게 강제한다.
 function isUniqueConstraintError(error: unknown): boolean {
@@ -52,6 +52,8 @@ export class GraphRefResolutionError extends Error {
 export interface GraphRefInput {
   workspaceId: string;
   graphId?: string;
+  /** Project id. 그래프 테이블 컬럼 이름(`resource_id`)을 따르지만 값은 저장소
+   *  Resource 가 같은 id 로 이관된 Project 의 id 다(docs/tickets.md). */
   resourceId?: string;
   folderPath?: string;
 }

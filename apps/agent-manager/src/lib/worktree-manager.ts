@@ -25,7 +25,7 @@
 //
 //   - worktree_mode = 'per_ticket' (default) → slug = <ticket8>  (one per ticket)
 //   - worktree_mode = 'shared'   → a WARM POOL of slots `shared-0 … shared-<N-1>`
-//         (규약 ⑥). N = the board concurrency (max_concurrent_tickets_per_agent,
+//         (규약 ⑥). N = the concurrency (max_concurrent_tickets_per_agent,
 //         flattened onto the trigger event). A ticket LEASES an idle slot for its
 //         whole lifecycle (reattaches across roles / resumes) and RELEASES it
 //         (idle-mark only, lazy) at terminal/archive. The NEXT lease RESETS the
@@ -48,9 +48,23 @@
 // when somebody has placed an unrelated `.git` there. Fallback is
 // reserved for missing repository metadata or `git worktree` failures
 // (unsupported/old git, disk error).
+//
+// ── main clone folder (board-less projects, docs/tickets.md) ───────────────
+// A project may name a per-host "main clone folder" (`base_repo.main_clone_dir`
+// on agent_trigger). It is the ONE canonical checkout of the project on this
+// machine and replaces `.awb/base/<slug>` as the base repository:
+//   - missing / empty folder  → cloned into (same credential flow + clone policy);
+//   - git checkout whose origin is the project repo → only fetched. It is the
+//     operator's checkout: never reset, checked out, cleaned or detached;
+//   - anything else (not a git checkout root, foreign origin) → durable
+//     provisioning failure — never wiped.
+// Ticket worktrees then live at `<main_clone>/.awb/wt/<ticket8>` and `.awb/` is
+// listed in the clone's `.git/info/exclude`. Main clones a manager has used are
+// remembered on disk (`mainCloneRegistryPath`) so terminal/archive cleanup and
+// the sweeps find those worktrees even when the REST ticket omits the folder.
 
 import { promises as fsp } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { log } from './logging.js';
@@ -60,6 +74,8 @@ import {
   classifyWorktreeCheckout,
   isGitAuthFailure,
   isGitRefLockRace,
+  normalizeRemoteUrl,
+  redactRemoteUrl,
   type PushReadinessDecision,
   type WorktreeCheckoutDecision,
 } from './dispatch-preflight.js';
@@ -213,6 +229,24 @@ function nowIso(): string {
  *  root without re-deriving it. */
 export function worktreesRootFor(baseWorkingDir: string): string {
   return join(baseWorkingDir, '.awb', 'wt');
+}
+
+/** Worktree root inside a project's main clone folder: `<main_clone>/.awb/wt`.
+ *  Ticket worktrees sit directly below it (`<main_clone>/.awb/wt/<ticket8>`) —
+ *  no repository segment, the main clone already IS one repository. */
+export function mainCloneWorktreesRootFor(mainCloneDir: string): string {
+  return join(mainCloneDir, '.awb', 'wt');
+}
+
+/** Durable main-clone provisioning failures (operator must fix the folder). */
+export const MAIN_CLONE_NOT_GIT_REPO = 'main_clone_not_git_repo';
+export const MAIN_CLONE_WRONG_REPOSITORY = 'main_clone_wrong_repository';
+
+/** On-disk record of a main clone folder this manager provisioned from. */
+interface MainCloneRecord {
+  resourceId?: string;
+  url?: string;
+  lastUsedAt: string;
 }
 
 /** Fixed QA/Security run-workspace root for an agent working_dir:
@@ -372,16 +406,17 @@ export interface ResolveCwdArgs {
   /** Kept for logging/observability; no longer part of the worktree path (a
    *  ticket gets ONE worktree that every role of it reuses). */
   role: string;
-  /** Board worktree_mode (worktree 규약 ①/②). Defaults to 'per_ticket'. */
+  /** worktree_mode from the trigger (worktree 규약 ①/②). Defaults to 'per_ticket';
+   *  board-less servers always send per_ticket. */
   mode?: WorktreeMode;
-  /** Warm-pool size for shared mode (규약 ⑥) = the board concurrency
+  /** Warm-pool size for shared mode (규약 ⑥) = the concurrency
    *  (max_concurrent_tickets_per_agent), flattened onto the trigger event.
    *  Ignored in per_ticket mode. Absent / ≤0 → 1 (a single reused slot, i.e. the
    *  pre-pool behavior). */
   poolSize?: number;
   /** Repository cloned under the working_dir storage container before creating
-   *  the ticket worktree. Dispatch resolves this as ticket repo first, then the board
-   *  environment's first repository. */
+   *  the ticket worktree. Dispatch resolves this as ticket repo (project) first,
+   *  then the environment's first repository. */
   bootstrapRepo?: {
     resourceId?: string;
     url: string;
@@ -391,6 +426,9 @@ export interface ResolveCwdArgs {
      *  clone 정책(ticket bddb63ee). 없으면 repo-credential 의 시스템 기본값
      *  (60분 wall-clock / idle 비활성 / 전체 clone)이 적용된다. */
     clonePolicy?: CloneWirePolicy | null;
+    /** Absolute main clone folder of the project on this host. When set it is
+     *  the base repository instead of `<working_dir>/.awb/base/<slug>`. */
+    mainCloneDir?: string | null;
   } | null;
 }
 
@@ -456,6 +494,10 @@ export class WorktreeManager {
   #provisionLocks = new Map<string, Promise<unknown>>();
   /** Serialize first-clone attempts for agents sharing one working_dir. */
   #bootstrapLocks = new Map<string, Promise<{ repo: string | null; reason?: string; detail?: string }>>();
+  /** Where the set of used main clone folders persists (null → memory only). */
+  #mainCloneRegistryPath: string | null;
+  /** normalized dir → record; lazily loaded from #mainCloneRegistryPath. */
+  #mainClones: Map<string, MainCloneRecord & { dir: string }> | null = null;
   /** OS 셸 래퍼 없이 오류·경쟁 조건을 재현하기 위한 플랫폼 중립 테스트 seam. */
   #terminalCleanupHooks: {
     removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
@@ -470,6 +512,9 @@ export class WorktreeManager {
     provisionLockTimeoutMs?: number;
     provisionLockStaleMs?: number;
     provisionLockHeartbeatMs?: number;
+    /** JSON file remembering main clone folders used for ticket worktrees, so
+     *  cleanup/sweeps survive a restart. Omitted → in-memory only. */
+    mainCloneRegistryPath?: string | null;
     terminalCleanupHooks?: {
       removeWorktree?: (repo: string, worktreePath: string) => Promise<boolean> | boolean;
       beforeRemoteDelete?: (branch: string) => Promise<void> | void;
@@ -480,6 +525,7 @@ export class WorktreeManager {
     this.#provisionLockStaleMs = opts.provisionLockStaleMs ?? PROVISION_LOCK_STALE_MS;
     this.#provisionLockHeartbeatMs = opts.provisionLockHeartbeatMs ?? PROVISION_LOCK_HEARTBEAT_MS;
     this.#terminalCleanupHooks = opts.terminalCleanupHooks ?? {};
+    this.#mainCloneRegistryPath = opts.mainCloneRegistryPath ?? null;
   }
 
   /**
@@ -563,6 +609,203 @@ export class WorktreeManager {
     return run;
   }
 
+  /**
+   * Prepare a project's main clone folder as the base repository (see the file
+   * header). Clone only into a missing/empty folder; an existing folder must be
+   * the ROOT of a git checkout whose origin is the project repository, and is
+   * then only fetched later — never reset/checked out/cleaned. Any other state
+   * is a durable failure (MAIN_CLONE_*), never a wipe.
+   */
+  async #bootstrapMainClone(
+    mainCloneDir: string,
+    repo: NonNullable<ResolveCwdArgs['bootstrapRepo']>,
+  ): Promise<{ repo: string | null; reason?: string; detail?: string }> {
+    const cleanUrl = repo.url.trim();
+    const key = `main\0${normPath(mainCloneDir)}`;
+    const active = this.#bootstrapLocks.get(key);
+    if (active) return active;
+    const run = (async () => {
+      let entries: string[] | null = null;
+      try {
+        entries = await fsp.readdir(mainCloneDir);
+      } catch (err: any) {
+        if (err?.code === 'ENOTDIR') {
+          return { repo: null, reason: MAIN_CLONE_NOT_GIT_REPO, detail: `main clone path is not a directory: ${mainCloneDir}` };
+        }
+        if (err?.code !== 'ENOENT') {
+          return { repo: null, reason: 'repository_unavailable', detail: `main clone folder unreadable (${err?.code || err?.message || err}): ${mainCloneDir}` };
+        }
+      }
+      if (!entries || entries.length === 0) {
+        const branch = (repo.branch || '').trim();
+        const cloned = await cloneWithRepoCredential({
+          url: cleanUrl,
+          dir: mainCloneDir,
+          branch,
+          credential: repo.credential,
+          policy: repo.clonePolicy,
+        });
+        if (!cloned.ok) {
+          const detail = maskCredential(cloned.stderr, repo.credential).trim();
+          log(`[worktree] main clone failed into ${mainCloneDir}: ${detail}`);
+          return {
+            repo: null,
+            reason: isGitAuthFailure(detail) ? 'repository_auth_failed' : 'repository_clone_failed',
+            detail,
+          };
+        }
+        await scrubOriginUrl(mainCloneDir, cleanUrl);
+        await installRepoCredential(mainCloneDir, cleanUrl, repo.credential);
+        log(`[worktree] cloned project main clone from ${cleanUrl}${branch ? ` branch=${branch}` : ''}: ${mainCloneDir}`);
+      } else {
+        const top = await git(mainCloneDir, ['rev-parse', '--show-toplevel']);
+        const topPath = top.ok ? top.stdout.trim() : '';
+        const [realTop, realDir] = await Promise.all([
+          topPath ? fsp.realpath(topPath).catch(() => topPath) : Promise.resolve(''),
+          fsp.realpath(mainCloneDir).catch(() => mainCloneDir),
+        ]);
+        if (!realTop || !samePath(realTop, realDir)) {
+          return {
+            repo: null,
+            reason: MAIN_CLONE_NOT_GIT_REPO,
+            detail: `main clone folder is not empty and is not the root of a git checkout: ${mainCloneDir}`,
+          };
+        }
+        const origin = await git(mainCloneDir, ['remote', 'get-url', 'origin']);
+        const originUrl = origin.ok ? origin.stdout.trim() : '';
+        const want = normalizeRemoteUrl(cleanUrl);
+        if (!originUrl || normalizeRemoteUrl(originUrl) !== want) {
+          return {
+            repo: null,
+            reason: MAIN_CLONE_WRONG_REPOSITORY,
+            detail: `main clone ${mainCloneDir} has origin ${redactRemoteUrl(originUrl) || '(unset)'}, not the project repository ${redactRemoteUrl(cleanUrl)}`,
+          };
+        }
+        await this.#installMainCloneCredential(mainCloneDir, cleanUrl, originUrl, repo.credential);
+      }
+      await this.#ensureAwbExcluded(mainCloneDir);
+      await this.#rememberMainClone(mainCloneDir, repo.resourceId, cleanUrl);
+      return { repo: mainCloneDir };
+    })().finally(() => this.#bootstrapLocks.delete(key));
+    this.#bootstrapLocks.set(key, run);
+    return run;
+  }
+
+  /** The operator's checkout may already authenticate on its own (ssh remote,
+   *  their own credential helper). Install the project credential only for an
+   *  https origin with no foreign local helper — never overwrite theirs. */
+  async #installMainCloneCredential(
+    dir: string,
+    cleanUrl: string,
+    originUrl: string,
+    credential: { username?: string; token: string } | null | undefined,
+  ): Promise<void> {
+    if (!credential?.token || !/^https?:\/\//i.test(originUrl)) return;
+    const helpers = await git(dir, ['config', '--local', '--get-all', 'credential.helper']);
+    const values = helpers.ok ? helpers.stdout.split(/\r?\n/).map((v) => v.trim()).filter(Boolean) : [];
+    if (values.length > 0 && !values.every((v) => v.includes('awb-credentials'))) {
+      log(`[worktree] main clone keeps its own credential.helper (not replaced): ${dir}`);
+      return;
+    }
+    await installRepoCredential(dir, cleanUrl, credential);
+  }
+
+  /** Keep ticket worktrees (`.awb/`) out of the main clone's `git status`.
+   *  `.git/info/exclude` is local-only (never committed), and re-running is a
+   *  no-op once the entry exists. Best-effort; never throws. */
+  async #ensureAwbExcluded(dir: string): Promise<void> {
+    try {
+      const r = await git(dir, ['rev-parse', '--git-path', 'info/exclude']);
+      if (!r.ok || !r.stdout.trim()) return;
+      const raw = r.stdout.trim();
+      const excludePath = isAbsolute(raw) ? raw : join(dir, raw);
+      const current = await fsp.readFile(excludePath, 'utf8').catch(() => '');
+      const listed = current.split(/\r?\n/).some((line) => ['.awb', '.awb/', '/.awb', '/.awb/'].includes(line.trim()));
+      if (listed) return;
+      await fsp.mkdir(dirname(excludePath), { recursive: true });
+      const sep = current && !current.endsWith('\n') ? '\n' : '';
+      await fsp.appendFile(excludePath, `${sep}# AWB agent-manager ticket worktrees\n/.awb/\n`, 'utf8');
+    } catch (err: any) {
+      log(`[worktree] could not register .awb/ in info/exclude of ${dir}: ${err?.message ?? err}`);
+    }
+  }
+
+  async #loadMainClones(): Promise<Map<string, MainCloneRecord & { dir: string }>> {
+    if (this.#mainClones) return this.#mainClones;
+    const loaded = new Map<string, MainCloneRecord & { dir: string }>();
+    if (this.#mainCloneRegistryPath) {
+      try {
+        const parsed = JSON.parse(await fsp.readFile(this.#mainCloneRegistryPath, 'utf8'));
+        const clones = parsed && typeof parsed === 'object' && parsed.clones && typeof parsed.clones === 'object'
+          ? parsed.clones as Record<string, any>
+          : {};
+        for (const [dir, rec] of Object.entries(clones)) {
+          if (!dir || !isAbsolute(dir)) continue;
+          loaded.set(normPath(dir), {
+            dir,
+            resourceId: typeof rec?.resourceId === 'string' ? rec.resourceId : undefined,
+            url: typeof rec?.url === 'string' ? rec.url : undefined,
+            lastUsedAt: typeof rec?.lastUsedAt === 'string' ? rec.lastUsedAt : '',
+          });
+        }
+      } catch {
+        // missing / malformed → start empty; the next provisioning rewrites it.
+      }
+    }
+    // A concurrent caller may have populated it while we awaited.
+    if (!this.#mainClones) this.#mainClones = loaded;
+    return this.#mainClones;
+  }
+
+  async #rememberMainClone(dir: string, resourceId: string | undefined, url: string): Promise<void> {
+    const clones = await this.#loadMainClones();
+    clones.set(normPath(dir), {
+      dir,
+      resourceId: resourceId?.trim() || undefined,
+      url: redactRemoteUrl(url) || undefined,
+      lastUsedAt: nowIso(),
+    });
+    if (!this.#mainCloneRegistryPath) return;
+    try {
+      const out: Record<string, MainCloneRecord> = {};
+      for (const rec of clones.values()) {
+        out[rec.dir] = { resourceId: rec.resourceId, url: rec.url, lastUsedAt: rec.lastUsedAt };
+      }
+      await fsp.mkdir(dirname(this.#mainCloneRegistryPath), { recursive: true });
+      const tmp = `${this.#mainCloneRegistryPath}.${process.pid}.tmp`;
+      await fsp.writeFile(tmp, JSON.stringify({ version: 1, clones: out }, null, 2) + '\n', 'utf8');
+      await fsp.rename(tmp, this.#mainCloneRegistryPath);
+    } catch (err: any) {
+      log(`[worktree] main clone registry write failed: ${err?.message ?? err}`);
+    }
+  }
+
+  /** Main clone folders this manager has provisioned ticket worktrees from
+   *  (persisted across restarts when a registry path is configured). Callers
+   *  run cleanup/sweeps over them in addition to the agent working_dirs. */
+  async knownMainClones(): Promise<string[]> {
+    return [...(await this.#loadMainClones()).values()].map((rec) => rec.dir);
+  }
+
+  /** Repositories a maintenance call targets: a main clone folder (when given)
+   *  or the AWB-managed `.awb/base/*` clones below a working_dir. */
+  async #reposFor(opts: {
+    baseWorkingDir?: string;
+    mainCloneDir?: string;
+    resourceId?: string;
+  }): Promise<Array<{ repo: string; worktreesRoot: string }>> {
+    if (opts.mainCloneDir) {
+      const dir = opts.mainCloneDir;
+      const wanted = opts.resourceId?.trim();
+      const known = (await this.#loadMainClones()).get(normPath(dir));
+      // A main clone holds exactly one project; skip a different project's clone.
+      if (wanted && known?.resourceId && known.resourceId !== wanted) return [];
+      return (await this.#isGitWorkTree(dir)) ? [{ repo: dir, worktreesRoot: mainCloneWorktreesRootFor(dir) }] : [];
+    }
+    if (!opts.baseWorkingDir) return [];
+    return this.#managedRepos(opts.baseWorkingDir, opts.resourceId);
+  }
+
   /** Discover only repositories owned by AWB below the working container. */
   async #managedRepos(baseWorkingDir: string, resourceId?: string): Promise<Array<{ repo: string; worktreesRoot: string }>> {
     const baseRoot = join(baseWorkingDir, '.awb', 'base');
@@ -643,8 +886,14 @@ export class WorktreeManager {
     // Even when an operator points it at a directory that happens to contain
     // `.git`, leave that checkout untouched and create AWB's managed base below
     // `.awb/base/<resource>`. This removes all behavior differences based on
-    // whether working_dir itself is a repo.
-    const bootstrapped = await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
+    // whether working_dir itself is a repo. The one exception is a project's
+    // main clone folder on this host (docs/tickets.md) — an explicit,
+    // operator-declared base repository (see #bootstrapMainClone).
+    const rawMainClone = typeof args.bootstrapRepo?.mainCloneDir === 'string' ? args.bootstrapRepo.mainCloneDir.trim() : '';
+    const mainCloneDir = rawMainClone && isAbsolute(rawMainClone) && args.bootstrapRepo?.url?.trim() ? rawMainClone : '';
+    const bootstrapped = mainCloneDir
+      ? await this.#bootstrapMainClone(mainCloneDir, args.bootstrapRepo!)
+      : await this.#bootstrapContainerRepo(baseWorkingDir, args.bootstrapRepo);
     const localBaseRepo = bootstrapped.repo;
     if (!localBaseRepo) {
       const result = fallback(bootstrapped.reason ?? 'repository_unavailable');
@@ -653,7 +902,11 @@ export class WorktreeManager {
     }
     // Existing checkouts need the Resource credential too; limiting this to
     // fresh clone would leave resumed/private-repo tickets unable to fetch.
-    await installRepoCredential(localBaseRepo, args.bootstrapRepo?.url ?? '', args.bootstrapRepo?.credential);
+    // (A main clone's credential is decided in #bootstrapMainClone — it must not
+    // replace the operator's own helper.)
+    if (!mainCloneDir) {
+      await installRepoCredential(localBaseRepo, args.bootstrapRepo?.url ?? '', args.bootstrapRepo?.credential);
+    }
 
     // 모든 신규/재개 dispatch는 먼저 원격을 갱신한다. 재개 worktree 자체에는
     // checkout/reset을 하지 않으므로 dirty 파일과 기존 브랜치는 그대로 보존된다.
@@ -683,7 +936,12 @@ export class WorktreeManager {
     const provisioningBase = localBaseRepo;
     const workSubpath = '';
     const withSub = (p: string) => p;
-    const worktreesRoot = join(worktreesRootFor(baseWorkingDir), resourceSlug);
+    const worktreesRoot = mainCloneDir
+      ? mainCloneWorktreesRootFor(mainCloneDir)
+      : join(worktreesRootFor(baseWorkingDir), resourceSlug);
+    // The main clone is the operator's checkout: never detach its HEAD to free
+    // the base branch (ticket worktrees branch off origin/<base> instead).
+    const operatorBase = Boolean(mainCloneDir);
 
     // ── shared: lease a warm-pool slot (규약 ⑥) ─────────────────────────────
     if (mode === 'shared') {
@@ -702,6 +960,7 @@ export class WorktreeManager {
         baseBranch,
         baseSha,
         baseRef,
+        operatorBase,
       });
     }
 
@@ -712,7 +971,7 @@ export class WorktreeManager {
       // this, simultaneous triggers can both observe a missing registration;
       // the loser then falls back to the shared base cwd and defeats isolation.
       await this.prune(provisioningBase);
-      const ens = await this.#ensureWorktree(provisioningBase, worktreesRoot, wtPath, baseRef);
+      const ens = await this.#ensureWorktree(provisioningBase, worktreesRoot, wtPath, baseRef, operatorBase);
       if (!ens.ok) {
         if (ens.reason === 'add_failed') {
           log(
@@ -871,6 +1130,7 @@ export class WorktreeManager {
     worktreesRoot: string,
     wtPath: string,
     startRef?: string,
+    operatorBase = false,
   ): Promise<{ ok: boolean; created: boolean; reason?: string; detail?: string }> {
     const worktrees = await this.listWorktrees(baseWorkingDir);
     // Git for Windows는 porcelain 경로의 8.3 단축명을 긴 경로로 확장할 수
@@ -912,8 +1172,9 @@ export class WorktreeManager {
     // Free the base branch: the column workflow guide tells the agent to
     // `git checkout <base-branch> && git pull` first, but a branch can be
     // checked out in only ONE worktree. Detaching the base HEAD (no file
-    // changes — same commit) frees the branch. Best-effort.
-    await this.#freeBaseBranch(baseWorkingDir);
+    // changes — same commit) frees the branch. Best-effort. Never on a main
+    // clone — that HEAD belongs to the operator.
+    if (!operatorBase) await this.#freeBaseBranch(baseWorkingDir);
 
     const add = await git(baseWorkingDir, ['worktree', 'add', '--detach', wtPath, ...(startRef ? [startRef] : [])]);
     if (!add.ok) {
@@ -1163,6 +1424,8 @@ export class WorktreeManager {
     baseBranch: string;
     baseSha: string;
     baseRef: string;
+    /** Base is a main clone (operator checkout) — never detach its HEAD. */
+    operatorBase?: boolean;
   }): Promise<ResolveCwdResult> {
     const N = Math.max(1, Math.floor(a.poolSize && a.poolSize > 0 ? a.poolSize : 1));
     const t8 = String(a.ticketId).slice(0, 8);
@@ -1186,7 +1449,7 @@ export class WorktreeManager {
       const mine = Object.keys(reg.slots).find((s) => reg.slots[s].ticketId === a.ticketId);
       if (mine) {
         const wtPath = join(a.worktreesRoot, mine);
-        const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath);
+        const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath, undefined, a.operatorBase);
         if (ens.ok) {
           // per_ticket 재개와 같은 이유로 slot 재부착에서도 attach 를 보장한다.
           const attached = await this.#attachFeatureBranch(wtPath, `ticket/${a.ticketId}-work`, a.baseRef);
@@ -1239,7 +1502,7 @@ export class WorktreeManager {
       const slotName = sharedSlotName(pick);
       const wtPath = join(a.worktreesRoot, slotName);
       const prevLease = reg.slots[slotName];
-      const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath, a.baseRef);
+      const ens = await this.#ensureWorktree(a.baseWorkingDir, a.worktreesRoot, wtPath, a.baseRef, a.operatorBase);
       if (!ens.ok) return a.fallback(ens.reason ?? 'worktree_unavailable');
 
       // Reset-on-acquire: hand a clean TRACKED tree at the base tip while keeping
@@ -1418,13 +1681,15 @@ export class WorktreeManager {
    * number of leases reclaimed. Never throws.
    */
   async reconcilePoolLeases(opts: {
-    baseWorkingDir: string;
+    baseWorkingDir?: string;
+    /** Reconcile a project's main clone folder instead of a working_dir. */
+    mainCloneDir?: string;
     liveTicketIds: Set<string>;
   }): Promise<number> {
-    const { baseWorkingDir, liveTicketIds } = opts;
-    if (!baseWorkingDir) return 0;
+    const { baseWorkingDir, mainCloneDir, liveTicketIds } = opts;
+    if (!baseWorkingDir && !mainCloneDir) return 0;
     let total = 0;
-    for (const managed of await this.#managedRepos(baseWorkingDir)) {
+    for (const managed of await this.#reposFor({ baseWorkingDir, mainCloneDir })) {
       total += await this.#reconcilePoolLeasesForRepo(managed.repo, managed.worktreesRoot, liveTicketIds);
     }
     return total;
@@ -1438,7 +1703,7 @@ export class WorktreeManager {
     return this.#withPoolLock(worktreesRoot, async () => {
       const reg = await this.#readRegistry(worktreesRoot);
       const now = Date.now();
-      // Orphan candidates: active leases with no live owner. A per_ticket board
+      // Orphan candidates: active leases with no live owner. A per_ticket setup
       // has an empty registry → no candidates → cheap no-op (no /proc scan).
       // Freshness grace (POOL_LEASE_RECLAIM_GRACE_MS): skip a lease still within
       // its dispatch window — the worker may be provisioning/spawning and just
@@ -1531,13 +1796,15 @@ export class WorktreeManager {
    * intentionally out of scope here.
    */
   async snapshotWorktrees(opts: {
-    baseWorkingDir: string;
+    baseWorkingDir?: string;
+    /** Snapshot a project's main clone folder instead of a working_dir. */
+    mainCloneDir?: string;
     liveTicketIds: Set<string>;
   }): Promise<WorktreeSnapshotEntry[]> {
-    const { baseWorkingDir, liveTicketIds } = opts;
-    if (!baseWorkingDir) return [];
+    const { baseWorkingDir, mainCloneDir, liveTicketIds } = opts;
+    if (!baseWorkingDir && !mainCloneDir) return [];
     const out: WorktreeSnapshotEntry[] = [];
-    for (const managed of await this.#managedRepos(baseWorkingDir)) {
+    for (const managed of await this.#reposFor({ baseWorkingDir, mainCloneDir })) {
       out.push(...await this.#snapshotWorktreesForRepo(managed.repo, managed.worktreesRoot, liveTicketIds));
     }
     out.sort((a, b) => {
@@ -1659,7 +1926,7 @@ export class WorktreeManager {
   }
 
   /** Read the on-disk lease registry; a missing / malformed file yields an empty
-   *  registry (so a per_ticket board never spuriously creates one). Never throws. */
+   *  registry (so a per_ticket setup never spuriously creates one). Never throws. */
   async #readRegistry(worktreesRoot: string): Promise<PoolRegistry> {
     try {
       const raw = await fsp.readFile(this.#registryPath(worktreesRoot), 'utf8');
@@ -1819,17 +2086,19 @@ export class WorktreeManager {
    * physically removed (a released pool slot is not a removal). Never throws.
    */
   async removeTicketWorktrees(opts: {
-    baseWorkingDir: string;
+    baseWorkingDir?: string;
+    /** Remove from a project's main clone folder (`<main>/.awb/wt`) instead. */
+    mainCloneDir?: string;
     ticketId: string;
     repositoryResourceId?: string;
   }): Promise<number> {
-    const { baseWorkingDir } = opts;
+    const { baseWorkingDir, mainCloneDir } = opts;
     const { ticketId } = opts;
-    if (!baseWorkingDir || !ticketId) return 0;
+    if ((!baseWorkingDir && !mainCloneDir) || !ticketId) return 0;
     const ticket8 = String(ticketId).slice(0, 8);
     const legacyPrefix = `${ticket8}-`;
     let removed = 0;
-    const managed = await this.#managedRepos(baseWorkingDir, opts.repositoryResourceId);
+    const managed = await this.#reposFor({ baseWorkingDir, mainCloneDir, resourceId: opts.repositoryResourceId });
     for (const entry of managed) {
       await this.prune(entry.repo);
       const worktrees = await this.listWorktrees(entry.repo);
@@ -1904,7 +2173,9 @@ export class WorktreeManager {
    * 대응은 `docs/worktree-orphan-cleanup.md` → "잔여물 회수 주체 — 확정" 참조.
    */
   async cleanupTerminalTicketGit(opts: {
-    baseWorkingDir: string;
+    baseWorkingDir?: string;
+    /** Clean up inside a project's main clone folder (`<main>/.awb/wt`) instead. */
+    mainCloneDir?: string;
     ticketId: string;
     baseBranch?: string;
     repositoryResourceId?: string;
@@ -1920,7 +2191,7 @@ export class WorktreeManager {
       alreadyAbsentLocalBranches: [],
       alreadyAbsentRemoteBranches: [],
     };
-    if (!opts.baseWorkingDir || !opts.ticketId) return report;
+    if ((!opts.baseWorkingDir && !opts.mainCloneDir) || !opts.ticketId) return report;
     const ticket8 = String(opts.ticketId).slice(0, 8);
     // 8자 slug는 worktree 위치를 찾는 힌트일 뿐 브랜치 소유권 증명이 아니다.
     // UUID 전체가 들어간 ref만 현재 티켓의 브랜치로 인정해 prefix 충돌을 막는다.
@@ -1929,7 +2200,11 @@ export class WorktreeManager {
       !!branch && branch.startsWith(branchPrefix);
     const baseBranch = (opts.baseBranch || 'main').trim();
     const protectedBranches = new Set(['main', 'production.private', 'codex', baseBranch]);
-    const managed = await this.#managedRepos(opts.baseWorkingDir, opts.repositoryResourceId);
+    const managed = await this.#reposFor({
+      baseWorkingDir: opts.baseWorkingDir,
+      mainCloneDir: opts.mainCloneDir,
+      resourceId: opts.repositoryResourceId,
+    });
 
     for (const entry of managed) {
       const blockedBranches = new Set<string>();
@@ -2323,13 +2598,15 @@ export class WorktreeManager {
    * Returns the number of worktrees removed.
    */
   async sweep(opts: {
-    baseWorkingDir: string;
+    baseWorkingDir?: string;
+    /** Sweep a project's main clone folder (`<main>/.awb/wt`) instead. */
+    mainCloneDir?: string;
     activeKeys: Set<string>;
   }): Promise<number> {
-    const { baseWorkingDir, activeKeys } = opts;
-    if (!baseWorkingDir) return 0;
+    const { baseWorkingDir, mainCloneDir, activeKeys } = opts;
+    if (!baseWorkingDir && !mainCloneDir) return 0;
     let removed = 0;
-    for (const entry of await this.#managedRepos(baseWorkingDir)) {
+    for (const entry of await this.#reposFor({ baseWorkingDir, mainCloneDir })) {
       await this.prune(entry.repo);
       const worktrees = await this.listWorktrees(entry.repo);
       let removedHere = 0;

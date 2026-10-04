@@ -112,7 +112,7 @@ function waitForExit(manager, tag, timeoutMs = 15_000) {
   });
 }
 
-function makeAgentContext(cwd, permissionMode) {
+function makeAgentContext(cwd, permissionMode, runtimeConfig) {
   return {
     agent_id: 'agent-perm',
     workspace_id: 'ws-perm',
@@ -125,14 +125,14 @@ function makeAgentContext(cwd, permissionMode) {
     extra_env: {},
     credential_provider: null,
     credential_id: null,
-    runtime_config: permissionMode
+    runtime_config: runtimeConfig ?? (permissionMode
       ? { strategy: 'single', permission_mode: permissionMode }
-      : null,
+      : null),
   };
 }
 
 /** 한 번의 one-shot spawn 을 끝까지 돌리고 자식이 기록한 argv 를 돌려준다. */
-async function captureOneshotArgv({ tag, permissionMode, harness }) {
+async function captureOneshotArgv({ tag, permissionMode, harness, runtimeConfig, effortPreset }) {
   const executable = await makeCaptureBin(`claude-${tag}.mjs`);
   const captureFile = join(fixtureRoot, `${tag}.json`);
   const cwd = join(fixtureRoot, `${tag}-home`);
@@ -153,8 +153,9 @@ async function captureOneshotArgv({ tag, permissionMode, harness }) {
       ticketId: `ticket-${tag}`,
       agentId: 'agent-perm',
       role: 'assignee',
-      agentContext: makeAgentContext(cwd, permissionMode),
+      agentContext: makeAgentContext(cwd, permissionMode, runtimeConfig),
       harness,
+      effortPreset,
     });
     assert.equal(result.spawned, true, `${tag}: spawn 실패`);
     await exited;
@@ -180,6 +181,20 @@ test('one-shot spawn: trusted Agent 는 harness=plan 을 이기고 실제 argv �
     false,
     `trusted 인데 대화형 permission 모드로 내려갔다: ${argv.join(' ')}`,
   );
+});
+
+// board-less 서버(docs/tickets.md)는 effort_preset 을 null 로 보내고 effort 를
+// RuntimeSpec 의 runtime_config.extra.effort 로만 싣는다. preset slice 가 없어도
+// 그 값이 claude 의 실제 argv(`--effort`)까지 도달해야 한다.
+test('one-shot spawn: effort_preset 이 null 이어도 runtime_config.extra.effort 가 --effort 로 실린다', async () => {
+  const argv = await captureOneshotArgv({
+    tag: 'runtime-effort',
+    runtimeConfig: { strategy: 'single', permission_mode: 'trusted', extra: { effort: 'high' } },
+    effortPreset: null,
+  });
+  const i = argv.indexOf('--effort');
+  assert.ok(i >= 0, `runtime effort 가 argv 에 없다: ${argv.join(' ')}`);
+  assert.equal(argv[i + 1], 'high');
 });
 
 test('one-shot spawn: strict Agent 는 harness 가 bypass 를 허용해도 실제 argv 에서 최소 권한으로 내려간다', async () => {

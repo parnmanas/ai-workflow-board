@@ -90,7 +90,7 @@ test('collaboration governor rejects single and enforces delegated bounds and su
       permission_mode: 'trusted',
       extra: { allowed_child_tools: ['move_ticket'] },
     }, true),
-    /terminal or consensus/,
+    /terminal ticket action/,
   );
 });
 

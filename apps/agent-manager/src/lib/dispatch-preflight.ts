@@ -138,11 +138,11 @@ export function decidePushReadiness(input: PushReadinessInput): PushReadinessDec
 // ── CLI workspace-trust / provider-auth preflight (ticket 48aeab6e) ─────────
 //
 // Two more DOOMED-dispatch conditions, same family as push-credential above:
-//   - the checked-out CLI workspace was never trust-approved, and the board's
+//   - the checked-out CLI workspace was never trust-approved, and the workspace
 //     harness `permission_mode` makes that trust dialog load-bearing (see
 //     CliAdapter.requiresWorkspaceTrust — the common `--dangerously-skip-
 //     permissions` default bypasses the dialog entirely, so this only bites
-//     boards that opt into a stricter mode);
+//     workspaces that opt into a stricter mode);
 //   - the CLI's OAuth session already expired and carries no refresh_token,
 //     so it cannot self-heal on the next spawn.
 // Both are OPERATOR-fixable and never self-heal on their own, so — like the
@@ -162,7 +162,7 @@ export interface CliTrustProbe {
 export interface CliTrustInput {
   /** CliAdapter.requiresWorkspaceTrust(harness) — false means this CLI/mode
    *  combination never surfaces an interactive trust dialog, so the probe is
-   *  irrelevant and this gate always passes (the common case: no board
+   *  irrelevant and this gate always passes (the common case: no workspace
    *  harness permission_mode override). */
   required: boolean;
   /** CliAdapter.readTrustMeta() result. Absent/null = the probe couldn't run
@@ -300,8 +300,8 @@ export interface WorktreeCheckoutProbe {
   originUrl?: string;
 }
 
-/** What the worktree SHOULD be a checkout of — the ticket/board repository
- *  resource's clone url. When unknown, the origin match is skipped (fail open)
+/** What the worktree SHOULD be a checkout of — the ticket's repository
+ *  (project / legacy repository resource) clone url. When unknown, the origin match is skipped (fail open)
  *  so a legitimately-provisioned tree is never wrongly blocked. */
 export interface WorktreeCheckoutExpectation {
   url?: string;
@@ -491,6 +491,11 @@ const DURABLE_BLOCKER_REASONS = new Set<string>([
   'not_a_git_repo',              // empty / clobbered work folder
   'incomplete_checkout',         // half-written clone — HEAD unresolved
   'wrong_repository',            // stale/foreign checkout — working_dir mis-pointed
+  // board-less project main clone folder (worktree-manager MAIN_CLONE_*): a
+  // non-empty folder that is not a git checkout root, or one cloned from another
+  // repository. AWB never wipes the operator's folder, so only they can fix it.
+  'main_clone_not_git_repo',
+  'main_clone_wrong_repository',
   'push_credential_unavailable', // remote auth rejected — operator must add a token
   'cli_trust_required',          // workspace trust dialog unresolved (ticket 48aeab6e)
   'cli_credential_expired',      // OAuth session expired, no refresh token (ticket 48aeab6e)

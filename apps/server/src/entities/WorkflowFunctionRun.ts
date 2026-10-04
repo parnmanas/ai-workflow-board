@@ -20,9 +20,6 @@ export class WorkflowFunctionRun {
   workspace_id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
-  @Column({ type: 'varchar', nullable: true, default: null })
   ticket_id: string | null;
 
   @Column({ type: 'varchar', nullable: true, default: null })

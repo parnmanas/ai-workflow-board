@@ -1,49 +1,45 @@
-import { parseRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
-import { BoardColumn } from '../../entities/BoardColumn';
-import { Board } from '../../entities/Board';
 import { Resource } from '../../entities/Resource';
-import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
 import { QaScenario, QaOnFailureTicketConfig } from '../../entities/QaScenario';
 import { QaRun } from '../../entities/QaRun';
 import { LogService } from '../../services/log.service';
-import { ActivityService } from '../../services/activity.service';
-import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
-import { findColumnByName, maxTicketPosition, resolveAgentIdAndName, refreshTicketWorkspaceId } from '../mcp/shared/ticket-helpers';
-import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { ProjectsService } from '../projects/projects.service';
+import { TicketService, normalizeTags, parseTags, type TicketActor } from '../tickets/ticket.service';
+import { DONE_STATUS, isDoneStatus } from '../../common/ticket-status';
+import { parseRuntimeSpec } from '../../common/runtime-spec';
 
-// Internal traceability label so per_open_ticket dedupe can find the scenario's
+// Internal traceability tag so per_open_ticket dedupe can find the scenario's
 // own open qa-failure ticket without a metadata column on Ticket.
-const SCENARIO_LABEL_PREFIX = 'qa-scenario:';
+const SCENARIO_TAG_PREFIX = 'qa-scenario:';
 // Generation marker for the QA→fix→QA loop (ticket 467dbc7a). A fix ticket born
 // from a rerun of generation N carries `qa-rerun:N`; QaRerunOnFixService reads it
 // back off the Done ticket to know how many reruns have happened (and to stop at
 // max_rerun_attempts). Exported so the rerun hook parses the same prefix.
-export const RERUN_LABEL_PREFIX = 'qa-rerun:';
-const DEFAULT_LABELS = ['qa-failure', 'auto'];
+export const RERUN_TAG_PREFIX = 'qa-rerun:';
+const DEFAULT_TAGS = ['qa-failure', 'auto'];
 const DEFAULT_PRIORITY = 'high';
 
-// The marker labels that identify a ticket as an AUTO QA-failure fix ticket for
+// The marker tags that identify a ticket as an AUTO QA-failure fix ticket for
 // on-pass sibling auto-close (ticket 64b9cbaf). Mirrors
-// QaRerunOnFixService.REQUIRED_LABELS so the SAME class of tickets the rerun hook
+// QaRerunOnFixService.REQUIRED_TAGS so the SAME class of tickets the rerun hook
 // fires on is the class a green run auto-closes — a human ticket that merely
 // carries the scenario marker is never touched. (Same documented coupling: a
-// scenario that customises cfg.labels and drops 'auto' opts out of both hooks.)
-const AUTO_TICKET_MARKER_LABELS = DEFAULT_LABELS;
+// scenario that customises cfg.tags and drops 'auto' opts out of both hooks.)
+const AUTO_TICKET_MARKER_TAGS = DEFAULT_TAGS;
 
-/** Parse a Ticket.labels JSON string into a string[]; [] on any malformed value. */
-function parseLabels(raw: string | null | undefined): string[] {
-  try {
-    const v = JSON.parse(raw || '[]');
-    return Array.isArray(v) ? v.filter((l): l is string => typeof l === 'string') : [];
-  } catch {
-    return [];
-  }
-}
+const QA_ACTOR: TicketActor = { id: '', name: 'QA', type: 'system' };
+
+/**
+ * Actor of the on-pass auto-close. Its distinct id is how QaRerunOnFixService
+ * recognises that synthetic Done move and stays quiet — auto-closing a
+ * `rerun_on_fix` ticket because the scenario already passed must not kick off a
+ * fresh (pointless) run of that same scenario.
+ */
+export const QA_AUTO_CLOSE_ACTOR: TicketActor = { id: 'qa-pass-auto-close', name: 'QA', type: 'system' };
 
 /**
  * QaFailureTicketService — files a fix ticket when a QaRun fails.
@@ -54,11 +50,18 @@ function parseLabels(raw: string | null | undefined): string[] {
  * terminal status, so a direct call is both simpler and deterministic (the test
  * can assert the ticket exists right after complete_qa_run returns).
  *
+ * The ticket goes through TicketService.create into the run's workspace pool
+ * (docs/tickets.md → "QA / Security failure tickets"): tags from the policy,
+ * optional project, status `todo` (or `backlog`), and an assignee resolved as
+ * `assignee_runtime` → scenario `target_runtime` → the project's
+ * default_assignee (TicketService applies that last one when we omit
+ * `assignee`).
+ *
  * Idempotency is two-layered:
  *   1. run.auto_ticket_id — set once per run; a re-finalize of the SAME run is a
  *      no-op (returns the existing id). This is the run-level guard.
  *   2. dedupe='per_open_ticket' — across DIFFERENT runs of the same scenario,
- *      if an open (non-terminal, non-archived) qa-failure ticket already exists,
+ *      if an open (not done, not archived) qa-failure ticket already exists,
  *      append a recurrence comment instead of filing a new one.
  *
  * Loop safety: the filed ticket is an ordinary ticket — it never re-triggers
@@ -66,10 +69,14 @@ function parseLabels(raw: string | null | undefined): string[] {
  */
 @Injectable()
 export class QaFailureTicketService {
+  // Tickets an on-pass auto-close is moving right now — two runs of the same
+  // scenario passing at once must not both close (and comment on) one ticket.
+  private readonly _closing = new Set<string>();
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly roleAssignmentService: TicketRoleAssignmentService,
-    private readonly activityService: ActivityService,
+    private readonly ticketService: TicketService,
+    private readonly projects: ProjectsService,
     private readonly logService: LogService,
   ) {}
 
@@ -86,15 +93,9 @@ export class QaFailureTicketService {
     if (run.auto_ticket_id) return run.auto_ticket_id;
 
     try {
-      const boardId = cfg.board_id || run.board_id || scenario.board_id || '';
-      if (!boardId) {
-        this.logService.warn('QA', `on_failure_ticket enabled for scenario ${scenario.id} but no board_id resolvable (cfg/run/scenario all empty) — skipping`);
-        return null;
-      }
-
-      const column = await this._resolveColumn(boardId, cfg.column_id, cfg.column_name);
-      if (!column) {
-        this.logService.warn('QA', `on_failure_ticket: no usable column in board ${boardId} for scenario ${scenario.id} — skipping`);
+      const workspaceId = run.workspace_id || scenario.workspace_id;
+      if (!workspaceId) {
+        this.logService.warn('QA', `on_failure_ticket enabled for scenario ${scenario.id} but run ${run.id} has no workspace — skipping`);
         return null;
       }
 
@@ -104,7 +105,7 @@ export class QaFailureTicketService {
       // one-ticket-per-run. run.auto_ticket_id above still no-ops a re-finalize of
       // the SAME run in both modes.
       if ((cfg.dedupe || 'per_open_ticket') === 'per_open_ticket') {
-        const existing = await this._findOpenFailureTicket(scenario, run.workspace_id);
+        const existing = await this._findOpenFailureTicket(scenario, workspaceId);
         if (existing) {
           await this._appendRecurrenceComment(existing, run, scenario);
           await this._stampRunTicket(run.id, existing.id);
@@ -113,7 +114,7 @@ export class QaFailureTicketService {
         }
       }
 
-      const ticketId = await this._createTicket(run, scenario, cfg, column);
+      const ticketId = await this._createTicket(run, scenario, cfg, workspaceId);
       await this._stampRunTicket(run.id, ticketId);
       this.logService.info('QA', `on_failure_ticket: filed ticket ${ticketId} for failed run ${run.id} (scenario ${scenario.id})`);
       return ticketId;
@@ -127,51 +128,48 @@ export class QaFailureTicketService {
   /**
    * On-pass sibling auto-close (ticket 64b9cbaf). When a scenario's run finalizes
    * as `passed`, the scenario state is the SSOT that resolves the scenario's open
-   * QA-failure fix tickets — so a single green run closes EVERY open (non-terminal,
+   * QA-failure fix tickets — so a single green run closes EVERY open (not done,
    * non-archived) auto fix ticket for that scenario at once, instead of leaving
-   * each duplicate/flaky ticket to individual manual closure. Each is moved to its
-   * board's terminal column with a resolved comment. Returns the ids actually
-   * closed (for logging / tests). Never throws — a side-effect failure here must
-   * not abort the completeRun finalization that called it.
+   * each duplicate/flaky ticket to individual manual closure. Each is moved to
+   * `done` (TicketService.move, so terminal stamp + activity + on-done hooks
+   * behave like any other close) with a resolved comment. Returns the ids
+   * actually closed (for logging / tests). Never throws — a side-effect failure
+   * here must not abort the completeRun finalization that called it.
    *
    * Scope: only tickets carrying ALL of `qa-failure` + `auto` + `qa-scenario:<id>`
-   * (AUTO_TICKET_MARKER_LABELS, mirroring QaRerunOnFixService.REQUIRED_LABELS) —
+   * (AUTO_TICKET_MARKER_TAGS, mirroring QaRerunOnFixService.REQUIRED_TAGS) —
    * a human ticket that merely references the scenario is never auto-closed.
    *
-   * Idempotency / concurrency: each close is an atomic conditional UPDATE guarded
-   * on the ticket STILL sitting in the (non-terminal) column we read it from, so a
-   * re-finalize of the same run, a duplicate pass, or two scenario runs passing at
-   * once can neither double-close nor double-comment; an already-terminal sibling
-   * is filtered out up front, making a re-finalize of a passed run a no-op.
+   * Idempotency: an already-done sibling is filtered out up front (re-read right
+   * before the move), making a re-finalize of a passed run a no-op; `_closing`
+   * keeps two concurrent passes from both closing one ticket.
    *
-   * Rerun suppression: the close stamps qa_rerun_dispatched_at == terminal_entered_at,
-   * so QaRerunOnFixService's edge-claim (qa_rerun_dispatched_at < terminal_entered_at)
-   * can't fire — auto-closing a `rerun_on_fix` ticket here does NOT kick off a
-   * fresh (pointless) run off the synthetic Done move.
+   * Rerun suppression: the move is made as QA_AUTO_CLOSE_ACTOR, which
+   * QaRerunOnFixService ignores — auto-closing a `rerun_on_fix` ticket here does
+   * NOT kick off a fresh run off the synthetic Done move.
    */
   async maybeCloseSiblingsOnPass(run: QaRun, scenario: QaScenario): Promise<string[]> {
     const cfg = scenario.on_failure_ticket;
     // Gate on the same opt-in as creation: no policy → the scenario never filed
-    // auto tickets, so there is nothing to close (and we don't touch a board that
-    // opted out of QA automation).
+    // auto tickets, so there is nothing to close.
     if (!cfg?.enabled) return [];
 
     try {
-      const open = await this._findOpenAutoFailureTickets(scenario, run.workspace_id);
+      const workspaceId = run.workspace_id || scenario.workspace_id;
+      if (!workspaceId) return [];
+      const open = await this._findOpenAutoFailureTickets(scenario, workspaceId);
       if (open.length === 0) return [];
 
       const closedIds: string[] = [];
-      for (const { ticket, column } of open) {
-        const done = await this._resolveDoneColumn(column.board_id);
-        if (!done) {
-          this.logService.warn(
-            'QA',
-            `on-pass auto-close: board ${column.board_id} has no terminal column — cannot close ticket ${ticket.id} (scenario ${scenario.id})`,
-          );
-          continue;
+      for (const ticket of open) {
+        try {
+          const closed = await this._closeTicketAsResolved(ticket, run, scenario);
+          if (closed) closedIds.push(ticket.id);
+        } catch (e: any) {
+          // One ticket that cannot move (archived mid-sweep, …) must not keep
+          // its siblings open.
+          this.logService.warn('QA', `on-pass auto-close: ticket ${ticket.id} not closed (scenario ${scenario.id}): ${e?.message || e}`);
         }
-        const closed = await this._closeTicketAsResolved(ticket, column, done, run, scenario);
-        if (closed) closedIds.push(ticket.id);
       }
 
       if (closedIds.length) {
@@ -190,126 +188,64 @@ export class QaFailureTicketService {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
-  /** Explicit column id/name → first active non-terminal → first non-terminal. */
-  private async _resolveColumn(boardId: string, columnId?: string, columnName?: string): Promise<BoardColumn | null> {
-    if (columnId) {
-      const byId = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: columnId, board_id: boardId } });
-      if (byId) return byId;
-    }
-    if (columnName) {
-      const byName = await findColumnByName(this.dataSource, boardId, columnName);
-      if (byName) return byName;
-    }
-    const cols = await this.dataSource.getRepository(BoardColumn).find({
-      where: { board_id: boardId },
-      order: { position: 'ASC' },
-    });
-    if (cols.length === 0) return null;
-    return cols.find((c) => c.kind === 'active' && !isTerminalColumn(c))
-      || cols.find((c) => !isTerminalColumn(c))
-      || cols[0];
+  /** Root, non-archived, not-done tickets carrying the scenario marker tag, by creation time. */
+  private async _openScenarioTickets(scenario: QaScenario, workspaceId: string, order: 'ASC' | 'DESC'): Promise<Ticket[]> {
+    const marker = `${SCENARIO_TAG_PREFIX}${scenario.id}`;
+    // Match the JSON-string tag list (`tags` is a JSON string column). LIKE
+    // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
+    return this.dataSource.getRepository(Ticket).createQueryBuilder('t')
+      .where('t.workspace_id = :ws', { ws: workspaceId })
+      .andWhere('t.depth = 0')
+      .andWhere('t.archived_at IS NULL')
+      .andWhere('t.status <> :done', { done: DONE_STATUS })
+      .andWhere('t.tags LIKE :marker', { marker: `%${marker}%` })
+      .orderBy('t.created_at', order)
+      .getMany();
   }
 
   private async _findOpenFailureTicket(scenario: QaScenario, workspaceId: string): Promise<Ticket | null> {
-    const marker = `${SCENARIO_LABEL_PREFIX}${scenario.id}`;
-    // Match the JSON-string label list (`labels` is a JSON string column). LIKE
-    // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
-    const rows = await this.dataSource.getRepository(Ticket).createQueryBuilder('t')
-      .where('t.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('t.depth = 0')
-      .andWhere('t.archived_at IS NULL')
-      .andWhere('t.labels LIKE :marker', { marker: `%${marker}%` })
-      .orderBy('t.created_at', 'DESC')
-      .getMany();
-    if (rows.length === 0) return null;
-    // Only count a ticket "open" while it sits in a non-terminal column.
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    for (const t of rows) {
-      if (!t.column_id) continue;
-      const col = await colRepo.findOne({ where: { id: t.column_id } });
-      if (col && !isTerminalColumn(col)) return t;
-    }
-    return null;
+    const rows = await this._openScenarioTickets(scenario, workspaceId, 'DESC');
+    return rows[0] ?? null;
   }
 
   /**
-   * Every OPEN (non-terminal, non-archived) AUTO fix ticket for the scenario,
-   * paired with its current column. Same JSON-string `labels LIKE` the dedupe
-   * finder uses, PLUS the marker-label scope guard (AUTO_TICKET_MARKER_LABELS) so
-   * only genuine QA-filed fix tickets are eligible for auto-close — a human ticket
-   * that merely carries `qa-scenario:<id>` is skipped.
+   * Every OPEN AUTO fix ticket for the scenario. Same `tags LIKE` the dedupe
+   * finder uses, PLUS the marker-tag scope guard (AUTO_TICKET_MARKER_TAGS) so
+   * only genuine QA-filed fix tickets are eligible for auto-close — a human
+   * ticket that merely carries `qa-scenario:<id>` is skipped.
    */
-  private async _findOpenAutoFailureTickets(
-    scenario: QaScenario,
-    workspaceId: string,
-  ): Promise<Array<{ ticket: Ticket; column: BoardColumn }>> {
-    const marker = `${SCENARIO_LABEL_PREFIX}${scenario.id}`;
-    const rows = await this.dataSource.getRepository(Ticket).createQueryBuilder('t')
-      .where('t.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('t.depth = 0')
-      .andWhere('t.archived_at IS NULL')
-      .andWhere('t.labels LIKE :marker', { marker: `%${marker}%` })
-      .orderBy('t.created_at', 'ASC')
-      .getMany();
-    if (rows.length === 0) return [];
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    const out: Array<{ ticket: Ticket; column: BoardColumn }> = [];
-    for (const t of rows) {
-      if (!t.column_id) continue;
-      // Scope guard: only auto QA-failure fix tickets (belt-and-suspenders vs the
-      // scenario marker already matched by the LIKE above).
-      const labels = parseLabels(t.labels);
-      if (!AUTO_TICKET_MARKER_LABELS.every((l) => labels.includes(l))) continue;
-      const col = await colRepo.findOne({ where: { id: t.column_id } });
-      if (col && !isTerminalColumn(col)) out.push({ ticket: t, column: col });
-    }
-    return out;
-  }
-
-  /** First terminal column of the board (lowest position), or null if none. */
-  private async _resolveDoneColumn(boardId: string): Promise<BoardColumn | null> {
-    const cols = await this.dataSource.getRepository(BoardColumn).find({
-      where: { board_id: boardId },
-      order: { position: 'ASC' },
+  private async _findOpenAutoFailureTickets(scenario: QaScenario, workspaceId: string): Promise<Ticket[]> {
+    const rows = await this._openScenarioTickets(scenario, workspaceId, 'ASC');
+    return rows.filter((t) => {
+      const tags = parseTags(t.tags);
+      return AUTO_TICKET_MARKER_TAGS.every((tag) => tags.includes(tag));
     });
-    return cols.find((c) => isTerminalColumn(c)) || null;
   }
 
   /**
-   * Atomically close one open auto fix ticket: move it to `doneCol`, stamp the
-   * terminal entry, and — critically — stamp qa_rerun_dispatched_at to the SAME
-   * instant so the QaRerunOnFixService edge-claim can't fire off this synthetic
-   * Done move. The UPDATE is guarded on the ticket still sitting in `fromCol` so a
-   * concurrent close / manual move can't be clobbered and only the winner posts
-   * the resolved comment + `moved` activity. Returns true iff this call claimed
-   * the close.
+   * Close one open auto fix ticket: move it to `done` as QA_AUTO_CLOSE_ACTOR and
+   * post the resolved comment. Re-reads the ticket first so a concurrent close /
+   * manual move / archive is not clobbered and only the winner comments. Returns
+   * true iff this call closed it.
    */
-  private async _closeTicketAsResolved(
-    ticket: Ticket,
-    fromCol: BoardColumn,
-    doneCol: BoardColumn,
-    run: QaRun,
-    scenario: QaScenario,
-  ): Promise<boolean> {
-    const closeAt = new Date();
-    const claim = await this.dataSource.getRepository(Ticket)
-      .createQueryBuilder()
-      .update(Ticket)
-      .set({ column_id: doneCol.id, terminal_entered_at: closeAt, qa_rerun_dispatched_at: closeAt })
-      .where('id = :id', { id: ticket.id })
-      .andWhere('column_id = :from', { from: fromCol.id })
-      .andWhere('archived_at IS NULL')
-      .execute();
-    const claimed = claim.affected === undefined || claim.affected === null || claim.affected > 0;
-    if (!claimed) return false;
+  private async _closeTicketAsResolved(ticket: Ticket, run: QaRun, scenario: QaScenario): Promise<boolean> {
+    if (this._closing.has(ticket.id)) return false;
+    this._closing.add(ticket.id);
+    try {
+      const fresh = await this.dataSource.getRepository(Ticket).findOne({ where: { id: ticket.id } });
+      if (!fresh || fresh.archived_at || isDoneStatus(fresh.status)) return false;
+      await this.ticketService.move(ticket.id, DONE_STATUS, QA_AUTO_CLOSE_ACTOR);
+    } finally {
+      this._closing.delete(ticket.id);
+    }
 
     const body = [
       `✅ **QA 시나리오 재통과 — 자동 종결**`,
       ``,
       `시나리오 \`${scenario.name}\` (\`${scenario.id}\`) 의 최신 run \`${run.id}\` 이 통과했습니다.`,
-      `이 자동 QA 실패 티켓은 더 이상 유효하지 않아 **${doneCol.name}** 로 자동 종결되었습니다.`,
+      `이 자동 QA 실패 티켓은 더 이상 유효하지 않아 **Done** 으로 자동 종결되었습니다.`,
       ``,
-      `_시나리오 상태를 SSOT 로 삼아, green run 하나가 같은 \`${SCENARIO_LABEL_PREFIX}${scenario.id}\` 의 열린 형제 auto 티켓을 함께 닫습니다. 재작업이 필요하면 이 티켓을 다시 열어 진행하세요._`,
+      `_시나리오 상태를 SSOT 로 삼아, green run 하나가 같은 \`${SCENARIO_TAG_PREFIX}${scenario.id}\` 의 열린 형제 auto 티켓을 함께 닫습니다. 재작업이 필요하면 이 티켓을 다시 열어 진행하세요._`,
     ].join('\n');
     const commentRepo = this.dataSource.getRepository(Comment);
     await commentRepo.save(commentRepo.create({
@@ -320,20 +256,6 @@ export class QaFailureTicketService {
       content: body,
       type: 'note',
     }));
-
-    // Emit the same `moved` activity the production move path emits so the board
-    // live-updates. The rerun re-trigger this would normally invite is already
-    // defused by the qa_rerun_dispatched_at stamp set above.
-    await this.activityService.logActivity({
-      entity_type: 'ticket',
-      entity_id: ticket.id,
-      action: 'moved',
-      field_changed: 'column',
-      old_value: fromCol.name,
-      new_value: doneCol.name,
-      ticket_id: ticket.id,
-      actor_name: 'QA',
-    });
     return true;
   }
 
@@ -341,83 +263,27 @@ export class QaFailureTicketService {
     run: QaRun,
     scenario: QaScenario,
     cfg: QaOnFailureTicketConfig,
-    column: BoardColumn,
+    workspaceId: string,
   ): Promise<string> {
-    const workspaceId = scenario.workspace_id;
-    const runtime = parseRuntimeSpec(cfg.assignee_runtime || (!cfg.assignee_id ? scenario.target_runtime : null));
-    const assigneeId = runtime ? runtimeIdentityKey(runtime) : cfg.assignee_id || scenario.target_agent_id || '';
-    const resolved = runtime ? { id: assigneeId, name: runtime.label } : await resolveAgentIdAndName(this.dataSource, assigneeId, '', this.logService);
-
-    const labels = this._buildLabels(cfg, scenario.id, run.rerun_generation);
-    const title = this._buildTitle(cfg, scenario);
-    const description = await this._buildBody(run, scenario, column.board_id);
-    const priority = cfg.priority || DEFAULT_PRIORITY;
-
-    const ticket = await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const position = await maxTicketPosition(manager, column.id);
-      return tRepo.save(tRepo.create({
-        column_id: column.id,
-        title,
-        description,
-        priority,
-        assignee: resolved.name,
-        reporter: resolved.name,
-        assignee_id: resolved.id || assigneeId,
-        reporter_id: resolved.id || assigneeId,
-        reviewer_id: resolved.id || assigneeId,
-        labels: JSON.stringify(labels),
-        channel_ids: '[]',
-        position,
-        // To Do is non-terminal; never stamp terminal_entered_at here.
-        created_by: 'QA',
-        created_by_type: 'system',
-        created_by_id: '',
-      }));
-    });
-
-    // Backfill workspace_id (column → board) then mirror the role trio onto
-    // TicketRoleAssignment so the trigger loop / focus selector see the ticket
-    // and the assignee loop actually dispatches.
-    await refreshTicketWorkspaceId(this.dataSource, ticket);
-    const wsId = ticket.workspace_id || workspaceId;
-    if (wsId && runtime) {
-      await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, {
-        assignee: [{ runtime }], reporter: [{ runtime }], reviewer: [{ runtime }],
-      });
-    } else if (wsId && (resolved.id || assigneeId)) {
-      const holderId = resolved.id || assigneeId;
-      await this.roleAssignmentService.syncBuiltinTrio(ticket.id, wsId, {
-        assignee_id: holderId,
-        reporter_id: holderId,
-        reviewer_id: holderId,
-      });
+    // A project id that no longer resolves in this workspace must not swallow
+    // the failure report — file it without a project and say so in the log.
+    let projectId: string | null = (cfg.project_id || '').trim() || null;
+    if (projectId && !(await this.projects.getInWorkspace(projectId, workspaceId))) {
+      this.logService.warn('QA', `on_failure_ticket: project ${projectId} not found in workspace ${workspaceId} (scenario ${scenario.id}) — filing without a project`);
+      projectId = null;
     }
+    // assignee_runtime → scenario target_runtime → (omitted) project default_assignee.
+    const assignee = parseRuntimeSpec(cfg.assignee_runtime) || parseRuntimeSpec(scenario.target_runtime);
 
-    // Board default role holders (ticket d94a1b87): fill any role still VACANT
-    // after the explicit trio above from the board's default_role_assignments.
-    // When the scenario names no assignee the trio sync is skipped, so this is
-    // what lets a board-configured default pick the auto-ticket up (and fills a
-    // default reviewer even when an assignee IS set — the "no default reviewer
-    // → pend" gap). Only ever fills vacant roles; never clobbers an explicit one.
-    if (wsId) {
-      try {
-        const defBoard = await this.dataSource.getRepository(Board).findOne({ where: { id: column.board_id } });
-        const defaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
-        if (Object.keys(defaults).length > 0) {
-          await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, defaults);
-        }
-      } catch { /* non-fatal — degrade to "no defaults" */ }
-    }
-
-    await this.activityService.logActivity({
-      entity_type: 'ticket',
-      entity_id: ticket.id,
-      action: 'created',
-      ticket_id: ticket.id,
-      actor_name: 'QA',
-    });
-
+    const { ticket } = await this.ticketService.create(workspaceId, {
+      title: this._buildTitle(cfg, scenario),
+      description: await this._buildBody(run, scenario, workspaceId),
+      priority: cfg.priority || DEFAULT_PRIORITY,
+      status: cfg.status === 'backlog' ? 'backlog' : 'todo',
+      tags: this._buildTags(cfg, scenario.id, run.rerun_generation),
+      project_id: projectId,
+      ...(assignee ? { assignee } : {}),
+    }, QA_ACTOR);
     return ticket.id;
   }
 
@@ -450,9 +316,12 @@ export class QaFailureTicketService {
     await this.dataSource.getRepository(QaRun).update({ id: runId }, { auto_ticket_id: ticketId });
   }
 
-  private _buildLabels(cfg: QaOnFailureTicketConfig, scenarioId: string, rerunGeneration?: number): string[] {
-    const base = cfg.labels && cfg.labels.length ? cfg.labels.slice() : DEFAULT_LABELS.slice();
-    const marker = `${SCENARIO_LABEL_PREFIX}${scenarioId}`;
+  private _buildTags(cfg: QaOnFailureTicketConfig, scenarioId: string, rerunGeneration?: number): string[] {
+    // `labels` is the pre-board-removal name of `tags` — still honoured for
+    // policies the migration did not rewrite (e.g. written by an older client).
+    const configured = normalizeTags(cfg.tags ?? cfg.labels);
+    const base = configured.length ? configured : DEFAULT_TAGS.slice();
+    const marker = `${SCENARIO_TAG_PREFIX}${scenarioId}`;
     if (!base.includes(marker)) base.push(marker);
     // Carry the generation so QaRerunOnFixService can read it back off this
     // ticket when it reaches Done and decide whether the loop has hit its cap.
@@ -460,10 +329,10 @@ export class QaFailureTicketService {
     // as gen 0, and the first rerun stamps `qa-rerun:1` on its child ticket.
     const gen = rerunGeneration && rerunGeneration > 0 ? Math.floor(rerunGeneration) : 0;
     if (gen > 0) {
-      const rerunMarker = `${RERUN_LABEL_PREFIX}${gen}`;
-      // Replace any stray rerun marker (e.g. from a custom cfg.labels) so exactly
+      const rerunMarker = `${RERUN_TAG_PREFIX}${gen}`;
+      // Replace any stray rerun marker (e.g. from a custom cfg.tags) so exactly
       // one generation marker is present.
-      const cleaned = base.filter((l) => !l.startsWith(RERUN_LABEL_PREFIX));
+      const cleaned = base.filter((t) => !t.startsWith(RERUN_TAG_PREFIX));
       cleaned.push(rerunMarker);
       return cleaned;
     }
@@ -488,9 +357,8 @@ export class QaFailureTicketService {
     });
   }
 
-  private async _buildBody(run: QaRun, scenario: QaScenario, boardId: string): Promise<string> {
-    const wsId = scenario.workspace_id;
-    const qaDetailLink = `/ws/${wsId}/boards/${boardId}/qa`;
+  private async _buildBody(run: QaRun, scenario: QaScenario, workspaceId: string): Promise<string> {
+    const qaDetailLink = `/ws/${workspaceId}/qa`;
 
     // Pair each failed step result with its scenario step definition so the
     // body shows the action/expect a debugger needs (step_results store only

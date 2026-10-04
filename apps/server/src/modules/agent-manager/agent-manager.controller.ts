@@ -8,13 +8,12 @@ import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Credential } from '../../entities/Credential';
 import { normalizeCredentialFields } from '../../common/credential-fields';
 import { Ticket } from '../../entities/Ticket';
-import { Resource } from '../../entities/Resource';
+import { Project } from '../../entities/Project';
 import { Workspace } from '../../entities/Workspace';
 import { ActivityLog } from '../../entities/ActivityLog';
 import { decrypt } from '../../services/encryption.service';
-import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
-import { DispatchIntentService } from '../agents/dispatch-intent.service';
+import { TicketDispatchService } from '../agents/ticket-dispatch.service';
 import { RunSkillSnapshotService } from '../skills/run-skill-snapshot.service';
 import { ChildRunService } from '../agents/child-run.service';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
@@ -321,17 +320,15 @@ export class AgentManagerController {
     private readonly sudoTickets: SudoTicketService,
     private readonly privileged: PrivilegedCommandService,
     private readonly commands: AgentManagerCommandService,
-    private readonly triggerLoop: TriggerLoopService,
     private readonly agentStatus: AgentStatusService,
     // Durable dispatch outbox ack sink (ticket e7c87517). From AgentsModule
     // (exported), reachable here via the existing forwardRef(AgentsModule).
-    private readonly dispatchIntents: DispatchIntentService,
+    private readonly dispatcher: TicketDispatchService,
     private readonly runSkillSnapshots: RunSkillSnapshotService,
     private readonly childRuns: ChildRunService,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
     @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
@@ -1122,31 +1119,17 @@ export class AgentManagerController {
     return res.json({ ok: true });
   }
 
-  // ─── Durable dispatch outbox — agent_trigger ack (ticket e7c87517) ────────
+  // ─── agent_trigger ack ────────────────────────────────────────────────────
 
   /**
-   * Manager → server: report the outcome of an `agent_trigger` SSE dispatch,
-   * closing the durable dispatch loop (ticket e7c87517). The manager POSTs this
-   * after it either spawns the subagent (`outcome='processed'`) or aborts the
-   * spawn (`outcome='nack'` — worktree `pool_exhausted`, missing repo, push
-   * credential, …). The `trigger_id` echoes the value the manager received on
-   * the trigger payload (SSE `field_changed`), so DispatchIntentService matches
-   * the ack to THAT exact dispatch and ignores a stale ack for a superseded one.
-   * 쌍둥이 억제는 `suppressed`로 별도 보고하며, intent를 재개하지 않고
-   * trigger_id별 전용 activity만 남겨 hard-budget에서 정확히 차감한다.
+   * Manager → server: the outcome of an `agent_trigger` dispatch. `processed`
+   * = the subagent was spawned; `nack` = the spawn was aborted (worktree pool
+   * exhausted, CLI not ready, …) and TicketDispatchService retries it with
+   * backoff from its sweep; `suppressed` = a twin dispatch the manager folded
+   * into a live one. Every outcome is recorded on the ticket's activity log.
    *
-   * CRITICAL (reviewer): `processed` is NOT resolution — it only extends the
-   * retry deadline (spawn started, give the strand time to show real progress).
-   * A `nack` re-opens the intent for a backoff re-dispatch. Only observed
-   * forward progress / a terminal ticket resolves an intent — that decision
-   * lives in DispatchReconcilerService, never here.
-   *
-   * Auth: AgentAuthGuard (X-Agent-Key), same open-trust model as
-   * /api/agent-manager/output-liveness — a bogus ack for a trigger_id that
-   * doesn't match the intent's current dispatch is simply ignored (stale-ack
-   * guard), so it cannot corrupt another manager's dispatch. Fire-and-forget on
-   * the manager side; the server-side reconciler backstops a lost ack via the
-   * processing-grace timeout regardless.
+   * Auth: AgentAuthGuard (X-Agent-Key). A bogus ack can at most schedule an
+   * extra retry of an in-progress ticket — the dispatcher re-checks every gate.
    */
   @ApiSecurity('agent-api-key')
   @Post('api/agent-manager/dispatch/ack')
@@ -1182,8 +1165,8 @@ export class AgentManagerController {
       }
     }
 
-    const result = await this.dispatchIntents.applyManagerAck({
-      ticketId: ticket_id, role, triggerId: trigger_id, outcome, reason,
+    const result = await this.dispatcher.applyManagerAck({
+      ticketId: ticket_id, triggerId: trigger_id, outcome, reason,
       managerAgentId: String(callerAgentId || ''),
     });
     if (outcome === 'processed' && skillSnapshotRunId) {
@@ -1194,12 +1177,12 @@ export class AgentManagerController {
     }
     this.logService.info(
       'AgentManager',
-      `Dispatch ack ticket=${ticket_id.slice(0, 8)} role=${role} outcome=${outcome} matched=${result.matched} agent=${callerAgentId}`,
-      { ticket_id, role, outcome, trigger_id, reason, matched: result.matched, status: result.status, agent_id: callerAgentId },
+      `Dispatch ack ticket=${ticket_id.slice(0, 8)} role=${role} outcome=${outcome} applied=${result.applied} agent=${callerAgentId}`,
+      { ticket_id, role, outcome, trigger_id, reason, applied: result.applied, agent_id: callerAgentId },
     );
     // 200 even when unmatched — a stale/duplicate ack is a no-op, not a client
     // error the manager should retry. The body reports whether it applied.
-    return res.status(200).json({ ok: true, applied: result.applied, matched: result.matched, status: result.status ?? null });
+    return res.status(200).json({ ok: true, applied: result.applied });
   }
 
   /**
@@ -1932,6 +1915,69 @@ export class AgentManagerController {
       key,
       workspace_id: workspaceId,
     });
+  }
+
+  // ─── manager → server: repository clone credential ─────────────────────
+  //
+  // The manager clones/pushes a ticket's project (`agent_trigger.base_repo`)
+  // and asks here for the project's Credential token. Repositories are
+  // Projects now (docs/tickets.md); repository Resources were migrated with
+  // the SAME id, so the old `/resources/:id/git-credential` path is kept as an
+  // alias and resolves a project by that id. Older managers only know the
+  // alias; current ones ask `/projects/` first and fall back on 404.
+  //
+  // Auth: a Runtime Host key (manager or runtime-tuple key). A paired Host
+  // supervises executions across workspaces, so the boundary is the project's
+  // own workspace: an explicit `workspace_id` must match it, a
+  // workspace-scoped (runtime) key must belong to it, and the credential must
+  // be global or of that workspace. `agent_id` is the runtime identity the
+  // clone is for — a runtime key may only ask for itself.
+  @ApiSecurity('agent-api-key')
+  @Get(['api/agent-manager/projects/:projectId/git-credential', 'api/agent-manager/resources/:resourceId/git-credential'])
+  @UseGuards(AgentAuthGuard)
+  @ApiOperation({ summary: "Manager → server: a project's repository clone credential (username + token)" })
+  async getProjectGitCredential(
+    @Param('projectId') projectIdParam: string | undefined,
+    @Param('resourceId') resourceIdParam: string | undefined,
+    @Query('agent_id') targetAgentId: string | undefined,
+    @Query('workspace_id') requestedWorkspaceId: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const callerHostId = String((req as any).currentHostId || '').trim();
+    if (!callerHostId) return res.status(403).json({ error: 'a Runtime Host API key is required' });
+    const callerRuntimeKey = String((req as any).currentRuntimeKey || '').trim();
+    const agentId = String(targetAgentId || '').trim();
+    if (callerRuntimeKey && agentId && agentId !== callerRuntimeKey) {
+      return res.status(403).json({ error: 'caller is not the runtime identity named by agent_id' });
+    }
+
+    const projectId = String(projectIdParam || resourceIdParam || '').trim();
+    const project = projectId ? await this.dataSource.getRepository(Project).findOne({ where: { id: projectId } }) : null;
+    const requestedWorkspace = String(requestedWorkspaceId || '').trim();
+    if (!project || (requestedWorkspace && requestedWorkspace !== project.workspace_id)) {
+      return res.status(404).json({ error: 'project not found in agent workspace' });
+    }
+    const keyWorkspaceId = callerRuntimeKey ? String((req as any).apiKey?.workspace_id || '').trim() : '';
+    if (keyWorkspaceId && keyWorkspaceId !== project.workspace_id) {
+      return res.status(403).json({ error: 'project is outside the API key workspace' });
+    }
+    if (!project.credential_id) return res.status(204).send();
+    const cred = await this.credentialRepo.findOne({ where: { id: project.credential_id } });
+    if (!cred || (cred.workspace_id !== null && cred.workspace_id !== project.workspace_id)) {
+      return res.status(403).json({ error: 'repository credential is outside the project workspace' });
+    }
+    const plaintext = decrypt(cred.encrypted_data || '');
+    if (!plaintext) return res.status(503).json({ error: 'credential_decrypt_failed' });
+    try {
+      const fields = normalizeCredentialFields(JSON.parse(plaintext));
+      const token = fields.token || fields.api_key || '';
+      if (!token) return res.status(422).json({ error: 'repository credential has no token/api_key' });
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ username: fields.username || 'x-access-token', token });
+    } catch {
+      return res.status(503).json({ error: 'credential_payload_invalid' });
+    }
   }
 
   @Post('api/agent-manager/runtime/child-runs/start')

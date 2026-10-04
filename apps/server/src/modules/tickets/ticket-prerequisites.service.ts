@@ -3,8 +3,7 @@
  * (ticket 48d14fff).
  *
  * Distinct from `Ticket.next_ticket_id` (forward 1:1 push, A finishes → wake B);
- * this is the backward M:N pull, B parks itself until every prereq A lands on
- * a terminal column.
+ * this is the backward M:N pull, B parks itself until every prereq A is done.
  *
  * Why it exists:
  *   - Validation: same-workspace, no self-reference, no cycle, no archived
@@ -13,7 +12,7 @@
  *     `removePrerequisite(ticket, prereq)`, `listPrerequisites(ticket)`.
  *   - Auto-resume sweep: `evaluatePendingForDependent(ticketId)` re-reads the
  *     row's prereq set and flips `pending_on_tickets` according to whether
- *     any remaining link still points at a non-terminal ticket. Returns
+ *     any remaining link still points at a ticket that is not done. Returns
  *     `{ flipped, before, after }` so the caller can decide whether to fire
  *     a dispatch.
  *   - Cascade hooks: `onPrerequisiteReached(prereqTicketId)` walks every
@@ -29,9 +28,8 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { TicketPrerequisite } from '../../entities/TicketPrerequisite';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { ActivityService } from '../../services/activity.service';
-import { emitFocusReleased } from '../agents/focus-eligibility';
+import { DONE_STATUS } from '../../common/ticket-status';
 
 export type RepoScope = DataSource | EntityManager;
 
@@ -41,16 +39,15 @@ export interface PrerequisiteRow {
   created_at: Date;
   created_by: string;
   reason: string;
-  // Convenience snapshot of the prereq side for the UI: title + column +
-  // whether the column is terminal (so the panel can render "satisfied"
-  // pills without a second round-trip). Always present in `listFull`
-  // results; omitted on the raw row helper.
+  // Convenience snapshot of the prereq side for the UI: title + status +
+  // whether it is done (so the panel can render "satisfied" pills without a
+  // second round-trip). Always present in `listFull` results; omitted on the
+  // raw row helper.
   prerequisite?: {
     id: string;
     title: string;
-    column_id: string | null;
-    column_name: string;
-    is_terminal: boolean;
+    status: string;
+    is_done: boolean;
     archived_at: Date | null;
   };
 }
@@ -175,15 +172,6 @@ export class TicketPrerequisitesService {
       }
     });
 
-    // 미완료 선행이 생겨 `pending_on_tickets` 가 켜졌다면 이 티켓은 방금
-    // focus 후보 집합에서 빠졌다 — 곧 lease 해제다 (ticket 2cc54fde,
-    // 요구사항 1). 위 트랜잭션이 커밋된 뒤에 브로드캐스트해서, 방금 열린
-    // 슬롯을 선행 티켓이 즉시 가져갈 수 있게 한다. 이게 없으면 교착이 풀린
-    // 뒤에도 다음 level sweep(기본 5분)까지 보드가 그대로 멈춰 있다.
-    if (!wasPendingOnTickets && ticket.pending_on_tickets) {
-      await emitFocusReleased(this.dataSource, ticket, 'pending_on_tickets');
-    }
-
     // Activity log — one row per add so the timeline reads naturally.
     for (const row of added) {
       await this.activityService.logActivity({
@@ -239,12 +227,12 @@ export class TicketPrerequisitesService {
 
   /**
    * Re-read the row's prereq set and align `pending_on_tickets` with whether
-   * any link still points at a non-terminal ticket. Idempotent — safe to call
-   * from any path that mutates the link set or the prereq's column.
+   * any link still points at a ticket that is not done. Idempotent — safe to
+   * call from any path that mutates the link set or a prereq's status.
    *
    * Returns the post-flip state so callers can decide whether to dispatch:
    * a `was_pending && !pending_on_tickets` transition is the cue for
-   * `TriggerLoopService.dispatchCurrentColumn`.
+   * `TicketDispatchService.resumeTicket`.
    */
   async evaluatePendingForDependent(
     ticketId: string,
@@ -269,7 +257,7 @@ export class TicketPrerequisitesService {
   }
 
   /**
-   * Callback for terminal-column landings: walk every dependent of the
+   * Callback for a ticket entering done: walk every dependent of the
    * just-landed ticket and re-evaluate. Returns ids of dependents that
    * flipped pending_on_tickets to false so the caller can dispatch.
    */
@@ -304,7 +292,6 @@ export async function listPrerequisitesFull(
     .find({ where: { ticket_id: ticketId }, order: { created_at: 'ASC' } });
   if (rows.length === 0) return [];
   const tRepo = scope.getRepository(Ticket);
-  const colRepo = scope.getRepository(BoardColumn);
   const dressed: PrerequisiteRow[] = [];
   for (const r of rows) {
     const prereq = await tRepo.findOne({ where: { id: r.prerequisite_ticket_id } });
@@ -321,13 +308,6 @@ export async function listPrerequisitesFull(
       });
       continue;
     }
-    let columnName = '';
-    let isTerminal = false;
-    if (prereq.column_id) {
-      const col = await colRepo.findOne({ where: { id: prereq.column_id } });
-      columnName = col?.name || '';
-      isTerminal = !!(col && ((col as any).is_terminal === true || (col as any).kind === 'terminal'));
-    }
     dressed.push({
       ticket_id: r.ticket_id,
       prerequisite_ticket_id: r.prerequisite_ticket_id,
@@ -337,9 +317,8 @@ export async function listPrerequisitesFull(
       prerequisite: {
         id: prereq.id,
         title: prereq.title,
-        column_id: prereq.column_id || null,
-        column_name: columnName,
-        is_terminal: isTerminal,
+        status: prereq.status,
+        is_done: prereq.status === DONE_STATUS,
         archived_at: prereq.archived_at,
       },
     });
@@ -348,23 +327,19 @@ export async function listPrerequisitesFull(
 }
 
 /**
- * Returns true if any prerequisite ticket in `rows` sits on a non-terminal
- * column (or has no column at all). A prereq that is archived counts as
+ * Returns true if any prerequisite ticket in `rows` is not done yet. A
+ * prereq that is archived counts as
  * resolved — link should be removed via the cascade, but we treat it as
  * "satisfied" defensively in case the row outlived the cascade.
  */
 async function anyPrereqOpen(scope: RepoScope, rows: TicketPrerequisite[]): Promise<boolean> {
   if (rows.length === 0) return false;
   const tRepo = scope.getRepository(Ticket);
-  const colRepo = scope.getRepository(BoardColumn);
   for (const r of rows) {
     const prereq = await tRepo.findOne({ where: { id: r.prerequisite_ticket_id } });
     if (!prereq) continue;
     if (prereq.archived_at) continue;
-    if (!prereq.column_id) return true;
-    const col = await colRepo.findOne({ where: { id: prereq.column_id } });
-    const isTerminal = !!(col && ((col as any).is_terminal === true || (col as any).kind === 'terminal'));
-    if (!isTerminal) return true;
+    if (prereq.status !== DONE_STATUS) return true;
   }
   return false;
 }

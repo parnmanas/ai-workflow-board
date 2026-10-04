@@ -25,8 +25,8 @@ const PAGE_SIZE = 500;
 /**
  * 도착지 주도 live import 오케스트레이션 (ticket 0f638509).
  *
- * DispatchIntent/DispatchReconcilerService(내구성 outbox, DB에서 상태
- * 재도출, 재시작 생존)를 참조 모델로 삼는다 — Agent가 개입하지 않는 서버
+ * (보드 제거 때 사라진) DispatchIntent/DispatchReconcilerService(내구성
+ * outbox, DB에서 상태 재도출, 재시작 생존)를 참조 모델로 삼았다 — Agent가 개입하지 않는 서버
  * 자체 구동 job이라는 점이 QaRunBatch보다 이쪽에 더 가깝다는 판단(진행 중
  * 티켓 코멘트 기록). 진행 상황은 매 페이지마다 MigrationRun 행에 커밋되므로
  * 프로세스가 죽어도 onModuleInit의 resumeIncompleteRuns()가 정확히 그

@@ -5,27 +5,19 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository, EntityManager } from 'typeorm';
 import { Workspace } from '../../entities/Workspace';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { User } from '../../entities/User';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ApiKey } from '../../entities/ApiKey';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { WorkspaceRole } from '../../entities/WorkspaceRole';
-import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { CurrentUserData } from '../../common/decorators/current-user.decorator';
 import { ActivityService } from '../../services/activity.service';
-import { DEFAULT_COLUMNS } from '../../database/database.module';
-import { DEFAULT_BOARD_ROUTING } from '../../db';
-import { WorkspaceRolesService } from '../workspace-roles/workspace-roles.service';
-import { PromptTemplatesService } from '../prompt-templates/prompt-templates.service';
+import { parseRuntimeSpec } from '../../common/runtime-spec';
+import { deleteWorkspaceContent } from './workspace-cleanup';
 import { ReBACService } from '../../services/rebac.service';
 import { findOrFail } from '../../common/find-or-fail';
-import { parseComments, expandCommentAttachments } from '../mcp/shared/ticket-parsing';
-import { writeRoutingConfigThrough } from '../boards/routing-config.helper';
 import { validateHarnessConfigInput, serializeHarnessConfig } from '../../common/harness-config';
 import { validateEnvironmentConfigInput, serializeEnvironmentConfig } from '../../common/environment-config';
 import { validateClonePolicyInput, serializeClonePolicy } from '../../common/clone-policy';
@@ -43,14 +35,10 @@ import { agentIsVisibleInWorkspace, agentWorkspaceWhere } from '../../common/age
 export class WorkspacesController {
   constructor(
     @InjectRepository(Workspace) private readonly wsRepo: Repository<Workspace>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly rebacService: ReBACService,
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly workspaceRolesService: WorkspaceRolesService,
-    private readonly promptTemplatesService: PromptTemplatesService,
     private readonly activityService: ActivityService,
   ) {}
 
@@ -80,48 +68,17 @@ export class WorkspacesController {
   async list(@Res() res: Response) {
     const workspaces = await this.wsRepo.find({ order: { created_at: 'DESC' } });
     const result = await Promise.all(workspaces.map(async ws => {
-      const boardCount = await this.boardRepo.count({ where: { workspace_id: ws.id } });
-      return { ...ws, board_count: boardCount };
+      const ticketCount = await this.ticketRepo.count({ where: { workspace_id: ws.id, archived_at: IsNull(), parent_id: IsNull() } });
+      return { ...ws, ticket_count: ticketCount };
     }));
     return res.json(result);
   }
 
   @Post()
   async create(@Body() body: any, @Res() res: Response) {
-    const { name, description = '', board_name } = body;
+    const { name, description = '' } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
-
     const ws = await this.wsRepo.save(this.wsRepo.create({ name, description }));
-    const board = await this.boardRepo.save(this.boardRepo.create({
-      workspace_id: ws.id, name: board_name?.trim() || `${name} Board`, description: '',
-      // Default routing pairs each workflow column with its driving role.
-      // Admins can edit via Board Settings → Routing.
-      routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
-    }));
-    const defaultCols = DEFAULT_COLUMNS.map(c => ({ ...c, board_id: board.id }));
-    const savedCols = await this.colRepo.save(defaultCols.map(c => this.colRepo.create(c)));
-    // v0.41 — fan board.routing_config into per-column role_routing.
-    await writeRoutingConfigThrough(this.dataSource, board.id);
-
-    // v0.34: every new workspace gets the same builtin role preset that
-    // existing workspaces received from the migration. Mention syntax,
-    // routing_config, and trigger dispatch all rely on these slugs being
-    // present, so seeding here keeps fresh workspaces immediately usable.
-    await this.workspaceRolesService.seedBuiltinRoles(ws.id);
-
-    // Default workflow prompt templates + auto-link each column to the
-    // matching template so the board ships with a working column→prompt
-    // map (not just empty routing). seedDefaults must precede the column
-    // map computation; otherwise the templates aren't yet visible.
-    await this.promptTemplatesService.seedDefaults(ws.id);
-    const colPrompts = await this.promptTemplatesService.computeDefaultColumnPrompts(
-      ws.id,
-      savedCols.map(c => ({ id: c.id, name: c.name })),
-    );
-    if (Object.keys(colPrompts).length > 0) {
-      await this.boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
-    }
-
     const result = await this.wsRepo.findOne({ where: { id: ws.id } });
     return res.status(201).json(result);
   }
@@ -129,40 +86,15 @@ export class WorkspacesController {
   @Get(':id')
   async get(@Param('id') id: string, @Res() res: Response) {
     const ws = await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
-
-    const boards = await this.boardRepo.find({ where: { workspace_id: id }, order: { created_at: 'ASC' } });
-    const boardsFull = await Promise.all(boards.map(async board => {
-      const columns = await this.colRepo.find({ where: { board_id: board.id }, order: { position: 'ASC' } });
-      const colsFull = await Promise.all(columns.map(async col => {
-        const tickets = await this.ticketRepo.find({
-          // Archive exclusion (ticket 9b44526b): workspace board snapshots
-          // must hide archived tickets by default — they have their own
-          // dedicated archive endpoint and including them here would silently
-          // re-inflate every consumer of /api/workspaces/:id.
-          where: { column_id: col.id, archived_at: IsNull() },
-          relations: ['children', 'comments'],
-          order: { position: 'ASC' },
-        });
-        return {
-          ...col,
-          tickets: tickets.map(t => ({
-            ...t,
-            labels: JSON.parse(t.labels || '[]'),
-            channel_ids: JSON.parse(t.channel_ids || '[]'),
-            children: (t.children || []).sort((a, b) => a.position - b.position),
-            comments: parseComments(t.comments),
-          })),
-        };
-      }));
-      return { ...board, columns: colsFull };
-    }));
-
-    // Hydrate comment attachments across every ticket in one batched query.
-    const allComments: any[] = [];
-    for (const b of boardsFull) for (const col of b.columns) for (const t of col.tickets) allComments.push(...t.comments);
-    await expandCommentAttachments(this.dataSource, allComments);
-
-    return res.json({ ...ws, boards: boardsFull });
+    const rows = await this.ticketRepo.createQueryBuilder('t')
+      .select('t.status', 'status')
+      .addSelect('COUNT(*)', 'n')
+      .where('t.workspace_id = :ws AND t.parent_id IS NULL AND t.archived_at IS NULL', { ws: id })
+      .groupBy('t.status')
+      .getRawMany();
+    const ticket_counts: Record<string, number> = {};
+    for (const r of rows) ticket_counts[r.status] = Number(r.n);
+    return res.json({ ...ws, ticket_counts });
   }
 
   @Patch(':id')
@@ -178,17 +110,12 @@ export class WorkspacesController {
     // audit can record old→new (ticket 1fcba693). These are the settings that
     // pace the supervisor backstop — the incident was a 4 h supervisor_stale_ms
     // applied with no trail. Audit written after a successful save below.
-    const cadenceBefore = {
-      supervisor_stale_ms: ws.supervisor_stale_ms,
-      supervisor_resend_ms: ws.supervisor_resend_ms,
-      dispatch_queue_depth: ws.dispatch_queue_depth,
-      claim_verification_grace_ms: ws.claim_verification_grace_ms,
-    };
+    const cadenceBefore = cadenceSnapshot(ws);
 
     const {
       name, description,
-      supervisor_stale_ms, supervisor_resend_ms, dispatch_queue_depth,
-      claim_verification_enabled, claim_verification_grace_ms,
+      supervisor_stale_ms, supervisor_resend_ms,
+      max_concurrent_tickets_per_agent, dispatch_paused_at, language, auto_archive_days,
       chat_workspace_folder_enabled,
       harness_config, environment_config,
       hard_budget_config, clone_policy,
@@ -196,11 +123,9 @@ export class WorkspacesController {
     if (name !== undefined) ws.name = name;
     if (description !== undefined) ws.description = description;
 
-    // v0.41 — cadence settings (AC #4). These bound the supervisor
-    // backstop frequency and the per-agent dispatch queue depth. Defaults
-    // (30 min / 5 min / 100) live in the entity column; we accept any
-    // positive finite integer here and silently ignore garbage so a bad
-    // PATCH can't wedge the workspace into "0 ms stale check".
+    // Supervisor cadence (TicketDispatchService). Defaults (30 min / 5 min)
+    // live in the entity column; only positive finite integers are accepted
+    // so a bad PATCH can't wedge the workspace into "0 ms stale check".
     if (supervisor_stale_ms !== undefined) {
       const v = Number(supervisor_stale_ms);
       if (Number.isFinite(v) && v > 0) ws.supervisor_stale_ms = Math.floor(v);
@@ -211,36 +136,43 @@ export class WorkspacesController {
       if (Number.isFinite(v) && v > 0) ws.supervisor_resend_ms = Math.floor(v);
       else return res.status(400).json({ error: 'supervisor_resend_ms must be a positive number' });
     }
-    if (dispatch_queue_depth !== undefined) {
-      const v = Number(dispatch_queue_depth);
-      if (Number.isFinite(v) && v > 0) ws.dispatch_queue_depth = Math.floor(v);
-      else return res.status(400).json({ error: 'dispatch_queue_depth must be a positive number' });
+    // Ticket dispatch settings that used to live on each board (docs/tickets.md).
+    if (max_concurrent_tickets_per_agent !== undefined) {
+      const v = Number(max_concurrent_tickets_per_agent);
+      if (Number.isInteger(v) && v >= 1 && v <= 50) ws.max_concurrent_tickets_per_agent = v;
+      else return res.status(400).json({ error: 'max_concurrent_tickets_per_agent must be an integer 1..50' });
+    }
+    if (dispatch_paused_at !== undefined) {
+      if (dispatch_paused_at === null || dispatch_paused_at === false || dispatch_paused_at === '') {
+        ws.dispatch_paused_at = null;
+      } else {
+        const at = dispatch_paused_at === true ? new Date() : new Date(dispatch_paused_at);
+        if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'dispatch_paused_at must be an ISO timestamp, true or null' });
+        ws.dispatch_paused_at = ws.dispatch_paused_at || at;
+      }
+    }
+    if (language !== undefined) {
+      const v = language == null ? '' : String(language).trim();
+      ws.language = v ? v.slice(0, 64) : null;
+    }
+    if (auto_archive_days !== undefined) {
+      if (auto_archive_days === null || auto_archive_days === '') {
+        ws.auto_archive_days = null;
+      } else {
+        const v = Number(auto_archive_days);
+        if (Number.isInteger(v) && v >= 1 && v <= 365) ws.auto_archive_days = v;
+        else return res.status(400).json({ error: 'auto_archive_days must be null or an integer 1..365' });
+      }
     }
 
-    // Claim-verification settings (ticket dcb9d661). `enabled` is stored
-    // as int (0/1) for SQLite compat; we accept boolean / number / string
-    // truthy values and normalise. `grace_ms` requires a positive finite
-    // integer — same shape as the supervisor cadences above.
-    if (claim_verification_enabled !== undefined) {
-      const raw = claim_verification_enabled;
-      const v = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
-      ws.claim_verification_enabled = v;
-    }
-    if (claim_verification_grace_ms !== undefined) {
-      const v = Number(claim_verification_grace_ms);
-      if (Number.isFinite(v) && v > 0) ws.claim_verification_grace_ms = Math.floor(v);
-      else return res.status(400).json({ error: 'claim_verification_grace_ms must be a positive number' });
-    }
-
-    // 채팅-워크스페이스-폴더 opt-in(티켓 9fd27487). 위 claim_verification_enabled와
-    // 동일한 int(0/1) truthy 정규화 방식을 사용한다.
+    // 채팅-워크스페이스-폴더 opt-in(티켓 9fd27487).    // 채팅-워크스페이스-폴더 opt-in(티켓 9fd27487). int(0/1) truthy 정규화.
     if (chat_workspace_folder_enabled !== undefined) {
       const raw = chat_workspace_folder_enabled;
       ws.chat_workspace_folder_enabled = (raw === true || raw === 1 || raw === '1' || raw === 'true') ? 1 : 0;
     }
 
-    // Workspace-wide default agent harness (ticket 7122600c). Same contract
-    // as the board PATCH: null clears, objects are strict-zod-validated → 400.
+    // Workspace agent harness (ticket 7122600c): null clears, objects are
+    // strict-zod-validated → 400.
     if (harness_config !== undefined) {
       if (harness_config === null) {
         ws.harness_config = null;
@@ -251,12 +183,9 @@ export class WorkspacesController {
       }
     }
 
-    // Workspace-wide default hard-budget ceiling (ticket a51ec6d9). Same
-    // contract as the board PATCH: null clears, objects are strict-zod-
-    // validated → 400. Also the sole scope axis for the QA/Action/
-    // Orchestration run-creation-rate ceiling (common/run-budget-guard.ts) —
-    // those entities have no board_id, so this workspace column is their
-    // only override point.
+    // Workspace hard-budget ceiling (ticket a51ec6d9) — the QA/Action/
+    // Orchestration run-creation-rate guard (common/run-budget-guard.ts).
+    // null clears, objects are strict-zod-validated → 400.
     if (hard_budget_config !== undefined) {
       if (hard_budget_config === null) {
         ws.hard_budget_config = null;
@@ -267,9 +196,8 @@ export class WorkspacesController {
       }
     }
 
-    // Workspace-wide default environment setup (ticket 354d336b; simplified in
-    // 8fbe90e9). Same contract as the board PATCH: null clears; objects are
-    // normalised to repositories[].resource_id only (legacy keys dropped).
+    // Workspace environment setup (ticket 354d336b) — env vars for ticket
+    // agents. null clears.
     if (environment_config !== undefined) {
       if (environment_config === null) {
         ws.environment_config = null;
@@ -280,8 +208,8 @@ export class WorkspacesController {
       }
     }
 
-    // Workspace-wide default repository clone policy (ticket bddb63ee). Repo
-    // Resources override it per key; null clears. 두 레이어 모두 비면 시스템
+    // Workspace-wide default repository clone policy (ticket bddb63ee).
+    // Projects override it per key; null clears. 두 레이어 모두 비면 시스템
     // 기본값(clone timeout 60분)이 그대로 적용된다.
     if (clone_policy !== undefined) {
       if (clone_policy === null) {
@@ -332,17 +260,16 @@ export class WorkspacesController {
   private async _auditCadenceChangesTx(
     manager: EntityManager,
     workspaceId: string,
-    before: { supervisor_stale_ms: number; supervisor_resend_ms: number; dispatch_queue_depth: number; claim_verification_grace_ms: number },
+    before: ReturnType<typeof cadenceSnapshot>,
     after: Workspace,
     actor: { actorId: string; actorName: string; source: string },
   ): Promise<ActivityLog[]> {
-    const fields: Array<keyof typeof before> = [
-      'supervisor_stale_ms', 'supervisor_resend_ms', 'dispatch_queue_depth', 'claim_verification_grace_ms',
-    ];
+    const now = cadenceSnapshot(after);
+    const fields = Object.keys(before) as Array<keyof typeof before>;
     const rows: ActivityLog[] = [];
     for (const field of fields) {
       const oldVal = before[field];
-      const newVal = (after as any)[field];
+      const newVal = now[field];
       if (oldVal === newVal) continue;
       rows.push(await this.activityService.logActivityTx(manager, {
         entity_type: 'workspace',
@@ -368,6 +295,7 @@ export class WorkspacesController {
     const count = await this.wsRepo.count();
     if (count <= 1) return res.status(400).json({ error: 'Cannot delete the last workspace' });
 
+    await deleteWorkspaceContent(this.dataSource, ws.id);
     await this.wsRepo.delete(ws.id);
     return res.json({ success: true });
   }
@@ -445,9 +373,9 @@ export class WorkspacesController {
   // ─── Mention autocomplete candidates ───────────────────────
   //
   // Returns the user + agent set the composer's @-dropdown should show for
-  // this workspace. When `ticket_id` is supplied, role shortcuts are included
-  // only for roles that the ticket has filled — otherwise `@assignee` etc.
-  // would resolve to nothing and confuse the user.
+  // this workspace. The only agent a ticket comment can wake is the ticket's
+  // assignee, so the agent section is that one agent (when `ticket_id` is
+  // supplied and the ticket has one).
 
   @Get(':id/mention-candidates')
   async mentionCandidates(
@@ -457,20 +385,19 @@ export class WorkspacesController {
   ) {
     await findOrFail(this.wsRepo, { where: { id } }, 'Workspace not found');
 
-    // P4c-4: Agent 행 없음 — 멘션 후보의 agent 섹션은 Host 목록으로 채운다.
-    const [members, owners, hosts] = await Promise.all([
+    const [members, owners] = await Promise.all([
       this.rebacService.listSubjects({ type: 'workspace', id }, 'member'),
       this.rebacService.listSubjects({ type: 'workspace', id }, 'owner'),
-      this.dataSource.getRepository(RuntimeHost).find({ order: { name: 'ASC' } }),
     ]);
-    const agents = hosts.map((h) => ({
-      id: h.id,
-      name: h.name,
-      manager_agent_id: null as string | null,
-    }));
-
-    // P4c-4: agent 섹션은 Host 목록이다 — Host 자체가 정체성이라 prefix 불필요.
-    const formatAgent = (a: { name: string }): string => a.name;
+    const agents: Array<{ id: string; name: string }> = [];
+    if (ticketId) {
+      const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
+      const spec = ticket ? parseRuntimeSpec(ticket.assignee) : null;
+      if (ticket && spec && ticket.assignee_key) {
+        const host = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: spec.manager_agent_id } });
+        agents.push({ id: ticket.assignee_key, name: host ? `${host.name}/${spec.label}` : spec.label });
+      }
+    }
 
     const allUserIds = [...new Set([
       ...members.filter(s => s.type === 'user').map(s => s.id),
@@ -482,55 +409,6 @@ export class WorkspacesController {
           .sort((a, b) => a.name.localeCompare(b.name))
       : [];
 
-    // v0.34: role shortcuts come from the workspace_roles table (any slug
-    // the workspace has defined), not the hardcoded triple. Each shortcut
-    // resolves against the ticket_role_assignments row for that role on
-    // the supplied ticket; roles with no assignment are omitted (so
-    // `@assignee` only appears in the autocompleter when an assignee is set).
-    const roleShortcuts: Array<{
-      key: string;
-      label: string;
-      resolved_type: 'agent' | 'user';
-      resolved_id: string;
-    }> = [];
-    if (ticketId) {
-      const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
-      if (ticket) {
-        const wsRoles = await this.dataSource
-          .getRepository(WorkspaceRole)
-          .find({ where: { workspace_id: id }, order: { position: 'ASC' } });
-        const assignments = await this.dataSource
-          .getRepository(TicketRoleAssignment)
-          .find({ where: { ticket_id: ticket.id } });
-        const byRoleId = new Map(assignments.map(a => [a.role_id, a]));
-        const agentById = new Map(agents.map(a => [a.id, a]));
-        const userById = new Map(users.map(u => [u.id, u]));
-        for (const role of wsRoles) {
-          const a = byRoleId.get(role.id);
-          if (!a) continue;
-          if (a.agent_id) {
-            const agent = agentById.get(a.agent_id);
-            const label = agent ? `${role.slug} (${formatAgent(agent)})` : role.slug;
-            roleShortcuts.push({
-              key: role.slug,
-              label,
-              resolved_type: 'agent',
-              resolved_id: a.agent_id,
-            });
-          } else if (a.user_id) {
-            const u = userById.get(a.user_id);
-            const label = u ? `${role.slug} (${u.name})` : role.slug;
-            roleShortcuts.push({
-              key: role.slug,
-              label,
-              resolved_type: 'user',
-              resolved_id: a.user_id,
-            });
-          }
-        }
-      }
-    }
-
     return res.json({
       users,
       agents: agents.map((a) => ({
@@ -540,7 +418,17 @@ export class WorkspacesController {
         manager_agent_id: null,
         manager_name: null,
       })),
-      role_shortcuts: roleShortcuts,
+      role_shortcuts: [],
     });
   }
+}
+
+/** The settings whose changes get a `config_changed` audit row (ticket 1fcba693). */
+function cadenceSnapshot(ws: Workspace) {
+  return {
+    supervisor_stale_ms: String(ws.supervisor_stale_ms),
+    supervisor_resend_ms: String(ws.supervisor_resend_ms),
+    max_concurrent_tickets_per_agent: String(ws.max_concurrent_tickets_per_agent),
+    dispatch_paused_at: ws.dispatch_paused_at ? new Date(ws.dispatch_paused_at).toISOString() : '',
+  };
 }

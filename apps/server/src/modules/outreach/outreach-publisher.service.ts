@@ -380,7 +380,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
     return null; // 'off' — never reached (filtered upstream)
   }
 
-  /** Tickets that reached a terminal column strictly after `since` (null =
+  /** Tickets that entered `done` strictly after `since` (null =
    *  no prior publish on record → no changelog, not "everything ever"). */
   private async _collectDoneTickets(workspaceId: string, since: Date | null): Promise<ReleaseDoneTicket[]> {
     if (!since) return [];

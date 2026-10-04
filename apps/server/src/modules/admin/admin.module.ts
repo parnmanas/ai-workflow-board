@@ -2,14 +2,11 @@ import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from '../../entities/User';
 import { Workspace } from '../../entities/Workspace';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { DiagnosticsController, PublicDiagnosticsController } from './diagnostics.controller';
 import { LogsController } from './logs.controller';
 import { PendingUsersController } from './pending-users.controller';
 import { SettingsController } from './settings.controller';
-import { StuckTicketsController } from './stuck-tickets.controller';
 import { WorkflowHealthController } from './workflow-health.controller';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
@@ -20,11 +17,10 @@ import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, Workspace, Board, BoardColumn, SystemSetting, ClaudeBackendProfile]),
-    // AgentsModule exports StuckTicketDetectorService, which the new
-    // /api/admin/stuck-tickets controller consults for current alert
-    // rows / re-alert / dismiss. forwardRef defends against any future
-    // cycle if AgentsModule starts importing AdminModule symbols.
+    TypeOrmModule.forFeature([User, Workspace, SystemSetting, ClaudeBackendProfile]),
+    // AgentsModule exports AgentUsageService, which the workflow-health
+    // controller reads. forwardRef defends against any future cycle if
+    // AgentsModule starts importing AdminModule symbols.
     forwardRef(() => AgentsModule),
   ],
   controllers: [
@@ -33,7 +29,6 @@ import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
     LogsController,
     PendingUsersController,
     SettingsController,
-    StuckTicketsController,
     WorkflowHealthController,
     ClaudeBackendProfilesController,
     ClaudeBackendProfileCatalogController,

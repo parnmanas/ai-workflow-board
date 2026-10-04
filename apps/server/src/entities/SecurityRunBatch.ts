@@ -32,9 +32,6 @@ export class SecurityRunBatch {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   // Ordered profile ids to run, one after another.
   @Column({ type: 'simple-json', nullable: true, default: null })
   profile_ids: string[] | null;

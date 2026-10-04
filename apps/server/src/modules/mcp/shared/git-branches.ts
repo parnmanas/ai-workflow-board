@@ -42,9 +42,6 @@ export async function resolveGitCredential(
   if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
     throw new GitCredentialResolutionError('Selected credential belongs to a different workspace');
   }
-  if (cred.board_id !== null && cred.board_id !== undefined) {
-    throw new GitCredentialResolutionError('Selected credential has not been migrated to Workspace scope');
-  }
   try {
     const data = JSON.parse(decryptStrict(cred.encrypted_data));
     const token = String(data.token || data.api_key || '').trim();

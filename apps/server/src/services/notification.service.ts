@@ -7,11 +7,10 @@ import { LogService } from './log.service';
 import { Ticket } from '../entities/Ticket';
 import { Comment } from '../entities/Comment';
 import { User } from '../entities/User';
-import { BoardColumn } from '../entities/BoardColumn';
 import { ActivityLog } from '../entities/ActivityLog';
-import { WorkspaceRole } from '../entities/WorkspaceRole';
-import { TicketRoleAssignment } from '../entities/TicketRoleAssignment';
 import { resolveAgentDisplayName } from '../utils/agent-name';
+import { displayNameForRuntime, parseRuntimeSpec } from '../common/runtime-spec';
+import { ticketParticipantUserIds } from './notification-providers/ticket-participants';
 
 const ACTION_COLORS: Record<string, number> = {
   created: 0x34d399,
@@ -20,6 +19,13 @@ const ACTION_COLORS: Record<string, number> = {
   deleted: 0xef4444,
   status_changed: 0xa78bfa,
 };
+
+interface TicketPeople {
+  assignee_name: string;
+  creator_name: string;
+  creator_user_id: string;
+  participant_user_ids: string[];
+}
 
 @Injectable()
 export class NotificationService implements OnModuleInit, OnModuleDestroy {
@@ -30,82 +36,38 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectDataSource() private readonly dataSource: DataSource,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
-    @InjectRepository(WorkspaceRole) private readonly roleRepo: Repository<WorkspaceRole>,
-    @InjectRepository(TicketRoleAssignment) private readonly assignRepo: Repository<TicketRoleAssignment>,
     private readonly discordService: DiscordService,
     private readonly logService: LogService,
   ) {}
 
   /**
-   * Resolve the assignee + reporter holders for a ticket via
-   * TicketRoleAssignment, falling back to the legacy
-   * `assignee` / `reporter` display columns when an assignment row hasn't
-   * been created yet (mid-migration drift). Discord notifications only
-   * mention these two slugs — custom roles aren't surfaced there yet.
+   * Who to show and ping for a ticket. The assignee is an agent (a
+   * RuntimeSpec, docs/tickets.md) — shown by its `<Host>/<label>` display,
+   * never @-mentioned (agents have no Discord identity). The people pinged are
+   * the ticket's human participants: its creator, commenters and mentioned
+   * users (ticketParticipantUserIds).
    */
-  private async _resolveLegacyHolders(ticket: Ticket): Promise<{
-    assignee_id: string;
-    assignee_name: string;
-    reporter_id: string;
-    reporter_name: string;
-  }> {
-    let assignee_id = '';
-    let assignee_name = ticket.assignee || '';
-    let reporter_id = '';
-    let reporter_name = ticket.reporter || '';
-
-    if (ticket.workspace_id) {
-      const roles = await this.roleRepo.find({
-        where: { workspace_id: ticket.workspace_id },
-      });
-      const bySlug = new Map(roles.map(r => [r.slug, r]));
-      const ar = bySlug.get('assignee');
-      const rr = bySlug.get('reporter');
-      const wantedRoleIds = [ar?.id, rr?.id].filter((x): x is string => !!x);
-      if (wantedRoleIds.length > 0) {
-        const assignments = await this.assignRepo
-          .createQueryBuilder('a')
-          .where('a.ticket_id = :tid', { tid: ticket.id })
-          .andWhere('a.role_id IN (:...rids)', { rids: wantedRoleIds })
-          .getMany();
-        for (const a of assignments) {
-          const role = roles.find(r => r.id === a.role_id);
-          if (!role) continue;
-          if (a.agent_id) {
-            // Use the canonical `<Manager>/<Agent>` display so Discord embeds
-            // match what the user sees on the board (TicketCard / activity feed
-            // already render the prefixed form). resolveAgentDisplayName falls
-            // back to the bare name if the manager row is missing.
-            const display = await resolveAgentDisplayName(this.dataSource, a.agent_id);
-            if (role.slug === 'assignee') {
-              assignee_id = a.agent_id;
-              assignee_name = display || assignee_name;
-            } else if (role.slug === 'reporter') {
-              reporter_id = a.agent_id;
-              reporter_name = display || reporter_name;
-            }
-          } else if (a.user_id) {
-            const user = await this.userRepo.findOne({ where: { id: a.user_id } });
-            if (role.slug === 'assignee') {
-              assignee_id = a.user_id;
-              assignee_name = user?.name || user?.email || assignee_name;
-            } else if (role.slug === 'reporter') {
-              reporter_id = a.user_id;
-              reporter_name = user?.name || user?.email || reporter_name;
-            }
-          }
-        }
-      }
+  private async _resolvePeople(ticket: Ticket): Promise<TicketPeople> {
+    let assignee_name = '';
+    const spec = parseRuntimeSpec(ticket.assignee);
+    if (spec) {
+      const hostName = await resolveAgentDisplayName(this.dataSource, spec.manager_agent_id);
+      assignee_name = displayNameForRuntime(hostName || spec.manager_agent_id.slice(0, 8), spec);
     }
+    const creator_user_id = ticket.created_by_type === 'user' ? (ticket.created_by_id || '') : '';
+    const participant_user_ids = await ticketParticipantUserIds(this.dataSource, ticket).catch(() => [] as string[]);
+    return { assignee_name, creator_name: ticket.created_by || '', creator_user_id, participant_user_ids };
+  }
 
-    // Legacy column fallback — populated by the v0.34 migration backfill or
-    // any pre-migration write-through. Keeps Discord working until Deploy 2
-    // strips these columns.
-    if (!assignee_id && (ticket as any).assignee_id) assignee_id = (ticket as any).assignee_id;
-    if (!reporter_id && (ticket as any).reporter_id) reporter_id = (ticket as any).reporter_id;
-
-    return { assignee_id, assignee_name, reporter_id, reporter_name };
+  /** `<@discordId>` for every given participant who linked a Discord account
+   *  (callers drop the actor — nobody is pinged about their own change). */
+  private async _mentionString(userIds: string[]): Promise<string> {
+    const mentions = new Set<string>();
+    for (const id of userIds) {
+      const discordId = await this.resolveDiscordId(id, '');
+      if (discordId) mentions.add(`<@${discordId}>`);
+    }
+    return [...mentions].join(' ');
   }
 
   /** Walk from a ticket up to the root, returning the hierarchy path (top-down). */
@@ -226,10 +188,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
 
   private async buildNotificationMessage(log: ActivityLog): Promise<{ content: string; embeds: any[] } | null> {
     let ticketTitle = '';
-    let reporterId = '';
-    let reporterName = '';
-    let assigneeId = '';
-    let assigneeName = '';
+    let people: TicketPeople | null = null;
     let isChildTicket = false;
 
     if (log.entity_type === 'comment') {
@@ -237,20 +196,11 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       const ticket = await this.ticketRepo.findOne({ where: { id: log.ticket_id } });
       if (ticket) {
         ticketTitle = ticket.title;
-        const holders = await this._resolveLegacyHolders(ticket);
-        reporterId = holders.reporter_id;
-        reporterName = holders.reporter_name;
-        assigneeId = holders.assignee_id;
-        assigneeName = holders.assignee_name;
+        people = await this._resolvePeople(ticket);
         isChildTicket = ticket.depth > 0;
       }
 
-      const reporterDiscordId = await this.resolveDiscordId(reporterId, reporterName);
-      const assigneeDiscordId = await this.resolveDiscordId(assigneeId, assigneeName);
-      const mentions = new Set<string>();
-      if (reporterDiscordId) mentions.add(`<@${reporterDiscordId}>`);
-      if (assigneeDiscordId) mentions.add(`<@${assigneeDiscordId}>`);
-      const mentionStr = [...mentions].join(' ');
+      const mentionStr = await this._mentionString((people?.participant_user_ids ?? []).filter(id => id !== log.actor_id));
 
       const hierarchyBreadcrumb = isChildTicket
         ? await this.buildHierarchyBreadcrumb(log.ticket_id)
@@ -268,10 +218,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       description += `**Ticket**: ${ticketTitle}`;
       if (commentContent) description += `\n\n💬 ${commentContent}`;
 
-      const assigneeDisplay = assigneeDiscordId ? `<@${assigneeDiscordId}>` : assigneeName;
-      const reporterDisplay = reporterDiscordId ? `<@${reporterDiscordId}>` : reporterName;
-      if (assigneeDisplay) description += `\n\n**Assignee**: ${assigneeDisplay}`;
-      if (reporterDisplay) description += `\n**Reporter**: ${reporterDisplay}`;
+      description += await this._peopleLines(people, '\n\n');
       if (log.actor_name) description += `\n**By**: ${log.actor_name}`;
 
       const titlePrefix = isChildTicket ? '[Subtask] ' : '';
@@ -291,11 +238,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       const ticket = await this.ticketRepo.findOne({ where: { id: log.entity_id } });
       if (ticket) {
         ticketTitle = ticket.title;
-        const holders = await this._resolveLegacyHolders(ticket);
-        reporterId = holders.reporter_id;
-        reporterName = holders.reporter_name;
-        assigneeId = holders.assignee_id;
-        assigneeName = holders.assignee_name;
+        people = await this._resolvePeople(ticket);
         isChildTicket = ticket.depth > 0;
       }
     } else if (log.entity_type === 'subtask') {
@@ -305,11 +248,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       });
       if (childTicket) {
         ticketTitle = childTicket.title;
-        const holders = await this._resolveLegacyHolders(childTicket);
-        reporterId = holders.reporter_id;
-        reporterName = holders.reporter_name;
-        assigneeId = holders.assignee_id;
-        assigneeName = holders.assignee_name;
+        people = await this._resolvePeople(childTicket);
         isChildTicket = true;
       }
     }
@@ -318,20 +257,11 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       const ticket = await this.ticketRepo.findOne({ where: { id: log.ticket_id } });
       if (ticket) {
         ticketTitle = ticket.title;
-        const holders = await this._resolveLegacyHolders(ticket);
-        if (!reporterId) reporterId = holders.reporter_id;
-        if (!reporterName) reporterName = holders.reporter_name;
-        if (!assigneeId) assigneeId = holders.assignee_id;
-        if (!assigneeName) assigneeName = holders.assignee_name;
+        people = await this._resolvePeople(ticket);
       }
     }
 
-    const reporterDiscordId = await this.resolveDiscordId(reporterId, reporterName);
-    const assigneeDiscordId = await this.resolveDiscordId(assigneeId, assigneeName);
-    const mentions = new Set<string>();
-    if (reporterDiscordId) mentions.add(`<@${reporterDiscordId}>`);
-    if (assigneeDiscordId) mentions.add(`<@${assigneeDiscordId}>`);
-    const mentionStr = [...mentions].join(' ');
+    const mentionStr = await this._mentionString((people?.participant_user_ids ?? []).filter(id => id !== log.actor_id));
 
     const actionLabel = log.action.replace('_', ' ').toUpperCase();
 
@@ -352,10 +282,7 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       if (log.new_value) description += `\n**To**: ${log.new_value}`;
     }
 
-    const assigneeDisplay = assigneeDiscordId ? `<@${assigneeDiscordId}>` : assigneeName;
-    const reporterDisplay = reporterDiscordId ? `<@${reporterDiscordId}>` : reporterName;
-    if (assigneeDisplay) description += `\n**Assignee**: ${assigneeDisplay}`;
-    if (reporterDisplay) description += `\n**Reporter**: ${reporterDisplay}`;
+    description += await this._peopleLines(people, '\n');
     if (log.actor_name) description += `\n**By**: ${log.actor_name}`;
 
     const titlePrefix = isChildTicket ? `[Subtask] ${actionLabel}` : actionLabel;
@@ -369,6 +296,20 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
         timestamp: new Date().toISOString(),
       }],
     };
+  }
+
+  /** "Assignee" (agent display) + "Created by" (Discord mention when linked) lines. */
+  private async _peopleLines(
+    people: TicketPeople | null,
+    leading: string,
+  ): Promise<string> {
+    if (!people) return '';
+    const lines: string[] = [];
+    if (people.assignee_name) lines.push(`**Assignee**: ${people.assignee_name}`);
+    const creatorDiscordId = await this.resolveDiscordId(people.creator_user_id, '');
+    const creatorDisplay = creatorDiscordId ? `<@${creatorDiscordId}>` : people.creator_name;
+    if (creatorDisplay) lines.push(`**Created by**: ${creatorDisplay}`);
+    return lines.length > 0 ? leading + lines.join('\n') : '';
   }
 
   private async resolveDiscordId(id: string, name: string): Promise<string> {
@@ -385,11 +326,5 @@ export class NotificationService implements OnModuleInit, OnModuleDestroy {
       if (user?.discord_user_id) return user.discord_user_id;
     }
     return '';
-  }
-
-  private async resolveColumnName(columnId: string): Promise<string> {
-    if (!columnId) return '';
-    const col = await this.colRepo.findOne({ where: { id: columnId } });
-    return col ? col.name : `Column #${columnId}`;
   }
 }

@@ -16,7 +16,6 @@ function scheduleToJson(s: WorkspaceSchedule) {
   return {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     target_agent_id: s.target_agent_id,
     task_prompt: s.task_prompt,
@@ -87,7 +86,6 @@ export class WorkspaceScheduleController {
       const user = (req as any).currentUser as { id: string } | undefined;
       const row = await this.scheduleService.create({
         workspaceId: body?.workspace_id,
-        boardId: body?.board_id ?? undefined,
         name: body?.name,
         targetAgentId: body?.target_agent_id,
         targetRuntime: body?.target_runtime,
@@ -108,7 +106,6 @@ export class WorkspaceScheduleController {
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
       const row = await this.scheduleService.update(id, body?.workspace_id, {
-        boardId: body?.board_id,
         name: body?.name,
         targetAgentId: body?.target_agent_id,
         targetRuntime: body?.target_runtime,

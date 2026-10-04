@@ -2,8 +2,8 @@
  * CiWaitResumeService — durable resume for the `await_ci_run` wait (ticket
  * 778b6dc7).
  *
- * Background: the Merging workflow gates landing on a pre-landing
- * `workflow_dispatch` CI run (ticket 34a6281a/623400e7). Waiting for that
+ * Background: landing work can gate on a pre-landing `workflow_dispatch` CI
+ * run (ticket 34a6281a/623400e7). Waiting for that
  * run to complete inside a live session — `sleep`/`gh run watch`/polling,
  * or worse, misusing the CLI-harness-only `ScheduleWakeup` tool (which has
  * no concept in AWB itself) — has repeatedly ended the session mid-wait
@@ -12,10 +12,10 @@
  * wait into durable ticket state (`pending_ci_wait` + `ci_wait_context`)
  * instead; this service is the sweep that resolves it.
  *
- * Sibling of `CiHealthMonitorService` / `StuckTicketDetectorService` — same
- * setInterval+unref sweep skeleton — but polls a SPECIFIC registered run per
- * ticket (from `Ticket.ci_wait_context`) rather than scanning a board's
- * recent runs for a red streak. No dedicated alert entity: the wait state
+ * Sibling of `CiHealthMonitorService` — same setInterval+unref sweep
+ * skeleton — but polls a SPECIFIC registered run per ticket (from
+ * `Ticket.ci_wait_context`) rather than scanning a project's recent runs for
+ * a red streak. No dedicated alert entity: the wait state
  * already lives directly on the Ticket row, one wait at a time.
  *
  * Delivery design (review rounds 1-3 — read this before touching
@@ -31,8 +31,7 @@
  *      inserts the resolution comment on the SAME transaction manager.
  *
  *      Round 2 tried to coordinate this with a lease
- *      (`lease_owner`/`lease_expires_at`/`delivery_generation`, mirroring
- *      `DispatchIntentService.claimForDispatch`) plus two separate durable
+ *      (`lease_owner`/`lease_expires_at`/`delivery_generation`) plus two separate durable
  *      flags (`comment_posted`/`dispatch_done`) flipped by CAS AFTER each
  *      side effect. Round 3 correctly rejected this: a lease only
  *      coordinates CONCURRENT attempts — it cannot close the window between
@@ -56,34 +55,31 @@
  *      `.orIgnore()` so even a hypothetical second winning transaction for
  *      the same outcome could not produce two comments.
  *
- *   3. The resume DISPATCH (`dispatchCurrentColumn`) is deliberately NOT
- *      inside that transaction — it is a fire-and-forget in-process
- *      EventEmitter emit that crosses to agent-manager over SSE, so it
- *      cannot participate in a local DB transaction, and by the time
+ *   3. The resume DISPATCH (`TicketDispatchService.resumeTicket`) is
+ *      deliberately NOT inside that transaction — it is a fire-and-forget
+ *      in-process EventEmitter emit that crosses to agent-manager over SSE,
+ *      so it cannot participate in a local DB transaction, and by the time
  *      `_deliver` reaches it `pending_ci_wait` is ALREADY durably false
- *      (`dispatchCurrentColumn` itself refuses to emit for a still-pending
- *      ticket — trigger-loop.service.ts's `pending_user_action /
- *      pending_on_tickets / pending_ci_wait` gate — so this call MUST run
+ *      (dispatch itself refuses to emit for a still-pending ticket —
+ *      `isTicketPending` covers `pending_ci_wait` — so this call MUST run
  *      after the CAS, never before; an earlier draft of this service called
  *      it before clearing the flag and its dispatch was silently always a
  *      no-op against the real gate, a gap the round-2 tests never caught
- *      because they stubbed `dispatchCurrentColumn` without reproducing
- *      that gate). This call is therefore best-effort: if it throws or the
- *      process dies right after the transaction commits, there is no
- *      "resume dispatch" bookkeeping left to lose, because the general
- *      dispatch-durability machinery already owns this ticket the instant
- *      `pending_ci_wait` flips false — `DispatchReconcilerService.
- *      _seedMissingIntents` (dispatch-reconciler.service.ts) scans every
- *      non-terminal, non-archived, non-pending ticket (its own pending
- *      check already includes `pending_ci_wait`, added in this ticket's
- *      round 1) and seeds+dispatches any routed ticket idle past
- *      `seedAfterMs` (default 3 min) with no open `DispatchIntent` for the
- *      role — itself DB-deduped via `dispatch_intents`' partial unique
- *      index. So the guarantee is layered, not hand-waved: AT MOST one
- *      direct dispatch from this call (nothing retries it — this ticket is
- *      no longer in the `pending_ci_wait=true` sweep candidate set), and AT
- *      LEAST one eventual dispatch from the reconciler's independent,
- *      already-hardened idle-seed sweep.
+ *      because they stubbed the dispatcher without reproducing that gate).
+ *      `resumeTicket` re-sends an `in_progress` ticket, queues a `todo` one,
+ *      and does nothing for any other status — a ticket that reached done
+ *      while parked just gets the comment. This call is therefore
+ *      best-effort: if it throws or the process dies right after the
+ *      transaction commits, there is no "resume dispatch" bookkeeping left to
+ *      lose, because `TicketDispatchService`'s own sweep owns this ticket the
+ *      instant `pending_ci_wait` flips false — a `todo` ticket is started by
+ *      its queue pump, and an `in_progress` one whose agent has no live
+ *      strand is re-sent by its supervisor once `supervisor_stale_ms` passes
+ *      without activity (the resolution comment counts as the last signal).
+ *      So the guarantee is layered: AT MOST one direct dispatch from this
+ *      call (nothing retries it — this ticket is no longer in the
+ *      `pending_ci_wait=true` sweep candidate set), and AT LEAST one
+ *      eventual dispatch from the dispatcher's independent sweep.
  *
  * Bounded wait: a run that never reaches a terminal status (deleted
  * workflow, stuck queue, wrong run id) would otherwise hang the ticket
@@ -95,21 +91,15 @@
  * Credential resolution (ticket 9bbe9146): `getWorkflowRun` needs a
  * `credential_id` to authenticate past `GitHubConnectorService`'s env-token
  * fallback (`process.env.GITHUB_TOKEN`, commonly unset — this deployment
- * authenticates via per-Resource stored credentials instead, see
- * `github-tools.ts`'s `sync_github_resource` comment). An earlier version of
- * this service never resolved one at all, so every poll silently degraded
- * to "no token" (`isGitHubDegradableError` → `getWorkflowRun` returns null)
- * and looked EXACTLY like "still queued" — six real Merging tickets sat
- * parked for 1-2h before a human noticed. `_resolveCredentialId` resolves
- * `Ticket.base_repo_resource_id` → `Resource` (workspace-scope checked,
- * mirrors `ClaimVerificationService._lookupRemoteSha`) → `Resource.
- * credential_id` — but falls back to the ticket's BOARD environment repo
- * (`pickBaseRepoResourceId`, same helper `trigger-loop.service.ts` dispatch
- * uses) when the ticket carries no repo binding of its own, since on some
- * boards every ticket's `base_repo_resource_id` is permanently empty (round 4
- * live-probe finding — dispatch resolves the board-env repo into the SSE
- * payload but never persists it onto the ticket row). Degrades to null when
- * NEITHER source resolves — never blocks the sweep.
+ * authenticates via stored per-repository credentials instead). An earlier
+ * version of this service never resolved one at all, so every poll silently
+ * degraded to "no token" (`isGitHubDegradableError` → `getWorkflowRun`
+ * returns null) and looked EXACTLY like "still queued" — six real tickets
+ * sat parked for 1-2h before a human noticed. `_resolveCredentialId` reads
+ * the ticket's project (`Ticket.project_id`, workspace-scope checked) →
+ * `Project.credential_id` — the same project dispatch ships as the ticket's
+ * `base_repo`. Degrades to null when the ticket has no project — never
+ * blocks the sweep.
  *
  * Poll-failure surfacing (ticket 9bbe9146): the silent-degrade case above is
  * exactly why a run that cannot be READ at all (thrown error, or degraded
@@ -125,16 +115,11 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
-import { Resource } from '../../entities/Resource';
-import { BoardColumn } from '../../entities/BoardColumn';
-import { Board } from '../../entities/Board';
-import { Workspace } from '../../entities/Workspace';
 import { LogService } from '../../services/log.service';
 import { GitHubConnectorService, GitHubWorkflowRun } from '../../services/github-connector.service';
 import { CiWaitService, parseCiWaitContext, CiWaitContext, CiWaitOutcome, CiWaitPollIssue } from '../tickets/ci-wait.service';
-import { TriggerLoopService } from './trigger-loop.service';
-import { mergeEnvironmentConfig } from '../../common/environment-config';
-import { pickBaseRepoResourceId, EnvRepoRef } from '../../common/base-repo-binding';
+import { ProjectsService } from '../projects/projects.service';
+import { TicketDispatchService } from './ticket-dispatch.service';
 
 const DEFAULTS = {
   ENABLED: true,
@@ -194,7 +179,8 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
     private readonly ciWaitService: CiWaitService,
-    private readonly triggerLoopService: TriggerLoopService,
+    private readonly ticketDispatch: TicketDispatchService,
+    private readonly projects: ProjectsService,
   ) {
     this.config = readConfigFromEnv();
     // GitHubConnectorService lives in McpServicesModule, which AgentsModule
@@ -364,60 +350,21 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Resolve this ticket's GitHub credential. `Ticket.base_repo_resource_id`
-   * wins when set, mirroring `ClaimVerificationService._lookupRemoteSha`'s
-   * pattern (claim-verification.service.ts): `Resource`, workspace-scope
-   * checked so a stale id pointing at another workspace's Resource can never
-   * leak that workspace's credential → `Resource.credential_id`.
+   * Resolve this ticket's GitHub credential from its project — the same
+   * project dispatch hands the agent as `base_repo`, so this service and
+   * dispatch always agree on which repo a ticket works on. `getInWorkspace`
+   * rejects a project of another workspace, so a stale id can never leak that
+   * workspace's credential.
    *
-   * Review round 4 (ticket 9bbe9146, live probe): on THIS board every ticket's
-   * `base_repo_resource_id` is permanently `''` — dispatch resolves the repo
-   * via `pickBaseRepoResourceId('', boardEnvRepositories)` inside
-   * `trigger-loop.service.ts` (~line 2727) but only fills the SSE payload,
-   * never writes it back onto the ticket row. A resolver that only reads
-   * `Ticket.base_repo_resource_id` therefore degrades to null for every
-   * ticket on this board — the exact silent failure this ticket exists to
-   * fix, just moved one layer down. Fixed by consulting the SAME
-   * `pickBaseRepoResourceId` fallback dispatch uses, reusing its board-env
-   * merge (`_resolveBoardEnvRepositories` below mirrors trigger-loop.service.
-   * ts:2614-2654's `boardEnvRepositories` construction) so this service and
-   * dispatch always agree on which repo a ticket resolves to.
-   *
-   * Degrades to null (→ GitHubConnectorService's env-token fallback, same as
-   * before this ticket) when nothing resolves — never blocks the sweep.
+   * Degrades to null (→ GitHubConnectorService's env-token fallback) when the
+   * ticket has no project or the project names no credential — never blocks
+   * the sweep. A persistently unreadable run then surfaces through the
+   * poll-failure alert below instead of looking like "still queued".
    */
   private async _resolveCredentialId(ticket: Ticket): Promise<string | null> {
-    if (!ticket.workspace_id) return null;
-    const boardEnvRepositories = await this._resolveBoardEnvRepositories(ticket);
-    const picked = pickBaseRepoResourceId(ticket.base_repo_resource_id, boardEnvRepositories);
-    if (!picked.resourceId) return null;
-    const resource = await this.dataSource.getRepository(Resource).findOne({ where: { id: picked.resourceId } });
-    if (resource && resource.workspace_id !== null && resource.workspace_id !== ticket.workspace_id) return null;
-    return resource?.credential_id || null;
-  }
-
-  /**
-   * Board-environment repositories for the ticket's board — the fallback
-   * source `pickBaseRepoResourceId` consults when the ticket carries no
-   * `base_repo_resource_id` of its own. Mirrors trigger-loop.service.ts:
-   * 2614-2654's `boardEnvRepositories` construction exactly (workspace default
-   * ⊕ board override, key-level merge) so this service can never disagree
-   * with dispatch about which repo a ticket resolves to. Degrades to `[]` (→
-   * no fallback candidate) on any missing link (no column, no board, no
-   * environment_config on either row) — never throws, never blocks the sweep.
-   */
-  private async _resolveBoardEnvRepositories(ticket: Ticket): Promise<EnvRepoRef[]> {
-    if (!ticket.column_id) return [];
-    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
-    if (!col?.board_id) return [];
-    const [board, workspace] = await Promise.all([
-      this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } }),
-      ticket.workspace_id
-        ? this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } })
-        : Promise.resolve(null),
-    ]);
-    const mergedEnv = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
-    return mergedEnv?.repositories || [];
+    if (!ticket.workspace_id || !ticket.project_id) return null;
+    const project = await this.projects.getInWorkspace(ticket.project_id, ticket.workspace_id);
+    return project?.credential_id || null;
   }
 
   /**
@@ -526,7 +473,7 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
       : '';
     return success
       ? `✅ **CI 대기 완료** — [run 결과](${run.html_url || ''}) \`${conclusion}\`.${shaNote} 이어서 진행하세요.`
-      : `⚠️ **CI 대기 완료 — 결과: \`${conclusion}\`** — [run 결과](${run.html_url || ''}).${shaNote} "When to integrate vs. escalate"에 따라 처리하세요(수정 후 재-dispatch, 또는 In Progress로 bounce/pend).`;
+      : `⚠️ **CI 대기 완료 — 결과: \`${conclusion}\`** — [run 결과](${run.html_url || ''}).${shaNote} 실패 원인을 고쳐 다시 진행하거나, 사람의 판단이 필요하면 \`pend_ticket\`으로 넘기세요.`;
   }
 
   /**
@@ -579,17 +526,16 @@ export class CiWaitResumeService implements OnModuleInit, OnModuleDestroy {
     if (outcome.kind === 'resolved') stats.resolved++;
 
     // Best-effort resume dispatch — MUST run after the claim above, never
-    // before: dispatchCurrentColumn refuses to emit while pending_ci_wait is
-    // still true (trigger-loop.service.ts's pending gate), and by this point
-    // it is already durably false. If this call throws or the process dies
-    // right here, nothing is lost: this ticket is no longer a sweep
-    // candidate, and DispatchReconcilerService's idle-seed sweep
-    // (dispatch-reconciler.service.ts) independently guarantees it still
-    // gets dispatched — see class docstring for the full reasoning.
+    // before: dispatch refuses to emit while pending_ci_wait is still true
+    // (isTicketPending), and by this point it is already durably false. If
+    // this call throws or the process dies right here, nothing is lost: this
+    // ticket is no longer a sweep candidate, and TicketDispatchService's own
+    // sweep (queue pump / supervisor) independently picks it up — see class
+    // docstring for the full reasoning.
     try {
-      await this.triggerLoopService.dispatchCurrentColumn(ticket.id, 'ci_wait_resolved', 'system');
+      await this.ticketDispatch.resumeTicket(ticket.id, 'ci_wait_resolved');
     } catch (e) {
-      this.logService.warn('CI', 'ci-wait resume dispatch failed — comment already posted and pending_ci_wait already cleared; DispatchReconcilerService idle-seed will still resume the ticket', {
+      this.logService.warn('CI', 'ci-wait resume dispatch failed — comment already posted and pending_ci_wait already cleared; the dispatcher sweep will still resume the ticket', {
         err: String(e), ticket_id: ticket.id,
       });
     }

@@ -3,20 +3,23 @@
  *
  * Tools: list_resources, get_resource, save_resource, delete_resource,
  *        search_resources, embed_resources, list_repo_branches
+ *
+ * Repositories are Projects now (docs/tickets.md → Project): save_resource
+ * refuses type='repository' and list_repo_branches takes a project_id.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Resource } from '../../../entities/Resource';
 import { Credential } from '../../../entities/Credential';
+import { Project } from '../../../entities/Project';
 import { ResourceEmbedding } from '../../../entities/ResourceEmbedding';
 import { cosineSimilarity } from '../../../services/embedding.service';
 import { ok, err } from '../shared/helpers';
-import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype } from '../shared/resource-helpers';
+import { parseResourceTags, resourceToJson, embedResource, inferResourceMimetype, REPOSITORY_RESOURCE_REJECTION } from '../shared/resource-helpers';
 import { listRepoBranches, resolveGitCredential } from '../shared/git-branches';
 import type { ToolContext } from './context';
 import { canUseCatalogItem } from '../../../common/catalog-scope';
-import { ClonePolicySchema, serializeClonePolicy } from '../../../common/clone-policy';
 
 export function registerResourceTools(server: McpServer, ctx: ToolContext): void {
   const { dataSource, logger, embeddingService } = ctx;
@@ -24,16 +27,16 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
   server.tool(
     'list_resources',
     'List inherited Global and Workspace resources. ' +
-    'Types: repository, document, image, link, comment_attachment (auto-managed, hidden from default UI).',
+    'Types: document, image, link, comment_attachment (auto-managed, hidden from default UI). ' +
+    'Repositories are Projects — use list_projects.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
-      type: z.string().optional().describe('Filter by resource type: repository, document, image, link, comment_attachment'),
+      type: z.string().optional().describe('Filter by resource type: document, image, link, comment_attachment'),
     },
     async ({ workspace_id, type }) => {
       const repo = dataSource.getRepository(Resource);
       const qb = repo.createQueryBuilder('r')
-        .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspace_id })
-        .andWhere('r.board_id IS NULL');
+        .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspace_id });
       if (type) qb.andWhere('r.type = :t', { t: type });
       else qb.andWhere('r.type != :hidden', { hidden: 'comment_attachment' });
       const resources = await qb.orderBy('r.name', 'ASC').getMany();
@@ -62,7 +65,8 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
   server.tool(
     'save_resource',
     'Create or update a resource. If `id` is provided → update; otherwise → create. ' +
-    'Supports five types: repository (GitHub repos etc.), document (text content), image (base64 file or URL), link (general URLs), comment_attachment (file payload to be tagged into a comment). ' +
+    'Supports four types: document (text content), image (base64 file or URL), link (general URLs), comment_attachment (file payload to be tagged into a comment). ' +
+    'Repositories are not Resources — create/update them with save_project. ' +
     'To attach a file to a comment from MCP: (1) call save_resource with type="comment_attachment" + file_data (base64) + file_name + file_mimetype, scoped to the same workspace as the target ticket; (2) pass the returned id in add_comment.attachment_resource_ids. Images render inline; videos render with an inline player; everything else renders as a download chip. ' +
     'Resources are automatically embedded for vector search when an embedding API is configured.',
     {
@@ -70,24 +74,19 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
       id: z.string().optional().describe('Resource ID — omit to create, provide to update'),
       name: z.string().describe('Resource name'),
       description: z.string().optional().describe('Short description'),
-      type: z.enum(['repository', 'document', 'image', 'link', 'comment_attachment']).optional().default('link').describe('Resource type. Use comment_attachment for files you intend to attach to a comment via add_comment.attachment_resource_ids — they are hidden from the default Resources UI but linked from the comment that owns them.'),
-      url: z.string().optional().describe('External URL (for repository/link/image types)'),
+      // 'repository' stays in the enum only so an old prompt gets the
+      // "use save_project" pointer below instead of a bare schema error.
+      type: z.enum(['repository', 'document', 'image', 'link', 'comment_attachment']).optional().default('link').describe("Resource type. Use comment_attachment for files you intend to attach to a comment via add_comment.attachment_resource_ids — they are hidden from the default Resources UI but linked from the comment that owns them. 'repository' is rejected — use save_project."),
+      url: z.string().optional().describe('External URL (for link/image types)'),
       content: z.string().optional().describe('Text content (for document type or notes)'),
       file_data: z.string().optional().describe('Base64-encoded file data (for image type)'),
       file_name: z.string().optional().describe('Original file name'),
       file_mimetype: z.string().optional().describe('File MIME type'),
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
-      default_branch: z.string().optional().describe('For type=repository: branch tickets default to when none is set on them. Empty string clears.'),
-      clone_policy: ClonePolicySchema.nullable().optional().describe(
-        'For type=repository: per-repo clone policy applied by agent-manager when it clones this repo. '
-        + 'Keys: clone_timeout_seconds (60..86400, wall-clock budget — system default 3600 = 60min), '
-        + 'clone_idle_timeout_seconds (0..86400, kill only after this long with NO clone progress output; 0 disables, and 0 is the system default — idle watching is opt-in because git progress output is not a reliable liveness signal on a slow large repo), '
-        + 'clone_depth (shallow clone), clone_filter (partial clone, e.g. "blob:none"), single_branch. '
-        + 'Every key is optional and falls through to the workspace default (update_workspace.clone_policy) and then the system default. '
-        + 'Pass null to clear the per-repo override.'),
     },
-    async ({ workspace_id, id, name, description, type, url, content, file_data, file_name, file_mimetype, tags, default_branch, clone_policy }) => {
+    async ({ workspace_id, id, name, description, type, url, content, file_data, file_name, file_mimetype, tags }) => {
       const repo = dataSource.getRepository(Resource);
+      if (type === 'repository') return err(REPOSITORY_RESOURCE_REJECTION);
       if (!name || !name.trim()) return err('Resource name is required');
       if (id) {
         const existing = await repo.findOne({ where: { id, workspace_id } });
@@ -106,12 +105,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         if (existing.file_data && !existing.file_mimetype) {
           existing.file_mimetype = inferResourceMimetype(existing.file_data, existing.file_name || existing.name);
         }
-        if (existing.board_id !== null) {
-          return err('Resource scope cannot be changed; create a new scoped Resource instead');
-        }
         if (tags !== undefined) existing.tags = JSON.stringify(tags);
-        if (default_branch !== undefined) existing.default_branch = default_branch || '';
-        if (clone_policy !== undefined) existing.clone_policy = serializeClonePolicy(clone_policy);
         const saved = await repo.save(existing);
         embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
         return ok(resourceToJson(saved));
@@ -124,7 +118,6 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         : (effectiveFileData ? inferResourceMimetype(effectiveFileData, effectiveFileName || name) : '');
       const created = repo.create({
         workspace_id,
-        board_id: null,
         name: name.trim(),
         description: description ?? '',
         type: type ?? 'link',
@@ -134,8 +127,6 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
         file_name: effectiveFileName,
         file_mimetype: effectiveMimetype,
         tags: JSON.stringify(tags ?? []),
-        default_branch: default_branch ?? '',
-        clone_policy: serializeClonePolicy(clone_policy),
       });
       const saved = await repo.save(created);
       embedResource(dataSource, logger, embeddingService, saved).catch(() => {});
@@ -145,32 +136,33 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'list_repo_branches',
-    'List branches of a repository Resource via `git ls-remote --heads`. The Resource must be type="repository" and carry a URL. ' +
-    'Branches sort with the Resource\'s `default_branch` (when set) pinned to the top. Used by the Ticket panel to populate the Base Branch picker, and by agents that want to verify a base_branch exists upstream before pinning it.',
+    'List branches of a Project\'s repository via `git ls-remote --heads`. The Project must carry a repo_url. ' +
+    'Branches sort with the Project\'s `default_branch` (when set) pinned to the top. Used to verify a base_branch exists upstream before pinning it on a ticket.',
     {
-      workspace_id: z.string().describe('Workspace ID — scope boundary so the resource lookup is workspace-bounded'),
-      resource_id: z.string().describe('Resource ID (must be type=repository)'),
+      workspace_id: z.string().describe('Workspace ID — scope boundary so the project lookup is workspace-bounded'),
+      project_id: z.string().optional().describe('Project ID'),
+      // Old prompts still say resource_id. Repository Resources were migrated
+      // to Projects with the same id, so the value resolves unchanged.
+      resource_id: z.string().optional().describe('Deprecated alias of project_id'),
     },
-    async ({ workspace_id, resource_id }) => {
-      const repo = dataSource.getRepository(Resource);
-      const resource = await repo.findOne({ where: { id: resource_id } });
-      if (!resource || (resource.workspace_id !== null && resource.workspace_id !== workspace_id)) {
-        return err('Resource not found in workspace');
-      }
-      if (resource.type !== 'repository') return err(`resource type must be 'repository' (got '${resource.type}')`);
-      if (!resource.url) return err("resource has no URL — set the repository's URL before listing branches");
+    async ({ workspace_id, project_id, resource_id }) => {
+      const id = (project_id || resource_id || '').trim();
+      if (!id) return err('project_id is required');
+      const project = await dataSource.getRepository(Project).findOne({ where: { id, workspace_id } });
+      if (!project) return err('Project not found in workspace');
+      if (!project.repo_url) return err("project has no repo_url — set the repository's URL before listing branches");
       try {
         const credential = await resolveGitCredential(
           dataSource.getRepository(Credential),
-          resource.credential_id,
+          project.credential_id,
           workspace_id,
         );
         const branches = await listRepoBranches({
-          url: resource.url,
+          url: project.repo_url,
           credential,
-          defaultBranch: resource.default_branch || '',
+          defaultBranch: project.default_branch || '',
         });
-        return ok({ branches, default_branch: resource.default_branch || '' });
+        return ok({ branches, default_branch: project.default_branch || '' });
       } catch (e: any) {
         return err(`failed to list branches: ${String(e?.message || e)}`);
       }
@@ -198,7 +190,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
   server.tool(
     'search_resources',
     'Search resources using semantic vector similarity (when embedding API configured) or text matching (fallback). ' +
-    'Returns resources ranked by relevance. Use this to find relevant documents, repos, images, or links.',
+    'Returns resources ranked by relevance. Use this to find relevant documents, images, or links.',
     {
       workspace_id: z.string().describe('Workspace ID (required)'),
       query: z.string().describe('Natural language search query'),
@@ -208,8 +200,7 @@ export function registerResourceTools(server: McpServer, ctx: ToolContext): void
     async ({ workspace_id, query, type, limit }) => {
       const repo = dataSource.getRepository(Resource);
       const qb = repo.createQueryBuilder('r')
-        .where('(r.workspace_id IS NULL OR r.workspace_id = :workspaceId)', { workspaceId: workspace_id })
-        .andWhere('r.board_id IS NULL');
+        .where('(r.workspace_id IS NULL OR r.workspace_id = :workspaceId)', { workspaceId: workspace_id });
       if (type) qb.andWhere('r.type = :type', { type });
       const resources = await qb.orderBy('r.name', 'ASC').getMany();
 

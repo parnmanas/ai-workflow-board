@@ -1,5 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
-import { Board } from './Board';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 
 @Entity('workspaces')
 export class Workspace {
@@ -21,45 +20,39 @@ export class Workspace {
   slug: string | null;
 
   // ─────────────────────────────────────────────────────────────────────
-  // Trigger-loop / supervisor / dispatch-queue cadence settings
-  //
-  // Workspace-scoped overrides for the three magic numbers that used to
-  // be hardcoded constants in TicketSupervisorService and (implicitly,
-  // unbounded) in TriggerLoopService. Defaults match the historical
-  // constants so an unmigrated workspace keeps the prior behaviour.
-  //
-  // Operators bump these via a Workspace settings PATCH (REST/MCP) when
-  // they need a different cadence — e.g. lower `supervisor_resend_ms`
-  // for fast-paced demos, or a deeper `dispatch_queue_depth` for boards
-  // that legitimately spike past the per-agent cap.
+  // Ticket dispatch settings (docs/tickets.md). These used to live on each
+  // Board; with boards gone the workspace is the only scope a ticket has.
   // ─────────────────────────────────────────────────────────────────────
 
-  /** Time-since-last-update before TicketSupervisor considers a (agent, ticket, role) pair stale. ms. Default: 30 min. */
+  /** An in_progress ticket with no live agent and no activity for this long is re-dispatched by the supervisor. ms. Default: 30 min. */
   @Column({ type: 'int', default: 1800000 })
   supervisor_stale_ms: number;
 
-  /** Cooldown between supervisor force-respawn re-pushes after the first stale emit. ms. Default: 5 min. */
+  /** Cooldown between supervisor re-dispatches of the same ticket. ms. Default: 5 min. */
   @Column({ type: 'int', default: 300000 })
   supervisor_resend_ms: number;
 
-  /**
-   * @deprecated since ticket 4a6cdfd7 (WorkflowFocusSelector). The
-   * per-agent dispatch queue was removed when the cap model was
-   * replaced with the focus selector — triggers are now either emitted
-   * immediately (focus = ticket) or dropped silently (focus ≠ ticket).
-   *
-   * The column is kept on the entity / REST setter / MCP setter so
-   * older clients setting `dispatch_queue_depth` still get HTTP 200
-   * rather than 400; a follow-up cleanup ticket can drop the column
-   * after one release cycle. No runtime code reads this value.
-   */
-  @Column({ type: 'int', default: 100 })
-  dispatch_queue_depth: number;
+  /** Distinct non-pending in_progress tickets one agent identity works at once. */
+  @Column({ type: 'int', default: 1 })
+  max_concurrent_tickets_per_agent: number;
+
+  /** Non-null = ticket dispatch is paused for the whole workspace (humans can still edit/move). */
+  @Column({ type: Date, nullable: true, default: null })
+  dispatch_paused_at: Date | null;
+
+  // Output language for every agent working a ticket here ("Korean", "English",
+  // …). Appended to the harness system prompt at dispatch. null = agent default.
+  @Column({ type: 'varchar', nullable: true, default: null })
+  language: string | null;
+
+  // Done tickets idle for this many days are archived by TicketArchiverService.
+  // null = disabled. 1..365 enforced on write.
+  @Column({ type: 'int', nullable: true, default: null })
+  auto_archive_days: number | null;
 
   /**
-   * Chat room to receive system alerts (e.g. stale-WAIT detector pings
-   * from `StuckTicketDetectorService`, ticket 8e934802). Optional — when
-   * null, the detector falls back to the workspace's oldest chat room
+   * Chat room to receive system alerts (e.g. CI-red pings from
+   * `CiHealthMonitorService`). Optional — when null, the sender falls back to the workspace's oldest chat room
    * (`created_at ASC`) so an unconfigured workspace still surfaces the
    * alert somewhere visible. Operators set this via the workspace
    * settings PATCH when they want a dedicated #alerts room.
@@ -71,10 +64,8 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   alerts_chat_room_id: string | null;
 
-  // Workspace-wide default agent harness (ticket 7122600c). Same JSON shape
-  // as Board.harness_config; boards override it per key via
-  // resolveHarnessConfig (common/harness-config.ts). null = no default —
-  // boards without their own harness keep the current dispatch behaviour.
+  // Workspace-wide agent harness (ticket 7122600c, common/harness-config.ts),
+  // shipped on every ticket dispatch. null = no harness override.
   @Column({ type: 'text', nullable: true, default: null })
   harness_config: string | null;
 
@@ -91,57 +82,24 @@ export class Workspace {
   @Column({ type: 'varchar', nullable: true, default: null })
   default_cli_runtime_profile: string | null;
 
-  // Workspace-wide default environment setup (ticket 354d336b). Same JSON shape
-  // as Board.environment_config; boards override it per top-level key via
-  // mergeEnvironmentConfig (common/environment-config.ts). null = no default —
-  // boards without their own environment_config keep the current dispatch
-  // behaviour (no provisioning step).
+  // Workspace-wide environment setup (ticket 354d336b,
+  // common/environment-config.ts) — env vars for ticket subagents. null = none.
   @Column({ type: 'text', nullable: true, default: null })
   environment_config: string | null;
 
-  // Workspace-wide default hard-budget ceiling (ticket a51ec6d9). Same JSON
-  // shape as Board.hard_budget_config; boards override it per key via
-  // resolveHardBudget (common/hard-budget-config.ts). Also the ONLY scope
-  // axis for the QA/Action/Orchestration run-creation-rate ceiling
-  // (common/run-budget-guard.ts) — those three entities have no board_id
-  // (docs/catalog-scopes.md), so this column is their sole override point.
-  // null = no default — boards/runs without a workspace override keep the
-  // env-folded baseline.
+  // Workspace hard-budget ceiling (ticket a51ec6d9, common/hard-budget-config.ts)
+  // for the QA/Action/Orchestration run-creation-rate guard
+  // (common/run-budget-guard.ts). null = the env-folded baseline.
   @Column({ type: 'text', nullable: true, default: null })
   hard_budget_config: string | null;
 
   // Workspace-wide default repository clone policy (ticket bddb63ee). Same JSON
-  // shape as Resource.clone_policy; a repository Resource overrides it per key
-  // via resolveClonePolicy (common/clone-policy.ts). null = no default — repos
+  // shape as Project.clone_policy; a Project overrides it per key via
+  // resolveClonePolicy (common/clone-policy.ts). null = no default — repos
   // without their own policy fall through to the system defaults (clone
   // timeout 60분).
   @Column({ type: 'text', nullable: true, default: null })
   clone_policy: string | null;
-
-  // ─────────────────────────────────────────────────────────────────────
-  // Claim-verification (ticket dcb9d661): detect assignees who post an
-  // "I'm done" comment in an active column without actually pushing a
-  // commit or calling move_ticket, and auto-park the ticket for human
-  // review after a grace window. Off by default until per-workspace
-  // tuning settles — flip on via Workspace settings PATCH.
-  // ─────────────────────────────────────────────────────────────────────
-
-  /**
-   * Master switch for `ClaimVerificationService`. When 0 the sweep
-   * skips this workspace entirely (no DB reads, no GitHub fetches,
-   * no pend) so a disabled workspace has zero per-tick cost. int
-   * (not boolean) for SQLite compat.
-   */
-  @Column({ type: 'int', default: 0 })
-  claim_verification_enabled: number;
-
-  /**
-   * Grace window — milliseconds since the assignee's claim comment
-   * during which a follow-up commit (snapshot SHA advances) or
-   * move_ticket call cancels the pend. Default 10 minutes.
-   */
-  @Column({ type: 'int', default: 600000 })
-  claim_verification_grace_ms: number;
 
   /**
    * ticket 9fd27487(비-티켓 실행 경로에는 workspace-folder 컨벤션이
@@ -150,8 +108,7 @@ export class Workspace {
    * 에이전트 자신의 운영용 채팅을 포함해 오늘날의 동작을 그대로 보존한다.
    * 1이면 RoomMessagingService가 일반(Action도 mission도 아닌) 채팅방의
    * 디스패치도 `.awb/chat/<room8>`에 고정한다(기본적으로 repo checkout 없음
-   * — common/workspace-folder-options.ts 참고). 위의
-   * claim_verification_enabled와 마찬가지로 SQLite 호환을 위해 boolean이
+   * — common/workspace-folder-options.ts 참고). SQLite 호환을 위해 boolean이
    * 아니라 int를 쓴다. Action Run 방은 이 플래그의 영향을 받지 않는다 —
    * 항상 자신의 `.awb/act/<leaf>` 폴더를 그대로 받는다.
    */
@@ -163,7 +120,4 @@ export class Workspace {
 
   @UpdateDateColumn()
   updated_at: Date;
-
-  @OneToMany(() => Board, board => board.workspace, { cascade: true, eager: true })
-  boards: Board[];
 }

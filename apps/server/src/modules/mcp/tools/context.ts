@@ -39,14 +39,11 @@ import { EmbeddingService } from '../../../services/embedding.service';
 import { GitHubConnectorService } from '../../../services/github-connector.service';
 import { MentionService } from '../../../services/mention.service';
 import type { AgentStatusService } from '../../agents/agent-status.service';
-import type { AllocationService } from '../../agents/allocation.service';
-import type { TriggerLoopService } from '../../agents/trigger-loop.service';
 import type { RoomCrudService } from '../../chat-rooms/room-crud.service';
 import { RoomMembershipService } from '../../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import { AgentConnectivityRegistry } from '../../../services/agent-connectivity.registry';
 import { MemoryMetricsRegistry } from '../../../services/memory-metrics.registry';
-import type { TicketRoleAssignmentService } from '../../workspace-roles/ticket-role-assignment.service';
 import type { ActionsService } from '../../actions/actions.service';
 import type { QaService } from '../../qa/qa.service';
 import type { QaRunService } from '../../qa/qa-run.service';
@@ -57,14 +54,14 @@ import type { SecurityProfileService } from '../../security/security-profile.ser
 import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import type { WorkspaceScheduleService } from '../../workspace-schedule/workspace-schedule.service';
-import type { FeaturesService } from '../../features/features.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
+import { TicketService } from '../../tickets/ticket.service';
+import { TicketDuplicateService } from '../../tickets/ticket-duplicate.service';
+import type { TicketDispatchService } from '../../agents/ticket-dispatch.service';
+import { ProjectsService } from '../../projects/projects.service';
 import type { PrivilegedCommandService } from '../../agent-manager/privileged-command.service';
 import type { InstanceRegistryService } from '../../agent-manager/instance-registry.service';
-import { MergeLeaseService } from '../../tickets/merge-lease.service';
-import type { HandoffService } from '../../handoff/handoff.service';
-import { BenchmarkService } from '../../benchmarks/benchmark.service';
 import type { PendingTicketRefAccumulator } from './ticket-ref-session';
 import type { WorkflowFunctionsService } from '../../workflow-functions/workflow-functions.service';
 import type { ArtifactRefsService } from '../../artifact-refs/artifact-refs.service';
@@ -104,7 +101,7 @@ export interface ToolContext {
   githubService: GitHubConnectorService;
   mentionService: MentionService;
   // 인스턴스 전역 fleet quiesce 조회(ticket 0f638509) — comment_mention
-  // 디스패치 지점(add_comment/ask_question/handoff_to_agent)이 quiesce 상태를
+  // 디스패치 지점(add_comment/ask_question)이 quiesce 상태를
   // 확인하는 데 필요하다. activityService처럼 stateless-over-DataSource라
   // 두 생성 경로 모두 항상 채운다(standalone도 optional이 아님).
   instanceQuiesceService: InstanceQuiesceService;
@@ -113,7 +110,6 @@ export interface ToolContext {
   // the standalone mcp-server entry point (no DI). Tools that depend on it
   // must degrade gracefully.
   agentStatusService?: AgentStatusService;
-  allocationService?: AllocationService;
   roomCrudService?: RoomCrudService;
   roomMembershipService?: RoomMembershipService;
   // v0.33: shared message-send entry point. Required for the MCP
@@ -122,10 +118,16 @@ export interface ToolContext {
   // agent_chain_depth) as the REST endpoints. Standalone context omits it —
   // the tool degrades to an explicit error in that mode.
   roomMessagingService?: RoomMessagingService;
-  // v0.34: ticket role-assignment helper. Required for ticket CRUD MCP tools
-  // to keep the assignment table in sync with legacy column writes.
-  // Standalone context omits it; tools degrade by skipping the sync.
-  ticketRoleAssignmentService?: TicketRoleAssignmentService;
+  // Ticket mutations (docs/tickets.md) — every ticket create/update/move/pend
+  // goes through it so MCP, REST and automatic producers share side effects.
+  // Present in both modes; standalone wires a dispatcher stub (no live SSE).
+  ticketService: TicketService;
+  // Ticket dispatch — present in NestJS mode only. Tools that re-wake an
+  // assignee (unpend, duplicate correction, manual run) degrade to a no-op
+  // without it.
+  ticketDispatchService?: TicketDispatchService;
+  // Projects (repositories + per-host main clone folders). Present in both modes.
+  projectsService: ProjectsService;
   // Actions feature: required by `run_action` MCP tool which needs to dispatch
   // a Run (create room, add participants, send first message). The CRUD tools
   // operate directly on repositories and don't need this.
@@ -139,7 +141,7 @@ export interface ToolContext {
   qaRunService?: QaRunService;
   // Build & Artifact Registry (ticket 80d52250). Required by the build-tools MCP
   // tools. Stateless over the DataSource, so BOTH modes provide it — the
-  // standalone builder constructs a thin instance directly (like benchmarkService).
+  // standalone builder constructs a thin instance directly.
   buildArtifactService?: BuildArtifactService;
   // Deployment awareness (ticket 8ce72b18). Required by the deployment-tools MCP
   // tool (report_deployment). Stateless over the DataSource, so BOTH modes
@@ -166,19 +168,6 @@ export interface ToolContext {
   // (no background tick in standalone mode).
   workspaceScheduleService?: WorkspaceScheduleService;
   artifactRefsService?: ArtifactRefsService;
-  // Feature/Epic intake (ticket aae7644c) — the entry point of the one-stop
-  // automated development loop. Required by feature-tools MCP tools
-  // (submit_feature_request / propose_feature_chain / approve_feature / ...).
-  // Standalone context omits it; the tools degrade to an explicit error (the
-  // planning dispatch + chain build need the DI-wired trigger/prereq services).
-  featuresService?: FeaturesService;
-  // Ticket a57517be: `unpend_ticket` tool needs to wake the ticket's current
-  // column's role-holders right after clearing `pending_user_action` (the
-  // `field_changed='pending_user_action'` activity row by itself does not
-  // dispatch through the column-routing path). Standalone context omits it;
-  // unpend in that mode degrades to a no-op for the dispatch with a warn log,
-  // since standalone has no live agent session to push to anyway.
-  triggerLoopService?: TriggerLoopService;
   // Ticket 48d14fff: prerequisite ("blocked-by ticket") mutations. Present in
   // both modes — the standalone builder constructs a thin instance directly
   // on the DataSource since the service is stateless over dataSource +
@@ -195,21 +184,6 @@ export interface ToolContext {
   // "이 서버에서는 쓸 수 없다" 로 명확히 실패한다(조용히 성공하지 않는다).
   privilegedCommandService?: PrivilegedCommandService;
   instanceRegistryService?: InstanceRegistryService;
-  // Ticket e630b530: 저장소별 랜딩 lease. 위와 마찬가지로 dataSource +
-  // activityService 위에서 상태를 갖지 않아 두 모드 모두에서 present.
-  // merge-lease-tools (await_merge_lease / release_merge_lease) 가 쓴다.
-  mergeLeaseService?: MergeLeaseService;
-  // Cross-board handoff pipeline (ticket ac21a745). Required by handoff-tools
-  // (reject_handoff / get_handoff_pipeline). Present only in NestJS integrated
-  // mode — the relay engine subscribes to the live activity bus, which the
-  // standalone MCP entry point has no counterpart for, so it's omitted there and
-  // the tools degrade to an explicit error (same posture as featuresService).
-  handoffService?: HandoffService;
-  // Ticket 684c012b: benchmark score persistence + leaderboard aggregation.
-  // Present in both modes — the service is stateless over the DataSource, so the
-  // standalone builder constructs a thin instance directly (same pattern as
-  // ticketPrerequisitesService). Used by benchmark-tools.
-  benchmarkService?: BenchmarkService;
   workflowFunctionsService?: WorkflowFunctionsService;
   // Ticket 20fa0197: AgentDispatchClassifier's in-process wait bridge.
   // Required by outreach-tools' record_outreach_classification — that tool
@@ -242,7 +216,7 @@ export interface ToolContext {
   // kicks off the initial Tier 1/1.5 build on first reference (graph_status);
   // `ontologyQueryService` answers the bounded traversal/lookup queries. Both
   // depend on a worker-pool/git-repo-cache-backed extraction service, so —
-  // same posture as orchestration*/featuresService above — standalone context
+  // same posture as orchestration* above — standalone context
   // omits them and the tools degrade to an explicit error.
   ontologyLifecycleService?: OntologyLifecycleService;
   ontologyQueryService?: OntologyQueryService;
@@ -324,13 +298,23 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   // same standalone-instantiation shape as the prereq service above.
   const ciWaitService = new CiWaitService(dataSource as any, activityService);
 
-  // 랜딩 lease 서비스 — 위와 같은 standalone 인스턴스화 모양.
-  const mergeLeaseService = new MergeLeaseService(dataSource as any, activityService);
-
-  // BenchmarkService is stateless over the DataSource (the @InjectDataSource
-  // decorator is DI metadata only — calling the constructor directly is the
-  // standalone equivalent of the DI singleton, matching the prereq service above).
-  const benchmarkService = new BenchmarkService(dataSource);
+  // Ticket mutations without the live dispatcher: standalone (stdio) MCP has
+  // no SSE stream to deliver an agent_trigger on, so dispatch is a recorded
+  // no-op — the server process's own sweep starts queued tickets.
+  const projectsService = new ProjectsService(dataSource);
+  const standaloneDispatcher = {
+    dispatch: async () => ({ dispatched: false, reason: 'standalone' }),
+    resumeTicket: async () => ({ dispatched: false, reason: 'standalone' }),
+    manualTrigger: async () => ({ dispatched: false, reason: 'standalone' }),
+    startQueued: async () => 0,
+  } as unknown as TicketDispatchService;
+  const ticketService = new TicketService(
+    dataSource,
+    activityService,
+    projectsService,
+    standaloneDispatcher,
+    new TicketDuplicateService(dataSource),
+  );
 
   // BuildArtifactService is likewise stateless over the DataSource (+ LogService),
   // so the build-tools work in standalone MCP mode too (ticket 80d52250).
@@ -353,8 +337,8 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     roomMessagingService,
     ticketPrerequisitesService,
     ciWaitService,
-    mergeLeaseService,
-    benchmarkService,
+    ticketService,
+    projectsService,
     buildArtifactService,
     deploymentService,
   };

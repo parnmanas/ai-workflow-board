@@ -141,7 +141,7 @@ test('composeChatRoomPrompt ordinary chat uses capability-first operational poli
     'ordinary chat receives the operational policy',
   );
   assert.ok(
-    p.includes('search workspace/board Actions') && p.includes('run it exactly once'),
+    p.includes('search workspace Actions') && p.includes('run it exactly once'),
     'Action lookup and execution precede fallback',
   );
   assert.ok(p.includes('required MCP/tool itself is unavailable'));
@@ -154,10 +154,12 @@ test('ordinary chat routes change requests ticket-first with narrow direct-chat 
   for (const usesNativeMcp of [true, false]) {
     const p = composeChatRoomPrompt(ROOM, [], MSG, undefined, usesNativeMcp);
     assert.ok(p.includes('ticket-first is the default for ordinary implementation'));
-    assert.ok(p.includes('First search for a suitable existing board'));
-    assert.ok(p.includes('create exactly one focused AWB ticket on that board'));
+    // board-less (docs/tickets.md): no board to search — one ticket classified by
+    // tags and, when it is about a repository, a project.
+    assert.ok(p.includes('File exactly one focused AWB ticket'));
+    assert.ok(p.includes('`tags`') && p.includes('project_id'));
+    assert.ok(!/existing board/.test(p), 'board-less prompt must not ask for a board');
     assert.ok(p.includes('genuinely small one-off work'));
-    assert.ok(p.includes('no suitable existing board exists'));
     assert.ok(p.includes('explicitly asks you to perform directly in chat'));
     assert.ok(p.includes('For a direct-chat exception, perform the requested work now'));
     assert.ok(
@@ -165,6 +167,8 @@ test('ordinary chat routes change requests ticket-first with narrow direct-chat 
       '기존 direct-chat 기본 문구가 다시 나타나면 안 된다',
     );
   }
+  const native = composeChatRoomPrompt(ROOM, [], MSG, undefined, true);
+  assert.ok(native.includes('use `mcp__awb__create_ticket` with `title`, `description`, `tags`'));
 });
 
 test('ticket-first routing treats future intent as actionable and preserves one room-linked ticket', () => {

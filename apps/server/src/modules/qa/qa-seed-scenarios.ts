@@ -12,14 +12,14 @@ import type { CreateScenarioInput } from './qa.service';
  * Each entry is **driver-agnostic data**: it carries the `steps[]` the visualizer
  * renders and the run prompt is built from. The catalogue ships two driver flavours:
  *
- *   - `awb-mcp` (scenarios 1–12) — the QA agent drives AWB's own MCP/REST surface
+ *   - `awb-mcp` — the QA agent drives AWB's own MCP/REST surface
  *     (see docs/qa-driver-guide.md §6 "http-api driver") and records evidence with
  *     save_resource + record_qa_step. The step `mcp_tool` values are real AWB MCP
  *     tool names so the agent can execute them verbatim; `params` use `{{placeholder}}`
  *     tokens the agent fills from the run context. Evidence is tool-result JSON
  *     (type=document) — backend validation, no pixels.
  *
- *   - `browser` (scenarios 13+) — the QA agent drives the real AWB **client UI** with
+ *   - `browser` — the QA agent drives the real AWB **client UI** with
  *     a headless-Chrome driver (CDP; see docs/qa-driver-guide.md §4 "Browser driver"
  *     and the reference helper apps/server/scripts/qa-visual-capture.mjs). Evidence is
  *     actual **screenshots (image/png) and a journey video (video/mp4)** so the QA
@@ -40,6 +40,12 @@ import type { CreateScenarioInput } from './qa.service';
  * Keeping the catalogue as plain data (no workspace/agent ids baked in) is what
  * makes it reproducible across environments — buildScenarioCreatePayloads()
  * stamps the env-specific scope on at seed time.
+ *
+ * Scenarios whose premise went away with boards (board pause, board move,
+ * column role routing / auto-advance, backlog promotion, role mentions,
+ * benchmarks, the board-scoped dispatch-liveness probe) were dropped from the
+ * catalogue; already-seeded rows of them stay in their workspace until an
+ * operator deletes them (re-seeding never deletes).
  */
 
 export interface SeedScenario {
@@ -111,55 +117,30 @@ function browserDriverConfig(extra: Record<string, any> = {}): Record<string, an
 }
 
 export const QA_SEED_SCENARIOS: SeedScenario[] = [
-  // 1 ────────────────────────────────────────────────────────────────────────
+  // 1 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'ticket-lifecycle',
-    name: 'Ticket lifecycle — create → move → done → auto-advance',
+    name: 'Ticket lifecycle — create → status lanes → done',
     description:
-      'Walk a root ticket through the kanban (To Do → In Progress → Review → Done) and assert '
-      + 'role-routed triggers fire at each routed column and the terminal entry stamps. Mirrors '
-      + 'test/qa-flows/ticket-lifecycle.test.mjs + auto-advance-unassigned.test.mjs.',
+      'Walk a root ticket through the fixed status lanes (To Do → In Progress → Review → Done) and '
+      + 'assert the terminal stamp: terminal_entered_at is set on entering `done` and cleared when the '
+      + 'ticket leaves it. The probe has NO assignee so the dispatcher never sends it to an agent '
+      + '(docs/tickets.md → Status). Mirrors test/qa-flows/ticket-lifecycle.test.mjs.',
     qa_driver: AWB_MCP_DRIVER,
     qa_driver_config: driverConfig(),
-    tags: ['lifecycle', 'tickets', 'routing', 'auto-advance'],
+    tags: ['lifecycle', 'tickets', 'status'],
     steps: [
-      step(0, 'Create a root ticket in the To Do column with an assignee set', 'Ticket created in To Do, status=todo', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{todo_column_id}}', title: 'QA lifecycle probe', assignee_id: '{{assignee_agent_id}}' }),
-      step(1, 'Read the ticket back', 'column_id == To Do, assignee resolved', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
-      step(2, 'Move the ticket to the assignee-routed active column', 'Move succeeds; assignee receives an agent_trigger', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{in_progress_column_id}}' }),
-      step(3, 'Move the ticket to the reviewer-routed column', 'reviewer (not assignee) is the role woken', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{review_column_id}}' }),
-      step(4, 'Move the ticket to the terminal column', 'Ticket lands in a terminal column, terminal_entered_at stamped, status=done', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{done_column_id}}' }),
-      step(5, 'Confirm final state', 'get_ticket shows column=Done and status=done', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
+      step(0, 'Create an unassigned root ticket in To Do', 'Ticket created with status=todo, assignee=null, terminal_entered_at=null', 'create_ticket', { workspace_id: '{{workspace_id}}', status: 'todo', title: 'QA lifecycle probe' }),
+      step(1, 'Read the ticket back', 'status == todo; tags/project_id echo what was sent', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
+      step(2, 'Move the ticket to In Progress', 'Move succeeds; status == in_progress (no agent_trigger — there is no assignee)', 'move_ticket', { ticket_id: '{{ticket_id}}', status: 'in_progress' }),
+      step(3, 'Move the ticket to Review', 'status == review', 'move_ticket', { ticket_id: '{{ticket_id}}', status: 'review' }),
+      step(4, 'Move the ticket to Done', 'status == done and terminal_entered_at stamped', 'move_ticket', { ticket_id: '{{ticket_id}}', status: 'done' }),
+      step(5, 'Reopen it (back to To Do)', 'status == todo and terminal_entered_at cleared', 'move_ticket', { ticket_id: '{{ticket_id}}', status: 'todo' }),
+      step(6, 'Archive the probe', 'archived_at stamped — the probe leaves the live pool', 'archive_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
   },
 
-  // 2 ────────────────────────────────────────────────────────────────────────
-  {
-    key: 'comment-mention-trigger',
-    name: 'Comment & mention triggers',
-    description:
-      'Posting a note on a routed In-Progress ticket wakes the column role holder; a structured '
-      + '@[role:reviewer|…] mention notifies the mentioned target specifically. Mirrors '
-      + 'comment-trigger.test.mjs + comment-mention.test.mjs.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['comments', 'mentions', 'triggers'],
-    steps: [
-      step(0, 'Create a ticket already in In Progress with an assignee', 'Ticket exists in In Progress', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA comment-trigger probe', assignee_id: '{{assignee_agent_id}}' }),
-      // author_role is passed explicitly here. The awb-mcp QA driver runs as a
-      // CHAT subagent (no X-AWB-Subagent-Role pin) and the probe ticket's author
-      // (the driver agent) ends up holding 2 roles — assignee (set in step 0) and
-      // reporter (create_ticket auto-fills reporter→caller). With 2+ roles and no
-      // pin, add_comment.resolveAuthorRole intentionally OMITS author_role to avoid
-      // misattributing the comment to a role the agent isn't acting as. That guard
-      // is correct product behaviour; the scenario must therefore exercise the
-      // explicit-override path (resolution order #1) to assert role attribution.
-      step(1, 'Add a plain note comment as the assignee', 'Assignee (In Progress role holder) receives a comment trigger', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: plain note — should wake assignee', type: 'note', author_role: 'assignee' }),
-      step(2, 'Add a comment with a structured reviewer mention, authored as the assignee', 'comment_mention notification is scoped to the reviewer only', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: @[role:reviewer|Reviewer] please look', type: 'note', author_role: 'assignee' }),
-      step(3, 'Reload the ticket thread', "Both comments present with metadata.author_role == 'assignee' (explicit override recorded)", 'get_ticket', { ticket_id: '{{ticket_id}}' }),
-    ],
-  },
-
-  // 3 ────────────────────────────────────────────────────────────────────────
+  // 2 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'chat-room-messaging',
     name: 'Chat room — message + attachment + dynamic loading',
@@ -180,26 +161,27 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     ],
   },
 
-  // 4 ────────────────────────────────────────────────────────────────────────
+  // 3 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'mcp-agent-roundtrip',
     name: 'MCP agent roundtrip (SSE in → tool call out)',
     description:
-      'The closed-loop promise: an agent woken by an SSE trigger reacts by calling MCP tools to '
-      + 'advance the ticket. Drive a move to fire the trigger, then assert the agent\'s add_comment '
-      + '+ move_ticket landed. Mirrors mcp-agent-roundtrip.test.mjs.',
+      'The closed-loop promise: a ticket queued in To Do for a live assignee is started by the '
+      + 'dispatcher (todo → in_progress + agent_trigger), and the agent reacts by calling MCP tools to '
+      + 'advance it. Assert the agent\'s add_comment + move_ticket landed. Mirrors '
+      + 'mcp-agent-roundtrip.test.mjs.',
     qa_driver: AWB_MCP_DRIVER,
     qa_driver_config: driverConfig({ requires_live_agent: true }),
     tags: ['mcp', 'sse', 'agent', 'roundtrip'],
     steps: [
-      step(0, 'Create a ticket in To Do assigned to a live QA agent', 'Ticket exists, assignee online', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{todo_column_id}}', title: 'QA roundtrip probe', prompt_text: 'Advance me to Review and leave a note.', assignee_id: '{{assignee_agent_id}}' }),
-      step(1, 'Subscribe to events so the trigger and the agent reaction are observable', 'SSE stream open', 'subscribe_events', { workspace_id: '{{workspace_id}}' }),
-      step(2, 'Move the ticket to the assignee-routed active column', 'agent_trigger delivered to the assignee within a few seconds', 'move_ticket', { ticket_id: '{{ticket_id}}', target_column_id: '{{in_progress_column_id}}' }),
-      step(3, 'Wait for the agent to react via MCP', 'A new comment from the agent appears AND the ticket moves forward (SSE→MCP loop closed)', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
+      step(0, 'Subscribe to events so the trigger and the agent reaction are observable', 'SSE stream open', 'subscribe_events', { workspace_id: '{{workspace_id}}' }),
+      step(1, 'Create a ticket in To Do assigned to a live agent runtime', 'Ticket exists with assignee set; the assignee is online', 'create_ticket', { workspace_id: '{{workspace_id}}', status: 'todo', title: 'QA roundtrip probe', prompt_text: 'Leave a short note, then move me to review.', assignee: '{{assignee_runtime}}' }),
+      step(2, 'Confirm the dispatcher started it', 'Within a few seconds status == in_progress and an agent_trigger was delivered to the assignee', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
+      step(3, 'Wait for the agent to react via MCP', 'A new comment from the agent appears AND status == review (SSE→MCP loop closed)', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
   },
 
-  // 5 ────────────────────────────────────────────────────────────────────────
+  // 4 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'action-run',
     name: 'Action authoring & dispatch',
@@ -218,143 +200,27 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     ],
   },
 
-  // 6 ────────────────────────────────────────────────────────────────────────
-  {
-    key: 'benchmark-lifecycle',
-    name: 'Benchmark lifecycle — run → score → leaderboard',
-    description:
-      'Create a benchmark run with candidates, submit per-dimension scores (upsert), and read the '
-      + 'run-scoped and agent-aggregate leaderboards. Mirrors benchmark-scoring / benchmark-lifecycle.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['benchmarks', 'scoring', 'leaderboard'],
-    steps: [
-      step(0, 'Create a benchmark run with two candidate agents', 'Run created; candidates dispatched (or parked if draft)', 'create_benchmark_run', { workspace_id: '{{workspace_id}}', board_id: '{{board_id}}', name: 'QA benchmark probe', candidate_agent_ids: ['{{candidate_a}}', '{{candidate_b}}'] }),
-      step(1, 'Submit scores for candidate A (correctness, quality)', 'Scores stored per (candidate, dimension)', 'submit_benchmark_score', { run_id: '{{run_id}}', candidate_agent_id: '{{candidate_a}}', scores: { correctness: 9, quality: 8 } }),
-      step(2, 'Re-submit one dimension for A', 'Upsert overwrites rather than duplicates', 'submit_benchmark_score', { run_id: '{{run_id}}', candidate_agent_id: '{{candidate_a}}', scores: { correctness: 10 } }),
-      step(3, 'Read the leaderboard', 'Run-scoped + agent-aggregate leaderboards reflect the submitted scores', 'get_benchmark_leaderboard', { run_id: '{{run_id}}', workspace_id: '{{workspace_id}}' }),
-    ],
-  },
-
-  // 7 ────────────────────────────────────────────────────────────────────────
-  {
-    key: 'board-pause-resume',
-    name: 'Board pause / resume gate',
-    description:
-      'A paused board (paused_at set) silently drops every agent_trigger; clearing paused_at restores '
-      + 'dispatch. The probe is assigned to a freshly-created INERT sink agent (created in step 0, no '
-      + 'manager attached) — NOT the QA driver agent itself. Two trigger-loop guards sit BEFORE the '
-      + 'pause gate and would otherwise confound the differential: (1) the self-trigger guard skips a '
-      + 'comment trigger when commenter == assignee, and the QA driver IS the scenario target agent, so '
-      + 'a self-assigned probe never emits a comment trigger regardless of pause; (2) a routed-column '
-      + 'self-assignee probe gets create-dispatched, claimed and pended, which independently suppresses '
-      + 'later comment triggers. A fresh inert sink dodges both: the comment targets a non-self holder '
-      + '(self-guard passes) and nothing consumes the emit (no claim/pend), and because the sink owns '
-      + 'exactly one ticket the focus selector always picks the probe. Pause is engaged BEFORE the probe '
-      + 'is created so create-dispatch is gated too. Asserted via ActivityLog: '
-      + 'agent_trigger_dropped_board_paused while paused vs trigger_emitted (trigger_source=comment) '
-      + 'after resume. Mirrors board-pause.test.mjs.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['boards', 'pause', 'triggers'],
-    steps: [
-      // P4c-3b NOTE: 'create_agent' no longer exists — this seed step fails until
-      // P4c-4 reworks the sink as an rt- runtime holder (role_assignments runtime).
-      step(0, 'Create a fresh INERT sink agent (no manager → its triggers emit as ActivityLog rows but are never consumed by a subagent) and capture its id as {{sink_agent_id}}', 'Agent created; its id is used as the probe assignee so the comment trigger targets a non-self holder (clears the self-trigger guard) and nothing claims/pends the probe', 'create_agent', { name: 'QA pause sink (inert)', type: 'custom', description: 'Throwaway inert assignee for the board pause/resume QA probe. No manager attached, so emitted triggers leave an ActivityLog row but spawn no subagent.' }),
-      step(1, 'Pause the board', 'update_board sets paused_at; re-read with get_board and confirm paused_at != null', 'update_board', { board_id: '{{board_id}}', paused: true }),
-      step(2, 'Create the probe ticket in In Progress assigned to the inert sink, and capture its id as {{ticket_id}}', 'Ticket exists in In Progress assigned to {{sink_agent_id}}; because the board is paused, create-dispatch is gated so NO trigger_emitted appears for this ticket', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{in_progress_column_id}}', title: 'QA pause probe', assignee_id: '{{sink_agent_id}}' }),
-      step(3, 'Post a comment while paused', 'Gate drops it: NO trigger_emitted for the probe; an agent_trigger_dropped_board_paused ActivityLog row is written instead (commenter != assignee, so only the pause gate suppresses the trigger)', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: comment while paused', type: 'note' }),
-      step(4, 'Resume the board', 'update_board clears paused_at; re-read with get_board and confirm paused_at == null', 'update_board', { board_id: '{{board_id}}', paused: false }),
-      step(5, 'Post another comment after resume', 'Assignee (the inert sink) now receives a comment trigger: a trigger_emitted ActivityLog row with trigger_source=comment is written for the probe', 'add_comment', { ticket_id: '{{ticket_id}}', content: 'QA: comment after resume', type: 'note' }),
-      step(6, 'Inspect recent activity', 'Differential holds for the probe ticket: a comment-sourced trigger_emitted row exists AFTER resume but NONE while paused; the while-paused comment produced an agent_trigger_dropped_board_paused row', 'get_recent_activity', { limit: 200 }),
-    ],
-  },
-
-  // 8 ────────────────────────────────────────────────────────────────────────
+  // 5 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'archive-unarchive',
     name: 'Archive / unarchive ticket',
     description:
-      'Archiving a ticket removes it from board/workspace ticket reads and the stuck detector; '
-      + 'unarchiving restores it. Mirrors archive-edge-paths.test.mjs.',
+      'Archiving a ticket removes it from the workspace ticket list; unarchiving restores it. '
+      + 'Mirrors archive-edge-paths.test.mjs.',
     qa_driver: AWB_MCP_DRIVER,
     qa_driver_config: driverConfig(),
     tags: ['archive', 'tickets'],
     steps: [
-      step(0, 'Create a ticket to archive', 'Ticket exists', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{todo_column_id}}', title: 'QA archive probe' }),
+      step(0, 'Create a ticket to archive', 'Ticket exists', 'create_ticket', { workspace_id: '{{workspace_id}}', status: 'todo', title: 'QA archive probe' }),
       step(1, 'Archive it', 'archived_at stamped', 'archive_ticket', { ticket_id: '{{ticket_id}}' }),
       step(2, 'List archived tickets', 'Ticket appears in the archived list', 'list_archived_tickets', { workspace_id: '{{workspace_id}}' }),
-      step(3, 'Confirm it is excluded from the live board', 'get_board_summary / board read no longer counts it', 'get_board_summary', { board_id: '{{board_id}}' }),
-      step(4, 'Unarchive it', 'archived_at cleared; ticket back on the board', 'unarchive_ticket', { ticket_id: '{{ticket_id}}' }),
+      step(3, 'Confirm it is excluded from the live ticket list', 'list_tickets (archived excluded by default) no longer returns it', 'list_tickets', { workspace_id: '{{workspace_id}}', query: 'QA archive probe' }),
+      step(4, 'Unarchive it', 'archived_at cleared; ticket back in the pool', 'unarchive_ticket', { ticket_id: '{{ticket_id}}' }),
       step(5, 'Confirm restoration', 'get_ticket shows the ticket live again', 'get_ticket', { ticket_id: '{{ticket_id}}' }),
     ],
   },
 
-  // 9 ────────────────────────────────────────────────────────────────────────
-  {
-    key: 'workspace-board-move',
-    name: 'Cross-workspace board move (re-stamp)',
-    description:
-      'Moving a board to another workspace re-stamps the board + its columns + tickets and carries '
-      + 'column-prompt templates / roles. Mirrors workspace-move-board.test.mjs.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['workspaces', 'boards', 'move'],
-    steps: [
-      step(0, 'Create a throwaway source board with a ticket', 'Board + ticket created', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA move-src' }),
-      step(1, 'Create a destination workspace', 'Destination workspace exists', 'create_workspace', { name: 'QA move-dst' }),
-      step(2, 'Move the board to the destination workspace', 'Board.workspace_id re-stamped; columns + tickets follow', 'move_board_to_workspace', { board_id: '{{src_board_id}}', target_workspace_id: '{{dst_workspace_id}}' }),
-      step(3, 'Verify re-stamp', 'get_board shows the new workspace_id; tickets carry it too', 'get_board', { board_id: '{{src_board_id}}' }),
-    ],
-  },
-
-  // 10 ───────────────────────────────────────────────────────────────────────
-  {
-    key: 'column-role-policy-auto-advance',
-    name: 'Column role routing & auto-advance',
-    description:
-      'A routed column with no matching role holder auto-advances a staffed ticket to the next '
-      + 'servable column, but HALTs a completely-unassigned ticket. Mirrors auto-advance-unassigned / '
-      + 'auto-advance-halt-unassigned.test.mjs.\n\n'
-      + 'GOTCHA — the orphan case needs a TRUE zero-holder ticket. create_ticket auto-defaults the '
-      + 'reporter to the calling agent (commit 29f7df8), so a freshly-created ticket is NOT an orphan: '
-      + 'it carries a reporter holder and TriggerLoopService._ticketHasAnyHolder counts the reporter, '
-      + 'so the ticket takes the staffed (reporter-only) cascade path instead of halting. Step 3 below '
-      + 'strips that auto-filled reporter so step 4 actually exercises the halt-unassigned guard.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['columns', 'column-policies', 'routing', 'auto-advance'],
-    steps: [
-      step(0, 'Create a board whose Plan column routes to "planner"', 'Board + columns created', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA policy probe' }),
-      step(1, 'Set Plan column role_routing to a role no agent holds', 'update_column persists role_routing=["planner"]', 'update_column', { column_id: '{{plan_column_id}}', role_routing: ['planner'] }),
-      step(2, 'Move a staffed ticket onto the unservable planner-routed column', 'Ticket auto-advances to the next servable column; assignee woken', 'move_ticket', { ticket_id: '{{staffed_ticket_id}}', target_column_id: '{{plan_column_id}}' }),
-      step(3, 'Strip the auto-filled reporter off the orphan ticket so it has ZERO role holders (create_ticket auto-defaults reporter→caller, so a fresh ticket is NOT a true orphan)', 'Reporter slot cleared via role_assignments — the ticket now holds no agent/user on any role (assignee/reporter/reviewer all empty)', 'update_ticket', { ticket_id: '{{orphan_ticket_id}}', role_assignments: [{ role_slug: 'reporter', agent_id: '' }] }),
-      step(4, 'Move the now truly-unassigned ticket onto the planner-routed column', 'The column follows its configured no-holder policy', 'move_ticket', { ticket_id: '{{orphan_ticket_id}}', target_column_id: '{{plan_column_id}}' }),
-    ],
-  },
-
-  // 11 ───────────────────────────────────────────────────────────────────────
-  {
-    key: 'backlog-promotion',
-    name: 'Backlog promotion (chain-aware, focus-gated)',
-    description:
-      'With the per-agent focus cap full, the backlog stays put; when focus frees up the chain '
-      + 'successor is promoted ahead of an unrelated higher-priority outsider. Mirrors '
-      + 'backlog-promotion-chain / workflow-state-cap.test.mjs.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['backlog', 'promotion', 'focus', 'chain'],
-    steps: [
-      step(0, 'Create a board with max_concurrent_tickets_per_agent = 1', 'Board created with focus cap', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA backlog probe', max_concurrent_tickets_per_agent: 1 }),
-      step(1, 'Put one ticket in the assignee-routed active column (fills the focus slot)', 'Focus slot occupied', 'move_ticket', { ticket_id: '{{active_ticket_id}}', target_column_id: '{{in_progress_column_id}}' }),
-      step(2, 'Add a chain successor (low priority) + an unrelated outsider (high priority) to Backlog', 'Two backlog candidates exist', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{backlog_column_id}}', title: 'QA chain successor', priority: 'low' }),
-      step(3, 'While focus is full, observe no promotion', 'get_board_summary shows backlog unchanged (focus-held gate)', 'get_board_summary', { board_id: '{{backlog_board_id}}' }),
-      step(4, 'Finish the active ticket by moving it to the terminal column', 'Exactly one intake ticket promotes — the chain successor wins over the outsider', 'move_ticket', { ticket_id: '{{active_ticket_id}}', target_column_id: '{{done_column_id}}' }),
-      step(5, 'Confirm the promotion', 'get_board_summary shows the chain successor promoted into the active column', 'get_board_summary', { board_id: '{{backlog_board_id}}' }),
-    ],
-  },
-
-  // 12 ───────────────────────────────────────────────────────────────────────
+  // 6 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'resource-media-attachment',
     name: 'Resource upload & comment media attachment',
@@ -373,36 +239,36 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     ],
   },
 
-  // 13 ───────────────────────────────────────────────────────────────────────
+  // 7 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'visual-core-screens',
-    name: 'Visual — core UI screens (login → board → ticket → chat → QA → resources)',
+    name: 'Visual — core UI screens (login → tickets → ticket → chat → QA → resources → projects)',
     description:
       'Drive the real AWB client UI with a headless-Chrome (browser) driver and capture a '
-      + 'screenshot of each core screen as image/png evidence: the login page, the board view, '
-      + 'a ticket detail panel with comments, a chat room, the board QA manager (table view), the '
-      + 'Workspace resource menus and the board sub-menu. Unlike the awb-mcp scenarios this leaves real '
+      + 'screenshot of each core screen as image/png evidence: the login page, the ticket pool, '
+      + 'a ticket detail panel with comments, a chat room, the QA manager (table view), the '
+      + 'Workspace resource menus and the projects page. Unlike the awb-mcp scenarios this leaves real '
       + 'pixels in the QA detail Gallery/Lightbox. Capture recipe: apps/server/scripts/qa-visual-capture.mjs.',
     qa_driver: BROWSER_DRIVER,
     qa_driver_config: browserDriverConfig(),
     tags: ['visual', 'ui', 'screenshots', 'gallery'],
     steps: [
       step(0, 'Navigate to the AWB login page and screenshot it', 'Login card ("Welcome Back" / email + password) renders; save as image/png', 'browser_screenshot', { route: '{{awb_base_url}}/', name: 'login.png', mimetype: 'image/png' }),
-      step(1, 'Log in, then screenshot the board (kanban columns + ticket cards)', 'Board view shows columns (Backlog…Done) and ticket cards', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}', name: 'board.png', mimetype: 'image/png' }),
-      step(2, 'Open a ticket detail panel (deep-link ?ticket=) and screenshot it', 'Ticket panel shows title, description, and comment thread', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}', name: 'ticket-detail.png', mimetype: 'image/png' }),
+      step(1, 'Log in, then screenshot the ticket pool (status lanes + ticket cards)', 'Tickets page shows the status lanes (Backlog…Done) and ticket cards', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets', name: 'tickets.png', mimetype: 'image/png' }),
+      step(2, 'Open a ticket detail panel (deep-link ?ticket=) and screenshot it', 'Ticket panel shows title, description, and comment thread', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets?ticket={{ticket_id}}', name: 'ticket-detail.png', mimetype: 'image/png' }),
       step(3, 'Open the chat room view and screenshot it', 'Chat room list + message thread render', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/chat', name: 'chat.png', mimetype: 'image/png' }),
       step(4, 'Open the Workspace QA page and screenshot it', 'QA scenario table shows Workspace and Global scenarios with last-run / pass-rate columns', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/qa', name: 'qa-manager.png', mimetype: 'image/png' }),
       step(5, 'Open the Workspace Resources page and screenshot it', 'Resources grid renders Global and Workspace entries together', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/resources', name: 'resources.png', mimetype: 'image/png' }),
-      step(6, 'Open the board sub-menu (catalog/settings/archive) and screenshot it', 'Board sub-menu navigation is visible', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}/settings', name: 'board-submenu.png', mimetype: 'image/png' }),
+      step(6, 'Open the Projects page and screenshot it', 'Project list renders with each project\'s repository and per-host folders', 'browser_screenshot', { route: '{{awb_base_url}}/ws/{{workspace_id}}/projects', name: 'projects.png', mimetype: 'image/png' }),
     ],
   },
 
-  // 14 ───────────────────────────────────────────────────────────────────────
+  // 8 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'visual-ticket-journey-video',
     name: 'Visual — ticket journey screen recording (video evidence)',
     description:
-      'Record one continuous journey through the AWB client UI as an mp4 (login → board → open a '
+      'Record one continuous journey through the AWB client UI as an mp4 (login → tickets → open a '
       + 'ticket → scroll its comments → QA manager) so the QA detail inline-video player and Lightbox '
       + 'have a real video/mp4 artifact to play. Validates the /api/resources/:id/raw Range-streaming '
       + 'path end-to-end. Capture recipe: apps/server/scripts/qa-visual-capture.mjs --record-video.',
@@ -411,61 +277,14 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
     tags: ['visual', 'ui', 'video', 'screencast'],
     steps: [
       step(0, 'Launch headless Chrome and start screencast recording', 'CDP screencast started; frames accumulating', 'browser_start_video', { fps: 8 }),
-      step(1, 'Log in and land on the board view', 'Board renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}' }),
-      step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/boards/{{board_id}}?ticket={{ticket_id}}' }),
+      step(1, 'Log in and land on the tickets page', 'Ticket pool renders within the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets' }),
+      step(2, 'Open a ticket and scroll through its comments', 'Ticket panel + comment thread captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/tickets?ticket={{ticket_id}}' }),
       step(3, 'Visit the Workspace QA page', 'QA table captured in the recording', 'browser_navigate', { route: '{{awb_base_url}}/ws/{{workspace_id}}/qa' }),
       step(4, 'Stop recording, encode mp4, and record it as THIS step\'s artifact', 'Journey saved as a Resource (file_mimetype=video/mp4) and recorded via record_qa_step on this step so the inline-video tile renders (per-step, not run-level)', 'browser_stop_video', { name: 'ticket-journey.mp4', mimetype: 'video/mp4', record_on_step: 4 }),
     ],
   },
 
-  // 15 ───────────────────────────────────────────────────────────────────────
-  {
-    key: 'dispatch-liveness-slot-reclaim',
-    name: 'Dispatch liveness & per-agent concurrency slot reclaim',
-    description:
-      'Regression for ticket 1fcba693 (티켓 처리 지연·병렬 dispatch·liveness 근본 수정). Validates the four '
-      + "root-cause fixes on AWB's own dispatch/liveness surface, end-to-end via MCP + ActivityLog:\n"
-      + '(1) POLICY — the effective supervisor-liveness policy is a sane 30-min default surfaced in the '
-      + 'workspace read; the observed 14,400,000ms (4h) value is gone and NO code path hardcodes a 4h '
-      + 'fallback (RCA: the 4h was a runtime PATCH into the DB row, never a literal — git log --all -S '
-      + '14400000 = 0).\n'
-      + '(2) CONCURRENCY — the per-agent focus window admits concurrency=cap parallel emits, so >=3 '
-      + 'independent strands on ONE assignee dispatch together; a ghost/process slot can never choke the '
-      + 'server emit path (getAgentFocusTicketIds top-N, N=max_concurrent_tickets_per_agent).\n'
-      + '(3) GENERATION-CAS — a per-session task_token makes the current_task seat a compare-and-swap: a '
-      + "stale/dead session's late clear_current_task can NEVER wipe a live successor's seat + "
-      + 'output-liveness badge.\n'
-      + '(4) EXACTLY-ONCE — single-flight suppresses respawn storms (agent_trigger_dropped_inflight_strand) '
-      + 'while a genuinely dropped column-move is preserved (queued_for_replay) and replays EXACTLY ONCE '
-      + '(inflight_strand_replay) on seat release, with zero twins (respawn_twin_detected -> 0 live).\n'
-      + 'The heavy process-level parts (3 real concurrent subagents, hard-kill reclaim SLA, '
-      + 'supervisor-restart rehydrate) are proven by the deterministic suites this mirrors — server: '
-      + 'inflight-strand-output-liveness / supervisor-output-liveness(-decision) / '
-      + 'supervisor-liveness-redispatch / supervisor-stale-ttl-guard / agent-status-supervisor-eviction; '
-      + 'manager: ticket-session-slot-lifecycle / dispatch-inflight-guard / watchdog-liveness / '
-      + 'restart-reap-resume. This scenario asserts the SERVER-observable contract so a regression that '
-      + 'reintroduces the 4h stall, serial dispatch, or a ghost-slot wipe is caught live.',
-    qa_driver: AWB_MCP_DRIVER,
-    qa_driver_config: driverConfig(),
-    tags: ['dispatch', 'liveness', 'concurrency', 'slot-reclaim', 'focus', 'generation-cas', 'exactly-once', 'regression', 'self-improvement'],
-    steps: [
-      step(0, 'Read the effective supervisor-liveness policy and its source', 'The AWB workspace shows supervisor_stale_ms == 1800000 (30 min) and supervisor_resend_ms == 300000 (5 min) — the sane defaults; the observed 14,400,000 (4h) band-aid is ABSENT and no code path hardcodes a 4h fallback (the 4h was a runtime PATCH into the DB row, not a literal — git log --all -S 14400000 = 0). Effective value + source are diagnosable from the workspace read (DoD item 6)', 'list_workspaces', {}),
-      step(1, 'Create a throwaway probe board with a per-agent focus cap of 3', 'Board created with max_concurrent_tickets_per_agent=3 so the focus window can admit 3 concurrent tickets for one agent; capture {{probe_board_id}} + its To Do / In Progress column ids', 'create_board', { workspace_id: '{{workspace_id}}', name: 'QA dispatch-liveness probe', max_concurrent_tickets_per_agent: 3 }),
-      // P4c-3b NOTE: same as above — rt-sink rework lands in P4c-4.
-      step(2, 'Create a fresh INERT sink agent to own all three probes (no manager -> triggers emit as ActivityLog rows but spawn no subagent, isolating the SERVER focus/dispatch/seat contract)', 'Agent created; capture {{sink_agent_id}}', 'create_agent', { name: 'QA dispatch sink (inert)', type: 'custom', description: 'Throwaway inert assignee for the dispatch-liveness QA probe — no manager attached, so emitted triggers leave ActivityLog rows but spawn no subagent.' }),
-      step(3, 'Create THREE independent probe tickets in To Do, all assigned to the same sink agent (repeat for n=1,2,3 -> {{probe1}},{{probe2}},{{probe3}})', 'Three tickets, one assignee, on the cap=3 board', 'create_ticket', { workspace_id: '{{workspace_id}}', column_id: '{{probe_todo_column_id}}', title: 'QA concurrency strand {{n}}', assignee_id: '{{sink_agent_id}}' }),
-      step(4, 'Move all three probes To Do -> In Progress to fire the assignee triggers together (repeat for probe1..3)', 'Each move fires an assignee trigger for the sink; because cap=3 the focus window (getAgentFocusTicketIds, N=3) admits ALL THREE — none held back by a per-agent concurrency/focus gate', 'move_ticket', { ticket_id: '{{probeN}}', target_column_name: 'In Progress', board_id: '{{probe_board_id}}' }),
-      step(5, 'Assert concurrency = cap: three parallel emits, none focus-dropped', 'Exactly THREE trigger_emitted rows for the sink\'s three probes within the window, and ZERO agent_trigger_dropped_* rows attributable to a concurrency/focus cap — server-observable proof that >=3 independent strands on one assignee dispatch concurrently (the "no parallelism / 3~4h gap" symptom is gone; a ghost/process slot cannot throttle the emit path)', 'get_recent_activity', { limit: 200 }),
-      step(6, 'Claim probe1 seat with a generation nonce (simulate live session A)', 'current_task seat for (sink, probe1, assignee) is set at generation genA with its output-liveness badge on (verify via get_agent -> current_task)', 'set_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', role: 'assignee', task_token: 'genA' }),
-      step(7, 'A respawn re-claims the SAME seat (session B) — the token is overwritten', 'The seat generation advances to genB; genA is now stale (a respawn that re-sets the same (agent,ticket,role) seat overwrites the token)', 'set_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', role: 'assignee', task_token: 'genB' }),
-      step(8, 'Session A LATE clear (stale token genA) must NOT wipe the live successor', "The clear is a NO-OP — compare-and-swap fails because the stored generation is genB, so session B's live seat + badge SURVIVE (get_agent still shows probe1 at genB). Core anti-wipe fix: a dead session can never clear a live successor", 'clear_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', task_token: 'genA' }),
-      step(9, 'Session B own clear (matching token genB) releases exactly its seat', 'The seat + output-liveness badge are released (token matches the current generation) — a generation-safe, exactly-once release; get_agent no longer shows probe1 as current_task', 'clear_current_task', { agent_id: '{{sink_agent_id}}', ticket_id: '{{probe1}}', task_token: 'genB' }),
-      step(10, 'Single-flight + exactly-once replay on an in-flight strand: (a) set_current_task {{probe2}} to hold the seat, (b) fire a redundant trigger (move/comment on probe2), (c) clear the seat, then read activity', 'While in-flight, the redundant same-strand trigger is dropped as agent_trigger_dropped_inflight_strand (single-flight -> no respawn storm / no same-branch collision) and the dropped column-move is preserved (queued_for_replay=true); on seat release it replays EXACTLY ONCE as inflight_strand_replay — no lost trigger, no duplicate, zero respawn_twin_detected that yields a second live seat (successor=1, twin=0)', 'get_recent_activity', { limit: 200 }),
-      step(11, 'No ghost slot / no false restart after the reclaim', "get_agent({{sink_agent_id}}) + get_board_summary({{probe_board_id}}) show only genuinely-live seats — no ghost slot lingering from the cleared strand, and the other probes' seats are untouched (healthy long strands are NOT false-restarted). With the sane 30-min stale policy (step 0) a dead strand is reclaimed by output-liveness in a short deterministic window (not after the 3–4h stale wait), while a healthy strand is never oscillated; supervisor-restart rehydrate without ghost leak is covered by agent-status-supervisor-eviction / restart-reap-resume", 'get_agent', { agent_id: '{{sink_agent_id}}' }),
-      step(12, 'Clean up the probe fixtures', 'Archive the three probe tickets off the throwaway board (repeat for probe1..3); the throwaway board + inert sink carry no live manager, so no probe residue affects real dispatch', 'archive_ticket', { ticket_id: '{{probeN}}' }),
-    ],
-  },
-  // 16 ───────────────────────────────────────────────────────────────────────
+  // 9 ─────────────────────────────────────────────────────────────────────────
   {
     key: 'hermes-live-chat-delivery',
     name: 'Hermes live chat delivery — real deployed-host smoke test',
@@ -507,8 +326,6 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
 export interface BuildScenarioOptions {
   workspace_id: string;
   target_runtime: Record<string, any>;
-  /** null/'' → workspace-scoped; <uuid> → pinned to that board. */
-  board_id?: string | null;
   created_by?: string;
   /** Only seed scenarios whose `key` is in this list (default: all). */
   only?: string[];
@@ -527,8 +344,9 @@ export interface BuildScenarioOptions {
  * suite re-runs the same scenarios repeatedly, so `per_open_ticket` is the
  * right dedupe: the first failure files a fix ticket; subsequent failures of
  * the same scenario append a recurrence comment to that still-open ticket
- * instead of spawning a fresh one. board/column/assignee are left unset so they
- * fall back to run.board_id → scenario.board_id and the scenario's target agent.
+ * instead of spawning a fresh one. project/assignee are left unset, so the fix
+ * ticket lands in the run's workspace pool assigned to the scenario's
+ * target_runtime.
  *
  * QA→fix→QA closed loop (ticket 467dbc7a): `rerun_on_fix` is ON so a seeded
  * scenario's fix ticket reaching Done deterministically re-runs the scenario,
@@ -537,7 +355,7 @@ export interface BuildScenarioOptions {
  * 서버를 치고, 그 서버는 배포 호스트가 `origin/main` 을 detached 로 다시 체크아웃해
  * 의존성 재설치·재빌드·재기동한 결과다. 수정을 main 에 머지해도 그 과정이 끝나기
  * 전에는 옛 코드가 서빙되므로, 즉시(0초) 재실행은 수정 전 코드를 검증할 수 있다.
- * This is a real, repeated failure mode: e.g. the board-pause scenario filed a fix ticket
+ * This is a real, repeated failure mode: e.g. a seeded scenario filed a fix ticket
  * whose rerun fired the instant the fix merged but seconds before the deploy
  * propagated, re-failing against the pre-fix build (a false negative). We default
  * to a non-zero buffer so the common case (deploy lands within a few minutes)
@@ -550,7 +368,7 @@ export const DEFAULT_SEED_ON_FAILURE_TICKET: QaOnFailureTicketConfig = {
   enabled: true,
   priority: 'high',
   dedupe: 'per_open_ticket',
-  labels: ['qa-failure', 'auto'],
+  tags: ['qa-failure', 'auto'],
   rerun_on_fix: true,
   max_rerun_attempts: 3,
   // 10-minute deploy-lag buffer (was 0). Covers the common main→prod auto-deploy
@@ -565,7 +383,7 @@ export function keyTag(key: string): string {
 }
 
 /**
- * Stamp the env-specific scope (workspace/board/agent) onto each template and
+ * Stamp the env-specific scope (workspace/agent) onto each template and
  * return ready-to-create payloads. The stable `key` is preserved both as the
  * leading tag (`key:<key>`) and folded into the catalogue, so an idempotent
  * seeder can match-and-update instead of duplicating.
@@ -579,7 +397,6 @@ export function buildScenarioCreatePayloads(opts: BuildScenarioOptions): Array<C
   return QA_SEED_SCENARIOS.filter((s) => !wanted || wanted.has(s.key)).map((s) => ({
     _key: s.key,
     workspace_id: opts.workspace_id,
-    board_id: opts.board_id ?? null,
     name: s.name,
     description: s.description,
     steps: s.steps,

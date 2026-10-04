@@ -8,11 +8,9 @@ import { validateCliRuntimeProfiles } from '../../common/cli-runtime-profiles';
 import {
   profileEntityToRuntime, publicProfile, runtimeToProfileEntity,
 } from '../../common/claude-backend-registry';
-import { Board } from '../../entities/Board';
 import { ClaudeBackendProfile } from '../../entities/ClaudeBackendProfile';
 import { Credential } from '../../entities/Credential';
 import { SystemSetting } from '../../entities/SystemSetting';
-import { Ticket } from '../../entities/Ticket';
 
 const DEFAULT_KEY = 'claude_backend_profiles.default';
 
@@ -26,25 +24,12 @@ export class ClaudeBackendProfilesController {
   }
 
   // 프로필은 인스턴스 전역이므로(티켓 e616dbfc) 워크스페이스 배정·기본값을
-  // 조회하던 3개 쿼리는 사라졌다. 남은 `workspaces` 는 실제 참조자(board /
-  // agent / ticket 핀)가 어느 워크스페이스에 걸쳐 있는지를 알려주는 파생값이다.
-  // P4c-4: Agent 참조 섹션 제거 (Agent 테이블 없음).
+  // 조회하던 3개 쿼리는 사라졌다. Board / Ticket 의 프로필 핀은 보드 제거와
+  // 함께 없어졌고(docs/tickets.md — 티켓 실행 설정은 assignee RuntimeSpec 이
+  // 갖는다), Agent 핀은 P4c-4 에서 사라졌다. 남은 참조자는 전역 기본값뿐이다.
   private async impact(id: string) {
-    const [boards, runs, defaultId] = await Promise.all([
-      this.dataSource.getRepository(Board).find({ where: { cli_runtime_profile: id } }),
-      this.dataSource.getRepository(Ticket).find({ where: { cli_runtime_profile: id } }),
-      this.defaultId(),
-    ]);
-    return {
-      global_default: defaultId === id,
-      workspaces: Array.from(new Set([
-        ...boards.map(x => x.workspace_id).filter(Boolean),
-        ...runs.map(x => x.workspace_id).filter(Boolean),
-      ])),
-      boards: boards.map(x => ({ id: x.id, name: x.name, workspace_id: x.workspace_id })),
-      agents: [],
-      runs: runs.map(x => ({ id: x.id, title: x.title, workspace_id: x.workspace_id })),
-    };
+    const defaultId = await this.defaultId();
+    return { global_default: defaultId === id };
   }
 
   @Get()
@@ -129,7 +114,7 @@ export class ClaudeBackendProfilesController {
     const repo = this.dataSource.getRepository(ClaudeBackendProfile);
     if (!(await repo.findOne({ where: { id } }))) return res.status(404).json({ error: 'Profile not found' });
     const impact = await this.impact(id);
-    const referenced = impact.global_default || impact.workspaces.length || impact.boards.length || impact.agents.length || impact.runs.length;
+    const referenced = impact.global_default;
     const replacement = body?.replacement_profile_id ? String(body.replacement_profile_id) : null;
     const detach = body?.detach === true;
     if (referenced && !replacement && !detach) return res.status(409).json({ error: 'Profile is referenced', impact });
@@ -139,9 +124,6 @@ export class ClaudeBackendProfilesController {
     }
     await this.dataSource.transaction(async manager => {
       const next = replacement || null; // detach means inherit
-      await manager.update(Board, { cli_runtime_profile: id }, { cli_runtime_profile: next });
-      // P4c-4: Agent 행 없음 — 남은 참조 테이블만 정리한다.
-      await manager.update(Ticket, { cli_runtime_profile: id }, { cli_runtime_profile: next });
       if (impact.global_default) {
         await manager.update(SystemSetting, { key: DEFAULT_KEY }, { value: next || '' });
       }
@@ -154,7 +136,7 @@ export class ClaudeBackendProfilesController {
 /**
  * 비관리자도 읽을 수 있는 전역 프로필 카탈로그 (티켓 e616dbfc).
  *
- * 프로필 핀 드롭다운(에이전트 / 보드 / 티켓 / ManagedAgentDialog)이 목록을
+ * 프로필 핀 드롭다운(에이전트 / 세션 설정 / ManagedAgentDialog)이 목록을
  * 채우던 워크스페이스 엔드포인트를 대체한다. 위의 관리자 컨트롤러는 같은
  * 목록을 주지만 `AdminGuard` 라서, 그대로 갈아끼우면 비관리자에게는 드롭다운이
  * 통째로 빈 목록이 된다 — 그래서 읽기 전용 표면을 따로 둔다. 쓰기(생성 /

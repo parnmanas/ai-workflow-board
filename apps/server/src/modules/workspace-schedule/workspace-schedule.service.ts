@@ -11,7 +11,6 @@ import { RuntimeHost } from '../../entities/RuntimeHost';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { isUuidShapedId } from '../../utils/agent-name';
-import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
 import { findOrFail } from '../../common/find-or-fail';
@@ -39,7 +38,6 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
 
 export interface CreateWorkspaceScheduleInput {
   workspaceId: string;
-  boardId?: string | null;
   name: string;
   /** 인라인 프롬프트 형태에서만. Action 형태에서는 Action 이 대상을 정한다. */
   targetAgentId?: string;
@@ -112,7 +110,6 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly messaging: RoomMessagingService,
     private readonly logService: LogService,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesce: InstanceQuiesceService,
@@ -149,8 +146,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
   async list(workspaceId: string): Promise<WorkspaceSchedule[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('s.board_id IS NULL');
+      .where('s.workspace_id = :ws', { ws: workspaceId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
@@ -163,7 +159,6 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     const target = await this._validateTarget(input.workspaceId, input.targetAgentId, input.taskPrompt, input.actionId, input.targetRuntime);
-    await this._assertBoardScope(input.workspaceId, input.boardId);
 
     const { cron, intervalMs } = this._validateCadence(input.cron, input.intervalMs);
     const enabled = input.enabled !== false;
@@ -171,7 +166,6 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     // P4c-4: spec-direct 스냅샷만 기록한다 (Agent 행 없음).
     const draft = this.scheduleRepo.create({
       workspace_id: input.workspaceId,
-      board_id: null,
       name: input.name.trim(),
       target_agent_id: target.targetAgentId,
       target_runtime: target.targetRuntime ?? null,
@@ -196,9 +190,6 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
       schedule.name = patch.name.trim();
-    }
-    if (patch.boardId !== undefined && (patch.boardId ?? null) !== schedule.board_id) {
-      throw makeError(400, 'scope cannot be changed after creation');
     }
     // 대상(무엇을 할지)은 셋이 서로 배타적이라 한 덩어리로 다시 검증한다 — 하나만
     // 패치해서 "프롬프트도 있고 action_id 도 있는" 상태로 빠지는 경로를 막는다.
@@ -439,12 +430,6 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
 
     this.logService.info('WorkspaceScheduler', `dispatched schedule ${schedule.id} → agent ${schedule.target_agent_id} room ${room.id}`);
     return { schedule_id: schedule.id, room_id: room.id, agent_id: schedule.target_agent_id };
-  }
-
-  private async _assertBoardScope(workspaceId: string, boardId: string | null | undefined): Promise<void> {
-    if (boardId) {
-      throw makeError(400, 'Board-scoped schedules are no longer supported; create the schedule in its Workspace');
-    }
   }
 
   /**

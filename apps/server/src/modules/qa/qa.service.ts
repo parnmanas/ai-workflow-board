@@ -5,7 +5,6 @@ import { QaScenario, QaScenarioStep, QaOnFailureTicketConfig } from '../../entit
 import { QaRun, QaRunStatus } from '../../entities/QaRun';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
-import { Board } from '../../entities/Board';
 import { findOrFail } from '../../common/find-or-fail';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
@@ -17,6 +16,7 @@ import {
   normalizeRepoRef,
 } from '../../common/workspace-folder-options';
 import { normalizeBuildTarget } from '../../common/build-artifact-options';
+import { normalizeTags as normalizeTicketTags } from '../tickets/ticket.service';
 import { QaRunService } from './qa-run.service';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -46,23 +46,27 @@ function normalizeTags(tags: any): string[] {
  * Normalize the loose `on_failure_ticket` input into a clean config (or null).
  * `null` / `{ enabled:false }` both disable the side-effect; every other field
  * is optional and defaulted at dispatch time in QaFailureTicketService.
+ * A `labels` input (the pre-board-removal name) is accepted as `tags`; the
+ * removed board/column/assignee_id keys are dropped.
  */
 function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
   if (input == null) return null;
   if (typeof input !== 'object') return null;
   const priority = ['low', 'medium', 'high', 'critical'].includes(input.priority) ? input.priority : undefined;
   const dedupe = input.dedupe === 'per_open_ticket' ? 'per_open_ticket' : (input.dedupe === 'per_run' ? 'per_run' : undefined);
-  const labels = Array.isArray(input.labels) ? input.labels.map((l: any) => String(l)).filter(Boolean) : undefined;
+  const status = input.status === 'backlog' || input.status === 'todo' ? input.status : undefined;
+  const rawTags = input.tags ?? input.labels;
+  const tags = rawTags === undefined || rawTags === null ? undefined : normalizeTicketTags(rawTags);
+  const projectId = input.project_id != null ? String(input.project_id).trim() : '';
   const maxRerun = Number(input.max_rerun_attempts);
   const rerunDelay = Number(input.rerun_delay_seconds);
   return {
     enabled: !!input.enabled,
-    board_id: input.board_id ? String(input.board_id) : undefined,
-    column_name: input.column_name ? String(input.column_name) : undefined,
+    project_id: projectId || undefined,
+    status,
     priority,
-    assignee_id: input.assignee_id ? String(input.assignee_id) : undefined,
     assignee_runtime: input.assignee_runtime ? normalizeRuntimeSpec(input.assignee_runtime, 'Failure ticket runtime') : undefined,
-    labels,
+    tags,
     dedupe,
     title_template: input.title_template ? String(input.title_template) : undefined,
     rerun_on_fix: input.rerun_on_fix === undefined ? undefined : !!input.rerun_on_fix,
@@ -87,7 +91,6 @@ export interface QaScenarioListItem extends Omit<QaScenario, 'refreshRuntimeIden
 
 export interface CreateScenarioInput {
   workspace_id: string;
-  board_id?: string | null;
   name: string;
   description?: string;
   steps?: any;
@@ -120,15 +123,15 @@ export interface CreateScenarioInput {
   /** Pre-serialized LivenessPolicy JSON string (or null to clear). The MCP/REST
    *  layer validates + serializes via qa-liveness-policy before calling in. */
   liveness_policy?: string | null;
-  /** Pre-serialized QaPhasesConfig JSON string (or null to clear/inherit board).
+  /** Pre-serialized QaPhasesConfig JSON string (or null to clear).
    *  The MCP/REST layer validates + serializes via qa-phases before calling in. */
   qa_phases?: string | null;
 }
 
 /**
- * Owns QaScenario CRUD. Mirrors ActionsService's CRUD half (workspace/board
- * scope checks, target-agent validation). The Run dispatch + result recording
- * live in QaRunService.
+ * Owns QaScenario CRUD. Mirrors ActionsService's CRUD half (workspace scope
+ * checks, target-agent validation). The Run dispatch + result recording live
+ * in QaRunService.
  */
 @Injectable()
 export class QaService {
@@ -137,15 +140,13 @@ export class QaService {
     @InjectRepository(QaRun) private readonly runRepo: Repository<QaRun>,
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
     private readonly runService: QaRunService,
   ) {}
 
   async list(workspaceId: string): Promise<QaScenarioListItem[]> {
     if (!workspaceId) throw makeError(400, 'workspace_id is required');
     const qb = this.scenarioRepo.createQueryBuilder('s')
-      .where('s.workspace_id = :ws', { ws: workspaceId })
-      .andWhere('s.board_id IS NULL');
+      .where('s.workspace_id = :ws', { ws: workspaceId });
     const scenarios = await qb.orderBy('s.name', 'ASC').getMany();
     return this._attachLastRun(scenarios);
   }
@@ -226,13 +227,8 @@ export class QaService {
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     const target = await this.resolveTarget(input.workspace_id, input.target_agent_id, input.target_runtime);
 
-    if (input.board_id) {
-      throw makeError(400, 'Board-scoped QA scenarios are no longer supported; create the scenario in its Workspace');
-    }
-
     const created = this.scenarioRepo.create({
       workspace_id: input.workspace_id,
-      board_id: null,
       name: input.name.trim(),
       description: input.description ?? '',
       steps: normalizeSteps(input.steps),
@@ -280,11 +276,6 @@ export class QaService {
       existing.target_agent_id = target.target_agent_id;
       existing.target_runtime = target.target_runtime;
     }
-    if (patch.board_id !== undefined) {
-      if ((patch.board_id || null) !== existing.board_id) {
-        throw makeError(400, 'scope cannot be changed after creation');
-      }
-    }
     if (patch.qa_driver !== undefined) existing.qa_driver = patch.qa_driver ?? '';
     if (patch.qa_driver_config !== undefined) existing.qa_driver_config = patch.qa_driver_config ?? null;
     if (patch.enabled !== undefined) existing.enabled = !!patch.enabled;
@@ -304,7 +295,7 @@ export class QaService {
     if (patch.build_mode !== undefined) existing.build_mode = normalizeBuildMode(patch.build_mode);
     // liveness_policy arrives pre-validated + serialized (string) or null to clear.
     if (patch.liveness_policy !== undefined) existing.liveness_policy = patch.liveness_policy ?? null;
-    // qa_phases arrives pre-validated + serialized (string) or null to clear/inherit board.
+    // qa_phases arrives pre-validated + serialized (string) or null to clear.
     if (patch.qa_phases !== undefined) existing.qa_phases = patch.qa_phases ?? null;
     return this.scenarioRepo.save(existing);
   }

@@ -8,8 +8,7 @@ import { CheckoutMode, WorkspaceFolderRepoRef } from '../common/workspace-folder
 // the room via the existing chat_room_message SSE flow — no new event type is
 // needed because Run-as-chat-room reuses the room infrastructure verbatim.
 //
-// workspace_id is required. board_id remains as a legacy compatibility column
-// and is always NULL after boot migration.
+// workspace_id is required.
 @Entity('actions')
 export class Action {
   @AfterLoad()
@@ -26,9 +25,6 @@ export class Action {
 
   @Column({ type: 'varchar' })
   workspace_id: string;
-
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
 
   @Column({ type: 'varchar' })
   name: string;
@@ -66,20 +62,21 @@ export class Action {
 
   // Lifecycle trigger (ticket 16a6339c). Empty string = the legacy
   // cron/manual-only Action. `'on_ticket_done'` opts the Action into the
-  // on-ticket-done hook: when a ticket lands on a terminal column (Done),
+  // on-ticket-done hook: when a ticket enters `done`,
   // OnTicketDoneActionService dispatches a Run with the completed ticket as
-  // context, applied workspace-wide (board_id is a dead legacy column — see
-  // below). trigger_label optionally narrows the policy further:
-  //   - trigger_label empty → any label; non-empty → the finished ticket must
-  //     carry that label.
+  // context, applied workspace-wide. trigger_label optionally narrows the
+  // policy further:
+  //   - trigger_label empty → any ticket; non-empty → the finished ticket must
+  //     carry that tag.
   // `enabled=false` still skips the hook (manual run_action only) — same rule
   // the scheduler already honours.
   @Column({ type: 'varchar', default: '' })
   trigger: string;
 
-  // Label-scope filter for `trigger='on_ticket_done'` (ticket 16a6339c). Empty
-  // = no label requirement (workspace-wide). Non-empty = the finished ticket's
-  // `labels` JSON array must include this exact string for the hook to fire.
+  // Tag-scope filter for `trigger='on_ticket_done'` (ticket 16a6339c). Empty
+  // = no tag requirement (workspace-wide). Non-empty = the finished ticket's
+  // `tags` must include this exact string for the hook to fire. (The column
+  // predates tags — they replaced ticket labels with the same encoding.)
   // Ignored when `trigger` is not 'on_ticket_done'.
   @Column({ type: 'varchar', default: '' })
   trigger_label: string;

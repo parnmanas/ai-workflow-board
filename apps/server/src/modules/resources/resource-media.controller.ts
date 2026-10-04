@@ -18,7 +18,7 @@ import { inferResourceMimetype } from '../mcp/shared/resource-helpers';
  *      an Authorization header. ResourcesController is gated by PermissionGuard
  *      (header Bearer only), so these routes need their own header-OR-query auth.
  *   2. Serving bytes via a real URL (with HTTP Range) lets the browser stream
- *      and seek large videos, and — crucially — stops the comment/board JSON
+ *      and seek large videos, and — crucially — stops the comment/ticket JSON
  *      payloads from carrying the full base64 of every attachment on every
  *      refetch (ticket ff3e7337). expandCommentAttachments now ships metadata
  *      only; the client points media tags at this endpoint.
@@ -58,7 +58,7 @@ export class ResourceMediaController {
 
   // Authorize workspace access the same way WorkspaceGuard does: admins bypass,
   // everyone else must hold member OR owner on the workspace. This is the
-  // isolation boundary the rest of the app enforces on every ticket/board read.
+  // isolation boundary the rest of the app enforces on every ticket read.
   private async canAccessWorkspace(user: User, workspaceId: string | null | undefined): Promise<boolean> {
     if (!workspaceId) return false;
     if (user.role === 'admin') return true;
@@ -117,7 +117,6 @@ export class ResourceMediaController {
     const resource = await this.resourceRepo.save(
       this.resourceRepo.create({
         workspace_id: workspaceId,
-        board_id: null,
         credential_id: null,
         name: fileName,
         description: '',
@@ -128,7 +127,6 @@ export class ResourceMediaController {
         file_name: fileName,
         file_mimetype: effectiveMimetype,
         tags: '[]',
-        default_branch: '',
       }),
     );
     // Return metadata only — never echo file_data back (it would re-inflate the
@@ -136,7 +134,6 @@ export class ResourceMediaController {
     return res.status(201).json({
       id: resource.id,
       workspace_id: resource.workspace_id,
-      board_id: resource.board_id,
       name: resource.name,
       type: resource.type,
       file_name: resource.file_name,

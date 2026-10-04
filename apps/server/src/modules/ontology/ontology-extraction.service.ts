@@ -7,13 +7,17 @@
 // 같은 lifecycle/자동 프로비저닝 배선은 ticket #6(미배정)의 몫이라 이
 // 서비스는 (workspaceId, resourceId, folderPath, graphId)를 호출자가 이미
 // 안다고 가정한다.
+//
+// `resourceId` 는 이름만 남은 것이다 — 값은 **Project id** 다. 저장소
+// Resource(type='repository')가 같은 id 로 Project 로 이관됐으므로
+// (docs/tickets.md) 그래프 테이블의 `resource_id` 컬럼과 git 캐시 경로를
+// 건드리지 않고 그대로 Project 로 해소한다.
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, EntityManager, Repository } from 'typeorm';
-import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
-import { findOrFail } from '../../common/find-or-fail';
+import { ProjectsService } from '../projects/projects.service';
 import { ensureRepoCache, listTreeRecursive, getFileContentsBatch, listCommits, type TreeFileEntry } from '../mcp/shared/git-repo-cache';
 import { resolveGitCredential } from '../mcp/shared/git-branches';
 import { AppOntologyDataSource } from '../../db';
@@ -35,6 +39,7 @@ function redactWorkerError(raw: string): string {
 
 export interface ExtractRepoOptions {
   workspaceId: string;
+  /** Project id (예전 저장소 Resource id — 같은 값으로 이관됐다). */
   resourceId: string;
   /** 빈 문자열 = 저장소 루트. */
   folderPath: string;
@@ -42,7 +47,7 @@ export interface ExtractRepoOptions {
    *  서비스는 lifecycle/프로비저닝을 하지 않는다(ticket #6 범위), 호출자가
    *  이미 갖고 있는 값을 그대로 받는다. */
   graphId: string;
-  /** 생략하면 Resource.default_branch, 그것도 비어 있으면 저장소 HEAD. */
+  /** 생략하면 Project.default_branch, 그것도 비어 있으면 저장소 HEAD. */
   ref?: string;
   poolSize?: number;
   /** lifecycle 전체 교체 트랜잭션에서 사용할 transaction manager. */
@@ -95,7 +100,7 @@ export class OntologyExtractionService {
   private persistFactBundles = persistFactBundles;
 
   constructor(
-    @InjectRepository(Resource) private readonly resourceRepo: Repository<Resource>,
+    private readonly projects: ProjectsService,
     @InjectRepository(Credential) private readonly credentialRepo: Repository<Credential>,
     @InjectDataSource() private readonly nestDataSource: DataSource,
   ) {}
@@ -120,20 +125,16 @@ export class OntologyExtractionService {
   }
 
   async extractRepo(opts: ExtractRepoOptions): Promise<ExtractRepoResult> {
-    const resource = await findOrFail(this.resourceRepo, { where: { id: opts.resourceId } }, 'Resource not found');
-    if (resource.workspace_id !== null && resource.workspace_id !== opts.workspaceId) {
-      throw new Error('Resource not found in workspace');
-    }
-    if (resource.type !== 'repository') {
-      throw new Error(`resource type must be 'repository' (got '${resource.type}')`);
-    }
-    if (!resource.url) {
-      throw new Error("resource has no URL — set the repository's URL before extracting its ontology graph");
+    const project = await this.projects.getInWorkspace(opts.resourceId, opts.workspaceId);
+    if (!project) throw new Error('Project not found in workspace');
+    if (!project.repo_url) {
+      throw new Error("project has no repo_url — set the project's repository URL before extracting its ontology graph");
     }
 
-    const credential = await this.resolveGitCredential(this.credentialRepo, resource.credential_id, opts.workspaceId);
-    const repoPath = await this.ensureRepoCache({ resourceId: opts.resourceId, url: resource.url, credential });
-    const ref = opts.ref || resource.default_branch || 'HEAD';
+    const credential = await this.resolveGitCredential(this.credentialRepo, project.credential_id, opts.workspaceId);
+    // 캐시 키는 project id — 저장소 Resource 시절과 같은 값이라 기존 캐시 클론을 그대로 재사용한다.
+    const repoPath = await this.ensureRepoCache({ resourceId: project.id, url: project.repo_url, credential });
+    const ref = opts.ref || project.default_branch || 'HEAD';
 
     const commits = await this.listCommits({ repoPath, ref, limit: 1 });
     const commit = commits[0]?.sha ?? ref;

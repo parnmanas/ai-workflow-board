@@ -1,4 +1,5 @@
 import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
+import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
 import { buildDataSourceOptions } from './db';
 import 'dotenv/config';
 import 'reflect-metadata';
@@ -15,7 +16,7 @@ import { ApiKeyService } from './services/api-key.service';
 import { DeploymentService } from './modules/deployments/deployment.service';
 import { LogService } from './services/log.service';
 import { preSyncPostgres } from './database/pre-sync-postgres';
-import { ensureSqljsDbHealthy, ensureOntologySqljsDbHealthy, preSyncSqljsOpenIntents } from './db';
+import { ensureSqljsDbHealthy, ensureOntologySqljsDbHealthy } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
 import { applySpaFallback } from './common/spa-fallback';
 
@@ -39,14 +40,9 @@ async function bootstrap() {
   // 검사한다(ticket b646ed54).
   await ensureOntologySqljsDbHealthy();
 
-  // Also before NestFactory (→ TypeOrmModule.forRoot → synchronize): collapse any
-  // pre-existing duplicate OPEN dispatch_intents so the partial UNIQUE index this
-  // ticket adds can be created without CREATE UNIQUE INDEX failing on legacy dup
-  // rows and aborting boot. No-op on postgres/mysql (postgres handled in
-  // preSyncPostgres above). Ticket 3c3b17a3.
-  await preSyncSqljsOpenIntents();
-
   await preSyncAgentCleanup(buildDataSourceOptions());
+  // Board removal phase 1 — snapshot what synchronize is about to drop.
+  await preSyncBoardRemoval(buildDataSourceOptions());
   const app = await NestFactory.create(AppModule);
 
   // Listen for SIGTERM/SIGINT and await NestJS lifecycle hooks (onModuleDestroy)

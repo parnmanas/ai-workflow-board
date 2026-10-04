@@ -14,31 +14,27 @@
  * CONTRACT (ticket 24694916, acceptance #1 "누락 없이") — the MCP tool surface is
  * classified EXHAUSTIVELY across every bucket below so a newly-added tool is a
  * deliberate decision, never a silent gap. tool-surface-parity.test.mjs asserts the
- * server's registered tools equal EMIT ∪ BATCH ∪ REJECT ∪ ARTIFACT ∪ AGENT ∪ BOARD ∪
- * EXCLUDE, failing CI on any unclassified (or stale) tool:
+ * server's registered tools equal EMIT ∪ ARTIFACT ∪ EXCLUDE, failing CI on any
+ * unclassified (or stale) tool:
  *
- *   EMIT (this map) — create / move (incl. cross-board) / update (incl. child),
- *     comment plus the typed-comment mutations (ask_question / answer_question /
- *     record_decision), claim / release, pend / unpend, archive / unarchive,
- *     prerequisite add / remove, handoff, and the consensus micro-protocol
- *     (propose_move + record_agreement).
- *   BATCH (BATCH_TICKET_TOOL) — batch_operations: ONE result fans out to MANY refs.
- *   REJECT (REJECT_HANDOFF_TOOL) — reject_handoff: ONE result → the newly-filed 반려
- *     defect ticket + the re-blocked follow-up (bespoke shape → resolveRejectHandoffRefs).
+ *   EMIT (this map) — create / move (status) / update (incl. child), comment plus
+ *     the typed-comment mutations (ask_question / answer_question / record_decision),
+ *     claim / release, pend / unpend, archive / unarchive, prerequisite add / remove,
+ *     CI wait.
  *   ARTIFACT (ARTIFACT_ACTION_TOOLS, F2-4 ⓒ) — build/deploy result cards, independent
  *     of the ticket_refs channel (see the bucket's own doc comment below).
- *   BOARD (BOARD_ACTION_TOOLS, F-3 ticket 3ca88253) — get_board_summary → board card.
- *   (AGENT bucket removed in P4c-4 with get_agent itself — Agent table dropped.)
- *   EXCLUDE (TICKET_TOOL_EXCLUSIONS) — reads, ticket deletes (404 deep-link),
- *     ticket-attachment I/O, the assistant's own send_chat_room_message, the
- *     current-task focus seat, remote improvement tickets (off-instance → 404), and
- *     every non-ticket domain. Enumerated there with a per-tool reason.
+ *   EXCLUDE (TICKET_TOOL_EXCLUSIONS) — reads (incl. list_tickets, whose results feed
+ *     the title cache), ticket deletes (404 deep-link), ticket-attachment I/O, the
+ *     assistant's own send_chat_room_message, the current-task focus seat, and every
+ *     non-ticket domain. Enumerated there with a per-tool reason.
+ *
+ * The board model's extra buckets (BATCH batch_operations, REJECT reject_handoff,
+ * BOARD get_board_summary) went away with those tools (docs/tickets.md — board-less).
  */
 export const TICKET_ACTION_TOOLS: Record<string, string> = {
   create_ticket: 'create',
   create_child_ticket: 'create',
   move_ticket: 'move',
-  move_ticket_to_board: 'move',
   update_ticket: 'update',
   update_child_ticket: 'update',
   decide_ticket_duplicate: 'update',
@@ -58,21 +54,11 @@ export const TICKET_ACTION_TOOLS: Record<string, string> = {
   unarchive_ticket: 'unarchive',
   add_ticket_prerequisites: 'prereq',
   remove_ticket_prerequisite: 'prereq',
-  register_completion_verification: 'verification',
-  record_completion_verification: 'verification',
   // ticket 778b6dc7: durable CI-run wait, same "blocking flag on the ticket
   // row" shape as prereq add/remove above — one category covers both
   // register/cancel directions, same precedent as 'prereq'.
   await_ci_run: 'ci_wait',
   cancel_ci_wait: 'ci_wait',
-  // ticket e630b530: 저장소별 랜딩 lease. 위 CI 대기와 똑같이 "티켓 row 의
-  // 차단 플래그(pending_merge_lease)" 를 세우고 내리는 모양이라, 획득/해제
-  // 양방향을 한 카테고리가 덮는다 — 'prereq' / 'ci_wait' 와 같은 선례.
-  await_merge_lease: 'merge_lease',
-  release_merge_lease: 'merge_lease',
-  handoff_to_agent: 'handoff',
-  propose_move: 'propose',
-  record_agreement: 'consensus',
 };
 /**
  * F2-4 ⓒ (ticket d21b28fc) — 결과물(artifact) 카드 캡처면.
@@ -88,52 +74,17 @@ export const ARTIFACT_ACTION_TOOLS: Record<string, string> = {
   report_build_failure: 'build',
   report_deployment: 'deploy',
 };
-/**
- * F-3 (ticket 3ca88253) — board 현황 카드 캡처면. get_board_summary 는 서버 설명대로
- * "compact LLM-friendly board summary" 전용 tool 이라 이것만 캡처한다. get_board(전체
- * 상세: children/comments 포함)는 다른 목적(티켓 상세 조회 등)으로도 널리 쓰이므로
- * 캡처 대상에서 제외 — 캡처하면 매 호출마다 대형 결과가 카드 후보가 되어버린다.
- */
-export const BOARD_ACTION_TOOLS: Record<string, string> = {
-  get_board_summary: 'summary',
-};
-
 /** Tools whose NEW ticket id is only in the tool RESULT (not the input). For every
  *  other tracked tool the input `ticket_id` is authoritative — the result `id` may
  *  be a comment id (add_comment) etc., so it must NOT be used as the ticket id. */
 export const TICKET_CREATE_TOOLS = new Set(['create_ticket', 'create_child_ticket']);
-
-/** The one MCP ticket tool whose single tool_result fans out to MANY refs:
- *  batch_operations runs N ops in a transaction, so its result carries a
- *  `results[]` array parallel to the input `operations[]`. Handled by
- *  resolveBatchTicketRefs (multi-ref), NOT the 1-result→1-ref path above. */
-export const BATCH_TICKET_TOOL = 'batch_operations';
-/** The cross-board reverse-rejection tool. Like batch_operations its single
- *  tool_result fans out to MANY refs, and its shape fits NEITHER the create
- *  (result.id) NOR the existing-ticket (input ticket_id) path — it returns
- *  {defect_ticket_id, source_ticket_id, followup_pending_on_tickets, followup{…}}.
- *  Handled by resolveRejectHandoffRefs (multi-ref), NOT resolveTicketRef. */
-export const REJECT_HANDOFF_TOOL = 'reject_handoff';
-/** batch_operations sub-action → card action. An op whose action isn't here (or
- *  that failed) emits no ref. Legacy aliases (add-subtask / update-subtask) fold
- *  onto the same action as their current name. */
-export const BATCH_OP_ACTION: Record<string, string> = {
-  'create-ticket': 'create',
-  'move-ticket': 'move',
-  'add-child': 'create',
-  'add-subtask': 'create',
-  'update-child': 'update',
-  'update-subtask': 'update',
-  'add-comment': 'comment',
-};
 /** Korean action label for the fallback content line — rendered on surfaces that
  *  don't understand metadata (history replay, notifications, legacy clients). */
 export const TICKET_ACTION_LABEL_KO: Record<string, string> = {
   create: '생성', move: '이동', update: '수정', comment: '코멘트',
   question: '질문', answer: '답변', decision: '결정',
   claim: '클레임', release: '클레임 해제', pend: '보류', unpend: '보류 해제',
-  archive: '아카이브', unarchive: '아카이브 해제', prereq: '선행조건',
-  handoff: '핸드오프', propose: '이동 제안', consensus: '합의', reject: '반려',
+  archive: '아카이브', unarchive: '아카이브 해제', prereq: '선행조건', ci_wait: 'CI 대기',
 };
 
 export interface TicketToolContext {
@@ -141,19 +92,12 @@ export interface TicketToolContext {
   fromResult: boolean;
   inputTicketId?: string;
   inputTitle?: string;
-  /** Set ONLY for batch_operations: the raw input `operations[]`, zipped against
-   *  the result `results[]` by resolveBatchTicketRefs. Presence of this field is
-   *  what routes a capture down the multi-ref path instead of resolveTicketRef. */
-  batchOps?: any[];
-  /** Set ONLY for reject_handoff: routes to resolveRejectHandoffRefs (bespoke
-   *  multi-ref shape). Presence of this flag is what selects that path. */
-  rejectHandoff?: boolean;
 }
 export interface TicketRef {
   action: string;
   ticket_id: string;
   title?: string;
-  // F2-4 ⓑ: propose_move 의 대상 컬럼 이름 등 제안/합의 부가 맥락(있으면).
+  /** move 의 목적지 status 등 부가 맥락(있으면). */
   detail?: string;
 }
 
@@ -184,26 +128,6 @@ export function trackedTicketTool(name: unknown, input: any): TicketToolContext 
   if (typeof name !== 'string') return null;
   const bare = bareToolName(name);
   const inp = input && typeof input === 'object' ? input : {};
-  // batch_operations is a special case: one call, many ticket mutations. Capture
-  // the raw operations[] here; resolveBatchTicketRefs zips it with results[] later.
-  if (bare === BATCH_TICKET_TOOL) {
-    return {
-      action: 'batch',
-      fromResult: true,
-      batchOps: Array.isArray(inp.operations) ? inp.operations : [],
-    };
-  }
-  // reject_handoff is the other multi-ref special: it keys on `followup_ticket_id`
-  // (not `ticket_id`) and files a NEW defect ticket, so its refs come from the
-  // bespoke resolveRejectHandoffRefs, not the standard action map below.
-  if (bare === REJECT_HANDOFF_TOOL) {
-    return {
-      action: 'reject',
-      fromResult: true,
-      rejectHandoff: true,
-      inputTicketId: typeof inp.followup_ticket_id === 'string' ? inp.followup_ticket_id : undefined,
-    };
-  }
   const action = TICKET_ACTION_TOOLS[bare];
   if (!action) return null;
   return {
@@ -232,8 +156,9 @@ export function parseStreamToolResult(raw: any): any {
 }
 
 /** Shallow-collect {id,title} ticket pairs from a parsed result (a ticket object,
- *  an array of tickets, or a ticket with a `children` array) — bounded, no deep
- *  descent. Pure: returns the pairs; the caller decides how to cache them. */
+ *  an array of tickets, a `{ tickets: [...] }` listing such as list_tickets, or a
+ *  ticket with a `children` array) — bounded, no deep descent. Pure: returns the
+ *  pairs; the caller decides how to cache them. */
 export function harvestTicketTitles(result: any): Array<{ id: string; title: string }> {
   const out: Array<{ id: string; title: string }> = [];
   if (!result || typeof result !== 'object') return out;
@@ -248,6 +173,7 @@ export function harvestTicketTitles(result: any): Array<{ id: string; title: str
   }
   consider(result);
   if (Array.isArray(result.children)) for (const c of result.children.slice(0, 100)) consider(c);
+  if (Array.isArray(result.tickets)) for (const t of result.tickets.slice(0, 100)) consider(t);
   return out;
 }
 
@@ -277,12 +203,6 @@ export function resolveTicketRef(
   if (!title) title = (titleLookup && titleLookup(ticketId)) || ctx.inputTitle;
   const ref: TicketRef = { action: ctx.action, ticket_id: ticketId };
   if (title) ref.title = title;
-  // F2-4 ⓑ: propose_move 결과의 target_column.name 을 승인 카드 배지용 detail 로 싣는다.
-  // ("→ <컬럼> 이동 제안"). record_agreement 등 여타 action 은 detail 없이 배지만 렌더.
-  if (ctx.action === 'propose' && obj && obj.target_column && typeof obj.target_column === 'object') {
-    const colName = (obj.target_column as any).name;
-    if (typeof colName === 'string' && colName) ref.detail = colName;
-  }
   return ref;
 }
 
@@ -351,144 +271,6 @@ export function chunkArtifactRefs(refs: ArtifactRef[], size: number): ArtifactRe
 
 // ─── F-3 agent-status ref capture removed in P4c-4 with get_agent itself. ──
 
-// ─── F-3 (ticket 3ca88253): board-summary ref capture ─────────────────────
-// Same minimal shape as AgentRef: capture the board id (+ name) only. The client
-// re-fetches the full board (GET /api/boards/:id) on open and renders a condensed
-// version of the SAME data Board.tsx uses — no ticket list travels through chat
-// metadata, which matters here because a board's Done column alone can hold 100+
-// tickets (would otherwise bloat every board-status turn).
-export interface BoardRef {
-  board_id: string;
-  title?: string;
-}
-export interface BoardToolContext {
-  tool: string;
-  /** get_board_summary's INPUT carries board_id; its RESULT only carries the
-   *  board's `name` (as `board`), not the id — so the id must ride along from
-   *  the tool_use input, captured here at track time. */
-  inputBoardId?: string;
-}
-export function trackedBoardTool(name: unknown, input: any): BoardToolContext | null {
-  if (typeof name !== 'string') return null;
-  const bare = bareToolName(name);
-  if (!BOARD_ACTION_TOOLS[bare]) return null;
-  const inp = input && typeof input === 'object' ? input : {};
-  return { tool: bare, inputBoardId: typeof inp.board_id === 'string' ? inp.board_id : undefined };
-}
-/** get_board_summary's result is `{board: <name>, description, columns: [...]}` —
- *  no id. The input board_id (captured at tracking time) is authoritative; without
- *  it the ref can't deep-link anywhere, so fail-closed. */
-export function resolveBoardRef(ctx: BoardToolContext, result: any, isError: boolean): BoardRef | null {
-  if (isError) return null;
-  if (!ctx.inputBoardId) return null;
-  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
-  const ref: BoardRef = { board_id: ctx.inputBoardId };
-  if (obj && typeof obj.board === 'string' && obj.board) ref.title = obj.board;
-  return ref;
-}
-export function chunkBoardRefs(refs: BoardRef[], size: number): BoardRef[][] {
-  if (!Array.isArray(refs) || refs.length === 0) return [];
-  if (!Number.isFinite(size) || size <= 0) return [refs.slice()];
-  const out: BoardRef[][] = [];
-  for (let i = 0; i < refs.length; i += size) out.push(refs.slice(i, i + size));
-  return out;
-}
-export function formatBoardRefsContent(refs: BoardRef[]): string {
-  return refs.map((r) => `📊 보드: ${r.title || r.board_id}`).join('\n');
-}
-
-/** Resolve a batch_operations call into MANY ticket refs — the multi-ref path the
- *  1-result→1-ref resolveTicketRef can't cover. Zips the captured input
- *  `operations[]` with the result `results[]` (parallel arrays, same index):
- *  every op that SUCCEEDED and maps to a tracked BATCH_OP_ACTION yields one ref.
- *  The ticket id comes from the result row's `ticketId` (a create's NEW id, a
- *  move/update-child's target), except add-comment whose result carries only a
- *  `commentId` — there the ticket is the INPUT op's `ticketId`. Failed ops
- *  (`error`, or no `success`) and untracked ops emit nothing. */
-export function resolveBatchTicketRefs(
-  ctx: TicketToolContext,
-  result: any,
-  isError: boolean,
-  titleLookup?: (id: string) => string | undefined,
-): TicketRef[] {
-  if (isError || !Array.isArray(ctx.batchOps)) return [];
-  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
-  const rows = obj && Array.isArray(obj.results) ? obj.results : null;
-  if (!rows) return [];
-  const ops = ctx.batchOps;
-  const out: TicketRef[] = [];
-  const n = Math.min(ops.length, rows.length);
-  for (let i = 0; i < n; i++) {
-    const op = ops[i];
-    const row = rows[i];
-    if (!op || typeof op !== 'object' || !row || typeof row !== 'object') continue;
-    if (row.success !== true || row.error != null) continue; // failed op → no card
-    const action = BATCH_OP_ACTION[String(op.action)];
-    if (!action) continue; // untracked op (e.g. read/unknown) → no card
-    const rowTicketId = typeof row.ticketId === 'string' ? row.ticketId : undefined;
-    const opTicketId = typeof op.ticketId === 'string' ? op.ticketId : undefined;
-    // add-comment's result is {success, commentId} — the ticket is the input's;
-    // every other op's result row carries the (new or target) ticketId.
-    const ticketId = action === 'comment' ? opTicketId : rowTicketId || opTicketId;
-    if (!ticketId) continue;
-    let title: string | undefined = typeof op.title === 'string' && op.title ? op.title : undefined;
-    if (!title) title = titleLookup && titleLookup(ticketId);
-    const ref: TicketRef = { action, ticket_id: ticketId };
-    if (title) ref.title = title;
-    out.push(ref);
-  }
-  return out;
-}
-
-/** Resolve a reject_handoff call into its ticket refs. The tool files a NEW defect
- *  ticket back on the source board AND re-blocks the follow-up on it, so ONE result
- *  legitimately yields TWO refs — neither fits resolveTicketRef's create (result.id)
- *  or existing-ticket (input ticket_id) shapes. Result shape:
- *  {defect_ticket_id, defect_board_id, source_ticket_id, followup_pending_on_tickets,
- *   followup:{id,title,…}}.
- *    • defect_ticket_id → action 'reject' (the newly-filed 반려 defect ticket, primary).
- *    • the follow-up (input followup_ticket_id, else result.followup.id) → 'prereq'
- *      (it was re-blocked on the defect as a prerequisite).
- *  Errors / missing ids emit nothing (fail-closed). The defect lives on the SOURCE
- *  board — a DIFFERENT board maybe, but the SAME AWB instance, so its deep-link
- *  resolves (unlike create_remote_improvement_ticket, which is off-instance). */
-export function resolveRejectHandoffRefs(
-  ctx: TicketToolContext,
-  result: any,
-  isError: boolean,
-  titleLookup?: (id: string) => string | undefined,
-): TicketRef[] {
-  if (isError) return [];
-  const obj = result && typeof result === 'object' && !Array.isArray(result) ? result : null;
-  if (!obj) return [];
-  // 1. The newly-filed defect ticket — the primary artifact of a rejection. Its
-  //    presence is the SUCCESS signal: with no defect_ticket_id the rejection did
-  //    not happen (error / unexpected shape), so emit NOTHING — never a stray prereq
-  //    off the input ticket id (fail-closed, mirrors the batch per-op success gate).
-  const defectId = typeof obj.defect_ticket_id === 'string' ? obj.defect_ticket_id : undefined;
-  if (!defectId) return [];
-  const out: TicketRef[] = [];
-  const defectRef: TicketRef = { action: 'reject', ticket_id: defectId };
-  const defectTitle = titleLookup && titleLookup(defectId);
-  if (defectTitle) defectRef.title = defectTitle;
-  out.push(defectRef);
-  // 2. The follow-up ticket, re-blocked on the defect as a prerequisite. Its title
-  //    rides along in the result under `followup`, else falls back to the cache.
-  const followup = obj.followup && typeof obj.followup === 'object' && !Array.isArray(obj.followup)
-    ? obj.followup : null;
-  const followupId =
-    ctx.inputTicketId || (followup && typeof followup.id === 'string' ? followup.id : undefined);
-  if (followupId) {
-    const ref: TicketRef = { action: 'prereq', ticket_id: followupId };
-    const title =
-      (followup && typeof followup.title === 'string' && followup.title ? followup.title : undefined) ||
-      (titleLookup && titleLookup(followupId)) || undefined;
-    if (title) ref.title = title;
-    out.push(ref);
-  }
-  return out;
-}
-
 /** Compose the Korean fallback content line for a coalesced set of refs. */
 export function formatTicketRefsContent(refs: TicketRef[]): string {
   return refs
@@ -527,11 +309,12 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
 /**
  * The COMPLEMENT of the emit surface: every server-registered MCP tool that is
  * deliberately NOT a ticket-action card, each with a one-word reason. Together with
- * TICKET_ACTION_TOOLS + BATCH_TICKET_TOOL + REJECT_HANDOFF_TOOL this is an EXHAUSTIVE
- * classification of the MCP tool surface — tool-surface-parity.test.mjs asserts the
- * server's registered tools == this union, so a newly-added tool fails CI until it is
- * classified here (or promoted to an emit above). Reasons:
- *   read        — get_/list_/search_ + whoami/ping/subscribe/fetch: feed title cache only.
+ * TICKET_ACTION_TOOLS + ARTIFACT_ACTION_TOOLS this is an EXHAUSTIVE classification of
+ * the MCP tool surface — tool-surface-parity.test.mjs asserts the server's registered
+ * tools == this union, so a newly-added tool fails CI until it is classified here (or
+ * promoted to an emit above). Reasons:
+ *   read        — get_/list_/search_ + whoami/subscribe/fetch: feed title cache only
+ *                 (list_tickets / get_my_tickets results label later title-less cards).
  *   delete      — delete_ticket / delete_child_ticket: a card would deep-link a 404.
  *   attachment  — ticket-attachment sub-resource I/O, not a lifecycle action.
  *   assistant   — send_chat_room_message / request_ticket_unpend_approval: agent-authored
@@ -540,12 +323,9 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 ticket_action card (TicketUnpendActionCard) — folding it into ticket_refs
  *                 too would double the signal, not close a gap.
  *   agent-state — set/clear_current_task: the focus seat, not a ticket-row mutation.
- *   remote      — create_remote_improvement_ticket: files on ANOTHER AWB instance,
- *                 so a local deep-link would 404.
- *   non-ticket  — board / workspace / agent / channel / resource / qa / security /
- *                 feature / action / function / user / api-key / benchmark / prompt-template /
- *                 chat / lesson / claude-backend-profile / outreach / ontology: not a ticket-row
- *                 mutation.
+ *   non-ticket  — project / workspace / channel / resource / qa / security / action /
+ *                 function / user / api-key / chat / claude-backend-profile / outreach /
+ *                 ontology: not a ticket-row mutation.
  *                 (build / deploy 결과물성 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로
  *                 이관 — EXCLUDE 아님.)
  */
@@ -554,13 +334,11 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // 자기 턴에서 읽고 쓰는 것이고, 채팅에 카드로 띄울 티켓 참조가 없다.
   request_privileged_command: 'non-ticket',
   get_privileged_command_result: 'non-ticket',
-  // read — get_board_summary 는 F-3(ticket 3ca88253)로 BOARD_ACTION_TOOLS 로
-  // 이관됨(EXCLUDE 아님). get_agent/list_agents 는 P4c-4 로 서버에서 삭제됨.
-  // get_board 는 여전히 read.
+  // read — get_agent/list_agents 는 P4c-4 로, board/feature/benchmark/handoff 조회는
+  // board 개념 제거(docs/tickets.md)로 서버에서 삭제됨.
   fetch_github_info: 'read', get_action: 'read',
-  get_allocated_tickets: 'read', get_api_key: 'read', get_benchmark_leaderboard: 'read',
-  get_board: 'read', get_chat_room_messages: 'read',
-  get_feature: 'read', get_function: 'read', get_handoff_pipeline: 'read',
+  get_api_key: 'read', get_chat_room_messages: 'read',
+  get_function: 'read',
   get_latest_artifact: 'read',
   get_my_tickets: 'read', get_qa_batch: 'read', get_qa_run: 'read', get_qa_scenario: 'read',
   get_qa_schedule: 'read', get_recent_activity: 'read', get_resource: 'read',
@@ -569,16 +347,23 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_ticket_attachment: 'read', get_user: 'read', get_workspace: 'read',
   get_workspace_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
   list_api_keys: 'read', list_archived_tickets: 'read',
-  list_board_lessons: 'read', list_boards: 'read', list_channels: 'read',
+  list_channels: 'read',
   list_chat_rooms: 'read', list_claude_backend_profiles: 'read',
-  list_features: 'read', list_function_runs: 'read',
-  list_functions: 'read', list_prompt_templates: 'read',
+  list_function_runs: 'read',
+  list_functions: 'read',
   list_qa_runs: 'read', list_qa_scenarios: 'read', list_qa_schedules: 'read',
   list_repo_branches: 'read', list_resources: 'read', list_security_profiles: 'read',
   list_security_runs: 'read', list_security_schedules: 'read', list_ticket_attachments: 'read',
   list_ticket_prerequisites: 'read', list_users: 'read', list_workspace_schedules: 'read',
   list_workspaces: 'read', search_actions: 'read', search_chat_messages: 'read',
   search_github: 'read', search_resources: 'read', subscribe_events: 'read', whoami: 'read',
+  // board-less (docs/tickets.md) — the workspace ticket pool listing, same posture as
+  // get_my_tickets / list_archived_tickets: a read whose `{ tickets: [...] }` result
+  // feeds the title cache (harvestTicketTitles) so later title-less cards stay labelled.
+  list_tickets: 'read',
+  // board-less Projects (git repo + its knowledge, replacing repository Resources).
+  // Reads; save_project below is a non-ticket write.
+  list_projects: 'read', get_project: 'read',
   // ticket d35b7b7d (Ontology Graph 6/7) — five pure-query graph_ tools, same
   // posture as search_resources above: read-only lookups over a domain
   // corpus (Ontology Graph nodes/edges), no ticket-row mutation.
@@ -587,9 +372,6 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // row either) — same split as embed_resources vs. the other resource-tools.
   graph_find_symbol: 'read', graph_module_summary: 'read', graph_neighbors: 'read',
   graph_blast_radius: 'read', graph_call_path: 'read',
-  // review-guard (1) — returns drift classification/recommendation; its internal
-  // reverification budget bookkeeping is not a user-facing ticket mutation card.
-  check_review_drift: 'review-guard',
   // delete (2)
   delete_child_ticket: 'delete', delete_ticket: 'delete',
   // attachment (2)
@@ -598,9 +380,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   request_ticket_unpend_approval: 'assistant', send_chat_room_message: 'assistant',
   // agent-state (2)
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
-  // remote (1)
-  create_remote_improvement_ticket: 'remote',
-  // orchestration (15) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
+  // orchestration (16) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
   // 전부 EXCLUDE 인 이유: 이 툴들은 티켓 row 를 하나도 건드리지 않고 Mission/Step
   // 상태만 바꾼다. 그리고 그 상태는 이미 전용 관찰면 — AWB 의 Mission 상세 화면
   // (Plan 그래프 + append-only 타임라인, `orchestration_update` SSE 로 라이브) —
@@ -626,24 +406,23 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   submit_orchestration_plan: 'orchestration',
   update_orchestration_criteria: 'orchestration',
   update_orchestration_step: 'orchestration',
-  // non-ticket (82) — 빌드/배포(register_build_artifact·report_build_failure·
+  // non-ticket — 빌드/배포(register_build_artifact·report_build_failure·
   // report_deployment)는 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로 이관됨(EXCLUDE 아님).
-  // non-ticket
-  add_board_lesson: 'non-ticket', add_chat_message_attachment: 'non-ticket',
-  add_chat_participants: 'non-ticket', approve_feature: 'non-ticket',
+  add_chat_message_attachment: 'non-ticket',
+  add_chat_participants: 'non-ticket',
   attach_qa_artifact: 'non-ticket', attach_security_artifact: 'non-ticket',
-  complete_action_run: 'non-ticket', complete_comment_summary: 'non-ticket',
+  // (complete_comment_summary 는 comment-summary 기능과 함께 서버에서 삭제됨.)
+  complete_action_run: 'non-ticket',
   complete_qa_run: 'non-ticket',
   complete_security_run: 'non-ticket',
-  create_api_key: 'non-ticket', create_benchmark_run: 'non-ticket', create_board: 'non-ticket',
-  create_channel: 'non-ticket', create_chat_room: 'non-ticket', create_column: 'non-ticket',
+  create_api_key: 'non-ticket',
+  create_channel: 'non-ticket', create_chat_room: 'non-ticket',
   create_qa_scenario: 'non-ticket', create_qa_schedule: 'non-ticket',
   create_security_profile: 'non-ticket', create_security_schedule: 'non-ticket',
   create_user: 'non-ticket', create_workspace: 'non-ticket',
   create_workspace_schedule: 'non-ticket', delete_action: 'non-ticket',
-  delete_api_key: 'non-ticket', delete_board: 'non-ticket',
+  delete_api_key: 'non-ticket',
   delete_channel: 'non-ticket', delete_chat_message_attachment: 'non-ticket',
-  delete_column: 'non-ticket', delete_prompt_template: 'non-ticket',
   delete_function: 'non-ticket',
   delete_qa_scenario: 'non-ticket', delete_qa_schedule: 'non-ticket',
   delete_resource: 'non-ticket', delete_security_profile: 'non-ticket',
@@ -655,16 +434,14 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // background build) but never touches a ticket row.
   graph_status: 'non-ticket',
   graph_refresh: 'non-ticket',
-  move_board_to_workspace: 'non-ticket', propose_feature_chain: 'non-ticket',
   propose_skill_change: 'non-ticket',
   qa_run_heartbeat: 'non-ticket', record_outreach_classification: 'non-ticket',
   record_qa_step: 'non-ticket',
   record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
-  reject_feature: 'non-ticket',
   revoke_api_key: 'non-ticket', run_action: 'non-ticket', run_qa_schedule_now: 'non-ticket',
   run_security_schedule_now: 'non-ticket', run_workspace_schedule_now: 'non-ticket',
   save_action: 'non-ticket', save_function: 'non-ticket',
-  save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
+  save_project: 'non-ticket', save_resource: 'non-ticket',
   keep_chat_session_alive: 'non-ticket',
   // 말로 답하기 — operator 세션이 사용자의 말로 받은 답을 다른 Agent Session 의 승인 대기·질문에 전한다
   // (서버 operator-tools.ts). 티켓을 만들지도 바꾸지도 않는다.
@@ -673,28 +450,25 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   answer_session_question: 'non-ticket',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
-  start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',
-  submit_feature_request: 'non-ticket', sync_github_resource: 'non-ticket',
-  update_api_key: 'non-ticket', update_board: 'non-ticket',
+  start_security_run: 'non-ticket',
+  sync_github_resource: 'non-ticket',
+  update_api_key: 'non-ticket',
   update_claude_backend_profile: 'non-ticket',
-  update_board_lesson: 'non-ticket', update_channel: 'non-ticket', update_column: 'non-ticket',
+  update_channel: 'non-ticket',
   update_qa_scenario: 'non-ticket', update_qa_schedule: 'non-ticket',
   update_security_profile: 'non-ticket', update_security_schedule: 'non-ticket',
   update_user: 'non-ticket', update_workspace: 'non-ticket',
   update_workspace_schedule: 'non-ticket', upsert_claude_backend_profile: 'non-ticket',
 };
 
-/** The full set of bare tool names this module classifies (emit ∪ batch ∪ reject ∪
- *  artifact ∪ exclude). The parity test compares this against the server's registered
- *  surface; exported as a function so callers always get a fresh Set (no shared mutable
- *  state). F2-4 ⓒ: ARTIFACT_ACTION_TOOLS 는 결과물 카드 버킷(EXCLUDE 아님)으로 합류. */
+/** The full set of bare tool names this module classifies (emit ∪ artifact ∪ exclude).
+ *  The parity test compares this against the server's registered surface; exported as
+ *  a function so callers always get a fresh Set (no shared mutable state). F2-4 ⓒ:
+ *  ARTIFACT_ACTION_TOOLS 는 결과물 카드 버킷(EXCLUDE 아님)으로 합류. */
 export function classifiedToolNames(): Set<string> {
   return new Set<string>([
     ...Object.keys(TICKET_ACTION_TOOLS),
-    BATCH_TICKET_TOOL,
-    REJECT_HANDOFF_TOOL,
     ...Object.keys(ARTIFACT_ACTION_TOOLS),
-    ...Object.keys(BOARD_ACTION_TOOLS),
     ...Object.keys(TICKET_TOOL_EXCLUSIONS),
   ]);
 }

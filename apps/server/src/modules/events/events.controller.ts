@@ -8,15 +8,10 @@ import { DataSource } from 'typeorm';
 import { Repository, In } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
-import { Board } from '../../entities/Board';
-import { Workspace } from '../../entities/Workspace';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { ApiKey } from '../../entities/ApiKey';
 import { activityEvents } from '../../services/activity.service';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
-import { pickBaseRepoResourceId } from '../../common/base-repo-binding';
-import { mergeEnvironmentConfig } from '../../common/environment-config';
 import { AuthService } from '../../services/auth.service';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -117,9 +112,6 @@ export class EventsController implements OnModuleDestroy {
 
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
-    @InjectRepository(Board) private readonly boardRepo: Repository<Board>,
-    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(RuntimeHost) private readonly hostRepo: Repository<RuntimeHost>,
     @InjectRepository(ApiKey) private readonly apiKeyRepo: Repository<ApiKey>,
@@ -142,10 +134,7 @@ export class EventsController implements OnModuleDestroy {
     // Table-driven listener registration: EVENT_TYPES drives everything.
     // One loop replaces the 9 hand-written listener blocks that previously lived here.
     const mapCtx: EventMapContext = {
-      resolveBoardId: (ticketId, entityId) => this.resolveBoardId(ticketId, entityId),
-      resolveTicketRepositoryResourceId: (ticketId) => this.resolveTicketRepositoryResourceId(ticketId),
-      resolveTicketColumnSnapshot: (ticketId, entityId) =>
-        this.resolveTicketColumnSnapshot(ticketId, entityId),
+      resolveTicketSnapshot: (ticketId, entityId) => this.resolveTicketSnapshot(ticketId, entityId),
       // Same (id → canonical display) resolver ActivityService uses on read, so
       // the realtime board_update frame and a later refetch never disagree.
       //
@@ -153,8 +142,8 @@ export class EventsController implements OnModuleDestroy {
       // 감싼다 — 감싸지 않았을 때 actor_id 하나의 uuid 캐스팅 오류가 아래 catch
       // 까지 올라가 eventSubject.next() 를 건너뛰고 board_update 를 통째로
       // 유실시켰다. 유실되면 agent-manager 의 worktree 회수(moved/archived)와 웹
-      // UI 실시간 갱신이 함께 죽는다. resolveBoardId 는 반대로 감싸지 말 것 —
-      // board 가 없으면 scope 를 만들 수 없어 현재의 skip 이 정답이다.
+      // UI 실시간 갱신이 함께 죽는다. resolveTicketSnapshot 은 반대로 감싸지 말 것 —
+      // 티켓이 없으면 scope 를 만들 수 없어 현재의 skip 이 정답이다.
       resolveActorDisplayName: async (actorId) => {
         if (!actorId) return null;
         try {
@@ -239,80 +228,26 @@ export class EventsController implements OnModuleDestroy {
     this.eventSubject.complete();
   }
 
-  private async resolveBoardId(ticketId: string, entityId: string): Promise<string | null> {
-    // Try to find the ticket and its column's board_id
+  /** The root ticket behind an activity — subtasks walk up (max depth 2). */
+  private async resolveTicketSnapshot(ticketId: string, entityId: string): Promise<{
+    root_id: string;
+    workspace_id: string;
+    status: string;
+    project_id: string;
+  } | null> {
     const id = ticketId || entityId;
     if (!id) return null;
-
-    const ticket = await this.ticketRepo.findOne({ where: { id } });
-    if (!ticket) return null;
-
-    // If ticket has a column_id, look up the board
-    if (ticket.column_id) {
-      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-      return col?.board_id || null;
-    }
-
-    // If it's a subtask, find the root parent's column
-    if (ticket.parent_id) {
-      const parent = await this.ticketRepo.findOne({ where: { id: ticket.parent_id } });
-      if (parent?.column_id) {
-        const col = await this.colRepo.findOne({ where: { id: parent.column_id } });
-        return col?.board_id || null;
-      }
-      // depth 2 - go up one more level
-      if (parent?.parent_id) {
-        const grandparent = await this.ticketRepo.findOne({ where: { id: parent.parent_id } });
-        if (grandparent?.column_id) {
-          const col = await this.colRepo.findOne({ where: { id: grandparent.column_id } });
-          return col?.board_id || null;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * ticket 112ea3c5: `base_repo_resource_id`가 비어 있으면 board environment
-   * repository를 상속한다 — dispatch 경로(trigger-loop.service.ts, ticket
-   * 8c3befa8)와 `loadTicketFull`이 이미 적용하는 것과 동일한 board-env 백필이다.
-   * 이 값이 먹이는 archive 시점 worktree 정리(agent-manager의
-   * `#cleanupArchivedTicketWorkspace`)가 티켓이 실제로 작업한 그 resource를
-   * 정확히 타깃하도록 하고, "모든 managed repo 스캔"으로 퇴화하지 않게 한다.
-   */
-  private async resolveTicketRepositoryResourceId(ticketId: string): Promise<string> {
-    if (!ticketId) return '';
-    const ticket = await this.ticketRepo.findOne({ where: { id: ticketId } });
-    if (!ticket) return '';
-    if (ticket.base_repo_resource_id) return ticket.base_repo_resource_id;
-    try {
-      const col = ticket.column_id
-        ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
-        : null;
-      const [board, workspace] = await Promise.all([
-        col?.board_id ? this.boardRepo.findOne({ where: { id: col.board_id } }) : Promise.resolve(null),
-        ticket.workspace_id ? this.workspaceRepo.findOne({ where: { id: ticket.workspace_id } }) : Promise.resolve(null),
-      ]);
-      const merged = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
-      return pickBaseRepoResourceId('', merged?.repositories || []).resourceId;
-    } catch {
-      return '';
-    }
-  }
-
-  private async resolveTicketColumnSnapshot(ticketId: string, entityId: string): Promise<{
-    id: string;
-    name: string;
-    kind: string;
-  } | null> {
-    let ticket = await this.ticketRepo.findOne({ where: { id: ticketId || entityId } });
-    for (let depth = 0; ticket && !ticket.column_id && ticket.parent_id && depth < 2; depth += 1) {
+    let ticket = await this.ticketRepo.findOne({ where: { id } });
+    for (let depth = 0; ticket && ticket.parent_id && depth < 2; depth += 1) {
       ticket = await this.ticketRepo.findOne({ where: { id: ticket.parent_id } });
     }
-    if (!ticket?.column_id) return null;
-    const column = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-    return column ? { id: column.id, name: column.name, kind: column.kind || '' } : null;
+    if (!ticket) return null;
+    return {
+      root_id: ticket.id,
+      workspace_id: ticket.workspace_id || '',
+      status: ticket.status,
+      project_id: ticket.project_id || '',
+    };
   }
 
   @Sse('stream')
@@ -393,7 +328,6 @@ export class EventsController implements OnModuleDestroy {
 
     const identity: SubscriberIdentity = {
       ...authIdentity,
-      boardId: (req.query.boardId as string) || undefined,
       sseSessionId,
       managedAgentIds,
     };
@@ -410,9 +344,7 @@ export class EventsController implements OnModuleDestroy {
     }
     this.logService.info(
       'SSE',
-      `Client connected (${identity.type}: ${identity.name}, board: ${
-        identity.boardId || 'all'
-      }, total: ${this.clientCount}${identity.agentId ? `, runtime_host_streams=${runtimeHostStreamCount}` : ''})`,
+      `Client connected (${identity.type}: ${identity.name}, total: ${this.clientCount}${identity.agentId ? `, runtime_host_streams=${runtimeHostStreamCount}` : ''})`,
     );
 
     // Idempotent cleanup invoked from EITHER req.on('close') (fires the

@@ -1,21 +1,17 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Ticket } from '../../entities/Ticket';
 import { LogService } from '../../services/log.service';
 
 const OFFLINE_THRESHOLD_MS = 60_000; // 60s = 2 missed heartbeats at 30s interval
 const SWEEP_INTERVAL_MS = 30_000;    // sweep every 30s
-const LOCK_TTL_MS = 30 * 60 * 1000;     // 30 min — matches claim_ticket default TTL
-const LOCK_SWEEP_INTERVAL_MS = 60_000;  // every 60s
+
+// The ticket-lock sweep (locked_by_agent_id / locked_at TTL) is gone: tickets
+// have no locks any more — one assignee owns a ticket (docs/tickets.md).
 
 @Injectable()
 export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
   private offlineSweepHandle: NodeJS.Timeout | null = null;
-  private lockSweepHandle: NodeJS.Timeout | null = null;
 
   constructor(
-    @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
     private readonly logService: LogService,
   ) {}
 
@@ -27,30 +23,15 @@ export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
       }
     }, SWEEP_INTERVAL_MS);
 
-    // NOTE: This lock sweep runs only in NestJS mode (onModuleInit is a NestJS lifecycle hook).
-    // In standalone mcp-server.ts mode, the in-request TTL check inside claim_ticket
-    // provides the gap-fill for expired lock enforcement.
-    this.lockSweepHandle = setInterval(async () => {
-      const count = await this.sweepExpiredLocks(LOCK_TTL_MS);
-      if (count > 0) {
-        this.logService.info('MCP', `Swept ${count} expired ticket lock(s)`);
-      }
-    }, LOCK_SWEEP_INTERVAL_MS);
-
-    // Don't let these housekeeping sweeps keep the Node event loop alive; the
+    // Don't let this housekeeping sweep keep the Node event loop alive; the
     // server lifecycle owns process exit. (Guarded for fake timers in tests.)
     this.offlineSweepHandle.unref?.();
-    this.lockSweepHandle.unref?.();
   }
 
   onModuleDestroy() {
     if (this.offlineSweepHandle) {
       clearInterval(this.offlineSweepHandle);
       this.offlineSweepHandle = null;
-    }
-    if (this.lockSweepHandle) {
-      clearInterval(this.lockSweepHandle);
-      this.lockSweepHandle = null;
     }
   }
 
@@ -78,24 +59,5 @@ export class AgentConnectionService implements OnModuleInit, OnModuleDestroy {
   async sweepOfflineAgents(thresholdMs: number): Promise<number> {
     void thresholdMs;
     return 0;
-  }
-
-  /**
-   * Clear locked_by_agent_id and locked_at on tickets whose lock has exceeded ttlMs.
-   * Uses createQueryBuilder().update() to bypass @VersionColumn auto-increment
-   * (administrative sweep — version should not change). Returns count of swept tickets.
-   */
-  async sweepExpiredLocks(ttlMs: number): Promise<number> {
-    const threshold = new Date(Date.now() - ttlMs);
-    const result = await this.ticketRepo
-      .createQueryBuilder()
-      .update(Ticket)
-      .set({ locked_by_agent_id: null, locked_at: null })
-      .where(
-        'locked_by_agent_id IS NOT NULL AND locked_at IS NOT NULL AND locked_at < :threshold',
-        { threshold }
-      )
-      .execute();
-    return result.affected ?? 0;
   }
 }

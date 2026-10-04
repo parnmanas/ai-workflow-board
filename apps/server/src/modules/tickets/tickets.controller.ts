@@ -1,24 +1,13 @@
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { Controller, Get, Post, Put, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
-import { Board } from '../../entities/Board';
 import { Comment, COMMENT_TYPES, CommentType } from '../../entities/Comment';
-import { CommentSummaryRun } from '../../entities/CommentSummaryRun';
-import { RuntimeHost } from '../../entities/RuntimeHost';
-import { ApiKey } from '../../entities/ApiKey';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
-import { resolveAgentDisplayName } from '../../utils/agent-name';
-import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
-import { recordCommentMentionDispatch } from '../../common/mention-dispatch-correlation';
 import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
-import { WorkspaceRole } from '../../entities/WorkspaceRole';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { WorkspaceGuard } from '../../common/guards/workspace.guard';
 import { ActivityService } from '../../services/activity.service';
@@ -27,11 +16,9 @@ import { InstanceQuiesceService } from '../../services/instance-quiesce.service'
 import { LogService } from '../../services/log.service';
 import { MentionService } from '../../services/mention.service';
 import { PresenceService } from '../../services/presence.service';
-import { TriggerLoopService } from '../agents/trigger-loop.service';
+import { TicketDispatchService } from '../agents/ticket-dispatch.service';
 import { TicketPrerequisitesService } from './ticket-prerequisites.service';
-import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
-import { getConsensusView, openMoveProposal, recordConsensusVote } from '../../services/consensus-actions';
-import { evaluateConsensusMoveGate } from '../../services/consensus.service';
+import { TicketInputError, TicketService, type TicketActor } from './ticket.service';
 import {
   MAX_COMMENT_ATTACHMENT_SIZE,
   MAX_COMMENT_ATTACHMENTS,
@@ -41,34 +28,27 @@ import {
 import { Resource } from '../../entities/Resource';
 import { TicketAttachment } from '../../entities/TicketAttachment';
 import { loadTicketFull, parseComments, expandCommentAttachments, loadTicketComments, DETAIL_COMMENT_PAGE } from '../mcp/shared/ticket-parsing';
-import { applyTerminalEnteredAtForMove, deriveRootTicketStatus, getRootArchivedAt, isTerminalColumn, TicketArchivedError } from '../mcp/shared/archive-helpers';
-import { releaseMergeLeaseForMove } from '../mcp/shared/merge-lease-move';
-import { isReviewToMerging, hasReviewerApproval, ReviewApprovalRequiredError } from '../mcp/shared/review-approval-guard';
-import { evaluateMergeGate, MergeGateBlockedError } from '../mcp/shared/merge-gate';
+import { getRootArchivedAt, TicketArchivedError } from '../mcp/shared/archive-helpers';
 import {
-  maxTicketPosition,
   maxChildPosition,
-  refreshTicketWorkspaceId,
-  resolveAgentIdAndName,
-  formatAgentDisplayName,
   shiftTicketPositions,
   deleteCommentAttachmentsForTicket,
   inferTicketAttachmentMimetype,
   projectTicketAttachment,
   approxBase64Size,
-  validateNextTicketId,
 } from '../mcp/shared/ticket-helpers';
 import { findOrFail } from '../../common/find-or-fail';
-import { parseDefaultRoleAssignments, type DefaultRoleAssignments } from '../../common/default-role-assignments-config';
-import { validateHandoffSpecInput } from '../../common/handoff-spec-config';
 import { computeTicketCommentChainDepth } from '../../common/agent-chain-depth';
-import { resolveMentionDispatchExtras, resolveMentionTarget } from '../../common/mention-dispatch-profile';
+import { resolveMentionTarget } from '../../common/mention-dispatch-profile';
 import { TicketDuplicateService } from './ticket-duplicate.service';
-import { globalRuntimeProfiles } from '../../common/claude-backend-registry';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
-import { subtaskGateBlocksExit, subtaskGateBlocksMove } from './subtask-gate';
-import { emitFocusReleased } from '../agents/focus-eligibility';
+import { normalizeTags } from './ticket.service';
+import { parseTicketStatus, TICKET_STATUSES, type TicketStatus } from '../../common/ticket-status';
 
+/**
+ * Ticket REST surface (docs/tickets.md). Mutations go through TicketService so
+ * REST, MCP and the automatic ticket producers share one set of side effects.
+ */
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
 @Controller('api')
@@ -76,9 +56,7 @@ import { emitFocusReleased } from '../agents/focus-eligibility';
 export class TicketsController {
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
     @InjectRepository(Comment) private readonly commentRepo: Repository<Comment>,
-    @InjectRepository(CommentSummaryRun) private readonly commentSummaryRepo: Repository<CommentSummaryRun>,
     @InjectRepository(UserMention) private readonly mentionRepo: Repository<UserMention>,
     @InjectRepository(TicketReadState) private readonly readStateRepo: Repository<TicketReadState>,
     @InjectRepository(TicketAttachment) private readonly attachmentRepo: Repository<TicketAttachment>,
@@ -86,9 +64,9 @@ export class TicketsController {
     private readonly activityService: ActivityService,
     private readonly logService: LogService,
     private readonly mentionService: MentionService,
-    private readonly triggerLoop: TriggerLoopService,
+    private readonly tickets: TicketService,
+    private readonly dispatcher: TicketDispatchService,
     private readonly presence: PresenceService,
-    private readonly ticketRoleAssignments: TicketRoleAssignmentService,
     private readonly ticketPrerequisites: TicketPrerequisitesService,
     private readonly ticketDuplicates: TicketDuplicateService,
     private readonly artifactRefs: ArtifactRefsService,
@@ -97,92 +75,15 @@ export class TicketsController {
     private readonly instanceQuiesce: InstanceQuiesceService,
   ) {}
 
-  @Get('tickets/:id/comment-summary')
-  async getCommentSummary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId as string;
-    const ticket = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    const run = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
-    if ((run?.status === 'pending' || run?.status === 'completing') && Date.now() - new Date(run.updated_at).getTime() > 5 * 60_000) {
-      await this.commentSummaryRepo.createQueryBuilder()
-        .update(CommentSummaryRun)
-        .set({ status: 'failed', error: 'Summary request timed out. Original comments were preserved.' })
-        .where('id = :id', { id: run.id })
-        .andWhere('status = :status', { status: run.status })
-        .andWhere('updated_at = :updatedAt', { updatedAt: run.updated_at })
-        .execute();
-      const current = await this.commentSummaryRepo.findOne({ where: { id: run.id, workspace_id: workspaceId } });
-      return res.json(current || { ticket_id: id, status: 'idle' });
-    }
-    return res.json(run || { ticket_id: id, status: 'idle' });
+  private actorOf(req: any): TicketActor {
+    const user = req.currentUser;
+    return user ? { id: user.id, name: user.name || user.email || '', type: 'user' } : { id: '', name: '', type: 'system' };
   }
 
-  @Post('tickets/:id/comment-summary')
-  async startCommentSummary(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId as string;
-    const ticket = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
-    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    const comments = await this.commentRepo.find({ where: { ticket_id: id }, order: { created_at: 'ASC' } });
-    const real = comments.filter(c => c.type !== 'system');
-    const alreadySummary = real.length === 1 && (() => {
-      try { return JSON.parse(real[0].metadata || '{}').comment_summary === true; } catch { return false; }
-    })();
-    if (real.length === 0) return res.status(409).json({ error: 'There are no comments to summarize' });
-    if (alreadySummary) return res.status(409).json({ error: 'This ticket already contains only a summary' });
-
-    const existing = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
-    if (existing?.status === 'pending' || existing?.status === 'completing') return res.status(200).json(existing);
-    // P4c-4: 요약 실행자는 티켓의 assignee holder 다 (Agent 행 없음).
-    const summaryAgentId = (ticket.assignee_id || '').trim();
-    if (!summaryAgentId) {
-      return res.status(409).json({
-        error: 'No assignee is available to summarize comments',
-        error_code: 'SUMMARY_AGENT_UNAVAILABLE',
-      });
-    }
-
-    const run = existing || this.commentSummaryRepo.create({
-      ticket_id: id,
-      workspace_id: ticket.workspace_id,
-      agent_id: summaryAgentId,
-      status: 'pending',
-      source_comment_count: comments.length,
-      source_comment_ids: JSON.stringify(comments.map(comment => comment.id)),
-      error: '',
-      error_code: '',
-      dispatch_trigger_id: '',
-      completed_at: null,
-    });
-    let saved: CommentSummaryRun | null = null;
-    try {
-      if (existing) {
-        const claimed = await this.commentSummaryRepo.update(
-          { id: existing.id, status: existing.status },
-          { agent_id: summaryAgentId, status: 'pending', source_comment_count: comments.length, source_comment_ids: JSON.stringify(comments.map(comment => comment.id)), error: '', error_code: '', dispatch_trigger_id: '', completed_at: null },
-        );
-        saved = (await this.commentSummaryRepo.findOne({ where: { id: existing.id } }))!;
-        if (!claimed.affected) return res.status(200).json(saved);
-      } else try {
-        saved = await this.commentSummaryRepo.save(run);
-      } catch (saveError: any) {
-        const raced = await this.commentSummaryRepo.findOne({ where: { ticket_id: id, workspace_id: workspaceId } });
-        if (raced) return res.status(200).json(raced);
-        throw saveError;
-      }
-      const triggerId = await this.triggerLoop.emitCommentSummaryTrigger(id, saved.agent_id, saved.id);
-      saved.dispatch_trigger_id = triggerId;
-      saved.error_code = '';
-      await this.commentSummaryRepo.save(saved);
-      return res.status(202).json(saved);
-    } catch (e: any) {
-      const failed = saved || run;
-      failed.status = 'failed';
-      failed.error_code = e?.code || 'SUMMARY_DISPATCH_FAILED';
-      failed.error = e?.message || 'Failed to dispatch summary agent';
-      failed.completed_at = null;
-      await this.commentSummaryRepo.save(failed);
-      return res.status(503).json(failed);
-    }
+  private fail(res: Response, err: any): Response {
+    if (err instanceof TicketInputError) return res.status(err.status).json({ error: err.message, code: err.code });
+    if (err instanceof TicketArchivedError) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: err.message });
+    throw err;
   }
 
   private resolveCreator(req: any, body: any): { created_by: string; created_by_type: string; created_by_id: string } {
@@ -194,174 +95,52 @@ export class TicketsController {
         created_by_id: body.created_by_id || '',
       };
     }
-    // If authenticated user (via session)
     const currentUser = req.currentUser;
     if (currentUser) {
-      return {
-        created_by: currentUser.name,
-        created_by_type: 'user',
-        created_by_id: currentUser.id,
-      };
+      return { created_by: currentUser.name, created_by_type: 'user', created_by_id: currentUser.id };
     }
     return { created_by: '', created_by_type: '', created_by_id: '' };
   }
 
-  @Post('columns/:columnId/tickets')
-  async create(@Param('columnId') columnId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const { title, description = '', priority = 'medium', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [], role_assignments, next_ticket_id, effort_preset, skip_default_assignments = false, source_kind, source_chat_room_id, related_ticket_id } = body;
-    if (!title) return res.status(400).json({ error: 'title is required' });
+  // ─── list / create ──────────────────────────────────────
 
-    await findOrFail(this.colRepo, { where: { id: columnId } }, 'Column not found');
+  @Get('workspaces/:wsId/tickets')
+  async list(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
+    const q = req.query as Record<string, string | undefined>;
+    const split = (v: string | undefined) => (v || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const statuses: TicketStatus[] = [];
+    for (const raw of split(q.status)) {
+      const status = parseTicketStatus(raw);
+      if (!status) return res.status(400).json({ error: `status must be one of ${TICKET_STATUSES.join(', ')}` });
+      statuses.push(status);
+    }
+    const result = await this.tickets.list(wsId, {
+      status: statuses,
+      tags: split(q.tags),
+      project_id: q.project_id || undefined,
+      assignee_key: q.assignee_key || undefined,
+      q: q.q || undefined,
+      include_archived: q.include_archived === '1' || q.include_archived === 'true',
+      archived_only: q.archived_only === '1' || q.archived_only === 'true',
+      limit: q.limit ? Number(q.limit) : undefined,
+    });
+    return res.json(result);
+  }
 
-    // Resolve the destination column's workspace upfront so the next_ticket_id
-    // workspace-guard runs against the correct value (the freshly-created
-    // ticket row's workspace_id is set by refreshTicketWorkspaceId AFTER save).
-    let prospectiveWorkspaceId = '';
+  @Get('workspaces/:wsId/ticket-tags')
+  async tags(@Param('wsId') wsId: string, @Res() res: Response) {
+    return res.json({ tags: await this.tickets.tagSuggestions(wsId) });
+  }
+
+  @Post('workspaces/:wsId/tickets')
+  async create(@Param('wsId') wsId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      const col = await this.colRepo.findOne({ where: { id: columnId } });
-      if (col) {
-        const board = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-        prospectiveWorkspaceId = board?.workspace_id || '';
-      }
-    } catch { /* non-fatal — validateNextTicketId will skip the workspace guard */ }
-
-    const duplicateAssessment = await this.ticketDuplicates.assess(prospectiveWorkspaceId, {
-      title, description, labels, source_kind, source_chat_room_id, related_ticket_id,
-    });
-
-    let resolvedNextTicketId: string | null = null;
-    if (next_ticket_id !== undefined) {
-      try {
-        // currentTicketId=null on create — the row doesn't have an id yet, so
-        // the self-link guard inside the helper is a no-op here. Still safe
-        // to call because UUIDs are unforgeable; a fresh ticket can't pre-
-        // collide with itself.
-        resolvedNextTicketId = await validateNextTicketId(this.dataSource, next_ticket_id, null, prospectiveWorkspaceId);
-      } catch (e: any) {
-        return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
-      }
+      const { ticket, duplicate_candidates } = await this.tickets.create(wsId, body, this.actorOf(req));
+      const full = await loadTicketFull(this.dataSource, ticket.id, { commentLimit: DETAIL_COMMENT_PAGE });
+      return res.status(201).json({ ...full, duplicate_candidates });
+    } catch (err) {
+      return this.fail(res, err);
     }
-
-    // Backfill name↔id whichever side the caller omitted — the MCP path
-    // hands us *_id only and TicketCard reads the legacy text columns
-    // directly. See `resolveAgentIdAndName` for the lookup semantics.
-    const assigneeResolved = await resolveAgentIdAndName(this.dataSource, assignee_id, assignee);
-    const reporterResolved = await resolveAgentIdAndName(this.dataSource, reporter_id, reporter);
-    let resolvedAssigneeId = assigneeResolved.id;
-    let resolvedAssignee = assigneeResolved.name;
-    let resolvedReporterId = reporterResolved.id;
-    let resolvedReporter = reporterResolved.name;
-    const creator = this.resolveCreator(req, body);
-
-    // Board default role holders (ticket d94a1b87). Parse the destination
-    // board's config up front (a) so a board-configured default reporter wins
-    // over the generic creator→reporter auto-fill, and (b) to backfill vacant
-    // roles after the explicit assignments below. skip_default_assignments opts
-    // the whole create out (genuine zero-holder — QA orphan probes) and also
-    // suppresses the creator→reporter auto-fill so no holder sneaks in.
-    let boardDefaults: DefaultRoleAssignments = {};
-    if (!skip_default_assignments) {
-      try {
-        const col = await this.colRepo.findOne({ where: { id: columnId } });
-        if (col) {
-          const defBoard = await this.dataSource.getRepository(Board).findOne({ where: { id: col.board_id } });
-          boardDefaults = parseDefaultRoleAssignments(defBoard?.default_role_assignments);
-        }
-      } catch { /* non-fatal — degrade to "no defaults" */ }
-    }
-    const hasDefaultReporter = Array.isArray(boardDefaults['reporter']) && boardDefaults['reporter'].length > 0;
-
-    // Default Reporter to the ticket's creator when none was supplied — keeps
-    // the original requester reachable without forcing the create form to ask.
-    // Suppressed on opt-out (zero-holder) or when the board sets a default
-    // reporter (that configured holder wins — applyBoardDefaults fills it).
-    if (!resolvedReporter && !resolvedReporterId && creator.created_by_id && !skip_default_assignments && !hasDefaultReporter) {
-      resolvedReporter = creator.created_by;
-      resolvedReporterId = creator.created_by_id;
-    }
-
-    const position = await maxTicketPosition(this.dataSource, columnId);
-    // Stamp terminal_entered_at on create when the destination column is
-    // already terminal (e.g. operator drops a ticket straight into Done).
-    // The archiver requires terminal_entered_at IS NOT NULL, so without this
-    // stamp those tickets would silently never auto-archive.
-    const destColumnForStamp = await this.colRepo.findOne({ where: { id: columnId } });
-    const terminalEnteredAt = isTerminalColumn(destColumnForStamp) ? new Date() : null;
-
-    // Guard (ticket 35b43ee9): a ticket carrying related_ticket_id is
-    // explicitly a follow-up/correction to other work — i.e. new, actionable
-    // work. Landing that directly in a terminal column leaves it invisible to
-    // every dispatch path (push trigger, focus-ticket polling, reconciler
-    // seed all exclude terminal columns by design). Direct terminal creation
-    // WITHOUT related_ticket_id (e.g. an operator filing a retroactive
-    // record) is unaffected — see MCP create_ticket for the full rationale.
-    if (duplicateAssessment.related_ticket_id && isTerminalColumn(destColumnForStamp)) {
-      return res.status(400).json({
-        error: `Refusing to create a follow-up ticket (related_ticket_id=${duplicateAssessment.related_ticket_id}) directly in terminal column "${destColumnForStamp?.name || columnId}" — it would never dispatch. Choose a non-terminal column.`,
-      });
-    }
-
-    const ticket = await this.ticketRepo.save(this.ticketRepo.create({
-      column_id: columnId, title, description, priority,
-      assignee: resolvedAssignee, reporter: resolvedReporter,
-      assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
-      labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids),
-      position, parent_id: null, depth: 0, status: deriveRootTicketStatus(destColumnForStamp),
-      next_ticket_id: resolvedNextTicketId,
-      // Abstract effort preset id (trim → empty becomes null). Resolved
-      // against the board catalog at dispatch; null = board default.
-      effort_preset: typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null,
-      terminal_entered_at: terminalEnteredAt,
-      workspace_id: prospectiveWorkspaceId,
-      source_kind: duplicateAssessment.source_kind,
-      source_chat_room_id: duplicateAssessment.source_chat_room_id,
-      related_ticket_id: duplicateAssessment.related_ticket_id,
-      canonical_ticket_id: duplicateAssessment.canonical_ticket_id,
-      pending_user_action: duplicateAssessment.ambiguous,
-      pending_reason: duplicateAssessment.ambiguous ? 'Confirm whether this chat report duplicates one of the suggested tickets.' : '',
-      pending_set_at: duplicateAssessment.ambiguous ? new Date() : null,
-      pending_set_by: duplicateAssessment.ambiguous ? 'duplicate_decision_guard' : '',
-      created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
-    }));
-
-    await this.ticketDuplicates.record(ticket, duplicateAssessment, creator.created_by, creator.created_by_id);
-
-    // Mirror onto TicketRoleAssignment so trigger loop / allocation /
-    // mention resolution see the new ticket via the v0.34 path.
-    await refreshTicketWorkspaceId(this.dataSource, ticket);
-    if (ticket.workspace_id) {
-      await this.ticketRoleAssignments.syncBuiltinTrio(ticket.id, ticket.workspace_id, {
-        assignee_id: resolvedAssigneeId,
-        reporter_id: resolvedReporterId,
-      });
-    }
-
-    // REST/MCP parity: accept role_assignments[] (planner / custom roles).
-    // Same explicit-slug-wins policy as MCP — applied AFTER syncBuiltinTrio.
-    if (Array.isArray(role_assignments) && role_assignments.length > 0) {
-      try {
-        await this._applyRoleAssignments(ticket.id, ticket.workspace_id, role_assignments);
-      } catch (e: any) {
-        return res.status(400).json({ error: e?.message || 'role_assignments rejected' });
-      }
-    }
-
-    // Board defaults (d94a1b87): fill roles still VACANT after the explicit
-    // trio + role_assignments. Priority is explicit holder > board default >
-    // unassigned — applyBoardDefaults only writes a currently-vacant role.
-    // Empty config / opt-out → boardDefaults is {} → no-op.
-    if (ticket.workspace_id && Object.keys(boardDefaults).length > 0) {
-      await this.ticketRoleAssignments.applyBoardDefaults(ticket.id, ticket.workspace_id, boardDefaults);
-    }
-
-    await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, action: 'created',
-      ticket_id: ticket.id,
-      actor_id: creator.created_by_id || undefined,
-      actor_name: creator.created_by || reporter || assignee,
-    });
-
-    return res.status(201).json({ ...ticket, labels, channel_ids, duplicate_candidates: duplicateAssessment.candidates, children: [], comments: [] });
   }
 
   @Post('tickets/:id/duplicate-decision')
@@ -378,7 +157,7 @@ export class TicketsController {
         actor.created_by_id,
       );
       if (!ticket.canonical_ticket_id) {
-        await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'duplicate_rejected', actor.created_by_id);
+        await this.dispatcher.resumeTicket(ticket.id, 'duplicate_rejected');
       }
       return res.json(ticket);
     } catch (e: any) {
@@ -386,54 +165,10 @@ export class TicketsController {
     }
   }
 
-  /**
-   * Apply REST `role_assignments[]` payload onto a ticket. Mirrors the MCP
-   * `applyRoleAssignments` helper so `planner` and any workspace custom
-   * role can be set from either surface. Throws on unknown slug; empty slug
-   * is silently skipped.
-   *
-   * MULTI-HOLDER (다중담당자 T1): repeated same-slug entries are grouped and
-   * applied as one holder set via `setHolders()` — matching the MCP path —
-   * so a role can carry several holders. An all-empty group clears the slot.
-   */
-  private async _applyRoleAssignments(
-    ticketId: string,
-    workspaceId: string,
-    assignments: Array<{ role_slug?: string; agent_id?: string; user_id?: string; runtime?: unknown }>,
-  ): Promise<void> {
-    if (!workspaceId) {
-      throw new Error('Cannot apply role_assignments — ticket has no workspace_id');
-    }
-    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
-
-    // Group by slug (first-seen order) so repeated same-slug entries become a
-    // multi-holder set instead of clobbering each other.
-    // P4c-2b: runtime entries ride along untouched — setHolders normalizes them.
-    const bySlug = new Map<string, Array<{ agent_id: string | null; user_id: string | null; runtime?: unknown }>>();
-    for (const a of assignments) {
-      const slug = (a?.role_slug || '').trim();
-      if (!slug) continue;
-      const holder = { agent_id: a?.agent_id || null, user_id: a?.user_id || null, runtime: a?.runtime };
-      const list = bySlug.get(slug);
-      if (list) list.push(holder);
-      else bySlug.set(slug, [holder]);
-    }
-
-    for (const [slug, holders] of bySlug) {
-      const role = await roleRepo.findOne({ where: { workspace_id: workspaceId, slug } });
-      if (!role) throw new Error(`Unknown role slug "${slug}" in workspace ${workspaceId}`);
-      // setHolders drops all-empty entries → an all-empty group clears the slot.
-      await this.ticketRoleAssignments.setHolders(ticketId, role.id, holders);
-    }
-  }
-
   @Post('tickets/:parentId/children')
   async createChild(@Param('parentId') parentId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const parent = await findOrFail(this.ticketRepo, { where: { id: parentId } }, 'Parent ticket not found');
-
-    // Archive gate — walk up to the root and check its archived_at. Subtasks
-    // don't carry the flag themselves (archive is board-level, subtasks have
-    // no column); the root row owns it.
+    // Archive gate — the root row owns archived_at; subtasks don't carry it.
     const rootArchived = await getRootArchivedAt(this.dataSource, parent);
     if (rootArchived) {
       return res.status(409).json({
@@ -442,79 +177,48 @@ export class TicketsController {
         message: new TicketArchivedError(parent.id).message,
       });
     }
-
     const childDepth = parent.depth + 1;
     if (childDepth > 2) return res.status(400).json({ error: 'Maximum depth of 2 exceeded' });
-
-    const { title, description = '', priority = 'medium', status = 'todo', assignee = '', reporter = '', assignee_id = '', reporter_id = '', labels = [], channel_ids = [] } = body;
+    const { title, description = '', priority = 'medium' } = body;
     if (!title) return res.status(400).json({ error: 'title is required' });
-
-    // Backfill name↔id from Host/link resolution (see root `create` above).
-    const assigneeResolved = await resolveAgentIdAndName(this.dataSource, assignee_id, assignee);
-    const reporterResolved = await resolveAgentIdAndName(this.dataSource, reporter_id, reporter);
-    let resolvedAssigneeId = assigneeResolved.id;
-    let resolvedAssignee = assigneeResolved.name;
-    let resolvedReporterId = reporterResolved.id;
-    let resolvedReporter = reporterResolved.name;
+    const status = body.status === 'done' ? 'done' : 'todo';
     const creator = this.resolveCreator(req, body);
-    if (!resolvedReporter && !resolvedReporterId && creator.created_by_id) {
-      resolvedReporter = creator.created_by;
-      resolvedReporterId = creator.created_by_id;
-    }
-
     const position = await maxChildPosition(this.dataSource, parentId);
     const child = await this.ticketRepo.save(this.ticketRepo.create({
-      parent_id: parentId, depth: childDepth, column_id: null as any,
+      parent_id: parentId, depth: childDepth,
       title, description, priority, status,
-      assignee: resolvedAssignee, reporter: resolvedReporter,
-      assignee_id: resolvedAssigneeId, reporter_id: resolvedReporterId,
-      labels: JSON.stringify(labels), channel_ids: JSON.stringify(channel_ids), position,
-      // Inherit workspace_id from parent so role lookups resolve immediately
-      // (children otherwise have NULL workspace_id and miss the sync below).
+      tags: JSON.stringify(normalizeTags(body.tags ?? [])),
+      channel_ids: JSON.stringify(Array.isArray(body.channel_ids) ? body.channel_ids : []),
+      position,
       workspace_id: parent.workspace_id || '',
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
-
-    if (child.workspace_id) {
-      await this.ticketRoleAssignments.syncBuiltinTrio(child.id, child.workspace_id, {
-        assignee_id: resolvedAssigneeId,
-        reporter_id: resolvedReporterId,
-      });
-    }
-
-    if (Array.isArray(body.role_assignments) && body.role_assignments.length) {
-      await this._applyRoleAssignments(child.id, child.workspace_id, body.role_assignments);
-      Object.assign(child, await this.ticketRepo.findOneByOrFail({ id: child.id }));
-    }
-
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: child.id, action: 'created',
       ticket_id: parent.depth === 0 ? parentId : parent.parent_id || parentId,
+      workspace_id: child.workspace_id,
       actor_id: creator.created_by_id || undefined,
-      actor_name: creator.created_by || reporter || assignee,
+      actor_name: creator.created_by,
       new_value: title,
     });
-
-    return res.status(201).json({ ...child, labels: JSON.parse(child.labels || '[]'), channel_ids: JSON.parse(child.channel_ids || '[]'), children: [], comments: [] });
+    return res.status(201).json({ ...this.tickets.serialize(child), children: [], comments: [] });
   }
 
-  // 한 워크스페이스 내에서 `userId`가 "관여"하는 티켓 ID 집합: role holder
-  // (assignee_id / reporter_id / reviewer_id) 이거나 TicketReadState 행이
-  // 있는(=한 번이라도 읽은 적 있는) 티켓 — 아카이브된 티켓은 어느 쪽이든 제외.
-  // unreadCounts 와 markAllTicketsRead 가 이 메서드를 공유해 "관여" 판정
-  // 기준이 항상 일치하도록 한다.
+  // ─── unread / read-all ──────────────────────────────────
+
+  // 한 워크스페이스 내에서 `userId`가 "관여"하는 티켓 ID 집합: 만든 사람이거나
+  // TicketReadState 행이 있는(=한 번이라도 읽은 적 있는) 티켓 — 아카이브된
+  // 티켓은 어느 쪽이든 제외. unreadCounts 와 markAllTicketsRead 가 이 메서드를
+  // 공유해 "관여" 판정 기준이 항상 일치하도록 한다.
   private async _getInvolvedTicketIds(
     wsId: string,
     userId: string,
   ): Promise<{ involvedIds: string[]; readBy: Record<string, Date | null> }> {
-    const roleTickets = await this.ticketRepo
+    const ownTickets = await this.ticketRepo
       .createQueryBuilder('t')
       .select('t.id', 'id')
       .where('t.workspace_id = :wsId', { wsId })
-      .andWhere(
-        '(t.assignee_id = :uid OR t.reporter_id = :uid OR t.reviewer_id = :uid)',
-        { uid: userId },
-      )
+      .andWhere('t.created_by_id = :uid', { uid: userId })
       .andWhere('t.archived_at IS NULL')
       .getRawMany();
     const readRows = await this.readStateRepo
@@ -523,14 +227,10 @@ export class TicketsController {
       .addSelect('r.last_read_at', 'last_read_at')
       .where('r.user_id = :uid AND r.workspace_id = :wsId', { uid: userId, wsId })
       .getRawMany();
-
     // A ticket the user once read and that has since been archived must not
-    // keep pinging the badge — role-derived involvement already filters on
-    // archived_at, so filter the read-state-derived half the same way instead
-    // of trusting the read-state row on its own.
-    const readOnlyIds = readRows
-      .map((r) => r.id)
-      .filter((id: string) => !roleTickets.some((t) => t.id === id));
+    // keep pinging the badge.
+    const ownIds = new Set<string>(ownTickets.map((t) => t.id));
+    const readOnlyIds = readRows.map((r) => r.id).filter((id: string) => !ownIds.has(id));
     const liveReadOnlyIds = readOnlyIds.length > 0
       ? (await this.ticketRepo
           .createQueryBuilder('t')
@@ -540,83 +240,17 @@ export class TicketsController {
           .andWhere('t.archived_at IS NULL')
           .getRawMany()).map((r) => r.id as string)
       : [];
-
-    const involvedIds = Array.from(new Set<string>([
-      ...roleTickets.map((r) => r.id),
-      ...liveReadOnlyIds,
-    ]));
+    const involvedIds = Array.from(new Set<string>([...ownIds, ...liveReadOnlyIds]));
     const readBy: Record<string, Date | null> = {};
     for (const r of readRows) readBy[r.id] = r.last_read_at ? new Date(r.last_read_at) : null;
     return { involvedIds, readBy };
   }
 
-  // 티켓 id(root/child/grandchild 무관)를 그 티켓을 소유한 보드의 id로
-  // 해석한다 — column_id → BoardColumn.board_id 를 따라가되, 자신의
-  // column_id 가 없는 티켓(서브태스크)은 먼저 parent_id 를 타고 올라간다.
-  // 주어진 티켓과 그 조상 체인만 로드하며 워크스페이스 전체를 훑지 않는다.
-  // 깊이는 2(root→child→grandchild)로 제한하고, 새 부모가 더 없으면 그
-  // bounded 루프가 즉시 멈춘다. Perf 티켓 b3812637.
-  private async _resolveTicketsToBoards(ticketIds: string[]): Promise<Map<string, string>> {
-    const boardByTicket = new Map<string, string>();
-    if (ticketIds.length === 0) return boardByTicket;
-    const byId = new Map<string, { column_id: string | null; parent_id: string | null }>();
-    let frontier: string[] = ticketIds.slice();
-    for (let hop = 0; frontier.length > 0 && hop < 6; hop++) {
-      const missing = frontier.filter((id) => !byId.has(id));
-      if (missing.length === 0) break;
-      const rows = await this.ticketRepo
-        .createQueryBuilder('t')
-        .select(['t.id AS id', 't.column_id AS column_id', 't.parent_id AS parent_id'])
-        .where('t.id IN (:...ids)', { ids: missing })
-        .getRawMany();
-      for (const t of rows) byId.set(t.id, { column_id: t.column_id, parent_id: t.parent_id });
-      frontier = rows
-        .map((t) => t.parent_id)
-        .filter((pid): pid is string => !!pid && !byId.has(pid));
-    }
-    const resolveColumn = (startId: string): string | null => {
-      let cursor: { column_id: string | null; parent_id: string | null } | undefined = byId.get(startId);
-      for (let i = 0; cursor && !cursor.column_id && cursor.parent_id && i < 5; i++) {
-        cursor = byId.get(cursor.parent_id);
-      }
-      return cursor?.column_id ?? null;
-    };
-    const columnIds = new Set<string>();
-    for (const id of ticketIds) {
-      const colId = resolveColumn(id);
-      if (colId) columnIds.add(colId);
-    }
-    if (columnIds.size > 0) {
-      const cols = await this.colRepo
-        .createQueryBuilder('c')
-        .select(['c.id AS id', 'c.board_id AS board_id'])
-        .where('c.id IN (:...ids)', { ids: Array.from(columnIds) })
-        .getRawMany();
-      const boardByColumn = new Map<string, string>();
-      for (const c of cols) boardByColumn.set(c.id, c.board_id);
-      for (const id of ticketIds) {
-        const colId = resolveColumn(id);
-        const boardId = colId ? boardByColumn.get(colId) : undefined;
-        if (boardId) boardByTicket.set(id, boardId);
-      }
-    }
-    return boardByTicket;
-  }
-
   // IMPORTANT: keep `tickets/unread-counts` above `tickets/:id` — Express
   // picks the first matching pattern, and `:id` would eat the literal
   // "unread-counts" segment (producing a 404 "Ticket not found").
-  // Sidebar badge + per-ticket badge source. Returns unread comment counts
-  // scoped to tickets the current user is involved in within one workspace —
-  // see _getInvolvedTicketIds. Scoping to "involved" tickets keeps the
-  // number manageable on big boards — we don't want every new comment on
-  // every ticket in the workspace lighting up the badge, just ones the user
-  // cares about.
-  //
-  // `unread` = comments with created_at > TicketReadState.last_read_at
-  // (or > user's role-grant date if the user has never marked it read).
-  // For simplicity NULL last_read_at counts every ticket-comment as unread,
-  // which matches the ticket detail panel's own rendering.
+  // Sidebar badge + per-ticket badge source: unread comment counts on tickets
+  // the current user is involved in (see _getInvolvedTicketIds).
   @Get('tickets/unread-counts')
   async unreadCounts(@Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
@@ -625,7 +259,7 @@ export class TicketsController {
     if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
 
     const { involvedIds, readBy } = await this._getInvolvedTicketIds(wsId, currentUser.id);
-    if (involvedIds.length === 0) return res.json({ total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} });
+    if (involvedIds.length === 0) return res.json({ total: 0, perTicket: {} });
 
     const perTicket: Record<string, number> = {};
     let total = 0;
@@ -641,100 +275,48 @@ export class TicketsController {
       perTicket[c.ticket_id] = (perTicket[c.ticket_id] || 0) + 1;
       total++;
     }
-
-    // Roll up perTicket → perBoard (sidebar per-board badges). `ticketBoard`
-    // exposes the same resolution to the client so that marking ONE ticket
-    // read can decrement the right board's badge locally — without it the
-    // per-board number stayed stale until the next full refresh while the
-    // per-ticket number had already dropped, i.e. the two badges disagreed.
-    const perBoard: Record<string, number> = {};
-    const ticketBoard: Record<string, string> = {};
-    const ticketIdsWithUnread = Object.keys(perTicket);
-    if (ticketIdsWithUnread.length > 0) {
-      const boardByTicket = await this._resolveTicketsToBoards(ticketIdsWithUnread);
-      for (const [id, boardId] of boardByTicket) {
-        perBoard[boardId] = (perBoard[boardId] || 0) + perTicket[id];
-        ticketBoard[id] = boardId;
-      }
-    }
-
-    return res.json({ total, perTicket, perBoard, ticketBoard });
+    return res.json({ total, perTicket });
   }
 
-  // 티켓 코멘트 일괄 "읽음 처리" — MentionsService.markAllRead 와 같은
-  // upsert-the-read-marker 아이디어를, UserMention.read_at(행마다 존재) 대신
-  // TicketReadState 에 적용한 것(티켓의 "읽음" 마커는 N개 행이 아니라 커서
-  // 하나뿐이다). _involved_ 티켓(_getInvolvedTicketIds 참고)에만 스코프되어
-  // 호출자가 아무 지분도 없는 티켓엔 read-state 행을 만들 수 없다. `board_id`
-  // 는 한 보드로 좁히고(사이드바의 보드별 "모두 읽음"), 생략하면 워크스페이스
-  // 내 관여 티켓 전체를 지운다. 처리 후 `ticket_reads_cleared` 를 emit 해
-  // 같은 사용자의 다른 탭/기기 세션도 재조회 없이 뱃지를 수렴시킨다
-  // (BroadcastChannel 은 같은 브라우저에서만 닿는다).
+  // 티켓 코멘트 일괄 "읽음 처리" — 관여 티켓(_getInvolvedTicketIds)에만
+  // 스코프되어 호출자가 아무 지분도 없는 티켓엔 read-state 행을 만들 수 없다.
+  // 처리 후 `ticket_reads_cleared` 를 emit 해 같은 사용자의 다른 탭/기기도
+  // 재조회 없이 뱃지를 수렴시킨다.
   @Post('tickets/read-all')
-  async markAllTicketsRead(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+  async markAllTicketsRead(@Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
     const wsId = (req.headers['x-workspace-id'] as string) || '';
     if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
-    const boardId = typeof body?.board_id === 'string' ? body.board_id : '';
 
     const { involvedIds } = await this._getInvolvedTicketIds(wsId, currentUser.id);
-    let targetIds = involvedIds;
-    if (boardId) {
-      const boardByTicket = await this._resolveTicketsToBoards(involvedIds);
-      targetIds = involvedIds.filter((id) => boardByTicket.get(id) === boardId);
-    }
-    if (targetIds.length === 0) return res.json({ updated: 0 });
-
+    if (involvedIds.length === 0) return res.json({ updated: 0 });
     const now = new Date();
-    const rows = targetIds.map((id) => ({
-      user_id: currentUser.id,
-      ticket_id: id,
-      workspace_id: wsId,
-      last_read_at: now,
-    }));
-    await this.readStateRepo.upsert(rows, ['user_id', 'ticket_id']);
+    await this.readStateRepo.upsert(involvedIds.map((id) => ({
+      user_id: currentUser.id, ticket_id: id, workspace_id: wsId, last_read_at: now,
+    })), ['user_id', 'ticket_id']);
     activityEvents.emit('ticket_reads_cleared', {
       user_id: currentUser.id,
       workspace_id: wsId,
-      board_id: boardId || null,
-      updated: targetIds.length,
+      updated: involvedIds.length,
       read_at: now.toISOString(),
     });
-    return res.json({ updated: targetIds.length });
+    return res.json({ updated: involvedIds.length });
   }
+
+  // ─── read ───────────────────────────────────────────────
 
   @Get('tickets/:id')
   async get(@Param('id') id: string, @Res() res: Response) {
     // bounded 코멘트 로드: detail 패널은 처음엔 최신 페이지만 필요하고 더 오래된
-    // 코멘트는 GET /tickets/:id/comments 로 scroll-load 한다. 여기가 OOM 경로 —
-    // 코멘트 수천 개 티켓은 패널을 열 때마다(+보드 갱신 refetch) 트리 전체 코멘트를
-    // 직렬화하고 있었다.
+    // 코멘트는 GET /tickets/:id/comments 로 scroll-load 한다.
     const ticket = await loadTicketFull(this.dataSource, id, { commentLimit: DETAIL_COMMENT_PAGE });
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-    // 채팅 ticket 아티팩트의 "보드에서 열기" 버튼(티켓 7815a958)이 쓸 board_id.
-    // Ticket 엔티티엔 board_id 컬럼이 없다(column_id 만 저장) — child/grandchild 는
-    // column_id 가 null 이라 column 을 가진 조상까지 올라간다(addComment 첨부 라우팅의
-    // resolveBoardId 와 동일 패턴). 이 REST 응답에만 붙이고 공유 loadTicketFull/MCP
-    // get_ticket 계약은 그대로 둔다.
-    let cursorColumnId = ticket.column_id as string | null;
-    let cursorParentId = ticket.parent_id as string | null;
-    while (!cursorColumnId && cursorParentId) {
-      const parent: Ticket | null = await this.ticketRepo.findOne({ where: { id: cursorParentId } });
-      if (!parent) break;
-      cursorColumnId = parent.column_id;
-      cursorParentId = parent.parent_id;
-    }
-    const board_id = cursorColumnId ? (await this.colRepo.findOne({ where: { id: cursorColumnId } }))?.board_id ?? null : null;
-    return res.json({ ...ticket, board_id });
+    return res.json(ticket);
   }
 
-  // 단일 티켓(root/하위)의 커서 페이지네이션 코멘트. chat 메시지 엔드포인트
-  // (GET /chat-rooms/:roomId/messages)와 동일한 모양: `limit`(기본 50, 최대 200)
-  // + `before`(코멘트 id)로 복합 (created_at, id) 커서를 따라가 같은 timestamp
-  // 버스트도 안 건너뛴다. 최신순으로 반환해 클라가 현재 화면 아래에 페이지를
-  // append 한다(코멘트는 newest-at-top). 패널은 사용자가 하단으로 스크롤할 때
-  // 이걸로 더 오래된 코멘트를 로드한다.
+  // 단일 티켓(root/하위)의 커서 페이지네이션 코멘트: `limit`(기본 50, 최대 200)
+  // + `before`(코멘트 id)로 복합 (created_at, id) 커서를 따라간다. 최신순.
   @Get('tickets/:id/comments')
   async getComments(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     const ticket = await this.ticketRepo.findOne({ where: { id } });
@@ -745,1038 +327,113 @@ export class TicketsController {
     return res.json(comments);
   }
 
+  // ─── update / move / run ────────────────────────────────
+
   @Patch('tickets/:id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-
-    const currentUser = req.currentUser;
-    const actorId = currentUser?.id || undefined;
-    const actorName = currentUser?.name || currentUser?.email || undefined;
-
-    const { title, description, priority, assignee, reporter, reviewer_id, assignee_id, reporter_id, labels, channel_ids, status, prompt_text, base_repo_resource_id, base_branch, role_assignments, next_ticket_id, on_done_action_ids, handoff_spec, pending_user_action, pending_reason, effort_preset, cli_runtime_profile } = body;
-    const oldAssignee = ticket.assignee;
-    const oldReporter = ticket.reporter;
-    const oldReviewerId = ticket.reviewer_id;
-    const oldStatus = ticket.status;
-    const oldBaseRepoId = ticket.base_repo_resource_id;
-    const oldBaseBranch = ticket.base_branch;
-    const oldNextTicketId = ticket.next_ticket_id;
-    const oldPending = !!ticket.pending_user_action;
-
-    if (title !== undefined) ticket.title = title;
-    if (description !== undefined) ticket.description = description;
-    if (priority !== undefined) ticket.priority = priority;
-    if (status !== undefined) ticket.status = status;
-    // Same name↔id backfill rule as the create path: when the caller flips
-    // only one side of the pair, look the other up via Host/link resolution so
-    // TicketCard / activity log don't see a half-stale row. Empty strings
-    // are passed for the omitted side so the helper actually does a DB
-    // lookup — pre-filling from the existing row makes both helper args
-    // truthy and trips the `if (id && name)` short-circuit, which silently
-    // re-saves the previous holder's name on an id-only update.
-    if (assignee !== undefined || assignee_id !== undefined) {
-      const resolved = await resolveAgentIdAndName(
-        this.dataSource,
-        assignee_id !== undefined ? assignee_id : '',
-        assignee !== undefined ? assignee : '',
-      );
-      ticket.assignee_id = assignee_id !== undefined ? assignee_id : (resolved.id || ticket.assignee_id);
-      // When the resolver matched a real Agent, write its canonical
-      // `<Manager>/<Agent>` display — beats any bare leaf name the caller
-      // hand-typed. Otherwise fall through to the caller's literal (which
-      // also lets `assignee: ''` clear the column).
-      if (resolved.id) {
-        ticket.assignee = resolved.name;
-      } else if (assignee !== undefined) {
-        ticket.assignee = assignee;
-      }
-    }
-    if (reporter !== undefined || reporter_id !== undefined) {
-      const resolved = await resolveAgentIdAndName(
-        this.dataSource,
-        reporter_id !== undefined ? reporter_id : '',
-        reporter !== undefined ? reporter : '',
-      );
-      ticket.reporter_id = reporter_id !== undefined ? reporter_id : (resolved.id || ticket.reporter_id);
-      if (resolved.id) {
-        ticket.reporter = resolved.name;
-      } else if (reporter !== undefined) {
-        ticket.reporter = reporter;
-      }
-    }
-    if (reviewer_id !== undefined) ticket.reviewer_id = reviewer_id;
-    if (labels !== undefined) ticket.labels = JSON.stringify(labels);
-    if (channel_ids !== undefined) ticket.channel_ids = JSON.stringify(channel_ids);
-    // Phase 1 ticket prompt snapshot (D-17 / ROLE-08)
-    if (prompt_text !== undefined) ticket.prompt_text = prompt_text;
-    if (base_repo_resource_id !== undefined) {
-      const next = base_repo_resource_id || '';
-      if (next && ticket.workspace_id) {
-        // Confine the picker to the ticket's workspace — without this an
-        // attacker who guesses (or scrapes) a Resource id from another
-        // workspace could pin it here, and the trigger SSE / loadTicketFull
-        // snapshot would happily surface its url to the assignee.
-        const repoExists = await this.dataSource.getRepository(Resource).findOne({ where: { id: next } });
-        if (!repoExists || (repoExists.workspace_id !== null && repoExists.workspace_id !== ticket.workspace_id)) {
-          return res.status(400).json({ error: 'base_repo_resource_id not found in this workspace' });
+    const actor = this.actorOf(req);
+    try {
+      // Pending flag first: the panel's "needs you" toggle. Clearing it wakes
+      // the assignee (TicketService.unpend → resumeTicket).
+      if (body.pending_user_action !== undefined) {
+        if (body.pending_user_action) {
+          if (!ticket.pending_user_action || (body.pending_reason !== undefined && body.pending_reason !== ticket.pending_reason)) {
+            await this.tickets.pend(ticket.id, body.pending_reason ?? ticket.pending_reason ?? '', actor);
+          }
+        } else if (ticket.pending_user_action) {
+          await this.tickets.unpend(ticket.id, actor);
         }
+      } else if (body.pending_reason !== undefined && ticket.pending_user_action && body.pending_reason !== ticket.pending_reason) {
+        await this.tickets.pend(ticket.id, body.pending_reason, actor);
       }
-      ticket.base_repo_resource_id = next;
+      await this.tickets.update(ticket.id, body, actor);
+    } catch (err) {
+      return this.fail(res, err);
     }
-    if (base_branch !== undefined) ticket.base_branch = base_branch || '';
-    if (next_ticket_id !== undefined) {
-      try {
-        ticket.next_ticket_id = await validateNextTicketId(
-          this.dataSource,
-          next_ticket_id,
-          ticket.id,
-          ticket.workspace_id || '',
-        );
-      } catch (e: any) {
-        return res.status(400).json({ error: e?.message || 'next_ticket_id rejected' });
-      }
-    }
-    // On-ticket-done hook binding (method "a", ticket 16a6339c). Stored as a
-    // JSON string like labels / channel_ids; dedupe + drop blanks so the array
-    // stays clean. An empty array clears the per-ticket binding. Mirrors the
-    // MCP update_ticket path (ticket-crud-tools.ts).
-    const oldOnDoneActionIds = ticket.on_done_action_ids;
-    if (on_done_action_ids !== undefined) {
-      const arr = Array.isArray(on_done_action_ids) ? on_done_action_ids : [];
-      const cleaned = Array.from(new Set(arr.filter((s: any) => typeof s === 'string' && s)));
-      ticket.on_done_action_ids = JSON.stringify(cleaned);
-    }
-
-    // Cross-board handoff relay spec (ticket ac21a745). Validate → canonical JSON
-    // string ('' clears). A bad shape throws a 400 (loud typo). Mirrors the MCP
-    // update_ticket path (ticket-crud-tools.ts).
-    const oldHandoffSpec = ticket.handoff_spec;
-    if (handoff_spec !== undefined) {
-      try {
-        ticket.handoff_spec = validateHandoffSpecInput(handoff_spec);
-      } catch (e: any) {
-        return res.status(e?.status || 400).json({ error: e?.message || 'handoff_spec rejected' });
-      }
-    }
-
-    // Abstract effort preset id — stored as-is (trim; empty → null). Resolved
-    // against the board catalog at dispatch; null = board default. Mirrors the
-    // MCP update_ticket path (ticket-crud-tools.ts).
-    const oldEffortPreset = ticket.effort_preset;
-    if (effort_preset !== undefined) {
-      ticket.effort_preset = typeof effort_preset === 'string' && effort_preset.trim() ? effort_preset.trim() : null;
-    }
-    if (cli_runtime_profile !== undefined) {
-      const selected = cli_runtime_profile == null ? null : String(cli_runtime_profile);
-      const profiles = await globalRuntimeProfiles(this.dataSource);
-      if (selected && selected !== 'none' && !profiles.some(profile => profile.id === selected)) {
-        return res.status(400).json({ error: `cli_runtime_profile "${selected}" does not exist` });
-      }
-      ticket.cli_runtime_profile = selected;
-    }
-
-    // Pending-user-action toggle (ticket a57517be). Mirrors the MCP
-    // update_ticket path: flipping true stamps set_at + set_by, flipping
-    // false clears all three; updating the reason on an already-pending
-    // ticket is a separate small change.
-    let pendingChanged = false;
-    let pendingReasonChanged = false;
-    if (pending_user_action !== undefined) {
-      const next = !!pending_user_action;
-      if (next !== oldPending) {
-        ticket.pending_user_action = next;
-        if (next) {
-          ticket.pending_set_at = new Date();
-          ticket.pending_set_by = actorName || '';
-          if (pending_reason !== undefined) ticket.pending_reason = pending_reason || '';
-        } else {
-          ticket.pending_set_at = null;
-          ticket.pending_set_by = '';
-          ticket.pending_reason = '';
-        }
-        pendingChanged = true;
-      } else if (next && pending_reason !== undefined && pending_reason !== ticket.pending_reason) {
-        ticket.pending_reason = pending_reason || '';
-        pendingReasonChanged = true;
-      }
-    } else if (pending_reason !== undefined && oldPending && pending_reason !== ticket.pending_reason) {
-      ticket.pending_reason = pending_reason || '';
-      pendingReasonChanged = true;
-    }
-
-    await this.ticketRepo.save(ticket);
-
-    // B1 carry-over: backfill workspace_id for legacy tickets created via
-    // the pre-fix MCP path (Ticket row stored with default ''). REST PATCH
-    // is the most likely surface to hit such a row first; without this any
-    // assignment-table sync below would silently skip.
-    await refreshTicketWorkspaceId(this.dataSource, ticket);
-
-    // v0.34: mirror builtin role changes onto TicketRoleAssignment so the
-    // trigger loop / mention resolution stay in sync. Each slot is only
-    // synced when the caller actually included the field — passing
-    // undefined leaves the assignment untouched (matches REST semantics
-    // where unspecified fields preserve their value).
-    if (ticket.workspace_id) {
-      const trio: { assignee_id?: string; reporter_id?: string; reviewer_id?: string } = {};
-      if (assignee !== undefined || assignee_id !== undefined) trio.assignee_id = ticket.assignee_id || '';
-      if (reporter !== undefined || reporter_id !== undefined) trio.reporter_id = ticket.reporter_id || '';
-      if (reviewer_id !== undefined) trio.reviewer_id = ticket.reviewer_id || '';
-      if (Object.keys(trio).length > 0) {
-        await this.ticketRoleAssignments.syncBuiltinTrio(ticket.id, ticket.workspace_id, trio);
-      }
-    }
-
-    // REST/MCP parity: accept role_assignments[] (planner / custom roles).
-    if (Array.isArray(role_assignments) && role_assignments.length > 0) {
-      try {
-        await this._applyRoleAssignments(ticket.id, ticket.workspace_id, role_assignments);
-      } catch (e: any) {
-        return res.status(400).json({ error: e?.message || 'role_assignments rejected' });
-      }
-    }
-
-    if (status !== undefined && status !== oldStatus) {
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'status_changed',
-        field_changed: 'status', old_value: oldStatus || '', new_value: status,
-        ticket_id: ticket.parent_id || ticket.id,
-        actor_id: actorId, actor_name: actorName,
-      });
-    }
-    // Trigger off the post-save name (which now reflects backfilled lookups)
-    // so a caller passing only `assignee_id` still produces a legible
-    // activity entry instead of an empty `→` arrow.
-    if ((assignee !== undefined || assignee_id !== undefined) && ticket.assignee !== oldAssignee) {
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'assignee', old_value: oldAssignee || '', new_value: ticket.assignee || '',
-        ticket_id: ticket.parent_id || ticket.id,
-        actor_id: actorId, actor_name: actorName,
-      });
-    }
-    if ((reporter !== undefined || reporter_id !== undefined) && ticket.reporter !== oldReporter) {
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'reporter', old_value: oldReporter || '', new_value: ticket.reporter || '',
-        ticket_id: ticket.parent_id || ticket.id,
-        actor_id: actorId, actor_name: actorName,
-      });
-    }
-    if (reviewer_id !== undefined && reviewer_id !== oldReviewerId) {
-      // P4c-4: Host/링크 이름으로 해소한다 (Agent 행 없음).
-      const reviewerName = reviewer_id
-        ? (await resolveAgentDisplayName(this.dataSource, reviewer_id)) ?? reviewer_id
-        : '';
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'reviewer', old_value: oldReviewerId || '', new_value: reviewerName || reviewer_id || '',
-        ticket_id: ticket.parent_id || ticket.id,
-        actor_id: actorId, actor_name: actorName,
-      });
-    }
-
-    const changes: string[] = [];
-    if (title !== undefined) changes.push('title');
-    if (description !== undefined) changes.push('description');
-    if (priority !== undefined) changes.push('priority');
-    if (base_repo_resource_id !== undefined && (base_repo_resource_id || '') !== (oldBaseRepoId || '')) changes.push('base_repo');
-    if (base_branch !== undefined && (base_branch || '') !== (oldBaseBranch || '')) changes.push('base_branch');
-    if (next_ticket_id !== undefined && (ticket.next_ticket_id || '') !== (oldNextTicketId || '')) changes.push('next_ticket');
-    if (on_done_action_ids !== undefined && ticket.on_done_action_ids !== oldOnDoneActionIds) changes.push('on_done_action_ids');
-    if (handoff_spec !== undefined && (ticket.handoff_spec || '') !== (oldHandoffSpec || '')) changes.push('handoff_spec');
-    if (effort_preset !== undefined && (ticket.effort_preset || '') !== (oldEffortPreset || '')) changes.push('effort_preset');
-    if (pendingReasonChanged) changes.push('pending_reason');
-    const otherChanges = changes.filter(c => !['assignee', 'reporter', 'status'].includes(c));
-    if (otherChanges.length > 0) {
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: otherChanges.join(', '),
-        ticket_id: ticket.parent_id || ticket.id,
-        actor_id: actorId, actor_name: actorName,
-      });
-    }
-    // Pending-user-action gets its own activity row so the audit trail
-    // shows the explicit flip rather than being bundled into a generic
-    // "updated". Field name matches the MCP path so a single grep
-    // surfaces every park/unpark event.
-    if (pendingChanged) {
-      await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-        field_changed: 'pending_user_action',
-        old_value: oldPending ? 'true' : 'false',
-        new_value: ticket.pending_user_action ? 'true' : 'false',
-        ticket_id: ticket.parent_id || ticket.id,
-        actor_id: actorId, actor_name: actorName,
-      });
-    }
-
-    // Ticket a57517be finding 2: an unpend (true → false) must explicitly
-    // wake the ticket's current column's role-holders. The
-    // `field_changed='pending_user_action'` activity row above does NOT
-    // route through column-based dispatch on its own, and before this
-    // flip the focus-selector + trigger-loop gates would have dropped
-    // any incidental wake-up anyway. This REST path is authenticated by
-    // AuthGuard (a human session) — since ticket b2e88390 it is the ONLY
-    // surface that can perform this flip; the MCP `unpend_ticket` tool
-    // (and an `update_ticket` false-flip) now reject unconditionally
-    // instead of mirroring this dispatch. Focus selector inside
-    // `_emitTrigger` still applies — if the assignee is already focused
-    // on another ticket, this stays silent and the focus model decides
-    // when this ticket comes back in.
-    if (pendingChanged && oldPending && !ticket.pending_user_action) {
-      try {
-        await this.triggerLoop.dispatchCurrentColumn(ticket.id, 'unpend', actorId || '');
-      } catch (e) {
-        this.logService.warn('Tickets', 'unpend dispatch failed (continuing)', {
-          err: String(e), ticket_id: ticket.id,
-        });
-      }
-    }
-
-    const updated = await loadTicketFull(this.dataSource, ticket.id);
+    const updated = await loadTicketFull(this.dataSource, ticket.id, { commentLimit: DETAIL_COMMENT_PAGE });
     return res.json(updated);
   }
 
   @Patch('tickets/:id/move')
   async move(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
-    const { targetColumnId, targetPosition, force } = body;
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-
-    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    if (ticket.depth > 0) return res.status(400).json({ error: 'Only root tickets can be moved on the board' });
-    if (targetColumnId && await subtaskGateBlocksMove(this.dataSource, ticket, targetColumnId)) {
-      return res.status(409).json({ error: 'subtask_gate_blocked', message: '모든 재귀 subtask를 완료한 뒤 부모를 이동할 수 있습니다.' });
+    if (body?.status === undefined || body?.status === null || body?.status === '') {
+      return res.status(400).json({ error: `status is required (${TICKET_STATUSES.join(', ')})` });
     }
-
-    // Review→Merging approval gate (ticket a3d25202 — proposal 2 of 86bfb8af).
-    // Unlike the terminal-reopen guard (which deliberately exempts this human
-    // drag path), proposal 2 *targets* the manual path: a person dragging a card
-    // Review→Merging must not cross the review gate unless a reviewer-authored
-    // comment exists. body.force is the explicit human override.
-    if (targetColumnId) {
-      const [sourceColForGuard, destColForGuard] = await Promise.all([
-        ticket.column_id ? this.colRepo.findOne({ where: { id: ticket.column_id } }) : Promise.resolve(null),
-        this.colRepo.findOne({ where: { id: targetColumnId } }),
-      ]);
-      if (!force && isReviewToMerging(sourceColForGuard, destColForGuard) && !(await hasReviewerApproval(this.dataSource, ticket.id))) {
-        const e = new ReviewApprovalRequiredError(ticket.id, sourceColForGuard?.name ?? String(ticket.column_id), destColForGuard?.name ?? String(targetColumnId));
-        return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
-      }
-
-      // 머지 게이트(티켓 c806bad3): Review→Merging(stale-base) / Merging→Done(부분머지)
-      // 기계 검증. board 가 merge_gate_config 로 opt-in 한 경우에만 동작하며 해석 실패는
-      // 전부 통과(availability-first) — 미설정 보드 무회귀. force 는 의도적 우회.
-      if (!force) {
-        const mg = await evaluateMergeGate(this.dataSource, ticket, sourceColForGuard, destColForGuard);
-        if (mg.blocked) {
-          const e = new MergeGateBlockedError(mg);
-          return res.status(e.status).json({ error: e.code, hint: e.hint, message: e.message });
-        }
-      }
-
-      // 다중담당자·합의 게이트(T5/T6): 이탈(현재) 컬럼 라우팅 역할 홀더가 ≥2 이고
-      // 합의 미성립이면 직접 컬럼 이동을 차단한다 — 사람이 보드에서 드래그해도
-      // 팀 합의를 우회하지 못하게(MCP move_ticket 게이트와 동일). force / reporter
-      // override(satisfied) 는 통과. 같은 컬럼 재정렬(targetColumnId===현재)은 면제.
-      if (!force && targetColumnId !== ticket.column_id) {
-        const gate = await evaluateConsensusMoveGate(this.consensusDeps(), ticket);
-        if (gate.blocked) {
-          return res.status(409).json({
-            error: 'consensus_required',
-            message: `다중담당자 티켓 — 라우팅 역할 홀더 ${gate.state.required.length}명의 합의가 필요합니다. `
-              + `합의 패널에서 '이동 제안' 후 전원 동의(또는 reporter override) 시 서버가 자동 이동합니다.`,
-            consensus: {
-              required: gate.state.required.length,
-              agreed: gate.state.agreed.length,
-              pending: gate.state.pending.length,
-              objected: gate.state.objected.length,
-            },
-          });
-        }
-      }
+    try {
+      await this.tickets.move(id, body.status, this.actorOf(req), { position: body.position });
+    } catch (err) {
+      return this.fail(res, err);
     }
-
-    await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const sourceColumnId = ticket.column_id;
-
-      await shiftTicketPositions(tRepo, { column_id: sourceColumnId }, ticket.position, -1);
-
-      const destColumnId = targetColumnId || sourceColumnId;
-      const destCount = await tRepo.createQueryBuilder('t')
-        .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: destColumnId, id: ticket.id })
-        .getCount();
-      const pos = Math.min(targetPosition ?? destCount, destCount);
-
-      await shiftTicketPositions(tRepo, { column_id: destColumnId }, pos, +1, { inclusive: true, excludeId: ticket.id });
-
-      // Clear the claim-verification branch-tip snapshot (ticket dcb9d661).
-      // Matches the MCP `move_ticket` tool's behaviour: a column move closes
-      // the prior column's claim cycle, so the snapshot tied to it is no
-      // longer evidence the sweep can use. Next assignee trigger on an active
-      // destination re-snapshots with a fresh baseline.
-      await tRepo.update(ticket.id, {
-        column_id: destColumnId,
-        position: pos,
-        branch_tip_sha_at_trigger: '',
-        branch_tip_snapshot_at: null,
-      });
-
-      // Stamp / clear terminal_entered_at when the move crosses the terminal
-      // boundary. Re-resolved here so cross-DB-driver locking semantics are
-      // preserved — same transaction as the position shifts above.
-      const colRepoTx = manager.getRepository(BoardColumn);
-      const [sourceColForStamp, destColForStamp] = await Promise.all([
-        sourceColumnId ? colRepoTx.findOne({ where: { id: sourceColumnId } }) : Promise.resolve(null),
-        colRepoTx.findOne({ where: { id: destColumnId } }),
-      ]);
-      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
-      await releaseMergeLeaseForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
-    });
-
-    const updated = await loadTicketFull(this.dataSource, ticket.id);
-
-    const oldCol = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-    const newColId = targetColumnId || ticket.column_id;
-    const newCol = await this.colRepo.findOne({ where: { id: newColId } });
-
-    const currentUser = req.currentUser;
-    await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, action: 'moved',
-      field_changed: 'column', old_value: oldCol?.name || String(ticket.column_id),
-      new_value: newCol?.name || String(newColId), ticket_id: ticket.id,
-      actor_id: currentUser?.id,
-      actor_name: currentUser?.name || currentUser?.email,
-    });
-
+    const updated = await loadTicketFull(this.dataSource, id, { commentLimit: DETAIL_COMMENT_PAGE });
     return res.json(updated);
   }
 
-  /**
-   * Re-parent a ticket. Two modes:
-   *   - `parent_id` set     → make the ticket a subtask of that parent.
-   *                            Sibling positions shift; column_id is cleared
-   *                            because non-root tickets don't live on a column.
-   *   - `parent_id` is null → promote the ticket back to root. Caller must
-   *                            supply `column_id` (which board column to land
-   *                            in); position defaults to end of column.
-   *
-   * Validates:
-   *   - cycle: target parent must not be the ticket itself or a descendant
-   *   - depth: subtree's deepest leaf must still fit under the 2-level cap
-   *   - workspace: parent must share the ticket's workspace
-   * Descendant depths are recomputed in the same transaction.
-   */
+  /** Re-parent a ticket under another ticket (subtask), or promote a subtask to a root ticket. */
   @Patch('tickets/:id/parent')
   async reparent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    const reparentRootArchived = await getRootArchivedAt(this.dataSource, ticket);
-    if (reparentRootArchived) {
-      return res.status(409).json({
-        error: 'ticket_archived',
-        hint: 'Call unarchive first',
-        message: new TicketArchivedError(ticket.id).message,
-      });
-    }
-
-    const rawParent = body?.parent_id;
-    const newParentId: string | null = rawParent === null || rawParent === '' || rawParent === undefined
-      ? null
-      : String(rawParent);
-    const targetColumnId: string | undefined = body?.column_id ? String(body.column_id) : undefined;
-    const targetPosition: number | undefined = typeof body?.targetPosition === 'number'
-      ? body.targetPosition
-      : undefined;
-
-    if (newParentId === ticket.id) {
-      return res.status(400).json({ error: 'A ticket cannot be its own parent' });
-    }
-
-    // Pull the moving ticket's full subtree once so we can: (a) detect a cycle
-    // when the requested parent is itself a descendant, (b) compute the
-    // subtree's max depth offset for the cap check, and (c) re-stamp depths.
-    const subtree = await this._collectSubtree(ticket.id);
-    const subtreeIds = new Set(subtree.map(t => t.id));
-    const subtreeMaxDepth = subtree.reduce((max, t) => Math.max(max, t.depth), ticket.depth) - ticket.depth;
-
-    let newDepth = 0;
-    let parent: Ticket | null = null;
+    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first' });
+    const newParentId: string | null = body?.parent_id ? String(body.parent_id) : null;
+    if (newParentId === ticket.parent_id) return res.json(await loadTicketFull(this.dataSource, id));
+    let depth = 0;
     if (newParentId) {
-      if (subtreeIds.has(newParentId)) {
-        return res.status(400).json({ error: 'Cannot re-parent under self or a descendant' });
-      }
-      parent = await this.ticketRepo.findOne({ where: { id: newParentId } });
+      if (newParentId === ticket.id) return res.status(400).json({ error: 'A ticket cannot be its own parent' });
+      const parent = await this.ticketRepo.findOne({ where: { id: newParentId } });
       if (!parent) return res.status(400).json({ error: 'Parent ticket not found' });
-      if (ticket.workspace_id && parent.workspace_id && parent.workspace_id !== ticket.workspace_id) {
-        return res.status(400).json({ error: 'Parent ticket belongs to a different workspace' });
+      if (parent.workspace_id !== ticket.workspace_id) return res.status(400).json({ error: 'Parent must be in the same workspace' });
+      depth = parent.depth + 1;
+      const hasGrandchildren = await this.ticketRepo
+        .createQueryBuilder('t')
+        .innerJoin(Ticket, 'c', 'c.parent_id = t.id')
+        .where('t.parent_id = :id', { id: ticket.id })
+        .getCount();
+      const subtreeDepth = hasGrandchildren ? 2 : (await this.ticketRepo.count({ where: { parent_id: ticket.id } })) ? 1 : 0;
+      if (depth + subtreeDepth > 2) return res.status(400).json({ error: 'Maximum depth of 2 exceeded' });
+      // Ancestor cycle guard.
+      let cursor: Ticket | null = parent;
+      for (let i = 0; cursor && i < 4; i++) {
+        if (cursor.id === ticket.id) return res.status(400).json({ error: 'Cannot move a ticket under its own descendant' });
+        cursor = cursor.parent_id ? await this.ticketRepo.findOne({ where: { id: cursor.parent_id } }) : null;
       }
-      newDepth = parent.depth + 1;
-    } else {
-      // Promotion to root requires a target column.
-      if (!targetColumnId) {
-        return res.status(400).json({ error: 'column_id is required when parent_id is null' });
-      }
-      const col = await this.colRepo.findOne({ where: { id: targetColumnId } });
-      if (!col) return res.status(400).json({ error: 'Target column not found' });
-      newDepth = 0;
     }
-
-    if (newDepth + subtreeMaxDepth > 2) {
-      return res.status(400).json({ error: 'Reparent would exceed maximum depth of 2' });
-    }
-
-    // No-op early-out: same parent and (for root tickets) same column with no
-    // position change. Lets the UI fire reparent on every drop without us
-    // having to bookkeep "did anything actually change" upstream.
     const oldParentId = ticket.parent_id;
-    const oldColumnId = ticket.column_id;
-    if (newParentId === oldParentId
-        && (newParentId !== null || (targetColumnId && targetColumnId === oldColumnId))
-        && targetPosition === undefined) {
-      const unchanged = await loadTicketFull(this.dataSource, ticket.id);
-      return res.json(unchanged);
-    }
-
     await this.dataSource.transaction(async (manager) => {
       const tRepo = manager.getRepository(Ticket);
-
-      // 1) Close the gap left in the source scope.
-      if (oldParentId) {
-        await shiftTicketPositions(tRepo, { parent_id: oldParentId }, ticket.position, -1);
-      } else if (oldColumnId) {
-        await shiftTicketPositions(tRepo, { column_id: oldColumnId }, ticket.position, -1);
-      }
-
-      // 2) Compute the destination position.
-      let pos: number;
-      if (newParentId) {
-        const destCount = await tRepo
-          .createQueryBuilder('t')
-          .where('t.parent_id = :pid AND t.id != :id', { pid: newParentId, id: ticket.id })
-          .getCount();
-        pos = Math.min(targetPosition ?? destCount, destCount);
-        await shiftTicketPositions(tRepo, { parent_id: newParentId }, pos, +1, { inclusive: true, excludeId: ticket.id });
-      } else {
-        const destCol = targetColumnId!;
-        const destCount = await tRepo
-          .createQueryBuilder('t')
-          .where('t.column_id = :cid AND t.id != :id AND t.parent_id IS NULL', { cid: destCol, id: ticket.id })
-          .getCount();
-        pos = Math.min(targetPosition ?? destCount, destCount);
-        await shiftTicketPositions(tRepo, { column_id: destCol }, pos, +1, { inclusive: true, excludeId: ticket.id });
-      }
-
-      // 3) Update the moving ticket. column_id is nulled when the ticket is
-      // parented (children don't live on a column); set to target column when
-      // promoted to root.
+      if (oldParentId) await shiftTicketPositions(tRepo, { parent_id: oldParentId }, ticket.position, -1);
+      const position = newParentId ? await maxChildPosition(manager, newParentId) : 0;
       await tRepo.update(ticket.id, {
         parent_id: newParentId,
-        depth: newDepth,
-        column_id: newParentId ? (null as any) : targetColumnId!,
-        position: pos,
+        depth,
+        position,
+        // A subtask is a checklist item (todo/done); a promoted root starts queued.
+        status: newParentId ? (ticket.status === 'done' ? 'done' : 'todo') : (ticket.status === 'done' ? 'done' : 'todo'),
       });
-
-      // Reparent can change whether the (now-root) ticket sits on a terminal
-      // column: promotion to root with a terminal target, or a child moving
-      // out of a parent that was on terminal. Re-resolve and stamp.
-      if (!newParentId) {
-        const colRepoTx = manager.getRepository(BoardColumn);
-        const [sourceColForStamp, destColForStamp] = await Promise.all([
-          oldColumnId ? colRepoTx.findOne({ where: { id: oldColumnId } }) : Promise.resolve(null),
-          colRepoTx.findOne({ where: { id: targetColumnId! } }),
-        ]);
-        await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
-        await releaseMergeLeaseForMove(tRepo, ticket.id, sourceColForStamp, destColForStamp);
-      } else {
-        // Demoted to subtask — clear the stamp (subtasks have no column).
-        await tRepo.update(ticket.id, { terminal_entered_at: null });
-      }
-
-      // 4) Re-stamp depths of descendants. Each was previously at
-      // (ticket.depth + offset); set to (newDepth + offset).
-      const depthDelta = newDepth - ticket.depth;
-      if (depthDelta !== 0) {
-        for (const desc of subtree) {
-          if (desc.id === ticket.id) continue;
-          await tRepo.update(desc.id, { depth: desc.depth + depthDelta });
-        }
-      }
+      // Children of the moved ticket keep their relative depth.
+      await tRepo.createQueryBuilder().update().set({ depth: depth + 1 }).where('parent_id = :id', { id: ticket.id }).execute();
     });
-
-    const updated = await loadTicketFull(this.dataSource, ticket.id);
-
-    const currentUser = req.currentUser;
-    const oldParentTitle = oldParentId
-      ? (await this.ticketRepo.findOne({ where: { id: oldParentId } }))?.title || oldParentId
-      : (oldColumnId ? (await this.colRepo.findOne({ where: { id: oldColumnId } }))?.name || oldColumnId : '');
-    const newParentTitle = newParentId
-      ? parent?.title || newParentId
-      : (targetColumnId ? (await this.colRepo.findOne({ where: { id: targetColumnId } }))?.name || targetColumnId : '');
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, action: 'updated',
-      field_changed: 'parent', old_value: oldParentTitle, new_value: newParentTitle,
-      ticket_id: newParentId
-        ? (parent?.parent_id || newParentId)
-        : ticket.id,
-      actor_id: currentUser?.id,
-      actor_name: currentUser?.name || currentUser?.email,
+      entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      field_changed: 'parent_id', old_value: oldParentId || '', new_value: newParentId || '',
+      actor_id: req.currentUser?.id, actor_name: req.currentUser?.name || '',
     });
-
-    return res.json(updated);
+    return res.json(await loadTicketFull(this.dataSource, id));
   }
 
-  /**
-   * Move a root ticket (with its entire subtree) to a different board.
-   * Body: { target_board_id, target_column_id?, target_position? }
-   *
-   * Subtasks travel automatically — they're attached via parent_id and
-   * carry column_id=null, so changing the root's column_id doesn't require
-   * touching descendants. Same-workspace constraint mirrors reparent;
-   * cross-workspace moves would invalidate channel/role/agent references.
-   *
-   * If target_column_id is omitted, lands in the target board's first
-   * column (lowest position).
-   */
-  @Patch('tickets/:id/move-to-board')
-  async moveToBoard(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-
-    if (ticket.archived_at) {
-      return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    }
-    if (ticket.parent_id || ticket.depth > 0) {
-      return res.status(400).json({ error: 'Only root tickets can be moved across boards' });
-    }
-
-    const targetBoardId: string | undefined = body?.target_board_id ? String(body.target_board_id) : undefined;
-    if (!targetBoardId) return res.status(400).json({ error: 'target_board_id is required' });
-
-    const targetColumnIdRaw: string | undefined = body?.target_column_id ? String(body.target_column_id) : undefined;
-    const targetPosition: number | undefined = typeof body?.target_position === 'number'
-      ? body.target_position
-      : undefined;
-    const force: boolean = body?.force === true;
-
-    const boardRepo = this.dataSource.getRepository(Board);
-    const targetBoard = await boardRepo.findOne({ where: { id: targetBoardId } });
-    if (!targetBoard) return res.status(400).json({ error: 'Target board not found' });
-
-    if (ticket.workspace_id && targetBoard.workspace_id && targetBoard.workspace_id !== ticket.workspace_id) {
-      return res.status(400).json({ error: 'Target board belongs to a different workspace' });
-    }
-
-    // Resolve target column: explicit if given (must belong to target board),
-    // otherwise the first column on that board by position.
-    let targetCol: BoardColumn | null;
-    if (targetColumnIdRaw) {
-      targetCol = await this.colRepo.findOne({ where: { id: targetColumnIdRaw } });
-      if (!targetCol) return res.status(400).json({ error: 'Target column not found' });
-      if (targetCol.board_id !== targetBoardId) {
-        return res.status(400).json({ error: 'Target column does not belong to target board' });
-      }
-    } else {
-      const cols = await this.colRepo.find({ where: { board_id: targetBoardId } as any, order: { position: 'ASC' as any } });
-      if (cols.length === 0) return res.status(400).json({ error: 'Target board has no columns' });
-      targetCol = cols[0];
-    }
-
-    // Resolve source board (current column → board) for the no-op check and
-    // activity log. column_id should always be set on a root ticket; the
-    // null guard is just defensive.
-    const sourceCol = ticket.column_id
-      ? await this.colRepo.findOne({ where: { id: ticket.column_id } })
-      : null;
-    const sourceBoardId = sourceCol?.board_id ?? null;
-
-    if (sourceBoardId === targetBoardId && targetCol.id === ticket.column_id && targetPosition === undefined) {
-      const unchanged = await loadTicketFull(this.dataSource, ticket.id);
-      return res.json(unchanged);
-    }
-
-    if (sourceBoardId !== targetBoardId && await subtaskGateBlocksExit(this.dataSource, ticket)) {
-      return res.status(409).json({ error: 'subtask_gate_blocked', message: '모든 재귀 subtask를 완료한 뒤 현재 게이트 컬럼을 이탈할 수 있습니다.' });
-    }
-
-    // 다중담당자·합의 게이트(ticket bd6d58db). 보드 간 이동도 현재 컬럼 이탈이므로
-    // move_ticket / REST /move 와 동일한 게이트를 태운다 — 안 그러면 멀티홀더 티켓을
-    // 다른 보드로 옮기는 방식이 합의 우회 경로가 된다. 목적지 컬럼이 현재와 다를
-    // 때만 발동(같은 컬럼 순수 재정렬은 면제). body.force 는 의도적 operator 우회.
-    if (!force && targetCol.id !== ticket.column_id) {
-      const gate = await evaluateConsensusMoveGate(this.consensusDeps(), ticket);
-      if (gate.blocked) {
-        return res.status(409).json({
-          error: 'consensus_required',
-          message: `다중담당자 티켓 — 현재 컬럼의 라우팅 역할 홀더 ${gate.state.required.length}명의 합의가 필요합니다. `
-            + `합의 패널에서 '이동 제안' 후 전원 동의(또는 reporter override) 시 서버가 자동 이동합니다. force=true 로 우회할 수 있습니다.`,
-          consensus: {
-            required: gate.state.required.length,
-            agreed: gate.state.agreed.length,
-            pending: gate.state.pending.length,
-            objected: gate.state.objected.length,
-          },
-        });
-      }
-    }
-
-    await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-
-      // 1) Close the gap in the source column.
-      if (ticket.column_id) {
-        await shiftTicketPositions(tRepo, { column_id: ticket.column_id }, ticket.position, -1);
-      }
-
-      // 2) Compute destination position in the target column and open a slot.
-      const destCount = await tRepo.createQueryBuilder('t')
-        .where('t.column_id = :colId AND t.id != :id AND t.parent_id IS NULL', { colId: targetCol!.id, id: ticket.id })
-        .getCount();
-      const pos = Math.min(targetPosition ?? destCount, destCount);
-      await shiftTicketPositions(tRepo, { column_id: targetCol!.id }, pos, +1, { inclusive: true, excludeId: ticket.id });
-
-      // 3) Update the ticket. workspace_id is preserved (same-workspace
-      // constraint guaranteed above) so subtasks remain consistent.
-      await tRepo.update(ticket.id, { column_id: targetCol!.id, position: pos });
-
-      // Cross-board move can change terminal status — stamp / clear
-      // terminal_entered_at the same way same-board moves do.
-      await applyTerminalEnteredAtForMove(tRepo, ticket.id, sourceCol, targetCol!);
-      await releaseMergeLeaseForMove(tRepo, ticket.id, sourceCol, targetCol!);
-    });
-
-    const updated = await loadTicketFull(this.dataSource, ticket.id);
-
-    const sourceBoard = sourceBoardId
-      ? await boardRepo.findOne({ where: { id: sourceBoardId } })
-      : null;
-
-    const currentUser = req.currentUser;
-    await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, action: 'moved',
-      field_changed: 'board',
-      old_value: sourceBoard?.name || sourceBoardId || '',
-      new_value: targetBoard.name || targetBoardId,
-      ticket_id: ticket.id,
-      actor_id: currentUser?.id,
-      actor_name: currentUser?.name || currentUser?.email,
-    });
-
-    return res.json(updated);
-  }
-
-  /**
-   * BFS from `rootId` collecting the ticket plus every descendant. Used by
-   * reparent for cycle detection and depth re-stamping. Stays bounded by the
-   * 2-level depth cap, so worst case is one root → N children → M grandchildren.
-   */
-  private async _collectSubtree(rootId: string): Promise<Ticket[]> {
-    const out: Ticket[] = [];
-    const queue: string[] = [rootId];
-    while (queue.length > 0) {
-      const ids = queue.splice(0, queue.length);
-      const rows = await this.ticketRepo.find({ where: { id: In(ids) } as any });
-      for (const r of rows) out.push(r);
-      const children = await this.ticketRepo.find({ where: { parent_id: In(ids) } as any });
-      for (const c of children) queue.push(c.id);
-    }
-    // Dedupe just in case the caller hits an unexpected cycle.
-    const seen = new Set<string>();
-    return out.filter(t => seen.has(t.id) ? false : (seen.add(t.id), true));
-  }
-
-  /**
-   * List the resolved role assignments for a ticket — one row per
-   * WorkspaceRole that has an assignment (rows with no assignment are
-   * omitted; the client merges this with the workspace's full role list to
-   * render an empty slot for unfilled roles).
-   *
-   * Each entry: { role: {id, slug, name, position, is_builtin}, holder: {type, id, name} | null }
-   */
-  @Get('tickets/:id/role-assignments')
-  async listRoleAssignments(@Param('id') id: string, @Res() res: Response) {
-    await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    const resolved = await this.ticketRoleAssignments.resolveForTicket(id);
-    return res.json(resolved.map(r => ({
-      role: {
-        id: r.role.id, slug: r.role.slug, name: r.role.name,
-        position: r.role.position, is_builtin: r.role.is_builtin,
-      },
-      holder: r.holder,
-    })));
-  }
-
-  /**
-   * Set (or clear) the holder of a single role on a ticket. Body:
-   *   { agent_id?: string|null, user_id?: string|null }
-   * Mutually exclusive — passing both rejects with 400. Both null/empty
-   * clears the slot (deletes the assignment row).
-   *
-   * Builtin slugs (`assignee`/`reporter`/`reviewer`) are mirrored back to the
-   * legacy ticket columns so older code paths (TicketCard, activity log,
-   * agent allocation fallbacks) keep seeing the same value. Custom slugs
-   * have no mirror — they live only in TicketRoleAssignment.
-   */
-  @Put('tickets/:id/role-assignments/:roleId')
-  async setRoleAssignment(
-    @Param('id') id: string,
-    @Param('roleId') roleId: string,
-    @Body() body: any,
-    @Req() req: any,
-    @Res() res: Response,
-  ) {
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    const agent_id: string | null = body?.agent_id || null;
-    const user_id: string | null = body?.user_id || null;
-    // P4c-4: spec-direct holder. 셋 중 하나만.
-    let runtime: Record<string, any> | null = null;
-    if (body?.runtime !== undefined && body?.runtime !== null) {
-      if (agent_id || user_id) {
-        return res.status(400).json({ error: 'cannot set more than one of agent_id, user_id, runtime' });
-      }
-      try {
-        runtime = { ...normalizeRuntimeSpec(body.runtime, 'runtime') };
-      } catch (e: any) {
-        return res.status(400).json({ error: e?.message || 'invalid runtime' });
-      }
-      // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
-      const hostRow = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: (runtime as any).manager_agent_id } });
-      if (!hostRow) return res.status(400).json({ error: 'Runtime Host not found' });
-    } else if (agent_id && user_id) {
-      return res.status(400).json({ error: 'cannot set both agent_id and user_id' });
-    }
-
-    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
-    const role = await roleRepo.findOne({ where: { id: roleId } });
-    if (!role) return res.status(404).json({ error: 'Role not found' });
-    if (ticket.workspace_id && role.workspace_id !== ticket.workspace_id) {
-      return res.status(400).json({ error: 'Role belongs to a different workspace' });
-    }
-
-    // Validate the holder exists. Skipping this would let a typo silently
-    // pin a dead id onto the ticket.
-    // P4c-4: Agent 행 대신 Host/링크 해소 — executable holder 는 agent uuid
-    // (legacy) 또는 Host uuid 다. manager 행 타입 검사는 행이 없으므로 생략
-    // (manager identity 는 holder 가 될 수 없다는 941c72d3 규칙은 Host id 가
-    // role holder 로 들어오는 것을 막지 않는다 — Host 는 실행 위치이지
-    // supervisor 행이 아니다).
-    let agentName = '';
-    let userName = '';
-    if (agent_id) {
-      const holder = await resolveCallerIdentityRow(this.dataSource, agent_id);
-      if (!holder) return res.status(404).json({ error: 'Agent not found' });
-      if (!agentIsVisibleInWorkspace(holder.workspace_id, ticket.workspace_id)) {
-        return res.status(400).json({ error: 'Agent belongs to a different workspace' });
-      }
-      agentName = holder.name;
-    }
-    if (user_id) {
-      const u = await this.dataSource.getRepository(User).findOne({ where: { id: user_id } });
-      if (!u) return res.status(404).json({ error: 'User not found' });
-      userName = u.name || u.email;
-    }
-
-    try {
-      await this.ticketRoleAssignments.setHolder(id, roleId, { agent_id, user_id, runtime: runtime ?? undefined });
-    } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update role' });
-    }
-
-    // Mirror builtin slugs onto the legacy ticket columns. Display-name
-    // columns (`assignee`, `reporter`) get the holder's name when an agent
-    // or user fills the slot, blank when cleared. There's no historical
-    // `reviewer` name column, only `reviewer_id`.
-    // P4c-4: runtime holder는 id에 키 + 이름에 라벨을 미러링한다.
-    const legacyMap: Record<string, { id: 'assignee_id' | 'reporter_id' | 'reviewer_id'; name?: 'assignee' | 'reporter' }> = {
-      assignee: { id: 'assignee_id', name: 'assignee' },
-      reporter: { id: 'reporter_id', name: 'reporter' },
-      reviewer: { id: 'reviewer_id' },
-    };
-    const mirror = legacyMap[role.slug];
-    let beforeId = '';
-    if (mirror) {
-      beforeId = (ticket as any)[mirror.id] || '';
-      const runtimeId = runtime ? runtimeIdentityKey(runtime as any) : '';
-      const runtimeLabel = runtime ? String((runtime as any).label || '').trim() || runtimeId.slice(0, 11) : '';
-      const newId = agent_id || user_id || runtimeId;
-      const update: any = { [mirror.id]: newId };
-      if (mirror.name) update[mirror.name] = agentName || userName || runtimeLabel;
-      await this.ticketRepo.update(id, update);
-    }
-
-    const currentUser = req.currentUser;
-    await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: id, action: 'updated',
-      field_changed: mirror ? role.slug : `role:${role.slug}`,
-      old_value: beforeId,
-      new_value: agentName || userName || (runtime ? String((runtime as any).label || '').trim() : '') || '',
-      ticket_id: ticket.parent_id || ticket.id,
-      actor_id: currentUser?.id,
-      actor_name: currentUser?.name || currentUser?.email,
-    });
-
-    const resolved = await this.ticketRoleAssignments.resolveForTicket(id);
-    return res.json({
-      assignments: resolved.map(r => ({
-        role: {
-          id: r.role.id, slug: r.role.slug, name: r.role.name,
-          position: r.role.position, is_builtin: r.role.is_builtin,
-        },
-        holder: r.holder,
-      })),
-    });
-  }
-
-  // ─── 다중담당자·합의 REST 브릿지 (T6) ────────────────────────────────────
-  // 합의 READ/제안/투표/override 는 지금까지 MCP 툴 전용(코멘트 마커 기반)이었다.
-  // 브라우저(웹 UI T6)가 소비할 수 있도록 같은 서버 로직(consensus-actions)을 얇게
-  // REST 로 노출한다 — 저자는 로그인 유저(req.currentUser). SSE consensus_update 는
-  // 액션 함수 안에서 방출되고, 합의 성립 시 서버가 auto-execute 로 실제 이동한다.
-  private consensusDeps() {
-    return {
-      dataSource: this.dataSource,
-      activityService: this.activityService,
-      ticketRoleAssignmentService: this.ticketRoleAssignments,
-    };
-  }
-
-  /**
-   * 현재 합의 상태 뷰 — 역할홀더별 agree/pending/object, 열린 이동 제안(target),
-   * party 표시 이름, 게이트 요약(홀더≥2 & 미성립이면 blocked). 합의 패널이 소비.
-   */
-  @Get('tickets/:id/consensus')
-  async getTicketConsensus(@Param('id') id: string, @Res() res: Response) {
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    const view = await getConsensusView(this.consensusDeps(), ticket);
-    return res.json(view);
-  }
-
-  /**
-   * 이동 제안 열기(홀더≥2). Body `{ target_column_id, content? }`. 제안 comment 의
-   * id 가 곧 proposal_id — 전 홀더가 동의하면 서버가 자동 이동한다. 홀더≤1 이면 400.
-   */
-  @Post('tickets/:id/consensus/propose')
-  async proposeTicketConsensusMove(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    const currentUser = req.currentUser;
-    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const targetColumnId: string = body?.target_column_id || body?.targetColumnId || '';
-    if (!targetColumnId) return res.status(400).json({ error: 'target_column_id is required' });
-    try {
-      const result = await openMoveProposal(this.consensusDeps(), {
-        ticket,
-        by: { type: 'user', id: currentUser.id },
-        byName: currentUser.name || currentUser.email || 'user',
-        destColumnId: targetColumnId,
-        content: typeof body?.content === 'string' ? body.content : undefined,
-      });
-      return res.json(result);
-    } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to open move proposal' });
-    }
-  }
-
-  /**
-   * 합의 시그널 캐스트. Body `{ status:'agree'|'object', proposal_id?, override?, content? }`.
-   * override 는 reporter 홀더에게만 유효(서버가 검증·무시). 합의 성립 시 서버가
-   * 열린 제안을 auto-execute 로 이동시킨다 — 응답 `moved` 에 반영.
-   */
-  @Post('tickets/:id/consensus/vote')
-  async recordTicketConsensusVote(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    const currentUser = req.currentUser;
-    if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const status = body?.status;
-    if (status !== 'agree' && status !== 'object') {
-      return res.status(400).json({ error: "status must be 'agree' or 'object'" });
-    }
-    try {
-      const result = await recordConsensusVote(this.consensusDeps(), {
-        ticket,
-        by: { type: 'user', id: currentUser.id },
-        byName: currentUser.name || currentUser.email || 'user',
-        status,
-        proposalId: typeof body?.proposal_id === 'string' ? body.proposal_id : null,
-        override: body?.override === true,
-        content: typeof body?.content === 'string' ? body.content : undefined,
-      });
-      return res.json(result);
-    } catch (e: any) {
-      return res.status(e?.status || 400).json({ error: e?.message || 'Failed to record consensus vote' });
-    }
-  }
-
-  /**
-   * Manually re-trigger an agent on this ticket. Used when the auto trigger
-   * fired but the agent never responded (dead subagent, missed SSE, etc.) and
-   * the human wants to punt it awake. Bypasses the 60s cooldown that the auto
-   * path honors. Body `{role, agent_id?}` — role picks which ticket slot
-   * (assignee/reporter/reviewer) to wake; an explicit agent_id overrides the
-   * role-resolved target (admin override, useful when the role isn't filled
-   * but someone specific should take it).
-   */
+  /** Manual Run: start a todo ticket now (capacity-bound) or re-send an in_progress one. */
   @Post('tickets/:id/trigger')
-  async triggerAgent(@Param('id') id: string, @Body() body: any, @Req() req: any, @Res() res: Response) {
-    const role = String(body?.role || '').toLowerCase();
-    if (!role) {
-      return res.status(400).json({ error: 'role is required (workspace role slug)' });
+  async trigger(@Param('id') id: string, @Res() res: Response) {
+    const ticket = await this.ticketRepo.findOne({ where: { id } });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+    if (await this.instanceQuiesce.isQuiesced()) {
+      return res.status(409).json({ ok: false, dispatched: false, reason: 'instance_quiesced' });
     }
-    const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
-    if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    const explicitAgentId = body?.agent_id ? String(body.agent_id) : '';
-
-    // Resolve the role holder against the workspace role catalog. Legacy
-    // ticket columns (assignee_id / reporter_id / reviewer_id) are still
-    // checked as a fallback so v1 callers that haven't migrated keep working
-    // for the builtin three slugs.
-    let targetAgentId = explicitAgentId;
-    if (!targetAgentId) {
-      const holder = await this.ticketRoleAssignments.getHolderBySlug(id, ticket.workspace_id, role);
-      if (holder) targetAgentId = holder.agent_id || '';
-      if (!targetAgentId) {
-        const legacyField = role === 'assignee' ? 'assignee_id'
-          : role === 'reporter' ? 'reporter_id'
-          : role === 'reviewer' ? 'reviewer_id'
-          : null;
-        if (legacyField) targetAgentId = (ticket as any)[legacyField] || '';
-      }
-    }
-    if (!targetAgentId) {
-      return res.status(400).json({
-        error: `No agent holds role '${role}' on this ticket. Set the holder first, or pass agent_id in the body.`,
-      });
-    }
-    const currentUser = req.currentUser;
-    try {
-      const trigger = await this.triggerLoop.emitManualTrigger(
-        id, targetAgentId, role,
-        {
-          id: currentUser?.id || '',
-          name: currentUser?.name || currentUser?.email || 'web-user',
-        },
-      );
-      return res.json({
-        trigger_id: trigger.trigger_id,
-        ticket_id: trigger.ticket_id,
-        agent_id: trigger.agent_id,
-        role: trigger.role,
-        trigger_source: 'manual',
-        pushed_at: new Date().toISOString(),
-      });
-    } catch (e: any) {
-      const status = typeof e?.status === 'number' ? e.status : 500;
-      return res.status(status).json({ error: e?.message || 'Manual trigger failed' });
-    }
+    const result = await this.dispatcher.manualTrigger(id);
+    return res.json({ ok: true, ...result });
   }
 
-  // ─── Archive endpoints (ticket 9b44526b) ───────────────────────
-  // Manual archive / restore. Background TicketArchiverService performs the
-  // same archive write — these are the human-driven entry points and the
-  // restore path (the archiver never auto-restores).
+  // ─── archive / delete ───────────────────────────────────
 
   @Post('tickets/:id/archive')
   async archiveTicket(@Param('id') id: string, @Req() req: any, @Res() res: Response) {
@@ -1785,72 +442,43 @@ export class TicketsController {
     if (ticket.parent_id || ticket.depth > 0) {
       return res.status(400).json({ error: 'Only root tickets can be archived' });
     }
-
-    let isTerminal = false;
-    if (ticket.column_id) {
-      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-      isTerminal = !!col && ((col as any).is_terminal === true || (col as any).kind === 'terminal');
-      if (!isTerminal) {
-        this.logService.info('Archiver', 'manual archive on non-terminal column', {
-          ticket_id: ticket.id, column_id: ticket.column_id, column_name: col?.name,
-        });
-      }
-    }
-
     ticket.archived_at = new Date();
-    // dedupe key 정리는 MCP archive_ticket과 동일 정책(티켓 a565b657) — terminal 진입 시
-    // 비우는 applyTerminalEnteredAtForMove와 대칭, 비터미널 아카이브도 키를 남기지 않는다.
+    // dedupe key 정리는 MCP archive_ticket과 동일 정책(티켓 a565b657).
     ticket.operational_dedupe_key = null;
     await this.ticketRepo.save(ticket);
-
     const currentUser = req.currentUser;
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'archived',
-      ticket_id: ticket.id,
+      ticket_id: ticket.id, workspace_id: ticket.workspace_id,
       actor_id: currentUser?.id,
       actor_name: currentUser?.name || currentUser?.email || 'manual',
       field_changed: 'archived_at',
       new_value: new Date(ticket.archived_at).toISOString(),
     });
-
-    // MCP archive_ticket 과 동일 정책 (ticket 2cc54fde) — active 컬럼 티켓을
-    // 아카이브해 풀린 focus 슬롯을 backlog 승격이 즉시 재사용하게 한다.
-    await emitFocusReleased(this.dataSource, ticket, 'archived');
-
     const updated = await loadTicketFull(this.dataSource, ticket.id);
-    return res.json({ ...updated, manual: true, on_terminal: isTerminal });
+    return res.json({ ...updated, manual: true, on_terminal: ticket.status === 'done' });
   }
 
   @Post('tickets/:id/unarchive')
   async unarchiveTicket(@Param('id') id: string, @Req() req: any, @Res() res: Response) {
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
     if (!ticket.archived_at) return res.json({ ...ticket, already_active: true });
-
-    let isTerminalNow = false;
-    if (ticket.column_id) {
-      const col = await this.colRepo.findOne({ where: { id: ticket.column_id } });
-      isTerminalNow = !!col && ((col as any).is_terminal === true || (col as any).kind === 'terminal');
-    }
-
     const wasArchivedAt = ticket.archived_at;
     ticket.archived_at = null;
     // Reset the archiver clock so the unarchived ticket gets the full grace
-    // window again — otherwise a ticket archived after 30 days, then
-    // unarchived, would be re-archived on the next tick.
-    ticket.terminal_entered_at = isTerminalNow ? new Date() : null;
+    // window again instead of being re-archived on the next tick.
+    ticket.terminal_entered_at = ticket.status === 'done' ? new Date() : null;
     await this.ticketRepo.save(ticket);
-
     const currentUser = req.currentUser;
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'unarchived',
-      ticket_id: ticket.id,
+      ticket_id: ticket.id, workspace_id: ticket.workspace_id,
       actor_id: currentUser?.id,
       actor_name: currentUser?.name || currentUser?.email || 'manual',
       field_changed: 'archived_at',
       old_value: new Date(wasArchivedAt).toISOString(),
       new_value: '',
     });
-
     const updated = await loadTicketFull(this.dataSource, ticket.id);
     return res.json(updated);
   }
@@ -1865,51 +493,39 @@ export class TicketsController {
     if (linkedDuplicates > 0) {
       return res.status(409).json({ error: 'canonical_has_duplicates', linked_duplicates: linkedDuplicates });
     }
-
-    const columnId = ticket.column_id;
     const position = ticket.position;
     const parentId = ticket.parent_id;
-
+    const workspaceId = ticket.workspace_id;
     // Prereq cascade (ticket 48d14fff): drop links pointing AT this ticket and
     // re-evaluate dependents BEFORE remove() — the FK ON DELETE CASCADE would
-    // otherwise wipe the link rows first, leaving nothing to read. Mirrors the
-    // MCP delete_ticket tool.
+    // otherwise wipe the link rows first, leaving nothing to read.
     let unblockedDependents: string[] = [];
     try {
       unblockedDependents = await this.ticketPrerequisites.onPrerequisiteRemoved(ticket.id);
     } catch (e) {
       this.logService.warn('Ticket', 'delete prereq cascade failed (continuing)', { err: String(e), ticket_id: ticket.id });
     }
-
     // Strip comment_attachment Resources before the ticket cascade removes
     // the comment rows they were tied to — Resource has no FK back to Ticket.
     await deleteCommentAttachmentsForTicket(this.dataSource, ticket.id);
-
     await this.ticketRepo.remove(ticket);
-
-    if (parentId) {
-      await shiftTicketPositions(this.ticketRepo, { parent_id: parentId }, position, -1);
-    } else if (columnId) {
-      await shiftTicketPositions(this.ticketRepo, { column_id: columnId }, position, -1);
-    }
-
-    // Wake the now-unblocked dependents on their current column.
+    if (parentId) await shiftTicketPositions(this.ticketRepo, { parent_id: parentId }, position, -1);
+    await this.activityService.logActivity({
+      entity_type: 'ticket', entity_id: id, action: 'deleted', ticket_id: id, workspace_id: workspaceId,
+    });
     for (const depId of unblockedDependents) {
       try {
-        await this.triggerLoop.dispatchCurrentColumn(depId, 'prerequisite_resolved', '');
+        await this.dispatcher.resumeTicket(depId, 'prerequisite_resolved');
       } catch (e) {
         this.logService.warn('Ticket', 'delete unblock dispatch failed (continuing)', { err: String(e), ticket_id: depId });
       }
     }
-
     return res.json({ success: true });
   }
 
   // ─── Ticket prerequisites (ticket 48d14fff) ─────────────
-  // The "blocked-by another ticket" M:N surface. The detail panel's
-  // Prerequisites section drives these; the link set itself is also folded
-  // into GET /tickets/:id via loadTicketFull, so the panel renders without an
-  // extra call and only hits these endpoints on mutation.
+  // The "blocked-by another ticket" M:N surface. The link set itself is also
+  // folded into GET /tickets/:id via loadTicketFull.
 
   @Get('tickets/:id/prerequisites')
   async listPrerequisites(@Param('id') id: string, @Res() res: Response) {
@@ -1952,10 +568,10 @@ export class TicketsController {
     } catch (e: any) {
       return res.status(e?.status === 400 ? 400 : 500).json({ error: e?.message || 'Failed to remove prerequisite' });
     }
-    // Wake the ticket's current-column holders only on a real true → false flip.
+    // Wake the assignee only on a real true → false flip.
     if (result.removed && wasPending && !result.pending_on_tickets) {
       try {
-        await this.triggerLoop.dispatchCurrentColumn(id, 'prerequisite_resolved', actor?.id || '');
+        await this.dispatcher.resumeTicket(id, 'prerequisite_resolved');
       } catch (e) {
         this.logService.warn('Ticket', 'remove prerequisite unblock dispatch failed (continuing)', { err: String(e), ticket_id: id });
       }
@@ -2199,19 +815,6 @@ export class TicketsController {
       return extMap[ext] || 'application/octet-stream';
     };
 
-    // Resolve the ticket's board so attachments land in that board's Resources
-    // (not the workspace scope). Tickets store column_id, not board_id, and
-    // child tickets have a null column — walk to the ancestor that has one.
-    const resolveBoardId = async (startTicket: Ticket): Promise<string | null> => {
-      let cursor: Ticket | null = startTicket;
-      while (cursor && !cursor.column_id && cursor.parent_id) {
-        cursor = await this.ticketRepo.findOne({ where: { id: cursor.parent_id } });
-      }
-      if (!cursor?.column_id) return null;
-      const col = await this.colRepo.findOne({ where: { id: cursor.column_id } });
-      return col?.board_id || null;
-    };
-    const ticketBoardId = inlineFiles.length > 0 ? await resolveBoardId(ticket) : null;
 
     const comment = await this.dataSource.transaction(async (manager) => {
       const createdIds: string[] = [];
@@ -2220,7 +823,6 @@ export class TicketsController {
         const r = await manager.getRepository(Resource).save(
           manager.getRepository(Resource).create({
             workspace_id: ticket.workspace_id,
-            board_id: ticketBoardId,
             credential_id: null,
             name: f.file_name,
             description: '',
@@ -2478,32 +1080,6 @@ export class TicketsController {
     const preview = (comment.content || '').slice(0, 500);
     const ts = (comment.created_at instanceof Date ? comment.created_at : new Date()).toISOString();
 
-    // Deep-link plumbing: resolve board_id once so each user-mention SSE
-    // payload carries enough context for MentionInboxBadge to navigate to
-    // /ws/<wsId>/boards/<boardId>?ticket=<id>&comment=<id> without a
-    // second round-trip. Lookup is best-effort — if the column row is
-    // missing for any reason the inbox falls back to the boards index.
-    //
-    // Subtasks carry no column_id (only the root ancestor does), so walk the
-    // parent chain — resolving from ticket.column_id alone emitted board_id
-    // = null for every mention on a subtask comment and the inbox click had
-    // nowhere to go. Mirrors MentionsService.listUnread's cold-load path.
-    let boardId: string | null = null;
-    {
-      let cursorColumnId = ticket.column_id as string | null;
-      let cursorParentId = ticket.parent_id as string | null;
-      for (let i = 0; !cursorColumnId && cursorParentId && i < 5; i++) {
-        const parent: Ticket | null = await this.ticketRepo.findOne({ where: { id: cursorParentId } });
-        if (!parent) break;
-        cursorColumnId = parent.column_id;
-        cursorParentId = parent.parent_id;
-      }
-      if (cursorColumnId) {
-        const col = await this.colRepo.findOne({ where: { id: cursorColumnId } });
-        boardId = col?.board_id ?? null;
-      }
-    }
-
     // Ticket-comment analog of room-messaging.service.ts's chat chain-depth
     // stamp (ticket 07402c57) — computed once per comment and reused across
     // every fan-out target below, since it reflects this ticket's comment
@@ -2522,12 +1098,6 @@ export class TicketsController {
         if (!target) continue;
 
         const { extras } = target;
-        const dispatchTriggerId = m.roleShortcut
-          ? await recordCommentMentionDispatch(this.dataSource, {
-              ticketId: ticket.id, workspaceId: ticket.workspace_id,
-              agentId: target.agentId, role: m.roleShortcut,
-            })
-          : '';
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
@@ -2537,11 +1107,11 @@ export class TicketsController {
           actor_type: 'user',
           actor_name: actor.name,
           content: comment.content,
-          dispatch_trigger_id: dispatchTriggerId,
-          dispatch_role: m.roleShortcut || '',
+          dispatch_trigger_id: '',
+          dispatch_role: '',
           role_prompt: target.rolePrompt,
-          mention_source: m.roleShortcut ? 'role' : 'direct',
-          role_shortcut: m.roleShortcut,
+          mention_source: 'direct',
+          role_shortcut: '',
           timestamp: ts,
           agent_chain_depth: agentChainDepth,
           harness_config: extras.harness_config,
@@ -2574,7 +1144,6 @@ export class TicketsController {
           source_type: 'comment',
           source_id: comment.id,
           ticket_id: ticket.id,
-          board_id: boardId,
           room_id: null,
           actor_id: actor.id,
           actor_type: 'user',

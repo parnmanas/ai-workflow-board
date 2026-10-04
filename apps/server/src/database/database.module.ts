@@ -1,28 +1,12 @@
 import { Module, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions, DEFAULT_COLUMNS, BUILTIN_ROLES, DEFAULT_BOARD_ROUTING, serializeSqljsTransactions } from '../db';
-import { DEFAULT_PROMPT_TEMPLATES } from './default-prompt-templates';
+import { buildDataSourceOptions, serializeSqljsTransactions } from '../db';
 import * as entitiesBarrel from '../entities';
 import { Workspace } from '../entities/Workspace';
-import { Board } from '../entities/Board';
-import { BoardColumn } from '../entities/BoardColumn';
-import { WorkspaceRole } from '../entities/WorkspaceRole';
-import { PromptTemplate } from '../entities/PromptTemplate';
-import { checkPromptTemplateDrift } from './prompt-template-drift-check';
 import { LogService } from '../services/log.service';
-import { writeRoutingConfigThrough } from '../modules/boards/routing-config.helper';
-import { seedDefaultColumnRolePolicies } from '../modules/column-policies/seed-helper';
-import { Not, IsNull } from 'typeorm';
 
 const entityList = Object.values(entitiesBarrel);
-
-/**
- * DEFAULT_COLUMNS is re-exported from here for backward compatibility —
- * several modules (workspaces, qa, boards controllers) import it from
- * `../../database/database.module`. The canonical definition lives in `db.ts`.
- */
-export { DEFAULT_COLUMNS };
 
 @Module({
   imports: [
@@ -73,114 +57,17 @@ export class DatabaseModule implements OnModuleInit {
       throw e;
     }
 
-    // ── Prompt template drift check (ticket 4a48a0b8, 623400e7 follow-up) ──
-    // Non-fatal, log-only: catches a content-refresh migration that IS
-    // recorded as applied yet left a workspace's template row byte-exact
-    // stuck on the pre-migration snapshot. A migration that simply hasn't
-    // run yet (ordinary deploy lag) is not drift and is never flagged here.
-    try {
-      const drift = await checkPromptTemplateDrift(this.dataSource);
-      if (drift.drifted.length > 0) {
-        this.logService?.warn('DB', 'Prompt template drift detected — migration applied but row content did not update', {
-          drifted: drift.drifted,
-        });
-      }
-      this.dbLog(
-        `Prompt template drift check: ${drift.migrations_applied}/${drift.migrations_registered} refresh migration(s) applied, ` +
-          `${drift.rows_checked} row(s) checked, ${drift.drifted.length} drifted`,
-      );
-    } catch (e) {
-      this.dbLog(`Prompt template drift check FAILED (non-fatal): ${(e as Error).message}`);
-    }
-
-
     const wsRepo = this.dataSource.getRepository(Workspace);
-    const boardRepo = this.dataSource.getRepository(Board);
-    const colRepo = this.dataSource.getRepository(BoardColumn);
-    const roleRepo = this.dataSource.getRepository(WorkspaceRole);
-    const tplRepo = this.dataSource.getRepository(PromptTemplate);
-
-    // Seed default workspace if empty (seeding, NOT migration — stays here)
+    // Seed default workspace if empty (seeding, NOT migration — stays here).
+    // A workspace is just a ticket pool now (docs/tickets.md) — nothing else
+    // to seed.
     const wsCount = await wsRepo.count();
     if (wsCount === 0) {
-      const ws = await wsRepo.save(wsRepo.create({
+      await wsRepo.save(wsRepo.create({
         name: 'Default Workspace',
         description: 'Main workspace for AI agent collaboration',
       }));
-
-      const board = await boardRepo.save(boardRepo.create({
-        workspace_id: ws.id,
-        name: 'AI Workflow Board',
-        description: 'Main board for AI agent collaboration',
-        // Seed the default plan→implement→review routing so the workflow
-        // is functional out of the box. Admins can override via Board
-        // Settings → Routing.
-        routing_config: JSON.stringify(DEFAULT_BOARD_ROUTING),
-      }));
-
-      const defaultCols = DEFAULT_COLUMNS.map(c => ({
-        ...c,
-        board_id: board.id,
-      }));
-      const savedCols = await colRepo.save(defaultCols.map(c => colRepo.create(c)));
-
-      // v0.41 — fan board.routing_config into per-column role_routing rows
-      // so the trigger-loop / allocation paths can read role slugs straight
-      // off the column without parsing the lowercased-name blob each time.
-      await writeRoutingConfigThrough(this.dataSource, board.id);
-
-      // v0.34 — seed the same role preset every newly-created workspace
-      // gets so the default workspace doesn't end up role-less if the
-      // 1760000000008 migration runs before this block (or never runs at
-      // all on a fresh DB).
-      await roleRepo.save(BUILTIN_ROLES.map(def => roleRepo.create({
-        workspace_id: ws.id,
-        slug: def.slug,
-        name: def.name,
-        role_prompt: def.role_prompt,
-        description: def.description,
-        position: def.position,
-        is_builtin: true,
-      })));
-
-      // Default workflow prompt templates + auto-link to columns by name.
-      // Inlined here (rather than calling PromptTemplatesService) because
-      // DatabaseModule has no DI access to feature-module services.
-      const seededTemplates = await tplRepo.save(DEFAULT_PROMPT_TEMPLATES.map(def =>
-        tplRepo.create({
-          workspace_id: ws.id,
-          name: def.name,
-          description: def.description,
-          content: def.content,
-          category: def.category,
-        })));
-      const tplIdByName = new Map(seededTemplates.map(t => [t.name, t.id]));
-      const colPrompts: Record<string, string> = {};
-      for (const col of savedCols) {
-        // SEED-ONLY name match — runtime dispatch reads `BoardColumn.kind`
-        // and `role_routing` exclusively (see ticket 47a90ea3 AC #3). This
-        // hits at workspace-creation time only to pair the default prompt
-        // templates with the freshly-minted default columns. TODO: migrate
-        // `default-prompt-templates.ts::column_match` from a lowercased
-        // name to a `kind_match: ColumnKind` enum so this last seed-time
-        // hardcode goes away too.
-        const def = DEFAULT_PROMPT_TEMPLATES.find(d => d.column_match === col.name.toLowerCase());
-        if (!def) continue;
-        const tplId = tplIdByName.get(def.name);
-        if (tplId) colPrompts[col.id] = tplId;
-      }
-      if (Object.keys(colPrompts).length > 0) {
-        await boardRepo.update({ id: board.id }, { column_prompts: JSON.stringify(colPrompts) });
-      }
-
-      // v0.42 — seed default ColumnRolePolicy rows for the freshly-created
-      // default board (ticket f886ada7). Mirrors the 1760000000017
-      // migration's logic — which only operates on PRE-existing boards —
-      // so the first-run workspace gets the alert layer active out of the
-      // box without a second restart.
-      const policiesSeeded = await seedDefaultColumnRolePolicies(this.dataSource, { boardId: board.id });
-
-      this.dbLog(`Seeded default workspace with board, ${defaultCols.length} columns, ${BUILTIN_ROLES.length} roles, ${seededTemplates.length} prompt templates, and ${policiesSeeded} column-role policies`);
+      this.dbLog('Seeded default workspace');
     }
   }
 }

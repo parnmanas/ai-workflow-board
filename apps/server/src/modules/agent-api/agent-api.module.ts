@@ -1,7 +1,5 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { Comment } from '../../entities/Comment';
 import { ChatRoom } from '../../entities/ChatRoom';
@@ -14,6 +12,7 @@ import { ActivityLog } from '../../entities/ActivityLog';
 import { AgentApiController } from './agent-api.controller';
 import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
+import { AgentsModule } from '../agents/agents.module';
 
 @Module({
   // Chat-room services are imported via ChatRoomsModule so AgentApiController
@@ -21,8 +20,10 @@ import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
   // each module re-provided the services, which risked state divergence for
   // any per-instance caches).
   imports: [
-    TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, UserMention, TicketAttachment, ActivityLog]),
+    TypeOrmModule.forFeature([Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, UserMention, TicketAttachment, ActivityLog]),
     ChatRoomsModule,
+    // TicketService (ordinary-work / operational fallback tickets).
+    AgentsModule,
   ],
   controllers: [AgentApiController],
   providers: [AgentAuthGuard],

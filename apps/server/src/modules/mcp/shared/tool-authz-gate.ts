@@ -184,19 +184,16 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   await_ci_run: 'caller',
   cancel_ci_wait: 'caller',
 
-  // 랜딩 lease (ticket e630b530) — 위 CI 대기와 같은 판단이다. 핸들러가
-  // `getCallerAgent` 로 인증된 에이전트 세션만 받고, 실제 스코핑은
-  // "이 티켓이 존재하는가 / 아카이브됐는가" 이며 교차 에이전트·교차 리소스
-  // 표면이 없다. lease 홀더 신원은 세션이 아니라 **티켓**이라(재개된 세션이
-  // 같은 lease 를 다시 잡는 것이 정상 경로) 세션 단위로 더 좁히는 것이
-  // 오히려 정상 동작을 깬다.
-  await_merge_lease: 'caller',
-  release_merge_lease: 'caller',
-
-  // durable 완료조건은 인증된 티켓 작업자만 등록·판정할 수 있다. 세부 범위는
-  // 각 도구가 ticket_id로 제한하고 중앙 게이트는 익명 호출을 차단한다.
-  register_completion_verification: 'caller',
-  record_completion_verification: 'caller',
+  // Board-less tickets (docs/tickets.md): new tools, not in
+  // KNOWN_EXISTING_TOOLS. 'caller' is the floor every handler already
+  // assumes — list_tickets scopes to the caller's workspace, and the project
+  // tools check callerCanAccessWorkspace against the project's workspace
+  // themselves (runbook (d)); a full-scope tier would lock out the ticket
+  // agents that need to read where a project lives on their host.
+  list_tickets: 'caller',
+  list_projects: 'caller',
+  get_project: 'caller',
+  save_project: 'caller',
 
   // ticket d35b7b7d (Ontology Graph 6/7, DESIGN.md 축 6): new tools, not in
   // KNOWN_EXISTING_TOOLS. 'caller' mirrors what every handler already

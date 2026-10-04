@@ -11,9 +11,9 @@ import {
   operationalDedupeKey,
   parseOperationalFallback,
 } from '../dist/lib/operational-chat-fallback.js';
-import { fetchOrdinaryWorkBoardCandidates } from '../dist/lib/rest.js';
+import { fetchOrdinaryWorkCandidates, fetchOrdinaryWorkBoardCandidates } from '../dist/lib/rest.js';
 import { composeChatRoomPrompt } from '../dist/lib/prompts.js';
-import { ordinaryWorkBoardsForChat } from '../dist/lib/event-dispatcher.js';
+import { ordinaryWorkCandidatesForChat } from '../dist/lib/event-dispatcher.js';
 
 const config = { url: 'https://awb.invalid', apiKey: 'key', workspace_id: 'workspace-1' };
 const marker = (operation = 'deploy awb') =>
@@ -136,8 +136,8 @@ test('non-native one-shot ordinary code change creates one focused ticket linked
   };
   try {
     const output = `처리하겠습니다.\nAWB_ORDINARY_WORK_FALLBACK: ${JSON.stringify({
-      board_id: 'board-suitable', title: '로그인 오류 수정',
-      description: '재현 테스트를 추가하고 오류를 수정한다.', original_request: '로그인 오류를 고쳐줘',
+      title: '로그인 오류 수정', description: '재현 테스트를 추가하고 오류를 수정한다.',
+      tags: ['bug', 'auth'], project_id: 'project-web', original_request: '로그인 오류를 고쳐줘',
     })}`;
     assert.ok(parseOrdinaryWorkFallback(output));
     const manager = new SubagentManager({ ...config, delegation: { enabled: true, maxConcurrent: 2, ttlMinutes: 15 } });
@@ -155,7 +155,12 @@ test('non-native one-shot ordinary code change creates one focused ticket linked
     }, 0);
     const ticketCalls = calls.filter(c => c.url.endsWith('/api/agent/ordinary-work-ticket'));
     assert.equal(ticketCalls.length, 1, 'focused ticket creation is requested exactly once');
-    assert.equal(ticketCalls[0].body.board_id, 'board-suitable');
+    // board-less contract (docs/tickets.md): tags + project_id, no board_id.
+    assert.deepEqual(ticketCalls[0].body.tags, ['bug', 'auth']);
+    assert.equal(ticketCalls[0].body.project_id, 'project-web');
+    assert.equal('board_id' in ticketCalls[0].body, false);
+    assert.equal(ticketCalls[0].body.workspace_id, 'workspace-1');
+    assert.ok(ticketCalls[0].body.dedupe_key);
     assert.equal(ticketCalls[0].body.room_id, 'room-source');
     assert.equal(ticketCalls[0].body.message_id, 'msg-code-change');
     const chatCall = calls.find(c => c.url.includes('/chat-rooms/'));
@@ -166,40 +171,99 @@ test('non-native one-shot ordinary code change creates one focused ticket linked
   }
 });
 
-test('non-native prompt receives real existing board candidates before selecting a ticket destination', async () => {
-  const boards = await fetchOrdinaryWorkBoardCandidates(config, async () =>
-    new Response(JSON.stringify([{ id: 'board-real', name: '제품 개발', description: '제품 코드 변경' }]), { status: 200 }));
+test('non-native prompt receives real project + tag candidates before filing a ticket', async () => {
+  const calls = [];
+  const candidates = await fetchOrdinaryWorkCandidates(config, async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({
+      projects: [{ id: 'project-web', name: '웹 클라이언트', repo_url: 'https://github.com/acme/web.git' }],
+      tags: [{ tag: 'bug', count: 4 }, { tag: 'auth', count: 1 }],
+    }), { status: 200 });
+  });
+  assert.deepEqual(calls, ['https://awb.invalid/api/agent/ordinary-work-candidates?workspace_id=workspace-1']);
   const prompt = composeChatRoomPrompt(
     'room-1', [], { content: '로그인 오류를 고쳐줘', sender_name: '사용자', sender_id: 'user-1' },
-    undefined, false, undefined, '', false, '', boards,
+    undefined, false, undefined, '', false, '', candidates,
   );
-  assert.match(prompt, /제품 개발 \| board-real \| 제품 코드 변경/);
-  assert.match(prompt, /use only these UUIDs/);
+  assert.match(prompt, /웹 클라이언트 \| project-web \| https:\/\/github.com\/acme\/web.git/);
+  assert.match(prompt, /use only these UUIDs as project_id/);
+  assert.match(prompt, /Tags already used in this workspace: bug \(4\), auth \(1\)/);
+  assert.match(prompt, /AWB_ORDINARY_WORK_FALLBACK: \{"title"/);
+  assert.match(prompt, /"tags":\["<tag>"\],"project_id"/);
+  assert.doesNotMatch(prompt, /board_id|existing board/);
 });
 
-test('ordinary-work board HTTP failure stops routing instead of becoming a direct-chat exception', async () => {
+test('empty project list still files a ticket (tags only) instead of a direct-chat exception', async () => {
+  const candidates = await fetchOrdinaryWorkCandidates(config, async () =>
+    new Response(JSON.stringify({ projects: [], tags: [] }), { status: 200 }));
+  const prompt = composeChatRoomPrompt(
+    'room-1', [], { content: '작업해줘', sender_name: '사용자', sender_id: 'user-1' },
+    undefined, false, undefined, '', false, '', candidates,
+  );
+  assert.match(prompt, /\(none; leave project_id null\)/);
+  assert.match(prompt, /Tags already used in this workspace: \(none yet\)/);
+  assert.match(prompt, /AWB_ORDINARY_WORK_FALLBACK/);
+});
+
+test('ordinary-work candidate HTTP failure stops routing instead of becoming a direct-chat exception', async () => {
   await assert.rejects(
-    fetchOrdinaryWorkBoardCandidates(config, async () =>
+    fetchOrdinaryWorkCandidates(config, async () =>
       new Response('일시적 서버 오류', { status: 500 })),
     /HTTP 500/,
   );
+  await assert.rejects(
+    fetchOrdinaryWorkCandidates(config, async () =>
+      new Response(JSON.stringify([{ id: 'board-1' }]), { status: 200 })),
+    /projects/,
+    'a non board-less shape is a failure, not an empty candidate list',
+  );
 });
 
-test('ordinary-work board timeout stops routing instead of producing a marker or direct execution', async () => {
+test('ordinary-work candidate timeout stops routing instead of producing a marker or direct execution', async () => {
   const timeout = new Error('요청 시간 초과');
   timeout.name = 'TimeoutError';
   await assert.rejects(
-    fetchOrdinaryWorkBoardCandidates(config, async () => { throw timeout; }),
+    fetchOrdinaryWorkCandidates(config, async () => { throw timeout; }),
     error => error === timeout,
   );
 });
 
+// 구버전(board 모델) 서버: 새 후보 엔드포인트가 404 면 기존 보드 후보로 폴백하고
+// 프롬프트/마커도 종전 board_id 형태를 유지한다(호스트별 업그레이드 시차 호환).
+test('pre-board-less server (404) falls back to legacy board candidates and board_id marker', async () => {
+  const calls = [];
+  const candidates = await fetchOrdinaryWorkCandidates(config, async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/ordinary-work-candidates')) return new Response('not found', { status: 404 });
+    return new Response(JSON.stringify([{ id: 'board-real', name: '제품 개발', description: '제품 코드 변경' }]), { status: 200 });
+  });
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /\/api\/agent\/ordinary-work-board-candidates\?workspace_id=workspace-1$/);
+  assert.deepEqual(candidates.boards, [{ id: 'board-real', name: '제품 개발', description: '제품 코드 변경' }]);
+  const prompt = composeChatRoomPrompt(
+    'room-1', [], { content: '로그인 오류를 고쳐줘', sender_name: '사용자', sender_id: 'user-1' },
+    undefined, false, undefined, '', false, '', candidates,
+  );
+  assert.match(prompt, /제품 개발 \| board-real \| 제품 코드 변경/);
+  assert.match(prompt, /use only these UUIDs\):/);
+  assert.match(prompt, /"board_id":"<existing board UUID>"/);
+
+  // A legacy board array passed straight through renders the same legacy block.
+  const boards = await fetchOrdinaryWorkBoardCandidates(config, async () =>
+    new Response(JSON.stringify([]), { status: 200 }));
+  const empty = composeChatRoomPrompt(
+    'room-1', [], { content: '작업해줘', sender_name: '사용자', sender_id: 'user-1' },
+    undefined, false, undefined, '', false, '', boards,
+  );
+  assert.match(empty, /none; treat this as the no-suitable-existing-board direct-chat exception/);
+});
+
 for (const dispatchPath of ['Hermes', 'non-native one-shot']) {
-  test(`${dispatchPath} Action room skips the failing ordinary-work board API and keeps direct execution`, async () => {
+  test(`${dispatchPath} Action room skips the failing ordinary-work candidate API and keeps direct execution`, async () => {
     const originalFetch = globalThis.fetch;
     let candidateFetches = 0;
     globalThis.fetch = async (url) => {
-      if (String(url).includes('/ordinary-work-board-candidates')) {
+      if (String(url).includes('/ordinary-work-')) {
         candidateFetches += 1;
         throw new Error('후보 API 장애');
       }
@@ -208,13 +272,13 @@ for (const dispatchPath of ['Hermes', 'non-native one-shot']) {
     try {
       // Hermes와 non-native one-shot은 모두 native MCP가 아니지만, Action room이면
       // capability-first 실행이므로 후보 조회 실패에 노출되지 않아야 한다.
-      const boards = await ordinaryWorkBoardsForChat(config, false, true);
-      assert.deepEqual(boards, []);
+      const candidates = await ordinaryWorkCandidatesForChat(config, false, true);
+      assert.equal(candidates, null);
       assert.equal(candidateFetches, 0, 'Action room에서는 후보 API를 호출하지 않는다');
 
       const prompt = composeChatRoomPrompt(
         'action-room', [], { content: '배포를 실행해줘', sender_name: '사용자', sender_id: 'user-1' },
-        undefined, false, undefined, '', true, '', boards,
+        undefined, false, undefined, '', true, '', candidates,
       );
       assert.match(prompt, /executing an Action Run/);
       assert.match(prompt, /carry it out DIRECTLY/);
@@ -225,23 +289,34 @@ for (const dispatchPath of ['Hermes', 'non-native one-shot']) {
   });
 }
 
-test('only a successful empty board response enables the no-board direct-chat exception', async () => {
-  const boards = await fetchOrdinaryWorkBoardCandidates(config, async () =>
-    new Response(JSON.stringify([]), { status: 200 }));
-  const prompt = composeChatRoomPrompt(
-    'room-1', [], { content: '작업해줘', sender_name: '사용자', sender_id: 'user-1' },
-    undefined, false, undefined, '', false, '', boards,
-  );
-  assert.match(prompt, /none; treat this as the no-suitable-existing-board direct-chat exception/);
+test('ordinary fallback marker parses the board-less shape and keeps a legacy board_id', () => {
+  const parsed = parseOrdinaryWorkFallback(`AWB_ORDINARY_WORK_FALLBACK: ${JSON.stringify({
+    title: '  로그인 오류 수정 ', description: '회귀 테스트 포함', tags: ['bug', ' bug ', '', 7, 'auth'],
+    project_id: 'project-web', original_request: '고쳐줘',
+  })}`);
+  assert.deepEqual(parsed, {
+    title: '로그인 오류 수정', description: '회귀 테스트 포함', original_request: '고쳐줘',
+    tags: ['bug', 'auth'], project_id: 'project-web',
+  });
+  const noProject = parseOrdinaryWorkFallback('AWB_ORDINARY_WORK_FALLBACK: {"title":"x","project_id":null}');
+  assert.equal(noProject.project_id, null);
+  const legacy = parseOrdinaryWorkFallback('AWB_ORDINARY_WORK_FALLBACK: {"board_id":"board-real","title":"x"}');
+  assert.equal(legacy.board_id, 'board-real');
+  assert.equal(parseOrdinaryWorkFallback('AWB_ORDINARY_WORK_FALLBACK: {"tags":["a"]}'), null, 'title is required');
 });
 
-test('ordinary fallback sends the selected pre-injected board exactly once', async () => {
+test('ordinary fallback sends the selected tags + project exactly once (no board_id)', async () => {
   const calls = [];
-  const request = { board_id: 'board-real', title: '로그인 오류 수정', description: '회귀 테스트 포함' };
+  const request = { title: '로그인 오류 수정', description: '회귀 테스트 포함', tags: ['bug'], project_id: 'project-web' };
   await ensureOrdinaryWorkFallbackTicket(config, request, { room_id: 'room-1', message_id: 'msg-1' }, async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(init.body) });
     return new Response(JSON.stringify({ id: 'ticket-1', title: request.title, reused: false }), { status: 201 });
   });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].body.board_id, 'board-real');
+  assert.equal(calls[0].url, 'https://awb.invalid/api/agent/ordinary-work-ticket');
+  assert.deepEqual(calls[0].body.tags, ['bug']);
+  assert.equal(calls[0].body.project_id, 'project-web');
+  assert.equal('board_id' in calls[0].body, false);
+  assert.equal(calls[0].body.room_id, 'room-1');
+  assert.equal(calls[0].body.message_id, 'msg-1');
 });

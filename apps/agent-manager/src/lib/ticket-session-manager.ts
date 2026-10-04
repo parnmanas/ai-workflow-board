@@ -17,8 +17,9 @@ import {
   type SessionRecord,
 } from './base-session-manager.js';
 import type { ParseResult } from './cli-adapters/base.js';
-import { composeTriggerPrompt } from './prompts.js';
+import { composeTriggerPrompt, ticketStatusLine, ticketWorkOrderLines, TICKET_WORK_ORDER_TEMPLATE_ID } from './prompts.js';
 import { buildAgentContextContract, renderAgentContextContract } from './agent-context-contract.js';
+import { isTicketStatusMove, parseTicketStatus, ticketWorkflowStatus } from './ticket-status.js';
 import { fireAndForgetTool } from './mcp-client.js';
 import { log } from './logging.js';
 import { postSilentExitSystemComment, postOutputLiveness, postToolCallTelemetry } from './rest.js';
@@ -62,9 +63,12 @@ const SILENT_EXIT_TAIL_MAX_CHARS = 4096;
 /** 살아 있는 persistent 세션에 보내는 매 turn 최신 컨텍스트. 별도 export는
  * resume 계약을 실제 조립 결과로 회귀 검증하기 위한 것이다. */
 export function composePersistentTriggerTurn(spec: TicketTriggerArgs): string {
+  // board-less trigger(status 동봉)면 column 대신 status + 단일 담당 work order 를 쓴다.
+  const status = ticketWorkflowStatus(spec.ticket)
+    ?? (spec.columnPrompt?.template_id === TICKET_WORK_ORDER_TEMPLATE_ID ? 'unknown' as const : null);
   const lines: string[] = [];
   lines.push('[New Trigger] A new trigger arrived for the ticket you are already working on.');
-  if (spec.ticket?.__awb_enforce_context_contract || (spec.ticket?.id && spec.ticket?.current_column_id && spec.ticket?.current_column_name)) {
+  if (spec.ticket?.__awb_enforce_context_contract || (spec.ticket?.id && ((spec.ticket?.current_column_id && spec.ticket?.current_column_name) || ticketWorkflowStatus(spec.ticket)))) {
     const contextContract = buildAgentContextContract({
       ticket: spec.ticket,
       role: spec.role,
@@ -77,18 +81,29 @@ export function composePersistentTriggerTurn(spec: TicketTriggerArgs): string {
     lines.push('');
     lines.push(renderAgentContextContract(contextContract));
   }
-  if (spec.ticket?.current_column_name || spec.ticket?.current_column_id) {
-    lines.push(
-      `Current column: ${spec.ticket.current_column_name || 'unknown'} ` +
-        `(kind: ${spec.ticket.current_column_kind || 'unknown'}, id: ${spec.ticket.current_column_id || 'unknown'})`,
-    );
-  }
-  if (spec.columnPrompt?.content) {
-    lines.push('', `Column workflow guide (${spec.columnPrompt.name || 'column_prompt'}):`, spec.columnPrompt.content);
+  if (status) {
+    lines.push(ticketStatusLine(status));
+    lines.push(...ticketWorkOrderLines(spec.columnPrompt));
+  } else {
+    if (spec.ticket?.current_column_name || spec.ticket?.current_column_id) {
+      lines.push(
+        `Current column: ${spec.ticket.current_column_name || 'unknown'} ` +
+          `(kind: ${spec.ticket.current_column_kind || 'unknown'}, id: ${spec.ticket.current_column_id || 'unknown'})`,
+      );
+    }
+    if (spec.columnPrompt?.content) {
+      lines.push('', `Column workflow guide (${spec.columnPrompt.name || 'column_prompt'}):`, spec.columnPrompt.content);
+    }
   }
   if (spec.ticketPrompt) lines.push('', 'Updated instructions:', spec.ticketPrompt);
   if (spec.worktreeInstructions) lines.push('', spec.worktreeInstructions);
   lines.push('', 'Use mcp__awb__get_ticket to fetch the latest ticket state and continue your work.');
+  if (status) {
+    lines.push(
+      'You still own this ticket end-to-end: finish with mcp__awb__move_ticket to `done` (or `review` if a human must check it), ' +
+        'or mcp__awb__pend_ticket when blocked on a human decision.',
+    );
+  }
   return lines.join('\n');
 }
 
@@ -972,19 +987,24 @@ export class TicketSessionManager
   }
 
   forwardBoardUpdate(ticketId: string, ev: any): boolean {
-    // A move changes role ownership. The server emits targeted agent_trigger
-    // events for the destination column; broadcasting this generic update to
-    // every old persistent session lets stale roles act on obsolete context.
-    if (ev?.entity_type === 'ticket' && ev?.action === 'moved') return false;
+    // A move changes who should act (column servers: role ownership; board-less
+    // servers: a status change the dispatcher re-triggers on its own). The server
+    // emits targeted agent_trigger events for the destination; broadcasting this
+    // generic update to every old persistent session lets stale sessions act on
+    // obsolete context. `board_update` keeps its name as the ticket-change event.
+    if (isTicketStatusMove(ev)) return false;
     const sessions = this.#sessionsForTicket(ticketId);
     if (sessions.length === 0) return false;
 
+    const status = parseTicketStatus(ev.status);
     const lines: string[] = [];
-    lines.push('[Board Update] The ticket you are working on was updated:');
+    lines.push('[Ticket Update] The ticket you are working on was updated:');
     lines.push(`  Event: ${ev.entity_type || 'unknown'}.${ev.action || 'unknown'}`);
     if (ev.field_changed) lines.push(`  Field changed: ${ev.field_changed}`);
     if (ev.actor_name) lines.push(`  By: ${ev.actor_name}`);
-    if (ev.current_column_name || ev.current_column_id) {
+    if (status) {
+      lines.push(`  ${ticketStatusLine(status)}`);
+    } else if (ev.current_column_name || ev.current_column_id) {
       lines.push(
         `  Current column: ${ev.current_column_name || 'unknown'} ` +
           `(kind: ${ev.current_column_kind || 'unknown'}, id: ${ev.current_column_id || 'unknown'})`,
@@ -1561,9 +1581,9 @@ export class TicketSessionManager
       `[ticket-session] moving-cue resume injected ticket=${(sess.ticketId || '').slice(0, 8)} role=${sess.role || '_'} pid=${sess.pid} reason=${reason}`,
     );
     const text =
-      '[Supervisor] Your previous comment announced a ticket move ("Moving to …") but no `mcp__awb__move_ticket` call followed. ' +
-      'Issue the `mcp__awb__move_ticket` call now to complete the transition — this is the very next tool call you must make, with no prose in between. ' +
-      'If you cannot move the ticket for a real reason (MCP error, you discovered a blocker), add a follow-up comment explaining why instead of staying silent.';
+      '[Supervisor] Your previous comment announced a ticket status change ("Moving to done …") but no `mcp__awb__move_ticket` call followed. ' +
+      'Issue the `mcp__awb__move_ticket` call now with the status you announced (`done`, or `review` if a human must check the result) — this is the very next tool call you must make, with no prose in between. ' +
+      'If you cannot move the ticket for a real reason (MCP error, you discovered a blocker), add a follow-up comment explaining why — and use `mcp__awb__pend_ticket` if a human decision is needed — instead of staying silent.';
     try {
       this._sendFollowUp(sess, text, { checkMaxTurns: false });
     } catch (err: any) {

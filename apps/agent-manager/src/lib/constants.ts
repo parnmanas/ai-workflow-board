@@ -27,6 +27,11 @@ export const SESSION_DEFER_PATH = join(AGENT_MANAGER_HOME, 'session-defer.json')
 // unreachable. Persisted so a manager that dies mid-outage still replays the
 // buffered messages on its next boot. See lib/outbox.ts.
 export const OUTBOX_PATH = join(AGENT_MANAGER_HOME, 'outbox.json');
+// Board-less projects (docs/tickets.md): the per-host project main clone folders
+// this manager has cut ticket worktrees from (`<main>/.awb/wt/<ticket8>`).
+// Persisted so terminal/archive cleanup and the sweeps still find those
+// worktrees after a restart, even when the ticket payload omits the folder.
+export const MAIN_CLONES_PATH = join(AGENT_MANAGER_HOME, 'main-clones.json');
 export const INSTANCES_DIR = join(AGENT_MANAGER_HOME, 'instances');
 // ST-6: per-managed-agent state lives under <home>/agents/<agent_id>/. Each
 // directory holds its own apiKey (issued by the server's provisioning

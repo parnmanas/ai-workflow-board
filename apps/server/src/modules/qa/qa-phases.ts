@@ -5,15 +5,15 @@
  * workloads have distinct stages with wildly different normal durations — a
  * Unity drive is import (tens of seconds) → build (tens of minutes) → run
  * (hours). A single timeout either false-reaps the long stage or never catches a
- * hang in the short one. This module lets a board (and, overriding it, a
- * scenario) declare an ordered list of phases, each with its own `timeout_sec`,
+ * hang in the short one. This module lets a scenario declare an ordered list of
+ * phases, each with its own `timeout_sec`,
  * so the reaper can judge "is THIS phase overdue" instead of "is the whole run
  * overdue".
  *
  * It deliberately mirrors qa-liveness-policy.ts: a zod WRITE schema, a fail-safe
  * READ parse (never throws mid-sweep — a malformed config falls back to null so
- * one bad board can't break reaping for everyone), and a scenario-?? -board-??
- * -null precedence resolver. The `phase_timeouts` LivenessDetector that consumes
+ * one bad scenario can't break reaping for everyone), and a resolver. The
+ * `phase_timeouts` LivenessDetector that consumes
  * this lives in qa-liveness-policy.ts (the detector registry); this file owns
  * only the data model + its parsing.
  *
@@ -38,7 +38,7 @@ export interface QaPhasesConfig {
 }
 
 /**
- * Zod schema for the WRITE path (future MCP update_board / create|update_qa_scenario).
+ * Zod schema for the WRITE path (MCP / REST create|update_qa_scenario).
  * A non-empty array of phases; ids must be unique and non-empty; timeout_sec a
  * positive integer (a phase with no/zero timeout is meaningless).
  */
@@ -68,8 +68,8 @@ export function serializeQaPhases(config: QaPhasesConfig | null | undefined): st
  * Validate a raw qa_phases WRITE input (an object straight off a REST body, where
  * — unlike the MCP tool boundary — no zod schema has run yet). Returns the
  * validated config on success or a flat error message on failure, mirroring
- * validateHarnessConfigInput / validateEnvironmentConfigInput so the boards /
- * scenario REST handlers can 400 on a malformed config instead of silently
+ * validateHarnessConfigInput / validateEnvironmentConfigInput so the scenario
+ * REST handlers can 400 on a malformed config instead of silently
  * storing garbage. null/clear is handled by the caller (pass the object only).
  */
 export function validateQaPhasesInput(
@@ -92,7 +92,7 @@ function isPosInt(v: unknown): v is number {
 /**
  * Parse a stored qa_phases JSON string into a validated config. FAILS SAFE to
  * null for empty/unparseable/structurally-invalid input — we never throw
- * mid-sweep so one malformed board config can't break reaping for every other
+ * mid-sweep so one malformed scenario config can't break reaping for every other
  * run (same contract as parseLivenessPolicy). Normalizes by dropping malformed
  * phase entries; if nothing valid remains, returns null. Duplicate ids collapse
  * to the first occurrence so a later bad entry can't shadow a good one.
@@ -123,16 +123,12 @@ export function parseQaPhases(raw: string | null | undefined): QaPhasesConfig | 
 }
 
 /**
- * Resolve the effective phase model for a run: scenario-level config wins over
- * the board-level config, which wins over null (legacy single-running). Each
- * scope's raw JSON is parsed independently so a malformed scenario config falls
- * through to the board, then to null — mirroring resolveLivenessPolicy.
+ * Resolve the effective phase model for a run: the scenario's config, or null
+ * (legacy single-running) when it has none or it is malformed. There is no
+ * board layer any more — phase models are scenario-level only.
  */
-export function resolveQaPhases(
-  scenarioRaw: string | null | undefined,
-  boardRaw: string | null | undefined,
-): QaPhasesConfig | null {
-  return parseQaPhases(scenarioRaw) ?? parseQaPhases(boardRaw) ?? null;
+export function resolveQaPhases(scenarioRaw: string | null | undefined): QaPhasesConfig | null {
+  return parseQaPhases(scenarioRaw);
 }
 
 /** Look up a phase by id within a resolved config (null when absent/unmatched). */

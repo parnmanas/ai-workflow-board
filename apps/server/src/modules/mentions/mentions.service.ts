@@ -1,91 +1,26 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { UserMention } from '../../entities/UserMention';
-import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 
-// API surface — UserMention plus the resolved board_id for comment-type rows.
-// Chat-type rows always carry board_id=null (deep link uses room_id).
-export type UserMentionRow = UserMention & { board_id: string | null };
+// API surface. Comment-type rows carry `ticket_id`; the inbox links them to
+// `/ws/<wsId>/tickets?ticket=<id>&comment=<id>` (no board to resolve any more).
+// Chat-type rows carry `room_id`.
+export type UserMentionRow = UserMention;
 
 @Injectable()
 export class MentionsService {
   constructor(
     @InjectRepository(UserMention) private readonly repo: Repository<UserMention>,
-    @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
-    @InjectRepository(BoardColumn) private readonly colRepo: Repository<BoardColumn>,
   ) {}
 
-  /**
-   * List the given user's unread mentions in one workspace, newest first.
-   *
-   * Comment-type rows are decorated with `board_id` (resolved via
-   * Ticket → BoardColumn) so the inbox can build a deep link to
-   * `/ws/<wsId>/boards/<boardId>?ticket=<id>&comment=<id>` without
-   * extra round-trips. SSE rows already carry `board_id` at emit time —
-   * this path covers cold loads where we never saw the SSE event.
-   */
+  /** List the given user's unread mentions in one workspace, newest first. */
   async listUnread(workspaceId: string, userId: string, limit = 50): Promise<UserMentionRow[]> {
-    const rows = await this.repo.find({
+    return this.repo.find({
       where: { workspace_id: workspaceId, user_id: userId, read_at: IsNull() },
       order: { created_at: 'DESC' },
       take: Math.min(limit, 200),
     });
-
-    const ticketIds = Array.from(new Set(
-      rows
-        .filter(r => r.source_type === 'comment' && r.ticket_id)
-        .map(r => r.ticket_id as string),
-    ));
-    const boardByTicket = new Map<string, string | null>();
-    if (ticketIds.length > 0) {
-      // Subtasks (depth > 0) carry no column_id — only the root ancestor does.
-      // Resolving from column_id alone therefore returned board_id=null for
-      // every mention on a subtask comment, and the inbox fell back to a
-      // board-less URL that no page consumed (the click went nowhere). Walk
-      // the parent chain the same bounded way tickets.controller does.
-      const byId = new Map<string, { column_id: string | null; parent_id: string | null }>();
-      let frontier: string[] = ticketIds.slice();
-      for (let hop = 0; frontier.length > 0 && hop < 6; hop++) {
-        const missing = frontier.filter(id => !byId.has(id));
-        if (missing.length === 0) break;
-        const rows = await this.ticketRepo.find({
-          where: { id: In(missing) },
-          select: ['id', 'column_id', 'parent_id'] as any,
-        });
-        for (const t of rows) byId.set(t.id, { column_id: t.column_id, parent_id: t.parent_id });
-        frontier = rows
-          .map(t => t.parent_id)
-          .filter((pid): pid is string => !!pid && !byId.has(pid));
-      }
-      const resolveColumn = (startId: string): string | null => {
-        let cursor = byId.get(startId);
-        for (let i = 0; cursor && !cursor.column_id && cursor.parent_id && i < 5; i++) {
-          cursor = byId.get(cursor.parent_id);
-        }
-        return cursor?.column_id ?? null;
-      };
-
-      const colIds = Array.from(new Set(
-        ticketIds.map(resolveColumn).filter(Boolean) as string[],
-      ));
-      const cols = colIds.length > 0
-        ? await this.colRepo.find({ where: { id: In(colIds) }, select: ['id', 'board_id'] as any })
-        : [];
-      const boardByCol = new Map(cols.map(c => [c.id, c.board_id]));
-      for (const id of ticketIds) {
-        const colId = resolveColumn(id);
-        boardByTicket.set(id, colId ? boardByCol.get(colId) ?? null : null);
-      }
-    }
-
-    return rows.map(r => ({
-      ...r,
-      board_id: r.source_type === 'comment' && r.ticket_id
-        ? boardByTicket.get(r.ticket_id) ?? null
-        : null,
-    }));
   }
 
   /**

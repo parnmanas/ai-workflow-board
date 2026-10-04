@@ -28,7 +28,6 @@ function buildArtifactToJson(a: BuildArtifact | null) {
   return {
     id: a.id,
     workspace_id: a.workspace_id,
-    board_id: a.board_id,
     repo_key: a.repo_key,
     repo_resource_id: a.repo_resource_id,
     repo_url: a.repo_url,

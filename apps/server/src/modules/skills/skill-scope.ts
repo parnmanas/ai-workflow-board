@@ -4,22 +4,19 @@ import { canUseCatalogItem, normalizeCatalogScope, type CatalogScope } from '../
 
 /**
  * Scope plumbing for skills, on top of the shared catalog-scope model
- * (`docs/catalog-scopes.md`). Skills carry no `board_id` column — new catalog
- * entities never add one — so every call into the shared helpers adapts with a
- * literal `board_id: null`.
+ * (`docs/catalog-scopes.md`): Global (`workspace_id NULL`) or one Workspace.
  */
 
 export type SkillScope = CatalogScope;
 
 /** '' / undefined / 'global' → global; otherwise the workspace uuid. */
 export function resolveSkillScope(input: {
-  scope?: SkillScope | 'board';
+  scope?: string | null;
   workspace_id?: string | null;
 }): { workspace_id: string | null } {
   const normalized = normalizeCatalogScope({
     scope: input.scope,
     workspace_id: input.workspace_id ?? null,
-    board_id: null,
   });
   return { workspace_id: normalized.workspace_id };
 }
@@ -29,7 +26,7 @@ export function skillScopeOf(skill: Pick<Skill, 'workspace_id'>): SkillScope {
 }
 
 export function skillIsVisibleTo(skill: Pick<Skill, 'workspace_id'>, workspaceId: string): boolean {
-  return canUseCatalogItem({ workspace_id: skill.workspace_id, board_id: null }, workspaceId);
+  return canUseCatalogItem({ workspace_id: skill.workspace_id }, workspaceId);
 }
 
 /**

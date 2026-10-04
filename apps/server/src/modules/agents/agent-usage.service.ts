@@ -20,20 +20,18 @@
  */
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, In } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { Subagent } from '../../entities/Subagent';
 import { ActivityLog } from '../../entities/ActivityLog';
-import { Ticket } from '../../entities/Ticket';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { AgentUsageDailyRollup } from '../../entities/AgentUsageDailyRollup';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_TOP_TICKETS_LIMIT = 5;
 
-// The 3 suppression event kinds a repeated-dispatch storm produces (ticket
-// 3970db66's getSuppressionStats reads the same 3, but lifetime-cumulative —
-// this needs a WINDOWED count to pair with a windowed avg-cost, so it's a
-// separate query rather than a reuse of that method).
+// The 3 suppression event kinds a repeated-dispatch storm produced (ticket
+// 3970db66). Their writers (respawn-storm detector, comment ping-pong guard)
+// were removed with boards, so this count only reflects older rows still
+// inside the window and drops to 0 once they age out.
 const SUPPRESSION_ACTIONS = [
   'respawn_storm_halted',
   'respawn_twin_detected',
@@ -117,34 +115,18 @@ export class AgentUsageService {
 
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
+  /** The default window getTokenUsageStats aggregates over, in minutes. */
+  get windowMinutes(): number {
+    return Math.round(this.windowMs / 60_000);
+  }
+
   async getTokenUsageStats(
-    opts: { windowMs?: number; now?: Date; topTicketsLimit?: number; boardId?: string } = {},
+    opts: { windowMs?: number; now?: Date; topTicketsLimit?: number } = {},
   ): Promise<TokenUsageStats> {
     const now = opts.now ?? new Date();
     const windowMs = opts.windowMs ?? this.windowMs;
     const since = new Date(now.getTime() - windowMs);
     const limit = opts.topTicketsLimit ?? DEFAULT_TOP_TICKETS_LIMIT;
-
-    // `boardId` scoping mirrors RespawnStormDetectorService.getWorkflowHealth's
-    // scopedColIds pattern (ticket → column → board), resolved once up front —
-    // null = unscoped (workspace-wide); [] = the board has zero tickets right
-    // now, so every query below is answered without touching Subagent/
-    // ActivityLog at all (an empty array in a SQL IN(...) is invalid/always-
-    // false depending on dialect, so this is special-cased rather than passed
-    // through).
-    const scopedTicketIds = await this._resolveScopedTicketIds(opts.boardId);
-    if (scopedTicketIds && scopedTicketIds.length === 0) {
-      return {
-        window_minutes: Math.round(windowMs / 60_000),
-        coverage: { runs_with_usage: 0, runs_total: 0 },
-        totals: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, total_cost_usd: 0 },
-        priced_runs: 0,
-        avg_cost_per_run_usd_priced_only: null,
-        top_tickets: [],
-        suppressed_attempts_in_window: 0,
-        estimated_saved_usd: null,
-      };
-    }
 
     const subRepo = this.dataSource.getRepository(Subagent);
 
@@ -160,7 +142,6 @@ export class AgentUsageService {
       .addSelect('COALESCE(SUM(s.total_cost_usd), 0)', 'total_cost_usd')
       .where('s.started_at >= :since', { since })
       .andWhere('s.started_at <= :now', { now });
-    if (scopedTicketIds) totalsQb.andWhere('s.ticket_id IN (:...tids)', { tids: scopedTicketIds });
     const totalsRow = await totalsQb.getRawOne<Record<string, string | number>>();
 
     const runsTotal = num(totalsRow?.runs_total);
@@ -186,7 +167,6 @@ export class AgentUsageService {
       .andWhere('s.ticket_id IS NOT NULL')
       .andWhere('s.input_tokens IS NOT NULL')
       .groupBy('s.ticket_id');
-    if (scopedTicketIds) topTicketsQb.andWhere('s.ticket_id IN (:...tids)', { tids: scopedTicketIds });
     const topTicketsRaw = await topTicketsQb.getRawMany<Record<string, string | number>>();
 
     const topTickets: TicketUsageBreakdown[] = topTicketsRaw
@@ -210,7 +190,6 @@ export class AgentUsageService {
       .where('a.action IN (:...actions)', { actions: [...SUPPRESSION_ACTIONS] })
       .andWhere('a.created_at >= :since', { since })
       .andWhere('a.created_at <= :now', { now });
-    if (scopedTicketIds) suppressedQb.andWhere('a.ticket_id IN (:...tids)', { tids: scopedTicketIds });
     const suppressedCount = await suppressedQb.getCount();
 
     return {
@@ -248,10 +227,10 @@ export class AgentUsageService {
    * 필요한 호출부는 대신 `getTokenUsageStats`의 윈도우 쿼리를 쓸 것(100%
    * live-table 기반이라 롤업이 관여하지 않으므로 day-정렬 제약도 없다).
    *
-   * workspace 스코프만 지원하고 board 스코프는 없다: 롤업 grain이
-   * (workspace_id, usage_date, agent_id)라 ticket/board 차원이 없다
-   * (8d5c6f5d에서의 planner 판단 — 그쪽은 위 `top_tickets`처럼
-   * live-window 전용으로 남는다). `from` 생략 = all-time(하한 없음).
+   * workspace 스코프만 지원한다: 롤업 grain이 (workspace_id, usage_date,
+   * agent_id)라 ticket 차원이 없다 (8d5c6f5d에서의 planner 판단 — 그쪽은
+   * 위 `top_tickets`처럼 live-window 전용으로 남는다). `from` 생략 =
+   * all-time(하한 없음).
    */
   async getLongTermUsageStats(opts: {
     workspaceId: string;
@@ -319,20 +298,5 @@ export class AgentUsageService {
       priced_runs: pricedRuns,
       avg_cost_per_run_usd_priced_only: pricedRuns > 0 ? totalCostUsd / pricedRuns : null,
     };
-  }
-
-  /** Resolve `boardId` → the concrete ticket_id allowlist Subagent/ActivityLog
-   *  rows must fall within to belong to that board (ticket → column → board,
-   *  the same resolution RespawnStormDetectorService.getWorkflowHealth uses
-   *  for its `scopedColIds`). Returns null when unscoped (workspace-wide). A
-   *  board with zero tickets resolves to `[]` — callers must treat that as
-   *  "matches nothing" rather than passing an empty array into a SQL
-   *  IN(...) clause. */
-  private async _resolveScopedTicketIds(boardId: string | undefined): Promise<string[] | null> {
-    if (!boardId) return null;
-    const colIds = (await this.dataSource.getRepository(BoardColumn).find({ where: { board_id: boardId } })).map((c) => c.id);
-    if (colIds.length === 0) return [];
-    const tickets = await this.dataSource.getRepository(Ticket).find({ where: { column_id: In(colIds) } });
-    return tickets.map((t) => t.id);
   }
 }

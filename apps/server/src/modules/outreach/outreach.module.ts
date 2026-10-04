@@ -4,12 +4,10 @@ import { OutreachChannel } from '../../entities/OutreachChannel';
 import { OutreachInboundItem } from '../../entities/OutreachInboundItem';
 import { OutreachOutboundPost } from '../../entities/OutreachOutboundPost';
 import { Credential } from '../../entities/Credential';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { Ticket } from '../../entities/Ticket';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
-import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
+import { AgentsModule } from '../agents/agents.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
 import { OutreachIngestService } from './outreach-ingest.service';
 import { OutreachPollingService } from './outreach-polling.service';
@@ -27,10 +25,10 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([OutreachChannel, OutreachInboundItem, OutreachOutboundPost, Credential, Board, BoardColumn, Ticket, ChatRoom, ChatRoomParticipant]),
-    // TicketRoleAssignmentService (board default_role_assignments backfill on
-    // auto-created tickets) is NOT @Global — must import explicitly.
-    WorkspaceRolesModule,
+    TypeOrmModule.forFeature([OutreachChannel, OutreachInboundItem, OutreachOutboundPost, Credential, Ticket, ChatRoom, ChatRoomParticipant]),
+    // TicketService (ticket creation for bug/feature reports) lives in
+    // AgentsModule. No cycle: AgentsModule does not import OutreachModule.
+    AgentsModule,
     // AgentDispatchClassifier's chat-room dispatch needs RoomMessagingService.
     ChatRoomsModule,
   ],
@@ -46,7 +44,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
     // is a strict superset of the old RuleBasedClassifier-only behavior.
     { provide: OUTREACH_CLASSIFIER, useClass: AgentDispatchClassifier },
     // OutreachPublisherService (deploy-triggered publish + approval gate) and
-    // OutreachResolveNotifierService (Done → reply) are both OnModuleInit
+    // OutreachResolveNotifierService (done → reply) are both OnModuleInit
     // activityEvents listeners (ticket d86d0c24 steps 5+6, 8) — registering
     // them as providers is what makes Nest instantiate + call onModuleInit.
     OutreachPublisherService,

@@ -115,7 +115,6 @@ export class WorkflowFunctionsController {
       const run = await this.functions.execute({
         functionId: id,
         workspaceId: body.workspace_id,
-        boardId: body.board_id,
         ticketId: body.ticket_id,
         inputs: body.inputs,
         idempotencyKey: body.idempotency_key,

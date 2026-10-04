@@ -32,11 +32,6 @@ export class QaScenario {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // Legacy compatibility column. Boot migration clears it; definitions are
-  // Global/Workspace-owned and Board context belongs to QaRun.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   @Column({ type: 'varchar' })
   name: string;
 
@@ -91,9 +86,10 @@ export class QaScenario {
   @Column({ type: 'varchar', default: '' })
   workspace_folder: string;
 
-  // Repo to run against. null = reuse the board/workspace environment_config
-  // repo. simple-json (serializes automatically); the create/update/projection
-  // paths still pass it through explicitly.
+  // Repo to run against (`project_id` or a raw `url`). null = no repo — the
+  // run folder is only created, nothing is cloned. simple-json (serializes
+  // automatically); the create/update/projection paths still pass it through
+  // explicitly.
   @Column({ type: 'simple-json', nullable: true, default: null })
   repo_ref: WorkspaceFolderRepoRef | null;
 
@@ -130,21 +126,16 @@ export class QaScenario {
   @Column({ type: 'int', default: 20 })
   max_runs: number;
 
-  // Per-scenario QaRun liveness policy override (ticket 40010b25). Same JSON
-  // shape as Board.liveness_policy (a LivenessPolicy descriptor). When set, the
-  // reaper uses this in preference to the scenario's board-level policy; null =
-  // inherit the board policy (and if that is also null, the built-in
-  // `zero_progress` default). Lets a single scenario opt into
-  // `heartbeat_deadline` without flipping the whole board.
+  // Per-scenario QaRun liveness policy (ticket 40010b25) — a LivenessPolicy
+  // descriptor JSON. null = the built-in `zero_progress` default. Lets a
+  // scenario opt into `heartbeat_deadline` (see qa-liveness-policy.ts).
   @Column({ type: 'text', nullable: true, default: null })
   liveness_policy: string | null;
 
-  // Per-scenario QA phase model override (multi-phase QA, ticket 90cc22f7). Same
-  // JSON shape as Board.qa_phases (a QaPhasesConfig). precedence: this scenario
-  // value wins over the board's qa_phases, which wins over null (legacy single-
-  // running). Lets one scenario define its own import→build→run stages with their
-  // own timeouts without touching the whole board. null = inherit the board model.
-  // See resolveQaPhases in modules/qa/qa-phases.ts (mirrors resolveLivenessPolicy).
+  // Per-scenario QA phase model (multi-phase QA, ticket 90cc22f7) — a
+  // QaPhasesConfig JSON. Lets a scenario define its own import→build→run stages
+  // with their own timeouts. null = legacy single `running` phase. See
+  // resolveQaPhases in modules/qa/qa-phases.ts (mirrors resolveLivenessPolicy).
   @Column({ type: 'text', nullable: true, default: null })
   qa_phases: string | null;
 
@@ -181,24 +172,24 @@ export interface QaScenarioStep {
  * When `enabled`, a QaRun that finalizes as `failed` or `error` files a fix
  * ticket carrying the failure evidence (failed steps + logs + artifact links).
  * Every field except `enabled` is optional and resolved with a fallback chain
- * in QaFailureTicketService:
- *   - board_id    → run.board_id → scenario.board_id
- *   - column_id/name → the board's first active non-terminal column
- *   - priority    → "high"
- *   - assignee_id → scenario.target_agent_id (also reporter/reviewer)
- *   - labels      → ['qa-failure','auto']
- *   - dedupe      → 'per_open_ticket' (scenario-level; a flaky scenario converges to one ticket)
+ * in QaFailureTicketService (docs/tickets.md → "QA / Security failure tickets"):
+ *   - status           → 'todo' ('backlog' parks it undispatched)
+ *   - project_id       → none (the ticket is not tied to a repository)
+ *   - priority         → "high"
+ *   - assignee_runtime → scenario.target_runtime → the project's default_assignee
+ *   - tags             → ['qa-failure','auto'] (stored `labels` still read)
+ *   - dedupe           → 'per_open_ticket' (scenario-level; a flaky scenario converges to one ticket)
  */
 export interface QaOnFailureTicketConfig {
   enabled: boolean;
-  board_id?: string;
-  /** Stable target column identifier. Preferred over column_name. */
-  column_id?: string;
-  /** Legacy/user-friendly target selector; column_id is rename-safe. */
-  column_name?: string;
+  /** Project the fix ticket belongs to (also its default assignee source). */
+  project_id?: string;
+  /** Status the ticket is filed in. Default 'todo' (queued for its assignee). */
+  status?: 'todo' | 'backlog';
   priority?: 'low' | 'medium' | 'high' | 'critical';
-  assignee_id?: string;
   assignee_runtime?: Record<string, any>;
+  tags?: string[];
+  /** @deprecated pre-board-removal name of `tags`; read as a fallback only. */
   labels?: string[];
   // Ticket-lifecycle dedupe (ticket 64b9cbaf). DEFAULT is 'per_open_ticket'.
   // 'per_open_ticket'— (DEFAULT) if an open qa-failure fix ticket for this
@@ -217,17 +208,17 @@ export interface QaOnFailureTicketConfig {
 
   // ── QA → fix → QA closed-loop (ticket 467dbc7a) ──────────────────────────
   // Opt-in: when true, a fix ticket auto-filed by this policy that later reaches
-  // a terminal column triggers QaRerunOnFixService to deterministically
+  // `done` triggers QaRerunOnFixService to deterministically
   // re-run the SAME scenario (server-side startQaRun — no agent prompt parsing).
   // Default false (historic behaviour: filing the ticket is the end of the
   // loop). The rerun is strictly scoped to tickets carrying this policy's
-  // markers (`qa-failure` + `auto` + `qa-scenario:<id>`), so a human accidentally
-  // labelling a ticket can't trigger a run.
+  // markers (`qa-failure` + `auto` + `qa-scenario:<id>` tags), so a human
+  // accidentally tagging a ticket can't trigger a run.
   rerun_on_fix?: boolean;
   // Convergence guard: the maximum number of automatic reruns before the loop
   // halts and posts a "human intervention needed" comment instead of re-running.
   // Counted via a `qa-rerun:<n>` generation label threaded fix-ticket → run →
-  // next fix-ticket. Default 3. <= 0 disables reruns (treated like opt-out).
+  // next fix-ticket (a ticket tag). Default 3. <= 0 disables reruns (treated like opt-out).
   max_rerun_attempts?: number;
   // 배포 타이밍 게이트 (docs/qa-rerun-on-fix.md 의 "Deployment timing" 절 참고).
   // QA 시나리오는 **돌고 있는** AWB 서버를 친다. 배포 호스트가 `origin/main` 을 detached
@@ -249,7 +240,7 @@ export interface QaOnFailureTicketConfig {
   // environment's live deployment actually INCLUDES the fix commit (the deployed
   // commit itself, or a known ancestor of it — deploymentIncludesCommit) and
   // fires the instant a matching `report_deployment` / self-report lands. The fix
-  // commit is read from a `fix-commit:<sha>` ticket label (preferred, exact
+  // commit is read from a `fix-commit:<sha>` ticket tag (preferred, exact
   // ancestry) or, absent that, gated on `deployed_at >= terminal_entered_at`
   // (deploy-freshness ordering). `rerun_delay_seconds` still applies as a
   // best-effort fallback cap so the rerun is never stranded forever if no deploy

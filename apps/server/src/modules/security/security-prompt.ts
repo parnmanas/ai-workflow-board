@@ -30,8 +30,9 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
     ? JSON.stringify(profile.scan_driver_config, null, 2)
     : '(none)';
 
+  // target_resource_id holds a project id (repository Resources became Projects).
   const target = profile.target_resource_id
-    ? `Resource \`${profile.target_resource_id}\``
+    ? `Project \`${profile.target_resource_id}\``
     : "AWB's own codebase (your worktree)";
 
   const checklistLines = checklist.length

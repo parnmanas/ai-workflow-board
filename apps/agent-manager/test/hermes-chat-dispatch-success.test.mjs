@@ -39,8 +39,8 @@ beforeEach(() => {
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
-    if (target.includes('/api/agent/ordinary-work-board-candidates')) {
-      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    if (target.includes('/api/agent/ordinary-work-candidates')) {
+      return new Response('{"projects":[],"tags":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (target.includes('/api/agent/chat-rooms/') && target.endsWith('/messages') && method === 'POST') {
       chatMessagePosts.push({ url: target, body: JSON.parse(init?.body || '{}') });
@@ -142,8 +142,8 @@ test('Hermes chat room dispatch that ends cleanly (stop=end_turn) but fails to P
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
-    if (target.includes('/api/agent/ordinary-work-board-candidates')) {
-      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    if (target.includes('/api/agent/ordinary-work-candidates')) {
+      return new Response('{"projects":[],"tags":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (target.includes('/api/agent/chat-rooms/') && target.endsWith('/messages') && method === 'POST') {
       const body = JSON.parse(init?.body || '{}');

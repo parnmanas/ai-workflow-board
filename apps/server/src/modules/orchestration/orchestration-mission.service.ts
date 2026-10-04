@@ -6,7 +6,7 @@
  * message or changes a step's status, and the runner never assembles a view
  * model. The one thing they share is `recordEvent`, which is deliberately here
  * because every timeline write must be paired with the same SSE push — putting
- * it anywhere else invites a state change that the board never learns about.
+ * it anywhere else invites a state change that the UI never learns about.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -1438,7 +1438,7 @@ export class OrchestrationMissionService {
 
   /**
    * Append a timeline row AND push the matching live update. Always use this —
-   * a bare `eventRepo.save` leaves the mission board stale until a refetch.
+   * a bare `eventRepo.save` leaves the mission screen stale until a refetch.
    */
   async recordEvent(
     mission: OrchestrationMission,

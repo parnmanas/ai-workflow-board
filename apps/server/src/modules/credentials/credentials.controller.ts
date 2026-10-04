@@ -16,9 +16,9 @@ import { normalizeCredentialFields } from '../../common/credential-fields';
 import { PROVIDER_FIELDS, REVEALABLE_OAUTH_FIELDS } from '../../common/credential-providers';
 import { catalogLoginCapable } from '../../common/cli-catalog';
 import { findOrFail } from '../../common/find-or-fail';
-import { assertCatalogBoardScope, catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
-import { Board } from '../../entities/Board';
+import { catalogScopeOf, normalizeCatalogScope, type CatalogScope } from '../../common/catalog-scope';
 import { Resource } from '../../entities/Resource';
+import { Project } from '../../entities/Project';
 import { AgentSessionCliSetting } from '../../entities/AgentSessionCliSetting';
 import { OutreachChannel } from '../../entities/OutreachChannel';
 import { AdminGuard } from '../../common/guards/admin.guard';
@@ -69,6 +69,9 @@ function isMaskedValue(value: string): boolean {
 // P4c-4: Agent 항목 제거 (Agent 테이블 없음).
 const CREDENTIAL_DEPENDENTS: Array<{ entity: Function; label: string }> = [
   { entity: Resource, label: 'resource(s)' },
+  // Repositories used to be Resources and carried their clone credential;
+  // they are Projects now and keep the same pointer.
+  { entity: Project, label: 'project(s)' },
   { entity: AgentSessionCliSetting, label: 'CLI session setting(s)' },
   { entity: OutreachChannel, label: 'outreach channel(s)' },
 ];
@@ -110,7 +113,6 @@ function serializeCred(c: Credential) {
   return {
     id: c.id,
     workspace_id: c.workspace_id,
-    board_id: c.board_id,
     scope: catalogScopeOf(c),
     name: c.name,
     description: c.description,
@@ -175,12 +177,12 @@ export class CredentialsController {
     // workspace view returns its own credentials PLUS inherited globals.
     let where: any[];
     if (scope === 'global') {
-      where = [{ workspace_id: IsNull(), board_id: IsNull() }];
+      where = [{ workspace_id: IsNull() }];
     } else {
       if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
       where = [
-        { workspace_id: workspaceId, board_id: IsNull() },
-        { workspace_id: IsNull(), board_id: IsNull() },
+        { workspace_id: workspaceId },
+        { workspace_id: IsNull() },
       ];
     }
     if (provider) where = where.map((w) => ({ ...w, provider }));
@@ -389,10 +391,6 @@ export class CredentialsController {
     let catalogScope;
     try {
       catalogScope = normalizeCatalogScope(body);
-      await assertCatalogBoardScope(
-        async (boardId, workspaceId) => !!await this.dataSource.getRepository(Board).findOne({ where: { id: boardId, workspace_id: workspaceId } }),
-        catalogScope,
-      );
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid scope' });
     }
@@ -440,9 +438,6 @@ export class CredentialsController {
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const cred = await findOrFail(this.credRepo, { where: { id } }, 'Credential not found');
-    if (body.board_id) {
-      return res.status(400).json({ error: 'Board-scoped catalog items are no longer supported; create the item in its Workspace instead' });
-    }
     if (body.scope !== undefined && body.scope !== 'global' && body.scope !== 'workspace') {
       return res.status(400).json({ error: `Unknown scope '${body.scope}'` });
     }
@@ -497,7 +492,6 @@ export class CredentialsController {
 
     if (scopeChanged) {
       cred.workspace_id = targetScope === 'global' ? null : actingWorkspaceId;
-      cred.board_id = null;
     }
 
     const saved = await this.credRepo.save(cred);

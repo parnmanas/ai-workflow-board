@@ -5,16 +5,12 @@ import { McpController } from './mcp.controller';
 import { AgentsModule } from '../agents/agents.module';
 import { McpServicesModule } from './mcp-services.module';
 import { ChatRoomsModule } from '../chat-rooms/chat-rooms.module';
-import { WorkspaceRolesModule } from '../workspace-roles/workspace-roles.module';
 import { ActionsModule } from '../actions/actions.module';
 import { QaScenarioModule } from '../qa/qa-scenario.module';
 import { BuildsModule } from '../builds/build-artifact.module';
 import { DeploymentsModule } from '../deployments/deployment.module';
 import { SecurityProfileModule } from '../security/security-profile.module';
-import { BenchmarksModule } from '../benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
-import { FeaturesModule } from '../features/features.module';
-import { HandoffModule } from '../handoff/handoff.module';
 import { WorkflowFunctionsModule } from '../workflow-functions/workflow-functions.module';
 import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 import { OutreachModule } from '../outreach/outreach.module';
@@ -30,7 +26,6 @@ import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
     AgentsModule,
     McpServicesModule,
     ChatRoomsModule,
-    WorkspaceRolesModule,
     ActionsModule,
     // Provides QaService + QaRunService for the qa-tools MCP tools.
     QaScenarioModule,
@@ -40,14 +35,8 @@ import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
     DeploymentsModule,
     // Provides SecurityProfileService + SecurityRunService for the security-tools MCP tools.
     SecurityProfileModule,
-    // Provides BenchmarkService for the benchmark MCP tools (ticket 684c012b).
-    BenchmarksModule,
     // Provides WorkspaceScheduleService for the workspace-schedule MCP tools (ticket 769eb260).
     WorkspaceScheduleModule,
-    // Provides FeaturesService for the feature-tools MCP tools (ticket aae7644c).
-    FeaturesModule,
-    // Provides HandoffService for the handoff-tools MCP tools (ticket ac21a745).
-    HandoffModule,
     WorkflowFunctionsModule,
     ArtifactRefsModule,
     // Provides ClassificationBridgeService for the outreach-tools MCP tool

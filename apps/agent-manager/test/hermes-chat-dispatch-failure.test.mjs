@@ -19,8 +19,8 @@ beforeEach(() => {
   globalThis.fetch = async (url, init) => {
     const target = String(url);
     const method = init?.method || 'GET';
-    if (target.includes('/api/agent/ordinary-work-board-candidates')) {
-      return Response.json([]);
+    if (target.includes('/api/agent/ordinary-work-candidates')) {
+      return Response.json({ projects: [], tags: [] });
     }
     if (target.includes('/api/agent/chat-rooms/') && target.endsWith('/messages') && method === 'POST') {
       chatMessagePosts.push({ url: target, body: JSON.parse(init?.body || '{}') });

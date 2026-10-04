@@ -28,7 +28,6 @@ function scheduleToJson(s: QaSchedule) {
   return {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     scope: s.scope,
     scenario_ids: s.scenario_ids ?? [],
@@ -51,7 +50,6 @@ function batchToJson(b: QaRunBatch) {
   return {
     id: b.id,
     workspace_id: b.workspace_id,
-    board_id: b.board_id,
     scenario_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,

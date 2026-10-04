@@ -15,7 +15,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * commit the reused exe corresponded to.
  *
  * Conventions match the rest of the entity layer (QaRun/QaScenario):
- *   - uuid PK, varchar workspace_id / nullable board_id, @Create/@UpdateDateColumn.
+ *   - uuid PK, varchar workspace_id, @Create/@UpdateDateColumn.
  *   - `status` is a plain varchar + a TS union alias (NOT a TypeORM enum column),
  *     so sqlite (dev) and Postgres (prod) stay schema-sync-safe under
  *     `synchronize: true` (db.ts D-01).
@@ -23,7 +23,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * Lookup identity is `(workspace_id, repo_key, target, commit_sha[, host])`.
  * `repo_key` is a normalized repo identity (see buildRepoKey in
  * common/build-artifact-options.ts) so artifacts are SHARED across scenarios /
- * boards that point at the same repo — the same-machine reuse ticket item (#5).
+ * profiles that point at the same repo — the same-machine reuse ticket item (#5).
  * `host` scopes reuse to a machine: a Windows `.exe` built on host A is useless
  * on host B, so a non-empty host narrows the match.
  */
@@ -39,10 +39,6 @@ export class BuildArtifact {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // null = workspace-scoped (any board can reuse it); <uuid> = pinned to a board.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   // Normalized repo identity — the SHARE key. Derived at write time from
   // repo_resource_id || repo_url via buildRepoKey(). Two scenarios pointing at
   // the same repo produce the same repo_key, so a build one made is visible to
@@ -52,6 +48,8 @@ export class BuildArtifact {
 
   // Provenance — either may be set (repo_key is the lookup key, these record how
   // it was derived so a human/agent can trace the source back).
+  // `repo_resource_id` holds a PROJECT id: repository Resources became Projects
+  // with the same id, and the column kept its name to avoid a rename migration.
   @Column({ type: 'varchar', default: '' })
   repo_resource_id: string;
 

@@ -1,4 +1,5 @@
 import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
+import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
 /**
  * Database compatibility module
  *
@@ -26,10 +27,6 @@ import { OntologyEdge } from './entities/OntologyEdge';
 import { OntologyReverseEdgeIndex } from './entities/OntologyReverseEdgeIndex';
 import { OntologyEnrichmentQueue } from './entities/OntologyEnrichmentQueue';
 import { OntologyGraph } from './entities/OntologyGraph';
-import {
-  DISPATCH_INTENTS_TABLE,
-  DEDUP_OPEN_DISPATCH_INTENTS_SQL,
-} from './database/dispatch-intent-dedup';
 
 const entities = Object.values(entitiesBarrel);
 
@@ -214,191 +211,6 @@ export function serializeSqljsTransactions(dataSource: DataSource): void {
   };
 }
 
-// PRESET — not enforced. New boards seed with these starter columns so the
-// first-run UX isn't an empty page; the user can rename, reorder, delete,
-// or add more freely. Critically distinct from the old "hardcoded routing
-// fallback" that auto-mapped column names to assignee/reporter/reviewer
-// roles — that remains removed (TriggerLoopService keys off routing_config
-// only, no name-based magic). New columns are created with empty
-// routing_config so they emit zero triggers until a workspace owner opts
-// in via Board Settings.
-//
-// Set this to [] if a deployment wants every board to start blank.
-//
-// `is_terminal: true` on Done marks it as a workflow end-state — agents
-// stop polling tickets parked there and the column toggles available in
-// Board Settings reflect it. Other presets stay non-terminal so tickets
-// can flow through them in either direction.
-export const DEFAULT_COLUMNS: Array<{
-  name: string;
-  position: number;
-  color: string;
-  is_terminal?: boolean;
-  /**
-   * v0.41 — workflow-kind classification. Seeded into BoardColumn.kind so
-   * runtime never has to match column names. See ColumnKind in the entity.
-   */
-  kind: 'intake' | 'active' | 'review' | 'merging' | 'terminal';
-  unassigned_policy: 'halt' | 'skip' | 'skip_if_ticket_staffed';
-  process_subtasks?: boolean;
-}> = [
-  { name: 'Backlog',     position: 0, color: '#94a3b8',                       kind: 'intake',   unassigned_policy: 'halt' },
-  { name: 'To Do',       position: 1, color: '#60a5fa',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed' },
-  // 'Plan' inserts a deliberate planning beat between intake and execution
-  // so the planner role has a column to live in. New default routing pairs
-  // each planning column with the planner role; teams that prefer the v1
-  // To Do → In Progress flow can rename or delete it.
-  { name: 'Plan',        position: 2, color: '#22d3ee',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed' },
-  { name: 'In Progress', position: 3, color: '#fbbf24',                       kind: 'active',   unassigned_policy: 'skip_if_ticket_staffed', process_subtasks: true },
-  { name: 'Review',      position: 4, color: '#a78bfa',                       kind: 'review',   unassigned_policy: 'halt' },
-  { name: 'Merging',     position: 5, color: '#f472b6',                       kind: 'merging',  unassigned_policy: 'halt' },
-  { name: 'Done',        position: 6, color: '#34d399', is_terminal: true,    kind: 'terminal', unassigned_policy: 'halt' },
-];
-
-/**
- * Default routing_config seeded onto every newly-created board. Keys are the
- * lowercased column names from DEFAULT_COLUMNS; values are arrays of role
- * slugs from BUILTIN_ROLES. Tickets entering one of these columns trigger
- * the listed roles (TriggerLoopService reads this verbatim).
- *
- * The "natural progression" — plan → execute → review — is wired up here so
- * the workflow is functional out of the box. Backlog/To Do/Done are left
- * unrouted: tickets sit there waiting for human intent (move forward) and
- * shouldn't auto-trigger anyone.
- *
- * Stringified at write time (Board.routing_config is a varchar JSON blob).
- */
-export const DEFAULT_BOARD_ROUTING: Record<string, string[]> = {
-  'plan':        ['planner'],
-  'in progress': ['assignee'],
-  'review':      ['reviewer'],
-  'merging':     ['assignee'],
-};
-
-/**
- * v0.34 — built-in workspace role preset, seeded into every newly created
- * workspace and into existing workspaces by the
- * `1760000000008-SeedWorkspaceRoles` migration. The Planner role was added
- * later by `1760000000009-AddPlannerRoleAndPrompts` (and is auto-inserted
- * into existing workspaces by that migration).
- *
- * Same starter-pack semantics as DEFAULT_COLUMNS: rows show up so the
- * first-run UX has working slugs that match the `routing_config` keys
- * boards historically use; they're then fully editable (slug, name, prompt)
- * and deletable per-workspace once admins adjust them. Plain rows in the
- * same `workspace_roles` table — `is_builtin` is purely a UI badge, not a
- * special-case in any code path.
- *
- * `role_prompt` is the v0.34 default-prompt seed. It's prepended to the
- * agent's own role_prompt when the agent is triggered as that role, so the
- * text below describes the role's responsibility from the agent's POV.
- * Existing workspaces keep their custom prompts untouched — the
- * 1760000000009 migration only fills rows where role_prompt is currently
- * the empty string.
- */
-export const BUILTIN_ROLES: Array<{
-  slug: string;
-  name: string;
-  position: number;
-  description: string;
-  role_prompt: string;
-}> = [
-  {
-    slug: 'planner',
-    name: 'Planner',
-    position: 0,
-    description: 'Breaks the ticket down into a concrete plan before implementation begins.',
-    role_prompt:
-      "You are acting as the PLANNER on this ticket.\n" +
-      "\n" +
-      "Goal: turn the ticket's intent into a concrete, reviewable plan before " +
-      "anyone starts implementing.\n" +
-      "\n" +
-      "Responsibilities:\n" +
-      "- Read the ticket, its description, and any prior comments end-to-end before posting.\n" +
-      "- Identify ambiguities, missing context, or hidden constraints — investigate the " +
-      "codebase, git history, and ticket comments yourself first. Only @mention the reporter " +
-      "(or other relevant role) when a genuine question remains that code and history can't " +
-      "answer.\n" +
-      "- Produce a numbered task breakdown that an assignee can execute without re-deriving " +
-      "the design. Each step should name files/components, expected behavior, and acceptance " +
-      "criteria.\n" +
-      "- Flag risks, edge cases, and rollback considerations explicitly. If subtasks are " +
-      "warranted, create them.\n" +
-      "- When the plan is complete and unblocked, move the ticket to In Progress so the " +
-      "assignee picks it up.\n" +
-      "\n" +
-      "Do NOT implement the work yourself in this role — that's the assignee's job.",
-  },
-  {
-    slug: 'assignee',
-    name: 'Assignee',
-    position: 1,
-    description: 'Owns the work — implements the planned change and drives the ticket forward.',
-    role_prompt:
-      "You are acting as the ASSIGNEE on this ticket.\n" +
-      "\n" +
-      "Goal: deliver the planned change to a state where the reviewer can sign off.\n" +
-      "\n" +
-      "Responsibilities:\n" +
-      "- Read the latest plan and any open questions before starting; if the plan is missing " +
-      "or stale, investigate the codebase, git history, and ticket comments yourself first — " +
-      "only comment and @mention the planner when a genuine design decision remains that you " +
-      "can't resolve on your own.\n" +
-      "- Implement the change in small, focused commits with clear messages. Keep behavior " +
-      "consistent with the plan; surface any plan-vs-reality conflicts as comments rather " +
-      "than silent deviations.\n" +
-      "- Self-test before handing off: run the relevant tests, exercise the user-visible " +
-      "behavior, and report what you actually verified (not just what you wrote).\n" +
-      "- When the work is ready for review, post a short summary comment (what changed, how " +
-      "it was tested, any caveats) and move the ticket to Review.\n" +
-      "- If the reviewer kicks it back, address every point in the same ticket — don't open " +
-      "a new one for the same work.",
-  },
-  {
-    slug: 'reporter',
-    name: 'Reporter',
-    position: 2,
-    description: 'Filed the ticket — clarifies intent and acceptance criteria for the rest of the workflow.',
-    role_prompt:
-      "You are acting as the REPORTER on this ticket — the person (or agent) who filed it.\n" +
-      "\n" +
-      "Goal: keep the ticket's intent and acceptance criteria unambiguous as it moves through " +
-      "the workflow.\n" +
-      "\n" +
-      "Responsibilities:\n" +
-      "- Answer planner / assignee / reviewer questions promptly and concretely. If you " +
-      "don't know an answer, say so and point to who would.\n" +
-      "- When acceptance criteria are vague or implicit, edit the ticket description to make " +
-      "them explicit. Prefer 'change the description' over 'leave it in a comment thread.'\n" +
-      "- If the proposed plan or implementation drifts from the original intent, push back " +
-      "early — don't wait for review.\n" +
-      "- Sign off on the final outcome only when it actually solves the problem you filed " +
-      "this ticket to solve.",
-  },
-  {
-    slug: 'reviewer',
-    name: 'Reviewer',
-    position: 3,
-    description: "Reviews the assignee's work for production-readiness before it advances.",
-    role_prompt:
-      "You are acting as the REVIEWER on this ticket.\n" +
-      "\n" +
-      "Goal: gate the change on production-readiness — correctness, safety, and fit with the " +
-      "rest of the system.\n" +
-      "\n" +
-      "Responsibilities:\n" +
-      "- Re-read the ticket goal and the plan before looking at the diff. Review against " +
-      "intent, not just code style.\n" +
-      "- Walk the actual diff. Check edge cases, error paths, observability, and breaking " +
-      "behavior for callers and downstream systems.\n" +
-      "- Verify the assignee's self-test claims where it's cheap to do so. If the test " +
-      "evidence is thin, say what additional check you want.\n" +
-      "- Leave actionable feedback. If everything passes, move the ticket to Merging (or " +
-      "Done if there's no merge step). If issues remain, move it back to In Progress with a " +
-      "clear list of what blocks approval — never silently drop a review.",
-  },
-];
 
 /**
  * Resolve the dev sql.js database directory + on-disk file location.
@@ -998,79 +810,6 @@ export async function ensureOntologySqljsDbHealthy(): Promise<void> {
   await checkAndRecoverSqljsFile(location, 'SQLJS_ONTOLOGY_DB_PATH');
 }
 
-/**
- * Rollout-safe pre-index repair for the dev sql.js database (ticket 3c3b17a3).
- *
- * Mirror of the Postgres `preSyncPostgres()` step for the sqljs backend: BEFORE
- * TypeORM `synchronize` builds the partial UNIQUE index on
- * `dispatch_intents (ticket_id, role) WHERE status != 'resolved'`, deterministically
- * resolve any pre-existing DUPLICATE open rows (a pre-fix non-atomic
- * find-then-insert could have produced them). Without this, `CREATE UNIQUE INDEX`
- * fails during `initialize()` and aborts boot on an upgraded DB that already holds
- * two open rows for the same (ticket, role).
- *
- * Runs on the persisted file via a raw sql.js load (same package/approach as
- * `ensureSqljsDbHealthy`), then writes the deduped buffer back — this happens
- * before the main DataSource reads the file, so no race with TypeORM. Guards:
- *   - sqlite backend only (postgres handled in preSyncPostgres; mysql N/A)
- *   - missing/empty file → nothing to repair (fresh DB created on initialize)
- *   - table absent → nothing to repair (fresh schema)
- *   - zero rows modified → file left untouched (no needless rewrite)
- * Idempotent; safe on every boot.
- */
-export async function preSyncSqljsOpenIntents(): Promise<void> {
-  const dbType = process.env.DB_TYPE || 'sqlite';
-  if (dbType !== 'sqlite') return;
-
-  const { location } = resolveSqljsLocation();
-  if (!fs.existsSync(location)) return;
-  if (fs.statSync(location).size === 0) return;
-
-  let SQL: any;
-  try {
-    const initSqlJs = require('sql.js');
-    SQL = await initSqlJs();
-  } catch {
-    // sql.js unavailable — let TypeORM surface any real problem on initialize().
-    return;
-  }
-
-  let db: any;
-  try {
-    const buf = fs.readFileSync(location);
-    db = new SQL.Database(buf);
-  } catch (e) {
-    // A corrupt file is ensureSqljsDbHealthy's job to report — don't mask it here.
-    console.warn(`[DB] dispatch_intents pre-sync skipped (open failed): ${(e as Error)?.message || e}`);
-    if (db) db.close();
-    return;
-  }
-
-  try {
-    const tbl = db.exec(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='${DISPATCH_INTENTS_TABLE}'`,
-    );
-    const tableExists = Array.isArray(tbl) && tbl.length > 0 && (tbl[0].values?.length ?? 0) > 0;
-    if (!tableExists) return; // fresh schema — nothing to dedup
-
-    db.run(DEDUP_OPEN_DISPATCH_INTENTS_SQL);
-    const modified = typeof db.getRowsModified === 'function' ? db.getRowsModified() : 0;
-    if (modified > 0) {
-      const out = Buffer.from(db.export());
-      fs.writeFileSync(location, out);
-      console.log(
-        `[DB] dispatch_intents pre-sync: resolved ${modified} duplicate open intent(s) before unique-index sync`,
-      );
-    }
-  } catch (e) {
-    // Non-fatal — if the repair itself errored, let initialize()/synchronize
-    // surface the canonical failure rather than crashing here.
-    console.warn(`[DB] dispatch_intents pre-sync skipped (repair failed): ${(e as Error)?.message || e}`);
-  } finally {
-    db.close();
-  }
-}
-
 export async function initDb() {
   // Catch a corrupt dev DB before TypeORM hangs on it (ticket e9847153).
   await ensureSqljsDbHealthy();
@@ -1078,10 +817,8 @@ export async function initDb() {
   // 일으킬 수 있어 아래 initOntologyDb() → AppOntologyDataSource.initialize()
   // 이전에 동일 가드를 돌린다(ticket b646ed54).
   await ensureOntologySqljsDbHealthy();
-  // Collapse any pre-existing duplicate open dispatch_intents before synchronize
-  // creates the partial unique index (ticket 3c3b17a3).
-  await preSyncSqljsOpenIntents();
   await preSyncAgentCleanup(buildDataSourceOptions());
+  await preSyncBoardRemoval(buildDataSourceOptions());
   await AppDataSource.initialize();
   // Ticket 6ca4894a — Postgres/MySQL에서는 no-op(그쪽은 AppOntologyDataSource가 null).
   await initOntologyDb();

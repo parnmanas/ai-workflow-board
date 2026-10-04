@@ -1,7 +1,7 @@
 /**
  * Ticket normalization helpers — pure functions that take a TypeORM `Ticket`
  * entity (optionally with relations loaded) and produce a plain-JSON object
- * with `labels`/`channel_ids` decoded, children/comments sorted, and grandchildren
+ * with `tags`/`channel_ids` decoded, children/comments sorted, and grandchildren
  * truncated.
  *
  * Used by:
@@ -11,25 +11,17 @@
 
 import type { DataSource, EntityManager } from 'typeorm';
 import { In } from 'typeorm';
-import { Board } from '../../../entities/Board';
-import { BoardColumn } from '../../../entities/BoardColumn';
 import { Comment } from '../../../entities/Comment';
 import { Ticket } from '../../../entities/Ticket';
-import { TicketRoleAssignment } from '../../../entities/TicketRoleAssignment';
+import { Project } from '../../../entities/Project';
 import { Resource } from '../../../entities/Resource';
+import { ProjectHostFolder } from '../../../entities/ProjectHostFolder';
+import { RuntimeHost } from '../../../entities/RuntimeHost';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
 import { TicketDuplicateDecision } from '../../../entities/TicketDuplicateDecision';
-import { TicketCompletionVerification } from '../../../entities/TicketCompletionVerification';
-import { Workspace } from '../../../entities/Workspace';
-import { pickBaseRepoResourceId } from '../../../common/base-repo-binding';
-import { mergeEnvironmentConfig } from '../../../common/environment-config';
-import { parseHandoffSpec } from '../../../common/handoff-spec-config';
-import { User } from '../../../entities/User';
-import { WorkspaceRole } from '../../../entities/WorkspaceRole';
 import { safeJsonParse, withArtifactRef } from './helpers';
 import { projectTicketAttachment } from './ticket-helpers';
-import { resolveAgentDisplayNamesByIds } from '../../../utils/agent-name';
-import { holderAssigneeId } from '../../../common/runtime-spec';
+import { parseRuntimeSpec } from '../../../common/runtime-spec';
 import { listPrerequisitesFull } from '../../tickets/ticket-prerequisites.service';
 import { isDuplicateDecisionPending } from '../../tickets/ticket-duplicate-pending';
 
@@ -48,14 +40,12 @@ export type CommentAttachment = {
 export function parseTicket(ticket: Ticket) {
   return withArtifactRef('ticket', {
     ...ticket,
-    labels: safeJsonParse(ticket.labels),
+    tags: safeJsonParse(ticket.tags),
     channel_ids: safeJsonParse(ticket.channel_ids),
     // On-ticket-done hook binding (ticket 16a6339c) — decode the JSON-string
-    // column to an array, same treatment as labels / channel_ids.
+    // column to an array, same treatment as tags / channel_ids.
     on_done_action_ids: safeJsonParse(ticket.on_done_action_ids),
-    // Cross-board handoff relay (ticket ac21a745) — decode the JSON-string spec
-    // to an object so the detail panel's handoff editor binds against it.
-    handoff_spec: parseHandoffSpec(ticket.handoff_spec),
+    assignee: parseRuntimeSpec(ticket.assignee),
   }, ticket.title);
 }
 
@@ -237,59 +227,27 @@ export async function loadTicketFull(
       : ['children', 'children.children'],
   });
   if (!ticket) return null;
-  // 컬럼은 id 로만 조회한다. `workspace_id` 를 조회 조건에 넣으면 레거시 행
-  // (BoardColumn.workspace_id 는 nullable·default '')이 매칭에 실패해 아래
-  // fail-closed 가드를 오탐으로 때린다 — detail GET 이 500 이 되고, 클라이언트는
-  // 그 에러를 삼킨 뒤 보드 카드 projection(`comments: []`)으로 폴백해 Comments
-  // 탭이 통째로 비어 보였다. 소속 검증은 조회 필터가 아니라 아래에서 명시적으로 한다.
-  const currentColumn = ticket.column_id
-    ? await scope.getRepository(BoardColumn).findOne({
-        where: { id: ticket.column_id },
-        relations: ['board'],
-      })
-    : null;
-  // 티켓의 실효 workspace는 현재 컬럼이 속한 보드가 권위 기준이다. TXIV처럼
-  // 보드는 현재 workspace로 옮겨졌지만 Ticket/BoardColumn의 비정규화 workspace_id가
-  // 예전 값을 유지하는 행이 존재한다. 컬럼 자신의 stale 값을 우선하면 정상 보드
-  // 소속 티켓을 cross-workspace로 오판하고, 보드 environment repo 상속도 막힌다.
-  const effectiveWorkspaceId = currentColumn?.board?.workspace_id || ticket.workspace_id || '';
-  // 루트 티켓의 워크플로 상태는 컬럼이 결정한다. 기준 컬럼을 fail-closed 로
-  // 해석한다 — 빈 값이나 추측한 이름을 반환하면 다른 workspace 의 컬럼을
-  // 노출하거나 호출자가 레거시 저장 값인 Ticket.status 로 폴백하도록 유도할 수 있다.
-  // Ticket/BoardColumn의 workspace_id는 레거시 비정규화 값일 수 있으므로 소속
-  // 판정에 쓰지 않는다. 컬럼 또는 그 부모 보드 자체가 없을 때만 막는다.
-  if (!ticket.parent_id && (
-    !currentColumn || !currentColumn.board
-  )) {
-    throw new Error(
-      `Ticket ${ticket.id} has no current column in workspace ${effectiveWorkspaceId}`,
-    );
-  }
+  const effectiveWorkspaceId = ticket.workspace_id || '';
   const out: any = {
     ...ticket,
-    current_column_id: currentColumn?.id || '',
-    current_column_name: currentColumn?.name || '',
-    current_column_kind: currentColumn?.kind || '',
-    labels: safeJsonParse(ticket.labels),
+    tags: safeJsonParse(ticket.tags),
     channel_ids: safeJsonParse(ticket.channel_ids),
-    // On-ticket-done hook binding (ticket 16a6339c) — decode to an array, same
-    // treatment as labels / channel_ids, so the REST GET the detail panel uses
-    // returns string[] (the picker binds against it). parseTicket already does
-    // this; loadTicketFull must match or the client sees a raw JSON string.
+    // On-ticket-done hook binding (ticket 16a6339c) — decode to an array so the
+    // REST GET the detail panel uses returns string[] (the picker binds to it).
     on_done_action_ids: safeJsonParse(ticket.on_done_action_ids),
-    // Cross-board handoff relay (ticket ac21a745) — decode on the root so the
-    // detail panel's handoff editor binds against a spec object, not a raw string.
-    handoff_spec: parseHandoffSpec(ticket.handoff_spec),
+    assignee: parseRuntimeSpec(ticket.assignee),
     children: (ticket.children || []).sort((a, b) => a.position - b.position).map(child => ({
       ...child,
-      labels: safeJsonParse(child.labels),
+      tags: safeJsonParse(child.tags),
       channel_ids: safeJsonParse(child.channel_ids),
       on_done_action_ids: safeJsonParse(child.on_done_action_ids),
+      assignee: null,
       children: (child.children || []).sort((a, b) => a.position - b.position).map(gc => ({
         ...gc,
-        labels: safeJsonParse(gc.labels),
+        tags: safeJsonParse(gc.tags),
         channel_ids: safeJsonParse(gc.channel_ids),
         on_done_action_ids: safeJsonParse(gc.on_done_action_ids),
+        assignee: null,
         children: [],
         comments: parseComments(gc.comments),
         attachments: [] as any[],
@@ -301,14 +259,6 @@ export async function loadTicketFull(
     attachments: [] as any[],
   };
 
-  const completionVerifications = await scope.getRepository(TicketCompletionVerification).find({
-    where: { ticket_id: ticket.id },
-    order: { created_at: 'ASC' },
-  });
-  out.completion_verifications = completionVerifications.map(row => ({
-    ...row,
-    evidence: safeJsonParse(row.evidence),
-  }));
 
   // Ambiguous chat-duplicate choices are durable decision rows, not merely a
   // create-response hint. Project the still-pending candidates on every full
@@ -426,229 +376,65 @@ export async function loadTicketFull(
       gc.attachments = sortAttachments(attachmentsByTicket.get(gc.id) || []);
     }
   }
-  // v0.34: hydrate `role_assignments` for root + every descendant in one
-  // batched lookup. Each entry surfaces the role slug / id and the resolved
-  // holder ({ type, id, name }) — so an MCP caller can verify planner /
-  // assignee / any custom role with a single `get_ticket`. Replicates
-  // `TicketRoleAssignmentService.resolveForTicket` inline so this works in
-  // the standalone MCP entry point (no DI / no service wiring).
-  await hydrateRoleAssignments(scope, out);
+  // Assignee display — `<Host>/<label>` (docs/runbooks/agent-display-name.md).
+  out.assignee_name = '';
+  if (out.assignee) {
+    const host = await scope.getRepository(RuntimeHost).findOne({ where: { id: out.assignee.manager_agent_id } }).catch(() => null);
+    out.assignee_name = host?.name ? `${host.name}/${out.assignee.label}` : out.assignee.label;
+  }
 
-  // Resolve the ticket's base repository (if any) into a small embedded
-  // snapshot so the client + agent get url / name / default_branch in one
-  // round-trip. Failing the lookup is non-fatal: leaves base_repo: null and
-  // the picker UI / agent prompt fall back to the bare id.
-  // Workspace-scoped lookup: even though writes are guarded, the read also
-  // filters by ticket.workspace_id so a stale/cross-workspace id (e.g. from
-  // a ticket cloned across workspaces) never leaks the foreign url here.
-  if (ticket.base_repo_resource_id) {
-    try {
-      const candidate = effectiveWorkspaceId
-        ? await scope.getRepository(Resource).findOne({ where: { id: ticket.base_repo_resource_id } })
-        : null;
-      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === effectiveWorkspaceId)
-        ? candidate
-        : null;
-      out.base_repo = repo
+  // Project the ticket is about — summary plus every host's main clone
+  // folder, so the panel and the agent see where it lives without a second
+  // round-trip. Workspace-scoped: a stale cross-workspace id resolves to null.
+  // `base_repo` keeps the pre-project shape agent-managers read on REST.
+  out.project = null;
+  out.base_repo = null;
+  if (ticket.project_id) {
+    const project = await scope.getRepository(Project).findOne({ where: { id: ticket.project_id } }).catch(() => null);
+    if (project && project.workspace_id === effectiveWorkspaceId) {
+      const folders: ProjectHostFolder[] = await scope.getRepository(ProjectHostFolder).find({ where: { project_id: project.id } }).catch(() => [] as ProjectHostFolder[]);
+      const assigneeHost = out.assignee?.manager_agent_id || '';
+      out.project = {
+        id: project.id,
+        name: project.name,
+        repo_url: project.repo_url,
+        default_branch: project.default_branch,
+        use_pr: !!project.use_pr,
+        host_folders: folders.map((f) => ({ host_id: f.host_id, path: f.path })),
+      };
+      out.base_repo = project.repo_url
         ? {
-            id: repo.id,
-            name: repo.name,
-            url: repo.url,
-            default_branch: repo.default_branch || '',
-            type: repo.type,
+            id: project.id,
+            name: project.name,
+            url: project.repo_url,
+            default_branch: project.default_branch || '',
+            main_clone_dir: folders.find((f) => f.host_id === assigneeHost)?.path || null,
           }
         : null;
-    } catch {
-      out.base_repo = null;
-    }
-  } else {
-    // ticket 112ea3c5: base_repo_resource_id가 비어 있다는 건 "repo 없음"이
-    // 아니라 "board environment repository를 상속한다"는 뜻이다 — dispatch
-    // 경로(trigger-loop.service.ts)가 agent_trigger payload에 이미 적용하는
-    // 것과 동일한 board-env 백필이다(ticket 8c3befa8). 모든 티켓 READER(MCP
-    // get_ticket, REST 상세, agent-api → agent-manager의 fetchTicketContext)가
-    // 동일한 repo로 resolve해야 한다 — 그렇지 않으면 세션 중 티켓을 재조회한
-    // caller가 base_repo:null을 보게 되고, 이것이 assignee가 무관한 resource의
-    // worktree로 빠졌던 사고의 정확한 원인이다.
-    out.base_repo = null;
-    try {
-      const col = ticket.column_id
-        ? await scope.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } })
-        : null;
-      const [board, workspace] = await Promise.all([
-        col?.board_id
-          ? scope.getRepository(Board).findOne({ where: { id: col.board_id } })
-          : Promise.resolve(null),
-        effectiveWorkspaceId
-          ? scope.getRepository(Workspace).findOne({ where: { id: effectiveWorkspaceId } })
-          : Promise.resolve(null),
-      ]);
-      const merged = mergeEnvironmentConfig(workspace?.environment_config, board?.environment_config);
-      const picked = pickBaseRepoResourceId('', merged?.repositories || []);
-      const candidate = picked.resourceId
-        ? await scope.getRepository(Resource).findOne({ where: { id: picked.resourceId } })
-        : null;
-      const repo = candidate && (candidate.workspace_id === null || candidate.workspace_id === effectiveWorkspaceId)
-        ? candidate
-        : null;
-      if (repo) {
-        out.base_repo = {
-          id: repo.id,
-          name: repo.name,
-          url: repo.url,
-          // 리뷰 지적(ticket 112ea3c5): board environment entry 자체의 branch
-          // 오버라이드가 resource의 default_branch보다 우선한다. 그렇지 않으면
-          // board가 "release"를 지정해도 read 경로는 resource의 "main"만 보여줘
-          // dispatch 경로(위 backfill과 동일 규칙)와 어긋난다.
-          default_branch: picked.branch || repo.default_branch || '',
-          type: repo.type,
-        };
-        // out.base_branch(원본 컬럼)는 그대로 둔다 — 클라이언트 편집 폼이 이
-        // 필드를 그대로 바인딩하므로, 상속된 값을 여기 써넣으면 "명시적으로
-        // 지정된 branch"처럼 보일 위험이 있다. 유효 branch는 base_repo.default_branch
-        // 하나로 노출한다(위 회귀 테스트가 검증하는 필드).
-      }
-    } catch {
-      out.base_repo = null;
     }
   }
 
   // Hydrate the linked next-ticket snapshot so the picker UI can render its
-  // title + current column without a second round-trip. Workspace-scoped
-  // for the same defense-in-depth reason as base_repo above — a stale id
-  // pointing at another workspace's row never leaks its title here.
-  // Failing the lookup is non-fatal: leaves next_ticket: null and the UI
-  // shows "(deleted)" / falls back to the bare id.
+  // title + status without a second round-trip. Workspace-scoped so a stale
+  // id pointing at another workspace's row never leaks its title here.
+  out.next_ticket = null;
   if (ticket.next_ticket_id) {
-    try {
-      const next = await scope.getRepository(Ticket).findOne({
-        where: ticket.workspace_id
-          ? { id: ticket.next_ticket_id, workspace_id: ticket.workspace_id }
-          : { id: ticket.next_ticket_id },
-      });
-      if (next) {
-        let columnName = '';
-        if (next.column_id) {
-          const col = await scope.getRepository(BoardColumn).findOne({ where: { id: next.column_id } });
-          columnName = col?.name || '';
-        }
-        out.next_ticket = { id: next.id, title: next.title, column_name: columnName };
-      } else {
-        out.next_ticket = null;
-      }
-    } catch {
-      out.next_ticket = null;
-    }
-  } else {
-    out.next_ticket = null;
+    const next = await scope.getRepository(Ticket).findOne({
+      where: ticket.workspace_id
+        ? { id: ticket.next_ticket_id, workspace_id: ticket.workspace_id }
+        : { id: ticket.next_ticket_id },
+    }).catch(() => null);
+    if (next) out.next_ticket = { id: next.id, title: next.title, status: next.status };
   }
 
   // Prerequisites (ticket 48d14fff) — the M:N "blocked-by" set for the root
-  // ticket. Each row carries the prereq's title + current column + whether
-  // that column is terminal (= satisfied) so the detail panel can render
-  // status pills without a second round-trip. Surfaced on get_ticket (MCP)
-  // and the REST GET the panel uses. Failing the lookup is non-fatal — leaves
-  // an empty array. Only loaded for the root ticket (subtasks can't carry
-  // prerequisites — they have no column to resume on).
+  // ticket. Each row carries the prereq's title + status + whether it is done
+  // (= satisfied) so the detail panel can render status pills without a
+  // second round-trip. Failing the lookup is non-fatal — leaves an empty array.
   try {
     out.prerequisites = await listPrerequisitesFull(scope, out.id);
   } catch {
     out.prerequisites = [];
   }
   return withTicketTreeArtifactRefs(out);
-}
-
-/**
- * Single-batched lookup of `ticket_role_assignments` for a ticket tree.
- * Mutates each node in `tree` (root + children + grandchildren) by setting
- * `node.role_assignments` to:
- *
- *   [{ role_id, slug, holder: { type, id, name } | null }, ...]
- *
- * sorted by `role.position`. Slugs include builtin (assignee/reporter/
- * reviewer) and any workspace-scoped custom role (e.g. `planner`) that has
- * a holder pinned. Empty arrays for nodes with no assignment rows.
- *
- * Holder name uses `formatAgentDisplayName` so the same Manager/Agent
- * formatting that `resolveAgentIdAndName` writes into the legacy text
- * columns is what comes back from `get_ticket`. Roles whose role row was
- * deleted underneath the assignment are dropped (matches
- * `TicketRoleAssignmentService.resolveForTicket` semantics).
- */
-async function hydrateRoleAssignments(scope: RepoScope, root: any): Promise<void> {
-  const allTicketIds: string[] = [
-    root.id,
-    ...root.children.map((c: any) => c.id),
-    ...root.children.flatMap((c: any) => (c.children || []).map((gc: any) => gc.id)),
-  ];
-  if (allTicketIds.length === 0) return;
-  const rows = await scope.getRepository(TicketRoleAssignment)
-    .find({ where: { ticket_id: In(allTicketIds) } as any })
-    .catch(() => [] as TicketRoleAssignment[]);
-
-  // Always set the field — even when empty — so callers don't have to
-  // defend against `undefined` in the response shape.
-  const empty: any[] = [];
-  root.role_assignments = empty;
-  for (const c of root.children) {
-    c.role_assignments = [] as any[];
-    for (const gc of (c.children || [])) gc.role_assignments = [] as any[];
-  }
-  if (rows.length === 0) return;
-
-  const roleIds = [...new Set(rows.map(r => r.role_id))];
-  const agentIds = [...new Set(rows.map(r => r.agent_id).filter((x): x is string => !!x))];
-  const userIds = [...new Set(rows.map(r => r.user_id).filter((x): x is string => !!x))];
-  const [roles, users] = await Promise.all([
-    scope.getRepository(WorkspaceRole).find({ where: { id: In(roleIds) } }),
-    userIds.length
-      ? scope.getRepository(User).find({ where: { id: In(userIds) } })
-      : Promise.resolve([] as User[]),
-  ]);
-  const roleMap = new Map(roles.map(r => [r.id, r]));
-  const userMap = new Map(users.map(u => [u.id, u]));
-  // P4c-4: uuid holder 표시는 Host/링크 이름으로 해소한다 (Agent 테이블 없음).
-  const displayByAgentId = await resolveAgentDisplayNamesByIds(scope, agentIds);
-
-  const byTicket = new Map<string, any[]>();
-  for (const r of rows) {
-    const role = roleMap.get(r.role_id);
-    if (!role) continue;
-    let holder: any = null;
-    if (r.agent_id && displayByAgentId.has(r.agent_id)) {
-      holder = { type: 'agent', id: r.agent_id, name: displayByAgentId.get(r.agent_id) };
-    } else if (r.agent_id) {
-      holder = { type: 'agent', id: r.agent_id, name: r.agent_id.slice(0, 8) };
-    } else if (r.user_id && userMap.has(r.user_id)) {
-      const u = userMap.get(r.user_id)!;
-      holder = { type: 'user', id: u.id, name: u.name || u.email };
-    }
-    // P4c-4: spec-direct holder — 스냅샷 라벨 (기존에 누락되던 경로).
-    if (!holder && !r.agent_id && !r.user_id) {
-      const rtId = holderAssigneeId(r as any);
-      const spec = (r as any).runtime_spec as Record<string, any> | null;
-      if (rtId && spec && typeof spec === 'object') {
-        holder = {
-          type: 'agent',
-          id: rtId,
-          name: (String(spec.label || '').trim() || rtId.slice(0, 11)),
-          runtime: { ...spec },
-        };
-      }
-    }
-    const entry = { role_id: role.id, slug: role.slug, holder, position: role.position };
-    const list = byTicket.get(r.ticket_id) || [];
-    list.push(entry);
-    byTicket.set(r.ticket_id, list);
-  }
-  const sortAndStrip = (list: any[]) =>
-    list.slice().sort((a, b) => a.position - b.position)
-      .map(({ position: _p, ...rest }) => rest);
-  root.role_assignments = sortAndStrip(byTicket.get(root.id) || []);
-  for (const c of root.children) {
-    c.role_assignments = sortAndStrip(byTicket.get(c.id) || []);
-    for (const gc of (c.children || [])) {
-      gc.role_assignments = sortAndStrip(byTicket.get(gc.id) || []);
-    }
-  }
 }

@@ -11,7 +11,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  *
  * Scope:
  *   - scope='all'      → at dispatch time, expand to every ENABLED profile in
- *     the workspace (board_id is a dead legacy column — see below).
+ *     the workspace.
  *     We deliberately store NO profile id snapshot for 'all' so adding/removing a
  *     profile is reflected automatically on the next run (the ticket's
  *     "id 스냅샷 말고 실행 시 resolve" requirement — handled by startBatch({all:true})).
@@ -45,12 +45,6 @@ export class SecuritySchedule {
 
   @Column({ type: 'varchar' })
   workspace_id: string;
-
-  // Legacy compatibility column. Boot migration (65adf0b) clears it and new
-  // Board-scoped schedules are rejected at create() — always NULL going
-  // forward; dispatch never reads it.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
 
   @Column({ type: 'varchar' })
   name: string;

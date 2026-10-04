@@ -1,29 +1,28 @@
 /**
  * CiHealthMonitorService — main CI red-streak watchdog (ticket cc1c494e).
  *
- * Background: this board runs `use_pr=false` (direct push/merge), so a
- * broken main-branch CI run never blocks anything and never surfaces in a PR
+ * Background: a project that lands with `use_pr=false` (direct push/merge)
+ * never sees a broken default-branch CI run block anything or surface in a PR
  * check — it can (and did) stay red for weeks with nobody noticing. This
- * service periodically polls each board's configured GitHub repo for its CI
+ * service periodically polls each project's GitHub repo for its CI
  * workflow(s), and once a red streak trips a threshold, posts an operator
- * chat alert AND (default on) auto-creates a Backlog ticket so the failure
- * enters the normal agent dispatch loop instead of depending on a human
- * happening to look.
+ * chat alert AND (default on) auto-creates a `todo` ticket on that project so
+ * the failure enters the normal dispatch loop (the project's
+ * `default_assignee` picks it up) instead of depending on a human happening
+ * to look.
  *
- * Sibling of `StuckTicketDetectorService` — same sweep/dedup/durable-delivery
- * skeleton (setInterval+unref, a dedup row per monitored target, `delivered_at`-
- * gated re-alert cooldown so a failed delivery retries every sweep instead of
- * going silent for a full cooldown window) — kept as a SEPARATE service and
- * entity (`CiRedAlert`) rather than a fourth `StuckTicketAlert.cause`, because
- * `StuckTicketAlert`'s PK IS the ticket_id it's alerting about, and a CI-red
- * episode has no ticket to key off until (and unless) this service creates one.
+ * Sweep skeleton: setInterval+unref, a dedup row per monitored target
+ * (`CiRedAlert`), and a `delivered_at`-gated re-alert cooldown so a failed
+ * delivery retries every sweep instead of going silent for a full cooldown
+ * window. The row is keyed by the monitored CI target rather than a ticket,
+ * because a CI-red episode has no ticket to key off until (and unless) this
+ * service creates one.
  *
- * Monitor target resolution (never guesses a repo): each Board's merged
- * `environment_config.repositories[0]` (workspace ⊕ board override, same
- * precedence `run-workspace-resolver.ts`'s `resolveRunRepo` uses) resolved to
- * a concrete GitHub owner/repo/branch. A board with no configured environment
- * repo, or one that isn't a github.com url, is silently skipped — never
- * widened to "guess" a repo from somewhere else.
+ * Monitor target resolution (never guesses a repo): each Project's `repo_url`
+ * + `default_branch`, authenticated with the project's `credential_id`. A
+ * project with no repo url, no default branch, or a url that isn't github.com
+ * is silently skipped — never widened to "guess" a repo or branch from
+ * somewhere else.
  *
  * Trigger condition (`evaluateRedStreak`, kept pure/standalone for unit
  * testing without booting Nest): per (repo, branch, workflow), walk the most
@@ -48,63 +47,59 @@
  * 통과하지 못한 green은 알림도 상태 변경도 없이 'CI' warn 로그 + `stale_green_rejected`
  * 카운터로만 관측된다. 같은 run의 재실행 flip(run id 동일)은 진짜 복구이므로 통과시킨다.
  *
- * Ticket idempotency: the auto-created ticket carries
- * `operational_dedupe_key = "ci_red:{workspace_id}:{repo}:{branch}:{workflow_id}"`
+ * Ticket idempotency: the auto-created ticket (tags `ci-red`, `auto-generated`)
+ * carries `operational_dedupe_key = "ci_red:{workspace_id}:{repo}:{branch}:{workflow_id}"`
  * under Ticket's pre-existing `uq_tickets_operational_dedupe_open` unique
  * index — INSERT-first, unique-violation-caught, winner-reused (never a
  * pre-SELECT check), mirroring `OutreachIngestService._createTicket` /
- * `_resolveDedupeCollision` exactly. `CiRedAlert.created_ticket_id` additionally
- * ensures at most one creation ATTEMPT per red episode even before any DB
- * race is in play — 단 그 가드는 "연결이 있는가" 가 아니라 `_hasLiveIncidentTicket()`,
- * 즉 **"연결된 티켓이 아직 canonical 로 살아 있는가"** 로 판정한다. 연결 유무만 보면
- * canonical 이 복구 없이 terminal 로 옮겨진 뒤의 새 실패가 Done 티켓에 매달린 채 영원히
- * 재평가되지 않는다 (아래 terminal 문단 참고).
+ * `_resolveDedupeCollision`. The key — not the tags — is what finds the
+ * incident's ticket. `CiRedAlert.created_ticket_id` additionally ensures at
+ * most one creation ATTEMPT per red episode even before any DB race is in
+ * play — 단 그 가드는 "연결이 있는가" 가 아니라 `_hasLiveIncidentTicket()`,
+ * 즉 **"연결된 티켓이 아직 canonical 로 살아 있는가"** (archive 되지 않았고 status 가
+ * done 이 아님) 로 판정한다. 연결 유무만 보면 canonical 이 복구 없이 done 으로 옮겨진 뒤의
+ * 새 실패가 Done 티켓에 매달린 채 영원히 재평가되지 않는다 (아래 done 문단 참고).
  *
- * **Incident 수렴 — 티켓은 보드당 1건이 아니라 장애당 1건이다** (ticket 3886473a):
- * 위 키에 들어가는 것은 board id 가 **아니라** workspace id 다. 같은 저장소를 감시하는
- * 보드가 둘이면 예전에는 같은 실패 run 에 대해 실행 티켓이 2건 열렸고, 같은 assignee 가
- * 양쪽에 붙어 같은 한 줄 수정을 두 번 dispatch 받았다(실측: AWB 보드와 토큰 절감 파일럿
- * 보드가 같은 run 을 두고 쌍둥이 티켓을 열어, 사람이 선행조건을 걸었다 풀었다 하며 손으로
- * 조정해야 했다). 이제 (workspace, repo, branch, workflow) 가 하나의 **incident** 이고,
- * 먼저 trip 한 보드가 canonical 티켓을 만들며 나머지 보드는 그것을 **채택**한다 —
- * `CiRedAlert.created_ticket_id` 가 같은 티켓을 가리키고(관계), 보드별 채팅 알림이 그
- * 티켓을 링크하며(알림), 채택 사실은 canonical 티켓에 코멘트로 남는다. 보드별 감시·복구
- * 판정·재알림 쿨다운은 그대로 보드별 `CiRedAlert` 행에 남으므로 보드별 가시성은 유지된다.
+ * **Incident 수렴 — 티켓은 프로젝트당 1건이 아니라 장애당 1건이다** (ticket 3886473a):
+ * 위 키에 들어가는 것은 project id 가 **아니라** workspace id 다. 같은 저장소를 가리키는
+ * 프로젝트가 한 workspace 에 둘 있으면, 키에 감시 단위를 넣었을 때 같은 실패 run 에 대해
+ * 실행 티켓이 2건 열리고 같은 담당자가 같은 한 줄 수정을 두 번 dispatch 받는다(보드 시절
+ * 실측: 같은 run 을 두고 쌍둥이 티켓이 열려, 사람이 선행조건을 걸었다 풀었다 하며 손으로
+ * 조정해야 했다). 그래서 (workspace, repo, branch, workflow) 가 하나의 **incident** 이고,
+ * 먼저 trip 한 프로젝트가 canonical 티켓을 만들며 나머지는 그것을 **채택**한다 —
+ * `CiRedAlert.created_ticket_id` 가 같은 티켓을 가리키고(관계), 프로젝트별 채팅 알림이 그
+ * 티켓을 링크하며(알림), 채택 사실은 canonical 티켓에 코멘트로 남는다. 프로젝트별 감시·복구
+ * 판정·재알림 쿨다운은 그대로 프로젝트별 `CiRedAlert` 행에 남는다.
  *
- * 스코프에 workspace 가 들어가는 이유(빼면 안 되는 이유): 티켓·역할 배정·에이전트가 전부
- * workspace 스코프다. 다른 workspace 의 티켓을 가리키면 그 보드에서는 열 수도 dispatch 할
- * 수도 없는 죽은 참조가 되고, 알림 본문의 `/ws/{workspace_id}/ticket/{id}` 링크도 어긋난다.
+ * 스코프에 workspace 가 들어가는 이유(빼면 안 되는 이유): 티켓·프로젝트가 전부
+ * workspace 스코프다. 다른 workspace 의 티켓을 가리키면 그 workspace 에서는 열 수도
+ * dispatch 할 수도 없는 죽은 참조가 되고, 알림 본문의 티켓 링크도 어긋난다.
  * 서로 다른 저장소·브랜치·workflow 는 키가 다르므로 절대 합쳐지지 않는다.
  *
- * canonical 티켓이 **terminal 컬럼에 들어가면 그 incident 는 끝난 것**이므로 재사용하지
- * 않는다 — 키를 반납시키고 새 티켓을 연다. 그러지 않으면 새 실패가 아무도 보지 않는 Done
- * 티켓에 붙어 조용히 묻힌다. 이 판정은 **CI 가 복구되지 않은 상태에서도** 성립해야 한다:
+ * canonical 티켓이 **done 이 되면 그 incident 는 끝난 것**이므로 재사용하지 않는다 —
+ * 키를 반납시키고 새 티켓을 연다. 그러지 않으면 새 실패가 아무도 보지 않는 Done 티켓에
+ * 붙어 조용히 묻힌다. 이 판정은 **CI 가 복구되지 않은 상태에서도** 성립해야 한다:
  * 복구는 감시 행을 지우지만, 운영자가 red 인 채로 티켓을 Done 으로 옮기는 전이는 행이
  * 살아 있는 상태에서 벌어지기 때문이다. 그래서 재평가 가드가 연결 유무가 아니라 연결
  * 대상의 생존을 본다. 부수 효과로, red 가 계속되는 동안 티켓을 Done 으로 닫으면 다음
  * sweep 이 새 티켓을 연다 — 그게 이 감시자의 목적(아무도 모르는 red 를 없애는 것)이고,
  * 닫아 두고 싶다면 CI 를 고치거나 `CI_MONITOR_CREATE_TICKET=false` 가 탈출구다.
+ * 반대 방향(복구 시 티켓 자동 완료)은 하지 않는다 — `_handleRecovery` 참고.
  */
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, IsNull } from 'typeorm';
-import { Board } from '../../entities/Board';
-import { BoardColumn } from '../../entities/BoardColumn';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { CiRedAlert } from '../../entities/CiRedAlert';
 import { Comment } from '../../entities/Comment';
-import { Resource } from '../../entities/Resource';
+import { Project } from '../../entities/Project';
 import { Ticket } from '../../entities/Ticket';
 import { Workspace } from '../../entities/Workspace';
-import { mergeEnvironmentConfig } from '../../common/environment-config';
-import { parseDefaultRoleAssignments } from '../../common/default-role-assignments-config';
+import { isDoneStatus, type TicketStatus } from '../../common/ticket-status';
 import { LogService } from '../../services/log.service';
-import { ActivityService } from '../../services/activity.service';
 import { compareRunIds, GitHubConnectorService, GitHubRateLimitError, GitHubWorkflow, GitHubWorkflowRun, parseGitHubUrl, sortWorkflowRunsNewestFirst } from '../../services/github-connector.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
-import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
-import { maxTicketPosition } from '../mcp/shared/ticket-helpers';
-import { isTerminalColumn } from '../mcp/shared/archive-helpers';
+import { TicketService, type TicketActor } from '../tickets/ticket.service';
 
 const DEFAULTS = {
   ENABLED: true,
@@ -114,6 +109,12 @@ const DEFAULTS = {
   REALERT_MS: 24 * 60 * 60_000,   // 24 h cooldown between re-alerts
   CREATE_TICKET: true,
 } as const;
+
+// The incident ticket lands ready to work: `todo` queues it for the project's
+// default_assignee (an unassigned project leaves it visible but undispatched).
+const CI_RED_TICKET_STATUS: TicketStatus = 'todo';
+const CI_RED_TICKET_TAGS = ['ci-red', 'auto-generated'];
+const CI_MONITOR_ACTOR: TicketActor = { id: '', name: 'CiHealthMonitor', type: 'system' };
 
 export interface CiHealthMonitorConfig {
   enabled: boolean;
@@ -149,7 +150,7 @@ function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): CiHealthMonito
 }
 
 // Exposed for unit tests so a spec can construct configs without touching
-// the host environment (mirrors stuck-ticket-detector.service.ts's __test__).
+// the host environment.
 export const __test__ = { readConfigFromEnv, DEFAULTS };
 
 // conclusions that carry no health signal — dropped before evaluation so they
@@ -310,12 +311,12 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 /**
- * 한 CI 장애(incident)의 신원. **board id 는 들어가지 않는다** — 같은 workspace 안에서
- * 같은 저장소·브랜치·workflow 를 감시하는 보드가 여럿이면 그것은 장애 N 건이 아니라
+ * 한 CI 장애(incident)의 신원. **project id 는 들어가지 않는다** — 같은 workspace 안에서
+ * 같은 저장소·브랜치·workflow 를 감시하는 프로젝트가 여럿이면 그것은 장애 N 건이 아니라
  * 1 건이고, 실행 티켓도 1 건이어야 한다 (ticket 3886473a).
  *
- * workspace 는 반드시 들어간다 — 티켓·역할 배정·에이전트가 workspace 스코프라 다른
- * workspace 의 티켓을 가리키면 그 보드에서 열 수도 dispatch 할 수도 없다.
+ * workspace 는 반드시 들어간다 — 티켓·프로젝트가 workspace 스코프라 다른 workspace 의
+ * 티켓을 가리키면 그 workspace 에서 열 수도 dispatch 할 수도 없다.
  */
 export function ciIncidentDedupeKey(
   workspaceId: string, repoFullName: string, branch: string, workflowId: string,
@@ -332,21 +333,22 @@ interface MonitorTarget {
 }
 
 interface CiSweepStats {
-  boards_scanned: number;
+  projects_scanned: number;
   targets_checked: number;
   alerts_created: number;
   alerts_updated: number;
   tickets_created: number;
-  /** 새 티켓을 만드는 대신 다른 보드가 이미 연 canonical incident 티켓을 채택한 횟수
-   *  (ticket 3886473a). `tickets_created` 와 합쳐 "이번 sweep 이 red 로 본 보드 수" 가
-   *  된다 — 채택이 0 인데 보드가 여럿이면 수렴이 동작하지 않는다는 신호다. */
+  /** 새 티켓을 만드는 대신 다른 프로젝트가 이미 연 canonical incident 티켓을 채택한 횟수
+   *  (ticket 3886473a). `tickets_created` 와 합쳐 "이번 sweep 이 incident 티켓을 해소한
+   *  프로젝트 수" 가 된다 — 같은 저장소의 프로젝트가 여럿인데 채택이 0 이면 수렴이
+   *  동작하지 않는다는 신호다. */
   tickets_linked: number;
   delivery_failures: number;
   recovered: number;
   skipped_disabled: boolean;
   /** GitHub reads that failed non-degradably (401/403/429/5xx/network) — see
    *  isGitHubDegradableError. Each one is also logged under 'CI' with
-   *  board/repo/workflow context; a nonzero count here means the sweep did
+   *  project/repo/workflow context; a nonzero count here means the sweep did
    *  NOT get a full picture this pass, even though it didn't throw. */
   fetch_failures: number;
   /** 최신 run 이 success 로 보였지만 기존 red 근거보다 최신이 아니라 복구로 인정하지 않은
@@ -355,9 +357,9 @@ interface CiSweepStats {
   stale_green_rejected: number;
 }
 
-/** `_resolveIncidentTicket` 의 결과 — 이 보드가 canonical 티켓을 직접 만들었는지
- *  (`created`), 아니면 다른 보드가 이미 연 것을 채택했는지 구분한다. 채택 쪽만
- *  canonical 티켓에 교차 보드 코멘트를 남긴다. */
+/** `_resolveIncidentTicket` 의 결과 — 이 프로젝트가 canonical 티켓을 직접 만들었는지
+ *  (`created`), 아니면 다른 프로젝트가 이미 연 것을 채택했는지 구분한다. 채택 쪽만
+ *  canonical 티켓에 교차 프로젝트 코멘트를 남긴다. */
 interface IncidentTicketOutcome {
   ticketId: string;
   created: boolean;
@@ -372,15 +374,13 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly logService: LogService,
-    private readonly activityService: ActivityService,
     private readonly messaging: RoomMessagingService,
-    private readonly roleAssignmentService: TicketRoleAssignmentService,
+    private readonly tickets: TicketService,
   ) {
     this.config = readConfigFromEnv();
     // GitHubConnectorService lives in McpServicesModule, which AgentsModule
     // does not import (avoids a cross-module cycle). Constructed directly —
-    // it only needs the DataSource — mirroring the existing
-    // trigger-loop.service.ts:3157 precedent for the same constraint.
+    // it only needs the DataSource.
     this.github = new GitHubConnectorService(this.dataSource);
   }
 
@@ -396,8 +396,8 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         this.logService.error('CI', 'sweep failed', { err: String(e) });
       });
     }, this.config.sweepMs);
-    // Same as StuckTicketDetectorService — the tick loop must never keep the
-    // process alive on its own; Nest's lifecycle owns shutdown.
+    // The tick loop must never keep the process alive on its own; Nest's
+    // lifecycle owns shutdown.
     if (typeof this.tickHandle?.unref === 'function') this.tickHandle.unref();
     this.logService.info('CI', 'CI health sweep loop initialized', { config: this.config });
   }
@@ -421,7 +421,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
    */
   async sweep(now: Date = new Date()): Promise<CiSweepStats> {
     const stats: CiSweepStats = {
-      boards_scanned: 0, targets_checked: 0, alerts_created: 0, alerts_updated: 0,
+      projects_scanned: 0, targets_checked: 0, alerts_created: 0, alerts_updated: 0,
       tickets_created: 0, tickets_linked: 0, delivery_failures: 0, recovered: 0,
       skipped_disabled: !this.config.enabled,
       fetch_failures: 0,
@@ -429,40 +429,39 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     };
     if (!this.config.enabled) return stats;
 
-    const boards = await this.dataSource.getRepository(Board).find();
+    const projects = await this.dataSource.getRepository(Project).find();
     // Cache API responses per (owner/repo/credential) and
     // (owner/repo/credential/workflow/branch) for the DURATION of this sweep
-    // only — several boards can point at the same repo, and each still needs
-    // its own per-board alert/ticket evaluation, but the underlying GitHub
+    // only — several projects can point at the same repo, and each still needs
+    // its own per-project alert/ticket evaluation, but the underlying GitHub
     // calls should fire once PER CREDENTIAL. credentialId is part of the key
-    // (ticket cc1c494e review) — two boards on the same repo with different
+    // (ticket cc1c494e review) — two projects on the same repo with different
     // credentials must never share a cached success or a cached rejection. A
-    // rejected promise is cached too — a second board hitting the same
+    // rejected promise is cached too — a second project hitting the same
     // broken repo/workflow/credential this sweep reuses the failure instead
     // of hammering an endpoint already known to be down this pass.
     const workflowsCache = new Map<string, Promise<GitHubWorkflow[]>>();
     const runsCache = new Map<string, Promise<GitHubWorkflowRun[]>>();
 
-    for (const board of boards) {
-      stats.boards_scanned += 1;
-      const target = await this._resolveMonitorTarget(board);
+    for (const project of projects) {
+      stats.projects_scanned += 1;
+      const target = this._resolveMonitorTarget(project);
       if (!target) continue;
-      // No token resolves for THIS target — neither its own Resource
-      // credential nor the env fallback. Checked per-target (never globally
-      // up front): env GITHUB_TOKEN being unset must not blind the sweep to
-      // every OTHER board whose Resource carries its own working credential
-      // (ticket cc1c494e review — this was the bug: a global env-only check
-      // skipped the entire sweep even when a board credential was valid).
+      // No token resolves for THIS target — neither the project's credential
+      // nor the env fallback. Checked per-target (never globally up front):
+      // env GITHUB_TOKEN being unset must not blind the sweep to every OTHER
+      // project that carries its own working credential (ticket cc1c494e
+      // review — this was the bug: a global env-only check skipped the entire
+      // sweep even when a per-repo credential was valid).
       if (!(await this.github.isEnabled(target.credentialId))) continue;
 
       // credentialId is part of the cache key (with an explicit sentinel for
-      // the env-token fallback) — two boards can point at the SAME repo with
+      // the env-token fallback) — two projects can point at the SAME repo with
       // DIFFERENT credentials, and each credential's success/failure must
-      // stay independent. Keying by owner/repo alone made the first board's
-      // cached promise (success OR rejection) get reused for a second board's
-      // different credential (ticket cc1c494e review — a private repo watched
-      // by an invalid credential on one board would poison a valid credential
-      // on another board of the same repo).
+      // stay independent. Keying by owner/repo alone made the first cached
+      // promise (success OR rejection) get reused for a second, different
+      // credential (ticket cc1c494e review — a private repo watched with an
+      // invalid credential would poison a valid credential on the same repo).
       const credKey = target.credentialId ?? '__env__';
       const wfKey = `${target.owner}/${target.repo}/${credKey}`;
       if (!workflowsCache.has(wfKey)) {
@@ -473,8 +472,8 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         workflows = await workflowsCache.get(wfKey)!;
       } catch (e) {
         stats.fetch_failures += 1;
-        this.logService.warn('CI', 'GitHub workflow list fetch failed — skipping this board this sweep', {
-          board_id: board.id, repo: target.repoFullName, branch: target.branch, ...this._describeFetchError(e),
+        this.logService.warn('CI', 'GitHub workflow list fetch failed — skipping this project this sweep', {
+          project_id: project.id, repo: target.repoFullName, branch: target.branch, ...this._describeFetchError(e),
         });
         continue;
       }
@@ -494,7 +493,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         } catch (e) {
           stats.fetch_failures += 1;
           this.logService.warn('CI', 'GitHub workflow runs fetch failed — skipping this workflow this sweep', {
-            board_id: board.id, repo: target.repoFullName, branch: target.branch,
+            project_id: project.id, repo: target.repoFullName, branch: target.branch,
             workflow_id: workflow.id, workflow_name: workflow.name, ...this._describeFetchError(e),
           });
           continue;
@@ -502,7 +501,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         // 평가는 `_applyEvaluation` 안에서 한다 — 복구 단조성 게이트의 하한선이 기존
         // `CiRedAlert` 행에 있으므로, 행을 먼저 읽은 뒤에야 올바른 평가가 가능하다
         // (ticket 0ef405f9).
-        await this._applyEvaluation(board, target, workflow, runs, now, stats);
+        await this._applyEvaluation(project, target, workflow, runs, now, stats);
       }
     }
     return stats;
@@ -518,38 +517,32 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Resolve a board's monitored GitHub target from its merged environment
-   * config, mirroring `run-workspace-resolver.ts`'s `resolveRunRepo` repo-Resource
-   * path exactly (same precedence: direct url wins, else resource_id lookup;
-   * branch falls back to the Resource's default_branch). Returns null — never
-   * a guess — when nothing is configured or the resolved url isn't github.com.
+   * Resolve a project's monitored GitHub target: its repo url on its default
+   * branch, read with its own credential. Returns null — never a guess — when
+   * the project names no repo or branch, or the url isn't github.com. An empty
+   * default_branch means "origin/HEAD" to the agents, but resolving that here
+   * would cost an extra API call per project per sweep to watch a branch
+   * nobody named, so it stays unwatched.
    */
-  private async _resolveMonitorTarget(board: Board): Promise<MonitorTarget | null> {
-    if (!board.workspace_id) return null;
-    const ws = await this.dataSource.getRepository(Workspace).findOne({ where: { id: board.workspace_id } });
-    const merged = mergeEnvironmentConfig(ws?.environment_config, board.environment_config);
-    const first = merged?.repositories?.[0];
-    if (!first) return null;
-
-    let url = (first.url || '').trim();
-    let branch = (first.branch || '').trim();
-    let credentialId: string | null = null;
-    if (first.resource_id) {
-      const resource = await this.dataSource.getRepository(Resource).findOne({ where: { id: first.resource_id.trim() } });
-      if (resource && resource.workspace_id !== null && resource.workspace_id !== board.workspace_id) return null;
-      if (!url) url = (resource?.url || '').trim();
-      if (!branch) branch = (resource?.default_branch || '').trim();
-      credentialId = resource?.credential_id || null;
-    }
+  private _resolveMonitorTarget(project: Project): MonitorTarget | null {
+    if (!project.workspace_id) return null;
+    const url = (project.repo_url || '').trim();
+    const branch = (project.default_branch || '').trim();
     if (!url || !branch) return null;
 
     const parsed = parseGitHubUrl(url);
     if (!parsed) return null; // not a github.com url — silently skip, never guess elsewhere
-    return { owner: parsed.owner, repo: parsed.repo, repoFullName: `${parsed.owner}/${parsed.repo}`, branch, credentialId };
+    return {
+      owner: parsed.owner,
+      repo: parsed.repo,
+      repoFullName: `${parsed.owner}/${parsed.repo}`,
+      branch,
+      credentialId: project.credential_id || null,
+    };
   }
 
   private async _applyEvaluation(
-    board: Board,
+    project: Project,
     target: MonitorTarget,
     workflow: GitHubWorkflow,
     runs: GitHubWorkflowRun[],
@@ -558,7 +551,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const alertRepo = this.dataSource.getRepository(CiRedAlert);
     const existing = await alertRepo.findOne({
-      where: { board_id: board.id, repo_full_name: target.repoFullName, branch: target.branch, workflow_id: workflow.id },
+      where: { project_id: project.id, repo_full_name: target.repoFullName, branch: target.branch, workflow_id: workflow.id },
     });
 
     const evalResult = evaluateRedStreak(
@@ -581,7 +574,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       // 존재하는 바로 그 "아무도 모르는" 실패가 되므로 반드시 남긴다 (ticket 0ef405f9).
       stats.stale_green_rejected += 1;
       this.logService.warn('CI', 'CI 복구 신호를 거부했다 — 기존 red 근거보다 최신이 아니다 (상태 유지)', {
-        board_id: board.id, repo: target.repoFullName, branch: target.branch,
+        project_id: project.id, repo: target.repoFullName, branch: target.branch,
         workflow_id: workflow.id, workflow_name: workflow.name,
         green_run_id: evalResult.staleGreenRun.id,
         green_run_created_at: evalResult.staleGreenRun.created_at,
@@ -593,7 +586,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (evalResult.isGreen) {
-      if (existing) await this._handleRecovery(board, target, workflow, existing, stats);
+      if (existing) await this._handleRecovery(project, target, workflow, existing, stats);
       return;
     }
     if (!evalResult.isRed) return; // no signal yet, or below threshold — wait for more data
@@ -602,8 +595,8 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     const isNewRow = !row;
     if (!row) {
       row = alertRepo.create({
-        board_id: board.id,
-        workspace_id: board.workspace_id || '',
+        project_id: project.id,
+        workspace_id: project.workspace_id,
         repo_full_name: target.repoFullName,
         branch: target.branch,
         workflow_id: workflow.id,
@@ -622,31 +615,29 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     await alertRepo.save(row);
     if (isNewRow) stats.alerts_created += 1; else stats.alerts_updated += 1;
 
-    // 에피소드당 보드당 한 번만 티켓을 해소한다 — 다만 그 기준은 "연결이 있는가" 가 아니라
-    // **"연결된 티켓이 아직 이 incident 의 canonical 로 살아 있는가"** 다 (ticket 3886473a
-    // 리뷰 지적). `!row.created_ticket_id` 만 보면, canonical 이 **복구 없이** terminal 로
-    // 옮겨진 뒤에는 "연결이 남아 있다" 는 이유로 재평가 자체를 영원히 건너뛴다 — 그 뒤의
+    // 에피소드당 프로젝트당 한 번만 티켓을 해소한다 — 다만 그 기준은 "연결이 있는가" 가
+    // 아니라 **"연결된 티켓이 아직 이 incident 의 canonical 로 살아 있는가"** 다 (ticket
+    // 3886473a 리뷰 지적). `!row.created_ticket_id` 만 보면, canonical 이 **복구 없이**
+    // done 으로 옮겨진 뒤에는 "연결이 남아 있다" 는 이유로 재평가 자체를 영원히 건너뛴다 — 그 뒤의
     // 새 실패는 아무도 보지 않는 Done 티켓에 계속 매달린 채 새 incident 도 dispatch 도
     // 생기지 않는다. 복구 경로는 행을 **지우므로** 이 전이를 가리지 못한다: 이것은 CI 가
     // red 인 채로 벌어지는 전이라 행이 살아 있는 상태에서만 드러난다.
     if (this.config.createTicket && !(await this._hasLiveIncidentTicket(row))) {
       try {
-        const outcome = await this._resolveIncidentTicket(board, target, workflow, evalResult);
-        if (outcome) {
-          // 관계를 먼저 영속화한다 — 아래 교차 보드 코멘트가 실패하더라도 이 보드는
-          // 이미 canonical 티켓을 가리키고 있어야 다음 sweep 이 새 티켓을 열지 않는다.
-          row.created_ticket_id = outcome.ticketId;
-          await alertRepo.save(row);
-          if (outcome.created) {
-            stats.tickets_created += 1;
-          } else {
-            stats.tickets_linked += 1;
-            await this._noteAdditionalBoard(outcome.ticketId, board, target, workflow);
-          }
+        const outcome = await this._resolveIncidentTicket(project, target, workflow, evalResult);
+        // 관계를 먼저 영속화한다 — 아래 교차 프로젝트 코멘트가 실패하더라도 이 프로젝트는
+        // 이미 canonical 티켓을 가리키고 있어야 다음 sweep 이 새 티켓을 열지 않는다.
+        row.created_ticket_id = outcome.ticketId;
+        await alertRepo.save(row);
+        if (outcome.created) {
+          stats.tickets_created += 1;
+        } else {
+          stats.tickets_linked += 1;
+          await this._noteAdditionalProject(outcome.ticketId, project, target, workflow);
         }
       } catch (e) {
         this.logService.warn('CI', 'CI-red ticket auto-creation failed — will retry next sweep', {
-          err: String(e), board_id: board.id, repo: target.repoFullName,
+          err: String(e), project_id: project.id, repo: target.repoFullName,
         });
       }
     }
@@ -654,37 +645,36 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     // Re-alert cooldown keys off delivered_at (last SUCCESSFUL post), never
     // off a plain last-attempt timestamp — a first delivery that fails is
     // retried every sweep instead of silenced for a full cooldown window
-    // (same durable-delivery contract as StuckTicketAlert, ticket e7c87517
-    // blocker #3).
+    // (durable-delivery contract, ticket e7c87517 blocker #3).
     if (row.delivered_at && now.getTime() - new Date(row.delivered_at).getTime() < this.config.realertMs) {
       return;
     }
     row.delivery_attempts = (row.delivery_attempts || 0) + 1;
     await alertRepo.save(row);
-    const delivered = await this._postRedAlert(board, target, workflow, row, evalResult, now);
+    const delivered = await this._postRedAlert(project, target, workflow, row, evalResult, now);
     if (delivered) {
       row.delivered_at = now;
       await alertRepo.save(row);
     } else {
       stats.delivery_failures += 1;
       this.logService.warn('CI', 'CI-red alert delivery failed — will retry next sweep', {
-        board_id: board.id, repo: target.repoFullName, delivery_attempts: row.delivery_attempts,
+        project_id: project.id, repo: target.repoFullName, delivery_attempts: row.delivery_attempts,
       });
     }
   }
 
   private async _postRedAlert(
-    board: Board,
+    project: Project,
     target: MonitorTarget,
     workflow: GitHubWorkflow,
     row: CiRedAlert,
     evalResult: RedStreakResult,
     now: Date,
   ): Promise<boolean> {
-    const roomId = await this._resolveAlertRoomId(board.workspace_id || '');
+    const roomId = await this._resolveAlertRoomId(project.workspace_id);
     if (!roomId) {
       this.logService.warn('CI', 'no chat room available for CI-red alert — will retry next sweep', {
-        board_id: board.id, repo: target.repoFullName,
+        project_id: project.id, repo: target.repoFullName,
       });
       return false;
     }
@@ -697,7 +687,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         // without them rather than losing the whole alert over this, but the
         // failure must still be logged, not silently dropped.
         this.logService.warn('CI', 'GitHub failed-jobs fetch failed — posting alert without job detail', {
-          board_id: board.id, repo: target.repoFullName, run_id: evalResult.lastRun.id, ...this._describeFetchError(e),
+          project_id: project.id, repo: target.repoFullName, run_id: evalResult.lastRun.id, ...this._describeFetchError(e),
         });
       }
     }
@@ -705,21 +695,21 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
       ? Math.max(0, (now.getTime() - new Date(evalResult.firstFailedRun.updated_at).getTime()) / 3_600_000)
       : 0;
     const lines = [
-      `🔴 **CI red** — \`${target.repoFullName}@${target.branch}\` · ${workflow.name}`,
+      `🔴 **CI red** — \`${target.repoFullName}@${target.branch}\` · ${workflow.name} (프로젝트 ${project.name})`,
       `연속 ${row.streak}회 실패 · 최초 실패 후 ${ageH.toFixed(1)}시간 경과`,
       failedJobs.length > 0 ? `실패한 잡: ${failedJobs.join(', ')}` : '',
       evalResult.lastRun?.html_url ? `[최신 run 보기](${evalResult.lastRun.html_url})` : '',
-      row.created_ticket_id ? `추적 티켓: [열기](/ws/${board.workspace_id}/ticket/${row.created_ticket_id})` : '',
+      row.created_ticket_id ? `추적 티켓: [열기](/ws/${project.workspace_id}/tickets?ticket=${row.created_ticket_id})` : '',
     ].filter(Boolean);
     try {
-      await this.messaging.sendSystemMessage(roomId, board.workspace_id || '', lines.join('\n\n'));
+      await this.messaging.sendSystemMessage(roomId, project.workspace_id, lines.join('\n\n'));
       this.logService.info('CI', 'CI-red alert posted', {
-        board_id: board.id, repo: target.repoFullName, streak: row.streak,
+        project_id: project.id, repo: target.repoFullName, streak: row.streak,
       });
       return true;
     } catch (e) {
       this.logService.warn('CI', 'CI-red alert post failed', {
-        err: String(e), board_id: board.id, repo: target.repoFullName,
+        err: String(e), project_id: project.id, repo: target.repoFullName,
       });
       return false;
     }
@@ -728,36 +718,35 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   /**
    * Recovery: newest completed run is green. Posts a one-shot "CI 복구" chat
    * message, appends a recovery comment on the tracked ticket (if one was
-   * created) WITHOUT closing it — a green run may just mean someone else's
-   * push happened to fix it, or masked the issue; closing the loop is left to
-   * whoever is holding the ticket — then deletes the row (self-pruning, same
-   * as StuckTicketAlert's unstuck path).
+   * created) WITHOUT moving it to done — a green run may just mean someone
+   * else's push happened to fix it, or masked the issue; closing the loop is
+   * left to the ticket's assignee — then deletes the row (self-pruning).
    *
-   * 채팅 알림은 보드별로 나가지만(보드별 가시성), **티켓 코멘트는 incident 당 1회**다
-   * (ticket 3886473a): 여러 보드가 같은 canonical 티켓을 가리키므로 보드마다 남기면 같은
-   * 문장이 보드 수만큼 쌓인다. 내 행을 먼저 지운 뒤 그 티켓을 아직 red 로 보고 있는
-   * `CiRedAlert` 행이 0 건일 때만 남긴다 — 어느 보드의 조회가 실패해 red 로 남아 있는
+   * 채팅 알림은 프로젝트별로 나가지만, **티켓 코멘트는 incident 당 1회**다 (ticket
+   * 3886473a): 여러 프로젝트가 같은 canonical 티켓을 가리킬 수 있으므로 프로젝트마다 남기면
+   * 같은 문장이 그 수만큼 쌓인다. 내 행을 먼저 지운 뒤 그 티켓을 아직 red 로 보고 있는
+   * `CiRedAlert` 행이 0 건일 때만 남긴다 — 어느 프로젝트의 조회가 실패해 red 로 남아 있는
    * sweep 에서 성급히 복구를 선언하지 않는다는 뜻이기도 하다.
    */
   private async _handleRecovery(
-    board: Board,
+    project: Project,
     target: MonitorTarget,
     workflow: GitHubWorkflow,
     row: CiRedAlert,
     stats: CiSweepStats,
   ): Promise<void> {
-    const roomId = await this._resolveAlertRoomId(board.workspace_id || '');
+    const roomId = await this._resolveAlertRoomId(project.workspace_id);
     if (roomId) {
       const lines = [
         `✅ **CI 복구** — \`${target.repoFullName}@${target.branch}\` · ${workflow.name}`,
         `연속 ${row.streak}회 실패 후 최신 run이 성공으로 복구됐습니다.`,
       ];
       try {
-        await this.messaging.sendSystemMessage(roomId, board.workspace_id || '', lines.join('\n\n'));
-        this.logService.info('CI', 'CI recovery posted', { board_id: board.id, repo: target.repoFullName });
+        await this.messaging.sendSystemMessage(roomId, project.workspace_id, lines.join('\n\n'));
+        this.logService.info('CI', 'CI recovery posted', { project_id: project.id, repo: target.repoFullName });
       } catch (e) {
         this.logService.warn('CI', 'CI recovery post failed (row still cleared)', {
-          err: String(e), board_id: board.id, repo: target.repoFullName,
+          err: String(e), project_id: project.id, repo: target.repoFullName,
         });
       }
     }
@@ -773,6 +762,7 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
         const commentRepo = this.dataSource.getRepository(Comment);
         await commentRepo.save(commentRepo.create({
           ticket_id: row.created_ticket_id,
+          workspace_id: project.workspace_id,
           author_type: 'system',
           author_id: '',
           author: 'CiHealthMonitor',
@@ -792,8 +782,6 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
    * Resolve the chat room to publish into for a workspace. Order:
    *   1. Workspace.alerts_chat_room_id, if set and the room exists.
    *   2. Oldest chat room in the workspace by `created_at ASC`.
-   * Mirrors StuckTicketDetectorService._resolveAlertRoomId exactly (kept as
-   * a local copy — that method is private on an unrelated service).
    */
   private async _resolveAlertRoomId(workspaceId: string): Promise<string | null> {
     if (!workspaceId) return null;
@@ -812,21 +800,6 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     return fallback?.id ?? null;
   }
 
-  /** First `kind='intake'` column (Backlog) on the board; else the first
-   *  active non-terminal column (mirrors OutreachIngestService._resolveColumn);
-   *  else null. Deliberately never falls back to a terminal column — a ticket
-   *  landing there is invisible to every dispatch path. */
-  private async _resolveTargetColumn(boardId: string): Promise<BoardColumn | null> {
-    const cols = await this.dataSource.getRepository(BoardColumn).find({
-      where: { board_id: boardId },
-      order: { position: 'ASC' },
-    });
-    return cols.find((c) => c.kind === 'intake')
-      || cols.find((c) => c.kind === 'active' && !isTerminalColumn(c))
-      || cols.find((c) => !isTerminalColumn(c))
-      || null;
-  }
-
   private _buildTicketDescription(target: MonitorTarget, workflow: GitHubWorkflow, evalResult: RedStreakResult, now: Date): string {
     const ageH = evalResult.firstFailedRun
       ? Math.max(0, (now.getTime() - new Date(evalResult.firstFailedRun.updated_at).getTime()) / 3_600_000)
@@ -834,9 +807,9 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
     const lines = [
       `main CI(\`${workflow.name}\`, workflow ${workflow.id})가 \`${target.repoFullName}@${target.branch}\`에서 연속 ${evalResult.streak}회 실패했습니다(최초 실패 후 약 ${ageH.toFixed(1)}시간 경과).`,
       '',
-      `이 저장소는 use_pr=false 운영이라 CI 실패가 PR 체크로 노출되지 않습니다 — 원인을 조사해 고쳐주세요.`,
+      `기본 브랜치의 CI 실패는 PR 체크로 드러나지 않습니다(특히 use_pr=false 로 직접 머지하는 프로젝트) — 원인을 조사해 고쳐주세요.`,
       '',
-      `이 티켓은 이 장애(저장소·브랜치·workflow) 전체의 canonical incident 티켓입니다 — 같은 장애를 감시하는 다른 보드는 새 티켓을 만들지 않고 이 티켓을 가리킵니다. 수정은 여기서만 진행하세요.`,
+      `이 티켓은 이 장애(저장소·브랜치·workflow) 전체의 canonical incident 티켓입니다 — 같은 저장소를 가리키는 다른 프로젝트는 새 티켓을 만들지 않고 이 티켓을 가리킵니다. 수정은 여기서만 진행하세요.`,
       '',
       evalResult.lastRun?.html_url ? `최신 run: ${evalResult.lastRun.html_url}` : '',
       '',
@@ -847,80 +820,65 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 이 red 에피소드가 가리킬 incident 티켓을 확정한다 — 새로 만들거나(`created: true`),
-   * 다른 보드가 이미 연 canonical 을 채택한다(`created: false`).
+   * 다른 프로젝트가 이미 연 canonical 을 채택한다(`created: false`).
    *
-   * 채택은 **예외 경로가 아니라 정상 경로**다 (ticket 3886473a): 키에서 board id 를 뺐으
-   * 므로 같은 장애를 보는 두 번째 보드는 매번 unique 위반을 거쳐 여기로 온다. 그래도
-   * INSERT-first 를 유지하는 이유는 pre-SELECT 가 경합을 막지 못하기 때문이다 — 승자를
-   * 정하는 것은 DB 의 UNIQUE 이고, 조회는 그 결과를 읽을 뿐이다. 에피소드당 보드당
-   * 한 번만 실행된다(`!row.created_ticket_id` 가드).
+   * 채택은 **예외 경로가 아니라 정상 경로**다 (ticket 3886473a): 키에서 project id 를
+   * 뺐으므로 같은 장애를 보는 두 번째 프로젝트는 매번 unique 위반을 거쳐 여기로 온다.
+   * 그래도 INSERT-first 를 유지하는 이유는 pre-SELECT 가 경합을 막지 못하기 때문이다 —
+   * 승자를 정하는 것은 DB 의 UNIQUE 이고, 조회는 그 결과를 읽을 뿐이다. 에피소드당
+   * 프로젝트당 한 번만 실행된다(`_hasLiveIncidentTicket` 가드).
    */
   private async _resolveIncidentTicket(
-    board: Board,
+    project: Project,
     target: MonitorTarget,
     workflow: GitHubWorkflow,
     evalResult: RedStreakResult,
-  ): Promise<IncidentTicketOutcome | null> {
-    const column = await this._resolveTargetColumn(board.id);
-    if (!column) {
-      this.logService.warn('CI', 'no non-terminal column available for CI-red ticket — skipping creation', {
-        board_id: board.id,
-      });
-      return null;
-    }
+  ): Promise<IncidentTicketOutcome> {
     const now = new Date();
-    const dedupeKey = ciIncidentDedupeKey(board.workspace_id || '', target.repoFullName, target.branch, workflow.id);
+    const dedupeKey = ciIncidentDedupeKey(project.workspace_id, target.repoFullName, target.branch, workflow.id);
     const title = `CI red: ${target.repoFullName}@${target.branch} — ${workflow.name}`;
     const description = this._buildTicketDescription(target, workflow, evalResult, now);
     try {
-      return { ticketId: await this._insertTicket(board, column, dedupeKey, title, description), created: true };
+      return { ticketId: await this._insertTicket(project, dedupeKey, title, description), created: true };
     } catch (e) {
       if (!isUniqueConstraintError(e)) throw e;
-      return await this._resolveTicketDedupeCollision(board, column, dedupeKey, title, description, e);
+      return await this._resolveTicketDedupeCollision(project, dedupeKey, title, description, e);
     }
-  }
-
-  /**
-   * 홀더 티켓이 terminal 컬럼에 있는가. terminal 이면 그 incident 는 이미 닫힌 것이므로
-   * 새 실패를 거기 붙이면 아무도 보지 않는 Done 티켓에 조용히 묻힌다 (ticket 3886473a).
-   */
-  private async _isTerminalTicket(ticket: Ticket): Promise<boolean> {
-    if (!ticket.column_id) return false;
-    const col = await this.dataSource.getRepository(BoardColumn).findOne({ where: { id: ticket.column_id } });
-    return isTerminalColumn(col);
   }
 
   /**
    * 이 감시 행이 가리키는 티켓이 **아직 이 incident 의 canonical 로 쓸 수 있는가**.
-   * 연결이 없거나, 티켓이 사라졌거나, archive 됐거나, terminal 컬럼에 있으면 false —
-   * 그때는 다음 실패에서 새 incident 를 열어야 한다 (ticket 3886473a 리뷰 지적).
+   * 연결이 없거나, 티켓이 사라졌거나, archive 됐거나, done 이면 false — 그때는 다음
+   * 실패에서 새 incident 를 열어야 한다 (ticket 3886473a 리뷰 지적). done 티켓에 새
+   * 실패를 붙이면 아무도 보지 않는 곳에 조용히 묻힌다.
    *
    * 살아 있으면 true 라서, 정상적인 red 에피소드에서는 `_resolveIncidentTicket` 이 다시
-   * 돌지 않는다(에피소드당 보드당 1회 시도 규약 유지). 죽은 링크일 때만 재해소한다.
+   * 돌지 않는다(에피소드당 프로젝트당 1회 시도 규약 유지). 죽은 링크일 때만 재해소한다.
    */
   private async _hasLiveIncidentTicket(row: CiRedAlert): Promise<boolean> {
     if (!row.created_ticket_id) return false;
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: row.created_ticket_id } });
     if (!ticket) return false;        // 하드 삭제됨 — 가리킬 것이 없다
     if (ticket.archived_at) return false;
-    return !(await this._isTerminalTicket(ticket));
+    return !isDoneStatus(ticket.status);
   }
 
   /**
-   * 끝난(terminal 이거나 archive 된) 홀더에게서 incident 키를 반납받고 새 티켓을 연다.
+   * 끝난(done 이거나 archive 된) 홀더에게서 incident 키를 반납받고 새 티켓을 연다.
    * 반납 자체가 새 INSERT 의 자리를 비우는 유일한 방법이다 — 키는 UNIQUE 이므로.
+   * 반납은 그 컬럼 하나만 쓴다 — 읽어 둔 홀더 행 전체를 다시 저장하면 그 사이에 바뀐
+   * status 등을 낡은 값으로 덮어쓴다.
    */
   private async _reopenIncident(
-    board: Board, column: BoardColumn, dedupeKey: string, title: string, description: string, staleHolder: Ticket,
+    project: Project, dedupeKey: string, title: string, description: string, staleHolder: Ticket,
   ): Promise<IncidentTicketOutcome> {
     const ticketRepo = this.dataSource.getRepository(Ticket);
-    staleHolder.operational_dedupe_key = null;
-    await ticketRepo.save(staleHolder);
+    await ticketRepo.update({ id: staleHolder.id }, { operational_dedupe_key: null });
     try {
-      return { ticketId: await this._insertTicket(board, column, dedupeKey, title, description), created: true };
+      return { ticketId: await this._insertTicket(project, dedupeKey, title, description), created: true };
     } catch (retryError) {
       if (!isUniqueConstraintError(retryError)) throw retryError;
-      // 키를 반납받은 직후 다른 보드의 sweep 이 먼저 새 incident 를 열었다 — 그것이 승자다.
+      // 키를 반납받은 직후 다른 프로젝트의 sweep 이 먼저 새 incident 를 열었다 — 그것이 승자다.
       const fallbackWinner = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
       if (fallbackWinner) return { ticketId: fallbackWinner.id, created: false };
       throw retryError;
@@ -928,79 +886,53 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 이 보드가 새 티켓 대신 기존 canonical 티켓을 채택했음을 그 티켓에 남긴다 — 티켓만
-   * 보고도 이 장애가 어느 보드들에 걸쳐 있는지 알 수 있어야, 지난번처럼 두 담당 흐름이
-   * 같은 원인을 각자 조사하고 사람이 선행조건을 걸었다 풀었다 하며 손으로 조정하는 일이
+   * 이 프로젝트가 새 티켓 대신 기존 canonical 티켓을 채택했음을 그 티켓에 남긴다 — 티켓만
+   * 보고도 이 장애가 어느 프로젝트들에 걸쳐 있는지 알 수 있어야, 두 담당 흐름이 같은
+   * 원인을 각자 조사하고 사람이 선행조건을 걸었다 풀었다 하며 손으로 조정하는 일이
    * 되풀이되지 않는다 (ticket 3886473a). 복구 코멘트와 같은 경로로 Comment 행만 쓰고
-   * activity log 는 남기지 않으므로 역할 holder 를 재-dispatch 하지 않는다 — 수렴의
-   * 목적이 중복 dispatch 제거인데 그 사실을 알리는 코멘트가 dispatch 를 유발하면 모순이다.
+   * activity log 는 남기지 않으므로 담당자를 재-dispatch 하지 않는다 — 수렴의 목적이
+   * 중복 dispatch 제거인데 그 사실을 알리는 코멘트가 dispatch 를 유발하면 모순이다.
    */
-  private async _noteAdditionalBoard(
-    ticketId: string, board: Board, target: MonitorTarget, workflow: GitHubWorkflow,
+  private async _noteAdditionalProject(
+    ticketId: string, project: Project, target: MonitorTarget, workflow: GitHubWorkflow,
   ): Promise<void> {
     try {
       const commentRepo = this.dataSource.getRepository(Comment);
       await commentRepo.save(commentRepo.create({
         ticket_id: ticketId,
+        workspace_id: project.workspace_id,
         author_type: 'system',
         author_id: '',
         author: 'CiHealthMonitor',
-        content: `🔗 같은 CI 장애가 보드 \`${board.name}\` 에서도 감지됐습니다 — \`${target.repoFullName}@${target.branch}\`(${workflow.name}) 로 동일한 장애라 별도 실행 티켓을 만들지 않고 이 티켓으로 수렴시켰습니다. 수정은 이 티켓 한 건에서만 진행하세요.`,
+        content: `🔗 같은 CI 장애가 프로젝트 \`${project.name}\` 에서도 감지됐습니다 — \`${target.repoFullName}@${target.branch}\`(${workflow.name}) 로 동일한 장애라 별도 실행 티켓을 만들지 않고 이 티켓으로 수렴시켰습니다. 수정은 이 티켓 한 건에서만 진행하세요.`,
         type: 'note',
       }));
     } catch (e) {
-      // 관계(`CiRedAlert.created_ticket_id`)와 보드별 채팅 알림이 이미 수렴을 성립시키므로
+      // 관계(`CiRedAlert.created_ticket_id`)와 프로젝트별 채팅 알림이 이미 수렴을 성립시키므로
       // 이 코멘트 하나 때문에 sweep 을 실패시키지 않는다 — 다만 조용히 넘기지도 않는다.
-      this.logService.warn('CI', '교차 보드 채택 코멘트 작성 실패 (수렴 자체는 성립)', {
-        err: String(e), ticket_id: ticketId, board_id: board.id, repo: target.repoFullName,
+      this.logService.warn('CI', '교차 프로젝트 채택 코멘트 작성 실패 (수렴 자체는 성립)', {
+        err: String(e), ticket_id: ticketId, project_id: project.id, repo: target.repoFullName,
       });
     }
   }
 
-  private async _insertTicket(
-    board: Board, column: BoardColumn, dedupeKey: string, title: string, description: string,
-  ): Promise<string> {
-    const { ticket, activityLog } = await this.dataSource.transaction(async (manager) => {
-      const tRepo = manager.getRepository(Ticket);
-      const position = await maxTicketPosition(manager, column.id);
-      const savedTicket = await tRepo.save(tRepo.create({
-        column_id: column.id,
-        workspace_id: board.workspace_id || '',
-        title,
-        description,
-        priority: 'high',
-        labels: JSON.stringify(['ci-red', 'auto-generated']),
-        channel_ids: '[]',
-        position,
-        created_by: 'CiHealthMonitor',
-        created_by_type: 'system',
-        created_by_id: '',
-        operational_dedupe_key: dedupeKey,
-      }));
-      const savedActivity = await this.activityService.logActivityTx(manager, {
-        entity_type: 'ticket',
-        entity_id: savedTicket.id,
-        action: 'created',
-        ticket_id: savedTicket.id,
-        actor_name: 'CiHealthMonitor',
-      });
-      return { ticket: savedTicket, activityLog: savedActivity };
-    });
-    this.activityService.emitLogged([activityLog]);
-
-    // Board default role holders only — an auto-filed ticket names no
-    // assignee, so a role stays vacant unless the board configures a
-    // default_role_assignments backfill (mirrors OutreachIngestService /
-    // BacklogPromotionService's bb5b9aed precedent: an unstaffed role means
-    // nobody ever picks the ticket up).
-    try {
-      const defaults = parseDefaultRoleAssignments(board.default_role_assignments);
-      if (Object.keys(defaults).length > 0) {
-        await this.roleAssignmentService.applyBoardDefaults(ticket.id, board.workspace_id || '', defaults);
-      }
-    } catch {
-      /* non-fatal — degrade to "no defaults" */
-    }
+  /**
+   * Files the incident ticket through TicketService so it gets the same
+   * position / activity / dispatch treatment as any other ticket. `assignee`
+   * is deliberately omitted (not null): omission is what makes TicketService
+   * apply the project's default_assignee. A unique violation on the dedupe
+   * key propagates to the caller — that is the INSERT-first race signal.
+   */
+  private async _insertTicket(project: Project, dedupeKey: string, title: string, description: string): Promise<string> {
+    const { ticket } = await this.tickets.create(project.workspace_id, {
+      title,
+      description,
+      priority: 'high',
+      status: CI_RED_TICKET_STATUS,
+      tags: CI_RED_TICKET_TAGS,
+      project_id: project.id,
+      operational_dedupe_key: dedupeKey,
+    }, CI_MONITOR_ACTOR);
     return ticket.id;
   }
 
@@ -1008,35 +940,36 @@ export class CiHealthMonitorService implements OnModuleInit, OnModuleDestroy {
    * _insertTicket()'s INSERT hit the operational_dedupe_key unique index —
    * this incident already has a holder. 두 갈래다:
    *
-   *   - 홀더가 **열려 있고 terminal 이 아니다** → 그게 canonical 이다. 이 보드는 새
-   *     티켓을 만들지 않고 그것을 채택한다(`created: false`). 다른 보드의 sweep 이 먼저
-   *     연 경우와, 이 프로세스가 앞 tick 이 끝나기 전에 재진입한 경우가 여기로 온다.
-   *   - 홀더가 **archive 됐거나 terminal 이다** → 그 incident 는 끝났다. 키를 반납시키고
-   *     새 incident 를 연다 (ticket 3886473a: 본문이 요구한 "canonical 이 terminal 이 된
-   *     뒤 새 실패는 새 incident"). terminal 판정이 없던 시절에는 `archived_at IS NULL`
-   *     만 보고 Done 티켓을 그대로 재사용했고, 그러면 새 실패가 아무도 보지 않는 티켓에
-   *     붙어 묻혔다.
+   *   - 홀더가 **열려 있다** (archive 되지 않았고 status 가 done 이 아니다) → 그게
+   *     canonical 이다. 이 프로젝트는 새 티켓을 만들지 않고 그것을 채택한다
+   *     (`created: false`). 다른 프로젝트의 sweep 이 먼저 연 경우와, 이 프로세스가 앞
+   *     tick 이 끝나기 전에 재진입한 경우가 여기로 온다.
+   *   - 홀더가 **archive 됐거나 done 이다** → 그 incident 는 끝났다. 키를 반납시키고
+   *     새 incident 를 연다 (ticket 3886473a: 본문이 요구한 "canonical 이 완료된 뒤 새
+   *     실패는 새 incident"). 완료 판정이 없던 시절에는 `archived_at IS NULL` 만 보고
+   *     Done 티켓을 그대로 재사용했고, 그러면 새 실패가 아무도 보지 않는 티켓에 붙어
+   *     묻혔다.
    *
    * 어느 갈래든 승자를 정하는 것은 DB 의 UNIQUE 이고 조회는 그 결과를 읽을 뿐이다 —
    * OutreachIngestService._resolveDedupeCollision 과 같은 INSERT-first 규약(ticket
    * cc1c494e Plan decision D), pre-SELECT / 보상삭제 춤이 아니다.
    */
   private async _resolveTicketDedupeCollision(
-    board: Board, column: BoardColumn, dedupeKey: string, title: string, description: string, originalError: unknown,
-  ): Promise<IncidentTicketOutcome | null> {
+    project: Project, dedupeKey: string, title: string, description: string, originalError: unknown,
+  ): Promise<IncidentTicketOutcome> {
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const openWinner = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey, archived_at: IsNull() } });
     if (openWinner) {
-      if (!(await this._isTerminalTicket(openWinner))) return { ticketId: openWinner.id, created: false };
-      return await this._reopenIncident(board, column, dedupeKey, title, description, openWinner);
+      if (!isDoneStatus(openWinner.status)) return { ticketId: openWinner.id, created: false };
+      return await this._reopenIncident(project, dedupeKey, title, description, openWinner);
     }
 
     const holder = await ticketRepo.findOne({ where: { operational_dedupe_key: dedupeKey } });
     if (!holder) throw originalError; // holder vanished mid-race — propagate, caller retries next sweep
-    // committed between our two lookups — 열려 있고 terminal 이 아니면 그대로 채택한다.
-    if (!holder.archived_at && !(await this._isTerminalTicket(holder))) {
+    // committed between our two lookups — 열려 있으면 그대로 채택한다.
+    if (!holder.archived_at && !isDoneStatus(holder.status)) {
       return { ticketId: holder.id, created: false };
     }
-    return await this._reopenIncident(board, column, dedupeKey, title, description, holder);
+    return await this._reopenIncident(project, dedupeKey, title, description, holder);
   }
 }

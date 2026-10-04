@@ -3,21 +3,17 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
 /**
  * Reusable operation exposed to humans, workflows, and MCP agents.
  * Scope is derived consistently across AWB catalogs:
- * global=(workspace_id NULL), workspace=(workspace_id set). board_id remains
- * as a legacy compatibility column and is always NULL after boot migration.
+ * global=(workspace_id NULL), workspace=(workspace_id set).
  */
 @Entity('workflow_functions')
-@Index('uq_workflow_functions_global_key', ['key'], { unique: true, where: 'workspace_id IS NULL AND board_id IS NULL' })
-@Index('uq_workflow_functions_workspace_key', ['workspace_id', 'key'], { unique: true, where: 'workspace_id IS NOT NULL AND board_id IS NULL' })
+@Index('uq_workflow_functions_global_key', ['key'], { unique: true, where: 'workspace_id IS NULL' })
+@Index('uq_workflow_functions_workspace_key', ['workspace_id', 'key'], { unique: true, where: 'workspace_id IS NOT NULL' })
 export class WorkflowFunction {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
   workspace_id: string | null;
-
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
 
   @Column({ type: 'varchar' })
   key: string;

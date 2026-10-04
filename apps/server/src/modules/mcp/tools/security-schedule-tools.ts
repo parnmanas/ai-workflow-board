@@ -35,7 +35,6 @@ function scheduleToJson(s: SecuritySchedule) {
   return {
     id: s.id,
     workspace_id: s.workspace_id,
-    board_id: s.board_id,
     name: s.name,
     kind: s.kind ?? 'scan',
     scope: s.scope,
@@ -59,7 +58,6 @@ function batchToJson(b: SecurityRunBatch) {
   return {
     id: b.id,
     workspace_id: b.workspace_id,
-    board_id: b.board_id,
     profile_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,

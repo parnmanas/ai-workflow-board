@@ -119,6 +119,8 @@ import {
 } from '../../common/orchestration-member-spec';
 import { callerHoldsId } from '../mcp/shared/session-auth';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
+import { ProjectsService } from '../projects/projects.service';
+import { MissionProject, loadMissionProject, projectFolderForHost } from './orchestration-project';
 
 /** Synthetic sender the dispatch messages are attributed to, mirroring QA/Actions. */
 const SYSTEM_SENDER_ID = 'system';
@@ -176,6 +178,9 @@ export class OrchestrationRunnerService {
     // 같은 규칙에 따라 그 뒤에 붙인다(티켓 f6a0de0e) — mission 방 self-join 과 발화
     // 시점 권한 재검사가 이 협력자를 쓴다.
     private readonly membership: RoomMembershipService,
+    // 역시 맨 뒤(docs/tickets.md) — 미션 프로젝트와 Host 별 main clone 폴더를 브리프·
+    // work order 에 적는다. 프로젝트가 있는 미션에서만 쓰이므로 스텁 생성자는 비워 둬도 된다.
+    private readonly projects: ProjectsService,
   ) {}
 
   /** Run `fn` with exclusive access to this mission's state machine. */
@@ -226,13 +231,30 @@ export class OrchestrationRunnerService {
         ?? orchestratorSpec?.cli
         ?? orchestratorId.slice(0, 11);
 
-      const roster = await this.buildRoster(team.id);
+      const project = await this.missionProject(mission);
+      const roster = await this.buildRoster(team.id, project);
       if (roster.length === 0) {
         throw orchestrationError(
           400,
           `team "${team.name}" has no members — add at least one agent for the orchestrator to delegate to`,
         );
       }
+      const briefProject = project
+        ? {
+            id: project.id,
+            name: project.name,
+            repo_url: project.repo_url,
+            branch: project.branch,
+            instructions: project.instructions,
+            own_host: orchestratorSpec
+              ? {
+                  host_name: (await this.hostNames([orchestratorSpec.manager_agent_id])).get(orchestratorSpec.manager_agent_id)
+                    ?? '(unknown host)',
+                  main_clone_folder: projectFolderForHost(project, orchestratorSpec.manager_agent_id),
+                }
+              : null,
+          }
+        : null;
 
       const room = await this.roomRepo.save(
         this.roomRepo.create({
@@ -280,6 +302,7 @@ export class OrchestrationRunnerService {
         teamName: team.name,
         teamPrompt: team.orchestrator_prompt,
         roster,
+        project: briefProject,
       });
 
       try {
@@ -1486,8 +1509,8 @@ export class OrchestrationRunnerService {
 
       // An orchestrator edit can change what is reachable — reopening a step
       // whose upstream is still failed, or skipping one that was the only thing
-      // blocking a subtree. Re-derive blocking before dispatching so the board
-      // never shows a step as merely "waiting" when it can never run.
+      // blocking a subtree. Re-derive blocking before dispatching so the mission
+      // screen never shows a step as merely "waiting" when it can never run.
       //
       // 복원이 차단보다 **먼저** 와야 한다(리뷰 라운드1 P1-4): retry 가 상류를 pending
       // 으로 되살린 직후이므로, 그때 자동 차단됐던 하류를 먼저 pending 으로 돌려놔야
@@ -2624,7 +2647,6 @@ export class OrchestrationRunnerService {
           id: step.id,
           runId: step.id,
           workspaceId: mission.workspace_id,
-          boardId: null,
           workspaceFolder: stepWorkspaceFolder,
           repoRef: mission.repo_ref,
           checkoutMode: mission.checkout_mode,
@@ -2639,6 +2661,24 @@ export class OrchestrationRunnerService {
     const graphNode = mission.graph_spec
       ? { kind: specNode?.kind ?? 'task', max_visits: specNode?.max_visits ?? 1 }
       : null;
+
+    // 프로젝트 폴더는 이 step 을 실제로 돌리는 Host 기준이다 — 매니저가 스폰에 쓰는
+    // 것과 같은 spec(step 스냅샷 → member spec)의 manager_agent_id 로 찾는다.
+    const project = await this.missionProject(mission);
+    const stepHostId = (parseTeamAgentSpec(agentSpec) ?? slotSpec)?.manager_agent_id ?? null;
+    const stepProject = project
+      ? {
+          id: project.id,
+          name: project.name,
+          repo_url: project.repo_url,
+          branch: project.branch,
+          instructions: project.instructions,
+          host_name: stepHostId ? (await this.hostNames([stepHostId])).get(stepHostId) ?? '' : '',
+          main_clone_folder: projectFolderForHost(project, stepHostId),
+          checked_out_in_workspace_folder: !!runProvision?.repo,
+        }
+      : null;
+
     const prompt = renderStepPrompt({
       mission,
       step,
@@ -2647,6 +2687,7 @@ export class OrchestrationRunnerService {
       dependencies,
       confirmFeedback: this.confirmFeedbackFor(mission, step, allSteps),
       roomId: room.id,
+      project: stepProject,
       isRetry: step.attempt > 1 || !!opts?.recovery,
       workspaceFolder: runProvision?.workspace_folder,
       sharedFolder: folderScope === 'shared' && slotSpec
@@ -3329,7 +3370,43 @@ export class OrchestrationRunnerService {
     return (await resolveAgentDisplayName(this.dataSource, agentId)) ?? '';
   }
 
-  private async buildRoster(teamId: string): Promise<RosterEntry[]> {
+  /**
+   * The mission's project for the prompts. Best-effort: a failed lookup leaves
+   * the project block out of the prompt (logged) rather than blocking a brief or
+   * a dispatch — the same availability-first stance as `buildRunProvision`.
+   */
+  private async missionProject(mission: OrchestrationMission): Promise<MissionProject | null> {
+    if (!mission.repo_ref) return null;
+    try {
+      return await loadMissionProject(this.projects, mission);
+    } catch (e: any) {
+      this.logService.warn('Orchestration', `mission ${mission.id}: project lookup failed — prompt omits it`, {
+        mission_id: mission.id,
+        err: e?.message || String(e),
+      });
+      return null;
+    }
+  }
+
+  /** RuntimeHost names by id (ids that are not Host rows are simply absent). */
+  private async hostNames(hostIds: string[]): Promise<Map<string, string>> {
+    const ids = Array.from(new Set(hostIds.filter((v) => !!v)));
+    const out = new Map<string, string>();
+    if (ids.length === 0) return out;
+    const rows = await this.dataSource.getRepository(RuntimeHost).find({
+      where: { id: In(ids) },
+      select: { id: true, name: true } as any,
+    });
+    for (const h of rows) if ((h as any)?.name) out.set(h.id, (h as any).name);
+    return out;
+  }
+
+  /**
+   * `project` (start-of-mission brief only) adds each member's main clone
+   * folder for the mission's project on that member's host. The other callers
+   * only validate assignee ids and leave it out.
+   */
+  private async buildRoster(teamId: string, project: MissionProject | null = null): Promise<RosterEntry[]> {
     const members = await this.teams.listMembers(teamId);
     // P4c-2b: Agent 행이 없는 rt- 슬롯도 로스터에 포함된다 — spec이 있으면 된다.
     const specsAll = new Map(members.map((m) => [m.agent_id, parseTeamAgentSpec(m.spec)]));
@@ -3417,6 +3494,7 @@ export class OrchestrationRunnerService {
                     && os.working_dir === spec.working_dir;
                 })
                 .map((other) => displayById.get(other.agent_id) ?? (other.role_label || other.agent_id.slice(0, 11))),
+              ...(project ? { project_folder: projectFolderForHost(project, spec.manager_agent_id) } : {}),
             }
           : null,
       };

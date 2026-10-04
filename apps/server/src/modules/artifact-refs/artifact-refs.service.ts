@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-import { Action, Board, BoardColumn, Ticket, WorkflowFunction, Workspace, WorkspaceSchedule } from '../../entities';
+import { Action, Ticket, WorkflowFunction, Workspace, WorkspaceSchedule } from '../../entities';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
-  ARTIFACT_REF_TYPES, ArtifactRefType, UUID_RE, formatArtifactRef, formatUnavailableArtifact,
+  ARTIFACT_REF_TYPES, ArtifactRefType, UUID_RE, formatArtifactRef, formatUnavailableArtifact, ticketPath,
 } from '../../common/artifact-ref';
 import { ReBACService } from '../../services/rebac.service';
 
@@ -15,7 +15,6 @@ export interface ResolvedArtifactRef {
   label: string;
   deepLink: string | null;
   workspaceName?: string;
-  boardName?: string;
   reason?: 'malformed_id' | 'workspace_access_denied' | 'not_found' | 'outside_workspace' | 'no_detail_surface';
 }
 
@@ -24,8 +23,6 @@ export class ArtifactRefsService {
   constructor(
     @InjectRepository(Ticket) private readonly tickets: Repository<Ticket>,
     @InjectDataSource() private readonly dataSource: DataSource,
-    @InjectRepository(Board) private readonly boards: Repository<Board>,
-    @InjectRepository(BoardColumn) private readonly columns: Repository<BoardColumn>,
     @InjectRepository(Action) private readonly actions: Repository<Action>,
     @InjectRepository(WorkflowFunction) private readonly functions: Repository<WorkflowFunction>,
     @InjectRepository(WorkspaceSchedule) private readonly schedules: Repository<WorkspaceSchedule>,
@@ -50,7 +47,7 @@ export class ArtifactRefsService {
   }
 
   async normalizeStoredOutput(workspaceId: string, text: string): Promise<string> {
-    const tokenLike = /#\[(ticket|agent|board|action|function|schedule):([^|\]\r\n]+)\|([^\]\r\n]+)\]/gi;
+    const tokenLike = /#\[(ticket|agent|action|function|schedule):([^|\]\r\n]+)\|([^\]\r\n]+)\]/gi;
     const matches = [...text.matchAll(tokenLike)];
     if (matches.length === 0) return text;
     let output = '';
@@ -87,19 +84,11 @@ export class ArtifactRefsService {
     let entityWorkspace: string | null = null;
     let label = '';
     let deepLink: string | null = null;
-    let boardName: string | undefined;
     if (ref.type === 'ticket') {
       entity = await this.tickets.findOne({ where: { id: ref.id } });
       entityWorkspace = entity?.workspace_id ?? null;
       label = entity?.title || '';
-      if (entity) {
-        const column = await this.columns.findOne({ where: { id: entity.column_id } });
-        if (column?.board_id) {
-          const board = await this.boards.findOne({ where: { id: column.board_id } });
-          boardName = board?.name;
-          deepLink = `/ws/${workspaceId}/boards/${column.board_id}?ticket=${entity.id}`;
-        }
-      }
+      deepLink = entity ? ticketPath(workspaceId, entity.id) : null;
     } else if (ref.type === 'agent') {
       // P4c-4: Host/링크 해소 (Agent 테이블 없음, agents UI 제거 — 딥링크 없음).
       const identity = await resolveCallerIdentityRow(this.dataSource, ref.id);
@@ -107,21 +96,11 @@ export class ArtifactRefsService {
       entityWorkspace = identity?.workspace_id ?? workspaceId;
       label = identity?.name || '';
       deepLink = null;
-    } else if (ref.type === 'board') {
-      entity = await this.boards.findOne({ where: { id: ref.id } });
-      entityWorkspace = entity?.workspace_id ?? null;
-      label = entity?.name || '';
-      boardName = entity?.name;
-      deepLink = entity ? `/ws/${workspaceId}/boards/${entity.id}` : null;
     } else {
       const repo = ref.type === 'action' ? this.actions : ref.type === 'function' ? this.functions : this.schedules;
       entity = await repo.findOne({ where: { id: ref.id } as any });
       entityWorkspace = entity?.workspace_id ?? (ref.type === 'function' && entity ? workspaceId : null);
       label = entity?.name || entity?.key || '';
-      if (entity?.board_id) {
-        const board = await this.boards.findOne({ where: { id: entity.board_id } });
-        boardName = board?.name;
-      }
       const surface = ref.type === 'action' ? 'actions' : ref.type === 'function' ? 'functions' : 'schedules';
       deepLink = entity ? `/ws/${workspaceId}/${surface}?artifact=${entity.id}` : null;
     }
@@ -130,8 +109,8 @@ export class ArtifactRefsService {
       return this.unavailable(ref.type, ref.id, 'outside_workspace');
     }
     if (!deepLink) {
-      return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label, workspaceName, boardName };
+      return { ...this.unavailable(ref.type, ref.id, 'no_detail_surface'), label, workspaceName };
     }
-    return { type: ref.type, id: ref.id, available: true, label, deepLink, workspaceName, boardName };
+    return { type: ref.type, id: ref.id, available: true, label, deepLink, workspaceName };
   }
 }

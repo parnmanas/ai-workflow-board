@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveBootstrapRepository } from '../dist/lib/event-dispatcher.js';
+import { parseMainCloneDir, resolveBootstrapRepository } from '../dist/lib/event-dispatcher.js';
 
 const TICKET_REPO = {
   id: 'ticket-resource',
@@ -37,12 +37,12 @@ const BOARD_ENV = env([
 
 test('ticket repo wins over the board environment (ticket > board priority)', () => {
   const picked = resolveBootstrapRepository(TICKET_REPO, 'feature/x', BOARD_ENV);
-  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'feature/x', defaultBranch: 'develop' });
+  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'feature/x', defaultBranch: 'develop', name: 'Ticket Repo' });
 });
 
 test('ticket repo with no explicit branch falls back to the ticket repo\'s OWN default_branch (not the board env repo\'s)', () => {
   const picked = resolveBootstrapRepository(TICKET_REPO, '', BOARD_ENV);
-  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'develop', defaultBranch: 'develop' });
+  assert.deepEqual(picked, { resourceId: 'ticket-resource', url: 'https://github.com/acme/ticket-repo.git', branch: 'develop', defaultBranch: 'develop', name: 'Ticket Repo' });
 });
 
 test('ticket repo with whitespace-only branch is treated as empty and falls back to the repo default_branch', () => {
@@ -124,4 +124,44 @@ test('board env repository with no resource_id still resolves (agent-manager is 
   const urlOnly = env([{ resource_id: '', url: 'https://github.com/acme/url-only.git', target_dir: 'repos/url-only', branch: '', post_clone_commands: [] }]);
   const picked = resolveBootstrapRepository(null, null, urlOnly);
   assert.deepEqual(picked, { resourceId: '', url: 'https://github.com/acme/url-only.git', branch: '', defaultBranch: null });
+});
+
+// ── board-less projects (docs/tickets.md) ─────────────────────────────────────
+// The new server ships the project as base_repo = { id: project.id, name, url,
+// default_branch, main_clone_dir }. main_clone_dir (the project's folder on the
+// assignee's host) replaces the managed `.awb/base/<slug>` clone when it is a
+// non-empty ABSOLUTE path; anything else keeps the managed clone.
+
+const PROJECT_REPO = {
+  id: 'project-1',
+  name: 'Web',
+  url: 'https://github.com/acme/web.git',
+  default_branch: 'main',
+};
+
+test('project base_repo carries an absolute main_clone_dir through to the bootstrap repo', () => {
+  const picked = resolveBootstrapRepository({ ...PROJECT_REPO, main_clone_dir: '/srv/web' }, '', null);
+  assert.deepEqual(picked, {
+    resourceId: 'project-1', url: 'https://github.com/acme/web.git', branch: 'main', defaultBranch: 'main',
+    name: 'Web', mainCloneDir: '/srv/web',
+  });
+  const win = resolveBootstrapRepository({ ...PROJECT_REPO, main_clone_dir: 'D:\\repos\\web' }, '', null);
+  assert.equal(win.mainCloneDir, 'D:\\repos\\web');
+});
+
+test('null / empty / relative main_clone_dir keeps the managed .awb/base clone (no mainCloneDir)', () => {
+  for (const dir of [null, undefined, '', '   ', 'repos/web', './web', 42]) {
+    const picked = resolveBootstrapRepository({ ...PROJECT_REPO, main_clone_dir: dir }, '', null);
+    assert.equal('mainCloneDir' in picked, false, `main_clone_dir=${JSON.stringify(dir)}`);
+    assert.equal(picked.resourceId, 'project-1');
+  }
+});
+
+test('parseMainCloneDir accepts POSIX, drive-letter and UNC absolute paths only', () => {
+  assert.equal(parseMainCloneDir(' /srv/web '), '/srv/web');
+  assert.equal(parseMainCloneDir('C:/work/web'), 'C:/work/web');
+  assert.equal(parseMainCloneDir('\\\\nas\\share\\web'), '\\\\nas\\share\\web');
+  assert.equal(parseMainCloneDir('web'), null);
+  assert.equal(parseMainCloneDir(''), null);
+  assert.equal(parseMainCloneDir(null), null);
 });

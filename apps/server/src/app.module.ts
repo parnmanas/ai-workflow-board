@@ -4,12 +4,10 @@ import { join, sep } from 'path';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module';
-import { BoardsModule } from './modules/boards/boards.module';
-import { ColumnsModule } from './modules/columns/columns.module';
 import { TicketsModule } from './modules/tickets/tickets.module';
+import { ProjectsModule } from './modules/projects/projects.module';
 import { UsersModule } from './modules/users/users.module';
 import { AgentsModule } from './modules/agents/agents.module';
-import { PromptTemplatesModule } from './modules/prompt-templates/prompt-templates.module';
 import { ChannelsModule } from './modules/channels/channels.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { ActivityModule } from './modules/activity/activity.module';
@@ -28,14 +26,9 @@ import { ActionsModule } from './modules/actions/actions.module';
 import { CredentialsModule } from './modules/credentials/credentials.module';
 import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
-import { WorkspaceRolesModule } from './modules/workspace-roles/workspace-roles.module';
 import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
 import { UserChannelsModule } from './modules/user-channels/user-channels.module';
-import { ColumnPoliciesModule } from './modules/column-policies/column-policies.module';
-import { BenchmarksModule } from './modules/benchmarks/benchmarks.module';
 import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-schedule.module';
-import { FeaturesModule } from './modules/features/features.module';
-import { HandoffModule } from './modules/handoff/handoff.module';
 import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-functions.module';
 import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
@@ -84,12 +77,10 @@ import { VoiceModule } from './modules/voice/voice.module';
     }),
     AuthModule,
     WorkspacesModule,
-    BoardsModule,
-    ColumnsModule,
+    ProjectsModule,
     TicketsModule,
     UsersModule,
     AgentsModule,
-    PromptTemplatesModule,
     ChannelsModule,
     ApiKeysModule,
     ActivityModule,
@@ -111,14 +102,9 @@ import { VoiceModule } from './modules/voice/voice.module';
     CredentialsModule,
     AgentLogsModule,
     MentionsModule,
-    WorkspaceRolesModule,
     AgentManagerModule,
     UserChannelsModule,
-    ColumnPoliciesModule,
-    BenchmarksModule,
     WorkspaceScheduleModule,
-    FeaturesModule,
-    HandoffModule,
     WorkflowFunctionsModule,
     SkillsModule,
     ArtifactRefsModule,

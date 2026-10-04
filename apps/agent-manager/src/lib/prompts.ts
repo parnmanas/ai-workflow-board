@@ -18,6 +18,8 @@ import {
   redactAgentContextText,
   renderAgentContextContract,
 } from './agent-context-contract.js';
+import { TICKET_STATUS_LABELS, ticketWorkflowStatus, type TicketStatus } from './ticket-status.js';
+import type { OrdinaryWorkBoardCandidate, OrdinaryWorkCandidates } from './rest.js';
 
 interface CommentLike {
   author_name?: string;
@@ -61,7 +63,7 @@ interface ChatRoomNewMessage {
 }
 
 const ARTIFACT_REFERENCE_INSTRUCTION =
-  '- When mentioning an AWB Ticket, Agent, Board, Action, Function, or Schedule in user-visible output, use ' +
+  '- When mentioning an AWB Ticket, Agent, Action, Function, or Schedule in user-visible output, use ' +
   '`#[type:<full-uuid>|Human-readable name]`. Never use only a shortened id. Use `@[agent:...]` only to notify. ' +
   'If existence or access cannot be verified, do not invent a link; give the name, full stable id, and reason.';
 
@@ -77,6 +79,52 @@ export const CURRENT_COLUMN_EXECUTION_CONTRACT = [
   '- Make safe, reversible assumptions and proceed autonomously. Ask only when the current-column work is blocked by a concrete product decision, unavailable credential or permission, missing required input, or irreversible risk.',
 ].join('\n');
 
+/** `column_prompt.template_id` of the board-less server's built-in single-agent
+ *  work order (server `common/ticket-work-order.ts`). */
+export const TICKET_WORK_ORDER_TEMPLATE_ID = 'builtin:ticket-work-order';
+
+/** Board-less execution contract (docs/tickets.md): one assignee does the whole
+ *  ticket. Replaces CURRENT_COLUMN_EXECUTION_CONTRACT whenever the trigger
+ *  carries `status` — there is no later column/role to hand the rest to. */
+export const SINGLE_AGENT_EXECUTION_CONTRACT = [
+  'AWB ticket execution contract (mandatory):',
+  '- You are the single assignee of this ticket and own it end-to-end. No later stage or other role will pick up unfinished work.',
+  '- The ticket `status` (backlog / todo / in_progress / review / done) is the canonical workflow state.',
+  '- Work through it in order: understand the ticket and its context → plan → implement (you may fan parts out to your own subagents; you stay responsible for the result) → verify (the builds/tests the project requires) → land the change per the project policy (pull request when the project uses PRs, otherwise its normal merge) → comment a summary of what you did and how it was verified.',
+  '- Finish by calling `mcp__awb__move_ticket` with status `done`, or `review` when a human must check the result before it is done.',
+  '- When the work is blocked by a concrete product decision, unavailable credential or permission, missing required input, or irreversible risk, comment exactly what is needed and call `mcp__awb__pend_ticket` instead of guessing.',
+  '- Inspect the ticket, repository, and available AWB context before asking the user. Make safe, reversible assumptions and proceed autonomously.',
+  '- Stay within the ticket scope. File worthwhile follow-up work as a separate ticket (`mcp__awb__create_ticket`) instead of doing it here.',
+].join('\n');
+
+/** Board-less (status) trigger? The trigger's status is authoritative; the
+ *  built-in work-order template id covers a ticket-less fallback prompt. */
+function statusModeOf(ticket: any, columnPrompt: ColumnPrompt | null | undefined): TicketStatus | 'unknown' | null {
+  const status = ticketWorkflowStatus(ticket);
+  if (status) return status;
+  return columnPrompt?.template_id === TICKET_WORK_ORDER_TEMPLATE_ID ? 'unknown' : null;
+}
+
+/** `Status: In Progress (in_progress)` — the status-mode twin of `Current column:`. */
+export function ticketStatusLine(status: TicketStatus | 'unknown'): string {
+  return status === 'unknown'
+    ? 'Status: unknown (fetch the ticket with mcp__awb__get_ticket)'
+    : `Status: ${TICKET_STATUS_LABELS[status]} (${status})`;
+}
+
+/** The single-agent work order the board-less server ships in `column_prompt`. */
+export function ticketWorkOrderLines(columnPrompt: ColumnPrompt | null | undefined): string[] {
+  if (!columnPrompt?.content) return [];
+  return ['', 'Ticket work order:', columnPrompt.content];
+}
+
+/** Closing instructions for a status-mode trigger (no "next column"). */
+const SINGLE_AGENT_CLOSING_INSTRUCTIONS = [
+  '- Use AWB MCP tools (mcp__awb__*) to perform the work.',
+  '- Leave a comment on the ticket when done describing what you did and how you verified it.',
+  '- When the work is complete, move the ticket to `done` with mcp__awb__move_ticket (or to `review` if a human must check it first). If you are blocked on a human decision, use mcp__awb__pend_ticket.',
+];
+
 function ticketReferenceLine(ticket: { id?: string; title?: string }): string {
   const id = String(ticket?.id || '');
   const title = String(ticket?.title || '').replace(/[\]\r\n|]+/g, ' ').trim();
@@ -91,6 +139,53 @@ interface BaseRepoLike {
   name?: string;
   url?: string;
   default_branch?: string;
+  /** Board-less server: the project's main clone folder on the assignee's host. */
+  main_clone_dir?: string | null;
+}
+
+interface ProjectLike {
+  id?: string;
+  name?: string;
+  repo_url?: string;
+  default_branch?: string;
+  use_pr?: boolean;
+  instructions?: string;
+}
+
+/** Project block for a status-mode trigger — the board-less replacement of
+ *  "Base repository". The project IS the repository (same id as the old
+ *  resource), plus its landing policy and the operator's main clone folder. */
+function appendProjectBlock(
+  lines: string[],
+  project: ProjectLike | null | undefined,
+  baseRepo: BaseRepoLike | null | undefined,
+  baseBranch: string | null | undefined,
+): void {
+  const name = project?.name || baseRepo?.name || '';
+  const url = baseRepo?.url || project?.repo_url || '';
+  const defaultBranch = (project?.default_branch || baseRepo?.default_branch || '').trim();
+  const branch = (baseBranch || defaultBranch).trim();
+  const mainClone = typeof baseRepo?.main_clone_dir === 'string' ? baseRepo.main_clone_dir.trim() : '';
+  if (!project && !baseRepo && !branch) return;
+  lines.push('');
+  lines.push('Project:');
+  if (name) lines.push(`- Name: ${name}`);
+  if (url) lines.push(`- Repository: ${url}`);
+  if (defaultBranch) lines.push(`- Default branch: ${defaultBranch}`);
+  if (branch) lines.push(`- Base branch: ${branch}`);
+  if (typeof project?.use_pr === 'boolean') {
+    lines.push(`- Landing: ${project.use_pr ? 'open a pull request' : 'fast-forward merge into the base branch directly (no pull request)'}`);
+  }
+  if (mainClone) {
+    lines.push(`- Main clone folder on this host: ${mainClone} — the operator's checkout. Read from it if useful, but never commit, reset, clean, or switch branches there; your ticket worktree is a separate folder below it.`);
+  }
+  if (project?.instructions && project.instructions.trim()) {
+    lines.push('- Project instructions:');
+    for (const ln of project.instructions.trim().split(/\r?\n/)) lines.push(`  ${ln}`);
+  }
+  if (url || mainClone) {
+    lines.push('- The current work folder is this ticket\'s own checkout of the repository, already prepared on its feature branch (see the repository preparation result).');
+  }
 }
 
 /** Append a "Base repository" block to the trigger prompt when the ticket has
@@ -151,11 +246,11 @@ function dedicatedFolderBoundaryBullets(): string[] {
   return [
     '- Work only inside that folder. Do not create another git worktree, clone, checkout directory, `_compilecheck_*`, `_test_*`, or a new build folder.',
     '- Never create anything above working_dir (the agent-home container) or inside another agent\'s home directory — that is exactly how the shared container gets polluted.',
-    '- If a dependency install is missing (e.g. node_modules), symlink it from the shared `.awb/base/<repo>` checkout instead of running a fresh install or clone.',
+    '- If a dependency install is missing (e.g. node_modules), symlink it from the shared base checkout (`.awb/base/<repo>`, or the project\'s main clone folder) instead of running a fresh install or clone.',
   ];
 }
 
-/** per_ticket 모드(보드 기본값)에서 매 티켓 턴에 주입되는 폴더 경계 정책. shared
+/** per_ticket 모드(기본값)에서 매 티켓 턴에 주입되는 폴더 경계 정책. shared
  * 모드와 목적(반스프롤)은 같지만 문구가 다르다 — per_ticket 워크트리는 티켓마다
  * 새로 배정되는 전용 폴더이므로 "캐시를 데워 유지하라"는 shared 전용 문구는 여기
  * 해당하지 않는다. 이 문구가 per_ticket에는 한 번도 전달된 적이 없었던 것이 ticket
@@ -170,8 +265,8 @@ export function perTicketWorktreeInstructions(workFolder: string): string {
   ].join('\n');
 }
 
-/** 트리거 프롬프트에 주입할 폴더 경계 정책 문구를 보드 worktree_mode에 따라 고른다.
- * mode가 없는 보드(worktree 규약 이전, worktree_mode 필드 자체가 없음)는 반드시 빈
+/** 트리거 프롬프트에 주입할 폴더 경계 정책 문구를 trigger 의 worktree_mode에 따라 고른다.
+ * mode가 없는 payload(worktree 규약 이전, worktree_mode 필드 자체가 없음)는 반드시 빈
  * 문자열을 반환해야 한다 — injectWorkFolder와 동일한 byte-identity 보장(수용 기준 4). */
 export function worktreeInstructionsFor(mode: WorktreeMode | undefined, workFolder: string): string {
   if (mode === 'shared') return sharedWorktreeInstructions(workFolder);
@@ -251,15 +346,19 @@ export function composeTriggerPrompt(
   columnPrompt: ColumnPrompt | null,
   extraInstructions?: string | null,
 ): string {
+  // board-less 서버(docs/tickets.md)는 trigger 에 status 를 싣는다. 그때는 담당자
+  // 한 명이 티켓 전체를 끝내므로 "현재 column 만" 계약 대신 단일 담당 계약과
+  // work order 를 렌더한다. status 가 없는 구버전(column) payload 는 종전 그대로.
+  const status = statusModeOf(ticket, columnPrompt);
   const lines: string[] = [];
   lines.push('You are an AWB subagent responding to an assigned trigger.');
   lines.push('');
-  lines.push(CURRENT_COLUMN_EXECUTION_CONTRACT);
+  lines.push(status ? SINGLE_AGENT_EXECUTION_CONTRACT : CURRENT_COLUMN_EXECUTION_CONTRACT);
   lines.push('');
   if (ticket) {
     // Dispatcher가 붙인 marker는 실제 실행 경계에서 계약/preflight가 필수임을
     // 뜻한다. marker 없는 직접 호출은 오래된 라이브러리 소비자 호환 경로다.
-    if ((ticket as any).__awb_enforce_context_contract || (ticket.id && ticket.current_column_id && ticket.current_column_name)) {
+    if ((ticket as any).__awb_enforce_context_contract || (ticket.id && ((ticket.current_column_id && ticket.current_column_name) || ticketWorkflowStatus(ticket)))) {
       const repositoryContext = (ticket as any).__awb_repository_context as TicketRepositoryContext | undefined;
       const contextContract = buildAgentContextContract({
         ticket,
@@ -275,7 +374,9 @@ export function composeTriggerPrompt(
     }
     lines.push(ticketReferenceLine(ticket));
     if (ticket.title) lines.push(`Title: ${ticket.title}`);
-    if (ticket.current_column_name || ticket.current_column_id) {
+    if (status) {
+      lines.push(ticketStatusLine(status));
+    } else if (ticket.current_column_name || ticket.current_column_id) {
       lines.push(
         `Current column: ${ticket.current_column_name || 'unknown'} ` +
           `(kind: ${ticket.current_column_kind || 'unknown'}, id: ${ticket.current_column_id || 'unknown'})`,
@@ -286,7 +387,9 @@ export function composeTriggerPrompt(
       lines.push('Description:');
       lines.push(ticket.description);
     }
-    if (columnPrompt && columnPrompt.content) {
+    if (status) {
+      lines.push(...ticketWorkOrderLines(columnPrompt));
+    } else if (columnPrompt && columnPrompt.content) {
       lines.push('');
       lines.push(`Column workflow guide (${columnPrompt.name || 'column_prompt'}):`);
       lines.push(columnPrompt.content);
@@ -300,7 +403,11 @@ export function composeTriggerPrompt(
       lines.push('Ticket instructions:');
       lines.push(ticket.prompt_text);
     }
-    appendBaseRepoBlock(lines, ticket.base_repo ?? null, ticket.base_branch ?? null);
+    if (status) {
+      appendProjectBlock(lines, ticket.__awb_project ?? ticket.project ?? null, ticket.base_repo ?? null, ticket.base_branch ?? null);
+    } else {
+      appendBaseRepoBlock(lines, ticket.base_repo ?? null, ticket.base_branch ?? null);
+    }
     const comments: CommentLike[] = Array.isArray(ticket.comments)
       ? ticket.comments.slice(-5)
       : [];
@@ -317,7 +424,9 @@ export function composeTriggerPrompt(
   } else {
     lines.push(ticketReferenceLine({ id: fallbackTicketId }));
     lines.push('(Fresh ticket context fetch failed — using embedded trigger payload only.)');
-    if (columnPrompt && columnPrompt.content) {
+    if (status) {
+      lines.push(...ticketWorkOrderLines(columnPrompt));
+    } else if (columnPrompt && columnPrompt.content) {
       lines.push('');
       lines.push(`Column workflow guide (${columnPrompt.name || 'column_prompt'}):`);
       lines.push(columnPrompt.content);
@@ -330,10 +439,14 @@ export function composeTriggerPrompt(
   }
   lines.push('');
   lines.push('Instructions:');
-  lines.push('- Use AWB MCP tools (mcp__awb__*) to perform the work.');
-  lines.push('- Claim the ticket if not already claimed.');
-  lines.push('- Leave a comment on the ticket when done describing what you did.');
-  lines.push('- Move the ticket to the next column when the work is complete.');
+  if (status) {
+    lines.push(...SINGLE_AGENT_CLOSING_INSTRUCTIONS);
+  } else {
+    lines.push('- Use AWB MCP tools (mcp__awb__*) to perform the work.');
+    lines.push('- Claim the ticket if not already claimed.');
+    lines.push('- Leave a comment on the ticket when done describing what you did.');
+    lines.push('- Move the ticket to the next column when the work is complete.');
+  }
   lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   if (extraInstructions) {
     lines.push('');
@@ -375,21 +488,29 @@ export type ChatReplyMode = boolean | 'agent_manager_delivers';
  *  perform DIRECTLY, not defer into an AWB ticket. So for Action rooms we drop
  *  the ordinary-chat work-routing rule and substitute a
  *  "do the work directly, do NOT create a ticket" 규칙으로 바꾼다. 일반 채팅방
- *  (isActionRoom = false, 기본값)은 일반 구현 작업을 적절한 기존 보드로 보내며,
- *  direct-chat은 좁게 정의된 예외에만 사용한다. */
-function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom = false): string[] {
+ *  (isActionRoom = false, 기본값)은 일반 구현 작업을 태그·프로젝트를 고른 티켓 하나로
+ *  보내며(board-less, docs/tickets.md), direct-chat은 좁게 정의된 예외에만 사용한다.
+ *
+ *  `legacyBoards` 는 board-less 이전 서버(후보 API 가 보드 목록을 돌려준 경우)에서만
+ *  켜진다 — 그때는 종전 "기존 보드 선택" 문구와 `board_id` 마커를 그대로 쓴다. */
+function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom = false, legacyBoards = false): string[] {
   const operationalPolicy = [
     '- OPERATIONAL REQUEST POLICY: requests to deploy, upgrade, publish, restart, roll out, or run recurring operational work are capability-first. Never ask the user to run commands, install tooling, create a ticket, or otherwise carry out the operation for you.',
-    '- For an operational request, first search workspace/board Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
+    '- For an operational request, first search workspace Actions (`search_actions` or `list_actions`). If a matching Action exists, check its approval/risk guard and run it exactly once with `run_action`; report the run id and state.',
     '- If no Action matches but a relevant MCP/tool exists, perform the operation with that tool. For safe repeatable work, register a narrow idempotent Action with `save_action` and run it. Ask for user input only when a concrete permission, approval, secret, or irreversible-risk gate requires it, and request only that minimum input.',
     '- If the required MCP/tool itself is unavailable, create one AWB capability ticket (title prefix `[운영 자동화]`; labels `automation`, `mcp`, `mcp-missing`, `source:chat`) instead of delegating work to the user. Include the original request, normalized operation, room/source ids, Action search evidence, missing capability, success criteria, risk conditions, and a back-reference to this conversation.',
     '- REPEATED-TURN RULE: inspect conversation history for an existing run id or open capability ticket for the same normalized operation. Reuse it and report its current state; do not create a duplicate run/ticket. Re-check Actions on a later turn so a newly registered Action can supersede an earlier missing-capability result.',
   ];
-  const ordinaryWorkPolicy = [
+  const ordinaryWorkPolicy = legacyBoards ? [
     '- ORDINARY WORK ROUTING: ticket-first is the default for ordinary implementation, bug-fix, refactor, configuration, and other change requests. First search for a suitable existing board; when one exists, create exactly one focused AWB ticket on that board and carry out the work through its workflow.',
     '- A ticket-first request is not satisfied by merely proposing, describing, or promising future work. Treat user language expressing future intent (for example, "I want to add", "we should change", or "please implement") as a request to create and execute the ticket now unless the user is only asking a question or explicitly asks for planning/advice only.',
     '- Use direct chat only for these exceptions: (1) genuinely small one-off work, (2) work for which no suitable existing board exists, or (3) work the user explicitly asks you to perform directly in chat. Do not create a new board merely to avoid the boardless exception.',
     '- When creating the ticket, pass this chat room id as `source_chat_room_id`, leave roles unset for board defaults, and create only one focused ticket for the request. Do not split it into speculative or duplicate tickets.',
+  ] : [
+    '- ORDINARY WORK ROUTING: ticket-first is the default for ordinary implementation, bug-fix, refactor, configuration, and other change requests. File exactly one focused AWB ticket for the request — classify it with `tags` (kind / area; prefer tags the workspace already uses) and, when the work concerns a repository, the matching project (`project_id` from the project candidates or `mcp__awb__list_projects`) — and carry out the work through that ticket.',
+    '- A ticket-first request is not satisfied by merely proposing, describing, or promising future work. Treat user language expressing future intent (for example, "I want to add", "we should change", or "please implement") as a request to create and execute the ticket now unless the user is only asking a question or explicitly asks for planning/advice only.',
+    '- Use direct chat only for these exceptions: (1) genuinely small one-off work, or (2) work the user explicitly asks you to perform directly in chat.',
+    '- When creating the ticket, pass this chat room id as `source_chat_room_id`, leave the assignee unset unless the user named one (the project default assignee applies), and create only one focused ticket for the request. Do not split it into speculative or duplicate tickets.',
     '- For a direct-chat exception, perform the requested work now and report the result inline; do not stop after describing what you could do.',
     '- DIRECT-CHAT GIT POLICY: before changing tracked repository files, inspect the current branch, working tree, remote default branch, and repository instructions. Pure inspection and environment-only work that does not change tracked files needs no branch.',
     '- For direct-chat file changes, use the branch explicitly requested by the user when safe. Otherwise create or reuse one dedicated branch for this chat task, named `chat/<room-id-short>-<slug>`, from the latest remote default branch. Never make direct-chat edits on shared/protected branches such as `main`, `master`, `production`, `production.private`, or release branches.',
@@ -416,7 +537,9 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     } else {
       lines.push(...operationalPolicy);
       lines.push(...ordinaryWorkPolicy);
-      lines.push('- For ticket-first work, use `mcp__awb__create_ticket` with the suitable existing board and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.');
+      lines.push(legacyBoards
+        ? '- For ticket-first work, use `mcp__awb__create_ticket` with the suitable existing board and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.'
+        : '- For ticket-first work, use `mcp__awb__create_ticket` with `title`, `description`, `tags`, the matching `project_id` when it concerns a repository, and `source_chat_room_id` set to this room. Questions, status/triage, and read-only investigation stay inline.');
     }
     lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
     return lines;
@@ -433,7 +556,9 @@ function chatReplyInstructions(mode: ChatReplyMode, roomId: string, isActionRoom
     lines.push(...operationalPolicy);
     lines.push(...ordinaryWorkPolicy);
     lines.push('- This adapter cannot call AWB MCP directly. For a missing operational capability, end with exactly one machine-readable line `AWB_OPERATIONAL_FALLBACK: {"operation":"<normalized operation>","missing_capability":"<missing MCP/tool>","original_request":"<request>"}` so the agent-manager fallback can create/reuse the capability ticket atomically; never tell the user to file it.');
-    lines.push('- For ticket-first ordinary work, select the suitable existing board from the available workspace context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.');
+    lines.push(legacyBoards
+      ? '- For ticket-first ordinary work, select the suitable existing board from the available workspace context and end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"board_id":"<existing board UUID>","title":"<focused ticket title>","description":"<acceptance criteria and context>","original_request":"<request>"}`. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.'
+      : '- For ticket-first ordinary work, end with exactly one machine-readable line `AWB_ORDINARY_WORK_FALLBACK: {"title":"<focused ticket title>","description":"<acceptance criteria and context>","tags":["<tag>"],"project_id":"<project UUID from the candidates, or null>","original_request":"<request>"}`. Choose tags that classify the work and a project only from the listed candidates. The agent-manager creates or reuses exactly one ticket and binds this room as `source_chat_room_id`; do not merely promise future work. Do not emit this marker for a listed direct-chat exception.');
   }
   lines.push(ARTIFACT_REFERENCE_INSTRUCTION);
   return lines;
@@ -448,7 +573,7 @@ export function chatFollowupPolicy(isActionRoom = false): string {
   return [
     '- Apply the operational-request policy again on this turn: Action search/run first, then an available MCP/tool, otherwise one deduplicated capability ticket; never delegate commands or ticket creation to the user.',
     '- Reuse any run id or open capability ticket already recorded in this conversation for the same normalized operation, while re-checking whether a matching Action has since appeared.',
-    '- For ordinary change requests, apply ticket-first routing again: search for a suitable existing board and create one focused ticket linked with this room as `source_chat_room_id`; use direct chat only for a small one-off, no suitable board, or an explicit user request to work directly in chat.',
+    '- For ordinary change requests, apply ticket-first routing again: file one focused ticket (tags, plus the project when it concerns a repository) linked with this room as `source_chat_room_id`; use direct chat only for a small one-off or an explicit user request to work directly in chat.',
     '- Future-intent wording is still actionable: create and execute the ticket now instead of only acknowledging or promising the work.',
   ].join('\n');
 }
@@ -566,8 +691,12 @@ export function composeChatRoomPrompt(
   // byte-identity no-op이 되므로 opt-in하지 않은 workspace/QA-security 디스패치
   // (별도로 자기만의 프롬프트를 조립하는 경로)는 영향받지 않는다.
   workFolder = '',
-  ordinaryWorkBoards: Array<{ id: string; name: string; description?: string }> = [],
+  // 일반 작업 티켓 후보(non-native 채팅만): board-less 서버는 projects + tags,
+  // 구버전 서버는 보드 배열(legacy — 배열 그대로 넘겨도 된다).
+  ordinaryWork: OrdinaryWorkCandidates | OrdinaryWorkBoardCandidate[] | null = null,
 ): string {
+  const candidates = normalizeOrdinaryWorkCandidates(ordinaryWork);
+  const legacyBoards = Array.isArray(candidates.boards);
   const lines: string[] = [];
   lines.push(
     isActionRoom
@@ -578,14 +707,7 @@ export function composeChatRoomPrompt(
   lines.push(`Room ID: ${roomId}`);
   if (!usesNativeMcp && !isActionRoom) {
     lines.push('');
-    lines.push('Existing board candidates for ordinary work (use only these UUIDs):');
-    if (ordinaryWorkBoards.length === 0) {
-      lines.push('- (none; treat this as the no-suitable-existing-board direct-chat exception)');
-    } else {
-      for (const board of ordinaryWorkBoards) {
-        lines.push(`- ${board.name} | ${board.id}${board.description ? ` | ${board.description.slice(0, 500)}` : ''}`);
-      }
-    }
+    lines.push(...ordinaryWorkCandidateLines(candidates));
   }
   lines.push('');
   const realHistory = Array.isArray(history)
@@ -622,7 +744,7 @@ export function composeChatRoomPrompt(
   lines.push('');
   lines.push('Instructions:');
   lines.push('- Compose a helpful reply using your knowledge and the conversation context.');
-  for (const ln of chatReplyInstructions(usesNativeMcp, roomId, isActionRoom)) lines.push(ln);
+  for (const ln of chatReplyInstructions(usesNativeMcp, roomId, isActionRoom, legacyBoards)) lines.push(ln);
   // Auto-title an untitled room (native MCP only — non-native runtimes have no
   // tool to persist the name). Fired only when roomName is empty, which is true
   // just on the opening turn; once set, subsequent turns omit this. Skipped for
@@ -642,6 +764,47 @@ export function composeChatRoomPrompt(
     lines.push(workInstructions);
   }
   return injectWorkFolder(lines.join('\n'), workFolder);
+}
+
+/** Accept the board-less candidate object, a legacy board array, or nothing. */
+function normalizeOrdinaryWorkCandidates(
+  raw: OrdinaryWorkCandidates | OrdinaryWorkBoardCandidate[] | null | undefined,
+): OrdinaryWorkCandidates {
+  if (Array.isArray(raw)) return { projects: [], tags: [], boards: raw };
+  return {
+    projects: Array.isArray(raw?.projects) ? raw!.projects : [],
+    tags: Array.isArray(raw?.tags) ? raw!.tags : [],
+    ...(Array.isArray(raw?.boards) ? { boards: raw!.boards } : {}),
+  };
+}
+
+function ordinaryWorkCandidateLines(c: OrdinaryWorkCandidates): string[] {
+  const lines: string[] = [];
+  if (Array.isArray(c.boards)) {
+    lines.push('Existing board candidates for ordinary work (use only these UUIDs):');
+    if (c.boards.length === 0) {
+      lines.push('- (none; treat this as the no-suitable-existing-board direct-chat exception)');
+    } else {
+      for (const board of c.boards) {
+        lines.push(`- ${board.name} | ${board.id}${board.description ? ` | ${board.description.slice(0, 500)}` : ''}`);
+      }
+    }
+    return lines;
+  }
+  lines.push('Project candidates for ordinary work tickets (use only these UUIDs as project_id):');
+  if (c.projects.length === 0) {
+    lines.push('- (none; leave project_id null)');
+  } else {
+    for (const project of c.projects.slice(0, 100)) {
+      lines.push(`- ${project.name} | ${project.id}${project.repo_url ? ` | ${project.repo_url}` : ''}`);
+    }
+  }
+  const tags = c.tags
+    .filter((t) => t && typeof t.tag === 'string' && t.tag)
+    .slice(0, 100)
+    .map((t) => (typeof t.count === 'number' ? `${t.tag} (${t.count})` : t.tag));
+  lines.push(`Tags already used in this workspace: ${tags.length > 0 ? tags.join(', ') : '(none yet)'}`);
+  return lines;
 }
 
 export const promptComposer: PromptComposer = {

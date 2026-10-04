@@ -2,7 +2,7 @@ import { Entity, PrimaryGeneratedColumn, Column, Index, CreateDateColumn, Update
 
 /**
  * CiRedAlert — dedup + delivery-state row for `CiHealthMonitorService` (ticket
- * cc1c494e). One row per (board, repo, branch, workflow) currently in a red
+ * cc1c494e). One row per (project, repo, branch, workflow) currently in a red
  * streak; the sweep consults it to decide whether the streak has already been
  * surfaced within the re-alert cooldown, and to avoid re-creating a Backlog
  * ticket for an episode still open.
@@ -22,18 +22,19 @@ import { Entity, PrimaryGeneratedColumn, Column, Index, CreateDateColumn, Update
  * keeps the table self-pruning, same as StuckTicketAlert's unstuck path.
  */
 @Entity('ci_red_alerts')
-@Index('uq_ci_red_alerts_target', ['board_id', 'repo_full_name', 'branch', 'workflow_id'], { unique: true })
+@Index('uq_ci_red_alerts_target', ['project_id', 'repo_full_name', 'branch', 'workflow_id'], { unique: true })
 export class CiRedAlert {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // Project whose repository is being watched.
   @Column({ type: 'varchar' })
-  board_id: string;
+  project_id: string;
 
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  // "owner/repo" — parsed from the board environment repo's Resource.url.
+  // "owner/repo" — parsed from the project's repo_url.
   @Column({ type: 'varchar' })
   repo_full_name: string;
 

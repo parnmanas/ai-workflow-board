@@ -22,7 +22,7 @@ import { WorkspaceFolderRepoRef } from './workspace-folder-options';
  * branch it was reached from).
  */
 export interface BuildRepoRef {
-  resource_id?: string;
+  project_id?: string;
   url?: string;
 }
 
@@ -42,15 +42,31 @@ export function normalizeRepoUrl(url: string): string {
 }
 
 /**
- * Derive the stable lookup key from a repo reference. `resource_id` wins (it is
- * the canonical, auth-carrying identity); otherwise a normalized url. Returns ''
- * when nothing usable is present — the caller (service) turns that into a 400 so
- * an unidentifiable build never silently pollutes the registry under an empty key.
+ * Project id of a repo reference — `project_id`, or a legacy `resource_id` from
+ * a caller that predates projects (repository Resources were migrated to
+ * Projects with the SAME id, so it names the same repo).
+ */
+export function buildRepoProjectId(ref: BuildRepoRef | WorkspaceFolderRepoRef | null | undefined): string {
+  if (!ref || typeof ref !== 'object') return '';
+  const raw = (ref as any).project_id ?? (ref as any).resource_id;
+  return raw != null ? String(raw).trim() : '';
+}
+
+/**
+ * Derive the stable lookup key from a repo reference. The project id wins (it
+ * is the canonical, auth-carrying identity); otherwise a normalized url. Returns
+ * '' when nothing usable is present — the caller (service) turns that into a 400
+ * so an unidentifiable build never silently pollutes the registry under an empty
+ * key.
+ *
+ * The project key keeps the `resource:` prefix on purpose: project ids ARE the
+ * old repository Resource ids, so artifacts registered before projects existed
+ * keep matching instead of every repo going cold once.
  */
 export function buildRepoKey(ref: BuildRepoRef | WorkspaceFolderRepoRef | null | undefined): string {
   if (!ref || typeof ref !== 'object') return '';
-  const resourceId = ref.resource_id != null ? String(ref.resource_id).trim() : '';
-  if (resourceId) return `resource:${resourceId}`;
+  const projectId = buildRepoProjectId(ref);
+  if (projectId) return `resource:${projectId}`;
   const url = ref.url != null ? normalizeRepoUrl(ref.url) : '';
   if (url) return `url:${url}`;
   return '';
@@ -71,10 +87,10 @@ export const BUILD_ARTIFACT_STATUSES = ['building', 'ok', 'failed'] as const;
 /** Zod schema for the `repo` argument shared by the build MCP tools. */
 export const buildRepoRefSchema = z
   .object({
-    resource_id: z.string().optional().describe('Checked-in repo Resource id (preferred, canonical identity)'),
-    url: z.string().optional().describe('Raw git URL (used when there is no Resource; e.g. `git -C <folder> remote get-url origin`)'),
+    project_id: z.string().optional().describe('Project id (preferred, canonical identity)'),
+    url: z.string().optional().describe('Raw git URL (used when there is no Project; e.g. `git -C <folder> remote get-url origin`)'),
   })
-  .describe('Repo identity for the artifact. Provide resource_id OR url — one is required so the artifact has a stable share key.');
+  .describe('Repo identity for the artifact. Provide project_id OR url — one is required so the artifact has a stable share key.');
 
 // ── Prompt block — "check the registry before you build" (ticket #2/#3) ────────
 
@@ -84,7 +100,7 @@ export interface BuildRegistryPromptInput {
   /** The QA/SecurityRun id — report_build_failure finalizes this run. */
   run_id: string;
   kind: 'qa' | 'security';
-  /** The scenario/profile repo_ref (may be null → build from the board repo). */
+  /** The scenario/profile repo_ref (may be null → identify the repo by its origin url). */
   repo_ref: WorkspaceFolderRepoRef | null | undefined;
   /** Resolved build target string (caller applies its own fallback). */
   build_target: string;
@@ -103,19 +119,19 @@ export interface BuildRegistryPromptInput {
  * on failure it reports a first-class `build_failed` instead of a generic error.
  *
  * `<REPO>` is rendered as the concrete JSON the agent should pass, derived from
- * repo_ref. When repo_ref carries no explicit identity (board environment_config
- * repo), the agent is told to resolve the folder's `origin` url itself so the
- * key still matches across scenarios sharing that repo.
+ * repo_ref. When repo_ref carries no explicit identity, the agent is told to
+ * resolve the folder's `origin` url itself so the key still matches across
+ * scenarios sharing that repo.
  */
 export function renderBuildRegistryBlock(input: BuildRegistryPromptInput): string {
   const target = (input.build_target || '').trim() || '<platform>/<config>';
-  const rid = input.repo_ref?.resource_id ? String(input.repo_ref.resource_id).trim() : '';
+  const pid = buildRepoProjectId(input.repo_ref);
   const rurl = input.repo_ref?.url ? String(input.repo_ref.url).trim() : '';
 
   let repoJson: string;
   let repoNote: string;
-  if (rid) {
-    repoJson = `{ "resource_id": "${rid}" }`;
+  if (pid) {
+    repoJson = `{ "project_id": "${pid}" }`;
     repoNote = '';
   } else if (rurl) {
     repoJson = `{ "url": "${rurl}" }`;

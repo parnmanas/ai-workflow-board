@@ -31,11 +31,11 @@ interface SessionState {
   active: Map<string, ChildRequest>;
 }
 
+// 자식(subagent)이 대신 할 수 없는 티켓 종결·상태 전이. board-less 모델(docs/tickets.md)
+// 에서 티켓 status 를 옮기는 것은 담당자 본인이다 — 보드 이동·합의 툴
+// (move_ticket_to_board / propose_move / record_agreement)은 서버에서 삭제됐다.
 const CHILD_FORBIDDEN_TOOLS = new Set([
   'move_ticket',
-  'move_ticket_to_board',
-  'record_agreement',
-  'propose_move',
   'archive_ticket',
   'unarchive_ticket',
   'run_action',
@@ -93,7 +93,7 @@ export class CollaborationGovernor {
     const forbidden = configuredTools.find((tool) => CHILD_FORBIDDEN_TOOLS.has(tool));
     if (forbidden) {
       throw new CollaborationPolicyError(
-        `Child tool ${forbidden} can perform a terminal or consensus action`,
+        `Child tool ${forbidden} can perform a terminal ticket action`,
       );
     }
   }
@@ -192,7 +192,7 @@ export class CollaborationGovernor {
     }
     if (request.tools.some((tool) => CHILD_FORBIDDEN_TOOLS.has(tool))) {
       throw new CollaborationPolicyError(
-        'Children cannot perform terminal ticket transitions or consensus actions',
+        'Children cannot perform terminal ticket transitions',
       );
     }
     if (request.skills.some((skill) => !skillSubset.has(skill))) {

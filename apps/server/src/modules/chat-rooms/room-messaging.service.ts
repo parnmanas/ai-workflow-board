@@ -18,7 +18,7 @@ import { resolveAgentDisplayName, resolveAgentDisplayMap } from '../../utils/age
 import { projectChatAttachment } from '../mcp/shared/ticket-helpers';
 import { RunProvision, resolveWorkspaceFolder } from '../../common/workspace-folder-options';
 import { cliDescriptor } from '../../common/cli-catalog';
-import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageBoardRef, ChatMessageTicketAction } from '../../common/types/stream-events';
+import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
@@ -75,11 +75,11 @@ function makeError(status: number, message: string): Error & { status: number } 
 // 한쪽만 있어도(예: 빌드 결과물만) metadata 는 유지되고, 둘 다 없을 때만 null.
 const MAX_TICKET_REFS = 20;
 const MAX_ARTIFACT_REFS = 20;
-// F-3 (ticket 3ca88253): agent/board refs share the same string bound. Capped lower
+// F-3 (ticket 3ca88253): agent refs share the same string bound. Capped lower
 // than ticket/artifact refs — a turn realistically surfaces at most a handful of
-// agent-status or board-summary cards, never a batch-mutation-sized burst.
+// agent-status cards, never a batch-mutation-sized burst. (Board-summary cards
+// went away with boards; a stored `board_refs` is dropped by the sanitizer.)
 const MAX_AGENT_REFS = 10;
-const MAX_BOARD_REFS = 10;
 const TICKET_REF_STR_MAX = 300;
 
 export function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
@@ -100,7 +100,7 @@ export function sanitizeTicketRefs(refsRaw: unknown): ChatMessageTicketRef[] {
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     if (typeof rec.title === 'string' && rec.title) ref.title = rec.title.slice(0, TICKET_REF_STR_MAX);
-    // F2-4 ⓑ: propose/consensus 카드의 대상 컬럼 등 부가 맥락(있으면 보존).
+    // F2-4 ⓑ: 카드의 부가 맥락(대상 상태 등, 있으면 보존).
     if (typeof rec.detail === 'string' && rec.detail) ref.detail = rec.detail.slice(0, TICKET_REF_STR_MAX);
     refs.push(ref);
   }
@@ -146,23 +146,6 @@ function sanitizeAgentRefs(refsRaw: unknown): ChatMessageAgentRef[] {
   return refs;
 }
 
-// F-3 (ticket 3ca88253): board ref 정제. `board_id` 는 필수, `title` 은 있으면 보존.
-function sanitizeBoardRefs(refsRaw: unknown): ChatMessageBoardRef[] {
-  if (!Array.isArray(refsRaw)) return [];
-  const refs: ChatMessageBoardRef[] = [];
-  for (const r of refsRaw) {
-    if (refs.length >= MAX_BOARD_REFS) break;
-    if (!r || typeof r !== 'object') continue;
-    const rec = r as Record<string, unknown>;
-    const boardId = typeof rec.board_id === 'string' ? rec.board_id.slice(0, TICKET_REF_STR_MAX) : '';
-    if (!boardId) continue;
-    const ref: ChatMessageBoardRef = { board_id: boardId };
-    if (typeof rec.title === 'string' && rec.title) ref.title = rec.title.slice(0, TICKET_REF_STR_MAX);
-    refs.push(ref);
-  }
-  return refs;
-}
-
 function sanitizeTicketAction(raw: unknown): ChatMessageTicketAction | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const rec = raw as Record<string, unknown>;
@@ -178,14 +161,12 @@ function sanitizeChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | nu
   const ticketRefs = sanitizeTicketRefs((raw as { ticket_refs?: unknown }).ticket_refs);
   const artifactRefs = sanitizeArtifactRefs((raw as { artifact_refs?: unknown }).artifact_refs);
   const agentRefs = sanitizeAgentRefs((raw as { agent_refs?: unknown }).agent_refs);
-  const boardRefs = sanitizeBoardRefs((raw as { board_refs?: unknown }).board_refs);
   const ticketAction = sanitizeTicketAction((raw as { ticket_action?: unknown }).ticket_action);
-  if (ticketRefs.length === 0 && artifactRefs.length === 0 && agentRefs.length === 0 && boardRefs.length === 0 && !ticketAction) return null;
+  if (ticketRefs.length === 0 && artifactRefs.length === 0 && agentRefs.length === 0 && !ticketAction) return null;
   const meta: ChatRoomMessageMetadata = {};
   if (ticketRefs.length > 0) meta.ticket_refs = ticketRefs;
   if (artifactRefs.length > 0) meta.artifact_refs = artifactRefs;
   if (agentRefs.length > 0) meta.agent_refs = agentRefs;
-  if (boardRefs.length > 0) meta.board_refs = boardRefs;
   if (ticketAction) meta.ticket_action = ticketAction;
   return meta;
 }
@@ -1252,7 +1233,7 @@ export class RoomMessagingService {
   /**
    * Resolve the agent > workspace Claude backend profile for a chat dispatch
    * (ticket 7d8ea7c9). Mirrors trigger-loop.service.ts's ticket-dispatch
-   * resolution, but agent-only — a chat turn carries no ticket/board to layer
+   * resolution, but agent-only — a chat turn carries no ticket to layer
    * on top. Claude backend profiles must stay invisible to every non-Claude
    * CLI, and a profile the agent's own credential can't satisfy must not be
    * silently handed to the wire — skip (with a warn log) instead of
@@ -1429,20 +1410,19 @@ export class RoomMessagingService {
     const refs = this.mentionService.parseMentions(content);
     if (refs.length === 0) return dispatched;
 
-    // Role shortcuts resolve against the ticket linked to this room (if any).
+    // A ticket-bound room resolves an `@[agent:<rt-key>]` of the ticket's
+    // assignee against the ticket's assignee spec, and stamps user mention
+    // rows with the ticket id.
     let ticket: Ticket | null = null;
-    if (refs.some(r => r.type === 'role')) {
-      const room = await this.roomRepo.findOne({ where: { id: roomId } });
-      if (room?.ticket_id) {
-        ticket = await this.ticketRepo.findOne({ where: { id: room.ticket_id } });
-      }
+    const room = await this.roomRepo.findOne({ where: { id: roomId } });
+    if (room?.ticket_id) {
+      ticket = await this.ticketRepo.findOne({ where: { id: room.ticket_id } });
     }
 
     // Self-exclusion, same as every ticket-comment path (T3). This call used
-    // to omit it, so a sender who wrote `@[user:<self>]` — or `@[role:…]` in a
-    // ticket-bound room where they hold that role — persisted a UserMention
-    // row addressed to themselves and got an unread mention badge for their
-    // own message, which nothing but opening the inbox could clear.
+    // to omit it, so a sender who wrote `@[user:<self>]` persisted a
+    // UserMention row addressed to themselves and got an unread mention badge
+    // for their own message, which nothing but opening the inbox could clear.
     // `_processMentions` only runs for sender_type === 'user' (CHAT-18), so
     // scoping the exclusion to the user domain is exact; agent dispatch below
     // is unaffected.
@@ -1457,7 +1437,7 @@ export class RoomMessagingService {
     for (const m of resolved) {
       if (m.type === 'agent') {
         // P4c-4: spec-direct (rt-) 멘션 — Agent 행 없이 스냅샷으로 dispatch.
-        // 티켓 방은 assignment 스냅샷, 티켓 없는 방은 참가자 행 스냅샷.
+        // 티켓 방의 assignee 는 티켓의 assignee 스펙, 그 밖은 참가자 행 스냅샷.
         if (isRuntimeIdentityKey(m.id)) {
           let rtRuntime: Record<string, any> | null = null;
           let rtName = m.id.slice(0, 11);
@@ -1471,7 +1451,7 @@ export class RoomMessagingService {
             rtName = fromTicket.displayName;
             rtRolePrompt = fromTicket.rolePrompt;
             rtProfile = fromTicket.extras.cli_runtime_profile ?? null;
-          } else if (!ticket) {
+          } else {
             const part = await this.participantRepo.findOne({
               where: { room_id: roomId, participant_type: 'agent', participant_id: m.id },
             });
@@ -1591,10 +1571,8 @@ export class RoomMessagingService {
           source_type: 'chat_message',
           source_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
-          // Chat mentions deep-link to /ws/<wsId>/chat/<roomId>?message=<id>;
-          // board_id is intentionally null even when the room is bound to a
-          // ticket so the inbox doesn't try to resolve a board route.
-          board_id: null,
+          // Chat mentions deep-link to /ws/<wsId>/chat/<roomId>?message=<id>
+          // even when the room is bound to a ticket.
           room_id: roomId,
           actor_id: senderId,
           actor_type: 'user',

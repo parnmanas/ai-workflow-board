@@ -21,13 +21,10 @@ import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
 import { AgentConnectionService } from '../agents/agent-connection.service';
-import { TriggerLoopService } from '../agents/trigger-loop.service';
 import { AgentStatusService } from '../agents/agent-status.service';
-import { AllocationService } from '../agents/allocation.service';
 import { RoomCrudService } from '../chat-rooms/room-crud.service';
 import { RoomMembershipService } from '../chat-rooms/room-membership.service';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
-import { TicketRoleAssignmentService } from '../workspace-roles/ticket-role-assignment.service';
 import { ActionsService } from '../actions/actions.service';
 import { QaService } from '../qa/qa.service';
 import { QaRunService } from '../qa/qa-run.service';
@@ -38,14 +35,13 @@ import { SecurityProfileService } from '../security/security-profile.service';
 import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
 import { WorkspaceScheduleService } from '../workspace-schedule/workspace-schedule.service';
-import { FeaturesService } from '../features/features.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
+import { TicketService } from '../tickets/ticket.service';
+import { TicketDispatchService } from '../agents/ticket-dispatch.service';
+import { ProjectsService } from '../projects/projects.service';
 import { PrivilegedCommandService } from '../agent-manager/privileged-command.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
-import { MergeLeaseService } from '../tickets/merge-lease.service';
-import { HandoffService } from '../handoff/handoff.service';
-import { BenchmarkService } from '../benchmarks/benchmark.service';
 import { MentionService } from '../../services/mention.service';
 import { ActivityService } from '../../services/activity.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -140,14 +136,11 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly activityService: ActivityService,
     private readonly embeddingService: EmbeddingService,
     private readonly githubService: GitHubConnectorService,
-    private readonly triggerLoopService: TriggerLoopService,
     private readonly mentionService: MentionService,
     private readonly agentStatusService: AgentStatusService,
-    private readonly allocationService: AllocationService,
     private readonly roomCrudService: RoomCrudService,
     private readonly roomMembershipService: RoomMembershipService,
     private readonly roomMessagingService: RoomMessagingService,
-    private readonly ticketRoleAssignmentService: TicketRoleAssignmentService,
     private readonly actionsService: ActionsService,
     private readonly qaService: QaService,
     private readonly qaRunService: QaRunService,
@@ -158,14 +151,13 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly securityRunService: SecurityRunService,
     private readonly securityScheduleService: SecurityScheduleService,
     private readonly workspaceScheduleService: WorkspaceScheduleService,
-    private readonly featuresService: FeaturesService,
     private readonly ticketPrerequisitesService: TicketPrerequisitesService,
     private readonly ciWaitService: CiWaitService,
+    private readonly ticketService: TicketService,
+    private readonly ticketDispatchService: TicketDispatchService,
+    private readonly projectsService: ProjectsService,
     private readonly privilegedCommandService: PrivilegedCommandService,
     private readonly instanceRegistry: InstanceRegistryService,
-    private readonly mergeLeaseService: MergeLeaseService,
-    private readonly handoffService: HandoffService,
-    private readonly benchmarkService: BenchmarkService,
     private readonly workflowFunctionsService: WorkflowFunctionsService,
     private readonly artifactRefsService: ArtifactRefsService,
     private readonly classificationBridgeService: ClassificationBridgeService,
@@ -255,11 +247,12 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       logger: this._logService,
       mentionService: this.mentionService,
       agentStatusService: this.agentStatusService,
-      allocationService: this.allocationService,
       roomCrudService: this.roomCrudService,
       roomMembershipService: this.roomMembershipService,
       roomMessagingService: this.roomMessagingService,
-      ticketRoleAssignmentService: this.ticketRoleAssignmentService,
+      ticketService: this.ticketService,
+      ticketDispatchService: this.ticketDispatchService,
+      projectsService: this.projectsService,
       actionsService: this.actionsService,
       qaService: this.qaService,
       qaRunService: this.qaRunService,
@@ -271,15 +264,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       securityScheduleService: this.securityScheduleService,
       workspaceScheduleService: this.workspaceScheduleService,
       artifactRefsService: this.artifactRefsService,
-      featuresService: this.featuresService,
-      triggerLoopService: this.triggerLoopService,
       ticketPrerequisitesService: this.ticketPrerequisitesService,
       ciWaitService: this.ciWaitService,
       privilegedCommandService: this.privilegedCommandService,
       instanceRegistryService: this.instanceRegistry,
-      mergeLeaseService: this.mergeLeaseService,
-      handoffService: this.handoffService,
-      benchmarkService: this.benchmarkService,
       workflowFunctionsService: this.workflowFunctionsService,
       classificationBridgeService: this.classificationBridgeService,
       orchestrationRunnerService: this.orchestrationRunnerService,

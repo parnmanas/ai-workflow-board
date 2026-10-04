@@ -338,11 +338,15 @@ test('TXIV wire consumer: GameClient/master 하나로 worktree·credential·push
     // ticket bddb63ee: wire 에 clone_policy 가 없으면 null 이 넘어가고, 매니저가
     // 자신의 시스템 기본값(clone timeout 60분)을 쓴다 — 구버전 서버와 동일 동작.
     clonePolicy: null,
+    // board-less main clone folder 가 없는(구버전) payload → managed .awb/base clone.
+    mainCloneDir: null,
   });
   assert.deepEqual(calls.checkout, [{ cwd: gameCwd, url: 'https://github.com/acme/GameClient.git' }]);
   assert.deepEqual(calls.push, [{ cwd: gameCwd, url: 'https://github.com/acme/GameClient.git' }]);
+  // board-less: the project credential path is asked first (same id as the old
+  // repository resource); a 200 there means the legacy alias is never needed.
   assert.equal(repositoryCredentialRequests.length, 1);
-  assert.match(repositoryCredentialRequests[0], /resources\/gameclient-resource\/git-credential/);
+  assert.match(repositoryCredentialRequests[0], /\/api\/agent-manager\/projects\/gameclient-resource\/git-credential/);
   assert.match(repositoryCredentialRequests[0], /workspace_id=txiv-board-workspace/);
   assert.deepEqual(dispatchAcks.map((ack) => ack.outcome), ['processed']);
 });

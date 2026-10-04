@@ -38,9 +38,6 @@ export class SecurityRun {
   @Column({ type: 'varchar' })
   workspace_id: string;
 
-  @Column({ type: 'varchar', nullable: true, default: null })
-  board_id: string | null;
-
   // pending → running → passed | failed | error
   @Column({ type: 'varchar', default: 'pending' })
   status: SecurityRunStatus;

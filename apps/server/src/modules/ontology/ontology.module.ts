@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Resource } from '../../entities/Resource';
 import { Credential } from '../../entities/Credential';
 import { OntologyExtractionService } from './ontology-extraction.service';
 import { OntologyResolverService } from './ontology-resolver.service';
@@ -26,12 +25,13 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 // (Reflector, AuthGuard) 이 모듈 스코프 안에 둘 다 없으면 부팅 시
 // UnknownDependenciesException으로 즉시 죽는다(실제로 겪음 — 아래
 // providers 배열 없이 첫 부팅에서 재현됨).
-// (@InjectRepository(Resource)/@InjectRepository(Credential)가 이미
-// ResourcesModule과 같은 엔티티를 forFeature하므로 중복 등록이지만, Nest는
-// 모듈별 forFeature 등록을 독립적으로 허용한다 — 두 모듈이 같은 리포지토리
-// 인스턴스를 공유해도 문제 없음.)
+// (@InjectRepository(Credential)는 다른 모듈도 같은 엔티티를 forFeature하므로
+// 중복 등록이지만, Nest는 모듈별 forFeature 등록을 독립적으로 허용한다 — 두
+// 모듈이 같은 리포지토리 인스턴스를 공유해도 문제 없음.) 그래프의 저장소는
+// Project 다(예전 저장소 Resource 와 같은 id) — ProjectsService 는 @Global
+// ProjectsModule 이 제공하므로 여기서 import 할 것이 없다.
 @Module({
-  imports: [TypeOrmModule.forFeature([Resource, Credential])],
+  imports: [TypeOrmModule.forFeature([Credential])],
   controllers: [OntologyController],
   providers: [
     OntologyExtractionService,

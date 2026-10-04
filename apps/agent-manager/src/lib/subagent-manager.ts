@@ -682,7 +682,7 @@ export class SubagentManager implements SubagentManagerContract {
     const effectiveCwd = ctx?.cwd || undefined;
     // Board/workspace harness (e9c7a896): keep the keys this adapter can
     // express, warn + skip the rest — a key the CLI can't map is a graceful
-    // skip, never a refusal to spawn. harness.model (board-level intent)
+    // skip, never a refusal to spawn. harness.model (workspace-level intent)
     // beats the per-agent Agent.model default.
     const { applied: harness, skipped: harnessSkipped } = partitionHarness(adapter, spec.harness);
     if (harnessSkipped.length > 0) {
@@ -696,7 +696,7 @@ export class SubagentManager implements SubagentManagerContract {
       );
     }
     // ticket 5851e435: 실행 권한의 단일 기준. Agent trust
-    // (`runtime_config.permission_mode`)가 board/workspace harness
+    // (`runtime_config.permission_mode`)가 workspace harness
     // `permission_mode` 를 이긴다 — 그래서 trusted 에이전트는 보드가 어떤
     // harness 값을 걸어도 최고 권한 플래그를 잃지 않는다. 정책은 partition
     // **이전**의 raw harness 로 계산한다: 어댑터가 permission_mode 를
@@ -733,7 +733,7 @@ export class SubagentManager implements SubagentManagerContract {
     // Ticket-level effort preset (parallel channel to harness). Pick this
     // adapter's slice: claude → { model?, effort?, ultracode? }; codex /
     // antigravity → { model? }; everything else → null. slice.model is the
-    // board-level effort intent and WINS the model precedence over both the
+    // preset-level effort intent and WINS the model precedence over both the
     // harness model and the per-agent Agent.model default. effort / ultracode
     // only ever survive for claude (the codex/antigravity slices never carry
     // them); they ride into buildOneshotSpawn and are ignored by adapters that
@@ -761,10 +761,12 @@ export class SubagentManager implements SubagentManagerContract {
       ? ctx.runtime_config.extra.effort
       : resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
     const ultracode = !!slice?.ultracode;
-    if (slice && (effortFlag || ultracode || slice.model)) {
+    // board-less 서버는 effort_preset 이 null 이고 effort 는 RuntimeSpec 의
+    // runtime_config.extra.effort 로만 온다 — preset slice 가 없어도 기록한다.
+    if (effortFlag || ultracode || slice?.model) {
       log(
         `[subagent] effort applied: ticket=${spec.ticketId.slice(0, 8) || '-'} cli=${adapter.cliType} ` +
-          `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice.model ?? '-'}`,
+          `effort=${effortFlag ?? '-'} ultracode=${ultracode} model=${slice?.model ?? '-'}`,
       );
     }
     // 폴백 모델 체인 (ticket 61f4dd18). 최초 spawn 은 effectiveModel(=주 모델)과
