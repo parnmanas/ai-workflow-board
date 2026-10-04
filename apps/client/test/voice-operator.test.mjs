@@ -59,6 +59,9 @@ test('the brief teaches spoken choices: read them numbered, pass the pick on wit
   assert.match(brief, /answer_session_permission \/ answer_session_question 도구로 그 세션에 전하고/);
   assert.match(brief, /list_pending_session_requests 로 확인하고/);
   assert.match(brief, /사용자의 말 없이 전하는 호출은 AWB 도 거절한다/);
+  // 실측: 가짜 마이크의 "1번." 을 ragnar ASR 이 "일반." 으로 적었다 — 숫자만 들었으면 확인부터.
+  assert.match(brief, /1번 → "일반"/);
+  assert.match(brief, /전하기 전에 "1번, 이번만 허용으로 전할까요\?" 처럼 한 번 확인하고 "네" 를 들은 뒤 전한다/);
 });
 
 test('aliases are typed comma-separated', () => {

@@ -293,9 +293,15 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
   4. 요청이 아직 미결이고(`request_gone`) 고른 선택지·값이 그 요청의 것이다(`option_unknown` · `choice_unknown` ·
      `field_missing`) — 자유 형식으로 승인을 만들어 내지 못한다.
   전할 때마다 operator · 사용자 · operator 턴 · 요청 · 고른 것을 `Voice` 로그에 남긴다.
+- **짧은 숫자는 잘못 들린다** — 실측으로 가짜 마이크의 "1번." 을 ragnar ASR 이 "일반." 으로 적었다("이번만" ↔ "2번만"도
+  같은 소리). 그래서 지침이 "답이 숫자 하나뿐이거나 선택지 이름과 정확히 맞지 않으면 전하기 전에 한 번 확인하고 '네' 를
+  들은 뒤 전한다" 를 가르친다. 선택지 이름("이번만 허용해")으로 답하면 바로 전한다.
 - 이름 없이 답하는 창(`wakeStore.openFollowUp`, 8초): 결정이 필요한 `operator_report` 를 다 읽은 직후에만, 이름 부르기가
   켜져 있고 잠든 동안에만 연다(깨어 있으면 이미 이름 없이 듣는다). 말을 **시작한** 순간 창이 열려 있었으면 그 말은
   답이다. 군소리는 답이 아니다.
+- 검증(브라우저): 헤드리스 Chromium 에 결정 보고 SSE + ragnar TTS 로 만든 알림 소리 + 가짜 마이크("1번.")를 넣고 실제 ragnar
+  ASR 로 — 알림을 다 읽은 순간 답 창이 열리고("answer"), 이름 없이 한 말이 받아 적혀 operator 가 깨어나 그 말이 첫 요청으로
+  갔다(알림 큐 8.0초 → 답 창 16.2초 → 깨어남 22.1초).
 - 회귀: `apps/server/test/voice-operator-answers.test.mjs`(보고 문장 · 목록 · 보고 턴 거절 · 사용자 턴 전달 · 한 번만 ·
   비operator · 다른 사용자 · 질문 값 검증 · 턴이 끝나면 다시 막힘 · SSE 필드), `apps/client/test/voice-wake.test.mjs`(답 창).
 
