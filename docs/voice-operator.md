@@ -261,6 +261,27 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
   `apps/client/test/voice-announcements.test.mjs`.
 - 남은 것: 브라우저가 꺼져 있으면 들을 곳이 없다 → Android 앱(P4)의 푸시. Telegram 전달은 그 전에 필요해지면 붙인다.
 
+## 셀프호스팅 엔진 (ragnar, 2026-10-04)
+
+유료 API 대신 ragnar(DGX Spark 계열: aarch64 · GB10 · 통합 메모리)에서 오픈소스 엔진을 돌린다. AWB 쪽은
+**`local` 어댑터**(`modules/voice/providers/local.ts`) 하나이고, 설정은 `voice.local.base_url` · `voice.local.api_key`
+— OpenAI 클라우드 어댑터와 주소·키가 달라 둘을 동시에 설정해 Voice lab 에서 비교할 수 있다.
+
+| | 고른 것 | 근거 |
+|---|---|---|
+| STT | **Qwen3-ASR-1.7B**(Apache-2.0) · vLLM | 한국어 자유발화 CER 최상위 오픈 모델(OpenKoASR: Kspon-other 14.3 vs Whisper-large-v3 16.6). vLLM 0.16+ 내장 — 공식 프롬프트(문맥 = system, 언어 고정 = assistant 접두)를 `/v1/audio/transcriptions` 의 `prompt`·`language` 로 그대로 만든다. 측정: 5초 발화 0.54초, 15초 1.06초(GPU 여유 시) |
+| TTS | **Qwen3-TTS-12Hz-1.7B-CustomVoice**(Apache-2.0) · vLLM-Omni 0.30, 목소리 `sohee` | 상업 사용 가능 후보 중 한국어 기본 목소리가 있는 유일한 것. 공개 한국어 CER 은 후보끼리 1점 안쪽(HF Open TTS: Qwen 4.24 · CosyVoice3 3.88 · VoxCPM2 4.75) — 자연스러움은 Voice lab 블라인드 테스트로 확인한다 |
+
+- 구성: `services/voice-server/` — 모델 서버는 localhost 만(ASR: systemd user 유닛 + venv, TTS: Docker
+  `vllm/vllm-omni:v0.30.0`), LAN 에는 **게이트웨이 하나**(`awb_voice_server.py`, :8410)만 연다. 게이트웨이가 Bearer 키를
+  본문 파싱 전에 검사하고, 브라우저 녹음(webm/opus · mp4/aac)을 16 kHz WAV 로 풀고(PyAV — 시스템 ffmpeg 불필요),
+  TTS 의 WAV 를 MP3 로 바꾸고, 목소리 목록(`voices.json`)을 준다.
+- GPU 는 ragnar 의 LLM(메모리 0.48)과 나눠 쓴다 — ASR 0.08, TTS 0.06+0.04 로 작게 잡았다. LLM 이 생성 중일 때는 지연이
+  늘어난다(TTS 는 실시간보다 느려질 수 있다 — 첫 조각을 짧게 자르는 `splitSpeakable` 이 그래서 중요하다).
+- 함정: NGC vLLM 컨테이너 26.04+ 는 드라이버 580 을 거부한다(upstream 이미지는 CUDA 13.0.2 라 그대로 돈다). Qwen3-TTS 는
+  `language` 를 `Korean` 같은 이름으로 받는다(`ko` 는 400). 마지막 음절이 잘리는 이슈(QwenLM/Qwen3-TTS#55)가 있어 게이트웨이가
+  입력 끝을 문장부호로 맞춘다.
+
 ## 메워야 할 공백 (2026-10-04 코드 기준)
 
 - ~~작업 종료가 어떤 알림으로도 나가지 않는다~~ — P2 의 음성 알림이 세션·미션 종료를 다룬다(토스트 포함). 외부 채널(Telegram 등)로는 아직 안 나간다.
