@@ -44,7 +44,7 @@ describe('Security Profile board-scope cleanup', () => {
         workspace_id: 'workspace-a',
         board_id: 'board-a',
         name: 'Board profile',
-        target_agent_id: 'agent-1',
+        target_runtime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
         scan_driver: 'code-review',
       }),
       /no longer supported/,
@@ -57,13 +57,13 @@ describe('Security Profile board-scope cleanup', () => {
       workspace_id: 'workspace-a',
       board_id: 'board-a',
       name: 'Legacy board-only profile',
-      target_agent_id: 'agent-1',
+      target_runtime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
       scan_driver: 'code-review',
     }));
     await service.create({
       workspace_id: 'workspace-a',
       name: 'Workspace profile',
-      target_agent_id: 'agent-1',
+      target_runtime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
       scan_driver: 'code-review',
     });
 

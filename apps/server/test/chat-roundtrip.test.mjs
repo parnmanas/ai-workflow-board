@@ -51,6 +51,7 @@ async function seedDmRoom(ds, { workspaceId, participants }) {
       room_id: room.id,
       participant_type: p.type,
       participant_id: p.id,
+      runtime_spec: p.runtime || null,
       last_read_at: null,
       left_at: null,
     }));
@@ -69,7 +70,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
 
   const user = await createUser(app, getDataSourceToken, { name: 'human' });
   const userToken = app.get(AuthService).createSession(user.id);
-  const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder' });
+  const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder', runtime: true });
   const responderKey = await createApiKey(app, getDataSourceToken, responder.id, {
     workspaceId: ws.id,
     label: 'responder',
@@ -80,7 +81,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     workspaceId: ws.id,
     participants: [
       { type: 'user', id: user.id },
-      { type: 'agent', id: responder.id },
+      { type: 'agent', id: responder.id, runtime: responder.runtime_spec },
     ],
   });
 
@@ -188,7 +189,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     'posting the card must not unpend the ticket',
   );
 
-  const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider' });
+  const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider', runtime: true });
   const outsiderKey = await createApiKey(app, getDataSourceToken, outsider.id, {
     workspaceId: ws.id,
     label: 'outsider',

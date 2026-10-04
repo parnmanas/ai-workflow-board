@@ -132,7 +132,7 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
 
   const transport = { close: async () => {} };
   sessionStore.register('runtime-session', transport, {}, {
-    agentId: childUuid,
+    agentId: 'host-1',
     source: 'db',
     clientType: 'runtime-child',
     runtimeRunId: 'ticket:t-1:reviewer',
@@ -149,7 +149,7 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
   assert.equal(result.isError, undefined);
   assert.equal(proposals.length, 1);
   assert.equal(proposals[0].status, 'pending');
-  assert.equal(proposals[0].source_agent_id, childUuid);
+  assert.equal(proposals[0].source_agent_id, 'host-1');
   assert.equal(proposals[0].source_run_id, 'ticket:t-1:reviewer');
 
   const unauthorized = await registered.handler({

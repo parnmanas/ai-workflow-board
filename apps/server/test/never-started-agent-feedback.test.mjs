@@ -205,14 +205,14 @@ test('issueSpawnAgent — classifies every failure, never emits (P4c-4: spawn ne
     });
     assert.equal(cmds.length, 0, 'this layer classifies, it does not dispatch spawn_agent');
   }
-  // legacy link (uuid → Host) resolves the same way.
+  // Retired Agent aliases no longer resolve to a Host.
   {
     const { svc } = await buildCommandService(
       registryOf([liveManagerInstance(HOST_ALICE)]),
       { hosts: [{ id: HOST_ALICE, name: 'Alice' }], links: [{ agent_id: HOST_BOB, host_id: HOST_ALICE }] },
     );
     const r = await svc.issueSpawnAgent(HOST_BOB, 'test');
-    assert.equal(r.reason, 'no_working_dir');
+    assert.equal(r.reason, 'agent_not_found');
   }
 });
 

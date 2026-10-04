@@ -128,7 +128,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
 
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
       const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
       if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
@@ -211,7 +212,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller) return err('Unauthorized: no agent identity for this session');
 
       // P4c-4: Host/링크 해소 (Agent 행 없음).
-      const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
       const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
       if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
@@ -323,7 +325,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
       const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
       if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
@@ -430,7 +433,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!caller) return err('Unauthorized: no agent identity for this session');
 
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found');
 
       // caller 등급(에이전트 신원)과 workspace 권한은 별개다(티켓 ced48818) — 형제 툴
@@ -552,7 +556,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
       const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
       if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');
@@ -594,7 +599,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const agent = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
+      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
       if (!agent) return err('Agent identity not found for this session');
       const callerWorkspaceId = caller.workspaceId || normalizeAgentWorkspaceId(agent.workspace_id);
       if (!callerWorkspaceId) return err('Could not resolve workspace from caller API key');

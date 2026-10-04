@@ -77,12 +77,12 @@ test('MCP get_chat_room_messages + search_chat_messages contract', async (t) => 
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'chat-read' });
 
-  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'member' });
+  const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'member', runtime: true });
   const memberKey = await createApiKey(app, getDataSourceToken, member.id, {
     workspaceId: ws.id,
     label: 'member',
   });
-  const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider' });
+  const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider', runtime: true });
   const outsiderKey = await createApiKey(app, getDataSourceToken, outsider.id, {
     workspaceId: ws.id,
     label: 'outsider',

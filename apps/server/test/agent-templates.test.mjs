@@ -91,3 +91,48 @@ test('action target keys are derived from runtime specs and have no legacy DB co
     assert.ok(await runner.hasColumn('actions', 'target_runtimes'));
   } finally { await db.destroy(); }
 });
+
+
+test('pre-sync cleanup reuses an existing Host binding and rejects conflicting aliases', async () => {
+  const db = await database();
+  try {
+    const qr = db.createQueryRunner();
+    const hosts = db.getRepository(RuntimeHost);
+    const host = await hosts.save(hosts.create({ name: 'paired' }));
+    await qr.query('CREATE TABLE agents (id varchar PRIMARY KEY, name varchar, type varchar)');
+    await qr.query("INSERT INTO agents VALUES ('old-manager', 'old', 'manager')");
+    await qr.addColumn('api_keys', new TableColumn({ name: 'agent_id', type: 'varchar', isNullable: true }));
+    await qr.query("INSERT INTO api_keys (id, name, key, agent_id, host_id) VALUES (?, ?, ?, ?, ?)", ['linked', 'pair', 'hash1', 'old-manager', host.id]);
+    await qr.query("INSERT INTO api_keys (id, name, key, agent_id, host_id) VALUES (?, ?, ?, ?, ?)", ['unlinked', 'pair2', 'hash2', 'old-manager', null]);
+    await qr.query("INSERT INTO api_keys (id, name, key, agent_id, host_id) VALUES (?, ?, ?, ?, ?)", ['conflict', 'pair3', 'hash3', 'old-manager', 'other-host']);
+    const migration = new AgentTemplates1760000000090();
+    await assert.rejects(migration.up(qr), /conflicting Runtime Host bindings/);
+    assert.equal(await qr.hasTable('agents'), true);
+    await qr.query("DELETE FROM api_keys WHERE id = 'conflict'");
+    await migration.up(qr);
+    assert.equal(await hosts.count(), 1);
+    assert.equal((await qr.query("SELECT host_id FROM api_keys WHERE id = 'unlinked'"))[0].host_id, host.id);
+    assert.equal(await qr.hasTable('agents'), false);
+  } finally { await db.destroy(); }
+});
+
+test('runtime identity resolves only from an active Host-bound execution credential', async () => {
+  const { resolveCallerIdentityRow, callerCanAccessWorkspace } = require('../dist/modules/mcp/shared/authz');
+  const db = await database();
+  try {
+    const host = await db.getRepository(RuntimeHost).save({ name: 'machine' });
+    const runtimeKey = 'rt-0123456789abcdef';
+    const keys = db.getRepository(ApiKey);
+    const key = await keys.save({ name: `runtime:Coder:${runtimeKey}`, key: 'hash', host_id: host.id, workspace_id: 'workspace-a' });
+    assert.deepEqual(await resolveCallerIdentityRow(db, runtimeKey), { kind: 'runtime', id: runtimeKey, name: 'Coder', workspace_id: 'workspace-a' });
+    const caller = { agentId: runtimeKey, source: 'db', scope: 'full' };
+    assert.equal(await callerCanAccessWorkspace(db, caller, 'workspace-a'), true);
+    assert.equal(await callerCanAccessWorkspace(db, caller, 'workspace-b'), false);
+    await keys.update(key.id, { is_active: 0 });
+    assert.equal(await resolveCallerIdentityRow(db, runtimeKey), null);
+    await keys.update(key.id, { is_active: 1 });
+    await db.getRepository(RuntimeHost).delete(host.id);
+    assert.equal(await resolveCallerIdentityRow(db, runtimeKey), null);
+    assert.equal(await resolveCallerIdentityRow(db, '11111111-1111-4111-8111-111111111111'), null);
+  } finally { await db.destroy(); }
+});

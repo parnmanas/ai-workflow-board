@@ -143,7 +143,6 @@ async function bootService() {
     ds.getRepository(entities.OrchestrationEvent),
     ds.getRepository(entities.OrchestrationTeam),
     ds.getRepository(entities.OrchestrationTeamMember),
-    ds.getRepository(entities.Agent),
     ds,
     logService,
   );

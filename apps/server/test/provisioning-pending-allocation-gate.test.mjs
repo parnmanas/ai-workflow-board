@@ -58,7 +58,7 @@ test('pending_user_action drops a ticket from getAllocatedTickets — the server
 
   step('Seed workspace + assignee agent + board with an active (In Progress) column');
   const ws = await createWorkspace(app, getDataSourceToken, 'prov-pending');
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'rolf' });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'rolf', type: 'manager' });
   const board = await createBoard(app, getDataSourceToken, ws.id, { name: 'code' });
   const inProgress = await createColumn(app, getDataSourceToken, board.id, {
     name: 'In Progress', position: 1, workspaceId: ws.id, kind: 'active', roleRouting: ['assignee'],

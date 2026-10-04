@@ -43,7 +43,7 @@ describe('QA Scenario board-scope cleanup', () => {
         workspace_id: 'workspace-a',
         board_id: 'board-a',
         name: 'Board scenario',
-        target_agent_id: 'agent-1',
+        target_runtime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
       }),
       /no longer supported/,
     );
@@ -55,12 +55,12 @@ describe('QA Scenario board-scope cleanup', () => {
       workspace_id: 'workspace-a',
       board_id: 'board-a',
       name: 'Legacy board-only scenario',
-      target_agent_id: 'agent-1',
+      target_runtime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
     }));
     await service.create({
       workspace_id: 'workspace-a',
       name: 'Workspace scenario',
-      target_agent_id: 'agent-1',
+      target_runtime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
     });
 
     const rows = await service.list('workspace-a');

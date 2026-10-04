@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { DataSource, Table, TableForeignKey } from 'typeorm';
+import { DataSource, Table, TableColumn, TableForeignKey } from 'typeorm';
 import { ApiKey } from '../dist/entities/ApiKey.js';
 import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { DropAgentTable1760000000089 } from '../dist/database/migrations/1760000000089-DropAgentTable.js';
@@ -41,9 +41,21 @@ async function fixture(t) {
     { name: 'last_seen_at', type: postgres ? 'timestamp' : 'datetime', isNullable: true },
   ] }));
   await runner.query(`INSERT INTO agents (id,name,type) VALUES ('${MANAGER_ID}','Legacy manager','manager'), ('child','Child','codex')`);
+  await runner.addColumn('api_keys', new TableColumn({ name: 'agent_id', type: 'varchar', isNullable: true }));
   await runner.createForeignKey('api_keys', new TableForeignKey({ columnNames: ['agent_id'],
     referencedTableName: 'agents', referencedColumnNames: ['id'], onDelete: 'SET NULL' }));
-  const keys = ds.getRepository(ApiKey);
+  const repo = ds.getRepository(ApiKey);
+  const keys = {
+    create: (input) => input,
+    findOneByOrFail: (where) => repo.findOneByOrFail(where),
+    async save(input) {
+      const { agent_id, ...current } = input;
+      const row = await repo.save(repo.create(current));
+      const sql = postgres ? 'UPDATE api_keys SET agent_id = $1 WHERE id = $2' : 'UPDATE api_keys SET agent_id = ? WHERE id = ?';
+      await runner.query(sql, [agent_id, row.id]);
+      return row;
+    },
+  };
   const key = await keys.save(keys.create({ name: 'agent-manager:legacy', key: randomUUID(),
     agent_id: MANAGER_ID, workspace_id: 'ws-1' }));
   const child = await keys.save(keys.create({ name: 'child', key: randomUUID(), agent_id: 'child' }));

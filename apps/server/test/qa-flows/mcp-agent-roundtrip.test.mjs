@@ -25,7 +25,7 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
     workspaceName: 'roundtrip',
     envRepo: true,
   });
-  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker' });
+  const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
   const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {
     workspaceId: ws.id,
     label: 'worker',
@@ -36,7 +36,7 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
   // Review → Blocked and this test's "moved to Review" assertion would fail.
   // Assign a reviewer so Review is servable and the ticket parks there. The
   // reviewer never has to react — only a holder must exist.
-  const reviewer = await createAgent(app, getDataSourceToken, ws.id, { name: 'reviewer' });
+  const reviewer = await createAgent(app, getDataSourceToken, ws.id, { name: 'reviewer', runtime: true });
   const user = await createUser(app, getDataSourceToken, { name: 'manager' });
   const ticket = await createTicket(app, getDataSourceToken, {
     columnId: columns.todo.id,

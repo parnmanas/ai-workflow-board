@@ -45,7 +45,7 @@ export function registerBenchmarkTools(server: McpServer, ctx: ToolContext): voi
     async ({ candidate_ticket_id, dimension, score, rationale, evaluator_agent_id, run_ticket_id }, extra: { sessionId?: string }) => {
       if (!benchmarkService) return err('benchmark scoring requires the integrated server (BenchmarkService not wired)');
       const caller = getCallerAgent(extra);
-      const evaluatorId = (evaluator_agent_id || caller?.agentId || '').trim();
+      const evaluatorId = (evaluator_agent_id || caller?.runtimeKey || caller?.agentId || '').trim();
       if (!evaluatorId) return err('evaluator_agent_id is required (no MCP session identity to infer it from)');
       try {
         const saved = await benchmarkService.upsertScore({

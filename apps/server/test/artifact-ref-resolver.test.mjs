@@ -18,9 +18,10 @@ const repo = (rows) => ({
 });
 
 function service(access = true) {
+  const hosts = repo([{ id: ids.agent, workspace_id: ws, name: 'Same name' }]);
   return new ArtifactRefsService(
     repo([{ id: ids.ticket, workspace_id: ws, column_id: 'column', title: 'Same name' }]),
-    repo([{ id: ids.agent, workspace_id: ws, name: 'Same name' }]),
+    { getRepository: () => hosts },
     repo([{ id: ids.board, workspace_id: ws, name: 'Same name' }]),
     repo([{ id: 'column', board_id: ids.board }]),
     repo([{ id: ids.action, workspace_id: ws, name: 'Same name' }]),
@@ -31,11 +32,16 @@ function service(access = true) {
   );
 }
 
-test('resolves all six types by exact id with canonical links despite duplicate names', async () => {
+test('resolves exact ids and keeps retired Agent detail links unavailable', async () => {
   const refs = Object.entries(ids).map(([type, id]) => ({ type, id }));
   const rows = await service().resolveMany({ id: 'user', role: 'user' }, ws, refs);
   assert.equal(rows.length, 6);
-  assert.ok(rows.every(row => row.available && row.label === 'Same name'));
+  assert.ok(rows.every(row => row.label === 'Same name'));
+  assert.ok(rows.filter(row => row.type !== 'agent').every(row => row.available));
+  const host = rows.find(row => row.type === 'agent');
+  assert.equal(host.available, false);
+  assert.equal(host.reason, 'no_detail_surface');
+  assert.equal(host.deepLink, null);
   assert.equal(new Set(rows.map(row => row.id)).size, 6);
   assert.equal(rows.find(row => row.type === 'ticket').deepLink, `/ws/${ws}/boards/${ids.board}?ticket=${ids.ticket}`);
   assert.equal(rows.find(row => row.type === 'action').deepLink, `/ws/${ws}/actions?artifact=${ids.action}`);
@@ -79,7 +85,7 @@ test('outside-workspace targets never expose canonical labels, context, or links
   const instance = service();
   for (const repository of [
     instance.tickets,
-    instance.agents,
+    instance.dataSource.getRepository(),
     instance.boards,
     instance.actions,
     instance.functions,

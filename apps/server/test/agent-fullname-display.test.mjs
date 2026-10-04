@@ -82,7 +82,7 @@ test('Activity tab: actor_name re-resolves to the Host bare name from actor_id',
   // — not a write mutation — supplies the canonical name.
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
-    field_changed: 'managed', actor_id: managed.id, actor_name: 'Coder-bare-leaf',
+    field_changed: 'managed', actor_id: manager.id, actor_name: 'Coder-bare-leaf',
   });
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
@@ -102,7 +102,7 @@ test('Activity tab: actor_name re-resolves to the Host bare name from actor_id',
   // old `<Manager>/<Agent>` text reads back as the current Host name.
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
-    field_changed: 'already-full', actor_id: managed.id, actor_name: 'Mgr/Coder',
+    field_changed: 'already-full', actor_id: manager.id, actor_name: 'Mgr/Coder',
   });
 
   const rows = await activityService.getTicketActivity(ticket.id);
@@ -216,7 +216,7 @@ test('Realtime board_update SSE: actor_name is the canonical Host display', asyn
   // arrive canonicalized, exactly like the durable read path.
   await activityService.logActivity({
     entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, action: 'updated',
-    field_changed: 'sse-managed', actor_id: managed.id, actor_name: 'Coder-bare-leaf',
+    field_changed: 'sse-managed', actor_id: manager.id, actor_name: 'Coder-bare-leaf',
   });
 
   const frame = await sse.waitFor(

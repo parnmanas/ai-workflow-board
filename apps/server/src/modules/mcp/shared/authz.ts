@@ -11,10 +11,10 @@
  * chat-tools.ts already does at its `callerWorkspaceId` call sites.
  */
 
-import type { DataSource, EntityManager } from 'typeorm';
+import { Like, type DataSource, type EntityManager } from 'typeorm';
+import { isRuntimeIdentityKey } from '../../../common/runtime-spec';
 import { RuntimeHost } from '../../../entities/RuntimeHost';
 import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
-import { isUuidShapedId } from '../../../utils/agent-name';
 import { ApiKey } from '../../../entities/ApiKey';
 import type { McpAgentContext } from './session-auth';
 
@@ -126,15 +126,25 @@ export async function callerCanAccessWorkspace(
 
 /**
  * P4c-4 caller identity row (Agent 테이블 제거 이후). host-keyed MCP 세션은
- * HOST uuid 를 caller.agentId 로 들고 온다. legacy agent uuid 는 api_keys
- * 페어링 링크 경유로 Host 이름/워크스페이스를 해소한다 (kind 는 'legacy').
- * 둘 다 없으면 null.
+ * HOST uuid 를 caller.agentId 로 들고 온다. 실행 키는 Host에 바인딩된
+ * runtime 자격 증명으로 해소하고, 삭제된 Agent UUID는 해소하지 않는다.
  */
 export async function resolveCallerIdentityRow(
   dataSource: DataSource | EntityManager,
   agentId: string | undefined,
-): Promise<{ kind: 'host'; id: string; name: string; workspace_id: string | null } | null> {
+): Promise<{ kind: 'host' | 'runtime'; id: string; name: string; workspace_id: string | null } | null> {
   if (!agentId) return null;
+  // Runtime credentials already carry the execution key in their provisioned
+  // name. Resolve that key without querying a UUID Host column or an Agent row.
+  if (isRuntimeIdentityKey(agentId)) {
+    const keys = await dataSource.getRepository(ApiKey).find({ where: { name: Like(`runtime:%:${agentId}`) } });
+    for (const key of keys) {
+      if (!key.host_id || !key.is_active) continue;
+      const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: key.host_id } });
+      if (host) return { kind: 'runtime', id: agentId, name: key.name.slice('runtime:'.length, -(agentId.length + 1)), workspace_id: key.workspace_id || null };
+    }
+    return null;
+  }
   const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: agentId } });
   if (host) {
     return { kind: 'host', id: host.id, name: host.name, workspace_id: host.workspace_id ?? null };

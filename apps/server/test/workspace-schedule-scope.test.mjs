@@ -42,7 +42,7 @@ describe('Workspace Schedule board-scope cleanup', () => {
         workspaceId: 'workspace-a',
         boardId: 'board-a',
         name: 'Board schedule',
-        targetAgentId: 'agent-1',
+        targetRuntime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
         taskPrompt: 'do the thing',
         intervalMs: 60_000,
       }),
@@ -65,7 +65,7 @@ describe('Workspace Schedule board-scope cleanup', () => {
     await service.create({
       workspaceId: 'workspace-a',
       name: 'Workspace schedule',
-      targetAgentId: 'agent-1',
+      targetRuntime: { manager_agent_id: 'agent-1', cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
       taskPrompt: 'do the thing',
       intervalMs: 60_000,
     });

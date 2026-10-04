@@ -204,44 +204,44 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const created = await service.create({
       workspace_id: WS,
       name: 'CLI 최신화',
-      target_agent_ids: [AGENT_A, AGENT_B],
+      target_runtimes: [SPECA, SPECB],
     });
-    assert.deepEqual(actionTargetAgentIds(created), [AGENT_A, AGENT_B]);
-    assert.equal(created.target_agent_id, AGENT_A, '레거시 컬럼은 대표 대상을 담아야 한다');
+    assert.deepEqual(actionTargetAgentIds(created), [KEYA, KEYB]);
+    assert.equal(created.target_agent_id, KEYA, '레거시 컬럼은 대표 대상을 담아야 한다');
 
     const reloaded = await service.get(created.id);
-    assert.deepEqual(actionTargetAgentIds(reloaded), [AGENT_A, AGENT_B], 'DB 왕복 후에도 유지');
+    assert.deepEqual(actionTargetAgentIds(reloaded), [KEYA, KEYB], 'DB 왕복 후에도 유지');
   });
 
-  it('레거시 단일 필드만 줘도 생성되고 배열 표현으로 수렴한다 (하위 호환)', async () => {
-    const created = await service.create({ workspace_id: WS, name: '단일', target_agent_id: AGENT_A });
-    assert.deepEqual(actionTargetAgentIds(created), [AGENT_A]);
-    assert.equal(created.target_agent_id, AGENT_A);
+  it('단일 Runtime 설정도 생성되고 배열 표현으로 수렴한다', async () => {
+    const created = await service.create({ workspace_id: WS, name: '단일', target_runtimes: [SPECA] });
+    assert.deepEqual(actionTargetAgentIds(created), [KEYA]);
+    assert.equal(created.target_agent_id, KEYA);
   });
 
-  it('대상 중 하나라도 타 워크스페이스면 저장 전체를 거부한다', async () => {
+  it('대상 중 하나라도 Host가 없으면 저장 전체를 거부한다', async () => {
     await assert.rejects(
-      service.create({ workspace_id: WS, name: 'bad', target_agent_ids: [AGENT_A, AGENT_C] }),
-      /different workspace/,
+      service.create({ workspace_id: WS, name: 'bad', target_runtimes: [SPECA, { ...SPECB, manager_agent_id: 'missing-host' }] }),
+      /unknown Runtime Host/,
     );
     assert.equal(await dataSource.getRepository(Action).count(), 0, '부분 저장이 남으면 안 된다');
   });
 
   it('update 로 대상을 늘리면 두 컬럼이 함께 갱신된다', async () => {
-    const created = await service.create({ workspace_id: WS, name: 'x', target_agent_id: AGENT_B });
-    const updated = await service.update(created.id, WS, { target_agent_ids: [AGENT_A, AGENT_B] });
-    assert.deepEqual(actionTargetAgentIds(updated), [AGENT_A, AGENT_B]);
-    assert.equal(updated.target_agent_id, AGENT_A, '대표 대상 미러가 stale 하면 레거시 독자가 지워진 대상을 본다');
+    const created = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECB] });
+    const updated = await service.update(created.id, WS, { target_runtimes: [SPECA, SPECB] });
+    assert.deepEqual(actionTargetAgentIds(updated), [KEYA, KEYB]);
+    assert.equal(updated.target_agent_id, KEYA, '대표 대상 미러가 stale 하면 레거시 독자가 지워진 대상을 본다');
   });
 
   it('대상을 0개로 만드는 update 는 거부된다', async () => {
-    const created = await service.create({ workspace_id: WS, name: 'x', target_agent_id: AGENT_A });
-    await assert.rejects(service.update(created.id, WS, { target_agent_ids: [] }), /at least one target/);
+    const created = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
+    await assert.rejects(service.update(created.id, WS, { target_runtimes: [] }), /at least one target/);
   });
 
   it('REST 로 내보내는 형태는 JSON 문자열이 아니라 진짜 배열이다', async () => {
     const created = await service.create({
-      workspace_id: WS, name: 'x', target_agent_ids: [AGENT_A, AGENT_B],
+      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     // 엔티티 자체는 JSON 문자열을 들고 있다 (SQLite/Postgres 패리티 관례).
     assert.equal(typeof created.target_agent_ids, 'string');
@@ -249,8 +249,8 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     // .filter 호출 시 화면이 터진다 — 모든 REST 읽기 경로가 이 정규화를 탄다.
     const wire = actionToWireJson(created);
     assert.ok(Array.isArray(wire.target_agent_ids));
-    assert.deepEqual(wire.target_agent_ids, [AGENT_A, AGENT_B]);
-    assert.equal(wire.target_agent_id, AGENT_A, '레거시 키도 대표 대상으로 정규화된다');
+    assert.deepEqual(wire.target_agent_ids, [KEYA, KEYB]);
+    assert.equal(wire.target_agent_id, KEYA, '레거시 키도 대표 대상으로 정규화된다');
   });
 
   it('REST 정규화는 배열이 빈 레거시 행도 단일 대상 배열로 채운다', () => {
@@ -744,7 +744,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     await dataSource.getRepository(Action).update({ id: actionId }, { target_runtimes: keepSpecs });
   }
 
-  it('P1-2: 삭제된 대상 하나가 나머지 대상의 실행을 막지 않는다', async () => {
+  it('대상 설정 하나를 제거하면 남은 Runtime만 실행한다', async () => {
     const action = await service.create({
       workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
@@ -755,12 +755,10 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
     assert.equal(result.runs.length, 1, '남은 대상은 정상 실행되어야 한다');
     assert.equal(result.runs[0].agent_id, KEYB);
-    assert.equal(result.failures.length, 1);
-    assert.equal(result.failures[0].agent_id, KEYA);
+    assert.equal(result.failures.length, 0);
 
     const rows = await dataSource.getRepository(ActionRun).find({ where: { action_id: action.id } });
-    assert.equal(rows.length, 2, '사라진 대상도 감사 행으로 남아야 한다');
-    assert.equal(rows.find((r) => r.agent_id === KEYA).status, 'failed');
+    assert.equal(rows.length, 1, '제거한 설정은 새 실행의 대상이 아니다');
   });
 
   it('P1-2: 대상이 모두 사라졌으면 던진다 (승인 grant 를 태우기 전 fail-fast)', async () => {
@@ -769,7 +767,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
     await assert.rejects(
       service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' }),
-      /no target agent of this action exists any more/,
+      /Action has no target agent set/,
     );
     assert.equal(await dataSource.getRepository(ActionRun).count(), 0, '할 일이 없으면 감사 행도 만들지 않는다');
   });

@@ -25,13 +25,18 @@ export class AgentTemplates1760000000090 implements MigrationInterface {
     }
     // Upgrade pre-Host installations before deleting the sole pairing link.
     if (await runner.hasTable('agents')) {
-      const managers = await runner.query("SELECT id, name, workspace_id FROM agents WHERE type = 'manager'");
+      const managers = await runner.query("SELECT * FROM agents WHERE type = 'manager'");
+      const hasLegacyKeys = await runner.hasColumn('api_keys', 'agent_id');
       for (const manager of managers) {
-        const hosts = await bindParams(runner, 'SELECT id FROM runtime_hosts WHERE id = ?', [manager.id]);
-        if (!hosts.length) await bindParams(runner, 'INSERT INTO runtime_hosts (id, name, workspace_id) VALUES (?, ?, ?)', [manager.id, manager.name, manager.workspace_id]);
-        if (await runner.hasColumn('api_keys', 'agent_id')) {
-          await bindParams(runner, 'UPDATE api_keys SET host_id = ? WHERE agent_id = ? AND host_id IS NULL', [manager.id, manager.id]);
-        }
+        const keys = hasLegacyKeys ? await bindParams(runner, 'SELECT * FROM api_keys WHERE agent_id = ?', [manager.id]) : [];
+        const hostIds = [...new Set<string>(keys.map((key: any) => key.host_id).filter(Boolean))];
+        if (hostIds.length > 1) throw new Error(`Manager ${manager.id} has conflicting Runtime Host bindings; refusing to drop agents`);
+        const hostId = hostIds[0] || manager.id;
+        const hosts = await bindParams(runner, 'SELECT id FROM runtime_hosts WHERE id = ?', [hostId]);
+        if (!hosts.length) await bindParams(runner,
+          'INSERT INTO runtime_hosts (id, name, workspace_id, is_active, last_seen_at) VALUES (?, ?, ?, ?, ?)',
+          [hostId, manager.name, keys[0]?.workspace_id || manager.workspace_id || null, manager.is_active ?? 1, manager.last_seen_at ?? null]);
+        if (hasLegacyKeys) await bindParams(runner, 'UPDATE api_keys SET host_id = ? WHERE agent_id = ? AND host_id IS NULL', [hostId, manager.id]);
       }
     }
     if (await runner.hasColumn('api_keys', 'agent_id')) {
