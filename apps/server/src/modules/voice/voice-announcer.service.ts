@@ -271,12 +271,14 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     }
     if (!kind) return;
     // 사용자가 그 세션 화면을 보고 있어도 operator 에게는 보고한다 — operator 가 사이트의 흐름(결과·결정까지)을
-    // 알게. 보고 있었다는 표시(viewed)가 붙은 보고는 소리로 전하지 않는다(사용자는 이미 보고 있다).
+    // 알게. 보고 있었다는 표시(viewed)가 붙은 보고는 소리로 전하지 않는다(사용자는 이미 보고 있다). 단 승인·질문은
+    // 보고 있어도 소리로 읽고 말로 답을 받는다 — 화면 앞에서도 손 대신 말로 답하는 것이 이 기능의 쓰임새다.
+    const decisionAwaited = kind === 'needs_permission' || kind === 'needs_input';
     const report: SessionReport = {
       ...this.toReport(kind, userId, session, detail, durationMs, now),
       ...(request ? { request } : {}),
       ...(decisions.length ? { decisions } : {}),
-      ...(viewing() ? { viewed: true } : {}),
+      ...(!decisionAwaited && viewing() ? { viewed: true } : {}),
     };
     if (await this.reports.submit(report)) return;
     // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(보고 있는 것·짧은 턴은 말하지 않는다).

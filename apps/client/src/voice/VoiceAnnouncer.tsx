@@ -6,7 +6,7 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import { useToast } from '../contexts/ToastContext';
 import type { VoiceAnnouncementEvent } from '../types';
-import { announcementPath, claimAnnouncement, isViewingTarget } from './announcements';
+import { announcementPath, claimAnnouncement, isViewingTarget, shouldSpeakAnnouncement } from './announcements';
 import { speechPlayer } from './speechPlayer';
 import { useSpeechState, useVoiceConfig } from './useVoice';
 import { playEarcon } from './earcon';
@@ -58,7 +58,7 @@ export default function VoiceAnnouncer() {
     void (async () => {
       // 보고 있는 세션이면 이 탭이 집어서(=처리됨) 다른 탭도 말하지 않게 하고, 자신도 말하지 않는다.
       const viewing = isViewingTarget(data.target, visible);
-      if (!(await claimAnnouncement(data.id, visible)) || viewing) return;
+      if (!(await claimAnnouncement(data.id, visible)) || !shouldSpeakAnnouncement(viewing, !!data.needs_decision)) return;
       const path = announcementPath(data.target, workspaceId);
       // operator 가 쓴 글이면(작업 보고 요약 · operator 의 답) 누가 말하는지 붙인다.
       const text = data.operator ? `🎙 ${data.operator.name}: ${data.text}` : data.text;

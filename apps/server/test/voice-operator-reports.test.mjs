@@ -386,3 +386,21 @@ test('after a server restart a session has no driver — its news still reaches 
   assert.equal(heard.length, 1);
   assert.equal(heard[0].user_id, 'admin-1');
 });
+
+test('a question or approval is read aloud even while the user looks at that session', async (t) => {
+  const jarvis = operator('jarvis', 'host-rolf');
+  const { heard, prompts, presence, teardown } = setup([jarvis]);
+  t.after(teardown);
+  const s = session('host-rolf', 's1');
+  presence.update('u1', 'tab-1', { manager_id: 'host-rolf', cli: 'codex', session_id: 's1' }, true);
+  event(s, 'elicitation_request', { elicitation_id: 'q1', mode: 'form', message: '오늘 저녁 메뉴는?', schema: { properties: { pick: { type: 'string', enum: ['김치찌개', '파스타'] } } } }, 't1');
+  update({ ...s, status: 'awaiting_input' }, 'elicitation');
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.doesNotMatch(prompts[0].text, /보고 있음/, 'a decision is never filed as "viewed"');
+  assert.match(prompts[0].text, /선택지를 번호와 함께 읽어 주세요/);
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '롤프의 세션이 저녁 메뉴를 물어요. 1번 김치찌개, 2번 파스타 중에 골라 주세요.');
+  await flush();
+  assert.equal(heard.length, 1, 'spoken — answering by voice is the point, screen or not');
+  assert.equal(heard[0].needs_decision, true);
+});

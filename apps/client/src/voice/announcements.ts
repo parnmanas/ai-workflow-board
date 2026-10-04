@@ -31,6 +31,14 @@ export function isViewingTarget(target: VoiceAnnouncementTarget | null | undefin
     && viewingSessionKey === sessionTargetKey(target.manager_id, target.cli, target.session_id);
 }
 
+/**
+ * 이 탭이 알림을 소리로 낼까. 보고 있는 세션에 대한 알림은 말하지 않는다(화면이 이미 보여 준다) — 단 결정을
+ * 기다리는 operator 보고(승인·질문)는 보고 있어도 읽는다: 선택지를 듣고 말로 답하는 것이 그 알림의 쓰임새다.
+ */
+export function shouldSpeakAnnouncement(viewingTarget: boolean, needsDecision: boolean): boolean {
+  return !viewingTarget || needsDecision;
+}
+
 /** 알림이 가리키는 화면 경로. 세션 경로에는 지금 워크스페이스가 필요하다(세션은 워크스페이스에 매이지 않는다). */
 export function announcementPath(target: VoiceAnnouncementTarget | null | undefined, workspaceId: string | null): string | null {
   if (!target) return null;
