@@ -12,6 +12,17 @@
  * style-src 등)는 helmet 기본값 그대로다.
  */
 export const CSP_DIRECTIVES: Record<string, string[]> = {
+  /*
+   * `'wasm-unsafe-eval'` — 브라우저가 WebAssembly 를 컴파일하도록 허락한다. 음성 대화 모드·이름 부르기의
+   * 말소리 감지(Silero VAD, onnxruntime-web)가 WASM 이다. helmet 기본값 `script-src 'self'` 만 두면
+   * `WebAssembly.instantiate()` 가 CSP 위반으로 막혀 VAD 가 아예 뜨지 않는다(2026-10-04 실측: "no available
+   * backend found … violates … script-src 'self'") — 개발 서버(Vite)에는 CSP 가 없어 거기서는 멀쩡했다.
+   *
+   * `'unsafe-eval'` 이 아니다: 이 키워드는 **WASM 컴파일만** 연다. JS 의 eval()·new Function() 은 그대로
+   * 막혀 있고, 실행할 수 있는 코드의 출처도 여전히 'self' 뿐이다(모델·런타임은 `/vad/` 에서 같은 오리진으로
+   * 받는다 — scripts/copy-vad-assets.mjs).
+   */
+  scriptSrc: ["'self'", "'wasm-unsafe-eval'"],
   objectSrc: ["'none'"],
   frameAncestors: ["'none'"],
   /*
