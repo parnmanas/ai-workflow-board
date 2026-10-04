@@ -119,18 +119,27 @@ agent-manager 가 맡는 것은 **operator 세션의 실행**뿐이다(아래 Op
 CLI 선택·권한 릴레이·스트리밍이 이미 있고 chat 모드의 기본 표면이다. 기록이 호스트에 있다는 약점은 operator 를
 서버와 같은 상시 장비(rolf)에 두어 상쇄한다. operator 는 admin 전용이다(사이트 권한을 가진 에이전트이므로).
 
-### 설정
+### 설정 (P3 구현)
 
-SystemSettings `operator.*` — `host`(manager id), `cli`, `model`, `cwd`, `session_id`(첫 개설 때 기록).
-UI 는 Hosts 의 `RuntimeSelectionFields` 와 `useHostModels()` 를 그대로 쓴다(모델 목록 단일 경로 규칙).
-CLI 를 바꾸면 새 세션을 연다 — 이전 세션은 세션 목록에 남고, 컨텍스트는 이어지지 않는다(필요하면 첫 프롬프트로 요약을 넘긴다).
+operator 를 고르는 화면을 따로 만들지 않는다 — **세션을 여는 화면이 이미 Host · CLI · 모델 · 작업 폴더를 고른다**
+(새 세션 대화상자의 `RuntimeSelectionFields`, 실행은 agent-manager). 원하는 조합으로 세션을 연 뒤 세션 헤더의
+**☆ Operator** 를 누르면 그 세션이 operator 가 된다(admin). 지정과 함께 operator 지침(아래)을 그 세션의 다음
+프롬프트로 보낸다. 사이드바 맨 위의 **🎙 OPERATOR** 가 어디서든 그 세션을 연다.
+
+- 저장: SystemSettings 한 행 `operator.session`(JSON: manager_id · cli · session_id · cwd · title · pinned_at · pinned_by).
+  Admin Settings 정의 목록에는 넣지 않는다 — 손으로 고칠 값이 아니다(`modules/voice/operator-config.ts`).
+- REST: `GET /api/voice/operator`(voice.use) · `PUT` / `DELETE`(admin).
+- CLI 를 바꾸려면 다른 CLI 로 세션을 열어 다시 지정한다 — 이전 세션은 세션 목록에 남고, 컨텍스트는 이어지지 않는다.
 
 ### 지침 (persona)
 
-operator 의 `cwd` 를 전용 폴더(예: `~/awb-operator/`)로 두고 그 안의 `AGENTS.md`(+ `@AGENTS.md` 한 줄짜리
-`CLAUDE.md`)에 역할을 적는다. Claude Code·Codex·opencode 가 모두 읽고 컴팩션 뒤에도 다시 읽힌다 — 첫 프롬프트에만
-넣는 방식은 컴팩션에 약하다. 핵심 규칙: 말하기용 요약 먼저 · 삭제/머지/재시작 같은 위험 작업은 복창 확인 ·
-발음이 비슷한 이름(rolf/ralf)은 되묻기 · 상세는 화면이나 티켓으로.
+지정할 때 보내는 지침(`apps/client/src/voice/operator.ts` `OPERATOR_BRIEF`)의 핵심: 말하기용 요약 먼저 · 삭제/머지/
+재시작 같은 위험 작업은 복창 확인 · 발음이 비슷한 이름(rolf/ralf/ragnar)·숫자는 되묻기 · 상세는 화면이나 티켓으로.
+
+첫 프롬프트에만 있는 지침은 컴팩션에 약하므로, 지침은 에이전트에게 작업 폴더의 `AGENTS.md`(+ `@AGENTS.md` 한 줄짜리
+`CLAUDE.md`)로 남기게 한다 — Claude Code·Codex·opencode 가 모두 읽고 컴팩션 뒤에도 다시 읽힌다. 단 **그 파일이 없을 때만**
+만들게 한다: operator 세션이 저장소 안에서 돌면 그 저장소의 AGENTS.md 를 덮어쓰면 안 된다. 그래서 operator 는 전용 폴더
+(예: `~/awb-operator/`)에서 여는 것을 권한다.
 
 ### 권한 — 결정 필요 (P3)
 
@@ -200,7 +209,7 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 |---|---|---|
 | P1 음성 게이트웨이 + 웹 대화 | `modules/voice`(공급자 · 설정 · 전사 · 합성 · `toSpeakable`), Agent Session 컴포저 마이크 + 응답 낭독, Voice lab | 세션 화면에서 말로 묻고 답을 듣는다. Voice lab 으로 엔진을 확정한다 |
 | P2 음성 알림 (웹 · Telegram) | announcer, `voice_announcement`, 클립 캐시, 사용자 설정, 아래 공백 메우기 | 다른 화면에 있을 때 세션 종료 · 미션 종료를 말로 듣는다 |
-| P3 operator | `operator.*` 설정과 개설 · 고정, 어디서든 부르는 진입점, persona 폴더, `notify_user`, 권한 tier | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
+| P3 operator | 세션 고정(☆ Operator) · 사이드바 진입점 · 지침. 남은 것: `notify_user`(턴 도중 먼저 말 걸기), 사이트 전체 권한 tier | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
 | P4 Android 앱 | `apps/mobile`, 디바이스 등록, FCM, 재생 서비스 | 폰이 잠겨 있어도 작업 종료를 말로 듣고, 앱에서 operator 와 대화한다 |
 | P5 (선택) | iOS, 실시간 음성 프런트(GPT-Live client delegation), wake word | — |
 

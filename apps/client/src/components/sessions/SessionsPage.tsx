@@ -28,6 +28,8 @@ import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voi
 import { speechPlayer } from '../../voice/speechPlayer';
 import { TurnAnswerTracker, shouldSpeakFinishedTurn } from '../../voice/turnAnswer.logic';
 import { sessionTargetKey, setViewingSession } from '../../voice/announcements';
+import { OPERATOR_BRIEF, announceOperatorChanged, isOperatorSession, useVoiceOperator } from '../../voice/operator';
+import { useAuth } from '../../contexts/AuthContext';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -400,6 +402,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   if (!answerTrackerRef.current) answerTrackerRef.current = new TurnAnswerTracker();
   const speechKeyPrefix = `${managerId}/${cli}/${sessionId}:`;
   const speakingHere = speech.speaking && !!speech.key?.startsWith(speechKeyPrefix);
+  // Operator — 이 세션을 사이트 관리 에이전트로 지정한다(admin). 사이드바 OPERATOR 가 여기를 연다.
+  const { hasPermission } = useAuth();
+  const canPinOperator = !!voiceConfig && hasPermission('admin.access');
+  const operator = useVoiceOperator(!!voiceConfig);
+  const isOperator = isOperatorSession(operator, managerId, cli, sessionId);
   // 다른 화면으로 가면 이 세션의 낭독을 멈춘다 — 무엇을 읽는지 보이지 않는 소리는 소음이다.
   useEffect(() => () => {
     if (speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();
@@ -604,6 +611,36 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       throw err;
     }
   }, [managerId, cli, sessionId, showToast]);
+
+  const toggleOperator = useCallback(async () => {
+    try {
+      if (isOperator) {
+        if (!(await confirm({ title: 'Operator 지정을 해제할까요?', message: '세션은 그대로 남고, 사이드바의 OPERATOR 만 사라집니다.', confirmLabel: '해제' }))) return;
+        await api.clearVoiceOperator();
+        announceOperatorChanged();
+        showToast('Operator 지정을 해제했습니다.', 'info');
+        return;
+      }
+      const ok = await confirm({
+        title: '이 세션을 Operator 로 지정할까요?',
+        message: (
+          <span>
+            사이드바의 OPERATOR 가 어디서든 이 세션을 엽니다. 지정과 함께 operator 지침(말로 듣기 좋은 답,
+            되돌리기 어려운 일은 복창 확인 등)을 이 세션의 다음 프롬프트로 보냅니다.
+            {operator ? <><br /><br />지금의 operator 지정은 이 세션으로 바뀝니다.</> : null}
+          </span>
+        ),
+        confirmLabel: '지정하고 지침 보내기',
+      });
+      if (!ok) return;
+      await api.setVoiceOperator({ manager_id: managerId, cli, session_id: sessionId, cwd, title });
+      announceOperatorChanged();
+      await send({ text: OPERATOR_BRIEF, images: [] });
+      showToast('Operator 로 지정했습니다.', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Operator 지정에 실패했습니다', 'error');
+    }
+  }, [isOperator, confirm, operator, managerId, cli, sessionId, cwd, title, send, showToast]);
 
   const decide = useCallback(async (requestId: string, optionId: string | null) => {
     setDecidingRequestId(requestId);
@@ -852,6 +889,20 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </select>
         )}
         <div style={{ display: 'flex', gap: 6 }}>
+          {canPinOperator && (
+            <Button
+              variant={isOperator ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-pressed={isOperator}
+              disabled={!isOperator && busy}
+              onClick={() => void toggleOperator()}
+              title={isOperator
+                ? '이 세션이 사이트 관리 operator 입니다 — 누르면 지정을 해제합니다'
+                : busy ? '턴이 끝난 뒤에 지정할 수 있습니다(지침을 다음 프롬프트로 보냅니다)' : '이 세션을 사이트 관리 operator 로 지정합니다'}
+            >
+              {isOperator ? '★ Operator' : '☆ Operator'}
+            </Button>
+          )}
           {ttsReady && (
             <Button
               variant={readReplies || speakingHere ? 'secondary' : 'ghost'}

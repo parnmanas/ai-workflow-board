@@ -29,6 +29,7 @@ import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
 import { useRoomActivity } from '../hooks/useRoomActivity';
 import { sessionActivity } from '../activity';
 import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
+import { useVoiceOperator } from '../voice/operator';
 import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.logic';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
@@ -146,6 +147,8 @@ export default function Sidebar({
   // 이고 세션 자체는 그 장비에 있다. 권한이 없는 사용자에겐 섹션을 그리지 않는다.
   const canUseSessions = hasPermission('agent_sessions.use');
   const canUseTerminals = hasPermission('terminals.use');
+  // Operator(고정된 Agent Session) — 지정돼 있으면 맨 위에서 어디서든 바로 연다(docs/voice-operator.md).
+  const operator = useVoiceOperator(canUseSessions && hasPermission('voice.use'));
   const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);
 
   // 워크스페이스를 바꾸면 펼침 상태를 초기 5개로 되돌린다. 30초 폴링이나
@@ -803,6 +806,13 @@ export default function Sidebar({
         aria-label="Primary navigation"
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
+        {operator && wsId && renderNavItem({
+          key: 'operator',
+          path: sessionPath(`/ws/${wsId}`, operator.manager_id, operator.cli, operator.session_id),
+          label: 'OPERATOR',
+          icon: '🎙',
+          title: `${operator.title || 'Operator'} — ${operator.cli}`,
+        })}
         {canAdmin && renderNavItem({
           key: 'hosts',
           path: `${workspaceBase}/hosts`,

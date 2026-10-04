@@ -100,7 +100,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, VoiceConfigView, VoiceOptionView, VoiceTranscript } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -2219,6 +2219,11 @@ export const api = {
   /** 이미 읽을 문장으로 다듬은 조각 하나를 소리로. */
   synthesizeVoice: async (text: string): Promise<Blob> =>
     (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
+  /** Operator(고정된 Agent Session) — 지정·해제는 admin 만. */
+  getVoiceOperator: () => request<{ operator: VoiceOperator | null }>('/voice/operator'),
+  setVoiceOperator: (input: { manager_id: string; cli: string; session_id: string; cwd?: string; title?: string }) =>
+    request<{ operator: VoiceOperator }>('/voice/operator', { method: 'PUT', body: JSON.stringify(input) }),
+  clearVoiceOperator: () => request<{ operator: null }>('/voice/operator', { method: 'DELETE' }),
   /** 음성 알림의 소리 — 받는 사람만, 서버가 처음 요청될 때 합성한다. */
   getVoiceAnnouncementAudio: async (id: string): Promise<Blob> =>
     (await fetchOk(`/voice/announcements/${encodeURIComponent(id)}/audio`)).blob(),

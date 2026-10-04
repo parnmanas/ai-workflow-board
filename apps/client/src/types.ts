@@ -3517,6 +3517,17 @@ export interface VoiceAnnouncementEvent {
   created_at: string;
 }
 
+/** Operator — 고정된 Agent Session 하나(서버 `operator-config.ts` 의 `OperatorSession`). */
+export interface VoiceOperator {
+  manager_id: string;
+  cli: string;
+  session_id: string;
+  cwd: string;
+  title: string;
+  pinned_at: string;
+  pinned_by: string;
+}
+
 /** 공급자 API 가 알려 준 목소리(Voice lab 의 목소리 고르기). */
 export interface VoiceOptionView {
   id: string;

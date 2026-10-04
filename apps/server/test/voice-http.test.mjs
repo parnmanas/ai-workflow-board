@@ -8,6 +8,8 @@
 //   5. 공급자가 꺼져 있거나 키가 틀리면 409 + 사유 — 대체 경로로 조용히 넘어가지 않는다.
 //   6. 음성 알림: 서버 이벤트(세션 턴 실패)가 받는 사용자의 SSE 에만 `voice_announcement` 로 가고,
 //      소리는 그 사용자만 /api/voice/announcements/:id/audio 로 받는다.
+//   7. Operator 지정: admin 만 지정·해제하고, 필수 셋(manager_id · cli · session_id)이 없으면 400.
+//   8. 음성 키(secret)만 바꿔도 설정 캐시가 바로 버려진다.
 //
 // 네트워크 없이: OpenAI 호환 공급자의 base_url 을 이 테스트가 띄운 가짜 서버로 둔다.
 // 실행: node --test --test-force-exit test/voice-http.test.mjs (dist 필요)
@@ -166,6 +168,39 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   assert.equal(announcementAudio.buf.toString(), 'ID3-fake-mp3');
   const notYours = await call(`${base}/api/voice/announcements/${announcement.id}/audio`, { headers: plainAuth });
   assert.equal(notYours.status, 403, 'voice.use is required before ownership is even checked');
+
+  // 7. Operator 지정
+  assert.deepEqual((await call(`${base}/api/voice/operator`, { headers: adminAuth })).body, { operator: null });
+  const badPin = await call(`${base}/api/voice/operator`, { method: 'PUT', headers: { ...adminAuth, ...json }, body: JSON.stringify({ manager_id: 'host-1' }) });
+  assert.equal(badPin.status, 400);
+  const pinned = await call(`${base}/api/voice/operator`, {
+    method: 'PUT', headers: { ...adminAuth, ...json },
+    body: JSON.stringify({ manager_id: 'host-1', cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator' }),
+  });
+  assert.equal(pinned.status, 200);
+  assert.equal(pinned.body.operator.pinned_by, admin.id);
+  const readBack = await call(`${base}/api/voice/operator`, { headers: adminAuth });
+  assert.deepEqual(
+    { ...readBack.body.operator, pinned_at: 'x' },
+    { manager_id: 'host-1', cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator', pinned_at: 'x', pinned_by: admin.id },
+  );
+  assert.equal((await call(`${base}/api/voice/operator`, { method: 'PUT', headers: { ...plainAuth, ...json }, body: '{}' })).status, 403);
+  assert.deepEqual((await call(`${base}/api/voice/operator`, { method: 'DELETE', headers: adminAuth })).body, { operator: null });
+  assert.deepEqual((await call(`${base}/api/voice/operator`, { headers: adminAuth })).body, { operator: null });
+
+  // 8. 키(secret)만 바꿔도 곧바로 반영 — OpenAI 키를 지우면 OpenAI 본가 base_url 에서는 준비 안 됨이 된다.
+  await call(`${base}/api/admin/settings`, {
+    method: 'PATCH', headers: { ...adminAuth, ...json },
+    body: JSON.stringify({ settings: { 'voice.openai.base_url': 'https://api.openai.com/v1' } }),
+  });
+  assert.equal((await call(`${base}/api/voice/config`, { headers: adminAuth })).body.stt.ready, false, 'hosted OpenAI without a key');
+  await call(`${base}/api/admin/settings`, {
+    method: 'PATCH', headers: { ...adminAuth, ...json }, body: JSON.stringify({ settings: { 'voice.openai.api_key': 'sk-new' } }),
+  });
+  assert.equal((await call(`${base}/api/voice/config`, { headers: adminAuth })).body.stt.ready, true, 'a secret-only save is visible at once');
+  await call(`${base}/api/admin/settings`, {
+    method: 'PATCH', headers: { ...adminAuth, ...json }, body: JSON.stringify({ settings: { 'voice.openai.base_url': fake.url } }),
+  });
 
   // 5. 모르는 공급자 이름은 대체하지 않고 거절한다.
   await call(`${base}/api/admin/settings`, {

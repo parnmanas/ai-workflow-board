@@ -1,5 +1,7 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
@@ -8,6 +10,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { VoiceError, VoiceService } from './voice.service';
 import { VoiceAnnouncerService } from './voice-announcer.service';
+import { parseOperatorInput, readOperator, writeOperator } from './operator-config';
 
 async function run(res: Response, fn: () => Promise<unknown> | unknown) {
   try {
@@ -118,5 +121,44 @@ export class VoiceLabController {
       voice: str(body?.voice),
       model: str(body?.model),
     }));
+  }
+}
+
+/**
+ * Operator — 고정된 Agent Session 하나(docs/voice-operator.md "Operator"). 세션 화면에서 지정하고,
+ * 사이드바의 OPERATOR 가 그 세션을 연다. 지정·해제는 admin 만 — 사이트를 다루는 에이전트이기 때문이다.
+ */
+@ApiBearerAuth('user-session')
+@ApiTags('voice')
+@Controller('api/voice/operator')
+@UseGuards(AuthGuard, PermissionGuard)
+@RequirePermission(PERMISSIONS.USE_VOICE)
+export class VoiceOperatorController {
+  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+
+  private isAdmin(req: Request): boolean {
+    return (req as any).currentUser?.role === 'admin';
+  }
+
+  @Get()
+  async get(@Res() res: Response) {
+    return res.json({ operator: await readOperator(this.dataSource) });
+  }
+
+  /** `{ manager_id, cli, session_id, cwd?, title? }` — 이 세션을 operator 로 지정한다. */
+  @Put()
+  async set(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    if (!this.isAdmin(req)) return res.status(403).json({ error: 'admin_required', message: 'Only an admin can choose the operator.' });
+    const value = parseOperatorInput(body, (req as any).currentUser.id);
+    if (!value) return res.status(400).json({ error: 'operator_session_required', message: 'manager_id, cli and session_id are required.' });
+    await writeOperator(this.dataSource, value);
+    return res.json({ operator: value });
+  }
+
+  @Delete()
+  async clear(@Req() req: Request, @Res() res: Response) {
+    if (!this.isAdmin(req)) return res.status(403).json({ error: 'admin_required', message: 'Only an admin can choose the operator.' });
+    await writeOperator(this.dataSource, null);
+    return res.json({ operator: null });
   }
 }

@@ -82,7 +82,6 @@ function applyLiveSettingChange(key: string, rawValue: string): void {
     const n = parseInt(rawValue, 10);
     if (Number.isFinite(n) && n > 0) sessionStore.setMaxSessions(n);
   }
-  if (key.startsWith('voice.')) invalidateVoiceConfig();
 }
 
 @ApiBearerAuth('user-session')
@@ -160,6 +159,10 @@ export class SettingsController {
         updated_at: existing.updated_at,
       });
     }
+
+    // 음성 설정은 짧게 캐시된다 — 키(secret)만 바꿔도 다음 요청부터 새 값을 쓰게 여기서 버린다.
+    // (applyLiveSettingChange 는 secret 을 거치지 않으므로 그 안에 둘 수 없다.)
+    if (Object.keys(settings).some((key) => key.startsWith('voice.'))) invalidateVoiceConfig();
 
     return res.json({ success: true, updated: results });
   }
