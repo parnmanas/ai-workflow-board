@@ -55,6 +55,8 @@ const ALLOWED = new Set([
   'esbuild',      // 네이티브 바이너리 선택 (vite/tsx 빌드 체인)
   'fsevents',     // macOS 파일 감시 — optional, 리눅스 러너에선 미설치
   '@scarf/scarf', // nestjs 계열이 끌고 오는 텔레메트리 (SCARF_ANALYTICS=false 로 무력화 가능)
+  'protobufjs',   // onnxruntime-web(대화 모드 VAD, apps/client)이 끌고 옴 — postinstall 은 상위 package.json 의
+                  // 버전 표기를 읽고 경고만 출력한다(네트워크·exec 없음). 동작에 필요 없어 --ignore-scripts 로도 그대로 돈다.
 ]);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
