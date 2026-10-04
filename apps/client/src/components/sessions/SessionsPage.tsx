@@ -990,7 +990,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         commands={commands}
         onSend={send}
         onCancel={() => void cancel()}
-        voiceInput={voiceConfig?.stt.ready ? { autoSend: true } : null}
+        voiceInput={voiceConfig?.stt.ready ? { liveCaptions: voiceConfig.stt.provider === 'local' } : null}
       />
     </>
   );
