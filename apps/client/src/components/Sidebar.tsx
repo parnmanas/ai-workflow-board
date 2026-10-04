@@ -802,6 +802,12 @@ export default function Sidebar({
         aria-label="Primary navigation"
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
+        {canAdmin && renderNavItem({
+          key: 'hosts',
+          path: `${workspaceBase}/hosts`,
+          label: 'HOSTS',
+          icon: 'H',
+        })}
         {canUseSessions && (
           <section aria-labelledby="sidebar-sessions-heading">
             {/* 섹션 헤더 — 폴드 토글 + 새 세션 버튼 */}

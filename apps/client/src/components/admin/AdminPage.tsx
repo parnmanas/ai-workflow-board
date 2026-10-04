@@ -51,7 +51,7 @@ export default function AdminPage() {
       <Route path="users" element={<AdminRoute page="users"><UserManager /></AdminRoute>} />
       <Route path="logs" element={<AdminRoute page="logs"><LogViewer /></AdminRoute>} />
       <Route path="agent-logs" element={<AdminRoute page="agent-logs"><AgentLogViewer /></AdminRoute>} />
-      <Route path="agent-manager" element={<WorkspaceRouteRedirect path="agents#agent-manager-runtime" />} />
+      <Route path="agent-manager" element={<WorkspaceRouteRedirect path="hosts" />} />
       <Route path="skills" element={<AdminRoute page="skills"><SkillsPage /></AdminRoute>} />
       <Route path="skill-registry" element={<AdminRoute page="skill-registry"><SkillRegistryPage /></AdminRoute>} />
       <Route path="workflow-health" element={<AdminRoute page="workflow-health"><WorkflowHealthDashboard /></AdminRoute>} />

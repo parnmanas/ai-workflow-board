@@ -29,6 +29,7 @@ const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPag
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 // Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 기본 랜딩.
 const SessionsPage = lazy(() => import('./components/sessions/SessionsPage'));
+const HostsPage = lazy(() => import('./components/HostsPage'));
 const TerminalsPage = lazy(() => import('./components/terminals/TerminalsPage'));
 // 오케스트레이션 모드 — 칸반 보드와 같은 최상위 작업 표면.
 const OrchestrationPage = lazy(() => import('./components/orchestration/OrchestrationPage'));
@@ -201,6 +202,7 @@ function AppContent() {
             <Route path="dashboard" element={<WorkspacedRedirect to="sessions" />} />
             <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
             <Route path="sessions" element={<WorkspacedRedirect to="sessions" />} />
+            <Route path="hosts" element={<WorkspacedRedirect to="hosts" />} />
             <Route path="terminals" element={<WorkspacedRedirect to="terminals" />} />
             <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
 
@@ -211,6 +213,7 @@ function AppContent() {
             <Route path="ws/:wsId">
               <Route index element={<WorkspaceSectionRedirect />} />
               <Route path="assistant" element={<ChatFirstHome />} />
+              <Route path="hosts" element={<HostsPage />} />
               <Route path="sessions" element={<SessionsPage />} />
               <Route path="sessions/:managerId" element={<SessionsPage />} />
               <Route path="sessions/:managerId/:cli/:sessionId" element={<SessionsPage />} />

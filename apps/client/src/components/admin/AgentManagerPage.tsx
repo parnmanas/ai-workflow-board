@@ -1394,6 +1394,7 @@ export default function AgentManagerPage({
 }: AgentManagerPageProps) {
   const isMobile = useMediaQuery('(max-width: 767px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(canManageRuntime);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pairOpen, setPairOpen] = useState(false);
@@ -1407,6 +1408,9 @@ export default function AgentManagerPage({
     try {
       const data = await api.listAgentManagerInstances();
       setInstances(data);
+      setLoadError(null);
+    } catch (err: any) {
+      setLoadError(err?.message || 'Runtime Host 목록을 불러오지 못했습니다.');
     } finally {
       setLoading(false);
     }
@@ -1520,6 +1524,12 @@ export default function AgentManagerPage({
             Pair manager…
           </Button>
         </div>
+        {loadError && (
+          <div role="alert" style={{ marginBottom: 12, fontSize: 12, color: tokens.colors.dangerLight }}>
+            {loadError}
+            <Button size="sm" variant="secondary" onClick={refresh} style={{ marginTop: 8 }}>다시 시도</Button>
+          </div>
+        )}
         <div
           data-testid="mainframe-agents-list"
           style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
@@ -1554,7 +1564,7 @@ export default function AgentManagerPage({
               </div>
             </button>
           )}
-          {grouped.length === 0 && !loading && (
+          {grouped.length === 0 && !loading && !loadError && (
             <div
               style={{
                 padding: 16,
@@ -1624,7 +1634,7 @@ export default function AgentManagerPage({
       >
         {isMobile && selected && (
           <Button size="sm" variant="secondary" onClick={() => setSelectedId(null)} style={{ alignSelf: 'flex-start' }}>
-            ← Back to agents
+            ← Back to hosts
           </Button>
         )}
         <div

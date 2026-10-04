@@ -15,13 +15,23 @@ test('ADMIN navigation omits standalone QA, Column Policies, and Agent Manager i
   assert.doesNotMatch(sidebarSource, /label:\s*'Agent Manager'/);
 });
 
-test('legacy Agent Manager URL redirects into the workspace AI Agents runtime section', () => {
+test('legacy Agent Manager URL redirects into workspace HOSTS management', () => {
   assert.match(
     adminPageSource,
-    /path="agent-manager"[\s\S]*WorkspaceRouteRedirect path="agents#agent-manager-runtime"/,
+    /path="agent-manager"[\s\S]*WorkspaceRouteRedirect path="hosts"/,
   );
   assert.doesNotMatch(adminPageSource, /path="qa"/);
   assert.doesNotMatch(adminPageSource, /path="column-policies"/);
+});
+
+test('HOSTS is reachable above Sessions and uses the guarded runtime management page', async () => {
+  const hostsPage = await readFile(new URL('../src/components/HostsPage.tsx', import.meta.url), 'utf8');
+  const nav = sidebarSource.slice(sidebarSource.indexOf('aria-label="Primary navigation"'));
+  assert.match(nav, /canAdmin && renderNavItem\(\{[\s\S]*?path: `\$\{workspaceBase\}\/hosts`,[\s\S]*?label: 'HOSTS'/);
+  assert.ok(nav.indexOf("label: 'HOSTS'") < nav.indexOf('sidebar-sessions-heading'));
+  assert.match(appSource, /path="hosts" element=\{<HostsPage \/>\}/);
+  assert.match(hostsPage, /hasPermission\('admin.access'\)/);
+  assert.match(hostsPage, /canManage \? \([\s\S]*<AgentManagerPage \/>/);
 });
 
 // P4c-4: AgentsPage 삭제 (Agent 테이블 없음) — agents 경로는 세션으로
