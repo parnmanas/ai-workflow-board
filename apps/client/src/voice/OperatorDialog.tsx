@@ -6,7 +6,7 @@ import type { VoiceOperator } from '../types';
 import { startHandsFree, type HandsFreeSession } from './handsFree';
 import { announceOperatorsChanged, parseAliasInput } from './operator';
 import { voiceRecordingSupported } from './recorder';
-import { heardName, matchWake } from './wake.logic';
+import { heardName, matchWake, withVocative } from './wake.logic';
 import { wakeStore } from './wakeState';
 
 /** 불러 보기 — 말을 기다리는 최대 시간. */
@@ -186,7 +186,7 @@ export default function OperatorDialog({ open, onClose, operator, session, onSav
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 13, color: tokens.colors.textSecondary }}>
         <div>
-          이름을 부르면 깨어납니다 — <b>"헤이 {draft.name || '이름'}"</b>, <b>"{draft.name || '이름'}야"</b>. 깨어난 뒤에는 이름 없이
+          이름을 부르면 깨어납니다 — <b>"헤이 {draft.name || '이름'}"</b>, <b>"{withVocative(draft.name || '이름')}"</b>. 깨어난 뒤에는 이름 없이
           이어서 말하면 되고, 대화를 마치는 말을 하면 operator 가 알아듣고 다시 잠듭니다.
         </div>
         <Input label="이름" aria-label="Operator name" value={name} maxLength={32} placeholder="예: 자비스" onChange={(e) => setName(e.target.value)} autoFocus />

@@ -5,9 +5,9 @@
  * 받아 적고, 그 글이 "헤이 <이름>" 으로 시작하는지 본다. 이름을 마음대로 지을 수 있어야 해서다 —
  * 키워드 모델은 이름마다 따로 학습해야 한다.
  *
- * 음성 인식은 이름을 조금씩 틀리게 적는다("자비스" → "재비스", "Jarvis" → "Javis"). 그래서
+ * 음성 인식은 이름을 조금씩 틀리게 적는다("자비스" → "재비스" · "잡이스", "Jarvis" → "Javis"). 그래서
  *   - 대소문자·공백·문장부호를 무시하고(`compactKey`, 서버 `operatorNameKey` 와 같은 규칙),
- *   - 한글은 자모로 풀어 편집 거리를 재며(받침 하나, 모음 하나 차이를 1 로 센다),
+ *   - 한글은 소리 나는 대로 자모로 풀어 편집 거리를 재며(연음 "잡이스" = "자비스", 모음 하나 차이는 1),
  *   - 이름 길이에 비례하는 만큼만 틀려도 같은 이름으로 본다.
  * 철자가 아예 다르게 나오는 이름(`Jarvis` 를 `자비스` 로)은 operator 의 별칭으로 등록한다.
  */
@@ -58,14 +58,20 @@ export function compactKey(value: string): string {
 
 const PREFIX_KEYS = [...new Set(WAKE_PREFIXES.map(compactKey))].sort((a, b) => b.length - a.length);
 
-/** 한글 음절 → 초성·중성·종성 자모. 그 밖의 글자는 그대로. */
+// 음절을 **소리 나는 대로** 자모로 푼다. 엔진은 같은 소리를 다르게 적는다 — "자비스" 를 "잡이스" 로(연음).
+// 그래서 받침과 초성을 같은 자음으로 쓰고, 소리 없는 초성 ㅇ 은 뺀다(잡이스 → ㅈㅏㅂㅣㅅㅡ = 자비스).
+// 겹받침은 두 자음으로 풀고, 요즘 발음에서 구별되지 않는 모음(ㅐ/ㅔ, ㅒ/ㅖ, ㅙ/ㅚ/ㅞ)은 하나로 본다.
+const CHOSEONG = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', '', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'];
+const JUNGSEONG = ['ㅏ', 'ㅔ', 'ㅑ', 'ㅖ', 'ㅓ', 'ㅔ', 'ㅕ', 'ㅖ', 'ㅗ', 'ㅘ', 'ㅞ', 'ㅞ', 'ㅛ', 'ㅜ', 'ㅝ', 'ㅞ', 'ㅟ', 'ㅠ', 'ㅡ', 'ㅢ', 'ㅣ'];
+const JONGSEONG = ['', 'ㄱ', 'ㄲ', 'ㄱㅅ', 'ㄴ', 'ㄴㅈ', 'ㄴㅎ', 'ㄷ', 'ㄹ', 'ㄹㄱ', 'ㄹㅁ', 'ㄹㅂ', 'ㄹㅅ', 'ㄹㅌ', 'ㄹㅍ', 'ㄹㅎ', 'ㅁ', 'ㅂ', 'ㅂㅅ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'];
+
+/** 한글 음절 → 소리 나는 대로의 자모(위 규칙). 그 밖의 글자는 그대로. */
 export function toJamo(value: string): string {
   let out = '';
   for (const ch of value) {
     const code = ch.charCodeAt(0) - 0xac00;
     if (code >= 0 && code < 11172) {
-      out += String.fromCharCode(0x1100 + Math.floor(code / 588), 0x1161 + Math.floor((code % 588) / 28));
-      if (code % 28) out += String.fromCharCode(0x11a7 + (code % 28));
+      out += CHOSEONG[Math.floor(code / 588)] + JUNGSEONG[Math.floor((code % 588) / 28)] + JONGSEONG[code % 28];
     } else {
       out += ch;
     }
@@ -166,6 +172,13 @@ export function matchWake<T extends WakeCandidate>(text: string, operators: read
   if (!best) return null;
   const { score: _score, ...match } = best;
   return match;
+}
+
+/** 부름 조사를 붙인 이름 — 받침으로 끝나면 "아"(민준아), 아니면 "야"(자비스야). 한글이 아닌 이름은 "야". */
+export function withVocative(name: string): string {
+  const last = name.trim().slice(-1);
+  const code = last.charCodeAt(0) - 0xac00;
+  return `${name.trim()}${code >= 0 && code < 11172 && code % 28 ? '아' : '야'}`;
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   stripWakeNote,
   toJamo,
   wakeTolerance,
+  withVocative,
   withWakeNote,
 } from '../src/voice/wake.logic.ts';
 
@@ -74,6 +75,9 @@ test('small recognition slips still match; short names must be exact', () => {
   assert.deepEqual(woke('헤이 재비스 오늘 일정'), { id: 'j', rest: '오늘 일정' }, 'one vowel off');
   assert.deepEqual(woke('Hey Javis'), { id: 'j', rest: '' }, 'one letter dropped');
   assert.deepEqual(woke('헤이 프라이대이'), { id: 'f', rest: '' });
+  assert.deepEqual(woke('헤이, 잡이스.'), { id: 'j', rest: '' }, 'measured: ragnar ASR wrote 자비스 as 잡이스 — same sound (liaison)');
+  assert.equal(toJamo('잡이스'), toJamo('자비스'));
+  assert.equal(toJamo('재'), toJamo('제'), 'ㅐ and ㅔ sound the same');
   assert.equal(woke('헤이 쟈베스'), null, 'two slips in a six-jamo name is another word');
   assert.equal(wakeTolerance(toJamo('루나').length), 1);
   assert.equal(wakeTolerance(toJamo('max').length), 0);
@@ -91,6 +95,13 @@ test('compactKey ignores case, spaces and punctuation like the server does', () 
   assert.equal(compactKey(' JAR-VIS! '), 'jarvis');
   assert.equal(compactKey('자 비 스'), '자비스');
   assert.equal(editDistance(toJamo('자비스'), toJamo('재비스')), 1);
+});
+
+test('the vocative follows the last syllable: 자비스야, 민준아', () => {
+  assert.equal(withVocative('자비스'), '자비스야');
+  assert.equal(withVocative('민준'), '민준아');
+  assert.equal(withVocative('Jarvis'), 'Jarvis야');
+  assert.deepEqual(woke('민준아 오늘 뭐 해', [{ id: 'm', name: '민준', aliases: [] }]), { id: 'm', rest: '오늘 뭐 해' });
 });
 
 test('heardName shows how the engine spelled the name, for registering an alias', () => {
