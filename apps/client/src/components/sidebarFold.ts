@@ -33,7 +33,7 @@ export interface SidebarFoldSnapshot {
   chats: boolean;
   /** 섹션 헤더(WORK / AUTOMATION / KNOWLEDGE / QUALITY / SETTINGS …) */
   sections: Record<string, boolean>;
-  /** WORK 의 최상위 메뉴 — teams / orchestrations / boards */
+  /** 자식 목록을 펴고 접는 최상위 메뉴 — WORK 의 teams / orchestrations / boards, 그리고 operators */
   groups: Record<string, boolean>;
   /** 세션 트리의 Runtime Host */
   hosts: string[];

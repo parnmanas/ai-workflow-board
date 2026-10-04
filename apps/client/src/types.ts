@@ -3513,9 +3513,14 @@ export interface VoiceAnnouncementEvent {
   event_type: 'voice_announcement';
   id: string;
   user_id: string;
+  /** `operator_report`(operator 가 작업 보고를 요약) · `operator_reply`(operator 의 답) · `session_*` · `mission_*`. */
   kind: string;
   text: string;
   target: VoiceAnnouncementTarget;
+  /** operator 가 쓴 글이면 그 operator. */
+  operator?: { id: string; name: string };
+  /** 사용자의 결정(승인·답)을 기다리는 보고 — 다 읽은 뒤 잠깐 이름 없이 답을 듣는다. */
+  needs_decision?: boolean;
   created_at: string;
 }
 

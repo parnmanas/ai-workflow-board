@@ -34,6 +34,13 @@ export interface OperatorEntry {
   session_id: string;
   cwd: string;
   title: string;
+  /**
+   * 이 세션을 다루던 워크스페이스 — 서버가 대신 프롬프트를 보낼 때(작업 보고) 그 워크스페이스의 CLI 설정
+   * (credential 바인딩·기억된 설정)으로 세션을 연다. 등록 때 화면의 워크스페이스로 정해진다.
+   */
+  workspace_id: string;
+  /** 사용자가 이 operator 와 마지막으로 대화한 시각 — 보고를 받을 operator 를 고르는 데 쓴다(같은 호스트가 없을 때). */
+  last_conversation_at: string;
   created_at: string;
   created_by: string;
   updated_at: string;
@@ -82,6 +89,8 @@ function sanitizeEntry(raw: any): OperatorEntry | null {
     session_id: str(raw?.session_id, 256),
     cwd: str(raw?.cwd, 1024),
     title: str(raw?.title, 256),
+    workspace_id: str(raw?.workspace_id, 128),
+    last_conversation_at: str(raw?.last_conversation_at, 64),
     created_at: str(raw?.created_at, 64),
     created_by: str(raw?.created_by, 128),
     updated_at: str(raw?.updated_at, 64) || str(raw?.created_at, 64),
@@ -134,6 +143,8 @@ export function createOperatorEntry(body: any, createdBy: string, list: Operator
     session_id,
     cwd: str(body?.cwd, 1024),
     title: str(body?.title, 256),
+    workspace_id: str(body?.workspace_id, 128),
+    last_conversation_at: '',
     created_at: at,
     created_by: createdBy,
     updated_at: at,
@@ -245,6 +256,20 @@ export async function cachedOperators(dataSource: DataSource): Promise<OperatorE
   const value = await readOperators(dataSource);
   operatorCache = { at: now, value };
   return value;
+}
+
+/**
+ * 사용자가 operator 와 대화했다 — 보고 받을 operator 를 고를 때 "가장 최근에 대화한" 의 근거다.
+ * 턴마다 설정 행을 다시 쓰지 않도록, 저장된 값이 `minGapMs` 보다 최근이면 쓰지 않는다.
+ */
+export async function touchOperatorConversation(dataSource: DataSource, operatorId: string, at: Date, minGapMs = 60_000): Promise<void> {
+  const current = (await cachedOperators(dataSource)).find((op) => op.id === operatorId);
+  if (!current) return;
+  if (current.last_conversation_at && at.getTime() - Date.parse(current.last_conversation_at) < minGapMs) return;
+  await updateOperators(dataSource, (list) => ({
+    next: list.map((op) => (op.id === operatorId ? { ...op, last_conversation_at: at.toISOString() } : op)),
+    result: undefined,
+  }));
 }
 
 /** 음성 인식 용어집에 더할 이름들 — 부르는 이름을 엔진이 알아듣게. */

@@ -76,6 +76,7 @@ import type { OrchestrationTeamService } from '../../orchestration/orchestration
 import type { AgentManagerCommandService } from '../../agent-manager/agent-manager-command.service';
 import type { OntologyLifecycleService } from '../../ontology/ontology-lifecycle.service';
 import type { OntologyQueryService } from '../../ontology/ontology-query.service';
+import type { OperatorDecisionService } from '../../voice/operator-decision.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -245,6 +246,10 @@ export interface ToolContext {
   // omits them and the tools degrade to an explicit error.
   ontologyLifecycleService?: OntologyLifecycleService;
   ontologyQueryService?: OntologyQueryService;
+  // 말로 답하기(docs/voice-operator.md) — operator 세션이 사용자의 말로 받은 답을 승인·질문을 기다리는
+  // 세션에 전한다(operator-tools.ts). 라이브 세션 상태가 NestJS 프로세스 메모리에 있으므로 standalone
+  // context 에는 없다 — 도구가 그 사유로 거절한다.
+  operatorDecisionService?: OperatorDecisionService;
   // Session-scoped bridge from successful create/update tools to the final
   // send_chat_room_message call. Initialized by createMcpServerForContext.
   pendingTicketRefs?: PendingTicketRefAccumulator;

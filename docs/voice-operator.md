@@ -226,14 +226,91 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 
 ## 음성 알림
 
+### 작업 보고 — 세션 소식은 operator 가 전한다 (2026-10-04)
+
+세션마다 따로 말하지 않는다. AWB 를 거쳐 연결된 세션(driver 가 있는 Agent Session)의 턴이 끝나거나(오류 포함)
+사용자의 승인·답을 기다리면, **AWB 가 그것을 알아채 operator 에게 보고**하고, operator 가 쓴 요약이 사용자에게
+소리(+토스트)로 간다. 말하는 것은 operator 하나다.
+
+```
+세션 턴 종료 · 오류 · 승인/질문 대기 (agent_session_update/event — 서버가 이미 안다)
+   │  사용자가 그 세션 화면을 보고 있으면 끝 (VoicePresenceService — 화면이 30초마다 알린다)
+   ▼
+OperatorReportService: 받을 operator = 같은 호스트(여럿이면 최근 대화) → 없으면 가장 최근에 대화한 operator
+   │  바쁘면(사용자와 대화 중) 줄 세웠다가 한가해지면 묶어서 한 번에
+   ▼
+operator 세션에 대신 보낸 프롬프트 "[AWB 작업 보고] … 1. 완료 — rolf / Codex · '배포 정리' · 12분 …"
+   ▼  (operator 가 1~2문장 요약)
+voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙 자비스: …" + 낭독, 누르면 그 세션으로
+```
+
+- **감지는 AWB 가 한다(MCP 자가보고가 아니다).** 턴 종료·승인 대기는 AWB 가 이미 정확히 알고, 승인 대기로 멈춘
+  세션은 MCP 도구를 부를 수도 없으며, 에이전트마다 "끝나면 보고해" 를 지키길 기대할 수 없다.
+- 받을 operator 는 `routeOperators()`(`modules/voice/operator-report.ts`). "대화" 는 사용자가 시작한 operator 턴이다 —
+  AWB 가 보낸 보고 턴은 세지 않는다. 시각은 `OperatorEntry.last_conversation_at` 에 1분 간격으로 남는다(재시작 뒤에도).
+- 보고는 `AgentSessionsService.promptOnBehalf()` — 화면이 보낸 것처럼 driver 의 라이브 전사에 프롬프트 행도 흘린다.
+  워크스페이스는 등록 때 화면의 것(`OperatorEntry.workspace_id`, 그 워크스페이스의 CLI 설정·credential 로 연다).
+  전사는 보고 프롬프트를 "📋 AWB 작업 보고 · n건" 으로 접는다.
+- **조용히 버리지 않는다.** operator 에게 닿지 못하면(호스트 꺼짐) 다음 후보로, 아무도 안 되거나 operator 가 보고 턴을
+  실패·10분 무응답하면, 승인·질문 보고가 바쁜 operator 를 2분 넘게 기다리면(요청은 15분이면 취소된다), 나머지는
+  20분 넘게 기다리면 — 아래 템플릿 문장으로 직접 알린다. 등록된 operator 가 없으면 예전처럼 직접 알린다.
+- operator 자신의 턴은 보고하지 않는다. 사용자가 그 operator 화면을 떠나 있을 때 끝난 대화 턴은 operator 의 답 자체를
+  들려준다(`operator_reply`). operator 가 사용자의 승인을 기다리면 직접 알린다.
+- 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림이 읽는다), 깨어 있는 대화를 맡은
+  화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
+- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기").
+- **SSE 전달 목록(event-registry)은 필드를 골라 담는다** — `voice_announcement` 에 필드를 더하면 `map()` 에도 더할 것
+  (`operator` 가 빠져 화면에 안 갔던 것을 `event-registry-payload-parity-guard` 가 잡았다).
+- 회귀: `apps/server/test/voice-operator-reports.test.mjs`(라우팅 · 보고 문장 · 요약 전달 · 보고 있음 · 바쁨/묶음 ·
+  다음 후보 · 직접 알림으로 되돌리기 · operator 자신의 턴 · 화면과의 계약).
+
+### 말로 답하기 — 승인·선택지를 듣고 말로 고른다 (2026-10-04)
+
+세션이 승인이나 답을 기다리면 operator 가 선택지를 번호와 함께 읽어 주고, 사용자가 말로 고르면 operator 가 그 세션에
+대신 답을 전한다.
+
+```
+세션 승인 대기(permission_request) / 질문(elicitation form)
+   ▼ 작업 보고: 요청 id · 번호 붙은 선택지 · "답 전하기: answer_session_permission(… request_id, option_id=1)"a" 2)"r")"
+operator 보고 턴: "롤프의 Codex 세션이 npm publish 허락을 기다려요. 1번 이번만 허용, 2번 거부 중에 골라 주세요."
+   ▼ 알림(needs_decision) 을 다 읽으면 ↑신호음 — 8초 동안 이름 없이 답을 듣는다(이름 부르기가 켜져 있으면)
+사용자: "1번" (또는 "헤이 자비스, 허용해")  →  operator 화면에서 깨어나고 그 말이 operator 에게 간다
+   ▼ operator 의 턴(사용자가 시작) — MCP answer_session_permission / answer_session_question
+AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'permission' / 'elicitation' → 세션이 이어서 돈다
+```
+
+- MCP 도구(`mcp/tools/operator-tools.ts`, 티어 `full`): `list_pending_session_requests` · `answer_session_permission` ·
+  `answer_session_question`. 미결 요청은 `AgentSessionsService` 가 매니저가 중계한 요청·결정 행으로 메모리에 둔다
+  (`PendingSessionInteraction` — 결정 · 턴 종료 · 프로세스 종료에서 지운다).
+- **사람이 정했다는 근거** — MCP 는 에이전트만 붙는 표면이라 증명을 못 하므로(티켓 `pending_user_action` 해제가
+  MCP 로 막혀 있는 것과 같은 문제), 서버가 확인할 수 있는 사실로만 허락한다(`voice/operator-decision.service.ts`):
+  1. 호출자가 등록된 operator 세션의 연결(매니저가 주입한 연결 · 그 세션 id · 그 Host 의 full 키 — MCP 세션에
+     `agentSessionId` 로 남는다),
+  2. 그 operator 가 **사용자가 시작한 턴**을 돌고 있다 — 로그인한 화면에서 사람이 방금 말을 걸었다. AWB 가 보낸 보고
+     턴, 서버가 모르는 턴(재시작 직후)에서는 `not_user_turn` 으로 거절한다. 보고에는 다른 세션이 쓴 글(믿을 수 없는
+     입력)이 실려 오므로, 그 글만 보고 operator 가 스스로 승인하는 길을 이 조건이 막는다,
+  3. 기다리는 세션의 driver 가 지금 operator 와 대화하는 사람과 같다(`not_this_user`),
+  4. 요청이 아직 미결이고(`request_gone`) 고른 선택지·값이 그 요청의 것이다(`option_unknown` · `choice_unknown` ·
+     `field_missing`) — 자유 형식으로 승인을 만들어 내지 못한다.
+  전할 때마다 operator · 사용자 · operator 턴 · 요청 · 고른 것을 `Voice` 로그에 남긴다.
+- **짧은 숫자는 잘못 들린다** — 실측으로 가짜 마이크의 "1번." 을 ragnar ASR 이 "일반." 으로 적었다("이번만" ↔ "2번만"도
+  같은 소리). 그래서 지침이 "답이 숫자 하나뿐이거나 선택지 이름과 정확히 맞지 않으면 전하기 전에 한 번 확인하고 '네' 를
+  들은 뒤 전한다" 를 가르친다. 선택지 이름("이번만 허용해")으로 답하면 바로 전한다.
+- 이름 없이 답하는 창(`wakeStore.openFollowUp`, 8초): 결정이 필요한 `operator_report` 를 다 읽은 직후에만, 이름 부르기가
+  켜져 있고 잠든 동안에만 연다(깨어 있으면 이미 이름 없이 듣는다). 말을 **시작한** 순간 창이 열려 있었으면 그 말은
+  답이다. 군소리는 답이 아니다.
+- 검증(브라우저): 헤드리스 Chromium 에 결정 보고 SSE + ragnar TTS 로 만든 알림 소리 + 가짜 마이크("1번.")를 넣고 실제 ragnar
+  ASR 로 — 알림을 다 읽은 순간 답 창이 열리고("answer"), 이름 없이 한 말이 받아 적혀 operator 가 깨어나 그 말이 첫 요청으로
+  갔다(알림 큐 8.0초 → 답 창 16.2초 → 깨어남 22.1초).
+- 회귀: `apps/server/test/voice-operator-answers.test.mjs`(보고 문장 · 목록 · 보고 턴 거절 · 사용자 턴 전달 · 한 번만 ·
+  비operator · 다른 사용자 · 질문 값 검증 · 턴이 끝나면 다시 막힘 · SSE 필드), `apps/client/test/voice-wake.test.mjs`(답 창).
+
 ### 출처 이벤트 (기본값)
 
 | 이벤트 | 조건 | 대상 | 예 |
 |---|---|---|---|
-| `agent_session_update` reason `turn_finished` | 턴이 30초 이상, 사용자가 그 세션을 보고 있지 않음 | driver | "롤프 클로드 세션 '배포 스크립트' 작업이 끝났어요." |
-| 같은 이벤트, status `awaiting_permission` / `awaiting_input` | — | driver | "… 세션에서 확인이 필요해요." |
-| reason `turn_failed` | — | driver | "… 세션이 오류로 멈췄어요." |
-| operator 세션 턴 종료 | 대화 화면이 열려 있지 않음 | driver | 응답의 말하기용 요약 |
+| 세션 턴 종료·오류·승인/질문 대기 | 사용자가 그 세션을 보고 있지 않음 | driver | **operator 의 요약**(위 "작업 보고"). operator 가 없으면: "롤프 클로드 세션 '배포 스크립트' 작업이 끝났어요."(턴 30초 이상) · "… 세션에서 확인이 필요해요." · "… 세션이 오류로 멈췄어요." |
+| operator 세션 턴 종료 | 그 operator 화면을 보고 있지 않음 | driver | operator 의 답(`operator_reply`) |
 | `orchestration_update` status `completed` / `failed` / `cancelled` | — | 미션 `created_by` | "미션 '…'이 끝났어요. 12개 중 12개 성공." |
 | 미션 사용자 확인 대기 | — | 기존 confirm-notify 수신자 | "미션 '…'에서 확인이 필요해요." |
 | `notify_user` | — | 지정 사용자 | 본문 |

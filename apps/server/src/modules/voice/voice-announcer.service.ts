@@ -16,20 +16,39 @@ import {
 import { TurnAnswerTracker, type FinishedTurnAnswer } from './turn-answer';
 import { loadVoiceConfig } from './voice-config';
 import { VoiceError, VoiceService } from './voice.service';
+import { cachedOperators, type OperatorEntry } from './operator-config';
+import {
+  elicitationDetail,
+  isUrgentReport,
+  permissionDetail,
+  questionFields,
+  type ReportedRequest,
+  type SessionReport,
+  type SessionReportKind,
+} from './operator-report';
+import { OperatorReportService, type OperatorSummary } from './operator-report.service';
+import { toSpeakable } from './speakable';
+import { VoicePresenceService } from './voice-presence.service';
 
 /**
- * 음성 알림(docs/voice-operator.md "음성 알림") — 일이 끝나면 AWB 가 먼저 말한다.
+ * 음성 알림(docs/voice-operator.md "음성 알림 · 작업 보고") — 일이 끝나면 AWB 가 먼저 말한다.
  *
- * 서버 이벤트를 듣고(세션 턴 종료·오류·확인 대기, 미션 종료·결정 대기) 말할 문장을 만들어
- * 대상 사용자에게 `voice_announcement` 로 보낸다. 소리는 **요청될 때 한 번** 합성한다 — 듣는
- * 화면이 없으면 엔진을 부르지 않는다. 보고 있는 화면에서 이미 읽고 있는 것(그 세션을 열어 둔 경우)은
- * 화면이 걸러 낸다.
+ * 세션(AWB 를 거쳐 연결된 Agent Session)의 턴 종료·오류·확인 대기는 **operator 에게 보고**한다
+ * (`OperatorReportService`) — 같은 호스트의 operator, 없으면 가장 최근에 대화한 operator. operator 가 쓴
+ * 요약이 사용자에게 `voice_announcement`(kind `operator_report`)로 간다. 말하는 것은 operator 하나다.
+ * 사용자가 그 세션 화면을 보고 있으면(`VoicePresenceService`) 보고하지 않는다. 등록된 operator 가 없거나
+ * 보고가 닿지 못하면 예전처럼 템플릿 문장으로 직접 알린다 — 조용히 버리지 않는다.
+ *
+ * 미션 종료·결정 대기는 템플릿 문장으로 직접 알린다. 소리는 **요청될 때 한 번** 합성한다 — 듣는 화면이
+ * 없으면 엔진을 부르지 않는다.
  *
  * 이 이벤트는 UI 전용(user-only)이다 — agent-manager 는 구독하지 않는다(SSE contract 무관).
  */
 
-/** 이보다 짧은 턴은 알리지 않는다 — 짧은 문답은 대개 화면을 보며 기다린 것이다. */
+/** operator 가 없을 때의 직접 알림에서, 이보다 짧은 턴은 알리지 않는다 — 짧은 문답은 대개 화면을 보며 기다린 것이다. */
 export const MIN_ANNOUNCED_TURN_MS = 30_000;
+/** operator 의 요약을 알림 글로 옮길 때의 상한(말로 들을 길이). 상세는 operator 세션 화면에 있다. */
+export const OPERATOR_SUMMARY_CHARS = 600;
 /** 같은 세션의 "확인 필요" 를 이보다 자주 말하지 않는다(권한 요청이 연달아 올 때). */
 const NEEDS_INPUT_COOLDOWN_MS = 60_000;
 const ANNOUNCEMENT_TTL_MS = 2 * 60 * 60 * 1000;
@@ -49,6 +68,36 @@ interface StoredAnnouncement extends VoiceAnnouncementPayload {
 
 const sessionKey = (managerId: string, cli: string, sessionId: string) => `${managerId}\u0000${cli}\u0000${sessionId}`;
 
+const DIRECT_KIND: Record<SessionReportKind, Extract<AnnouncementKind, `session_${string}`>> = {
+  finished: 'session_turn_finished',
+  failed: 'session_turn_failed',
+  needs_permission: 'session_needs_input',
+  needs_input: 'session_needs_input',
+};
+
+/** 매니저가 중계한 요청 행 → 보고에 실을 요청(답을 전하는 데 필요한 id · 선택지 · 칸). */
+function reportedRequest(pending: { type: string; payload: any }): ReportedRequest | undefined {
+  const p = pending.payload || {};
+  if (pending.type === 'permission_request' && typeof p.request_id === 'string') {
+    return {
+      kind: 'permission',
+      id: p.request_id,
+      title: String(p.title || '').trim(),
+      options: Array.isArray(p.options)
+        ? p.options.filter((o: any) => o && typeof o.option_id === 'string').map((o: any) => ({ option_id: o.option_id, name: String(o.name || o.option_id) }))
+        : [],
+      fields: [],
+    };
+  }
+  if (pending.type === 'elicitation_request' && typeof p.elicitation_id === 'string') {
+    return { kind: 'question', id: p.elicitation_id, title: String(p.message || '').trim(), options: [], fields: questionFields(p.schema) };
+  }
+  return undefined;
+}
+
+const findOperator = (operators: readonly OperatorEntry[], s: { manager_id: string; cli: string; session_id: string }) =>
+  operators.find((op) => op.manager_id === s.manager_id && op.cli === s.cli && op.session_id === s.session_id) ?? null;
+
 @Injectable()
 export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   #store = new Map<string, StoredAnnouncement>();
@@ -57,6 +106,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   #finishedTurn = new Map<string, FinishedTurnAnswer>();
   #turnStartedAt = new Map<string, number>();
   #lastNeedsInputAt = new Map<string, number>();
+  /** 세션 → 지금 사용자를 기다리는 요청(권한·질문)의 내용 — 보고에 무엇을 정해야 하는지 싣는다. */
+  #pendingRequest = new Map<string, { type: string; payload: any }>();
   #listeners: Array<[string, (...args: any[]) => void]> = [];
 
   constructor(
@@ -64,12 +115,23 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     private readonly voice: VoiceService,
     private readonly logService: LogService,
     private readonly rebac: ReBACService,
+    private readonly reports: OperatorReportService,
+    private readonly presence: VoicePresenceService,
   ) {}
 
   onModuleInit(): void {
     this.listen('agent_session_event', (e) => this.onSessionEvent(e));
     this.listen('agent_session_update', (e) => this.onSessionUpdate(e));
     this.listen('orchestration_update', (e) => this.onMissionUpdate(e));
+    this.reports.onSummary((summary) => this.guard('operator summary', () => this.announceOperatorSummary(summary)));
+    this.reports.onUndeliverable((list, reason) => this.guard('undelivered report', async () => {
+      this.logService.info('Voice', `announcing ${list.length} session report(s) directly: ${reason}`);
+      await this.announceReportsDirectly(list);
+    }));
+  }
+
+  private guard(what: string, fn: () => Promise<unknown>): void {
+    fn().catch((err) => this.logService.warn('Voice', `${what} failed: ${err?.message ?? err}`));
   }
 
   onModuleDestroy(): void {
@@ -89,10 +151,25 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
 
   // ─── 세션 ────────────────────────────────────────────────────────────────
 
-  private onSessionEvent(e: any): void {
-    if (!e?.event) return;
-    const finished = this.#answers.push(e.event);
-    if (finished) this.#finishedTurn.set(sessionKey(e.manager_id, e.cli, e.session_id), finished);
+  private async onSessionEvent(e: any): Promise<void> {
+    const ev = e?.event;
+    if (!ev) return;
+    const key = sessionKey(e.manager_id, e.cli, e.session_id);
+    if (ev.type === 'permission_request' || (ev.type === 'elicitation_request' && ev.payload?.mode !== 'url')) {
+      this.#pendingRequest.set(key, { type: ev.type, payload: ev.payload });
+    }
+    const finished = this.#answers.push(ev);
+    if (finished) this.#finishedTurn.set(key, finished);
+    // operator 세션의 턴 — 지금 무슨 턴인지 기록하고(말로 받은 답을 전하는 도구의 근거), 사용자가 시작한 턴이면
+    // "가장 최근에 대화한" 의 근거로 남긴다(AWB 가 보낸 보고 턴은 대화가 아니다).
+    const phase = ev.type === 'turn' ? ev.payload?.phase : null;
+    if ((phase === 'started' || phase === 'finished') && ev.turn_id) {
+      const operator = findOperator(await cachedOperators(this.dataSource), e);
+      if (operator) {
+        this.reports.noteOperatorTurn(operator.id, ev.turn_id, phase);
+        if (phase === 'started' && !this.reports.isReportTurn(ev.turn_id)) this.reports.noteConversation(operator.id);
+      }
+    }
   }
 
   private async onSessionUpdate(e: any): Promise<void> {
@@ -107,50 +184,137 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       if (!this.#turnStartedAt.has(key)) this.#turnStartedAt.set(key, now);
       return;
     }
+    const operator = findOperator(await cachedOperators(this.dataSource), session);
+    const viewing = () => this.presence.isViewing(userId, session.manager_id, session.cli, session.session_id);
 
-    let kind: AnnouncementKind | null = null;
-    let answer: string | null = null;
+    let kind: SessionReportKind | null = null;
+    let detail = '';
+    let durationMs: number | null = null;
+    let request: ReportedRequest | undefined;
     if (reason === 'turn_finished' || reason === 'turn_failed') {
       const startedAt = this.#turnStartedAt.get(key);
       this.#turnStartedAt.delete(key);
       const finished = this.#finishedTurn.get(key) ?? null;
       this.#finishedTurn.delete(key);
-      if (finished?.stopReason === 'cancelled') return; // 사용자가 멈춘 턴
-      // 시작 시각을 모르면(서버가 턴 도중에 재시작) 길었다고 본다 — 놓치는 쪽보다 한 번 더 말하는 쪽이 낫다.
-      const long = startedAt === undefined || now - startedAt >= MIN_ANNOUNCED_TURN_MS;
-      if (reason === 'turn_finished') {
-        if (!long) return;
-        kind = 'session_turn_finished';
-        answer = finished?.answer || null;
-      } else {
-        kind = 'session_turn_failed';
+      this.#pendingRequest.delete(key);
+      if (operator) {
+        // operator 자신의 턴 — 보고 턴이면 그 답이 요약으로 나간다. 사용자와의 대화 턴이면, 사용자가 그 화면을
+        // 떠나 있을 때 operator 의 답을 그대로 들려준다(operator 는 보고하지 않는다 — 그것이 보고 받는 쪽이다).
+        if (await this.reports.handleOperatorUpdate(operator, reason, finished)) return;
+        if (viewing()) return;
+        if (reason === 'turn_finished') {
+          if (finished && finished.stopReason !== 'cancelled' && finished.answer) {
+            await this.announceOperator([userId], 'operator_reply', operator, finished.answer, {
+              type: 'session', manager_id: session.manager_id, cli: session.cli, session_id: session.session_id,
+            });
+          }
+          return;
+        }
+        await this.announceReportsDirectly([this.toReport('failed', userId, session, session.last_error || '', null, now)]);
+        return;
       }
+      if (finished?.stopReason === 'cancelled') return; // 사용자가 멈춘 턴
+      // 시작 시각을 모르면(서버가 턴 도중에 재시작) 길이를 모른다 — null.
+      durationMs = startedAt === undefined ? null : now - startedAt;
+      kind = reason === 'turn_finished' ? 'finished' : 'failed';
+      detail = reason === 'turn_finished' ? (finished?.answer || '') : (session.last_error || '');
     } else if (session.status === 'awaiting_permission' || session.status === 'awaiting_input') {
       const last = this.#lastNeedsInputAt.get(key) ?? 0;
       if (now - last < NEEDS_INPUT_COOLDOWN_MS) return;
       this.#lastNeedsInputAt.set(key, now);
-      kind = 'session_needs_input';
-    } else if (reason === 'closed' || reason === 'process_exit') {
+      kind = session.status === 'awaiting_permission' ? 'needs_permission' : 'needs_input';
+      const lang = announcementLanguage((await loadVoiceConfig(this.dataSource)).stt.languages);
+      const pending = this.#pendingRequest.get(key);
+      detail = !pending ? ''
+        : pending.type === 'permission_request' ? permissionDetail(pending.payload, lang) : elicitationDetail(pending.payload, lang);
+      request = pending ? reportedRequest(pending) : undefined;
+      if (operator) {
+        // operator 자신이 사용자의 승인을 기다린다 — 다른 operator 를 거치지 않고 직접 알린다.
+        if (!viewing()) await this.announceReportsDirectly([this.toReport(kind, userId, session, detail, null, now)]);
+        return;
+      }
+    } else if (reason === 'closed' || reason === 'process_exit' || reason === 'host_offline') {
       this.#turnStartedAt.delete(key);
       this.#lastNeedsInputAt.delete(key);
+      this.#pendingRequest.delete(key);
+    }
+
+    if (operator) {
+      // 그 밖의 operator 상태 변화(열림·종료·하트비트) — 보고 턴의 정리와 줄 선 보고의 재전송을 맡긴다.
+      await this.reports.handleOperatorUpdate(operator, reason, null);
       return;
     }
     if (!kind) return;
+    // 사용자가 그 세션 화면을 보고 있다 — 이미 보고 있는 것을 보고하지 않는다.
+    if (viewing()) return;
+    const report = { ...this.toReport(kind, userId, session, detail, durationMs, now), ...(request ? { request } : {}) };
+    if (await this.reports.submit(report)) return;
+    // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(짧은 턴은 화면을 보며 기다린 것으로 본다).
+    if (kind === 'finished' && durationMs !== null && durationMs < MIN_ANNOUNCED_TURN_MS) return;
+    await this.announceReportsDirectly([report]);
+  }
 
-    const config = await loadVoiceConfig(this.dataSource);
+  private toReport(kind: SessionReportKind, userId: string, session: any, detail: string, durationMs: number | null, at: number): SessionReport {
+    return {
+      kind,
+      user_id: userId,
+      session: {
+        manager_id: session.manager_id,
+        manager_name: session.manager_name || String(session.manager_id || '').slice(0, 8),
+        cli: session.cli,
+        cli_label: cliDescriptor(session.cli)?.label || session.cli,
+        session_id: session.session_id,
+        title: session.title || '',
+        cwd: session.cwd || '',
+      },
+      detail,
+      duration_ms: durationMs,
+      at,
+    };
+  }
+
+  /** 템플릿 문장으로 직접 — operator 가 없거나, 보고가 operator 에게 닿지 못했을 때. */
+  private async announceReportsDirectly(reports: SessionReport[]): Promise<void> {
+    if (!reports.length || !(await this.ttsReady())) return;
+    const lang = announcementLanguage((await loadVoiceConfig(this.dataSource)).stt.languages);
+    for (const report of reports) {
+      const kind = DIRECT_KIND[report.kind];
+      const s = report.session;
+      const text = sessionAnnouncementText(kind, {
+        hostName: s.manager_name,
+        cliLabel: s.cli_label,
+        title: s.title,
+        answer: report.kind === 'finished' ? report.detail : null,
+      }, lang);
+      this.announce([report.user_id], kind, text, { type: 'session', manager_id: s.manager_id, cli: s.cli, session_id: s.session_id });
+    }
+  }
+
+  /** operator 가 보고를 요약했다 — 그 답을 사용자에게. 화면 이동은 결정이 필요한 세션이 먼저다. */
+  private async announceOperatorSummary(summary: OperatorSummary): Promise<void> {
+    const focus = summary.reports.find(isUrgentReport) ?? summary.reports[summary.reports.length - 1];
+    if (!focus) return;
+    if (!toSpeakable(summary.answer, OPERATOR_SUMMARY_CHARS)) {
+      await this.announceReportsDirectly(summary.reports); // 읽을 말이 없는 답(코드뿐) — 템플릿으로
+      return;
+    }
+    await this.announceOperator([summary.userId], 'operator_report', summary.operator, summary.answer, {
+      type: 'session', manager_id: focus.session.manager_id, cli: focus.session.cli, session_id: focus.session.session_id,
+    }, summary.reports.some(isUrgentReport));
+  }
+
+  private async announceOperator(
+    userIds: string[],
+    kind: Extract<AnnouncementKind, `operator_${string}`>,
+    operator: OperatorEntry,
+    answer: string,
+    target: VoiceAnnouncementTarget,
+    needsDecision = false,
+  ): Promise<void> {
     if (!(await this.ttsReady())) return;
-    const text = sessionAnnouncementText(kind as Extract<AnnouncementKind, `session_${string}`>, {
-      hostName: session.manager_name || String(session.manager_id || '').slice(0, 8),
-      cliLabel: cliDescriptor(session.cli)?.label || session.cli,
-      title: session.title || '',
-      answer,
-    }, announcementLanguage(config.stt.languages));
-    this.announce([userId], kind, text, {
-      type: 'session',
-      manager_id: session.manager_id,
-      cli: session.cli,
-      session_id: session.session_id,
-    });
+    const text = toSpeakable(answer, OPERATOR_SUMMARY_CHARS);
+    if (!text) return;
+    this.announce(userIds, kind, text, target, { id: operator.id, name: operator.name }, needsDecision);
   }
 
   // ─── 미션 ────────────────────────────────────────────────────────────────
@@ -202,7 +366,14 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private announce(userIds: string[], kind: AnnouncementKind, text: string, target: VoiceAnnouncementTarget): void {
+  private announce(
+    userIds: string[],
+    kind: AnnouncementKind,
+    text: string,
+    target: VoiceAnnouncementTarget,
+    operator?: { id: string; name: string },
+    needsDecision = false,
+  ): void {
     this.prune();
     for (const userId of userIds) {
       const payload: VoiceAnnouncementPayload = {
@@ -211,6 +382,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
         kind,
         text,
         target,
+        ...(operator ? { operator } : {}),
+        ...(needsDecision ? { needs_decision: true } : {}),
         created_at: new Date().toISOString(),
       };
       this.#store.set(payload.id, { ...payload, expiresAt: Date.now() + ANNOUNCEMENT_TTL_MS, audio: null });

@@ -53,6 +53,9 @@ export interface McpAgentContext {
   // Protocol-runtime attribution. These values are pinned by the Runtime Host
   // on its authenticated MCP connection and are used for proposal-only APIs.
   clientType?: 'subagent' | 'managed-subagent' | 'runtime-child';
+  // Agent Session(CLI 직접 세션)에 매니저가 주입한 연결이면(`X-AWB-Client-Type: agent-session`) 그 세션 id
+  // (`X-AWB-Session-Id`). operator 세션만 부를 수 있는 도구가 호출자를 알아보는 데 쓴다(operator-config.ts).
+  agentSessionId?: string;
   runtimeRunId?: string;
   executionStrategy?: 'single' | 'delegated' | 'swarm';
   // Ticket ee26302d: opt-in reduced MCP tool surface for small-context

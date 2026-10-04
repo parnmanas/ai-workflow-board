@@ -103,10 +103,11 @@ export default function Sidebar({
   const [searchParams] = useSearchParams();
   // WORK 최상위 메뉴별 접기/펼치기. 기본은 모두 펼침 — 어느 메뉴 하나만 다르게
   // 동작하지 않도록 세 그룹이 같은 state 모양을 쓴다.
-  const [collapsedGroups, setCollapsedGroups] = React.useState<Partial<Record<WorkNavGroupKey, boolean>>>(
+  // OPERATORS 목록도 같은 모양으로 접는다(키 'operators').
+  const [collapsedGroups, setCollapsedGroups] = React.useState<Partial<Record<WorkNavGroupKey | 'operators', boolean>>>(
     // 저장본에서 복원한다. `foldInit` 는 아래에서 선언되므로 여기서 직접 읽는다 —
     // useState 초기화 함수는 최초 렌더에 한 번만 돈다.
-    () => loadSidebarFold().groups as Partial<Record<WorkNavGroupKey, boolean>>,
+    () => loadSidebarFold().groups as Partial<Record<WorkNavGroupKey | 'operators', boolean>>,
   );
   const [visibleGroupCounts, setVisibleGroupCounts] = React.useState<Partial<Record<WorkNavGroupKey, number>>>({});
   const [visibleRoomCount, setVisibleRoomCount] = React.useState(SIDEBAR_ROOMS_BASE_COUNT);
@@ -810,25 +811,63 @@ export default function Sidebar({
         aria-label="Primary navigation"
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
-        {operators.length > 0 && wsId && (
-          <section aria-labelledby="sidebar-operators-heading">
-            <div style={sectionHeaderStyle}>
-              <span id="sidebar-operators-heading">Operators</span>
-              <WakeToggle operators={operators} />
-            </div>
-            {operators.map((op) => {
-              const awake = wake.mode === 'awake' && wake.operatorId === op.id;
-              return renderNavItem({
-                key: `operator-${op.id}`,
-                path: sessionPath(`/ws/${wsId}`, op.manager_id, op.cli, op.session_id),
-                label: op.name,
-                icon: '🎙',
-                title: `${op.name} — ${op.title || runtimeLabel(op.cli)}${awake ? ' (깨어 있음)' : ''}`,
-                ...(awake ? { activity: { label: '깨어 있음', tone: 'live' as const, live: true } } : {}),
-              });
-            })}
-          </section>
-        )}
+        {/* OPERATORS — HOSTS 와 같은 높이의 메뉴 줄이고, 등록된 operator 들이 그 아래 한 단계 들여 나온다
+            (WORK 의 Teams/Boards 목록과 같은 모양). 섹션 머리(SESSIONS · CHAT …)로 두면 그 아래 오는
+            HOSTS 줄까지 operator 묶음처럼 보인다. 줄을 누르면 목록을 펴고 접는다 — operator 를 모아 보는
+            화면은 따로 없다(관리는 Admin → Voice). */}
+        {operators.length > 0 && wsId && (() => {
+          const expanded = !collapsedGroups.operators;
+          const awakeOperator = wake.mode === 'awake' ? operators.find((op) => op.id === wake.operatorId) ?? null : null;
+          const toggle = () => setCollapsedGroups((prev) => ({ ...prev, operators: expanded }));
+          return (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  onClick={toggle}
+                  aria-expanded={expanded}
+                  aria-controls="sidebar-operators-list"
+                  title={awakeOperator ? `Operators — ${awakeOperator.name} 깨어 있음` : 'Operators — 이름을 불러 깨우는 세션들'}
+                  style={{ ...navRowStyle(false), width: 'auto', flex: 1, minWidth: 0 }}
+                  onMouseEnter={(event) => { event.currentTarget.style.background = tokens.colors.surfaceHover; }}
+                  onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
+                >
+                  <span style={iconStyle(false)} aria-hidden="true">🎙</span>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    OPERATORS
+                  </span>
+                  {/* 접어 둬도 누가 깨어 있는지는 보인다. */}
+                  {!expanded && awakeOperator && <ActivityDot view={{ label: `${awakeOperator.name} 깨어 있음`, tone: 'live', live: true }} size={6} />}
+                </button>
+                <WakeToggle operators={operators} />
+                <button
+                  type="button"
+                  aria-label={expanded ? 'Collapse Operators list' : 'Expand Operators list'}
+                  aria-expanded={expanded}
+                  onClick={toggle}
+                  style={{ width: 24, height: 24, marginRight: 8, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 10, flexShrink: 0 }}
+                >
+                  {expanded ? '\u25BC' : '\u25B6'}
+                </button>
+              </div>
+              {expanded && (
+                <div id="sidebar-operators-list" aria-label="Operators list">
+                  {operators.map((op) => {
+                    const awake = awakeOperator?.id === op.id;
+                    return renderNavItem({
+                      key: `operator-${op.id}`,
+                      path: sessionPath(`/ws/${wsId}`, op.manager_id, op.cli, op.session_id),
+                      label: op.name,
+                      icon: (op.name.trim()[0] || 'O').toUpperCase(),
+                      title: `${op.name} — ${op.title || runtimeLabel(op.cli)}${awake ? ' (깨어 있음)' : ''}`,
+                      ...(awake ? { activity: { label: '깨어 있음', tone: 'live' as const, live: true } } : {}),
+                    }, true);
+                  })}
+                </div>
+              )}
+            </>
+          );
+        })()}
         {canAdmin && renderNavItem({
           key: 'hosts',
           path: `${workspaceBase}/hosts`,

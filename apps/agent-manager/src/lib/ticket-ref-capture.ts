@@ -666,6 +666,11 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   save_action: 'non-ticket', save_function: 'non-ticket',
   save_prompt_template: 'non-ticket', save_resource: 'non-ticket',
   keep_chat_session_alive: 'non-ticket',
+  // 말로 답하기 — operator 세션이 사용자의 말로 받은 답을 다른 Agent Session 의 승인 대기·질문에 전한다
+  // (서버 operator-tools.ts). 티켓을 만들지도 바꾸지도 않는다.
+  list_pending_session_requests: 'non-ticket',
+  answer_session_permission: 'non-ticket',
+  answer_session_question: 'non-ticket',
   set_chat_room_name: 'non-ticket', set_qa_phase: 'non-ticket', set_typing: 'non-ticket',
   start_qa_batch: 'non-ticket', start_qa_run: 'non-ticket', start_security_batch: 'non-ticket',
   start_security_run: 'non-ticket', submit_benchmark_score: 'non-ticket',

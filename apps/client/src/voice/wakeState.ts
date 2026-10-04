@@ -37,7 +37,15 @@ export interface WakeSnapshot {
   error: string | null;
   /** 마이크를 쓰는 대화 모드 수 — 0 일 때만 상시 청취가 마이크를 연다. */
   micClaims: number;
+  /**
+   * 답을 기다리는 짧은 창 — operator 가 결정이 필요한 보고(선택지)를 읽어 준 직후다. 이 동안은 이름을 부르지
+   * 않아도 들린 말이 그 operator 에게 간다(스마트 스피커의 후속 질문처럼).
+   */
+  followUp: { operatorId: string; until: number } | null;
 }
+
+/** 결정이 필요한 보고를 읽은 뒤 이름 없이 답을 기다리는 시간. */
+export const FOLLOW_UP_MS = 8_000;
 
 const ENABLED_KEY = 'awb.voice.wake';
 /** 깨어났는데 그 operator 의 화면이 이만큼 안에 열리지 않으면(이동 실패) 다시 잠든다. */
@@ -51,8 +59,9 @@ function readEnabled(): boolean {
 
 class WakeStore {
   #state: WakeSnapshot = {
-    enabled: false, mode: 'off', operatorId: null, wokeAt: 0, listener: 'idle', error: null, micClaims: 0,
+    enabled: false, mode: 'off', operatorId: null, wokeAt: 0, listener: 'idle', error: null, micClaims: 0, followUp: null,
   };
+  #followUpTimer: ReturnType<typeof setTimeout> | null = null;
   #listeners = new Set<Listener>();
   #firstPrompt: { operatorId: string; text: string } | null = null;
   #attached = new Map<string, number>();
@@ -87,6 +96,7 @@ class WakeStore {
     if (enabled) this.#set({ enabled, mode: this.#state.mode === 'awake' ? 'awake' : 'sleeping', error: null });
     else {
       this.#firstPrompt = null;
+      this.#clearFollowUp();
       this.#set({ enabled, mode: 'off', operatorId: null, listener: 'idle', error: null });
     }
   }
@@ -98,6 +108,7 @@ class WakeStore {
 
   /** `operatorId` 가 불렸다. `firstPrompt` 는 이름 뒤에 이어 한 말(없으면 null). */
   wake(operatorId: string, firstPrompt: string | null): void {
+    this.#clearFollowUp();
     this.#firstPrompt = firstPrompt ? { operatorId, text: firstPrompt } : null;
     this.#set({ mode: 'awake', operatorId, wokeAt: Date.now(), error: null });
     if (this.#attachTimer) clearTimeout(this.#attachTimer);
@@ -134,6 +145,30 @@ class WakeStore {
       this.#attached.set(operatorId, Math.max(0, (this.#attached.get(operatorId) ?? 1) - 1));
       setTimeout(() => { if (!this.#attached.get(operatorId)) this.sleep(operatorId); }, 0);
     };
+  }
+
+  /**
+   * operator 가 결정이 필요한 보고를 막 읽어 줬다 — 잠깐 이름 없이 답을 듣는다. 이름 부르기가 켜져 있고 잠든
+   * 동안에만 연다(깨어 있으면 이미 이름 없이 듣고 있다).
+   */
+  openFollowUp(operatorId: string, ms = FOLLOW_UP_MS): boolean {
+    if (!this.#state.enabled || this.#state.mode !== 'sleeping') return false;
+    if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
+    this.#followUpTimer = setTimeout(() => this.#clearFollowUp(), ms);
+    this.#set({ followUp: { operatorId, until: Date.now() + ms } });
+    return true;
+  }
+
+  /** 지금 답을 기다리는 창이 열려 있으면 그 operator. */
+  activeFollowUp(now = Date.now()): string | null {
+    const f = this.#state.followUp;
+    return f && now < f.until ? f.operatorId : null;
+  }
+
+  #clearFollowUp(): void {
+    if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
+    this.#followUpTimer = null;
+    if (this.#state.followUp) this.#set({ followUp: null });
   }
 
   setListener(listener: WakeListenerStatus, error: string | null = null): void {

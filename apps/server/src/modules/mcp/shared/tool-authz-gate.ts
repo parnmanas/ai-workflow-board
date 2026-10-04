@@ -218,6 +218,14 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   graph_neighbors: 'caller',
   graph_blast_radius: 'caller',
   graph_call_path: 'caller',
+
+  // 말로 답하기(docs/voice-operator.md) — operator 세션이 사용자의 말로 받은 답을 승인·질문을 기다리는
+  // 세션에 전한다. 'full' 은 핸들러가 이미 무조건 강제하는 하한이다: OperatorDecisionService.operatorFor()
+  // 가 source 'db' + scope 'full' + 등록된 operator 세션(그 Host 의 키 · 그 세션 id)만 받는다. 그 위에 답을
+  // 전하는 둘은 "사용자가 시작한 턴" · "같은 사용자의 세션" · "아직 미결인 요청과 그 선택지" 를 서비스가 본다.
+  list_pending_session_requests: 'full',
+  answer_session_permission: 'full',
+  answer_session_question: 'full',
 };
 
 /**

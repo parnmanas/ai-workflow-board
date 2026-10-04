@@ -28,6 +28,7 @@ import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voi
 import { speechPlayer } from '../../voice/speechPlayer';
 import { TurnAnswerTracker, shouldSpeakFinishedTurn } from '../../voice/turnAnswer.logic';
 import { sessionTargetKey, setViewingSession } from '../../voice/announcements';
+import { reportViewingSession } from '../../voice/presence';
 import { operatorBrief, operatorForSession, useVoiceOperators } from '../../voice/operator';
 import OperatorDialog from '../../voice/OperatorDialog';
 import { playEarcon } from '../../voice/earcon';
@@ -429,6 +430,17 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     setViewingSession(sessionTargetKey(managerId, cli, sessionId));
     return () => setViewingSession(null);
   }, [managerId, cli, sessionId]);
+  // 서버에도 알린다 — 보고 있는 세션의 완료·대기는 operator 에게 보고하지 않는다(docs/voice-operator.md "작업 보고").
+  // 깨어 있는 대화를 맡은 동안은 탭이 숨어도 이 화면이 답을 읽으므로 보고 있는 것으로 알린다.
+  const voiceAvailable = !!voiceConfig;
+  useEffect(() => {
+    if (!voiceAvailable) return;
+    reportViewingSession({ manager_id: managerId, cli, session_id: sessionId }, awakeHere);
+  }, [voiceAvailable, managerId, cli, sessionId, awakeHere]);
+  useEffect(() => () => reportViewingSession(null), [managerId, cli, sessionId]);
+  // 이 화면이 보낸 턴 — 여기서 읽는 것은 이것뿐이다. 다른 데서 시작된 턴(AWB 가 operator 에게 보낸 작업 보고
+  // 등)의 답은 음성 알림이 들려준다 — 두 경로가 같은 답을 두 번 읽지 않게.
+  const ownTurnIdsRef = useRef(new Set<string>());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** 첨부 이미지가 나중에 디코딩되며 높이를 키울 때 바닥을 유지하기 위한 내용 래퍼. */
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -466,7 +478,8 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     // 보고 있는 화면에서만 읽는다. 다른 화면에 있을 때 알리는 것은 음성 알림의 몫이다.
     // 이름을 불러 깨운 대화는 탭이 숨어 있어도 읽는다 — 켜 둔 단말을 스피커처럼 쓰는 경우다.
     const finished = answerTrackerRef.current?.push(data.event);
-    if (!finished) return;
+    if (!finished || !ownTurnIdsRef.current.has(finished.turnId)) return;
+    ownTurnIdsRef.current.delete(finished.turnId);
     // operator 가 대화를 마무리하면 답 끝에 잠들기 표시를 붙인다 — 다 읽은 뒤에 잠든다.
     const { text: answer, sleep } = splitSleepMarker(finished.answer);
     const { awake, operator: op } = wakeRefs.current;
@@ -630,6 +643,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     const optimisticText = text || (images.length ? `[${images.length} image(s)]` : '');
     try {
       const result = await api.promptHostSession(managerId, cli, sessionId, text, images);
+      ownTurnIdsRef.current.add(result.turn_id);
       setLive(result.live);
       setEvents((prev) => appendLiveEvent(prev, {
         id: `local:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text: optimisticText }, created_at: new Date().toISOString(),

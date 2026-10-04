@@ -13,6 +13,8 @@ export function describeWake(state: WakeSnapshot, operators: readonly VoiceOpera
     return `${name} 깨어 있음 — 이름 없이 말하면 됩니다`;
   }
   const names = operators.map((op) => `"헤이 ${op.name}"`).join(', ');
+  const answering = state.followUp ? operators.find((op) => op.id === state.followUp!.operatorId) : null;
+  if (answering) return `${answering.name} 에게 답을 듣는 중 — 이름 없이 바로 말하세요`;
   switch (state.listener) {
     case 'waiting-gesture': return '화면을 한 번 누르면 듣기 시작합니다(브라우저가 사용자 동작 전에는 마이크 소리를 막습니다)';
     case 'other-tab': return '다른 탭이 듣고 있습니다';
@@ -63,7 +65,7 @@ export default function WakeToggle({ operators }: { operators: readonly VoiceOpe
       }}
     >
       <span aria-hidden="true">{state.mode === 'awake' && on ? '●' : state.listener === 'error' && on ? '!' : '👂'}</span>
-      {on ? (state.mode === 'awake' ? 'awake' : state.listener === 'waiting-gesture' ? 'tap' : 'on') : 'off'}
+      {on ? (state.mode === 'awake' ? 'awake' : state.followUp ? 'answer' : state.listener === 'waiting-gesture' ? 'tap' : 'on') : 'off'}
     </button>
   );
 }

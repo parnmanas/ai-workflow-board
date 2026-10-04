@@ -155,6 +155,26 @@ interface LiveState {
   updated_at: number;
 }
 
+/**
+ * 사용자의 답을 기다리는 요청(권한·질문) 하나 — 매니저가 중계한 `permission_request` / `elicitation_request`(form)
+ * 에서 만들고, 결정 행·턴 종료·프로세스 종료에서 지운다. 메모리에만 둔다(서버가 다시 뜨면 화면의 기록 RPC 가
+ * 카드를 되살린다). operator 가 말로 받은 답을 전할 때 무엇이 미결인지 여기서 본다(docs/voice-operator.md "말로 답하기").
+ */
+export interface PendingSessionInteraction {
+  kind: 'permission' | 'question';
+  /** permission 이면 request_id, question 이면 elicitation_id. */
+  id: string;
+  turn_id: string;
+  /** 권한 요청의 제목 · 질문 문장. */
+  title: string;
+  description: string;
+  /** 권한 요청의 선택지. */
+  options: Array<{ option_id: string; name: string; kind: string }>;
+  /** 질문(form)의 JSON Schema. */
+  schema: Record<string, unknown> | null;
+  created_at: string;
+}
+
 interface PendingRpc {
   manager_id: string;
   op: string;
@@ -310,6 +330,8 @@ function normalizeCommands(input: unknown): AgentSessionCommand[] {
 export class AgentSessionsService implements OnModuleDestroy {
   private readonly pending = new Map<string, PendingRpc>();
   private readonly live = new Map<string, LiveState>();
+  /** 세션 → 사용자의 답을 기다리는 요청들(`PendingSessionInteraction`). */
+  private readonly awaiting = new Map<string, Map<string, PendingSessionInteraction>>();
 
   /**
    * 매니저 프로세스가 사라지면(재시작·self-update·하트비트 TTL) 그 장비의 세션 프로세스도
@@ -1161,6 +1183,32 @@ export class AgentSessionsService implements OnModuleDestroy {
     return { turn_id: turnId, live };
   }
 
+  /**
+   * 서버가 사용자 대신 보내는 프롬프트 — operator 에게 가는 작업 보고(docs/voice-operator.md "작업 보고").
+   * 화면이 보낸 프롬프트는 화면이 자기 전사에 그려 두지만 이것은 화면을 거치지 않으므로, driver 의 라이브
+   * 전사에 프롬프트 행을 같이 흘려 보낸다(매니저는 라이브 프롬프트를 되돌려 보내지 않는다 — 기록에는 남는다).
+   */
+  async promptOnBehalf(
+    workspaceId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    text: string,
+  ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
+    const result = await this.prompt(workspaceId, userId, managerId, cli, sessionId, text);
+    const createdAt = new Date().toISOString();
+    activityEvents.emit('agent_session_event', {
+      manager_id: managerId,
+      cli,
+      session_id: sessionId,
+      driver_user_id: userId,
+      event: { id: `server-prompt:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text }, created_at: createdAt },
+      timestamp: createdAt,
+    });
+    return result;
+  }
+
   async decidePermission(
     workspaceId: string,
     userId: string,
@@ -1177,6 +1225,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const optionId = typeof optionIdInput === 'string' && optionIdInput.trim() ? optionIdInput.trim() : null;
     const state = this.live.get(liveKey(managerId, cli, sessionId));
     if (!state) throw new AgentSessionError(409, 'session_not_live', 'This session has no live process on the Runtime Host.');
+    this.awaiting.get(liveKey(managerId, cli, sessionId))?.delete(requestId);
     state.driver_user_id = userId;
     if (state.status === 'awaiting_permission') state.status = 'busy';
     state.updated_at = Date.now();
@@ -1220,6 +1269,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     const state = this.live.get(liveKey(managerId, cli, sessionId));
     if (!state) throw new AgentSessionError(409, 'session_not_live', 'This session has no live process on the Runtime Host.');
+    this.awaiting.get(liveKey(managerId, cli, sessionId))?.delete(elicitationId);
     state.driver_user_id = userId;
     if (state.status === 'awaiting_input') state.status = 'busy';
     state.updated_at = Date.now();
@@ -1336,6 +1386,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     state.status = 'closed';
     state.driver_user_id = userId;
     state.updated_at = Date.now();
+    this.awaiting.delete(liveKey(managerId, cli, sessionId));
     this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, cli, op: 'close', session_id: sessionId, driver_user_id: userId });
     return this.emitUpdate(state, 'closed');
   }
@@ -1381,6 +1432,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const events = itemsInput
       .map((raw: any, i: number) => this.normalizeEvent(raw, i, true))
       .filter((e): e is AgentSessionEventRecord => !!e);
+    this.trackPending(key, events);
     let state = this.live.get(key);
     if (!state) {
       // 매니저가 먼저 말을 거는 경우(서버 재시작 뒤) — driver 없이 상태만 둔다. 상태는 배치에서 읽는다:
@@ -1408,6 +1460,78 @@ export class AgentSessionsService implements OnModuleDestroy {
       state.updated_at = Date.now();
     }
     return { relayed: events.length, live };
+  }
+
+  // ─── 미결 요청(권한·질문) ───────────────────────────────────────────────
+
+  private trackPending(key: string, events: AgentSessionEventRecord[]): void {
+    for (const ev of events) {
+      const p: any = ev.payload || {};
+      const forSession = () => {
+        let map = this.awaiting.get(key);
+        if (!map) {
+          map = new Map();
+          this.awaiting.set(key, map);
+        }
+        return map;
+      };
+      if (ev.type === 'permission_request' && typeof p.request_id === 'string' && p.request_id) {
+        forSession().set(p.request_id, {
+          kind: 'permission',
+          id: p.request_id,
+          turn_id: ev.turn_id,
+          title: typeof p.title === 'string' ? p.title : '',
+          description: typeof p.description === 'string' ? p.description : '',
+          options: Array.isArray(p.options)
+            ? p.options
+              .filter((o: any) => o && typeof o.option_id === 'string')
+              .map((o: any) => ({ option_id: o.option_id, name: typeof o.name === 'string' ? o.name : o.option_id, kind: typeof o.kind === 'string' ? o.kind : '' }))
+            : [],
+          schema: null,
+          created_at: ev.created_at,
+        });
+      } else if (ev.type === 'elicitation_request' && p.mode !== 'url' && typeof p.elicitation_id === 'string' && p.elicitation_id) {
+        forSession().set(p.elicitation_id, {
+          kind: 'question',
+          id: p.elicitation_id,
+          turn_id: ev.turn_id,
+          title: typeof p.message === 'string' ? p.message : '',
+          description: '',
+          options: [],
+          schema: p.schema && typeof p.schema === 'object' ? p.schema : null,
+          created_at: ev.created_at,
+        });
+      } else if (ev.type === 'permission_decision' && typeof p.request_id === 'string') {
+        this.awaiting.get(key)?.delete(p.request_id);
+      } else if (ev.type === 'elicitation_decision' && typeof p.elicitation_id === 'string') {
+        this.awaiting.get(key)?.delete(p.elicitation_id);
+      } else if (ev.type === 'turn' && p.phase === 'finished') {
+        this.awaiting.delete(key); // 턴이 끝났으면 기다리던 것도 없다
+      }
+    }
+    if (this.awaiting.get(key)?.size === 0) this.awaiting.delete(key);
+  }
+
+  /** 이 세션이 사용자의 답을 기다리는 요청들. */
+  pendingInteractions(managerId: string, cli: string, sessionId: string): PendingSessionInteraction[] {
+    return [...(this.awaiting.get(liveKey(managerId, cli, sessionId))?.values() ?? [])];
+  }
+
+  /** driver 가 이 사용자인 세션들의 미결 요청 — operator 가 "지금 무엇을 기다리나" 를 볼 때. */
+  pendingForDriver(userId: string): Array<{ session: AgentSessionLiveSnapshot; interactions: PendingSessionInteraction[] }> {
+    const out: Array<{ session: AgentSessionLiveSnapshot; interactions: PendingSessionInteraction[] }> = [];
+    for (const [key, map] of this.awaiting) {
+      const state = this.live.get(key);
+      if (!state || state.driver_user_id !== userId || !map.size) continue;
+      out.push({ session: this.snapshot(state), interactions: [...map.values()] });
+    }
+    return out;
+  }
+
+  /** 서버가 아는 이 세션의 라이브 상태(없으면 null). */
+  liveSnapshot(managerId: string, cli: string, sessionId: string): AgentSessionLiveSnapshot | null {
+    const state = this.live.get(liveKey(managerId, cli, sessionId));
+    return state ? this.snapshot(state) : null;
   }
 
   applyState(managerId: string, cli: string, sessionId: string, patch: ManagerStatePatch): AgentSessionLiveSnapshot {
@@ -1469,8 +1593,10 @@ export class AgentSessionsService implements OnModuleDestroy {
   /** 이 Runtime Host 의 프로세스가 모두 사라졌다 — 진행 중이던 세션을 idle 로 되돌린다. */
   markHostOffline(managerId: string): number {
     let changed = 0;
-    for (const state of this.live.values()) {
-      if (state.manager_id !== managerId || !IN_FLIGHT_STATUSES.has(state.status)) continue;
+    for (const [key, state] of this.live) {
+      if (state.manager_id !== managerId) continue;
+      this.awaiting.delete(key); // 프로세스가 없으면 기다리던 요청도 없다
+      if (!IN_FLIGHT_STATUSES.has(state.status)) continue;
       state.status = 'idle';
       state.updated_at = Date.now();
       this.emitUpdate(state, 'host_offline');
@@ -1572,6 +1698,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (patch.status !== undefined) {
       if (typeof patch.status !== 'string' || !STATUS_SET.has(patch.status)) throw new AgentSessionError(400, 'status_invalid');
       state.status = patch.status;
+      // 프로세스가 사라졌거나 닫혔다 — 기다리던 요청은 함께 사라졌다.
+      if (patch.status === 'idle' || patch.status === 'closed') this.awaiting.delete(liveKey(state.manager_id, state.cli, state.session_id));
     }
     if (typeof patch.cwd === 'string') state.cwd = patch.cwd.slice(0, CWD_MAX);
     if (typeof patch.title === 'string') state.title = patch.title.slice(0, TITLE_MAX);

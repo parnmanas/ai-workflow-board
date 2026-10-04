@@ -222,6 +222,16 @@ export function stripWakeNote(text: string): { text: string; noted: boolean } {
   return { text: text.slice(WAKE_PROMPT_NOTE.length).replace(/^\n/, ''), noted: true };
 }
 
+/**
+ * AWB 가 operator 에게 보내는 작업 보고의 첫머리(서버 `modules/voice/operator-report.ts` `OPERATOR_REPORT_PREFIX`
+ * — 서버 테스트 `voice-operator-reports.test.mjs` 가 두 값이 같은지 본다). 전사는 이 줄로 보고를 알아보고 접어 둔다.
+ */
+export const OPERATOR_REPORT_PREFIX = '[AWB 작업 보고]';
+
+export function isOperatorReportPrompt(text: string): boolean {
+  return (text || '').startsWith(OPERATOR_REPORT_PREFIX);
+}
+
 /** 깨어 있는 동안 들린 군소리 — 프롬프트로 보내지 않는다. "네" 는 확인 대답이라 군소리가 아니다. */
 const FILLERS = new Set(['음', '음음', '으음', '어', '어어', '흠', '으', '아', 'um', 'uh', 'hmm', 'mm', 'eh']);
 

@@ -15,7 +15,11 @@ export type AnnouncementKind =
   | 'mission_completed'
   | 'mission_failed'
   | 'mission_cancelled'
-  | 'mission_needs_decision';
+  | 'mission_needs_decision'
+  /** operator 가 작업 보고를 요약한 답(글은 operator 가 썼다 — 템플릿이 아니다). */
+  | 'operator_report'
+  /** 사용자가 operator 에게 물은 것의 답 — 그 화면을 떠나 있을 때. */
+  | 'operator_reply';
 
 export type AnnouncementLanguage = 'ko' | 'en';
 

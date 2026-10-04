@@ -56,6 +56,7 @@ import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
 import { ClassificationBridgeService } from '../outreach/classifier/classification-bridge.service';
 import { OntologyLifecycleService } from '../ontology/ontology-lifecycle.service';
 import { OntologyQueryService } from '../ontology/ontology-query.service';
+import { OperatorDecisionService } from '../voice/operator-decision.service';
 
 // Module-level log reference, set from McpController.onModuleInit
 let logService: LogService | null = null;
@@ -177,6 +178,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // ticket 0f638509 — instance-wide fleet quiesce. @Global() (see
     // shared-services.module.ts), cycle-free.
     private readonly instanceQuiesceService: InstanceQuiesceService,
+    // 말로 답하기 — operator-tools.ts (VoiceModule).
+    private readonly operatorDecisionService: OperatorDecisionService,
   ) {}
 
   onModuleInit() {
@@ -282,6 +285,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       agentManagerCommandService: this.agentManagerCommandService,
       ontologyLifecycleService: this.ontologyLifecycleService,
       ontologyQueryService: this.ontologyQueryService,
+      operatorDecisionService: this.operatorDecisionService,
     };
   }
 
@@ -462,6 +466,9 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
           ? clientTypeRaw
           : undefined;
       const runtimeRunIdHeader = String(req.headers['x-awb-run-id'] || '').trim().slice(0, 256) || undefined;
+      const agentSessionIdHeader = clientTypeRaw === 'agent-session'
+        ? String(req.headers['x-awb-session-id'] || '').trim().slice(0, 256) || undefined
+        : undefined;
       const strategyRaw = String(req.headers['x-awb-execution-strategy'] || '').toLowerCase().trim();
       const executionStrategyHeader =
         strategyRaw === 'single' || strategyRaw === 'delegated' || strategyRaw === 'swarm'
@@ -494,6 +501,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               subagentTriggerId: subagentTriggerIdHeader,
               subagentSessionId: subagentSessionIdHeader,
               clientType: clientTypeHeader,
+              agentSessionId: agentSessionIdHeader,
               runtimeRunId: runtimeRunIdHeader,
               executionStrategy: executionStrategyHeader,
               toolProfile,

@@ -26,6 +26,17 @@ test('sidebar keeps the chat-first category order', () => {
   assert.ok(featureSectionsIndex < operationsIndex);
 });
 
+test('OPERATORS is a menu row at the level of HOSTS, with the registered operators nested under it', () => {
+  // 섹션 머리(SESSIONS · CHAT 과 같은 모양)로 두면 그 아래 오는 HOSTS 줄까지 operator 묶음처럼 보였다.
+  assert.ok(!sidebarSource.includes('sidebar-operators-heading'), 'OPERATORS is not a section header');
+  const operatorsRow = sidebarSource.indexOf('aria-controls="sidebar-operators-list"');
+  const operatorsList = sidebarSource.indexOf('id="sidebar-operators-list"');
+  const hostsRow = sidebarSource.indexOf("key: 'hosts'");
+  assert.ok(operatorsRow > 0 && operatorsRow < operatorsList && operatorsList < hostsRow, 'OPERATORS row, its list, then HOSTS');
+  assert.match(sidebarSource.slice(operatorsList, hostsRow), /\}, true\);/, 'each operator renders as a nested row');
+  assert.match(sidebarSource, /collapsedGroups\.operators/, 'the list folds like the WORK lists and the fold is saved with them');
+});
+
 test('sidebar nav is a single scroll container (no nested chat-room scroll area) with canonical room paths', () => {
   // 이중 스크롤 제거(티켓 0f3a0ec9) — Chat 방 목록은 더 이상 자체 maxHeight/overflowY 를
   // 갖지 않는다. <nav> 하나가 Chat 섹션 + Work/Automation/... 섹션을 함께 스크롤한다.

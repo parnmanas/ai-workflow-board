@@ -21,7 +21,7 @@ import type {
   AgentSessionStatus,
 } from '../../types';
 import { cliLabel } from '../../cli/catalog';
-import { splitSleepMarker, stripWakeNote } from '../../voice/wake.logic';
+import { isOperatorReportPrompt, splitSleepMarker, stripWakeNote } from '../../voice/wake.logic';
 import { sessionActivity } from '../../activity';
 import type { ActivityView } from '../../activity';
 
@@ -141,8 +141,11 @@ export interface PlanEntryView {
 }
 
 export type TranscriptBlock =
-  /** `voice` — 이름을 불러 깨운 뒤의 첫 요청(앞에 붙은 음성 대화 안내 한 줄을 떼고 보여 준다). */
-  | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean }
+  /**
+   * `voice` — 이름을 불러 깨운 뒤의 첫 요청(앞에 붙은 음성 대화 안내 한 줄을 떼고 보여 준다).
+   * `report` — 사람이 아니라 AWB 가 operator 에게 보낸 작업 보고(접어서 보여 준다).
+   */
+  | { kind: 'prompt'; key: string; seq: number; turnId: string; text: string; createdAt: string; voice?: boolean; report?: boolean }
   | { kind: 'assistant'; key: string; seq: number; turnId: string; text: string; createdAt: string }
   | { kind: 'reasoning'; key: string; seq: number; turnId: string; text: string }
   | {
@@ -295,7 +298,11 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     switch (ev.type) {
       case 'user_prompt': {
         const { text, noted } = stripWakeNote(str(p.text));
-        blocks.push({ kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at, ...(noted ? { voice: true } : {}) });
+        blocks.push({
+          kind: 'prompt', key: ev.id, seq: ev.seq, turnId, text, createdAt: ev.created_at,
+          ...(noted ? { voice: true } : {}),
+          ...(isOperatorReportPrompt(text) ? { report: true } : {}),
+        });
         break;
       }
       case 'text':
@@ -498,11 +505,11 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         break;
     }
   }
+  // operator 의 잠들기 표시는 화면이 읽는 신호다 — 보여 주지 않는다(docs/voice-operator.md "잠들기").
+  for (const b of blocks) if (b.kind === 'assistant') b.text = splitSleepMarker(b.text).text;
   if (usageByTurn.size === 0) return blocks;
   // usage 를 각 턴의 **마지막 블록 뒤에** 한 번만 놓는다. 흐름 중간에 끼우지 않으므로
   // 스트리밍 텍스트가 쪼개지지 않고, 턴당 하나뿐이라 토큰 줄이 중복되지 않는다.
-  // operator 의 잠들기 표시는 화면이 읽는 신호다 — 보여 주지 않는다(docs/voice-operator.md "잠들기").
-  for (const b of blocks) if (b.kind === 'assistant') b.text = splitSleepMarker(b.text).text;
   const turnOf = (b: TranscriptBlock): string => ('turnId' in b ? b.turnId : '');
   const lastIndexOfTurn = new Map<string, number>();
   blocks.forEach((b, i) => lastIndexOfTurn.set(turnOf(b), i));
