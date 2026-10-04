@@ -1,3 +1,4 @@
+import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 // Global skill scope + the built-in pack / tap registry that feeds it.
 //
 // Before this work `Skill.workspace_id` was NOT NULL and every query was a
@@ -163,15 +164,16 @@ test('a run snapshot includes an assigned GLOBAL skill', async () => {
   const detail = await skills.get(ws.id, globalSkill.id);
   assert.ok(detail.versions.length > 0, 'a global skill must expose its versions to a workspace reader');
 
+  const runtime = { manager_agent_id: agent.manager_agent_id, cli: 'codex', working_dir: '/tmp/skills', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
   await skills.assign(ws.id, globalSkill.id, {
     skill_version_id: detail.versions[0].id,
-    agent_id: agent.id,
+    runtime,
   }, 'tester');
 
   const snapshot = await snapshots.resolve({
     workspaceId: ws.id,
     runId: `run-global-${stamp}`,
-    agentId: agent.id,
+    agentId: runtimeIdentityKey(runtime),
   });
   const slugs = snapshot.manifest.map((entry) => entry.slug);
   assert.ok(

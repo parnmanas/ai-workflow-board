@@ -78,36 +78,8 @@ async function hostNameById(
   const out = new Map<string, string>();
   const distinct = Array.from(new Set(ids.filter(isUuidShapedId)));
   if (distinct.length === 0) return out;
-  const [hosts, keys] = await Promise.all([
-    scope.getRepository(RuntimeHost).find({
-      where: { id: In(distinct) },
-      select: { id: true, name: true },
-    }),
-    scope.getRepository(ApiKey).find({
-      where: [{ agent_id: In(distinct) }, { host_id: In(distinct) }],
-      select: { agent_id: true, host_id: true },
-    }),
-  ]);
-  const hostName = new Map(hosts.map((h) => [h.id, h.name]));
-  for (const h of hosts) {
-    if (h.name) out.set(h.id, h.name);
-  }
-  if (keys.length > 0) {
-    const linkedHostIds = [...new Set(keys.map((k) => k.host_id).filter((x): x is string => !!x))];
-    if (linkedHostIds.length > 0) {
-      const linked = await scope.getRepository(RuntimeHost).find({
-        where: { id: In(linkedHostIds) },
-        select: { id: true, name: true },
-      });
-      for (const h of linked) hostName.set(h.id, h.name);
-    }
-    for (const k of keys) {
-      if (k.agent_id && k.host_id && !out.has(k.agent_id)) {
-        const n = hostName.get(k.host_id);
-        if (n) out.set(k.agent_id, n);
-      }
-    }
-  }
+  const hosts = await scope.getRepository(RuntimeHost).find({ where: { id: In(distinct) }, select: { id: true, name: true } });
+  for (const host of hosts) if (host.name) out.set(host.id, host.name);
   return out;
 }
 

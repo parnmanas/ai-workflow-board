@@ -1,3 +1,4 @@
+import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 // Workspace scheduler MCP tools (ticket 769eb260) — exercises the
 // create → run_now → list round-trip over the live MCP surface, on top of the
 // foundation WorkspaceScheduleService (ticket 8845be79). Verifies the 6 tools
@@ -19,7 +20,7 @@ test('Workspace schedule MCP: create → run_now → list round-trip', async (t)
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-mcp' });
   // The schedule both dispatches to, and authenticates as, this agent.
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker' });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'sched' });
 
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
@@ -30,13 +31,13 @@ test('Workspace schedule MCP: create → run_now → list round-trip', async (t)
   const created = await mcp.callTool('create_workspace_schedule', {
     workspace_id: ws.id,
     name: 'nightly housekeeping',
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     task_prompt: 'Run the nightly housekeeping checklist.',
     interval_ms: 3_600_000,
   });
   assert.ok(!created?.isError, `create should succeed: ${JSON.stringify(created)}`);
   assert.ok(created.id, 'created schedule has an id');
-  assert.equal(created.target_agent_id, agent.id);
+  assert.equal(created.target_agent_id, runtimeIdentityKey(agent.runtime_spec));
   assert.equal(created.interval_ms, 3_600_000);
   assert.equal(created.cron, null);
   assert.equal(created.enabled, true);
@@ -48,7 +49,7 @@ test('Workspace schedule MCP: create → run_now → list round-trip', async (t)
   const bothErr = await mcp.callTool('create_workspace_schedule', {
     workspace_id: ws.id,
     name: 'bad',
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     task_prompt: 'x',
     cron: '0 3 * * *',
     interval_ms: 5000,

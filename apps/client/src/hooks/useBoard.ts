@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api';
-import { BoardWithCards, Workspace, User, Agent, Channel } from '../types';
+import { BoardWithCards, Workspace, User, RuntimeParticipant, Channel } from '../types';
 import { useBoardStream } from '../contexts/BoardStreamContext';
 
 export function useBoard(boardId: string = '') {
   const [board, setBoard] = useState<BoardWithCards | null>(null);
   const [users, setUsers] = useState<User[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const [agents, setAgents] = useState<RuntimeParticipant[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   // Workspace roles catalog. Drives the dynamic role rows on TicketPanel
   // and the trigger menu — one row per role, ordered by `position`.
@@ -224,7 +224,7 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.setTicketRoleAssignment(ticketId, roleId, holder));
   };
 
-  const createChildTicket = async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => {
+  const createChildTicket = async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string; role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }> }) => {
     await withLocalAction(() => api.createChildTicket(parentId, data));
   };
 

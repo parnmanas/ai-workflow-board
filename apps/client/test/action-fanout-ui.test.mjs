@@ -191,13 +191,13 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
   const saved = [];
   const originals = {
     listActions: api.listActions,
-    listOrchestrationRuntimeHosts: api.listOrchestrationRuntimeHosts,
+    listTemplateHosts: api.listTemplateHosts,
     validateRuntimeSpec: api.validateRuntimeSpec,
     createAction: api.createAction,
   };
   api.listActions = async () => [];
-  api.listOrchestrationRuntimeHosts = async () => [
-    { manager_agent_id: 'host-1', manager_name: 'host-one' },
+  api.listTemplateHosts = async () => [
+    { id: 'host-1', name: 'host-one' },
   ];
   const specFor = (dir) => ({
     manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: dir,
@@ -232,7 +232,7 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
     assert.equal(picker.querySelectorAll('input[type="checkbox"]').length, 0, 'Agent 체크박스가 남아 있으면 안 된다');
 
     // runtime 선언 섹션을 열고 Host/CLI/dir 을 채운다.
-    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes('Runtime으로 지정'));
+    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes('실행 설정 · Agent 템플릿 선택'));
     assert.ok(toggle, 'runtime 선언 토글이 없다');
     click(toggle.querySelector('input[type="checkbox"]'));
     await flush();
@@ -252,7 +252,7 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
         setNativeValue(dirInput(), dir, window.Event);
       });
       await flush();
-      const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('Resolve'));
+      const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('이 설정 사용'));
       assert.ok(resolveBtn, 'Resolve 버튼이 없다');
       click(resolveBtn);
       await flush();

@@ -78,11 +78,11 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
   // synchronize 가 agents.id 를 real uuid 로 깐다 — 이 결함의 전제 그 자체다.
   await ds.initialize();
 
-  const agentRepo = ds.getRepository(entities.Agent);
+  const agentRepo = ds.getRepository(entities.RuntimeHost);
 
   const idType = await ds.query(
     `SELECT data_type FROM information_schema.columns
-      WHERE table_schema = $1 AND table_name = 'agents' AND column_name = 'id'`,
+      WHERE table_schema = $1 AND table_name = 'runtime_hosts' AND column_name = 'id'`,
     [SCHEMA],
   );
   assert.equal(
@@ -101,22 +101,18 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
   // ── 가드 경로: 세 sentinel 모두 throw 없이 null ─────────────────────────
   for (const sentinel of ['auto-advance', 'system', 'test-user']) {
     assert.equal(
-      await resolveAgentDisplayName(agentRepo, sentinel), null,
+      await resolveAgentDisplayName(ds, sentinel), null,
       `'${sentinel}' 는 real Postgres 에서도 throw 없이 null 이어야 한다`,
     );
   }
 
   // ── 대조군: 실제 agent 는 real Postgres 에서도 정규 표시로 해석된다 ──────
-  const manager = await agentRepo.save(agentRepo.create({
-    name: 'Rolf', workspace_id: 'ws-actor-sentinel', type: 'manager',
-  }));
-  const agent = await agentRepo.save(agentRepo.create({
-    name: 'Programmer', workspace_id: 'ws-actor-sentinel', type: 'subagent',
-    manager_agent_id: manager.id,
+  const host = await agentRepo.save(agentRepo.create({
+    name: 'Rolf', workspace_id: 'ws-actor-sentinel',
   }));
   assert.equal(
-    await resolveAgentDisplayName(agentRepo, agent.id), 'Rolf/Programmer',
-    '가드가 공허하지 않다 — 진짜 uuid 는 여전히 조회되고 manager prefix 가 붙는다',
+    await resolveAgentDisplayName(ds, host.id), 'Rolf',
+    'a real Host UUID still resolves through the guarded lookup',
   );
 
   // ── 프레임 생존: 실제 EVENT_TYPES 의 board_update map() 을 real pg repo 로 ──
@@ -126,7 +122,7 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
     resolveBoardId: async () => 'board-1',
     resolveTicketRepositoryResourceId: async () => '',
     resolveTicketColumnSnapshot: async () => ({ id: 'col-done', name: 'Done', kind: 'done' }),
-    resolveActorDisplayName: (actorId) => resolveAgentDisplayName(agentRepo, actorId),
+    resolveActorDisplayName: (actorId) => resolveAgentDisplayName(ds, actorId),
   };
 
   // trigger-loop 의 auto-advance(moved) 와 ticket-archiver(archived, 'system') —

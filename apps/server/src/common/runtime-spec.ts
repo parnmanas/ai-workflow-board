@@ -20,11 +20,9 @@ import {
   normalizeTeamAgentSpec,
   parseTeamAgentSpec,
   mergeTeamAgentSpec,
-  DEFAULT_MEMBER_FOLDER_SCOPE,
   workingDirLeaf,
   type TeamAgentSpec,
 } from './orchestration-member-spec';
-import type { AgentRuntimeConfig } from './runtime-config';
 
 export type { TeamAgentSpec };
 
@@ -123,69 +121,6 @@ export function mergeRuntimeSpec(
       `${workingDirLeaf(mergedBase.working_dir)}/${mergedBase.cli}`,
     role_prompt: nextPrompt,
   };
-}
-
-/**
- * Agent 행 → RuntimeSpec 스냅샷 (P2 dual-write용). 배정 시점에 복사하므로
- * 이후 Agent 편집이 과거 배정을 오염시키지 않는다. `runtime_config`는 검증
- * 없이 raw 복사 — 스냅샷은 선언이 아니라 기록이라 shape 검증을 하지 않는다
- * (dispatch 시점에 normalize한다). `folder_scope`는 티켓 홀더에 무의미하므로
- * 기본값으로 고정한다.
- */
-export function runtimeSpecFromAgentRow(row: {
-  name?: string | null;
-  type?: string | null;
-  model?: string | null;
-  working_dir?: string | null;
-  manager_agent_id?: string | null;
-  credential_id?: string | null;
-  cli_runtime_profile?: string | null;
-  runtime_config?: unknown;
-  role_prompt?: string | null;
-}): RuntimeSpec {
-  const cli = (row.type || '').trim().toLowerCase();
-  const workingDir = row.working_dir ?? '';
-  return {
-    manager_agent_id: row.manager_agent_id ?? '',
-    cli,
-    model: row.model ?? null,
-    working_dir: workingDir,
-    folder_scope: DEFAULT_MEMBER_FOLDER_SCOPE,
-    credential_id: row.credential_id ?? null,
-    cli_runtime_profile: row.cli_runtime_profile ?? null,
-    runtime_config: (row.runtime_config as AgentRuntimeConfig | undefined) ?? {
-      strategy: 'single',
-      permission_mode: 'approve',
-    },
-    label: (row.name || '').trim() || `${workingDirLeaf(workingDir) || 'agent'}/${cli || 'custom'}`,
-    role_prompt: row.role_prompt ?? '',
-  };
-}
-
-/**
- * 스냅샷이 지금의 Agent 행과 같은 대상을 가리키는가 (P4a dispatch 일치 검사).
- * 5키 튜플 비교 — 하나라도 다르면 스냅샷이 stale (배정 후 Agent 편집됨).
- * user 홀더(null 스냅샷)는 호출자가 미리 걸러낸다.
- */
-export function specMatchesAgent(
-  spec: Pick<RuntimeSpec, 'manager_agent_id' | 'cli' | 'model' | 'working_dir' | 'credential_id'> | null | undefined,
-  row: {
-    manager_agent_id?: string | null;
-    type?: string | null;
-    model?: string | null;
-    working_dir?: string | null;
-    credential_id?: string | null;
-  } | null | undefined,
-): boolean {
-  if (!spec || !row) return false;
-  const norm = (v: string | null | undefined) => (v || '').trim();
-  return (
-    norm(spec.manager_agent_id) === norm(row.manager_agent_id) &&
-    norm(spec.cli).toLowerCase() === norm(row.type).toLowerCase() &&
-    norm(spec.model) === norm(row.model) &&
-    norm(spec.working_dir) === norm(row.working_dir) &&
-    norm(spec.credential_id) === norm(row.credential_id)
-  );
 }
 
 /**

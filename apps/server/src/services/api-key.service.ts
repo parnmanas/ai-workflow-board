@@ -30,7 +30,6 @@ export class ApiKeyService {
 
   async createApiKey(params: {
     name: string;
-    agent_id?: string | null;
     host_id?: string | null;
     scope?: string;
     expires_at?: Date | null;
@@ -43,7 +42,6 @@ export class ApiKeyService {
       // once (raw_key below) and is never recoverable from the DB afterwards.
       key: this.hashKey(rawKey),
       key_prefix: this.maskKey(rawKey),
-      agent_id: params.agent_id ?? null,
       host_id: params.host_id ?? null,
       scope: params.scope || 'full',
       expires_at: params.expires_at ?? null,
@@ -85,61 +83,6 @@ export class ApiKeyService {
     return true;
   }
 
-  /**
-   * Bulk-revoke active apiKeys whose name starts with `namePrefix` and which
-   * belong to the given agent. Used by the agent-manager apiKey provisioning
-   * path so a rotation only invalidates the prior provisioner-issued key,
-   * not user-minted keys an operator may have separately created for the
-   * same agent.
-   *
-   * Returns the affected row count.
-   */
-  async revokeApiKeysByAgentAndNamePrefix(agentId: string, namePrefix: string): Promise<number> {
-    const result = await this.repo
-      .createQueryBuilder()
-      .update()
-      .set({ is_active: 0 })
-      .where('agent_id = :agent_id AND is_active = :active AND name LIKE :prefix', {
-        agent_id: agentId,
-        active: 1,
-        prefix: `${namePrefix}%`,
-      })
-      .execute();
-    return result.affected ?? 0;
-  }
-
-  /**
-   * Hard-delete every apiKey row for an agent matching a name prefix.
-   * Use this for system-managed key paths (e.g., managed-agent
-   * provisioning rotation) where the only reason a row exists is the
-   * live secret — the moment we mint a replacement, the old row is
-   * useless and the audit trail is captured in LogService instead.
-   * Without hard-delete the table grew unbounded as every spawn /
-   * restart minted a new row and only soft-revoked the previous,
-   * leaving dozens of `is_active=0` rows per agent.
-   *
-   * Returns the affected row count.
-   */
-  async deleteApiKeysByAgentAndNamePrefix(agentId: string, namePrefix: string, workspaceId?: string): Promise<number> {
-    const query = this.repo
-      .createQueryBuilder()
-      .delete()
-      .where('agent_id = :agent_id AND name LIKE :prefix', {
-        agent_id: agentId,
-        prefix: `${namePrefix}%`,
-      });
-    if (workspaceId !== undefined) query.andWhere('workspace_id = :workspace_id', { workspace_id: workspaceId });
-    const result = await query.execute();
-    return result.affected ?? 0;
-  }
-
-  /**
-   * P4c-2a: hard-delete provisioning-path rows for one runtime identity.
-   * Mirrors deleteApiKeysByAgentAndNamePrefix (same unbounded-growth reason —
-   * every rotation mints a row) but keyed by host_id instead of agent_id.
-   * Matches by key SUFFIX (`%:<key>`) because the display label in the
-   * middle may change between rotations (P4c-4).
-   */
   async deleteApiKeysByHostAndNamePrefix(hostId: string, key: string, workspaceId?: string): Promise<number> {
     const query = this.repo
       .createQueryBuilder()
@@ -163,7 +106,6 @@ export class ApiKeyService {
     scope?: string;
     is_active?: number;
     expires_at?: Date | null;
-    agent_id?: string | null;
     host_id?: string | null;
   }) {
     const found = await this.repo.findOne({ where: { id } });
@@ -173,7 +115,6 @@ export class ApiKeyService {
     if (updates.scope !== undefined) found.scope = updates.scope;
     if (updates.is_active !== undefined) found.is_active = updates.is_active;
     if (updates.expires_at !== undefined) found.expires_at = updates.expires_at;
-    if (updates.agent_id !== undefined) found.agent_id = updates.agent_id;
     if (updates.host_id !== undefined) found.host_id = updates.host_id;
 
     const saved = await this.repo.save(found);

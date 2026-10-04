@@ -6,7 +6,7 @@ import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { User } from '../../entities/User';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { activityEvents } from '../../services/activity.service';
-import { normalizeRuntimeSpec, runtimeIdentityKey, runtimeSpecFromAgentRow } from '../../common/runtime-spec';
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { isUuidShapedId } from '../../utils/agent-name';
 import { resolveAgentDisplayName } from '../../utils/agent-name';
 import { LogService } from '../../services/log.service';

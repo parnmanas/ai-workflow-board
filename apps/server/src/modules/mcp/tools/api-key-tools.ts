@@ -13,31 +13,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ok, err } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
-import { resolveCallerWorkspaceId, resolveCallerIdentityRow } from '../shared/authz';
-import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
+import { resolveCallerWorkspaceId } from '../shared/authz';
 import type { ToolContext } from './context';
-
-const FOREIGN_AGENT_MESSAGE =
-  'Unauthorized: agent_id must reference an Agent visible in your workspace.';
-
-/**
- * An api key's agent_id link must point at an Agent the caller's own
- * workspace can actually see — otherwise workspace A could bind its key to
- * a workspace B Agent id, muddying audit/attribution across the tenant
- * boundary (ticket d6b56237 review round 2). Reuses the same visibility
- * rule artifacts already use (`agentIsVisibleInWorkspace`): workspace-local
- * or genuinely global Agents pass, anything bound to a DIFFERENT workspace
- * does not.
- */
-async function agentIdVisibleInWorkspace(
-  ctx: ToolContext,
-  agentId: string,
-  workspaceId: string,
-): Promise<boolean> {
-  // P4: Agent 행 또는 Host 행 — 둘 다 identity 로 인정한다.
-  const row = await resolveCallerIdentityRow(ctx.dataSource, agentId);
-  return !!row && agentIsVisibleInWorkspace(row.workspace_id, workspaceId);
-}
 
 const SCOPE_RANK: Record<string, number> = { read: 0, write: 1, full: 2 };
 
@@ -93,11 +70,10 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
     'Create a new API key for MCP authentication, scoped to your workspace. The raw key is returned ONLY in this response — save it immediately.',
     {
       name: z.string().describe('Display name for the key (e.g. "claude-prod", "gpt-dev")'),
-      agent_id: z.string().optional().describe('Link to an Agent ID (optional)'),
       scope: z.enum(['full', 'read', 'write']).optional().default('full').describe('Permission scope'),
       expires_in_days: z.number().optional().describe('Auto-expire after N days (optional, null = never)'),
     },
-    async ({ name, agent_id, scope, expires_in_days }, extra: { sessionId?: string }) => {
+    async ({ name, scope, expires_in_days }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const workspaceId = await resolveCallerWorkspaceId(ctx.dataSource, caller);
       if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
@@ -111,9 +87,6 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
         return err(`Unauthorized: cannot mint a "${requestedScope}" key from a "${callerScope}"-scoped caller.`);
       }
 
-      if (agent_id && !(await agentIdVisibleInWorkspace(ctx, agent_id, workspaceId))) {
-        return err(FOREIGN_AGENT_MESSAGE);
-      }
 
       let expires_at: Date | null = null;
       if (expires_in_days && expires_in_days > 0) {
@@ -123,7 +96,6 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
 
       const result = await apiKeyService.createApiKey({
         name,
-        agent_id: agent_id ?? null,
         scope: requestedScope,
         expires_at,
         workspace_id: workspaceId,
@@ -174,10 +146,9 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
       name: z.string().optional().describe('New display name'),
       scope: z.enum(['full', 'read', 'write']).optional().describe('New scope'),
       is_active: z.number().optional().describe('1 = active, 0 = revoked'),
-      agent_id: z.string().optional().describe('Link to Agent ID (null to unlink)'),
       expires_in_days: z.number().optional().describe('Set expiry N days from now (0 or null = never expire)'),
     },
-    async ({ key_id, name, scope, is_active, agent_id, expires_in_days }, extra: { sessionId?: string }) => {
+    async ({ key_id, name, scope, is_active, expires_in_days }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const workspaceId = await resolveCallerWorkspaceId(ctx.dataSource, caller);
       if (!workspaceId) return err(UNAUTHORIZED_MESSAGE);
@@ -191,15 +162,11 @@ export function registerApiKeyTools(server: McpServer, ctx: ToolContext): void {
         }
       }
 
-      if (agent_id !== undefined && agent_id && !(await agentIdVisibleInWorkspace(ctx, agent_id, workspaceId))) {
-        return err(FOREIGN_AGENT_MESSAGE);
-      }
 
       const updates: any = {};
       if (name !== undefined) updates.name = name;
       if (scope !== undefined) updates.scope = scope;
       if (is_active !== undefined) updates.is_active = is_active;
-      if (agent_id !== undefined) updates.agent_id = agent_id;
       if (expires_in_days !== undefined) {
         if (expires_in_days === 0) {
           updates.expires_at = null;

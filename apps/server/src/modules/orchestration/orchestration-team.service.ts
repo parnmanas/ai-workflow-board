@@ -211,15 +211,7 @@ export class OrchestrationTeamService {
   private async resolveSlotAgentId(spec: TeamAgentSpec, teamWorkspaceId: string | null): Promise<string> {
     // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 행 없음).
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
-    if (!host) {
-      const link = await this.dataSource.getRepository(ApiKey).findOne({
-        where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-        select: { agent_id: true, host_id: true },
-      });
-      const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-      const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-      if (!linked) throw orchestrationError(400, `Runtime Host ${spec.manager_agent_id} does not exist`);
-    }
+    if (!host) throw orchestrationError(400, `Runtime Host ${spec.manager_agent_id} does not exist`);
     if (spec.credential_id) {
       const cred = await this.credentialRepo.findOne({ where: { id: spec.credential_id } });
       if (!cred || (cred.workspace_id !== null && cred.workspace_id !== teamWorkspaceId)) {
@@ -426,26 +418,6 @@ export class OrchestrationTeamService {
         select: { id: true, name: true } as any,
       })
       : [];
-    // 링크된 manager uuid → Host 이름 (dual-write 시절 spec 호환).
-    const missingHostIds = hostIdList.filter((id) => !hostRows.some((h) => h.id === id));
-    if (missingHostIds.length > 0) {
-      const links = await this.dataSource.getRepository(ApiKey).find({
-        where: { agent_id: In(missingHostIds) },
-        select: { agent_id: true, host_id: true } as any,
-      });
-      const linkedIds = [...new Set(links.map((l) => l.host_id).filter((x): x is string => !!x))];
-      if (linkedIds.length > 0) {
-        const linkedHosts = await this.hostRepo.find({
-          where: { id: In(linkedIds) },
-          select: { id: true, name: true } as any,
-        });
-        const nameByHost = new Map(linkedHosts.map((h) => [h.id, h.name]));
-        for (const l of links) {
-          const n = l.host_id ? nameByHost.get(l.host_id) : undefined;
-          if (l.agent_id && n) hostRows.push({ id: l.agent_id, name: n } as any);
-        }
-      }
-    }
     const hostById = new Map<string, { id: string; name: string; is_online?: number }>();
     for (const h of hostRows) hostById.set(h.id, { id: h.id, name: h.name });
     // Host 행에는 presence 컬럼이 없다 — 레지스트리 heartbeat 로 보정한다.

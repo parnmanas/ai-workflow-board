@@ -796,7 +796,6 @@ export type AgentManagerCommand =
   | 'stop_agent'         // SIGTERM the running CLI for an agent identity
   | 'restart_agent'      // stop + spawn
   | 'restart_all_agents' // reap+respawn every managed agent in place; manager process stays up (zero downtime, fresh credential + immediate in-flight re-push per agent)
-  | 'set_working_dir'    // update Agent.working_dir on disk + reload
   | 'reload_config'      // re-read config.json (e.g., after admin edits delegation tunables)
   | 'update_plugins'     // git pull every plugin marketplace under the managed agent's cli-home
   | 'refresh_mcp_config' // rewrite mcp-config.json so spawned subagents see the current AWB url

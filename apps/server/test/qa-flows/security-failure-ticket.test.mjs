@@ -48,7 +48,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   const profile = await mcp.callTool('create_security_profile', {
     workspace_id: ws.id,
     name: 'self code-review',
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     scan_driver: 'code-review',
     scope_mode: 'incremental',
     board_id: board.id,
@@ -59,6 +59,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
       column_name: 'Todo',
       priority: 'high',
       min_severity: 'high',
+      assignee_runtime: agent.runtime_spec,
       dedupe: 'per_open_ticket',
     },
   });
@@ -122,6 +123,9 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   const tickets = await countTicketsForProfile(ds, ws.id, profile.id);
   assert.equal(tickets.length, 1, 'exactly one security ticket filed');
   const ticket = tickets[0];
+  const fixHolders = await ds.getRepository('TicketRoleAssignment').find({ where: { ticket_id: doneC.auto_ticket_id } });
+  assert.equal(fixHolders.length, 3);
+  assert.ok(fixHolders.every(holder => holder.runtime_spec?.manager_agent_id === agent.manager_agent_id && holder.agent_id === null), 'failure ticket carries inline runtimes, with no Agent binding');
   assert.equal(ticket.id, doneC.auto_ticket_id, 'run.auto_ticket_id points at the filed ticket');
 
   // Lands in the configured non-terminal column.

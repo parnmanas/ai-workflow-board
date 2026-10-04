@@ -506,7 +506,7 @@ export const QA_SEED_SCENARIOS: SeedScenario[] = [
 
 export interface BuildScenarioOptions {
   workspace_id: string;
-  target_agent_id: string;
+  target_runtime: Record<string, any>;
   /** null/'' → workspace-scoped; <uuid> → pinned to that board. */
   board_id?: string | null;
   created_by?: string;
@@ -583,7 +583,7 @@ export function buildScenarioCreatePayloads(opts: BuildScenarioOptions): Array<C
     name: s.name,
     description: s.description,
     steps: s.steps,
-    target_agent_id: opts.target_agent_id,
+    target_runtime: opts.target_runtime,
     qa_driver: s.qa_driver,
     qa_driver_config: s.qa_driver_config,
     enabled: true,

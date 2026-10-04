@@ -55,7 +55,7 @@ describe('Actions board-scope cleanup', () => {
         workspace_id: 'workspace-a',
         board_id: 'board-a',
         name: 'Board Action',
-        target_agent_id: HOST_ID,
+        target_runtimes: [{ manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
       }),
       /no longer supported/,
     );
@@ -67,12 +67,12 @@ describe('Actions board-scope cleanup', () => {
       workspace_id: 'workspace-a',
       board_id: 'board-a',
       name: 'Legacy board-only action',
-      target_agent_id: HOST_ID,
+      target_runtimes: [{ manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
     }));
     await service.create({
       workspace_id: 'workspace-a',
       name: 'Workspace action',
-      target_agent_id: HOST_ID,
+      target_runtimes: [{ manager_agent_id: HOST_ID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }],
     });
 
     const rows = await service.list('workspace-a');

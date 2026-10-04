@@ -56,8 +56,6 @@ export class MoveActionCronToWorkspaceSchedules1760000000088 implements Migratio
     if (isPostgres) {
       await queryRunner.query('ALTER TABLE workspace_schedules ADD COLUMN IF NOT EXISTS action_id VARCHAR');
       // Action 형태 스케줄은 이 두 값을 비워 둔다 — NOT NULL 이면 삽입이 막힌다.
-      await queryRunner.query("ALTER TABLE workspace_schedules ALTER COLUMN target_agent_id SET DEFAULT ''");
-      await queryRunner.query('ALTER TABLE workspace_schedules ALTER COLUMN target_agent_id DROP NOT NULL');
     }
 
     const rows: Array<{ id: string; workspace_id: string; name: string; schedule_cron: string; enabled: any }> =
@@ -86,10 +84,10 @@ export class MoveActionCronToWorkspaceSchedules1760000000088 implements Migratio
       await bindParams(
         queryRunner,
         `INSERT INTO workspace_schedules
-           (id, workspace_id, board_id, name, target_agent_id, task_prompt, action_id,
+           (id, workspace_id, board_id, name, task_prompt, action_id,
             cron, interval_ms, enabled, next_run_at, last_run_at, last_room_id,
             triggered_by_type, created_by)
-         VALUES (?, ?, NULL, ?, '', '', ?, ?, NULL, ?, NULL, NULL, NULL, 'system', '')`,
+         VALUES (?, ?, NULL, ?, '', ?, ?, NULL, ?, NULL, NULL, NULL, 'system', '')`,
         [
           randomUUID(),
           action.workspace_id,

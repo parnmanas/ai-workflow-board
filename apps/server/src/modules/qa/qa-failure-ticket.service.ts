@@ -1,3 +1,4 @@
+import { parseRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -343,8 +344,9 @@ export class QaFailureTicketService {
     column: BoardColumn,
   ): Promise<string> {
     const workspaceId = scenario.workspace_id;
-    const assigneeId = cfg.assignee_id || scenario.target_agent_id || '';
-    const resolved = await resolveAgentIdAndName(this.dataSource, assigneeId, '', this.logService);
+    const runtime = parseRuntimeSpec(cfg.assignee_runtime || (!cfg.assignee_id ? scenario.target_runtime : null));
+    const assigneeId = runtime ? runtimeIdentityKey(runtime) : cfg.assignee_id || scenario.target_agent_id || '';
+    const resolved = runtime ? { id: assigneeId, name: runtime.label } : await resolveAgentIdAndName(this.dataSource, assigneeId, '', this.logService);
 
     const labels = this._buildLabels(cfg, scenario.id, run.rerun_generation);
     const title = this._buildTitle(cfg, scenario);
@@ -379,7 +381,11 @@ export class QaFailureTicketService {
     // and the assignee loop actually dispatches.
     await refreshTicketWorkspaceId(this.dataSource, ticket);
     const wsId = ticket.workspace_id || workspaceId;
-    if (wsId && (resolved.id || assigneeId)) {
+    if (wsId && runtime) {
+      await this.roleAssignmentService.applyBoardDefaults(ticket.id, wsId, {
+        assignee: [{ runtime }], reporter: [{ runtime }], reviewer: [{ runtime }],
+      });
+    } else if (wsId && (resolved.id || assigneeId)) {
       const holderId = resolved.id || assigneeId;
       await this.roleAssignmentService.syncBuiltinTrio(ticket.id, wsId, {
         assignee_id: holderId,

@@ -16,8 +16,7 @@ export interface ApiKey {
   id: string; // GUID
   name: string;
   key_masked: string;
-  agent_id: string | null; // GUID — references Agent.id
-  agent: Agent | null;
+  host_id: string | null;
   scope: string; // 'full' | 'read' | 'write'
   is_active: number;
   expires_at: string | null;
@@ -83,7 +82,7 @@ export interface AgentRuntimeConfig {
   extra?: Record<string, unknown>;
 }
 
-export interface Agent {
+export interface RuntimeParticipant {
   id: string; // GUID
   name: string;
   description: string;
@@ -95,37 +94,10 @@ export interface Agent {
   last_seen_at: string | null; // ISO timestamp or null (Phase 2)
   lifecycle_state?: AgentLifecycleState; // 5-state process lifecycle (ticket bfdd80b7)
   lifecycle_detail?: string;   // concrete reason when lifecycle_state==='error' (ticket 1f750878)
-  // Phase 1 role prompt fields (D-14 / ROLE-02)
-  role_prompt?: string;
-  role_prompt_meta?: Record<string, any> | null;
-  // ST-4 — agent-manager-managed agents. Empty/null on legacy rows.
-  working_dir?: string;
   manager_agent_id?: string | null;
-  runtime_config?: AgentRuntimeConfig | null;
-  /** Workspace this agent identity belongs to. Server populates on every
-   *  list/get; the Agent Manager runtime section uses it to render the per-row
-   *  workspace picker that lets operators relocate managed agents that
-   *  were created against a global manager. */
   workspace_id?: string | null;
-  /** Optional Credential row that supplies CLI auth (subscription / API key)
-   *  for the spawned agent. null = fall back to the operator's main HOME. */
-  credential_id?: string | null;
-  /** Per-agent default model the spawned CLI runs under (e.g. 'opus',
-   *  'claude-opus-4-8', 'deepseek-reasoner'). null/empty = the CLI's own
-   *  default (no --model flag). Candidates come from the manager's reported
-   *  available_models; free-text is also accepted. */
-  model?: string | null;
-  cli_runtime_profile?: string | null;
-  /** Name of the Runtime Host that supervises this agent. Populated
-   *  by the server's agent listing endpoints (one DB lookup per request).
-   *  Drives the `<ManagerName>/<AgentName>` display format used everywhere
-    *  in the UI; undefined only for historical invalid rows. */
   manager_name?: string;
-  /** Live Runtime Host snapshot from InstanceRegistry. Set by `/api/agents`
-    *  and `/api/agents/:id` when the assigned host is heartbeating. */
   live_instance?: AgentLiveInstance;
-  /** Subagent rollup attached server-side from SubagentMonitor. Lets the AI
-   *  Agents admin page show "5 active / 23 total" without an extra fetch. */
   subagents?: AgentSubagentRollup;
   created_at: string;
   updated_at: string;
@@ -557,6 +529,7 @@ export interface QaOnFailureTicketConfig {
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   dedupe?: 'per_run' | 'per_open_ticket';
   title_template?: string;
@@ -860,6 +833,7 @@ export interface SecurityOnFailureTicketConfig {
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   /** Severity gate (default 'high'). critical > high > medium > low > info. */
   min_severity?: SecuritySeverity;
@@ -1243,6 +1217,7 @@ export interface HandoffPipeline {
 }
 
 export interface Ticket {
+  workspace_id?: string;
   id: string; // GUID
   column_id: string | null; // GUID — references BoardColumn.id, null for child tickets
   parent_id: string | null; // GUID — references parent Ticket.id
@@ -1652,7 +1627,6 @@ export interface Workspace {
   // AWB 어시스턴트 에이전트 id (에픽 bf65ca00 · S2). null/미포함 = 미지정 —
   // Chat-first 랜딩은 임의 에이전트를 고르지 않고 관리자에게 지정을 안내하는 empty
   // state 를 렌더한다. 설정은 관리자 전용 workspace PATCH 로만 가능.
-  assistant_agent_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1743,22 +1717,6 @@ export interface DashboardAgent {
   origin?: string;
 }
 
-export interface AgentDetail extends DashboardAgent {
-  description?: string;
-  type?: string;
-  runtime_config?: AgentRuntimeConfig | null;
-  is_active?: number;
-  role_prompt: string;                                // '' when redacted per D-44
-  role_prompt_meta: { updated_at: string; updated_by: string } | null;
-  redacted: boolean;                                  // true for non-admin viewer per D-44
-  /** Runtime-hosted agent fields. Executable agents require
-    *  manager_agent_id, working_dir, and runtime_config. */
-  working_dir?: string;
-  credential_id?: string | null;
-  /** Set by `_enrichLiveData` server-side when the assigned Runtime Host is
-    *  heartbeating. */
-  live_instance?: AgentLiveInstance;
-}
 
 // ActivityRow mirrors the ActivityLog entity shape emitted by GET /api/activity
 // and GET /api/agents/:id/activity, with an optional `row_id` used by DashboardPage
@@ -2572,7 +2530,6 @@ export type AgentManagerCommandKind =
   | 'stop_agent'
   | 'restart_agent'
   | 'restart_all_agents'
-  | 'set_working_dir'
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
@@ -2697,25 +2654,6 @@ export interface BoardMovePreview {
 }
 
 // ─── Cross-workspace agent move (ticket 868ead64) ───────────────
-// Mirror of the server's WorkspaceMoveService.AgentMovePreview. Shares the
-// MovePreviewItem shape with the board move (same kinds/entities).
-export type AgentApiKeyPolicy = 'migrate' | 'clear' | 'refuse';
-export type AgentCrossRefPolicy = 'block' | 'clear';
-
-export interface AgentMovePreview {
-  agent: { id: string; name: string };
-  source_workspace: { id: string; name: string } | null;
-  target_workspace: { id: string; name: string };
-  counts: { api_keys: number; copied: number; cleared: number; cross_refs: number };
-  items: BoardMovePreviewItem[];
-  /** Non-empty → commit is refused. Structured blockers carry inline remedies;
-   *  `message` is the legacy human-readable reason. */
-  blockers: MoveBlocker[];
-  api_key_policy: AgentApiKeyPolicy;
-  cross_ref_policy: AgentCrossRefPolicy;
-  /** false for a dry-run preview, true once the transaction has committed. */
-  committed: boolean;
-}
 
 // ─── Workflow Health (ticket 3970db66 — /admin/workflow-health/*) ──────────
 
@@ -3621,4 +3559,17 @@ export interface TerminalOutputEvent {
   driver_user_id: string;
   chunk: TerminalOutputChunk;
   timestamp: string;
+}
+
+/** Saved preferences copied into an execution; never an execution identity. */
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  host_id: string;
+  cli: string;
+  model: string | null;
+  effort: string | null;
+  runtime_config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
 }

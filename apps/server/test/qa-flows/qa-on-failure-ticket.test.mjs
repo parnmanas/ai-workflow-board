@@ -93,10 +93,10 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 1. failed run → fix ticket with evidence ────────────────────────────────
   step('CASE 1: failed run files a fix ticket with evidence');
   const sc1 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Login flow QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Login flow QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
-      enabled: true, board_id: board.id, column_name: 'Todo', priority: 'high', assignee_id: qaAgent.id,
+      enabled: true, board_id: board.id, column_name: 'Todo', priority: 'high', assignee_runtime: qaAgent.runtime_spec,
       dedupe: 'per_run', labels: ['qa-failure', 'auto'],
     },
   });
@@ -106,6 +106,9 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   const done1 = await runOnce(sc1.id, 'failed', { artifact: 'art-shot-0' });
   assert.ok(done1.auto_ticket_id, 'completed failed run carries auto_ticket_id');
 
+  const fixHolders = await ds.getRepository('TicketRoleAssignment').find({ where: { ticket_id: done1.auto_ticket_id } });
+  assert.equal(fixHolders.length, 3);
+  assert.ok(fixHolders.every(holder => holder.runtime_spec?.manager_agent_id === qaAgent.manager_agent_id && holder.agent_id === null), 'failure ticket carries inline runtimes, with no Agent binding');
   const rows1 = await ticketsForScenario(sc1.id);
   assert.equal(rows1.length, 1, 'exactly one fix ticket filed');
   assert.equal(rows1[0].id, done1.auto_ticket_id, 'run.auto_ticket_id points at the filed ticket');
@@ -118,8 +121,8 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   for (const l of ['qa-failure', 'auto', `qa-scenario:${sc1.id}`]) {
     assert.ok(full1.labels.includes(l), `label present: ${l}`);
   }
-  assert.equal(full1.assignee_id, qaAgent.id, 'assignee = configured agent');
-  assert.equal(full1.reviewer_id, qaAgent.id, 'reviewer mirrored');
+  assert.equal(full1.assignee_id, sc1.target_agent_id, 'assignee = configured agent');
+  assert.equal(full1.reviewer_id, sc1.target_agent_id, 'reviewer mirrored');
   assert.ok(full1.description.includes(done1.id ?? ''), 'body references the run id');
   assert.ok(full1.description.includes('step 0 failed — evidence here'), 'body includes the failed step log');
   assert.ok(full1.description.includes('/api/resources/art-shot-0/raw'), 'body links the artifact raw stream');
@@ -148,7 +151,7 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 4. per_open_ticket dedupe → recurrence comment, no new ticket ───────────
   step('CASE 4: per_open_ticket appends a recurrence comment instead of a new ticket');
   const sc2 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Checkout QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Checkout QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
       enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_open_ticket',
@@ -172,7 +175,7 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 5. scenario WITHOUT on_failure_ticket → nothing filed ───────────────────
   step('CASE 5: a scenario without on_failure_ticket files nothing on failure');
   const sc3 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'No-hook QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'No-hook QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
   });
   assert.ok(!sc3?.isError && sc3.id);
@@ -185,7 +188,7 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 6. dedupe DEFAULTS to per_open_ticket (ticket 64b9cbaf) ─────────────────
   step('CASE 6: dedupe defaults to per_open_ticket — flaky scenario converges to one ticket');
   const sc6 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Default dedupe QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Default dedupe QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: { enabled: true, board_id: board.id, column_name: 'Todo' },   // NO dedupe key → default
   });
@@ -207,7 +210,7 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 7. a passing run auto-closes all open sibling fix tickets (ticket 64b9cbaf) ──
   step('CASE 7: a passing run auto-closes every open sibling + suppresses rerun-on-fix');
   const sc7 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Auto-close QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Auto-close QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     // per_run so we build a 2-ticket sibling cluster; rerun_on_fix so the close
     // would fire a rerun UNLESS the qa_rerun_dispatched_at stamp suppresses it.
@@ -258,7 +261,7 @@ test('QA on-failure auto-ticket: create / idempotency / passed-noop / per_open d
   // ── 8. auto-close scope guard (ticket 64b9cbaf) ─────────────────────────────
   step('CASE 8: a non-auto ticket carrying only the scenario label is NOT auto-closed');
   const sc8 = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Scope guard QA', target_agent_id: qaAgent.id,
+    workspace_id: ws.id, name: 'Scope guard QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: { enabled: true, board_id: board.id, column_name: 'Todo', dedupe: 'per_run' },
   });

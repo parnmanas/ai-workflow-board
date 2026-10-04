@@ -163,6 +163,7 @@ const onFailureTicketSchema = z.object({
   column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Ticket priority (default high)'),
   assignee_id: z.string().optional().describe('Agent for all 3 roles (default scenario.target_agent_id)'),
+  assignee_runtime: z.record(z.string(), z.any()).optional().describe('Runtime settings for the fix ticket; defaults to the scenario/profile runtime'),
   labels: z.array(z.string()).optional().describe("Ticket labels (default ['qa-failure','auto'])"),
   dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_open_ticket (DEFAULT) = comment on the scenario\'s existing open fix ticket instead of filing a new one, so a flaky scenario converges to ONE ticket (a green run then auto-closes it); per_run = opt back into 1 ticket per failed run'),
   title_template: z.string().optional().describe('Title override; {{scenario.name}} is substituted (default "QA 실패: {{scenario.name}}")'),

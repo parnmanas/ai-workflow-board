@@ -1,7 +1,9 @@
+import { parseRuntimeSpec, runtimeIdentityKey } from '../../../common/runtime-spec';
+import { RuntimeHost } from '../../../entities/RuntimeHost';
 /**
  * AgentDispatchClassifier — the real (LLM-backed) OutreachClassifier (ticket
  * 20fa0197, 2500fea3 D5's follow-up). When the channel names a
- * `classifier_agent_id`, classify() opens a ChatRoom (mirrors
+ * `classifier_runtime`, classify() opens a ChatRoom (mirrors
  * SecurityRunService.startChecklistRefresh's minimal dispatch shape — room +
  * two participants + one prompt, no run-tracking row), asks that agent to
  * classify the item, and waits on ClassificationBridgeService for
@@ -11,9 +13,9 @@
  * RuleBasedClassifier is kept as the fallback (the ticket's own open
  * question — "keep as fallback, or replace outright?" — resolved as "keep,
  * both roles"): it's used directly when no agent is configured
- * (classifier_agent_id is the per-channel opt-in), and as the safety net
+ * (classifier_runtime is the per-channel opt-in), and as the safety net
  * when dispatch fails or the agent doesn't report back in time. A channel
- * that never sets classifier_agent_id sees zero behavior change from before
+ * that never sets classifier_runtime sees zero behavior change from before
  * this ticket.
  *
  * This is the one place in the outreach pipeline that genuinely blocks on an
@@ -63,27 +65,11 @@ export class AgentDispatchClassifier implements OutreachClassifier {
   ) {}
 
   async classify(item: InboundItem, context: ClassificationContext): Promise<ClassificationResult> {
-    if (!context.classifierAgentId) return this.fallback.classify(item);
+    if (!context.classifierRuntime) return this.fallback.classify(item);
 
-    // P4c-4: Host/링크 해소 (Agent 행 없음) — 못 찾으면 rule 기반 폴백.
-    const agent = await resolveCallerIdentityRow(this.dataSource, context.classifierAgentId);
-    if (!agent) {
-      this.logService.warn('Outreach', `classifier_agent_id ${context.classifierAgentId} not found — falling back to rule-based`, {
-        channel_id: context.channelId,
-      });
-      return this.fallback.classify(item);
-    }
-    // Re-check visibility at dispatch time, not just at channel-save time
-    // (outreach-channel.service.ts's _assertAgentScope): if the agent's
-    // workspace_id changed since classifier_agent_id was configured, a
-    // stale channel must not hand inbound item content to an agent outside
-    // its workspace.
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, context.workspaceId)) {
-      this.logService.warn('Outreach', `classifier_agent_id ${agent.id} is no longer visible in workspace ${context.workspaceId} — falling back to rule-based`, {
-        channel_id: context.channelId,
-      });
-      return this.fallback.classify(item);
-    }
+    const spec = parseRuntimeSpec(context.classifierRuntime);
+    if (!spec || !await this.dataSource.getRepository(RuntimeHost).existsBy({ id: spec.manager_agent_id })) return this.fallback.classify(item);
+    const agent = { id: runtimeIdentityKey(spec) };
 
     const { runId, result } = this.bridge.register(agent.id, this.timeoutMs);
     try {
@@ -117,7 +103,7 @@ export class AgentDispatchClassifier implements OutreachClassifier {
     const joinedAt = new Date();
     await this.participantRepo.save([
       this.participantRepo.create({
-        room_id: room.id, participant_type: 'agent', participant_id: agent.id, last_read_at: joinedAt, left_at: null,
+        room_id: room.id, participant_type: 'agent', participant_id: agent.id, runtime_spec: context.classifierRuntime, last_read_at: joinedAt, left_at: null,
       }),
       this.participantRepo.create({
         room_id: room.id, participant_type: 'user', participant_id: 'system', last_read_at: joinedAt, left_at: null,

@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { cliModelChoices, useHostModels } from '../../cli/hostModels';
+import RuntimeSelectionFields from '../runtime/RuntimeSelectionFields';
+import React, { useEffect, useMemo, useState } from 'react';
 import { tokens } from '../../tokens';
 import type {
   ClaudeBackendProfile,
@@ -11,7 +11,7 @@ import type {
 } from '../../types';
 import { Button, Input, Select } from '../common';
 import DirectoryPicker from '../admin/DirectoryPicker';
-import RuntimeConfigFields, {
+import {
   EMPTY_RUNTIME_SELECTION,
   buildRuntimeConfig,
   runtimeSelectionFromAgent,
@@ -41,6 +41,7 @@ export interface SlotDraft {
   /** CLI + execution strategy + permission tier, in RuntimeConfigFields' shape. */
   runtime: RuntimeSelection;
   model: string;
+  effort: string;
   working_dir: string;
   folder_scope: OrchestrationFolderScope;
   credential_id: string;
@@ -52,6 +53,7 @@ export function emptySlotDraft(): SlotDraft {
     manager_agent_id: '',
     runtime: EMPTY_RUNTIME_SELECTION,
     model: '',
+    effort: '',
     working_dir: '',
     // Shared is the default because sharing a folder is the point: a team spread
     // over several machines still wants co-located members to collaborate in one
@@ -69,6 +71,7 @@ export function slotDraftFromRuntime(rt: OrchestrationSlotRuntime | null): SlotD
     manager_agent_id: rt.manager_agent_id,
     runtime: runtimeSelectionFromAgent(rt.cli, (rt.runtime_config as any) ?? null),
     model: rt.model ?? '',
+    effort: String((rt.runtime_config as any)?.extra?.effort || ''),
     working_dir: rt.working_dir,
     folder_scope: rt.folder_scope,
     credential_id: rt.credential_id ?? '',
@@ -103,7 +106,7 @@ export function slotDraftToSpec(draft: SlotDraft): OrchestrationSlotSpecInput {
     folder_scope: draft.folder_scope,
     credential_id: draft.credential_id || null,
     cli_runtime_profile: draft.cli_runtime_profile || null,
-    runtime_config: buildRuntimeConfig(draft.runtime),
+    runtime_config: { ...buildRuntimeConfig(draft.runtime)!, extra: { effort: draft.effort || null } },
   };
 }
 
@@ -191,49 +194,6 @@ export default function TeamSlotRuntimeFields({
       .map((n) => n.label);
   }, [neighbours, value.manager_agent_id, value.working_dir]);
 
-  // 모델 목록은 모든 화면이 공유하는 스토어에서 온다(src/cli/hostModels.ts): 오래된/빈
-  // 목록은 훅이 조용히 재열거하고, 아래 Refresh 버튼은 같은 refresh() 를 부른다.
-  //
-  // `host.available_models` 로 **떨어지지 않는다**. 예전엔 훅이 빈 목록일 때 그 스냅샷을
-  // 썼는데, 서버가 그 필드를 다르게(하트비트 + agent 행에 핀된 모델, 알파벳 재정렬)
-  // 계산해서 같은 호스트의 목록이 팀 슬롯과 세션/Agent 다이얼로그에서 달라 보였다.
-  // 목록은 한 곳에서만 온다 — 비어 있으면 아래 자유 입력이 답이다.
-  const hostModels = useHostModels(host?.manager_agent_id ?? null, cli);
-  const modelOptions = hostModels.models;
-  const refreshingModels = hostModels.refreshing;
-  const [modelProbeNote, setModelProbeNote] = useState<string | null>(null);
-
-  const refreshModels = useCallback(async () => {
-    if (!host || refreshingModels) return;
-    setModelProbeNote('Asking the host to list its models…');
-    const fresh = await hostModels.refresh();
-    if (!fresh) {
-      // Never block authoring on this: the free-text input below still works.
-      setModelProbeNote(hostModels.error || 'Could not refresh the model list.');
-      return;
-    }
-    const found = cli ? (fresh.models[cli] ?? []).length : 0;
-    setModelProbeNote(
-      found > 0
-        ? null
-        : `${host.manager_name} reported no model list for ${cli || 'this CLI'} — type a model id, or leave it blank for the CLI default.`,
-    );
-  }, [host, refreshingModels, hostModels, cli]);
-
-  /**
-   * Options for the dropdown, with the saved value prepended when the host does
-   * not list it. Without that, editing a slot whose model was typed by hand (or
-   * enumerated by an older host build) would render as "Default" — telling the
-   * operator the model is unset while the slot still carries it.
-   */
-  const modelSelectOptions = [
-    { value: '', label: `Default — let ${cli || 'the CLI'} decide (no --model)` },
-    // 세션과 같은 이름으로 그린다(`opus` → `Opus 5.5`) — 같은 호스트의 같은 목록이 화면마다 달라 보였다.
-    ...cliModelChoices(modelOptions, hostModels.labels, value.model),
-    ...(value.model && !modelOptions.includes(value.model)
-      ? [{ value: value.model, label: `${value.model} (not listed by this host)` }]
-      : []),
-  ];
   // Credential providers are prefixed by CLI (`claude_subscription`,
   // `codex_api_key`, …) — the prefix is a catalog fact, same filter the admin
   // agent dialog uses. CLIs without a credential concept get an empty list.
@@ -245,94 +205,19 @@ export default function TeamSlotRuntimeFields({
 
   return (
     <>
-      <Select
-        label="Runtime Host *"
-        value={value.manager_agent_id}
+      <RuntimeSelectionFields
+        value={{ host_id: value.manager_agent_id, cli, model: value.model || null, effort: value.effort || null,
+          runtime_config: buildRuntimeConfig(value.runtime) || { strategy: 'single', permission_mode: 'approve' } }}
+        hosts={hosts.map((h) => ({ id: h.manager_agent_id, name: h.manager_name, clis: h.clis }))}
         disabled={disabled}
-        options={[
-          { value: '', label: hosts.length ? 'Select a machine' : 'No Runtime Hosts paired yet' },
-          ...hosts.map((h) => ({
-            value: h.manager_agent_id,
-            label: `${h.manager_name}${h.hostname ? ` (${h.hostname})` : ''}${h.is_online ? '' : ' — offline'}`,
-          })),
-        ]}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
-          // Host change invalidates everything host-specific. Clearing rather
-          // than keeping the old values is the honest move: a model id, a
-          // credential and a path from machine A are all meaningless on B, and
-          // silently carrying them over is how a slot ends up pointing at a
-          // folder that does not exist there.
-          patch({
-            manager_agent_id: e.target.value,
-            model: '',
-            working_dir: '',
-            credential_id: '',
-          });
-          setCustomFolder(false);
-        }}
-      />
-      {host && !host.is_online && (
-        <Hint tone="warning">
-          This host is offline. You can still author the slot — work queues and the agent starts automatically
-          when the host reconnects — but the CLI, model and folder lists below only show what AWB already knows
-          about it.
-        </Hint>
-      )}
-
-      <RuntimeConfigFields
-        value={value.runtime}
-        disabled={disabled || !value.manager_agent_id}
-        availableRuntimeIds={host?.clis}
-        onChange={(runtime) => {
-          // A CLI change invalidates the model and credential for the same
-          // reason a host change does.
-          const cliChanged = runtime.runtime !== value.runtime.runtime;
-          patch({
-            runtime,
-            ...(cliChanged ? { model: '', credential_id: '' } : {}),
+        onChange={(next) => {
+          patch({ manager_agent_id: next.host_id, runtime: runtimeSelectionFromAgent(next.cli, next.runtime_config as any),
+            model: next.model || '', effort: next.effort || '',
+            ...(next.host_id !== value.manager_agent_id ? { working_dir: '', credential_id: '' } : {}),
+            ...(next.cli !== cli ? { credential_id: '', cli_runtime_profile: '' } : {}),
           });
         }}
       />
-
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          {modelOptions.length > 0 || (value.model && modelSelectOptions.length > 1) ? (
-            <Select
-              label="Model"
-              value={value.model}
-              disabled={disabled || !cli}
-              options={modelSelectOptions}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ model: e.target.value })}
-            />
-          ) : (
-            <Input
-              label="Model"
-              value={value.model}
-              disabled={disabled || !cli}
-              placeholder={
-                refreshingModels
-                  ? 'Asking the host for its model list…'
-                  : cli
-                    ? `Leave blank for the ${cli} default`
-                    : 'Pick a CLI first'
-              }
-              onChange={(e) => patch({ model: e.target.value })}
-            />
-          )}
-        </div>
-        {host && cli && (
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={disabled || refreshingModels || !host.is_online}
-            title={host.is_online ? 'Make this host re-list its models' : 'Host is offline'}
-            onClick={() => void refreshModels()}
-          >
-            {refreshingModels ? 'Listing…' : 'Refresh'}
-          </Button>
-        )}
-      </div>
-      {modelProbeNote && <Hint>{modelProbeNote}</Hint>}
 
       {/* ── Working folder ─────────────────────────────────────────────── */}
       {folderOptions.length > 0 && !customFolder ? (

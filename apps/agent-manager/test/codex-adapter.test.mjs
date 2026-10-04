@@ -574,3 +574,12 @@ test('prepareCliHome refuses (without overwriting) when an inherited MCP server 
   );
   assert.equal(await fsp.readFile(configPath, 'utf8'), broken);
 });
+
+
+test('runtime template effort is passed as a quoted Codex config override', () => {
+  const adapter = new CodexCliAdapter();
+  const descriptor = adapter.buildOneshotSpawn({ rolePrompt: '', taskText: 'test', mcpConfigPath: null, effort: 'xhigh' });
+  assert.ok(descriptor.args.includes('model_reasoning_effort="xhigh"'));
+  const defaultRun = adapter.buildOneshotSpawn({ rolePrompt: '', taskText: 'test', mcpConfigPath: null });
+  assert.equal(defaultRun.args.some((a) => a.startsWith('model_reasoning_effort=')), false);
+});

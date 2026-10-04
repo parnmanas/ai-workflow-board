@@ -719,3 +719,34 @@ hermes acp --version
 Use Hermes-native UIs only for runtime diagnostics. AWB is the authoritative
 project UI because it owns the work graph, identities, permissions, skills,
 and audit trail.
+
+
+## Agent templates and runtime selections
+
+Hosts → Agents · Templates stores reusable launch preferences: name, Host, CLI,
+model, effort and execution strategy/permissions. A template has no working
+folder, workspace ownership, lifecycle, API key or dispatch identity. Selecting
+one copies its settings into the current form; edits and deletion never rewrite
+existing executions. Sessions, chat participants, board roles, team slots and
+Action/QA/Security/Schedule editors share `RuntimeSelectionFields`. Model lists
+still come exclusively from `useHostModels`.
+
+Execution folders belong to the session or inline RuntimeSpec. The old
+`set_working_dir` manager command has been removed from both contracts. CLI
+capabilities govern effort availability; explicit runtime effort reaches both
+one-shot and persistent launches. Session effort uses the adapter's
+`thought_level` config option.
+
+Migration `1760000000090` removes the legacy `agents` table (including
+`working_dir`), `api_keys.agent_id`, `workspaces.assistant_agent_id`, and duplicate
+Agent target columns on Actions, QA, Security, Schedules and Features. Target
+identifiers in existing response/event contracts are computed from inline specs;
+run history, locks and in-flight runtime identifiers remain execution data.
+Skill pins now address `runtime_skill_assignments.runtime_key`, and Outreach
+classifiers store `classifier_runtime` instead of an Agent pointer. Old Agent-only
+skill bindings are removed; existing runtime-key bindings are retained.
+
+`preSyncAgentCleanup` runs before schema synchronization in both entry points so
+Host pairing aliases can be translated before the old key column disappears.
+The cleanup is idempotent on SQLite and PostgreSQL. Database backups are required
+for rollback; retired Agent data is not reconstructed by `down()`.

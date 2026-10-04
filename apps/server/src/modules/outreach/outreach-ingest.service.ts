@@ -282,7 +282,7 @@ export class OutreachIngestService {
       workspaceId: channel.workspace_id,
       channelId: channel.id,
       channelKind: channel.kind,
-      classifierAgentId: channel.classifier_agent_id,
+      classifierRuntime: channel.classifier_runtime,
     });
     let status: OutreachItemStatus;
     let needsTicket = false;

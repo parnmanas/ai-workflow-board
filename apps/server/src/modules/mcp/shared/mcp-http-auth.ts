@@ -82,7 +82,7 @@ export async function authenticateMcpRequest(
         // (parsed from the provisioned name) is what orchestration gates
         // compare against stored rt- assignee/orchestrator ids.
         let runtimeKey: string | undefined;
-        if (!ak.agent_id && ak.host_id) {
+        if (ak.host_id) {
           // P4c-4: `runtime:<label>:<key>` (label may contain spaces, never colons).
           const m = /^runtime:.*:(rt-[0-9a-f]{16})$/.exec(ak.name || '');
           runtimeKey = m ? m[1] : undefined;
@@ -92,7 +92,7 @@ export async function authenticateMcpRequest(
           // display prefix for the hint.
           keyHint: ak.key_prefix || 'awb_***',
           agentName: ak.host_id ? ak.name : undefined,
-          agentId: ak.agent_id ?? ak.host_id ?? undefined,
+          agentId: ak.host_id ?? undefined,
           runtimeKey,
           keyId: ak.id,
           scope: ak.scope,

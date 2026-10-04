@@ -6,10 +6,12 @@
 // single booted app across many fixtures.
 
 import { randomUUID, createHash } from 'node:crypto';
+import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 import { traceEvent } from './trace.mjs';
 
 const stamp = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const runtimeHostKeysByAgent = new Map();
+const runtimeSpecsById = new Map();
 // host agent id → its api key, so several agents under one host share one key
 // (a real manager runs one SSE stream for all of them).
 const hostKeysByHost = new Map();
@@ -30,10 +32,11 @@ export function runtimeHostKeyForAgent(agentId) {
  */
 // P4c-4: Agent 테이블 없음 — synthetic child id → host 매핑은 createAgent 가
 // 채운다. 매핑에 없는 id 면 새 Host + 키를 만들어 매핑한다.
-export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '' } = {}) {
+export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '', hostId = null, runtime = null } = {}) {
+  if (runtime) { runtimeSpecsById.set(agentId, runtime); hostId ||= runtime.manager_agent_id; }
   if (!agentId || runtimeHostKeysByAgent.has(agentId)) return runtimeHostKeysByAgent.get(agentId) ?? null;
   const ds = app.get(getDataSourceToken());
-  const host = await ds.getRepository('RuntimeHost').save(
+  const host = (hostId && await ds.getRepository('RuntimeHost').findOneBy({ id: hostId })) || await ds.getRepository('RuntimeHost').save(
     ds.getRepository('RuntimeHost').create({
       name: `runtime-host-${agentId.slice(0, 8)}`,
       hostname: 'fixture',
@@ -111,16 +114,13 @@ export async function createUser(
   return row;
 }
 
-// P4c-4: Agent 테이블 없음.
-//  - type === 'manager' → RuntimeHost 행을 만들고 그 id 를 identity 로 돌려준다.
-//  - 그 외 → DB 행 없이 synthetic identity ({id, name, ...}) 를 돌려준다.
-//    hosted 이면 전용 Host 행 + 키도 함께 만들고 매핑한다 (실행 주체는 항상
-//    Host 위에 있으므로). holder id/표시명/display-fallback 판정에 쓴다.
+// Test actors are Host identities; runtime:true provisions an inline RuntimeSpec
+// and its execution credential. No fixture creates a saved Agent row or alias.
 export async function createAgent(
   app,
   getDataSourceToken,
   workspaceId,
-  { name = 'agent', rolePrompt, type = 'custom', hosted = true } = {},
+  { name = 'agent', rolePrompt, type = 'custom', hosted = true, runtime = false } = {},
 ) {
   const ds = app.get(getDataSourceToken());
   const agentName = `${name}-${stamp()}`;
@@ -152,18 +152,29 @@ export async function createAgent(
       role_prompt: rolePrompt || '',
     };
   }
-  const id = randomUUID();
+  let id = randomUUID();
   let managerAgentId = null;
+  let executionSpec = null;
   if (hosted) {
     const host = await ds.getRepository('RuntimeHost').save(
       ds.getRepository('RuntimeHost').create({
-        name: `runtime-host-${name}-${stamp()}`,
+        name: agentName,
         hostname: 'fixture',
-        workspace_id: null,
+        workspace_id: workspaceId || null,
         is_active: 1,
       }),
     );
     managerAgentId = host.id;
+    const spec = {
+      manager_agent_id: host.id, cli: type === 'custom' ? 'codex' : type,
+      model: null, working_dir: `/tmp/qa/${id}`, folder_scope: 'shared',
+      credential_id: null, cli_runtime_profile: null, label: agentName,
+      role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
+      runtime_config: { strategy: 'single', permission_mode: 'strict' },
+    };
+    executionSpec = spec;
+    id = runtime ? runtimeIdentityKey(spec) : host.id;
+    if (runtime) runtimeSpecsById.set(id, spec);
     const hostKey = await createApiKey(app, getDataSourceToken, null, {
       workspaceId: workspaceId || '',
       label: `runtime-host-${name}`,
@@ -171,9 +182,7 @@ export async function createAgent(
     });
     runtimeHostKeysByAgent.set(id, hostKey.raw_key);
     hostKeysByHost.set(host.id, hostKey.raw_key);
-    // P4c-4: synthetic id → Host DB 링크 (pairing 완료 상태 모델링).
-    // 없으면 resolveCallerIdentityRow 가 이 id 를 해소하지 못해 MCP 호출이
-    // 'Agent not found' 로 떨어진다.
+    // Provision the same Host-bound runtime credential used by real dispatch.
     await createApiKey(app, getDataSourceToken, id, {
       workspaceId: workspaceId || '',
       label: `link-${name}`,
@@ -190,6 +199,7 @@ export async function createAgent(
     workspace_id: workspaceId,
     role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
     manager_agent_id: managerAgentId,
+    runtime_spec: executionSpec,
     runtime_config: managerAgentId
       ? { strategy: 'single', permission_mode: 'strict' }
       : null,
@@ -206,6 +216,9 @@ export async function createApiKey(
 ) {
   const ds = app.get(getDataSourceToken());
   const repo = ds.getRepository('ApiKey');
+  const runtime = runtimeSpecsById.get(agentId);
+  if (!hostId && runtime) hostId = runtime.manager_agent_id;
+  if (!hostId && agentId && /^[0-9a-f-]{36}$/i.test(agentId) && await ds.getRepository('RuntimeHost').existsBy({ id: agentId })) hostId = agentId;
   const rawKey = `qa-${label}-${randomUUID()}`;
   // Mirror ApiKeyService: persist the SHA-256 hash + a display prefix, never
   // the raw key (the prod storage model the hashing change enforces).
@@ -215,10 +228,9 @@ export async function createApiKey(
     : rawKey.slice(0, 8) + '***' + rawKey.slice(-4);
   const row = await repo.save(
     repo.create({
-      name: `qa-${label}`,
+      name: runtime ? `runtime:${label}:${agentId}` : `qa-${label}`,
       key: keyHash,
       key_prefix: keyPrefix,
-      agent_id: agentId,
       ...(hostId ? { host_id: hostId } : {}),
       scope,
       is_active: 1,
@@ -365,6 +377,8 @@ export async function createTicket(
         ticket_id: row.id,
         role_id: role.id,
         agent_id: agentId,
+        runtime_spec: runtimeSpecsById.get(agentId) || null,
+        holder_key: runtimeSpecsById.has(agentId) ? `runtime:${agentId}` : `agent:${agentId}`,
         user_id: null,
       }));
     }
@@ -411,7 +425,8 @@ export async function addRoleHolder(
     role_id: role.id,
     agent_id: agentId,
     user_id: null,
-    holder_key: `agent:${agentId}`,
+    runtime_spec: runtimeSpecsById.get(agentId) || null,
+    holder_key: runtimeSpecsById.has(agentId) ? `runtime:${agentId}` : `agent:${agentId}`,
   }));
   traceEvent('fixture', {
     kind: 'role-holder',

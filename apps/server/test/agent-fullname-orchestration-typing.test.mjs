@@ -161,7 +161,7 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
     type: 'note',
     message: 'hello',
     actor_type: 'agent',
-    actor_id: memberA.id,
+    actor_id: mgrA.id,
     actor_name: 'Coder',
   });
   // A system actor has no agent id → its label must survive verbatim.
@@ -192,7 +192,7 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
       acceptance_criteria: '',
       team_id: team.id,
       depends_on: [],
-      assignee_agent_id: memberB.id,
+      assignee_agent_id: mgrB.id,
       status: 'pending',
       position: 0,
       plan_version: mission.plan_version,
@@ -216,19 +216,19 @@ test('agent_typing SSE: actor_name is the Host display, never the raw agent id',
     columnId: columns.todo.id,
     workspaceId: ws.id,
     title: 'typing target',
-    assigneeId: memberA.id,
+    assigneeId: mgrA.id,
   });
 
   const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'typing-sub' });
   const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
-  const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'typing-caller' });
+  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'typing-caller' });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: callerKey.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
   const res = await client.callTool('set_typing', {
-    agent_id: memberA.id,
+    agent_id: mgrA.id,
     ticket_id: ticket.id,
     is_typing: true,
   });
@@ -241,10 +241,10 @@ test('agent_typing SSE: actor_name is the Host display, never the raw agent id',
   );
   assert.equal(frame.data.actor_name, MEMBER_A_DISPLAY,
     `agent_typing.actor_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.actor_name}"`);
-  assert.notEqual(frame.data.actor_name, memberA.id, 'actor_name must never be the raw agent id');
+  assert.notEqual(frame.data.actor_name, mgrA.id, 'actor_name must never be the raw agent id');
   assert.ok(!String(frame.data.actor_name).includes('/'), 'actor_name is the bare Host display');
 
-  await client.callTool('set_typing', { agent_id: memberA.id, ticket_id: ticket.id, is_typing: false });
+  await client.callTool('set_typing', { agent_id: mgrA.id, ticket_id: ticket.id, is_typing: false });
 });
 
 // ─── 5. Chat typing indicator (chat_room_typing) ─────────────────────────────
@@ -276,14 +276,14 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
   const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
-  const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'chat-typing-caller' });
+  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-typing-caller' });
   const resp = await fetch(
     `http://127.0.0.1:${port}/api/agent/chat-rooms/${room.id}/typing`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Agent-Key': callerKey.raw_key },
       body: JSON.stringify({
-        agent_id: memberA.id,
+        agent_id: mgrA.id,
         agent_name: 'Coder',   // bare hint — must NOT win
         is_typing: true,
         status: 'thinking',
@@ -301,7 +301,7 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
     `chat_room_typing.agent_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.agent_name}"`);
   assert.ok(!String(frame.data.agent_name).includes('/'),
     'the chat typing label is the bare Host display');
-  assert.equal(frame.data.agent_id, memberA.id,
+  assert.equal(frame.data.agent_id, mgrA.id,
     'the frame must be keyed by the ANSWERING agent — the client clears the indicator by this id');
 });
 
@@ -332,7 +332,7 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
   const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
-  const callerKey = await createApiKey(app, getDataSourceToken, memberA.id, { workspaceId: ws.id, label: 'chat-status-caller' });
+  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-status-caller' });
   const keepAliveUntilMs = Date.now() + 8 * 60_000;
   const resp = await fetch(
     `http://127.0.0.1:${port}/api/agent/chat-rooms/${room.id}/session-status`,
@@ -340,7 +340,7 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Agent-Key': callerKey.raw_key },
       body: JSON.stringify({
-        agent_id: memberA.id,
+        agent_id: mgrA.id,
         keep_alive_until_ms: keepAliveUntilMs,
         background_task_count: 2,
       }),
@@ -357,7 +357,7 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
     `chat_room_session_status.agent_name must be "${MEMBER_A_DISPLAY}", got "${frame.data.agent_name}"`);
   assert.ok(!String(frame.data.agent_name).includes('/'),
     'the session-status label is the bare Host display');
-  assert.equal(frame.data.agent_id, memberA.id,
+  assert.equal(frame.data.agent_id, mgrA.id,
     'the frame must be keyed by the ANSWERING agent, not the manager');
   assert.equal(frame.data.keep_alive_until_ms, keepAliveUntilMs,
     'keep_alive_until_ms must be forwarded verbatim (absolute deadline, not pre-computed remaining minutes)');

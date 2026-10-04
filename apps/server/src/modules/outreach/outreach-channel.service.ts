@@ -1,3 +1,5 @@
+import { normalizeRuntimeSpec } from '../../common/runtime-spec';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 /**
  * OutreachChannelService — CRUD + validation for OutreachChannel (ticket
  * 2500fea3 step 7). Mirrors QaScheduleService's CRUD shape: plain validated
@@ -44,7 +46,7 @@ export interface CreateChannelInput {
   pollIntervalMs?: number;
   pollCron?: string | null;
   classifyThreshold?: number;
-  classifierAgentId?: string | null;
+  classifierRuntime?: Record<string, any> | null;
   deployPostMode?: OutreachDeployPostMode;
   replyThreadRef?: string | null;
   autoReuseWindowDays?: number;
@@ -100,7 +102,7 @@ export class OutreachChannelService {
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
     await this._assertCredentialScope(input.credentialId ?? null, input.workspaceId);
     const targetBoardId = await this._assertBoardScope(input.targetBoardId ?? null, input.workspaceId);
-    const classifierAgentId = await this._assertAgentScope(input.classifierAgentId ?? null, input.workspaceId);
+    const classifierRuntime = await this._validateClassifierRuntime(input.classifierRuntime ?? null, input.workspaceId);
     const deployPostMode = this._validateDeployPostMode(input.deployPostMode);
     const replyThreadRef = this._sanitizeThreadRef(input.replyThreadRef);
     this._assertReplyThreadRefPresence(deployPostMode, replyThreadRef);
@@ -121,7 +123,7 @@ export class OutreachChannelService {
       last_poll_at: null,
       since_cursor: '',
       classify_threshold: this._validateThreshold(input.classifyThreshold),
-      classifier_agent_id: classifierAgentId,
+      classifier_runtime: classifierRuntime,
       deploy_post_mode: deployPostMode,
       reply_thread_ref: replyThreadRef,
       auto_reuse_window_days: this._validateReuseWindowDays(input.autoReuseWindowDays),
@@ -154,8 +156,8 @@ export class OutreachChannelService {
     if (patch.publishPolicy !== undefined) channel.publish_policy = this._validatePolicy(patch.publishPolicy);
     if (patch.rateLimitPerHour !== undefined) channel.rate_limit_per_hour = this._validateRateLimit(patch.rateLimitPerHour);
     if (patch.classifyThreshold !== undefined) channel.classify_threshold = this._validateThreshold(patch.classifyThreshold);
-    if (patch.classifierAgentId !== undefined) {
-      channel.classifier_agent_id = await this._assertAgentScope(patch.classifierAgentId || null, channel.workspace_id);
+    if (patch.classifierRuntime !== undefined) {
+      channel.classifier_runtime = await this._validateClassifierRuntime(patch.classifierRuntime || null, channel.workspace_id);
     }
     if (patch.deployPostMode !== undefined) channel.deploy_post_mode = this._validateDeployPostMode(patch.deployPostMode);
     if (patch.replyThreadRef !== undefined) channel.reply_thread_ref = this._sanitizeThreadRef(patch.replyThreadRef);
@@ -246,21 +248,21 @@ export class OutreachChannelService {
     return board.id;
   }
 
-  /** A configured classifier_agent_id must be visible in the channel's own
+  /** A configured classifier_runtime must be visible in the channel's own
    *  workspace — same "caught at save time, not silently ignored" contract
    *  as _assertBoardScope, reusing the same agent-workspace-visibility rule
    *  SecurityProfile.target_agent_id (and 15+ other call sites) already
    *  standardize on: a workspace-scoped agent must match, but a global
    *  agent (workspace_id null/'') is visible everywhere. */
   // P4c-4: Host/링크 해소 (Agent 행 없음).
-  private async _assertAgentScope(agentId: string | null, workspaceId: string): Promise<string | null> {
-    if (!agentId) return null;
-    const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
-    if (!agent) throw makeError(400, 'classifier_agent_id not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-      throw makeError(400, 'classifier_agent_id must belong to this workspace');
-    }
-    return agent.id;
+  private async _validateClassifierRuntime(input: unknown, workspaceId: string): Promise<Record<string, any> | null> {
+    if (input == null) return null;
+    let spec;
+    try { spec = normalizeRuntimeSpec(input, 'classifier_runtime'); }
+    catch (error) { throw makeError(400, (error as Error).message); }
+    if (!await this.dataSource.getRepository(RuntimeHost).existsBy({ id: spec.manager_agent_id })) throw makeError(400, 'Runtime Host not found');
+    await this._assertCredentialScope(spec.credential_id, workspaceId);
+    return { ...spec };
   }
 
   private _validateCron(cron: string | null | undefined): string | null {

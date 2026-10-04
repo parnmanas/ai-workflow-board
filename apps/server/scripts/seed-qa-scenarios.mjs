@@ -12,17 +12,18 @@
 //   node apps/server/scripts/seed-qa-scenarios.mjs \
 //     --base-url http://localhost:7701 \
 //     --workspace <workspace_id> \
-//     --agent <target_agent_id> \
+//     --runtime <runtime-spec.json> \
 //     [--board <board_id>] \
 //     [--api-key <key>] \
 //     [--only ticket-lifecycle,chat-room-messaging] \
 //     [--dry-run]
 //
-// Env fallbacks: AWB_BASE_URL, AWB_WORKSPACE_ID, AWB_QA_AGENT_ID, AWB_BOARD_ID, AWB_API_KEY.
+// Env fallbacks: AWB_BASE_URL, AWB_WORKSPACE_ID, AWB_QA_RUNTIME_FILE, AWB_BOARD_ID, AWB_API_KEY.
 //
 // Build first so dist/ has the catalogue: (cd apps/server && npm run build)
 
 import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { McpClient } from '../test/helpers/mcp-client.mjs';
 
@@ -45,13 +46,13 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const baseUrl = args['base-url'] || process.env.AWB_BASE_URL || 'http://localhost:7701';
   const workspaceId = args.workspace || process.env.AWB_WORKSPACE_ID;
-  const agentId = args.agent || process.env.AWB_QA_AGENT_ID;
+  const runtimePath = args.runtime || process.env.AWB_QA_RUNTIME_FILE;
   const boardId = args.board || process.env.AWB_BOARD_ID || null;
   const apiKey = args['api-key'] || process.env.AWB_API_KEY || '';
   const only = args.only ? String(args.only).split(',').map((s) => s.trim()).filter(Boolean) : undefined;
 
-  if (!workspaceId || !agentId) {
-    console.error('ERROR: --workspace <id> and --agent <target_agent_id> are required.\n');
+  if (!workspaceId || !runtimePath) {
+    console.error('ERROR: --workspace <id> and --runtime <runtime-spec.json> are required.\n');
     console.error('Run with --help-ish flags; see the header of this file.');
     process.exit(2);
   }
@@ -67,7 +68,7 @@ async function main() {
 
   const payloads = buildScenarioCreatePayloads({
     workspace_id: workspaceId,
-    target_agent_id: agentId,
+    target_runtime: JSON.parse(await readFile(runtimePath, 'utf8')),
     board_id: boardId,
     created_by: 'seed-qa-scenarios',
     only,

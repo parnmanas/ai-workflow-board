@@ -9,7 +9,7 @@ import { BoardColumn } from '../../entities/BoardColumn';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
-import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey, runtimeSpecFromAgentRow } from '../../common/runtime-spec';
+import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { isUuidShapedId } from '../../utils/agent-name';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
@@ -151,7 +151,8 @@ export class FeaturesService {
 
     // P4c-3b: spec-direct면 정규화 + identity 키가 planner가 된다.
     // 아니면 기존 폴백 (planner_agent_id → created_by_id → 빈 값).
-    let plannerId = (input.planner_agent_id || input.created_by_id || '').trim();
+    let plannerId = '';
+    if (input.planner_agent_id && !input.planner_runtime) throw new BadRequestException('planner_runtime is required; Agent references are no longer supported');
     let plannerSpec: Record<string, any> | null = null;
     if (input.planner_runtime !== undefined && input.planner_runtime !== null) {
       let spec;
@@ -163,19 +164,12 @@ export class FeaturesService {
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
       if (!hostRow) {
-        const link = await this.dataSource.getRepository(ApiKey).findOne({
-          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-          select: { agent_id: true, host_id: true },
-        });
-        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-        if (!linked) throw new BadRequestException('planner_runtime references an unknown Runtime Host');
+        throw new BadRequestException('planner_runtime references an unknown Runtime Host');
       }
       plannerId = runtimeIdentityKey(spec);
       plannerSpec = { ...spec };
     }
     // P4c-4: uuid planner 스냅샷 없음 (Agent 행 없음 — runtime holder 만 spec).
-    const plannerRow = null;
     const feature = await this.featureRepo.save(this.featureRepo.create({
       workspace_id: input.workspace_id,
       board_id: input.board_id || null,
@@ -183,7 +177,7 @@ export class FeaturesService {
       requirement,
       status: 'draft',
       planner_agent_id: plannerId,
-      planner_runtime: plannerSpec ?? (plannerRow ? { ...runtimeSpecFromAgentRow(plannerRow) } : null),
+      planner_runtime: plannerSpec,
       source_chat_room_id: (input.source_chat_room_id || '').trim(),
       created_by: input.created_by || '',
       proposal: null,
@@ -248,7 +242,7 @@ export class FeaturesService {
         participant_id: plannerId,
         runtime_spec: feature.planner_runtime
           ? { ...feature.planner_runtime }
-          : agent ? { ...runtimeSpecFromAgentRow(agent) } : null,
+          : null,
         last_read_at: joinedAt,
         left_at: null,
       }),

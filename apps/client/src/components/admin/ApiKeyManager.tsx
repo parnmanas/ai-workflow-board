@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api';
-import { ApiKey, Agent } from '../../types';
+import { ApiKey } from '../../types';
 import { tokens } from '../../tokens';
 import { Button, Input, Select, Badge, Modal, Card } from '../common';
 import { useConfirm } from '../../contexts/ConfirmContext';
@@ -21,26 +21,21 @@ const apiKeyCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
 export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } = {}) {
   const confirm = useConfirm();
   const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: '', scope: 'full', agent_id: '', expires_in_days: '' });
+  const [form, setForm] = useState({ name: '', scope: 'full', expires_in_days: '' });
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
-    const [keysData, agentsData] = await Promise.all([
-      api.getApiKeys(workspaceId),
-      Promise.resolve([] as any[]),
-    ]);
+    const keysData = await api.getApiKeys(workspaceId);
     setKeys(keysData);
-    setAgents(agentsData);
   }, [workspaceId]);
 
   useEffect(() => { load(); }, [load]);
 
   const resetForm = () => {
-    setForm({ name: '', scope: 'full', agent_id: '', expires_in_days: '' });
+    setForm({ name: '', scope: 'full', expires_in_days: '' });
     setEditingId(null);
     setShowForm(false);
     setCreatedKey(null);
@@ -54,16 +49,14 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
       await api.updateApiKey(editingId, {
         name: form.name,
         scope: form.scope,
-        agent_id: form.agent_id || null,
-        expires_in_days: form.expires_in_days ? parseInt(form.expires_in_days) : undefined,
+                expires_in_days: form.expires_in_days ? parseInt(form.expires_in_days) : undefined,
       });
       resetForm();
     } else {
       const result = await api.createApiKey({
         name: form.name,
         scope: form.scope,
-        agent_id: form.agent_id || null,
-        expires_in_days: form.expires_in_days ? parseInt(form.expires_in_days) : undefined,
+                expires_in_days: form.expires_in_days ? parseInt(form.expires_in_days) : undefined,
       });
       setCreatedKey(result.raw_key);
     }
@@ -74,8 +67,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
     setForm({
       name: key.name,
       scope: key.scope,
-      agent_id: key.agent_id?.toString() || '',
-      expires_in_days: '',
+            expires_in_days: '',
     });
     setEditingId(key.id);
     setShowForm(true);
@@ -175,13 +167,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
                   { value: 'migration_export', label: 'Migration Export (server-to-server pull)' },
                 ]}
               />
-              <Select
-                label="Agent (Optional)"
-                value={form.agent_id}
-                onChange={e => setForm({ ...form, agent_id: (e.target as HTMLSelectElement).value })}
-                placeholder="No agent"
-                options={agents.map(a => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-              />
+
               <Input
                 label="Expires In (Days)"
                 type="number"
@@ -221,7 +207,7 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
               <th style={apiKeyHeadStyle('left')}>Status</th>
               <th style={apiKeyHeadStyle('left')}>Scope</th>
               <th style={apiKeyHeadStyle('left')}>Masked Key</th>
-              <th style={apiKeyHeadStyle('left')}>Agent</th>
+              <th style={apiKeyHeadStyle('left')}>Host</th>
               <th style={apiKeyHeadStyle('right')}>Used</th>
               <th style={apiKeyHeadStyle('left')}>Last Used</th>
               <th style={apiKeyHeadStyle('left')}>Expires</th>
@@ -271,15 +257,8 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
-                    title={key.agent ? formatAgentDisplayName(key.agent) : undefined}
                   >
-                    {key.agent ? (
-                      <span style={{ color: tokens.colors.accentLight }}>
-                        {formatAgentDisplayName(key.agent)}
-                      </span>
-                    ) : (
-                      <span style={{ color: tokens.colors.textMuted }}>—</span>
-                    )}
+                    {key.host_id || '—'}
                   </td>
                   <td
                     style={{

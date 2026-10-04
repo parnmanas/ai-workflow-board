@@ -1,3 +1,4 @@
+import type { AgentTemplate } from './types';
 import type { CliDescriptor } from './cli/catalog';
 import type { HostModelsView } from './cli/hostModels';
 import type {
@@ -33,7 +34,6 @@ import type {
   ChatMessage,
   ChatThread,
   DashboardAgent,
-  AgentDetail,
   ActivityRow,
   ChatRoomListItem,
   ChatRoomDetail,
@@ -58,7 +58,7 @@ import type {
   AgentManagerCommandKind,
   AgentManagerCommandOutcome,
   AgentManagerCommandResult,
-  Agent,
+  RuntimeParticipant,
   TicketAttachmentMeta,
   TicketPrerequisiteRow,
   UserNotificationChannel,
@@ -269,7 +269,7 @@ export const api = {
   getWorkspace: (id: string) => request<any>(`/workspaces/${id}`),
   createWorkspace: (data: { name: string; description?: string; board_name?: string }) =>
     request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null; clone_policy?: ClonePolicy | null; assistant_agent_id?: string | null }) =>
+  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null; clone_policy?: ClonePolicy | null }) =>
     request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspace: (id: string) =>
     request<any>(`/workspaces/${id}`, { method: 'DELETE' }),
@@ -664,6 +664,7 @@ export const api = {
     title: string; description?: string; priority?: string; status?: string;
     assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
     labels?: string[]; channel_ids?: string[];
+    role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }>;
   }) =>
     request<any>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
 
@@ -1640,6 +1641,13 @@ export const api = {
   refreshHostModels: (managerAgentId: string) =>
     request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models/refresh`, { method: 'POST' }),
   /** RuntimeSpec live 검증 — RuntimeSpecEditor의 저장 전 체크. 저장하지 않는다. */
+  listTemplateHosts: () => request<Array<{ id: string; name: string }>>('/agent-templates/hosts'),
+  listAgentTemplates: () => request<AgentTemplate[]>('/agent-templates'),
+  createAgentTemplate: (value: Omit<AgentTemplate, 'id' | 'created_at' | 'updated_at'>) =>
+    request<AgentTemplate>('/agent-templates', { method: 'POST', body: JSON.stringify(value) }),
+  updateAgentTemplate: (id: string, value: Partial<Omit<AgentTemplate, 'id' | 'created_at' | 'updated_at'>>) =>
+    request<AgentTemplate>(`/agent-templates/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) }),
+  deleteAgentTemplate: (id: string) => request(`/agent-templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   validateRuntimeSpec: (workspace_id: string | null, spec: Record<string, any>) =>
     request<{ ok: boolean; spec?: Record<string, any>; error?: string }>('/runtime-specs/validate', {
       method: 'POST',
@@ -1814,7 +1822,7 @@ export const api = {
     skillId: string,
     body: {
       skill_version_id: string;
-      agent_id: string;
+      runtime: Record<string, any>;
       board_id?: string;
       role_slug?: string;
     },

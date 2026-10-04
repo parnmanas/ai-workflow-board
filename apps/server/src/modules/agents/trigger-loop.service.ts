@@ -42,7 +42,7 @@ import { lastHumanUnpendAt, countWindowDispatches, countWindowDispatchesBySource
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability } from '../../common/manager-capability-gate';
-import { holderAssigneeId, runtimeSpecFromAgentRow, specMatchesAgent, isRuntimeIdentityKey } from '../../common/runtime-spec';
+import { holderAssigneeId, isRuntimeIdentityKey } from '../../common/runtime-spec';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { isUuidShapedId } from '../../utils/agent-name';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
@@ -3385,7 +3385,7 @@ candidate's branch or move the ticket.
       // 읽고 P4c에서 runtime 정본으로 전환한다.
       runtime: assignmentSpec
         ? { ...assignmentSpec }
-        : agent ? { ...runtimeSpecFromAgentRow(agent) } : null,
+        : null,
       role,
       trigger_source: triggerSource,
       current_column_id: col?.id || '',

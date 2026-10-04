@@ -368,10 +368,18 @@ test('Durable dispatch outbox — full closed loop', async (t) => {
 
     const forged = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
       method: 'POST',
-      headers: { 'X-Agent-Key': (await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'non-manager' })).raw_key, 'Content-Type': 'application/json' },
+      headers: { 'X-Agent-Key': (await createApiKey(app, getDataSourceToken, null, { workspaceId: ws.id, label: 'non-manager' })).raw_key, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ticket_id: ticket.id, role: 'assignee', trigger_id: 'forged', outcome: 'suppressed' }),
     });
     assert.equal(forged.status, 403, '일반 agent는 hard-budget 차감 신호를 위조할 수 없어야 한다');
+    const execution = await createAgent(app, getDataSourceToken, ws.id, { name: 'runtime-worker', runtime: true });
+    const executionKey = await createApiKey(app, getDataSourceToken, execution.id, { workspaceId: ws.id, label: 'runtime-worker' });
+    const runtimeForgery = await fetch(`http://127.0.0.1:${port}/api/agent-manager/dispatch/ack`, {
+      method: 'POST', headers: { 'X-Agent-Key': executionKey.raw_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket_id: ticket.id, role: 'assignee', trigger_id: 'forged', outcome: 'suppressed' }),
+    });
+    assert.equal(runtimeForgery.status, 403, 'a Host-bound execution key is not a manager control key');
+
   });
 
   await t.test('10c: SSE 수신 즉시 도착한 suppressed ACK도 상관 행을 찾는다', async () => {

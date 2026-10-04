@@ -27,7 +27,7 @@ export function emptySummary(): SyncSummary {
  * reconciliation rules are identical and must not drift apart:
  *
  *   - **Append-only.** An update publishes a NEW immutable SkillVersion; no
- *     existing version is ever edited or deleted. Every AgentSkillAssignment
+ *     existing version is ever edited or deleted. Every RuntimeSkillAssignment
  *     pins a specific `skill_version_id`, so a sync can never change what an
  *     already-assigned agent runs — the operator re-points the assignment when
  *     they are ready. This is the same guarantee the run snapshot relies on.

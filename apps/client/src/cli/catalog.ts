@@ -138,7 +138,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
       presets: [],
     },
     sessions: { acp: true, backend_profile: false },
-    effort: { ...MODEL_ONLY_EFFORT },
+    effort: { keys: ['model', 'effort'] },
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,

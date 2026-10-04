@@ -1,132 +1,21 @@
-// Workspace 어시스턴트 지정 검증 (에픽 bf65ca00 · Phase 1 · S2).
-//
-// planner 결정 a: workspace.assistant_agent_id 는 관리자 전용이며, 지정 값은 이
-// workspace 소속의 활성·비매니저 에이전트여야 한다. Chat-first 랜딩이 이 지정을 DM
-// 프리셋으로 연결하므로, 잘못된/권한없는 지정이 서버에서 막히는지 실제
-// WorkspacesController.update() (REST 경로)를 구동해 검증한다.
-//
-// 커버:
-//   - 기본값 null (기존 workspace 무변경, 마이그레이션 0)
-//   - 관리자(admin.agents)가 활성 in-ws 에이전트 지정 → 200, 영속
-//   - 비관리자 → 403, 값 불변 (권한 게이트)
-//   - 비활성 / 매니저 / 타-workspace / 존재안함 → 400 (workspace 경계 + 적격성)
-//   - null / '' 로 해제 → 200
-//   - assistant 미포함 PATCH(name)은 비관리자도 그대로 허용 → 기존 PATCH 권한 회귀 0
-//
-// 실행:  node --test --test-force-exit test/qa-flows/workspace-assistant-agent.test.mjs
-
-import { test } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import { bootApp } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent } from '../helpers/fixtures.mjs';
+import { createWorkspace } from '../helpers/fixtures.mjs';
+import { WorkspacesController } from '../../dist/modules/workspaces/workspaces.controller.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIST_ROOT = path.join(__dirname, '..', '..', 'dist');
-const loadDist = (...p) => import('file://' + path.join(DIST_ROOT, ...p));
-
-function fakeRes() {
-  return {
-    _status: 200,
-    _json: undefined,
-    status(c) { this._status = c; return this; },
-    json(x) { this._json = x; return this; },
-  };
-}
-
-test('workspace assistant_agent_id: admin 지정/해제 + 경계 검증 + 비관리자 403', async (t) => {
-  const { app, modules } = await bootApp({ port: parseInt(process.env.PORT || '0', 10) });
+test('workspace updates no longer persist a saved assistant Agent binding', async (t) => {
+  const { app, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
-
-  const { WorkspacesController } = await loadDist('modules', 'workspaces', 'workspaces.controller.js');
-  const controller = app.get(WorkspacesController);
-  const wsRepo = ds.getRepository('Workspace');
-
-  const ws = await createWorkspace(app, modules.getDataSourceToken, 'assistant');
-  const otherWs = await createWorkspace(app, modules.getDataSourceToken, 'other');
-
-  const active = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'assistant', type: 'custom' });
-  const inactive = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'inactive', type: 'custom' });
-  // P4c-4: is_active 컬럼 없음 — 'inactive' 는 이름뿐인 fixture 다.
-  const manager = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'mgr', type: 'manager' });
-  const foreign = await createAgent(app, modules.getDataSourceToken, otherWs.id, { name: 'foreign', type: 'custom' });
-  const globalNull = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'global-null', type: 'custom' });
-  const globalEmpty = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'global-empty', type: 'custom' });
-  // P4c-4: 전역 취급은 링크 행의 workspace 로 — null/'' 모두 전역이다.
-  const linkRepo = ds.getRepository('ApiKey');
-  await linkRepo.update({ agent_id: globalNull.id }, { workspace_id: null });
-  await linkRepo.update({ agent_id: globalEmpty.id }, { workspace_id: '' });
-
-  const admin = { id: 'u-admin', name: 'Admin', email: 'a@x', role: 'admin', permissions: [] };
-  const nonAdmin = { id: 'u-user', name: 'User', email: 'u@x', role: 'user', permissions: [] };
-
-  const patch = async (body, user) => {
-    const res = fakeRes();
-    await controller.update(ws.id, body, res, user);
-    return res;
-  };
-  const currentAssistant = async () => (await wsRepo.findOne({ where: { id: ws.id } })).assistant_agent_id;
-
-  // 기본값: null (설정 전)
-  assert.equal(await currentAssistant(), null, 'default assistant_agent_id is null');
-
-  // 관리자가 활성 in-ws 에이전트 지정 → 200, 영속
-  let res = await patch({ assistant_agent_id: active.id }, admin);
-  assert.equal(res._status, 200, 'admin sets active in-ws agent → 200');
-  assert.equal(await currentAssistant(), active.id, 'persisted');
-
-  res = await patch({ assistant_agent_id: globalNull.id }, admin);
-  assert.equal(res._status, 200, 'null-workspace global agent is assignable');
-  assert.equal(await currentAssistant(), globalNull.id);
-
-  res = await patch({ assistant_agent_id: globalEmpty.id }, admin);
-  assert.equal(res._status, 200, 'legacy empty-workspace global agent is assignable');
-  assert.equal(await currentAssistant(), globalEmpty.id);
-
-  await patch({ assistant_agent_id: active.id }, admin);
-
-  // 비관리자 변경 시도 → 403, 값 불변
-  res = await patch({ assistant_agent_id: null }, nonAdmin);
-  assert.equal(res._status, 403, 'non-admin cannot change assistant → 403');
-  assert.equal(await currentAssistant(), active.id, 'unchanged after 403');
-
-  // P4c-4: is_active/type 검사가 없다 (Agent 행 없음) — 링크된 정체성은 지정된다.
-  res = await patch({ assistant_agent_id: inactive.id }, admin);
-  assert.equal(res._status, 200, 'P4c-4: inactive 개념 없음 → 200');
-  assert.equal(await currentAssistant(), inactive.id);
-  await patch({ assistant_agent_id: active.id }, admin);
-
-  // Host identity 도 지정된다 (DM auto-route 제외 규칙은 Agent 테이블과 함께 사라짐).
-  res = await patch({ assistant_agent_id: manager.id }, admin);
-  assert.equal(res._status, 200, 'P4c-4: Host 지정 → 200');
-  assert.equal(await currentAssistant(), manager.id);
-  await patch({ assistant_agent_id: active.id }, admin);
-
-  // 타 workspace 에이전트 → 400 (경계)
-  res = await patch({ assistant_agent_id: foreign.id }, admin);
-  assert.equal(res._status, 400, 'other-workspace agent → 400');
-
-  // 존재하지 않는 id → 400
-  res = await patch({ assistant_agent_id: 'no-such-agent' }, admin);
-  assert.equal(res._status, 400, 'nonexistent agent → 400');
-
-  // 관리자가 null 로 해제 → 200, null
-  res = await patch({ assistant_agent_id: null }, admin);
-  assert.equal(res._status, 200, 'admin clears with null → 200');
-  assert.equal(await currentAssistant(), null, 'cleared');
-
-  // 빈 문자열도 해제로 처리
-  await patch({ assistant_agent_id: active.id }, admin);
-  res = await patch({ assistant_agent_id: '' }, admin);
-  assert.equal(res._status, 200, "empty string clears → 200");
-  assert.equal(await currentAssistant(), null, 'cleared via empty string');
-
-  // assistant 미포함 PATCH(name)은 비관리자도 그대로 허용 → 기존 권한 요건 회귀 0
-  await patch({ assistant_agent_id: active.id }, admin);
-  res = await patch({ name: 'renamed-by-user' }, nonAdmin);
-  assert.equal(res._status, 200, 'non-admin can still PATCH name (existing behavior preserved)');
-  assert.equal(await currentAssistant(), active.id, 'name PATCH did not disturb assistant');
+  const ws = await createWorkspace(app, modules.getDataSourceToken, 'without-assistant');
+  const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
+  await app.get(WorkspacesController).update(ws.id, { name: 'Renamed', assistant_agent_id: 'retired' }, res,
+    { id: 'admin', name: 'Admin', role: 'admin', permissions: [] });
+  assert.equal(res.statusCode, 200);
+  const stored = await ds.getRepository('Workspace').findOneByOrFail({ id: ws.id });
+  assert.equal(stored.name, 'Renamed');
+  assert.equal(stored.assistant_agent_id, undefined);
+  assert.equal(res.body.assistant_agent_id, undefined);
+  assert.equal(await ds.createQueryRunner().hasColumn('workspaces', 'assistant_agent_id'), false);
 });

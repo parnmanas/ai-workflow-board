@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { runtimeIdentityKey, parseRuntimeSpec } from '../common/runtime-spec';
+import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 
 /**
@@ -31,6 +32,14 @@ import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/works
  */
 @Entity('security_profiles')
 export class SecurityProfile {
+  @AfterLoad()
+  @BeforeInsert()
+  @BeforeUpdate()
+  refreshRuntimeIdentity(): void {
+    const spec = parseRuntimeSpec(this.target_runtime);
+    this.target_agent_id = spec ? runtimeIdentityKey(spec) : '';
+  }
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
@@ -55,14 +64,9 @@ export class SecurityProfile {
   checklist: SecurityChecklistItem[] | null;
 
   // The agent that runs this inspection (dispatched via ChatRoom, like QA).
-  @Column({ type: 'varchar' })
-  target_agent_id: string;
+  /** Computed dispatch keys. Runtime specs below are the persisted source of truth. */
+  target_agent_id: string = '';
 
-  /**
-   * Snapshot of the target's runtime at save time (P2c dual-write).
-   * `target_agent_id`와 항상 함께 쓴다. P4에서 dispatch가 이쪽을 읽으면
-   * `target_agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
-   */
   @Column({ type: 'simple-json', nullable: true, default: null })
   target_runtime: Record<string, any> | null;
 
@@ -210,6 +214,7 @@ export interface SecurityOnFailureTicketConfig {
   priority?: 'low' | 'medium' | 'high' | 'critical';
   /** Assignee for the fix ticket; falls back to the profile's target agent. */
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   /**
    * Severity gate. A ticket is filed only if the run has a finding whose

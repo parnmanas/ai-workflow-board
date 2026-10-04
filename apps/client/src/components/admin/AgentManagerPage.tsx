@@ -3,7 +3,7 @@ import { api, getActiveWorkspaceId } from '../../api';
 import { tokens } from '../../tokens';
 import { installedVersionBadge, managerUpdateAction, updateFailureBadge } from './managerUpdateAction';
 import type {
-  Agent,
+  RuntimeParticipant,
   AgentCredentialEntry,
   AgentCurrentTask,
   AgentLifecycleState,

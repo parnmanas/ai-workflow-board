@@ -4,7 +4,7 @@ import { useToast } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import { Modal, Button, Input } from './common';
 import { formatAgentDisplayName } from '../utils/agentName';
-import type { Agent, BenchmarkRunDetail } from '../types';
+import type { RuntimeParticipant, BenchmarkRunDetail } from '../types';
 
 /**
  * Create / Edit a benchmark run (ticket 5eb459c4).
@@ -31,7 +31,7 @@ interface BenchmarkRunModalProps {
   /** Candidate-column choices (board columns). */
   columns: Array<{ id: string; name: string }>;
   /** Agent pool for the candidate + evaluator multiselects. */
-  agents: Agent[];
+  agents: RuntimeParticipant[];
   /** edit when set, otherwise create. */
   runId?: string;
   /** Called after a successful create/edit/start so the page can refresh. */
@@ -73,7 +73,7 @@ function AgentMultiSelect({
   lockedIds,
   lockedReason,
 }: {
-  agents: Agent[];
+  agents: RuntimeParticipant[];
   selected: Set<string>;
   onToggle: (id: string) => void;
   /** Ids that cannot be unchecked (e.g. existing candidates on a started run). */

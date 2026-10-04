@@ -53,7 +53,7 @@ test('security schedule kind=checklist_refresh: tick refreshes profiles, creates
     const p = await mcp.callTool('create_security_profile', {
       workspace_id: ws.id,
       name,
-      target_agent_id: agent.id,
+      target_runtime: agent.runtime_spec,
       scan_driver: 'code-review',
       enabled,
       checklist: [{ id: 'sqli', title: 'SQL injection', severity_hint: 'critical' }],

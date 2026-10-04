@@ -589,15 +589,6 @@ export class AgentSessionsService implements OnModuleDestroy {
   private async requireManagerAgent(managerId: string): Promise<{ id: string; name: string }> {
     const host = await this.hosts.findOne({ where: { id: managerId } });
     if (host) return { id: host.id, name: host.name };
-    // api_keys 페어링 링크 경유 (dual-write 시절 manager uuid 호환).
-    const link = await this.dataSource.getRepository(ApiKey).findOne({
-      where: { agent_id: managerId },
-      select: { agent_id: true, host_id: true },
-    });
-    if (link?.host_id) {
-      const linked = await this.hosts.findOne({ where: { id: link.host_id } });
-      if (linked) return { id: linked.id, name: linked.name };
-    }
     throw new AgentSessionError(404, 'host_unknown', 'No Runtime Host with this id.');
   }
 

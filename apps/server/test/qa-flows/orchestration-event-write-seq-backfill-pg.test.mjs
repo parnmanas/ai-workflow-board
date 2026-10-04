@@ -150,7 +150,6 @@ test('백필은 같은 밀리초 안에서도 마이크로초 순서대로 write
     ds.getRepository(entities.OrchestrationEvent),
     ds.getRepository(entities.OrchestrationTeam),
     ds.getRepository(entities.OrchestrationTeamMember),
-    ds.getRepository(entities.Agent),
     ds,
     { info() {}, warn() {}, error() {}, debug() {} },
   );

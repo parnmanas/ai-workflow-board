@@ -42,7 +42,7 @@ test('Feature intake E2E: 요구사항 → 기획 디스패치 → 구조화 제
 
   const { ws, board, columns } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'feature-intake-e2e' });
   // The planner the intake dispatches its planning round to.
-  const planner = await createAgent(app, getDataSourceToken, ws.id, { name: 'planner-bot' });
+  const planner = await createAgent(app, getDataSourceToken, ws.id, { name: 'planner-bot', runtime: true });
 
   step('intake 생성 (auto_plan) → 상태 planning + 기획방 스폰 + 프롬프트 메시지 영속화');
   const created = await svc.create({
@@ -50,7 +50,7 @@ test('Feature intake E2E: 요구사항 → 기획 디스패치 → 구조화 제
     board_id: board.id,
     title: '카드 마감일 & 지연 알림',
     requirement: REQUIREMENT,
-    planner_agent_id: planner.id,
+    planner_runtime: planner.runtime_spec,
     created_by: 'e2e',
     created_by_id: planner.id,
   });

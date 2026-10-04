@@ -16,7 +16,7 @@ async function listHosts(app) {
   return app.get(OrchestrationHostsService).listRuntimeHosts('any-workspace');
 }
 
-test('Linked dual-write pair collapses to one host-keyed row with legacy alias', async (t) => {
+test('Host catalog returns one host-keyed row without retired Agent aliases', async (t) => {
   const { app, modules } = await bootApp({ port: 0 });
   t.after(async () => { await app.close(); });
 
@@ -41,7 +41,7 @@ test('Linked dual-write pair collapses to one host-keyed row with legacy alias',
   const hosts = await listHosts(app);
   assert.equal(hosts.length, 1, JSON.stringify(hosts.map((h) => h.manager_name)));
   assert.equal(hosts[0].manager_agent_id, host.id);
-  assert.equal(hosts[0].legacy_agent_id, legacyAgentId);
+  assert.equal(hosts[0].legacy_agent_id, null);
   assert.ok(hosts[0].manager_name.startsWith('union-manager'), hosts[0].manager_name);
 });
 

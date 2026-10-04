@@ -232,7 +232,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
       // Auto-fill from authenticated agent if fields are missing
       const caller = getCallerAgent(extra);
       const resolvedAuthorType = author_type || (caller?.agentId ? 'agent' : 'user');
-      const resolvedAuthorId = author_id || caller?.agentId || '';
+      const resolvedAuthorId = author_id || caller?.runtimeKey || caller?.agentId || '';
 
       if (!resolvedAuthorId) return err('author_id is required (or authenticate with an agent API key)');
 
@@ -758,7 +758,7 @@ export function registerCommentTools(server: McpServer, ctx: ToolContext): void 
   ): Promise<{ authorType: 'user' | 'agent'; authorId: string; authorName: string } | { error: string }> {
     const caller = getCallerAgent(extra);
     const authorType = requestedType || (caller?.agentId ? 'agent' : 'user');
-    const authorId = requestedId || caller?.agentId || '';
+    const authorId = requestedId || caller?.runtimeKey || caller?.agentId || '';
     if (!authorId) return { error: 'author_id is required (or authenticate with an agent API key)' };
 
     let authorName = requestedName || '';

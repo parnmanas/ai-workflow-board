@@ -1,9 +1,11 @@
+import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { IsNull, Repository, DataSource } from 'typeorm';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
-import { AgentSkillAssignment } from '../../entities/AgentSkillAssignment';
+import { RuntimeSkillAssignment } from '../../entities/RuntimeSkillAssignment';
 import { Skill } from '../../entities/Skill';
 import { SkillProposal } from '../../entities/SkillProposal';
 import { SkillVersion } from '../../entities/SkillVersion';
@@ -19,7 +21,7 @@ export class SkillsService {
   constructor(
     @InjectRepository(Skill) private readonly skills: Repository<Skill>,
     @InjectRepository(SkillVersion) private readonly versions: Repository<SkillVersion>,
-    @InjectRepository(AgentSkillAssignment) private readonly assignments: Repository<AgentSkillAssignment>,
+    @InjectRepository(RuntimeSkillAssignment) private readonly assignments: Repository<RuntimeSkillAssignment>,
     @InjectRepository(SkillProposal) private readonly proposals: Repository<SkillProposal>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
@@ -197,16 +199,19 @@ export class SkillsService {
       where: { id: String(body.skill_version_id), skill_id: skillId },
     });
     if (!version) throw httpError(404, 'skill_version_not_found', 'Skill version not found');
-    // P4c-4: Host/링크 해소 (Agent 행 없음).
-    const agent = await resolveCallerIdentityRow(this.dataSource, String(body.agent_id));
-    if (!agent || !agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-      throw httpError(404, 'agent_not_in_workspace', 'Agent does not belong to this workspace');
+    let spec;
+    try { spec = normalizeRuntimeSpec(body.runtime, 'runtime'); }
+    catch (error) { throw httpError(400, 'invalid_runtime', (error as Error).message); }
+    if (!await this.dataSource.getRepository(RuntimeHost).existsBy({ id: spec.manager_agent_id })) {
+      throw httpError(404, 'host_not_found', 'Runtime Host not found');
     }
+    const runtimeKey = runtimeIdentityKey(spec);
     const boardId = String(body.board_id || '');
     const roleSlug = String(body.role_slug || '');
     const existing = await this.assignments.findOne({
       where: {
-        agent_id: agent.id,
+        workspace_id: workspaceId,
+        runtime_key: runtimeKey,
         skill_id: skillId,
         board_id: boardId,
         role_slug: roleSlug,
@@ -215,7 +220,7 @@ export class SkillsService {
     return this.assignments.save(this.assignments.create({
       ...existing,
       workspace_id: workspaceId,
-      agent_id: agent.id,
+      runtime_key: runtimeKey,
       skill_id: skillId,
       skill_version_id: version.id,
       board_id: boardId,

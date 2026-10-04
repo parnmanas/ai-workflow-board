@@ -30,7 +30,7 @@ test('client has no standalone session routing controls or legacy topology choic
 // P4c-3b/4: Agent 생성 폼 삭제 — 선언은 RuntimeSpecEditor 가 받는다. Host
 // 미선택·상대경로 working_dir 을 거부하는지 소스 계약으로 단언한다.
 test('Runtime declaration requires an explicit Host and an absolute working dir', () => {
-  const source = read('components/runtime/RuntimeSpecEditor.tsx');
+  const source = read('components/runtime/RuntimeSpecEditor.tsx') + read('components/runtime/RuntimeSelectionFields.tsx');
 
   assert.match(source, /label="Runtime Host"/);
   assert.match(source, /value:\s*''\s*,\s*label:\s*'선택…'/);

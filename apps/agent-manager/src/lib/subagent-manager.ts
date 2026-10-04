@@ -757,7 +757,9 @@ export class SubagentManager implements SubagentManagerContract {
     const effectiveModel = claudeRuntimeProfile
       ? null
       : (slice?.model ?? harness?.model ?? ctx?.model ?? null);
-    const effortFlag = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
+    const effortFlag = typeof ctx?.runtime_config?.extra?.effort === 'string'
+      ? ctx.runtime_config.extra.effort
+      : resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
       log(

@@ -1,5 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { ApiKey } from '../../entities/ApiKey';
+import { bindParams } from '../action-cron-timezone';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
@@ -38,9 +38,9 @@ export class DropAgentTable1760000000089 implements MigrationInterface {
       const managers: Array<{ id: string; name: string; is_active: number; last_seen_at: Date | null }> =
         await queryRunner.query("SELECT id, name, is_active, last_seen_at FROM agents WHERE type = 'manager'");
       const hostRepo = queryRunner.manager.getRepository(RuntimeHost);
-      const keys = queryRunner.manager.getRepository(ApiKey);
+
       for (const manager of managers) {
-        const managerKeys = await keys.find({ where: { agent_id: manager.id } });
+        const managerKeys = await bindParams(queryRunner, 'SELECT * FROM api_keys WHERE agent_id = ?', [manager.id]);
         const hostIds = [...new Set(managerKeys.map((key) => key.host_id).filter((id): id is string => !!id))];
         if (hostIds.length > 1) {
           throw new Error(`Manager ${manager.id} has conflicting Runtime Host bindings; refusing to drop agents`);
@@ -59,17 +59,17 @@ export class DropAgentTable1760000000089 implements MigrationInterface {
         for (const key of managerKeys) {
           if (!key.host_id) {
             key.host_id = hostId;
-            await keys.save(key);
+            await bindParams(queryRunner, 'UPDATE api_keys SET host_id = ? WHERE id = ?', [key.host_id, key.id]);
           }
         }
       }
     }
     // ── 1. spec re-key ──────────────────────────────────────────────
-    const keyRepo = queryRunner.manager.getRepository(ApiKey);
+
     let links: Array<{ agent_id: string | null; host_id: string | null }> = [];
     try {
-      if (await queryRunner.hasTable('api_keys')) {
-        links = await keyRepo.find({ select: { agent_id: true, host_id: true } });
+      if (await queryRunner.hasColumn('api_keys', 'agent_id')) {
+        links = await queryRunner.query('SELECT agent_id, host_id FROM api_keys');
       }
     } catch {
       links = [];

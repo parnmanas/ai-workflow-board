@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { runtimeIdentityKey, parseRuntimeSpec } from '../common/runtime-spec';
+import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 import type { HandoffSpec } from '../common/handoff-spec-config';
 
 /**
@@ -40,6 +41,14 @@ export type FeatureStatus =
 
 @Entity('features')
 export class Feature {
+  @AfterLoad()
+  @BeforeInsert()
+  @BeforeUpdate()
+  refreshRuntimeIdentity(): void {
+    const spec = parseRuntimeSpec(this.planner_runtime);
+    this.planner_agent_id = spec ? runtimeIdentityKey(spec) : '';
+  }
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
@@ -65,14 +74,9 @@ export class Feature {
 
   // The agent the planning round is dispatched to (the board's planner holder,
   // or the submitter as a fallback). Empty = intake created without auto-plan.
-  @Column({ type: 'varchar', default: '' })
-  planner_agent_id: string;
+  /** Computed dispatch keys. Runtime specs below are the persisted source of truth. */
+  planner_agent_id: string = '';
 
-  /**
-   * Snapshot of the planner's runtime at intake time (P2c dual-write).
-   * `planner_agent_id`와 항상 함께 쓴다. P4에서 dispatch가 이쪽을 읽으면
-   * `planner_agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
-   */
   @Column({ type: 'simple-json', nullable: true, default: null })
   planner_runtime: Record<string, any> | null;
 

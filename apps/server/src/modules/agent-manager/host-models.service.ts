@@ -271,14 +271,6 @@ export class HostModelsService implements OnModuleInit {
     if (!id) throw new HostModelsError(400, 'manager_agent_id is required');
     const direct = await this.hostRepo.findOne({ where: { id } });
     if (direct) return direct;
-    const link = await this.apiKeyRepo.findOne({
-      where: { agent_id: id },
-      select: { agent_id: true, host_id: true },
-    });
-    if (link?.host_id) {
-      const host = await this.hostRepo.findOne({ where: { id: link.host_id } });
-      if (host) return host;
-    }
     throw new HostModelsError(404, 'Runtime Host not found');
   }
 

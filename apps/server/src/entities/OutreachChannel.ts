@@ -107,8 +107,8 @@ export class OutreachChannel {
   // fully rule-based (RuleBasedClassifier) — today's behavior, unchanged;
   // this is also the fallback when the dispatched agent doesn't report back
   // in time.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  classifier_agent_id: string | null;
+  @Column({ type: 'simple-json', nullable: true, default: null })
+  classifier_runtime: Record<string, any> | null;
 
   // Deploy-triggered publish behavior (ticket d86d0c24, the ticket's core
   // request). Default 'off' — an EXISTING channel must never start posting

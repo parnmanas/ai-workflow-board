@@ -91,16 +91,7 @@ export class OrchestrationHostsService {
     // dual-write 쌍은 api_keys 의 agent_id/host_id 쌍으로 묶어 하나로 합친다).
     // P4c-4: runtime_hosts 원천 (Agent 테이블 없음 — legacy 별칭은
     // api_keys 링크에서 복원한다).
-    const [hostRows, keys] = await Promise.all([
-      this.hostRepo.find({ order: { name: 'ASC' } }),
-      this.apiKeyRepo.find({ select: { agent_id: true, host_id: true } as any }),
-    ]);
-    const hostByAgent = new Map<string, string>();
-    for (const k of keys) {
-      if (k.agent_id && k.host_id && !hostByAgent.has(k.agent_id)) {
-        hostByAgent.set(k.agent_id, k.host_id);
-      }
-    }
+    const hostRows = await this.hostRepo.find({ order: { name: 'ASC' } });
     if (hostRows.length === 0) return [];
 
     interface Entry {
@@ -120,14 +111,6 @@ export class OrchestrationHostsService {
         hostname: h.hostname || '',
       });
     }
-    // dual-write 시절 manager Agent uuid → 같은 Host 로 접기 (legacy 별칭).
-    const hostIdSet = new Set(hostRows.map((h) => h.id));
-    for (const [agentUuid, hid] of hostByAgent) {
-      if (!hostIdSet.has(hid)) continue;
-      const e = entries.get(hid);
-      if (e && !e.legacyAgentId) e.legacyAgentId = agentUuid;
-    }
-
     const live = new Map<string, InstanceRecord>();
     for (const rec of this.registry.list()) {
       if (rec.mode !== 'manager') continue;
@@ -151,7 +134,7 @@ export class OrchestrationHostsService {
     const knownHostIds = new Set(hostRows.map((h) => h.id));
     const entryKeyFor = (raw: string): string => {
       if (knownHostIds.has(raw)) return raw;
-      return hostByAgent.get(raw) ?? raw;
+      return raw;
     };
     for (const dir of await this.specWorkingDirs()) {
       addTo(folders, entryKeyFor(dir.manager_agent_id), dir.working_dir);

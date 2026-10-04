@@ -4,11 +4,11 @@
 // (mirrors outreach-ingest.test.mjs's style); only ClassificationBridgeService
 // itself is real, since the wait/resolve/timeout logic is what's under test.
 //
-//   • classifier_agent_id unset → classify() returns RuleBasedClassifier's
+//   • classifier_runtime unset → classify() returns RuleBasedClassifier's
 //     result immediately; no room/participant/message is ever created.
-//   • classifier_agent_id set but the agent doesn't exist → same fallback,
+//   • classifier_runtime set but the agent doesn't exist → same fallback,
 //     no dispatch attempted (the lookup fails before any room is created).
-//   • classifier_agent_id set, dispatch succeeds, the SAME agent reports back
+//   • classifier_runtime set, dispatch succeeds, the SAME agent reports back
 //     via ClassificationBridgeService.report() with the run_id embedded in
 //     the dispatched prompt → classify() resolves with the REPORTED
 //     category/confidence, not the rule-based fallback.
@@ -25,6 +25,10 @@ import assert from 'node:assert/strict';
 import { AgentDispatchClassifier, MIN_TIMEOUT_MS } from '../dist/modules/outreach/classifier/agent-dispatch.classifier.js';
 import { ClassificationBridgeService } from '../dist/modules/outreach/classifier/classification-bridge.service.js';
 import { RuleBasedClassifier } from '../dist/modules/outreach/classifier/rule-based.classifier.js';
+
+import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
+const spec = (id) => ({ manager_agent_id: id, cli: 'codex', working_dir: '/tmp/project', folder_scope: 'shared', runtime_config: { strategy: 'single', permission_mode: 'approve' } });
+const identity = (id) => runtimeIdentityKey(spec(id));
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -51,7 +55,7 @@ function context(over = {}) {
     workspaceId: 'ws-1',
     channelId: 'chan-1',
     channelKind: 'github',
-    classifierAgentId: null,
+    classifierRuntime: null,
     ...over,
   };
 }
@@ -59,7 +63,7 @@ function context(over = {}) {
 // P4c-4: classifier 정체성은 Host 행이다 — fixture agent 를 Host 행처럼 내놓는다.
 function makeHostScope(agents) {
   const hostRepo = {
-    async findOne({ where: { id } }) { return agents.find((a) => a.id === id) || null; },
+    async existsBy({ id }) { return agents.find((a) => a.id === id) || null; },
     async find() { return []; },
   };
   return { getRepository: () => hostRepo };
@@ -120,44 +124,39 @@ function makeClassifier({ agents = [], timeoutMs, onSend } = {}) {
   return { classifier, roomRepo, participantRepo, messaging, bridge };
 }
 
-test('classifier_agent_id unset falls back to rule-based, no dispatch', async () => {
+test('classifier_runtime unset falls back to rule-based, no dispatch', async () => {
   const { classifier, roomRepo, messaging } = makeClassifier();
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());
 
-  const result = await classifier.classify(item(), context({ classifierAgentId: null }));
+  const result = await classifier.classify(item(), context({ classifierRuntime: null }));
 
   assert.deepEqual(result, expected);
   assert.equal(roomRepo.rooms.length, 0);
   assert.equal(messaging.calls.length, 0);
 });
 
-test('classifier_agent_id set but agent not found falls back to rule-based, no dispatch', async () => {
+test('classifier_runtime set but agent not found falls back to rule-based, no dispatch', async () => {
   const { classifier, roomRepo, messaging } = makeClassifier({ agents: [] });
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());
 
-  const result = await classifier.classify(item(), context({ classifierAgentId: 'agent-missing' }));
+  const result = await classifier.classify(item(), context({ classifierRuntime: spec('agent-missing') }));
 
   assert.deepEqual(result, expected);
   assert.equal(roomRepo.rooms.length, 0);
   assert.equal(messaging.calls.length, 0);
 });
 
-test('agent workspace changed after channel configuration falls back to rule-based, no dispatch', async () => {
-  // classifier_agent_id is validated at channel-save time
-  // (outreach-channel.service.ts's _assertAgentScope), but that snapshot can
-  // go stale if the agent is later moved to a different workspace. classify()
-  // must re-check visibility itself right before dispatching, not trust the
-  // save-time check to still hold.
+test('host removed after channel configuration falls back to rule-based, no dispatch', async () => {
   const agents = [{ id: 'agent-1', workspace_id: 'ws-1' }]; // matched when the channel was configured
   const { classifier, roomRepo, messaging, bridge } = makeClassifier({ agents });
-  agents[0].workspace_id = 'ws-2'; // agent moved to another workspace afterward
+  agents.splice(0); // agent moved to another workspace afterward
 
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());
 
-  const result = await classifier.classify(item(), context({ classifierAgentId: 'agent-1', workspaceId: 'ws-1' }));
+  const result = await classifier.classify(item(), context({ classifierRuntime: spec('agent-1'), workspaceId: 'ws-1' }));
 
   assert.deepEqual(result, expected);
   assert.equal(roomRepo.rooms.length, 0);
@@ -165,23 +164,19 @@ test('agent workspace changed after channel configuration falls back to rule-bas
   assert.equal(bridge.pendingCount(), 0, 'a rejected agent must never reach bridge.register()');
 });
 
-test('classifier_agent_id resolving to a global agent (workspace_id null) still dispatches', async () => {
-  // Guards the other direction of the workspace re-check added above: a
-  // global agent (the same "visible everywhere" contract
-  // agentIsVisibleInWorkspace enforces for every other caller) must not be
-  // rejected as a false positive.
+test('classifier_runtime resolving to a global agent (workspace_id null) still dispatches', async () => {
   const sent = deferred();
   const { classifier, roomRepo, bridge, messaging } = makeClassifier({
     agents: [{ id: 'agent-global', workspace_id: null }],
     onSend: sent.resolve,
   });
 
-  const classifyPromise = classifier.classify(item(), context({ classifierAgentId: 'agent-global' }));
+  const classifyPromise = classifier.classify(item(), context({ classifierRuntime: spec('agent-global') }));
   await sent.promise;
   assert.equal(roomRepo.rooms.length, 1);
 
   const runId = extractRunId(messaging.calls[0].content);
-  bridge.report(runId, 'agent-global', 'question', 80);
+  bridge.report(runId, identity('agent-global'), 'question', 80);
 
   const result = await classifyPromise;
   assert.deepEqual(result, { category: 'question', confidence: 80 });
@@ -194,7 +189,7 @@ test('dispatch + matching report resolves with the reported classification', asy
     onSend: sent.resolve,
   });
 
-  const classifyPromise = classifier.classify(item(), context({ classifierAgentId: 'agent-1' }));
+  const classifyPromise = classifier.classify(item(), context({ classifierRuntime: spec('agent-1') }));
 
   // Wait for the actual observable event (the dispatch prompt being sent),
   // not a guessed number of microtask ticks — sendMessage is the last step
@@ -203,11 +198,11 @@ test('dispatch + matching report resolves with the reported classification', asy
   await sent.promise;
   assert.equal(roomRepo.rooms.length, 1);
   assert.equal(participantRepo.saved.length, 2);
-  assert.ok(participantRepo.saved.some((p) => p.participant_type === 'agent' && p.participant_id === 'agent-1'));
+  assert.ok(participantRepo.saved.some((p) => p.participant_type === 'agent' && p.participant_id === identity('agent-1') && p.runtime_spec.manager_agent_id === 'agent-1'));
   assert.equal(messaging.calls.length, 1);
 
   const runId = extractRunId(messaging.calls[0].content);
-  const accepted = bridge.report(runId, 'agent-1', 'bug', 92);
+  const accepted = bridge.report(runId, identity('agent-1'), 'bug', 92);
   assert.equal(accepted, true);
 
   const result = await classifyPromise;
@@ -238,7 +233,7 @@ test('no report before timeout falls back to rule-based', async () => {
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());
 
-  const result = await classifier.classify(item(), context({ classifierAgentId: 'agent-1' }));
+  const result = await classifier.classify(item(), context({ classifierRuntime: spec('agent-1') }));
 
   assert.deepEqual(result, expected);
   assert.equal(bridge.pendingCount(), 0, 'timed-out entry must not linger in the pending map');
@@ -260,7 +255,7 @@ test('dispatch failure cancels the pending bridge entry immediately, not after t
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());
 
-  const result = await classifier.classify(item(), context({ classifierAgentId: 'agent-1' }));
+  const result = await classifier.classify(item(), context({ classifierRuntime: spec('agent-1') }));
 
   assert.deepEqual(result, expected);
   assert.equal(bridge.pendingCount(), 0, 'dispatch failure must cancel the pending entry, not leave it for the timeout');

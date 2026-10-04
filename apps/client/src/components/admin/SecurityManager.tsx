@@ -128,7 +128,6 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
   const [agents, setAgents] = useState<SecAgent[]>([]);
   // P4b: runtime 선언 → 매칭용 full 행.
-  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   const [selected, setSelected] = useState<SecurityProfile | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<string | null>(null);
@@ -171,7 +170,6 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
       setProfiles(rows);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
       // P4b: runtime 선언 → 매칭용 full 행 보관.
-      setAgentsFull((agentList || []) as any[]);
       setSchedules(scheduleList || []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load security profiles', 'error');
@@ -333,7 +331,7 @@ export default function SecurityManager({ workspaceId, allScopes = false }: Secu
           profile={editing === 'new' ? null : editing}
           workspaceId={effectiveWorkspaceId}
           agents={agents}
-          agentsFull={agentsFull}
+
           onClose={() => setEditing(null)}
           onSaved={async (saved) => {
             setEditing(null);
@@ -1177,18 +1175,17 @@ interface ProfileEditorProps {
   workspaceId: string;
   agents: SecAgent[];
   /** P4b: runtime 선언 → 매칭용 full 행. */
-  agentsFull: Array<any>;
+
   onClose: () => void;
   onSaved: (p: SecurityProfile) => void;
 }
 
-function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSaved }: ProfileEditorProps) {
+function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: ProfileEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(profile?.name ?? '');
   const [description, setDescription] = useState(profile?.description ?? '');
-  const [targetAgentId, setTargetAgentId] = useState(profile?.target_agent_id ?? (agents[0]?.id ?? ''));
   // P4c-3b: spec-direct target (QA와 동일).
-  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>(null);
+  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>((profile as any)?.target_runtime ?? null);
   const [targetResourceId, setTargetResourceId] = useState(profile?.target_resource_id ?? '');
   const [scanDriver, setScanDriver] = useState(profile?.scan_driver ?? 'code-review');
   const [scopeMode, setScopeMode] = useState<SecurityScopeMode>(profile?.scope_mode ?? 'incremental');
@@ -1208,7 +1205,7 @@ function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSa
   const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
   const [oftPriority, setOftPriority] = useState<SecurityOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
   const [oftMinSeverity, setOftMinSeverity] = useState<SecuritySeverity>(oft?.min_severity ?? 'high');
-  const [oftAssigneeId, setOftAssigneeId] = useState(oft?.assignee_id ?? '');
+  const [oftRuntime, setOftRuntime] = useState<Record<string, any> | null>(oft?.assignee_runtime ?? null);
   const [oftColumnId, setOftColumnId] = useState(oft?.column_id ?? '');
   const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
   const [oftDedupe, setOftDedupe] = useState<SecurityOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
@@ -1217,7 +1214,7 @@ function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSa
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
-    if (!targetAgentId && !pendingSpec) { showToast('Target agent 를 선택하세요', 'error'); return; }
+    if (!pendingSpec) { showToast('Target agent 를 선택하세요', 'error'); return; }
     let checklist: any; let config: any;
     try { checklist = checklistText.trim() ? JSON.parse(checklistText) : []; } catch { showToast('체크리스트는 유효한 JSON 배열이어야 합니다', 'error'); return; }
     if (!Array.isArray(checklist)) { showToast('체크리스트는 JSON 배열이어야 합니다', 'error'); return; }
@@ -1230,7 +1227,7 @@ function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSa
           priority: oftPriority,
           min_severity: oftMinSeverity,
           dedupe: oftDedupe,
-          ...(oftAssigneeId ? { assignee_id: oftAssigneeId } : {}),
+          ...(oftRuntime ? { assignee_runtime: oftRuntime } : {}),
           ...(oftColumnId.trim() ? { column_id: oftColumnId.trim() } : {}),
           ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
           ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
@@ -1242,9 +1239,7 @@ function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSa
     try {
       let saved: SecurityProfile;
       // P4c-3b: pendingSpec이 있으면 spec-direct 저장.
-      const targetPayload = pendingSpec
-        ? { target_agent_id: undefined, target_runtime: pendingSpec }
-        : { target_agent_id: targetAgentId, target_runtime: undefined };
+      const targetPayload = { target_runtime: pendingSpec };
       const common = {
         name, description, ...targetPayload,
         target_resource_id: targetResourceId.trim() || null,
@@ -1289,22 +1284,14 @@ function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSa
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <Input label="Name" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
         <Input label="Description" value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
-        <Select
-          label="Target agent"
-          placeholder="— select —"
-          value={targetAgentId}
-          options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-          onChange={(e) => { setTargetAgentId((e.target as HTMLSelectElement).value); setPendingSpec(null); }}
-        />
-        {/* P4b: runtime 선언 → Agent 매칭/생성 (QA 파일럿과 동일). */}
         <DeclareRuntimeSection
+          initialValue={pendingSpec}
           workspaceId={workspaceId}
-          agentsFull={agentsFull}
-          onResolved={(id, created, spec) => {
-            setTargetAgentId(id);
-            setPendingSpec(created ? spec : null);
+
+          onResolved={(spec) => {
+            setPendingSpec(spec);
             showToast(
-              created ? 'Runtime spec으로 저장됩니다 (Agent 행 없음)' : '기존 Agent와 매칭되었습니다',
+              '실행 설정을 적용했습니다',
               'success',
             );
           }}
@@ -1398,13 +1385,10 @@ function ProfileEditor({ profile, workspaceId, agents, agentsFull, onClose, onSa
                   />
                 </div>
               </div>
-              <Select
-                label="담당자 (assignee — 비우면 프로파일 타깃 에이전트)"
-                placeholder="— 프로파일 타깃 에이전트 사용 —"
-                value={oftAssigneeId}
-                options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-                onChange={(e) => setOftAssigneeId((e.target as HTMLSelectElement).value)}
-              />
+              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 현재 타깃 설정 사용)</div>
+              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftRuntime} onResolved={setOftRuntime} />
+              {oftRuntime && <div style={{ fontSize: 12 }}>{oftRuntime.label || oftRuntime.cli} <button type="button" onClick={() => setOftRuntime(null)}>초기화</button></div>}
+
               <Input label="컬럼 ID (권장, 이름 변경에 안전)" value={oftColumnId} onChange={(e) => setOftColumnId((e.target as HTMLInputElement).value)} />
               <Input label="컬럼 이름 (호환용, 비우면 첫 active 컬럼)" value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
               <Input label="Board ID (비우면 run/프로파일 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />

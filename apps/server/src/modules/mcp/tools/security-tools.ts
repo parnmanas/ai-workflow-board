@@ -130,6 +130,7 @@ const onFailureTicketSchema = z.object({
   column_name: z.string().optional().describe('Target column name; when omitted, the first active non-terminal column is used'),
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Fix ticket priority (default high)'),
   assignee_id: z.string().optional().describe('Assignee for the fix ticket (falls back to the profile target agent)'),
+  assignee_runtime: z.record(z.string(), z.any()).optional().describe('Runtime settings for the fix ticket; defaults to the scenario/profile runtime'),
   labels: z.array(z.string()).optional().describe('Extra labels (security-profile:<id> back-ref is always added)'),
   min_severity: severityEnum.optional().describe('Severity gate (default "high"): a ticket is filed only when the run has a finding at or above this. critical>high>medium>low>info'),
   dedupe: z.enum(['per_run', 'per_open_ticket']).optional().describe('per_run (default) files one ticket per failed run; per_open_ticket appends a recurrence comment to an existing open security ticket for this profile instead'),

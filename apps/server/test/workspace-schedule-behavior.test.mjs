@@ -269,30 +269,30 @@ test('runNow fires regardless of enabled, stamps last_room_id, and does NOT dist
 test('create: rejects both/neither cadence, requires target_agent_id + task_prompt', async () => {
   const { svc } = svcWith([]);
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: 'a', taskPrompt: 'p', cron: '0 3 * * *', intervalMs: 5 * MIN }),
+    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p', cron: '0 3 * * *', intervalMs: 5 * MIN }),
     /exactly one of cron or interval_ms/,
   );
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: 'a', taskPrompt: 'p' }),
+    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p' }),
     /one of cron or interval_ms is required/,
   );
   // 프롬프트 형태에서만 대상 에이전트가 필수다(Action 형태는 Action 이 정한다).
   await assert.rejects(
     () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: '', taskPrompt: 'p', intervalMs: 5 * MIN }),
-    /target_agent_id is required/,
+    /target_runtime is required/,
   );
   // 프롬프트도 action_id 도 없으면 "무엇을 할지" 가 비어 있다. Action 참조가
   // 생기면서(크론 이관) 문구가 둘을 함께 말하도록 바뀌었다 — 하나만 말하면
   // 사용자는 나머지 선택지를 모른다.
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: 'a', taskPrompt: '  ', intervalMs: 5 * MIN }),
+    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: '  ', intervalMs: 5 * MIN }),
     /one of task_prompt or action_id is required/,
   );
 });
 
 test('create: a valid interval schedule precomputes next_run_at forward', async () => {
   const { svc } = svcWith([]);
-  const created = await svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: 'a', taskPrompt: 'p', intervalMs: 5 * MIN });
+  const created = await svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p', intervalMs: 5 * MIN });
   assert.ok(created.next_run_at instanceof Date, 'next_run_at precomputed');
   assert.ok(created.next_run_at.getTime() > Date.now() - 1000, 'cursor is in the (near) future');
   assert.equal(created.interval_ms, 5 * MIN);

@@ -76,6 +76,7 @@ function normalizeOnFailureTicket(cfg: any): SecurityOnFailureTicketConfig | nul
   if (cfg.column_name != null && String(cfg.column_name).trim()) out.column_name = String(cfg.column_name).trim();
   if (VALID_PRIORITIES.includes(cfg.priority)) out.priority = cfg.priority;
   if (cfg.assignee_id != null && String(cfg.assignee_id).trim()) out.assignee_id = String(cfg.assignee_id).trim();
+  if (cfg.assignee_runtime) out.assignee_runtime = normalizeRuntimeSpec(cfg.assignee_runtime, 'Failure ticket runtime');
   if (Array.isArray(cfg.labels)) out.labels = cfg.labels.map((l: any) => String(l)).filter(Boolean);
   out.min_severity = VALID_SEVERITIES.includes(cfg.min_severity) ? cfg.min_severity : 'high';
   out.dedupe = cfg.dedupe === 'per_open_ticket' ? 'per_open_ticket' : 'per_run';
@@ -89,7 +90,7 @@ function normalizeOnFailureTicket(cfg: any): SecurityOnFailureTicketConfig | nul
  * finding count) without an N+1 fetch-runs-per-profile. Computed via a single
  * security_runs query keyed on the listed profile ids.
  */
-export interface SecurityProfileListItem extends SecurityProfile {
+export interface SecurityProfileListItem extends Omit<SecurityProfile, 'refreshRuntimeIdentity'> {
   last_run_at: string | null;
   last_run_status: SecurityRunStatus | null;
   last_scope_used: SecurityScopeMode | null;
@@ -213,24 +214,11 @@ export class SecurityProfileService {
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
       if (!hostRow) {
-        const link = await this.dataSource.getRepository(ApiKey).findOne({
-          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-          select: { agent_id: true, host_id: true },
-        });
-        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-        if (!linked) throw makeError(400, 'target_runtime references an unknown Runtime Host');
+        throw makeError(400, 'target_runtime references an unknown Runtime Host');
       }
       return { target_agent_id: runtimeIdentityKey(spec), target_runtime: { ...spec } };
     }
-    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음, 스냅샷 없음).
-    if (!targetAgentId) throw makeError(400, 'target_agent_id is required');
-    const agent = await resolveCallerIdentityRow(this.dataSource, targetAgentId);
-    if (!agent) throw makeError(400, 'target agent not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-      throw makeError(400, 'target agent belongs to a different workspace');
-    }
-    return { target_agent_id: targetAgentId, target_runtime: null };
+    throw makeError(400, 'target_runtime is required; Agent references are no longer supported');
   }
 
   async create(input: CreateProfileInput): Promise<SecurityProfile> {

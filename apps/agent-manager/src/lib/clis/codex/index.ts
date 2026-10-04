@@ -99,7 +99,7 @@ export const codexModule = defineCliModule({
     lockRelativePath: (sessionId) => `thread-writer-locks/${sessionId}.lock`,
   },
 
-  effort: { keys: ['model'] },
+  effort: { keys: ['model', 'effort'] },
 
   dispatch: {
     // codex 는 AWB MCP 를 오직 네이티브 config.toml 로만 붙인다 — 그 파일을 못 만들면

@@ -66,7 +66,7 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
     workspace_id: ws.id,
     name: 'Deploy prod',
     prompt: 'deploy',
-    target_agent_id: agent.id,
+    target_runtimes: [agent.runtime_spec],
   });
   assert.ok(!saved.isError, 'save_action succeeds');
   const t1 = await createTicket(app, getDataSourceToken, {

@@ -1,9 +1,10 @@
+import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { setupKanbanScene, createAgent, createApiKey, createTicket, createUser, registerRuntimeHostKeyFor } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_CHAT_DUPLICATE_PORT || '0';
@@ -23,7 +24,10 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   step('Seed prerequisite C and lifecycle sentinels');
   const { ws, columns } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'chat-dedupe-prereq' });
   const assignee = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'duplicate-assignee' });
-  const key = await createApiKey(app, modules.getDataSourceToken, assignee.id, { workspaceId: ws.id });
+  const runtime = { manager_agent_id: assignee.manager_agent_id, cli: 'codex', working_dir: '/tmp/duplicate', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
+  assignee.id = runtimeIdentityKey(runtime);
+  await registerRuntimeHostKeyFor(app, modules.getDataSourceToken, assignee.id, { workspaceId: ws.id, hostId: runtime.manager_agent_id });
+  const key = await createApiKey(app, modules.getDataSourceToken, null, { workspaceId: ws.id, hostId: runtime.manager_agent_id });
   const operator = await createUser(app, modules.getDataSourceToken, { name: 'duplicate-intake-operator' });
   const userToken = app.get(modules.AuthService).createSession(operator.id);
   const prerequisite = await createTicket(app, modules.getDataSourceToken, {
@@ -47,7 +51,7 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
         Authorization: `Bearer ${userToken}`,
         'X-Workspace-Id': ws.id,
       },
-      body: JSON.stringify({ assignee_id: assignee.id, ...body }),
+      body: JSON.stringify({ role_assignments: [{ role_slug: 'assignee', runtime }], ...body }),
     });
     if (response.status !== 201) {
       assert.fail(`REST ticket intake failed (${response.status}): ${await response.text()}`);
@@ -86,6 +90,15 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   assert.equal(duplicate.pending_user_action, false);
   const persistedDuplicate = await ticketRepo.findOne({ where: { id: duplicate.id } });
   assert.equal(persistedDuplicate.canonical_ticket_id, canonical.id);
+  const childResponse = await fetch(`http://localhost:${port}/api/tickets/${canonical.id}/children`, {
+    method: 'POST', headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Runtime child', description: 'Uses the copied template settings', role_assignments: [{ role_slug: 'assignee', runtime }] }),
+  });
+  assert.equal(childResponse.status, 201, await childResponse.clone().text());
+  const child = await childResponse.json();
+  const childHolder = await ds.getRepository('TicketRoleAssignment').findOne({ where: { ticket_id: child.id, holder_key: `runtime:${runtimeIdentityKey(runtime)}` } });
+  assert.equal(childHolder?.runtime_spec?.working_dir, runtime.working_dir);
+  assert.equal(childHolder?.agent_id, null);
   const decisionRepo = ds.getRepository('TicketDuplicateDecision');
   assert.equal(await decisionRepo.count({
     where: { report_ticket_id: duplicate.id, candidate_ticket_id: canonical.id, outcome: 'auto_linked' },

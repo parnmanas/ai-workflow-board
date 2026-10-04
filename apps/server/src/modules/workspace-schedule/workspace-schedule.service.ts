@@ -9,7 +9,7 @@ import { ApiKey } from '../../entities/ApiKey';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
-import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey, runtimeSpecFromAgentRow } from '../../common/runtime-spec';
+import { isRuntimeIdentityKey, normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { isUuidShapedId } from '../../utils/agent-name';
 import { Board } from '../../entities/Board';
 import { LogService } from '../../services/log.service';
@@ -208,7 +208,7 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
         patch.targetAgentId !== undefined ? patch.targetAgentId : schedule.target_agent_id,
         patch.taskPrompt !== undefined ? patch.taskPrompt : schedule.task_prompt,
         patch.actionId !== undefined ? patch.actionId : schedule.action_id,
-        patch.targetRuntime !== undefined ? patch.targetRuntime : undefined,
+        patch.targetRuntime !== undefined ? patch.targetRuntime : schedule.target_runtime,
       );
       schedule.target_agent_id = target.targetAgentId;
       // P4c-3b: spec-direct면 스냅샷이 정본. 아니면 행 조회.
@@ -490,18 +490,11 @@ export class WorkspaceScheduleService implements OnModuleInit, OnModuleDestroy {
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
       if (!hostRow) {
-        const link = await this.dataSource.getRepository(ApiKey).findOne({
-          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-          select: { agent_id: true, host_id: true },
-        });
-        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-        if (!linked) throw makeError(400, 'target_runtime references an unknown Runtime Host');
+        throw makeError(400, 'target_runtime references an unknown Runtime Host');
       }
       return { targetAgentId: runtimeIdentityKey(spec), taskPrompt: prompt, actionId: null, targetRuntime: { ...spec } };
     }
-    if (!agent) throw makeError(400, 'target_agent_id is required');
-    return { targetAgentId: agent, taskPrompt: prompt, actionId: null };
+    throw makeError(400, 'target_runtime is required for a task schedule');
   }
 
   private _validateCadence(cron: string | null | undefined, intervalMs: number | null | undefined): { cron: string | null; intervalMs: number | null } {

@@ -521,58 +521,24 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     cleanup();
   });
 
-  // ─── DoD (c): api-key create/update must reject a foreign agent_id ───
-
-  it('rejects create_api_key / update_api_key linking a foreign-workspace agent_id', async () => {
-    const agentA = await makeAgent('workspace-a');
-    const agentB = await makeAgent('workspace-b');
+  it('API keys no longer expose or persist an Agent binding', async () => {
+    const host = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
-      agentId: agentA.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
+      agentId: host.id, workspaceId: 'workspace-a', scope: 'full', source: 'db',
     });
-
-    const createResult = await tools.create_api_key.handler(
-      { name: 'cross-linked-key', agent_id: agentB.id },
-      { sessionId },
-    );
-    assert.equal(createResult.isError, true);
-
-    const ownKey = await apiKeyService.createApiKey({ name: 'ws-a-key-2', workspace_id: 'workspace-a' });
-    const updateResult = await tools.update_api_key.handler(
-      { key_id: ownKey.apiKey.id, agent_id: agentB.id },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(updateResult.isError, true);
-    const reloaded = await apiKeyService.getApiKey(ownKey.apiKey.id);
-    assert.notEqual(reloaded.agent_id, agentB.id);
+    try {
+      const result = await tools.create_api_key.handler({ name: 'workspace-key' }, { sessionId });
+      assert.equal(result.isError, undefined);
+      const body = JSON.parse(result.content[0].text);
+      assert.equal('agent_id' in body, false);
+      const persisted = await apiKeyService.getApiKey(body.id);
+      assert.equal(persisted.workspace_id, 'workspace-a');
+      assert.equal(persisted.host_id, null);
+      assert.equal('agent_id' in persisted, false);
+    } finally { cleanup(); }
   });
 
-  it('allows create_api_key linking an agent_id that belongs to the caller\'s own workspace', async () => {
-    const agentA = await makeAgent('workspace-a');
-    const linked = await makeAgent('workspace-a');
-    const sessionId = `session-${randomUUID()}`;
-    const cleanup = registerSession(sessionId, {
-      agentId: agentA.id,
-      workspaceId: 'workspace-a',
-      scope: 'full',
-      source: 'db',
-    });
-
-    const result = await tools.create_api_key.handler(
-      { name: 'same-workspace-link', agent_id: linked.id },
-      { sessionId },
-    );
-    cleanup();
-
-    assert.equal(result.isError, undefined);
-    const body = JSON.parse(result.content[0].text);
-    assert.equal(body.agent_id, linked.id);
-  });
 });
 
 // ─── Central gate (ticket 838f43c4, follow-up to d6b56237) ───

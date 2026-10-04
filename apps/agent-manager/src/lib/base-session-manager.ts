@@ -166,7 +166,7 @@ export interface SpawnOpts {
      *  기준이 된다 — 실제 호출자는 전부 AgentExecutionContext 를 넘기므로 이미
      *  채워져 있고, 여기서는 이 필드를 모르는 호출자를 막지 않으려고 선택적으로
      *  선언한다. */
-    runtime_config?: { permission_mode?: string | null } | null;
+    runtime_config?: { permission_mode?: string | null; extra?: Record<string, unknown> } | null;
   };
   /** Per-turn image attachments for chat sessions. Only honored by adapters
    *  that support inline image content blocks (Claude); other adapters
@@ -743,7 +743,9 @@ export class BaseSessionManager {
     const effectiveModel = claudeRuntimeProfile
       ? null
       : (slice?.model ?? harness?.model ?? agentContext?.model ?? null);
-    const effortFlag = resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
+    const effortFlag = typeof agentContext?.runtime_config?.extra?.effort === 'string'
+      ? agentContext.runtime_config.extra.effort
+      : resolveClaudeExecutionEffort(slice, claudeRuntimeProfile).effort;
     const ultracode = !!slice?.ultracode;
     if (slice && (effortFlag || ultracode || slice.model)) {
       log(

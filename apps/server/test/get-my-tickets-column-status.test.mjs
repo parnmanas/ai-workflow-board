@@ -35,7 +35,7 @@ test('get_my_tickets status=in_progress resolves root tickets via column kind, n
 
   const { ws, columns } = await setupKanbanScene(app, modules.getDataSourceToken, { workspaceName: 'my-tickets-status' });
 
-  const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'assignee' });
+  const agent = await createAgent(app, modules.getDataSourceToken, ws.id, { name: 'assignee', type: 'manager' });
   const key = await createApiKey(app, modules.getDataSourceToken, agent.id, { workspaceId: ws.id });
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => mcp.close());

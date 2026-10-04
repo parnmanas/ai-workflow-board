@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { AgentSkillAssignment } from '../../entities/AgentSkillAssignment';
+import { RuntimeSkillAssignment } from '../../entities/RuntimeSkillAssignment';
 import { RunSkillSnapshot } from '../../entities/RunSkillSnapshot';
 import { Skill } from '../../entities/Skill';
 import { SkillVersion } from '../../entities/SkillVersion';
@@ -21,7 +21,7 @@ export interface PinnedSkillManifestEntry {
 export class RunSkillSnapshotService {
   constructor(
     @InjectRepository(RunSkillSnapshot) private readonly snapshots: Repository<RunSkillSnapshot>,
-    @InjectRepository(AgentSkillAssignment) private readonly assignments: Repository<AgentSkillAssignment>,
+    @InjectRepository(RuntimeSkillAssignment) private readonly assignments: Repository<RuntimeSkillAssignment>,
     @InjectRepository(SkillVersion) private readonly versions: Repository<SkillVersion>,
     @InjectRepository(Skill) private readonly skills: Repository<Skill>,
   ) {}
@@ -39,7 +39,7 @@ export class RunSkillSnapshotService {
     if (existing) return existing;
 
     const allAssignments = await this.assignments.find({
-      where: { workspace_id: args.workspaceId, agent_id: args.agentId },
+      where: { workspace_id: args.workspaceId, runtime_key: args.agentId },
     });
     const selected = allAssignments.filter((assignment) =>
       (!assignment.board_id || assignment.board_id === (args.boardId || ''))

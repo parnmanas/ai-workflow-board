@@ -255,9 +255,9 @@ test('trigger dispatch resolves and validates Claude backend profiles only for C
   const guard = triggerSource.match(
     // 게이트는 cli-catalog.ts 의 `sessions.backend_profile`(오늘은 claude 뿐)로 판정한다 —
     // 리터럴 'claude' 비교로 되돌리지 말 것.
-    /if \(agent && cliDescriptor\(agent\.type\)\?\.sessions\.backend_profile\) \{[\s\S]*?runtimeProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
+    /if \(specCli && cliDescriptor\(specCli\)\?\.sessions\.backend_profile\) \{[\s\S]*?specProfile = await resolveClaudeBackendProfileForDispatch\([\s\S]*?credential_required[\s\S]*?\n    \}/,
   );
-  assert.ok(guard, 'profile resolution and credential validation must share one cliDescriptor(...).sessions.backend_profile guard');
+  assert.ok(guard, 'runtime profile resolution and credential validation share the catalog guard');
   assert.match(guard[0], /\{ source: 'run', value: ticket\.cli_runtime_profile \}[\s\S]*source: 'agent'[\s\S]*source: 'board'/);
   assert.match(
     triggerSource,
@@ -266,7 +266,7 @@ test('trigger dispatch resolves and validates Claude backend profiles only for C
   );
   assert.doesNotMatch(
     triggerSource.slice(guard.index + guard[0].length),
-    /runtimeProfile = await resolveClaudeBackendProfileForDispatch/,
+    /specProfile = await resolveClaudeBackendProfileForDispatch/,
     'profile resolution must not have an unguarded fallback',
   );
 });

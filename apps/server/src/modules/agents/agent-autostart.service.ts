@@ -193,19 +193,7 @@ export class AgentAutostartService implements OnModuleInit, OnModuleDestroy {
     const host = agentId ? await this.hostRepo.findOne({ where: { id: agentId } }) : null;
     let hostId: string | null = host?.id ?? null;
     let hostName = host?.name ?? '';
-    if (!host && agentId) {
-      const link = await this.apiKeyRepo.findOne({
-        where: { agent_id: agentId },
-        select: { agent_id: true, host_id: true },
-      });
-      if (link?.host_id) {
-        const linked = await this.hostRepo.findOne({ where: { id: link.host_id } });
-        if (linked) {
-          hostId = linked.id;
-          hostName = linked.name;
-        }
-      }
-    }
+
     if (!hostId) {
       return { agent: null, reachable: false, state: 'offline', autostart: 'runtime_host_required' };
     }

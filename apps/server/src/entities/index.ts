@@ -85,7 +85,7 @@ export { ClaudeBackendProfile } from './ClaudeBackendProfile';
 export { Skill } from './Skill';
 export { SkillVersion } from './SkillVersion';
 export { SkillTap } from './SkillTap';
-export { AgentSkillAssignment } from './AgentSkillAssignment';
+export { RuntimeSkillAssignment } from './RuntimeSkillAssignment';
 export { RunSkillSnapshot } from './RunSkillSnapshot';
 export { SkillProposal } from './SkillProposal';
 export { ChildRun } from './ChildRun';
@@ -160,3 +160,5 @@ export { MigrationRun } from './MigrationRun';
 // Credential 로 인증할지. 세션 내용은 저장하지 않는다(docs/agent-sessions.md).
 // Auto-DDL'd by TypeORM `synchronize` (D-01).
 export { AgentSessionCliSetting } from './AgentSessionCliSetting';
+
+export { AgentTemplate } from './AgentTemplate';

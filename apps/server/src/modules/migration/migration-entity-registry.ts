@@ -88,6 +88,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   // (주의: 이 배열 본문 안의 주석에 따옴표로 감싼 엔티티명을 쓰지 말 것 —
   // completeness 테스트가 본문의 모든 따옴표 문자열을 등록명으로 파싱한다.)
   'RuntimeHost',
+  'AgentTemplate',
   'ApiKey',
   'AgentErrorLog', 'AgentUsageDailyRollup',
 
@@ -106,7 +107,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'ResourceEmbedding', // (연성) Resource 의존, 위에서 이미 삽입됨
 
   // Skill 체인 / 배치-런
-  'SkillProposal', 'SkillVersion', 'AgentSkillAssignment', 'RunSkillSnapshot',
+  'SkillProposal', 'SkillVersion', 'RuntimeSkillAssignment', 'RunSkillSnapshot',
   'QaRunBatch', 'QaSchedule', 'SecurityRunBatch', 'SecuritySchedule',
 
   // ChatRoom 계열

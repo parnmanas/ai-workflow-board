@@ -7,7 +7,7 @@ import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
 import { Button, Badge, HeaderAction } from './common';
 import BenchmarkRunModal from './BenchmarkRunModal';
-import type { Agent } from '../types';
+import type { RuntimeParticipant } from '../types';
 
 /**
  * Benchmark leaderboard view (ticket 684c012b). Two panels:
@@ -96,7 +96,7 @@ export default function BenchmarkLeaderboardPage() {
 
   // Run lifecycle UI (ticket 5eb459c4): agent pool + board columns for the
   // create/edit modal, plus the modal's own open/target state.
-  const [agentPool, setAgentPool] = useState<Agent[]>([]);
+  const [agentPool, setAgentPool] = useState<RuntimeParticipant[]>([]);
   const [boardColumns, setBoardColumns] = useState<BoardColumnOption[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editRunId, setEditRunId] = useState<string | undefined>(undefined);
@@ -111,7 +111,7 @@ export default function BenchmarkLeaderboardPage() {
       const [agg, full, pool] = await Promise.all([
         api.getBenchmarkLeaderboard(wid),
         api.getBoard(boardId).catch(() => null),
-        Promise.resolve([] as Agent[]),
+        Promise.resolve([] as RuntimeParticipant[]),
       ]);
       setAgents(Array.isArray(agg?.agents) ? agg.agents : []);
       setAgentPool(Array.isArray(pool) ? pool : []);

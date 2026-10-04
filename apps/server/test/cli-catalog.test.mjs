@@ -125,7 +125,8 @@ test('catalog encodes the per-CLI facts the old tables carried', () => {
   assert.equal(byId.pi.credential, null);
   assert.deepEqual(byId.deepseek.effort, { slice_key: 'claude', keys: ['effort', 'ultracode', 'model'] });
   assert.deepEqual(byId.claude.effort, { keys: ['effort', 'ultracode', 'model'] });
-  for (const id of ['codex', 'antigravity', 'pi', 'opencode']) {
+  assert.deepEqual(byId.codex.effort, { keys: ['model', 'effort'] });
+  for (const id of ['antigravity', 'pi', 'opencode']) {
     assert.deepEqual(byId[id].effort, { keys: ['model'] }, `${id} is model-only`);
   }
   for (const d of CLI_CATALOG) {
@@ -295,7 +296,7 @@ test('effort preset schema accepts the same presets as before and stays strict',
 
   // strict: unknown keys at either level are rejected exactly as before.
   assert.equal(EffortPresetSchema.safeParse({ ...rich, bogus: {} }).success, false);
-  assert.equal(EffortPresetSchema.safeParse({ ...rich, codex: { effort: 'high' } }).success, false, 'codex is model-only');
+  assert.equal(EffortPresetSchema.safeParse({ ...rich, codex: { effort: 'high' } }).success, true, 'codex supports effort');
   assert.equal(EffortPresetSchema.safeParse({ ...rich, claude: { speed: 'fast' } }).success, false);
   assert.equal(EffortPresetSchema.safeParse({ ...rich, claude: { effort: 'turbo' } }).success, false, 'effort enum');
   assert.equal(EffortPresetSchema.safeParse({ ...rich, deepseek: { model: 'v3' } }).success, false, 'no deepseek block');

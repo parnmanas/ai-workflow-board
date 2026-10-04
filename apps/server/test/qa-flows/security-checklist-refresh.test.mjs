@@ -35,7 +35,7 @@ test('security checklist: source/added_at model + refresh_security_checklist dis
   const profile = await mcp.callTool('create_security_profile', {
     workspace_id: ws.id,
     name: 'AWB self code-review',
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     scan_driver: 'code-review',
     checklist: [
       {

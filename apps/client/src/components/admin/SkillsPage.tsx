@@ -1,7 +1,8 @@
+import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../../api';
 import { formatAgentDisplayName } from '../../utils/agentName';
-import type { Agent, Skill, SkillDetail, SkillProposal } from '../../types';
+import type { RuntimeParticipant, Skill, SkillDetail, SkillProposal } from '../../types';
 import { tokens } from '../../tokens';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -23,7 +24,6 @@ export default function SkillsPage() {
   const { showToast } = useToast();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [proposals, setProposals] = useState<SkillProposal[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [selected, setSelected] = useState<SkillDetail | null>(null);
   const [tab, setTab] = useState<'catalog' | 'proposals'>('catalog');
   const [loading, setLoading] = useState(true);
@@ -33,7 +33,7 @@ export default function SkillsPage() {
   const [description, setDescription] = useState('');
   const [body, setBody] = useState('# Skill\n');
   const [newVersionBody, setNewVersionBody] = useState('');
-  const [assignmentAgent, setAssignmentAgent] = useState('');
+  const [assignmentRuntime, setAssignmentRuntime] = useState<Record<string, any> | null>(null);
   const [assignmentVersion, setAssignmentVersion] = useState('');
   const [assignmentBoard, setAssignmentBoard] = useState('');
   const [assignmentRole, setAssignmentRole] = useState('');
@@ -47,16 +47,14 @@ export default function SkillsPage() {
     }
     setLoading(true);
     try {
-      const [skillRows, proposalRows, agentRows] = await Promise.all([
+      const [skillRows, proposalRows] = await Promise.all([
         // include_shadowed: an overridden global must stay visible, otherwise
         // "why isn't the built-in applying" has no answer in the UI.
         api.listSkills(currentWorkspaceId, true),
         api.listSkillProposals(currentWorkspaceId),
-        Promise.resolve([] as any[]),
       ]);
       setSkills(skillRows);
       setProposals(proposalRows);
-      setAgents(agentRows as Agent[]);
       if (selected) {
         const fresh = await api.getSkill(currentWorkspaceId, selected.id);
         setSelected(fresh);
@@ -82,7 +80,7 @@ export default function SkillsPage() {
       setSelected(detail);
       setNewVersionBody(detail.versions[0]?.body || '# Skill\n');
       setAssignmentVersion(detail.versions[0]?.id || '');
-      setAssignmentAgent(agents[0]?.id || '');
+      setAssignmentRuntime(null);
     } catch (error: any) {
       showToast(error?.message || 'Failed to load skill', 'error');
     }
@@ -129,12 +127,12 @@ export default function SkillsPage() {
   };
 
   const assign = async () => {
-    if (!currentWorkspaceId || !selected || !assignmentAgent || !assignmentVersion) return;
+    if (!currentWorkspaceId || !selected || !assignmentRuntime || !assignmentVersion) return;
     setSaving(true);
     try {
       await api.assignSkill(currentWorkspaceId, selected.id, {
         skill_version_id: assignmentVersion,
-        agent_id: assignmentAgent,
+        runtime: assignmentRuntime,
         board_id: assignmentBoard,
         role_slug: assignmentRole,
       });
@@ -303,12 +301,8 @@ export default function SkillsPage() {
 
               <Card style={{ display: 'grid', gap: 10 }}>
                 <strong style={{ color: tokens.colors.textPrimary }}>Pin assignment</strong>
-                <select value={assignmentAgent} onChange={(event) => setAssignmentAgent(event.target.value)} style={textareaStyle}>
-                  <option value="">Select Agent</option>
-                  {agents.filter((agent) => agent.type !== 'manager').map((agent) => (
-                    <option key={agent.id} value={agent.id}>{formatAgentDisplayName(agent)}</option>
-                  ))}
-                </select>
+                <DeclareRuntimeSection workspaceId={currentWorkspaceId || ''} onResolved={setAssignmentRuntime} />
+                {assignmentRuntime && <span>{assignmentRuntime.label || assignmentRuntime.cli} · {assignmentRuntime.working_dir}</span>}
                 <select value={assignmentVersion} onChange={(event) => setAssignmentVersion(event.target.value)} style={textareaStyle}>
                   {selected.versions.map((version) => (
                     <option key={version.id} value={version.id}>v{version.version} · {version.digest.slice(0, 12)}</option>

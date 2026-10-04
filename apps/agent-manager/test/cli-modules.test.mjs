@@ -101,14 +101,14 @@ test('effort 슬라이스 선택이 모듈 선언을 따른다 (옛 selectEffort
   const preset = { id: 'p', claude: { model: 'opus', effort: 'high', ultracode: true }, codex: { model: 'gpt', effort: 'high' }, opencode: { model: 'oc' } };
   assert.deepEqual(selectEffortSlice('claude', preset), { model: 'opus', effort: 'high', ultracode: true });
   assert.deepEqual(selectEffortSlice('deepseek', preset), { model: 'opus', effort: 'high', ultracode: true }, 'deepseek 는 claude 슬라이스를 빌려 쓴다');
-  assert.deepEqual(selectEffortSlice('codex', preset), { model: 'gpt' }, 'codex 는 model 만 — effort 는 버린다');
+  assert.deepEqual(selectEffortSlice('codex', preset), { model: 'gpt', effort: 'high' }, 'codex 는 model 과 effort 를 전달한다');
   assert.deepEqual(selectEffortSlice('opencode', preset), { model: 'oc' });
   assert.equal(selectEffortSlice('pi', preset), null, '슬라이스가 없으면 null');
   assert.equal(selectEffortSlice('hermes', preset), null);
   assert.equal(selectEffortSlice('claude', null), null);
   assert.deepEqual(effortSliceKeys(), ['claude', 'codex', 'antigravity', 'pi', 'opencode']);
   assert.deepEqual([...effortKeysForSlice('claude')].sort(), ['effort', 'model', 'ultracode']);
-  assert.deepEqual([...effortKeysForSlice('codex')], ['model']);
+  assert.deepEqual([...effortKeysForSlice('codex')], ['model', 'effort']);
 });
 
 test('Agent Session: ACP 명령·감지가 모듈 슬라이스에서 나온다', async () => {

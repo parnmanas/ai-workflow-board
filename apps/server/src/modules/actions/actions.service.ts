@@ -409,22 +409,8 @@ export class ActionsService {
     if (!input.workspace_id) throw makeError(400, 'workspace_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
 
-    // 대상은 배열이 정본이고 레거시 단일 필드는 그 첫 원소로 흡수된다
-    // (티켓 fc3906c5). 둘 중 어느 쪽으로 들어와도 같은 목록으로 수렴한다.
-    // P4c-3b: target_runtimes 입력이 있으면 spec-direct — id 배열 대신 spec을 본다.
-    const specTargets = normalizeSpecTargets((input as any).target_runtimes);
-    let targetIds = actionTargetAgentIds(input);
-    if (!specTargets && targetIds.length === 0) throw makeError(400, 'target_agent_id is required');
-
-    // Scope check: the target agent must live in this workspace (or be global —
-    // workspace_id null/empty means global). Cross-workspace dispatch would
-    // bypass our SSE recipient filter and silently never deliver.
-    // fan-out이면 **모든** 대상을 검사한다 — 하나라도 타 워크스페이스면 저장
-    // 자체를 거부해서, 절대 전달되지 않을 대상이 설정에 남지 않게 한다.
-    // spec-direct 입력은 _resolveSpecTargets 안에서 검증한다.
-    if (!specTargets) {
-      await this._assertTargetAgentsVisible(targetIds, input.workspace_id);
-    }
+    const specTargets = normalizeSpecTargets(input.target_runtimes);
+    if (!specTargets?.length) throw makeError(400, 'target_runtimes is required; Agent references are no longer supported');
 
     if (input.board_id) {
       throw makeError(400, 'Board-scoped Actions are no longer supported; create the Action in its Workspace');
@@ -441,23 +427,9 @@ export class ActionsService {
       throw makeError(400, "trigger must be '' (cron/manual) or 'on_ticket_done'");
     }
 
-    // P4c-3b: target_runtimes 입력이 있으면 spec-direct (세 컬럼 모두 스냅샷에서).
-    // 없으면 레거시 id 배열 경로 (행 조회 + 스냅샷 dual-write).
-    // 둘 다 오면 합집합 (spec 키 먼저, id 뒤 — 순서 보존 중복 제거).
-    let targetRuntimes: Array<Record<string, any>>;
-    if (specTargets) {
-      const resolved = await this._resolveSpecTargets(specTargets, input.workspace_id);
-      const seen = new Set(resolved.map((r) => r.key));
-      const extraIds = targetIds.filter((id) => !seen.has(id));
-      if (extraIds.length > 0) await this._assertTargetAgentsVisible(extraIds, input.workspace_id);
-      targetIds = [...resolved.map((r) => r.key), ...extraIds];
-      targetRuntimes = [
-        ...resolved.map((r) => ({ ...r.spec })),
-        ...(await this._snapshotTargetRuntimes(extraIds)),
-      ];
-    } else {
-      targetRuntimes = await this._snapshotTargetRuntimes(targetIds);
-    }
+    const resolved = await this._resolveSpecTargets(specTargets, input.workspace_id);
+    const targetIds = resolved.map((r) => r.key);
+    const targetRuntimes = resolved.map((r) => ({ ...r.spec }));
 
     const created = this.actionRepo.create({
       workspace_id: input.workspace_id,
@@ -492,42 +464,12 @@ export class ActionsService {
     }
     if (patch.description !== undefined) existing.description = patch.description;
     if (patch.prompt !== undefined) existing.prompt = patch.prompt;
-    // 대상 갱신 (티켓 fc3906c5). 배열이 오면 배열이 이기고, 레거시 단일 필드만
-    // 오면 그것이 단일 대상 배열로 해석된다. 어느 쪽이든 두 컬럼을 같이 쓴다 —
-    // 배열만 갱신하고 단일 미러를 방치하면 레거시 컬럼만 읽는 코드가 지워진
-    // 대상을 계속 보게 된다.
-    // P4c-3b: target_runtimes가 오면 spec-direct가 가장 이긴다.
-    const patchSpecs = normalizeSpecTargets((patch as any).target_runtimes);
-    if (patchSpecs) {
-      const resolved = await this._resolveSpecTargets(patchSpecs, workspaceId);
-      const seen = new Set(resolved.map((r) => r.key));
-      // P4c-3b: id 배열도 함께 오면 합집합 (위 create와 동일).
-      let extraIds: string[] = [];
-      if (patch.target_agent_ids !== undefined || patch.target_agent_id !== undefined) {
-        const sentIds = patch.target_agent_ids !== undefined
-          ? normalizeTargetAgentIds(patch.target_agent_ids)
-          : normalizeTargetAgentIds([patch.target_agent_id]);
-        extraIds = sentIds.filter((id) => !seen.has(id));
-        if (extraIds.length > 0) await this._assertTargetAgentsVisible(extraIds, workspaceId);
-      }
-      const nextIds = [...resolved.map((r) => r.key), ...extraIds];
-      if (nextIds.length === 0) throw makeError(400, 'at least one target agent is required');
-      existing.target_agent_id = nextIds[0];
-      existing.target_agent_ids = serializeTargetAgentIds(nextIds);
-      existing.target_runtimes = [
-        ...resolved.map((r) => ({ ...r.spec })),
-        ...(await this._snapshotTargetRuntimes(extraIds)),
-      ];
-    } else if (patch.target_agent_ids !== undefined || patch.target_agent_id !== undefined) {
-      const nextIds = patch.target_agent_ids !== undefined
-        ? normalizeTargetAgentIds(patch.target_agent_ids)
-        : normalizeTargetAgentIds([patch.target_agent_id]);
-      if (nextIds.length === 0) throw makeError(400, 'at least one target agent is required');
-      await this._assertTargetAgentsVisible(nextIds, workspaceId);
-      existing.target_agent_id = nextIds[0];
-      existing.target_agent_ids = serializeTargetAgentIds(nextIds);
-      // P2c dual-write.
-      existing.target_runtimes = await this._snapshotTargetRuntimes(nextIds);
+    if (patch.target_runtimes !== undefined) {
+      const specs = normalizeSpecTargets(patch.target_runtimes);
+      if (!specs?.length) throw makeError(400, 'at least one target runtime is required');
+      existing.target_runtimes = (await this._resolveSpecTargets(specs, workspaceId)).map((r) => ({ ...r.spec }));
+    } else if (patch.target_agent_id !== undefined || patch.target_agent_ids !== undefined) {
+      throw makeError(400, 'Use target_runtimes; Agent references are no longer supported');
     }
     if (patch.board_id !== undefined) {
       if ((patch.board_id || null) !== existing.board_id) {
@@ -563,38 +505,6 @@ export class ActionsService {
   }
 
   /**
-   * 대상 에이전트 목록 전체가 이 워크스페이스에서 보이는지 검사한다
-   * (티켓 fc3906c5 — 단일 대상 시절의 검사를 배열로 확장).
-   *
-   * 하나라도 없거나 타 워크스페이스면 **저장을 통째로 거부**한다. 부분 저장을
-   * 허용하면 사용자가 고른 대상 중 일부가 조용히 빠진 Action이 남고, 이후 모든
-   * 실행이 사용자 의도와 다른 범위로 돌게 된다. 어느 id가 문제인지 메시지에
-   * 담아 UI에서 바로 고칠 수 있게 한다.
-   */
-  // P4c-4: Host/링크 해소 + workspace 가시성 (Agent 행 없음).
-  private async _assertTargetAgentsVisible(agentIds: string[], workspaceId: string): Promise<void> {
-    for (const agentId of agentIds) {
-      // P4c-4: rt- 슬롯 id 는 팀 member 행으로 존재·workspace를 확인한다.
-      if (isRuntimeIdentityKey(agentId)) {
-        const member = await this.dataSource.getRepository(OrchestrationTeamMember).findOne({
-          where: { agent_id: agentId },
-          select: ['workspace_id'],
-        });
-        if (!member) throw makeError(400, `target agent not found: ${agentId}`);
-        if (!agentIsVisibleInWorkspace(member.workspace_id, workspaceId)) {
-          throw makeError(400, `target agent belongs to a different workspace: ${agentId}`);
-        }
-        continue;
-      }
-      const agent = await resolveCallerIdentityRow(this.dataSource, agentId);
-      if (!agent) throw makeError(400, `target agent not found: ${agentId}`);
-      if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-        throw makeError(400, `target agent belongs to a different workspace: ${agentId}`);
-      }
-    }
-  }
-
-  /**
    * P4c-3b: spec-direct target 해석. 각 spec을 검증 + host 확인하고 identity
    * key를 매겨 `{ key, spec }` 목록으로 돌려준다 (입력 순서 유지, 중복 제거).
    */
@@ -608,13 +518,7 @@ export class ActionsService {
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
       if (!hostRow) {
-        const link = await this.dataSource.getRepository(ApiKey).findOne({
-          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-          select: { agent_id: true, host_id: true },
-        });
-        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-        if (!linked) throw makeError(400, `target_runtime references an unknown Runtime Host: ${spec.manager_agent_id}`);
+        throw makeError(400, `target_runtime references an unknown Runtime Host: ${spec.manager_agent_id}`);
       }
       const key = runtimeIdentityKey(spec);
       if (seen.has(key)) continue;
@@ -622,26 +526,6 @@ export class ActionsService {
       out.push({ key, spec });
     }
     if (out.length === 0) throw makeError(400, 'at least one target agent is required');
-    return out;
-  }
-
-  /**
-   * P2c dual-write helper: 대상 id 목록의 runtime 스냅샷 배열 (targetIds 순서).
-   * 호출 전에 _assertTargetAgentsVisible이 통과했으므로 행은 전부 존재한다.
-   */
-  // P4c-4: uuid 타겟 스냅샷 없음 (Agent 행 없음 — 스냅샷은 spec 입력에서만 온다).
-  // rt- 타겟은 팀 member 행의 spec 스냅샷으로 채운다 — id 만으로 만든 액션도
-  // dispatch 시점에 해소돼야 한다 (옛 dual-write 와 같은 역할).
-  private async _snapshotTargetRuntimes(agentIds: string[]): Promise<Array<Record<string, any>>> {
-    const out: Array<Record<string, any>> = [];
-    for (const id of agentIds) {
-      if (!isRuntimeIdentityKey(id)) continue;
-      const member = await this.dataSource.getRepository(OrchestrationTeamMember).findOne({
-        where: { agent_id: id },
-      });
-      const spec = (member as any)?.spec;
-      if (spec && typeof spec === 'object') out.push({ ...(spec as Record<string, any>) });
-    }
     return out;
   }
 

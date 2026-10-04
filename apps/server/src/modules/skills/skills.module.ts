@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AgentSkillAssignment } from '../../entities/AgentSkillAssignment';
+import { RuntimeSkillAssignment } from '../../entities/RuntimeSkillAssignment';
 import { RunSkillSnapshot } from '../../entities/RunSkillSnapshot';
 import { Skill } from '../../entities/Skill';
 import { SkillProposal } from '../../entities/SkillProposal';
@@ -20,7 +20,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
   imports: [TypeOrmModule.forFeature([
     Skill,
     SkillVersion,
-    AgentSkillAssignment,
+    RuntimeSkillAssignment,
     RunSkillSnapshot,
     SkillProposal,
     SkillTap,
