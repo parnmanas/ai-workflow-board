@@ -34,8 +34,26 @@ export interface ReportedRequest {
   fields: QuestionField[];
 }
 
+/** 턴 안에서 정해진 것 — 권한 요청의 선택 · 질문의 답(누가 정했는지 포함). 끝난 턴의 보고에 실린다. */
+export interface ReportedDecision {
+  kind: 'permission' | 'question';
+  /** 요청 제목 · 질문 문장. */
+  title: string;
+  /** 고른 선택지 이름 · 답한 값 · 거절/취소. */
+  outcome: string;
+  /** 매니저의 decided_by — 'user'(화면 또는 operator 가 전한 사용자의 답) · 'timeout' · 'system' · 'agent'. */
+  by: string;
+}
+
 export interface SessionReport {
   kind: SessionReportKind;
+  /**
+   * 그 일이 일어날 때 사용자가 그 세션 화면을 보고 있었다. 그래도 operator 에게는 보고한다(operator 가 사이트의
+   * 흐름을 알게) — 다만 소리로는 전하지 않는다(사용자는 이미 보고 있다).
+   */
+  viewed?: boolean;
+  /** 끝난 턴에서 정해진 것들(권한 선택 · 질문의 답). */
+  decisions?: ReportedDecision[];
   /** 승인·질문이면 그 요청 — operator 가 선택지를 읽어 주고, 사용자가 고르면 이것으로 답을 전한다. */
   request?: ReportedRequest;
   /** 소식을 들을 사람 — 그 세션의 driver. */
@@ -107,23 +125,36 @@ const DETAIL_LABEL: Record<AnnouncementLanguage, Record<SessionReportKind, strin
  */
 export function composeReportPrompt(reports: readonly SessionReport[], lang: AnnouncementLanguage): string {
   const lines: string[] = [];
-  const decisions = reports.some((r) => r.request);
-  if (lang === 'ko') {
+  const spoken = reports.filter((r) => !r.viewed);
+  const decisions = spoken.some((r) => r.request);
+  if (!spoken.length) {
+    // 사용자가 모두 화면에서 보고 있었다 — 소리로 전하지 않는다. operator 는 흐름만 알면 된다.
+    lines.push(lang === 'ko'
+      ? `${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. 모두 사용자가 그 세션 화면에서 보고 있던 것이라 소리로 전하지 않습니다 — 기록으로만 알아 두고, 한 문장으로 짧게 확인만 답하세요. 승인이나 답은 사용자가 화면에서 직접 합니다. 이 보고에는 [[sleep]] 을 붙이지 마세요.`
+      : `${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. The user was looking at all of them, so nothing is spoken — just take note and acknowledge in one short sentence. The user answers any request on screen. Do not add [[sleep]] to this reply.`);
+  } else if (lang === 'ko') {
     lines.push(`${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. 사용자에게 소리로 전할 요약을 1~2문장으로 답하세요 — 어느 장비의 어느 세션인지 이름으로 말하고, 여러 건이면 묶어서 짧게. 이 보고에는 [[sleep]] 을 붙이지 마세요.`
+      + (spoken.length < reports.length ? ' "보고 있음" 표시가 붙은 건은 사용자가 이미 화면에서 보고 있으니 요약에서 빼세요(기록으로만 알아 두면 됩니다).' : '')
       + (decisions ? ' 승인이나 답이 필요한 건은 무엇을 정해야 하는지와 선택지를 번호와 함께 읽어 주세요. 이 답에서는 아무것도 승인하거나 답하지 마세요 — 사용자가 말로 고르면 그 턴에서 "답 전하기" 의 도구로 전합니다(이 보고 턴에서는 AWB 가 거절합니다).' : ''));
   } else {
     lines.push(`${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. Reply with a 1–2 sentence summary the user will hear — name the host and session, keep several updates together and short. Do not add [[sleep]] to this reply.`
+      + (spoken.length < reports.length ? ' Leave out the ones marked "viewed" — the user already sees them on screen (just take note).' : '')
       + (decisions ? ' For anything that needs approval or an answer, say what has to be decided and read the choices, numbered. Do not approve or answer anything in this reply — when the user picks, pass it on in that turn with the tool under "Answer with" (AWB refuses it in this report turn).' : ''));
   }
   reports.forEach((r, i) => {
     const s = r.session;
     const title = s.title ? (lang === 'ko' ? ` · '${s.title}'` : ` · "${s.title}"`) : '';
     lines.push('');
-    lines.push(`${i + 1}. ${KIND_LABEL[lang][r.kind]} — ${s.manager_name} / ${s.cli_label}${title}${r.kind === 'finished' ? minutes(r.duration_ms, lang) : ''}`);
+    const viewed = r.viewed ? (lang === 'ko' ? ' · 보고 있음' : ' · viewed') : '';
+    lines.push(`${i + 1}. ${KIND_LABEL[lang][r.kind]} — ${s.manager_name} / ${s.cli_label}${title}${r.kind === 'finished' ? minutes(r.duration_ms, lang) : ''}${viewed}`);
     if (s.cwd) lines.push(`   ${lang === 'ko' ? '작업 폴더' : 'Folder'}: ${s.cwd}`);
     if (r.request) {
       lines.push(...requestLines(r, lang));
       return;
+    }
+    if (r.decisions?.length) {
+      lines.push(`   ${lang === 'ko' ? '이 턴에서 정해진 것' : 'Decided in this turn'}:`);
+      for (const d of r.decisions) lines.push(`   - ${decisionLine(d, lang)}`);
     }
     const detail = clip(r.detail, REPORT_DETAIL_CHARS, lang);
     if (detail) {
@@ -134,6 +165,17 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
     }
   });
   return lines.join('\n');
+}
+
+const DECIDED_BY: Record<AnnouncementLanguage, Record<string, string>> = {
+  ko: { user: '사용자', timeout: '시간 초과', system: '중단', agent: '에이전트' },
+  en: { user: 'the user', timeout: 'timed out', system: 'interrupted', agent: 'the agent' },
+};
+
+/** "'Run npm publish' → Allow once (사용자)". */
+export function decisionLine(d: ReportedDecision, lang: AnnouncementLanguage): string {
+  const by = DECIDED_BY[lang][d.by] || d.by;
+  return `'${clip(d.title, 160, lang) || (lang === 'ko' ? '(제목 없음)' : '(untitled)')}' → ${clip(d.outcome, 200, lang)}${by ? ` (${by})` : ''}`;
 }
 
 const numbered = (items: string[]) => items.map((item, i) => `${i + 1}) ${item}`).join('  ');

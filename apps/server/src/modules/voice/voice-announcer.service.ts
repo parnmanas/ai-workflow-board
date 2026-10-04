@@ -22,6 +22,7 @@ import {
   isUrgentReport,
   permissionDetail,
   questionFields,
+  type ReportedDecision,
   type ReportedRequest,
   type SessionReport,
   type SessionReportKind,
@@ -108,6 +109,10 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   #lastNeedsInputAt = new Map<string, number>();
   /** 세션 → 지금 사용자를 기다리는 요청(권한·질문)의 내용 — 보고에 무엇을 정해야 하는지 싣는다. */
   #pendingRequest = new Map<string, { type: string; payload: any }>();
+  /** 세션 → 요청 id → 요청 행(결정 행이 오면 무엇을 정했는지 글로 만든다). */
+  #requests = new Map<string, Map<string, { type: string; payload: any }>>();
+  /** 세션 → 이번 턴에서 정해진 것들 — 턴이 끝나면 그 보고에 실려 operator 가 결과까지 안다. */
+  #decisions = new Map<string, ReportedDecision[]>();
   #listeners: Array<[string, (...args: any[]) => void]> = [];
 
   constructor(
@@ -157,6 +162,18 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     const key = sessionKey(e.manager_id, e.cli, e.session_id);
     if (ev.type === 'permission_request' || (ev.type === 'elicitation_request' && ev.payload?.mode !== 'url')) {
       this.#pendingRequest.set(key, { type: ev.type, payload: ev.payload });
+      const id = String(ev.payload?.request_id || ev.payload?.elicitation_id || '');
+      if (id) {
+        if (!this.#requests.has(key)) this.#requests.set(key, new Map());
+        this.#requests.get(key)!.set(id, { type: ev.type, payload: ev.payload });
+      }
+    } else if (ev.type === 'permission_decision' || ev.type === 'elicitation_decision') {
+      const decision = this.decisionOf(key, ev.type, ev.payload);
+      if (decision) {
+        const list = this.#decisions.get(key) ?? [];
+        list.push(decision);
+        this.#decisions.set(key, list.slice(-10));
+      }
     }
     const finished = this.#answers.push(ev);
     if (finished) this.#finishedTurn.set(key, finished);
@@ -191,12 +208,16 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     let detail = '';
     let durationMs: number | null = null;
     let request: ReportedRequest | undefined;
+    let decisions: ReportedDecision[] = [];
     if (reason === 'turn_finished' || reason === 'turn_failed') {
       const startedAt = this.#turnStartedAt.get(key);
       this.#turnStartedAt.delete(key);
       const finished = this.#finishedTurn.get(key) ?? null;
       this.#finishedTurn.delete(key);
       this.#pendingRequest.delete(key);
+      this.#requests.delete(key);
+      decisions = this.#decisions.get(key) ?? [];
+      this.#decisions.delete(key);
       if (operator) {
         // operator 자신의 턴 — 보고 턴이면 그 답이 요약으로 나간다. 사용자와의 대화 턴이면, 사용자가 그 화면을
         // 떠나 있을 때 operator 의 답을 그대로 들려준다(operator 는 보고하지 않는다 — 그것이 보고 받는 쪽이다).
@@ -237,6 +258,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       this.#turnStartedAt.delete(key);
       this.#lastNeedsInputAt.delete(key);
       this.#pendingRequest.delete(key);
+      this.#requests.delete(key);
+      this.#decisions.delete(key);
     }
 
     if (operator) {
@@ -245,16 +268,36 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (!kind) return;
-    // 사용자가 그 세션 화면을 보고 있다 — 이미 보고 있는 것을 보고하지 않는다.
-    if (viewing()) {
-      this.logService.debug('Voice', `not reporting ${kind} of ${session.cli}/${String(session.session_id).slice(0, 8)} — the user is looking at it`);
-      return;
-    }
-    const report = { ...this.toReport(kind, userId, session, detail, durationMs, now), ...(request ? { request } : {}) };
+    // 사용자가 그 세션 화면을 보고 있어도 operator 에게는 보고한다 — operator 가 사이트의 흐름(결과·결정까지)을
+    // 알게. 보고 있었다는 표시(viewed)가 붙은 보고는 소리로 전하지 않는다(사용자는 이미 보고 있다).
+    const report: SessionReport = {
+      ...this.toReport(kind, userId, session, detail, durationMs, now),
+      ...(request ? { request } : {}),
+      ...(decisions.length ? { decisions } : {}),
+      ...(viewing() ? { viewed: true } : {}),
+    };
     if (await this.reports.submit(report)) return;
-    // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(짧은 턴은 화면을 보며 기다린 것으로 본다).
-    if (kind === 'finished' && durationMs !== null && durationMs < MIN_ANNOUNCED_TURN_MS) return;
+    // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(보고 있는 것·짧은 턴은 말하지 않는다).
+    if (report.viewed || (kind === 'finished' && durationMs !== null && durationMs < MIN_ANNOUNCED_TURN_MS)) return;
     await this.announceReportsDirectly([report]);
+  }
+
+  /** 결정 행 → 무엇을 정했는지. 요청 행을 못 봤으면(서버 재시작) 제목 없이 결과만. */
+  private decisionOf(key: string, type: string, payload: any): ReportedDecision | null {
+    const id = String(payload?.request_id || payload?.elicitation_id || '');
+    const request = id ? this.#requests.get(key)?.get(id) : undefined;
+    if (id) this.#requests.get(key)?.delete(id);
+    const by = String(payload?.decided_by || 'user');
+    if (type === 'permission_decision') {
+      const options: any[] = Array.isArray(request?.payload?.options) ? request!.payload.options : [];
+      const chosen = payload?.option_id ? options.find((o) => o?.option_id === payload.option_id) : null;
+      const outcome = payload?.option_id ? String(chosen?.name || payload.option_id) : 'cancelled';
+      return { kind: 'permission', title: String(request?.payload?.title || ''), outcome, by };
+    }
+    const action = String(payload?.action || '');
+    const content = payload?.content && typeof payload.content === 'object' ? payload.content : null;
+    const values = content ? Object.entries(content).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('/') : typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ') : '';
+    return { kind: 'question', title: String(request?.payload?.message || ''), outcome: action === 'accept' ? (values || 'accepted') : action || 'cancelled', by };
   }
 
   private toReport(kind: SessionReportKind, userId: string, session: any, detail: string, durationMs: number | null, at: number): SessionReport {
@@ -277,7 +320,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 템플릿 문장으로 직접 — operator 가 없거나, 보고가 operator 에게 닿지 못했을 때. */
-  private async announceReportsDirectly(reports: SessionReport[]): Promise<void> {
+  private async announceReportsDirectly(all: SessionReport[]): Promise<void> {
+    const reports = all.filter((r) => !r.viewed); // 보고 있던 것은 말하지 않는다
     if (!reports.length || !(await this.ttsReady())) return;
     const lang = announcementLanguage((await loadVoiceConfig(this.dataSource)).stt.languages);
     for (const report of reports) {
@@ -295,15 +339,20 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
 
   /** operator 가 보고를 요약했다 — 그 답을 사용자에게. 화면 이동은 결정이 필요한 세션이 먼저다. */
   private async announceOperatorSummary(summary: OperatorSummary): Promise<void> {
-    const focus = summary.reports.find(isUrgentReport) ?? summary.reports[summary.reports.length - 1];
-    if (!focus) return;
+    // 사용자가 모두 화면에서 보고 있던 소식이면 operator 가 기록만 하고 소리로는 전하지 않는다.
+    const unseen = summary.reports.filter((r) => !r.viewed);
+    const focus = unseen.find(isUrgentReport) ?? unseen[unseen.length - 1];
+    if (!focus) {
+      this.logService.debug('Voice', `operator "${summary.operator.name}" took note of ${summary.reports.length} viewed report(s) — not spoken`);
+      return;
+    }
     if (!toSpeakable(summary.answer, OPERATOR_SUMMARY_CHARS)) {
-      await this.announceReportsDirectly(summary.reports); // 읽을 말이 없는 답(코드뿐) — 템플릿으로
+      await this.announceReportsDirectly(unseen); // 읽을 말이 없는 답(코드뿐) — 템플릿으로
       return;
     }
     await this.announceOperator([summary.userId], 'operator_report', summary.operator, summary.answer, {
       type: 'session', manager_id: focus.session.manager_id, cli: focus.session.cli, session_id: focus.session.session_id,
-    }, summary.reports.some(isUrgentReport));
+    }, unseen.some(isUrgentReport));
   }
 
   private async announceOperator(
