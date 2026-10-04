@@ -191,8 +191,10 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
 
   private async onSessionUpdate(e: any): Promise<void> {
     const session = e?.session;
-    const userId: string | undefined = e?.driver_user_id || session?.driver_user_id;
-    if (!session || !userId) return;
+    // driver 가 없을 수 있다(서버 재시작 뒤 아무도 그 세션을 다시 열지 않았다). 그래도 operator 에게는 보고한다 —
+    // 받을 사람은 그 operator 를 등록한 사용자가 된다(OperatorReportService). 직접 알림은 받을 사람이 있어야 한다.
+    const userId: string = e?.driver_user_id || session?.driver_user_id || '';
+    if (!session) return;
     const key = sessionKey(session.manager_id, session.cli, session.session_id);
     const reason = String(e.reason || '');
     const now = Date.now();
@@ -202,7 +204,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const operator = findOperator(await cachedOperators(this.dataSource), session);
-    const viewing = () => this.presence.isViewing(userId, session.manager_id, session.cli, session.session_id);
+    const viewing = () => !!userId && this.presence.isViewing(userId, session.manager_id, session.cli, session.session_id);
 
     let kind: SessionReportKind | null = null;
     let detail = '';
@@ -427,7 +429,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     needsDecision = false,
   ): void {
     this.prune();
-    for (const userId of userIds) {
+    for (const userId of userIds.filter(Boolean)) { // 받을 사람을 모르는 소식(driver 없음)은 말하지 않는다
       const payload: VoiceAnnouncementPayload = {
         id: randomUUID(),
         user_id: userId,
