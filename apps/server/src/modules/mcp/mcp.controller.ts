@@ -15,6 +15,7 @@ import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
 import { authenticateMcpRequest } from './shared/mcp-http-auth';
+import { isOperatorConnection } from '../voice/operator-config';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -308,6 +309,19 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       const mcpAuthInfo = await authenticateMcpRequest(req, res, this.apiKeyService, mcpLogError);
       if (!mcpAuthInfo) return; // Response already sent
 
+      // Operator(고정된 Agent Session)의 연결은 워크스페이스에 묶지 않는다 — 사이트 전체를 관리한다.
+      // 조건·신뢰 경계는 voice/operator-config.ts `isOperatorConnection`.
+      if (mcpAuthInfo.workspaceId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers)) {
+        if (req.method === 'POST' && req.body?.method === 'initialize') {
+          this._logService.info('MCP', 'operator session connected with site-wide scope', {
+            host_id: mcpAuthInfo.agentId,
+            session_id: String(req.headers['x-awb-session-id'] || ''),
+            pairing_workspace_id: mcpAuthInfo.workspaceId,
+          });
+        }
+        mcpAuthInfo.workspaceId = undefined;
+      }
+
       // Inject workspace_id from API key into request context for downstream use
       (req as any).currentWorkspaceId = mcpAuthInfo.workspaceId ?? null;
 
@@ -378,6 +392,12 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       if (sessionId && sessionStore.has(sessionId)) {
         const session = sessionStore.get(sessionId)!;
         sessionStore.touch(sessionId);
+        // 워크스페이스 범위는 요청마다 다시 판정한 값을 따른다 — 이미 열린 MCP 세션을 operator 로
+        // 지정하거나 해제해도 다음 요청부터 맞는 범위로 돈다(같은 키의 연결일 때만).
+        if (session.auth && session.auth.source === 'db' && session.auth.agentId === mcpAuthInfo.agentId
+          && session.auth.workspaceId !== mcpAuthInfo.workspaceId) {
+          session.auth.workspaceId = mcpAuthInfo.workspaceId;
+        }
         const sessionToolProfile: ToolProfile = session.auth?.toolProfile === 'compact' ? 'compact' : 'full';
 
         // Cache hit: skip the SDK pipeline entirely for tools/list. The

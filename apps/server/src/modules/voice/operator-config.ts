@@ -49,6 +49,7 @@ export async function readOperator(dataSource: DataSource): Promise<OperatorSess
 }
 
 export async function writeOperator(dataSource: DataSource, value: OperatorSession | null): Promise<void> {
+  invalidateOperatorCache();
   const repo = dataSource.getRepository('SystemSetting');
   const existing: any = await repo.findOne({ where: { key: OPERATOR_SETTING_KEY } });
   const stored = value ? JSON.stringify(value) : '';
@@ -58,4 +59,60 @@ export async function writeOperator(dataSource: DataSource, value: OperatorSessi
   } else if (value) {
     await repo.save(repo.create({ key: OPERATOR_SETTING_KEY, value: stored }));
   }
+}
+
+// ─── 사이트 전체 권한 ─────────────────────────────────────────────────────
+
+/**
+ * operator 세션의 AWB MCP 연결은 **워크스페이스에 묶지 않는다** — 사이트 전체를 관리하는 에이전트다
+ * (docs/voice-operator.md "권한").
+ *
+ * 세션의 MCP 는 그 장비 매니저의 키로 주입되고(agent-session-runner `#defaultMcpServers`), 그 키는
+ * 페어링 때 한 워크스페이스에 묶인다. operator 로 지정된 세션의 연결만 그 묶음을 푼다 — 조건은 셋이 다:
+ *   1. 매니저가 Agent Session 에 주입한 연결이다(`X-AWB-Client-Type: agent-session`),
+ *   2. `X-AWB-Session-Id` 가 지정된 operator 세션이다,
+ *   3. 키가 그 operator 의 Host 의 full 키다.
+ * 풀린 연결은 Host 신원(장비 단위, 워크스페이스 없음)으로 판정된다(`authz.ts` `callerCanAccessWorkspace`).
+ *
+ * 신뢰 경계는 그 장비의 사용자다: 같은 장비의 다른 프로세스도 매니저 키를 읽고 같은 헤더를 만들 수 있다.
+ * operator 지정이 admin 전용인 이유이고, 풀릴 때마다 로그를 남긴다.
+ */
+
+const OPERATOR_CACHE_MS = 5_000;
+let operatorCache: { at: number; value: OperatorSession | null } | null = null;
+
+export function invalidateOperatorCache(): void {
+  operatorCache = null;
+}
+
+async function cachedOperator(dataSource: DataSource): Promise<OperatorSession | null> {
+  const now = Date.now();
+  if (operatorCache && now - operatorCache.at < OPERATOR_CACHE_MS) return operatorCache.value;
+  const value = await readOperator(dataSource);
+  operatorCache = { at: now, value };
+  return value;
+}
+
+export interface OperatorConnectionAuth {
+  source: string;
+  agentId?: string;
+  scope?: string;
+  workspaceId?: string;
+}
+
+export async function isOperatorConnection(
+  dataSource: DataSource,
+  auth: OperatorConnectionAuth,
+  headers: Record<string, string | string[] | undefined>,
+): Promise<boolean> {
+  if (auth.source !== 'db' || !auth.agentId || auth.scope !== 'full') return false;
+  const header = (name: string) => {
+    const v = headers[name];
+    return String(Array.isArray(v) ? v[0] : v ?? '').trim();
+  };
+  if (header('x-awb-client-type').toLowerCase() !== 'agent-session') return false;
+  const sessionId = header('x-awb-session-id');
+  if (!sessionId) return false;
+  const operator = await cachedOperator(dataSource);
+  return !!operator && operator.session_id === sessionId && operator.manager_id === auth.agentId;
 }

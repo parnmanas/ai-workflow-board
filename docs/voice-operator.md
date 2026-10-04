@@ -141,14 +141,22 @@ operator 를 고르는 화면을 따로 만들지 않는다 — **세션을 여�
 만들게 한다: operator 세션이 저장소 안에서 돌면 그 저장소의 AGENTS.md 를 덮어쓰면 안 된다. 그래서 operator 는 전용 폴더
 (예: `~/awb-operator/`)에서 여는 것을 권한다.
 
-### 권한 — 결정 필요 (P3)
+### 권한 — 사이트 전체 (P3 구현)
 
-지금 세션의 AWB MCP 는 매니저 키로 주입되고(`apps/agent-manager/src/lib/agent-session-runner.ts`
-`#defaultMcpServers`), 매니저 키는 페어링 때 워크스페이스에 묶인다(`mcp/shared/authz.ts`
-`callerCanAccessWorkspace`). 즉 지금 그대로면 operator 는 **한 워크스페이스만** 관리한다.
-사이트 전체를 다루려면 operator 전용 권한 tier 가 필요하다. 기본안: 서버가 operator 전용 키를 발급해 operator
-세션의 open RPC 로 넘기고 그 세션의 MCP 에만 주입한다 — `agent_session_request` payload 변경이므로 server ·
-agent-manager 같은 PR. 같은 OS 사용자의 다른 프로세스는 그 키를 읽을 수 있으므로 신뢰 경계는 호스트 사용자다.
+세션의 AWB MCP 는 매니저 키로 주입되고(`apps/agent-manager/src/lib/agent-session-runner.ts` `#defaultMcpServers`),
+매니저 키는 페어링 때 한 워크스페이스에 묶인다(`mcp/shared/authz.ts` `callerCanAccessWorkspace`). 그대로면 operator 는
+한 워크스페이스만 관리한다.
+
+**operator 로 지정된 세션의 MCP 연결만 그 묶음을 푼다**(`modules/voice/operator-config.ts` `isOperatorConnection`,
+`mcp.controller.ts`). 조건은 셋이 다: ① 매니저가 Agent Session 에 주입한 연결(`X-AWB-Client-Type: agent-session`),
+② `X-AWB-Session-Id` 가 지정된 operator 세션, ③ 키가 그 operator Host 의 full 키. 풀린 연결은 Host 신원(장비 단위,
+워크스페이스 없음)으로 판정된다. 판정은 요청마다 다시 한다 — 이미 열린 MCP 세션도 지정·해제 직후의 요청부터 맞는
+범위로 돈다(지정값은 5초 캐시, 지정·해제 때 즉시 버림).
+
+- 이 방식은 agent-manager 를 바꾸지 않는다(SSE contract · 매니저 배포 없음). 처음 생각한 "operator 전용 키를 open RPC 로
+  넘기기" 와 신뢰 경계가 같다 — 어느 쪽이든 그 장비의 사용자로 도는 다른 프로세스가 매니저 키를 읽고 같은 헤더를
+  만들 수 있다. 그래서 지정은 admin 전용이고, 풀린 연결이 처음 붙을 때 `MCP` 로그를 남긴다.
+- 회귀: `apps/server/test/voice-operator-scope.test.mjs`(지정 전 거부 → 지정 후 허용 → 다른 세션은 거부 → 해제 후 거부).
 
 ### 먼저 말 걸기
 
@@ -209,7 +217,7 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 |---|---|---|
 | P1 음성 게이트웨이 + 웹 대화 | `modules/voice`(공급자 · 설정 · 전사 · 합성 · `toSpeakable`), Agent Session 컴포저 마이크 + 응답 낭독, Voice lab | 세션 화면에서 말로 묻고 답을 듣는다. Voice lab 으로 엔진을 확정한다 |
 | P2 음성 알림 (웹 · Telegram) | announcer, `voice_announcement`, 클립 캐시, 사용자 설정, 아래 공백 메우기 | 다른 화면에 있을 때 세션 종료 · 미션 종료를 말로 듣는다 |
-| P3 operator | 세션 고정(☆ Operator) · 사이드바 진입점 · 지침. 남은 것: `notify_user`(턴 도중 먼저 말 걸기), 사이트 전체 권한 tier | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
+| P3 operator | 세션 고정(☆ Operator) · 사이드바 진입점 · 지침 · 사이트 전체 권한. 남은 것: `notify_user`(턴 도중 먼저 말 걸기) | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
 | P4 Android 앱 | `apps/mobile`, 디바이스 등록, FCM, 재생 서비스 | 폰이 잠겨 있어도 작업 종료를 말로 듣고, 앱에서 operator 와 대화한다 |
 | P5 (선택) | iOS, 실시간 음성 프런트(GPT-Live client delegation), wake word | — |
 
@@ -266,7 +274,7 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 ## 계약 · 규칙
 
 - `voice_announcement` 는 user-only UI 이벤트다(`orchestration_update` 와 같은 패턴) → agent-manager contract 무관.
-- operator 전용 키를 open RPC 로 넘기는 순간 `agent_session_request` contract 가 바뀐다 → server · agent-manager 같은 PR.
+- operator 의 사이트 전체 권한은 서버 쪽 판정이다 — agent-manager contract 무관. (전용 키를 open RPC 로 넘기는 방식으로 바꾸면 그때는 `agent_session_request` contract 가 바뀐다 → server · agent-manager 같은 PR.)
 - 새 엔티티는 배럴 export + `MIGRATION_ENTITY_ORDER` 한 쌍. 새 테스트는 등록(client `package.json`, server `test/suites/*.txt`).
 
 ## 비용 감 (2026-10-04 정가)
