@@ -12,6 +12,7 @@ import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { sessionStore, DEFAULT_MAX_SESSIONS } from '../../modules/mcp/internal/session-store';
 import { callRemoteMcpTool } from '../../modules/mcp/shared/remote-mcp-client';
+import { VOICE_SETTING_DEFINITIONS, invalidateVoiceConfig } from '../voice/voice-config';
 
 const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
@@ -66,6 +67,8 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
     is_secret: true,
     default_value: '',
   },
+  // 음성 게이트웨이 — 의미는 voice 모듈이 안다(docs/voice-operator.md).
+  ...VOICE_SETTING_DEFINITIONS,
 };
 
 /**
@@ -156,6 +159,10 @@ export class SettingsController {
         updated_at: existing.updated_at,
       });
     }
+
+    // 음성 설정은 짧게 캐시된다 — 키(secret)만 바꿔도 다음 요청부터 새 값을 쓰게 여기서 버린다.
+    // (applyLiveSettingChange 는 secret 을 거치지 않으므로 그 안에 둘 수 없다.)
+    if (Object.keys(settings).some((key) => key.startsWith('voice.'))) invalidateVoiceConfig();
 
     return res.json({ success: true, updated: results });
   }

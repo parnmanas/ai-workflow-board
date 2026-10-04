@@ -313,6 +313,13 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - PTY 는 **선택 의존성**(`@lydell/node-pty`, 플랫폼별 prebuild — linux/darwin/win32). 못 불러오면 던지지 않고 그 장비의 셸 목록을 비운다 → 서버가 터미널 호스트 목록에서 뺀다(409 `terminal_unsupported`). Windows 는 ConPTY 로 같은 경로를 탄다.
 - `terminal_request` payload · `/api/agent/terminals/*` 바디 · 하트비트 필드는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/terminals.md`.
 
+## Voice (음성 입력 · 낭독 · 음성 알림)
+
+- 음성은 **AWB 서버가 엔진을 잡는다**(`modules/voice`, SystemSettings `voice.*`, 권한 `voice.use` 기본 admin 전용) — 화면은 녹음 바이트를 보내 글자를 받고, 글자를 보내 소리를 받는다. CLI 에이전트는 텍스트만 다루고 **agent-manager 는 오디오 경로에 없다**(SSE contract 무관). Claude/Codex 의 자체 음성 기능은 구독 경로로 재사용할 수 없어서 별도 엔진(Soniox · ElevenLabs · Typecast · Azure · Google · OpenAI 호환)을 쓴다.
+- 화면용 답을 소리로 바꾸는 규칙은 `modules/voice/speakable.ts` 의 `toSpeakable()` 한 곳이다 — 세션 낭독 · 음성 알림 · 앱이 모두 이것을 지난다. 경로마다 따로 다듬지 말 것.
+- 설정이 비었거나 공급자 이름이 틀리거나 키가 없으면 409 + 사유다. 다른 공급자로 조용히 넘어가는 대체 경로를 만들지 말 것.
+- 엔진은 Admin → Voice 의 lab(STT 비교 · TTS 블라인드 테스트)으로 고른다. 상세 · 로드맵(음성 알림, operator, Android 앱): `docs/voice-operator.md`.
+
 ## Skills (AWB 기능)
 
 - Global(`workspace_id NULL`) / Workspace 2계층. 같은 slug면 Workspace가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.

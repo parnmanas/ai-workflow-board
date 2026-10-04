@@ -19,6 +19,11 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   // 413 (see AllExceptionsFilter's entity.too.large handling).
   app.use('/api/resources/upload', raw({ type: () => true, limit: '200mb' }));
 
+  // 음성 발화 업로드(docs/voice-operator.md) — 같은 이유로 raw 로 잡는다. 녹음 한 건의 상한은
+  // 2분이라(webm/opus ≈ 1MB/분) 25MB 면 넉넉하다.
+  app.use('/api/voice/transcribe', raw({ type: () => true, limit: '25mb' }));
+  app.use('/api/voice/lab/transcribe', raw({ type: () => true, limit: '25mb' }));
+
   // Raise the JSON/urlencoded limit from Express's 100KB default to 10MB. Agent
   // plugins ship proxy.log error/event batches (up to 500 entries) that routinely
   // cross 100KB; the default silently bounced them as Express catch-all 404s.

@@ -9,6 +9,7 @@ import MigrationManager from './MigrationManager';
 import WorkflowHealthDashboard from './WorkflowHealthDashboard';
 import SkillsPage from './SkillsPage';
 import SkillRegistryPage from './SkillRegistryPage';
+import VoicePage from './VoicePage';
 import { tokens } from '../../tokens';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -23,6 +24,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
   },
   'workflow-health': { title: 'Workflow Health', description: 'Automation suppression, respawn storms, QA trends, and token usage' },
   settings: { title: 'Settings', description: 'System configuration' },
+  voice: { title: 'Voice', description: 'Speech engines for voice input, spoken replies and announcements — and the lab to choose them' },
   migration: { title: 'Live Import', description: 'Pull this instance\'s data from a live source AWB server' },
 };
 
@@ -58,6 +60,7 @@ export default function AdminPage() {
       <Route path="global-credentials" element={<WorkspaceRouteRedirect path="settings/credentials" />} />
       <Route path="claude-backend-profiles" element={<WorkspaceRouteRedirect path="settings/claude-profiles" />} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
+      <Route path="voice" element={<AdminRoute page="voice"><VoicePage /></AdminRoute>} />
       <Route path="migration" element={<AdminRoute page="migration"><MigrationManager /></AdminRoute>} />
       <Route path="functions" element={<WorkspaceRouteRedirect path="functions" />} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />

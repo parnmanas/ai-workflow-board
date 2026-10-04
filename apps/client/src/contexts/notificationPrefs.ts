@@ -24,6 +24,11 @@ export interface NotificationPrefs {
   admin: boolean;
   /** Audio cue toggle. Mirrors the legacy `chat_notify_muted` key inverted. */
   audio: boolean;
+  /**
+   * 음성 알림 — 세션·미션이 끝나면 말로 알린다(docs/voice-operator.md). 서버에 TTS 가 준비돼
+   * 있을 때만 의미가 있고, 이 단말에서 들을지 말지만 여기서 정한다.
+   */
+  voice: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -32,6 +37,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   tickets: true,
   admin: true,
   audio: true,
+  voice: true,
 };
 
 const PREFS_KEY = 'awb.notifications.prefs';

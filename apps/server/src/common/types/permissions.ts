@@ -25,6 +25,9 @@ export const PERMISSIONS = {
   // Terminal(Runtime Host 셸) — 그 장비에서 셸을 띄우고 임의의 명령을 친다. 사실상
   // 장비 운영자 권한이므로 기본은 admin 전용이고, 필요한 사용자에게만 부여한다.
   USE_TERMINALS: 'terminals.use',
+  // 음성(STT/TTS) — 외부 엔진을 부르는 유료 경로라 기본은 admin 전용이고, 필요한 사용자에게만 부여한다.
+  // docs/voice-operator.md
+  USE_VOICE: 'voice.use',
 } as const;
 
 export type Permission = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -75,4 +78,5 @@ export const PERMISSION_LABELS: Record<string, { label: string; description: str
   [PERMISSIONS.BROWSE_AGENT_FS]: { label: 'Browse Agent Filesystem', description: 'Browse files on an agent machine within scoped roots configured on the plugin side', group: 'Admin' },
   [PERMISSIONS.USE_TERMINALS]: { label: 'Use Terminals', description: 'Open shell terminals on Runtime Host machines and run arbitrary commands there — effectively operator access to that machine', group: 'Sessions' },
   [PERMISSIONS.USE_AGENT_SESSIONS]: { label: 'Use Agent Sessions', description: 'Browse and drive CLI sessions (Claude Code / Codex / Hermes) on Runtime Host machines, including sessions already on those machines', group: 'Sessions' },
+  [PERMISSIONS.USE_VOICE]: { label: 'Use Voice', description: 'Speak prompts and hear replies — audio goes to the configured speech-to-text / text-to-speech provider, which is billed per use', group: 'Sessions' },
 };
