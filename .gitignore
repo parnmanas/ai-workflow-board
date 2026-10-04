@@ -51,3 +51,6 @@ apps/client/playwright-report/
 
 # 로컬 MCP 설정 (API 키 포함 — 커밋 금지)
 .mcp.json
+
+# Voice-activity-detection runtime, copied from node_modules at build time (apps/client/scripts/copy-vad-assets.mjs).
+apps/client/public/vad/

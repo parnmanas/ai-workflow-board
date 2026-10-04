@@ -203,6 +203,7 @@ const ALLOWED_INSTALL_SCRIPTS = new Set([
   'esbuild', // 플랫폼별 바이너리 배치 — vite/tsx 빌드 체인 필수
   'fsevents', // macOS 전용 optional native watcher
   '@scarf/scarf', // swagger-ui-dist 전이 telemetry — 아래 테스트에서 opt-out 강제
+  'protobufjs', // onnxruntime-web(대화 모드 VAD) 전이 — postinstall 은 버전 표기 경고만 출력(네트워크·exec 없음)
 ]);
 
 test('no unexpected package runs an install script', () => {

@@ -3,7 +3,7 @@ import { tokens } from '../../tokens';
 import type { AgentSessionCommand } from '../../types';
 import { applySlashCommand, matchSlashCommands } from './sessionTranscript.logic';
 import { readFileAsBase64 } from '../chat/utils/attachments';
-import { useVoiceDictation } from '../../voice/useVoice';
+import { useHandsFreeConversation, type ConversationPhase } from '../../voice/useVoice';
 
 /**
  * Agent Session 프롬프트 입력. Chat 의 ChatMessageInput 과 달리 방/멘션에
@@ -62,10 +62,20 @@ export interface SessionComposerProps {
   onCancel: () => void;
   /**
    * 음성 입력 — 서버에 STT 가 준비돼 있을 때만 준다(없으면 마이크 버튼이 나오지 않는다).
-   * 전사된 글자는 입력창의 글자 뒤에 붙고, `autoSend` 면 곧바로 보낸다(턴 중이면 큐로).
+   * 🎙 를 켜면 대화 모드다: 말을 멈출 때마다 그 발화가 글자로 바뀌어 곧바로 전송된다(턴 중이면 큐로).
+   * `liveCaptions` 면 말하는 동안 실시간 자막을 보여 준다(엔진을 더 부르므로 무료 엔진에서만).
    */
-  voiceInput?: { autoSend: boolean } | null;
+  voiceInput?: { liveCaptions: boolean } | null;
 }
+
+const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
+  off: '',
+  starting: '마이크 준비 중… (처음 한 번은 음성 감지 모델을 받느라 몇 초 걸립니다)',
+  listening: '🎙 듣는 중 — 말을 멈추면 자동으로 보냅니다',
+  hearing: '🔴 말하는 중…',
+  transcribing: '보내는 중…',
+  'paused-for-reply': '🔈 답을 읽는 중 — 끝나면 다시 듣습니다',
+};
 
 function promptLabel(p: SessionPrompt): string {
   if (p.text.trim()) return p.text;
@@ -237,23 +247,17 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     }
   }, [text, images, disabled, busy, sending, stillReading, onSend, setQueueBoth, revokeImages]);
 
-  const dictation = useVoiceDictation(useCallback((spoken: string) => {
+  const conversation = useHandsFreeConversation(useCallback((spoken: string) => {
     const merged = [text.trim(), spoken].filter(Boolean).join(' ');
     // 보낼 수 없는 순간(다른 전송 중 · 이미지 읽는 중)이면 버리지 않고 입력창에 남긴다.
-    if (voiceInput?.autoSend && !stillReading && !sending && !disabled) {
+    if (!stillReading && !sending && !disabled) {
       void submit(merged);
       return;
     }
     setText(merged);
-    requestAnimationFrame(() => {
-      const el = ref.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(merged.length, merged.length);
-    });
-  }, [text, voiceInput?.autoSend, stillReading, sending, disabled, submit]));
-  const showMic = !!voiceInput && dictation.supported;
-  const recording = dictation.phase === 'recording';
+  }, [text, stillReading, sending, disabled, submit]), { liveCaptions: !!voiceInput?.liveCaptions });
+  const showMic = !!voiceInput && conversation.supported;
+  const conversing = conversation.phase !== 'off';
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
@@ -354,8 +358,27 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       {attachError && (
         <div style={{ fontSize: 11.5, color: tokens.colors.warning, marginBottom: 6 }}>{attachError}</div>
       )}
-      {showMic && dictation.error && (
-        <div role="status" style={{ fontSize: 11.5, color: tokens.colors.warning, marginBottom: 6 }}>{dictation.error}</div>
+      {showMic && conversation.error && (
+        <div role="status" style={{ fontSize: 11.5, color: tokens.colors.warning, marginBottom: 6 }}>{conversation.error}</div>
+      )}
+      {showMic && conversing && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-conversation-phase={conversation.phase}
+          style={{
+            display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6, padding: '6px 10px',
+            borderRadius: tokens.radii.md, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
+            fontSize: 12, color: tokens.colors.textSecondary,
+          }}
+        >
+          <span style={{ flexShrink: 0, color: conversation.phase === 'hearing' ? tokens.colors.dangerLight : tokens.colors.textMuted }}>
+            {CONVERSATION_PHASE_LABEL[conversation.phase]}
+          </span>
+          {conversation.caption && (
+            <span style={{ flex: 1, minWidth: 0, color: tokens.colors.textPrimary, fontStyle: 'italic' }}>{conversation.caption}</span>
+          )}
+        </div>
       )}
       {popupOpen && (
         <ul
@@ -426,25 +449,26 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         {showMic && (
           <button
             type="button"
-            onClick={dictation.toggle}
-            disabled={locked || dictation.phase === 'transcribing'}
-            aria-label={recording ? 'Stop recording and send' : 'Speak a prompt'}
-            aria-pressed={recording}
-            title={recording
-              ? '다시 누르면 녹음을 끝내고 글자로 바꿔 보냅니다'
-              : dictation.phase === 'transcribing' ? '글자로 바꾸는 중…' : '눌러서 말하기 — 다시 누르면 끝납니다'}
+            onClick={conversation.toggle}
+            disabled={disabled}
+            aria-label={conversing ? 'Stop conversation mode' : 'Start conversation mode'}
+            aria-pressed={conversing}
+            title={conversing
+              ? '대화 모드 끄기 — 마이크를 닫습니다'
+              : '대화 모드 — 켜 두고 말하면, 말을 멈출 때마다 자동으로 보냅니다'}
             style={{
               height: 40, minWidth: 40, padding: '0 10px', borderRadius: tokens.radii.lg,
-              border: `1px solid ${recording ? tokens.colors.danger : tokens.colors.border}`,
-              background: recording ? `${tokens.colors.danger}22` : tokens.colors.surface,
-              color: recording ? tokens.colors.dangerLight : locked ? tokens.colors.textMuted : tokens.colors.textSecondary,
-              fontSize: 16, cursor: locked ? 'not-allowed' : 'pointer',
+              border: `1px solid ${conversing ? tokens.colors.danger : tokens.colors.border}`,
+              background: conversing ? `${tokens.colors.danger}22` : tokens.colors.surface,
+              color: conversing ? tokens.colors.dangerLight : disabled ? tokens.colors.textMuted : tokens.colors.textSecondary,
+              fontSize: 16, cursor: disabled ? 'not-allowed' : 'pointer',
               // 입력 크기를 테두리 그림자로 — 듣고 있다는 것을 눈으로 확인한다.
-              boxShadow: recording ? `0 0 0 ${Math.round(2 + dictation.level * 8)}px ${tokens.colors.danger}33` : 'none',
+              boxShadow: conversation.phase === 'hearing' || conversation.phase === 'listening'
+                ? `0 0 0 ${Math.round(2 + conversation.level * 8)}px ${tokens.colors.danger}33` : 'none',
               transition: 'box-shadow 80ms linear',
             }}
           >
-            {dictation.phase === 'transcribing' ? '…' : recording ? '■' : '🎙'}
+            {conversation.phase === 'starting' ? '…' : '🎙'}
           </button>
         )}
         <textarea
@@ -516,7 +540,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         </button>
       </div>
       <div style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
-        {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 tap to speak, tap again to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
+        {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 conversation mode: just talk, pause to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
       </div>
     </div>
   );

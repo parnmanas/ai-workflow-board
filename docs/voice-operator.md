@@ -230,7 +230,7 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 | 낭독 정리 | `toSpeakable()`(코드·표·URL·식별자 제거, 경로는 마지막 조각) + `splitSpeakable()`(문장 경계 조각, 첫 조각은 짧게) | `modules/voice/speakable.ts` |
 | REST (`voice.use`, 기본 admin) | `GET /api/voice/config` · `POST /api/voice/transcribe`(raw 오디오 본문) · `POST /api/voice/speakable` · `POST /api/voice/speech` | `modules/voice/voice.controller.ts` |
 | REST (admin) | Voice lab — `POST /api/voice/lab/transcribe?provider=` · `POST /api/voice/lab/speech` · `GET /api/voice/lab/voices?provider=` | 같은 파일 |
-| 화면 — 세션 | 컴포저 🎙(탭 → 말 → 탭: 전사 후 바로 전송, 턴 중이면 큐), 헤더 "Read aloud"(턴이 끝나면 최종 답 낭독). **말로 물은 답은 Read aloud 가 꺼져 있어도 읽는다**(voice in → voice out). 녹음을 시작하면 낭독을 멈춘다(barge-in). 보고 있는(visible) 화면에서만 읽고, 세션 화면을 떠나면 멈춘다 | `components/sessions/*`, `voice/*` |
+| 화면 — 세션 | 컴포저 🎙 = **대화 모드**(아래), 헤더 "Read aloud"(턴이 끝나면 최종 답 낭독). **말로 물은 답은 Read aloud 가 꺼져 있어도 읽는다**(voice in → voice out). 보고 있는(visible) 화면에서만 읽고, 세션 화면을 떠나면 멈춘다 | `components/sessions/*`, `voice/*` |
 | 화면 — Admin → Voice | 엔진 설정 + STT 비교(같은 발화를 모든 공급자에, 정답을 적으면 CER) + TTS 블라인드 테스트(문장마다 다시 섞은 A/B/C, 평점 뒤 공개, "Use this voice") | `components/admin/VoicePage.tsx` |
 
 - 한 턴의 "읽을 답" 은 마지막 도구·권한·질문·plan 뒤의 텍스트 덩어리다(`voice/turnAnswer.logic.ts`). 답 뒤에
@@ -241,6 +241,25 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
   Android WebView 녹음)은 있지만 **mp4 컨테이너(iOS Safari 녹음)는 없다** — iOS 단계에서 확인하고, 안 되면 그때 변환이나
   비동기 API 를 붙인다. ElevenLabs Scribe · OpenAI 는 mp4/m4a 를 받는다.
 - 회귀: `apps/server/test/voice-{speakable,gateway,http}.test.mjs`, `apps/client/test/voice-{turn-answer,lab}.test.mjs`.
+
+## 대화 모드 (2026-10-04)
+
+처음의 "🎙 탭 → 말 → 다시 탭" 은 버튼으로 녹음을 끊어야 전사가 돌았다. 지금은 🎙 를 **한 번 켜 두면** 브라우저가
+말의 시작과 끝을 스스로 알아채고, 말을 멈출 때마다(약 1.1초 정적) 그 발화를 글자로 바꿔 곧바로 보낸다.
+
+- 판정: **Silero VAD v6**(`@ricky0123/vad-web`, onnxruntime-web)를 브라우저 안에서 돌린다 — 오디오를 서버로 계속
+  흘리지 않고, 끝난 발화 구간(16 kHz WAV)만 `/api/voice/transcribe` 로 보낸다. 모델·런타임(약 16MB)은 AWB 가 직접
+  내려준다: 빌드 때 `apps/client/scripts/copy-vad-assets.mjs` 가 `public/vad/` 로 복사(gitignore), dev 서버는
+  `vite.config.ts` 의 `serveVadAssetsRaw` 가 원본 그대로 준다(Vite 는 public 의 .mjs 를 모듈로 import 하면 500 을 낸다).
+- 실시간 자막: 말하는 동안 1.5초마다 지금까지의 구간을 받아써 보여 준다 — 엔진을 그만큼 더 부르므로 **무료인
+  셀프호스팅(`local`) 엔진일 때만** 켠다.
+- 답을 읽는 동안에는 듣기를 멈춘다(마이크 트랙을 닫는다) — 스피커 소리를 다시 듣고 자기 답을 프롬프트로 보내지 않게.
+  읽기가 끝나면 저절로 다시 듣는다. 탭이 숨으면 멈췄다가 돌아오면 다시 듣고, 화면을 떠나면 마이크를 닫는다.
+- 검증: 헤드리스 Chromium 의 가짜 마이크(`--use-file-for-fake-audio-capture`)에 정적 1.5초 + 한국어 5.1초 + 정적을 넣고
+  ragnar 엔진으로 받아쓴 결과 — 켠 지 0.8초에 듣기 시작, 자막 4번 갱신, 말이 끝나고 약 2.3초(정적 대기 1.1초 포함) 만에
+  프롬프트가 자동 전송됐다.
+- 남은 것: 말을 끊고 들어오기(barge-in — 읽는 동안에도 듣기)는 에코 제거가 확실한 환경에서만 의미가 있어 아직 없다.
+  읽기를 멈추려면 헤더의 "■ Stop reading".
 
 ## P2 구현 — 음성 알림 (웹)
 
