@@ -30,7 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function scenarioPayload(wsId, agentId, name) {
   return {
     workspace_id: wsId,
-    target_agent_id: agentId,
+    target_runtime: agentId,
     name,
     qa_driver: 'http-api',
     steps: [{ idx: 0, action: `noop for ${name}`, expect: 'ok' }],
@@ -54,7 +54,7 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   const names = ['batch-s0', 'batch-s1', 'batch-s2'];
   const scenarios = [];
   for (const n of names) {
-    const sc = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.id, n));
+    const sc = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.runtime_spec, n));
     assert.ok(!sc?.isError && sc.id, `create ${n} failed: ${JSON.stringify(sc)}`);
     scenarios.push(sc);
   }

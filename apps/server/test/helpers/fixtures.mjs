@@ -32,7 +32,8 @@ export function runtimeHostKeyForAgent(agentId) {
  */
 // P4c-4: Agent 테이블 없음 — synthetic child id → host 매핑은 createAgent 가
 // 채운다. 매핑에 없는 id 면 새 Host + 키를 만들어 매핑한다.
-export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '', hostId = null } = {}) {
+export async function registerRuntimeHostKeyFor(app, getDataSourceToken, agentId, { workspaceId = '', hostId = null, runtime = null } = {}) {
+  if (runtime) { runtimeSpecsById.set(agentId, runtime); hostId ||= runtime.manager_agent_id; }
   if (!agentId || runtimeHostKeysByAgent.has(agentId)) return runtimeHostKeysByAgent.get(agentId) ?? null;
   const ds = app.get(getDataSourceToken());
   const host = (hostId && await ds.getRepository('RuntimeHost').findOneBy({ id: hostId })) || await ds.getRepository('RuntimeHost').save(
@@ -153,6 +154,7 @@ export async function createAgent(
   }
   let id = randomUUID();
   let managerAgentId = null;
+  let executionSpec = null;
   if (hosted) {
     const host = await ds.getRepository('RuntimeHost').save(
       ds.getRepository('RuntimeHost').create({
@@ -170,6 +172,7 @@ export async function createAgent(
       role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
       runtime_config: { strategy: 'single', permission_mode: 'strict' },
     };
+    executionSpec = spec;
     id = runtime ? runtimeIdentityKey(spec) : host.id;
     if (runtime) runtimeSpecsById.set(id, spec);
     const hostKey = await createApiKey(app, getDataSourceToken, null, {
@@ -196,7 +199,7 @@ export async function createAgent(
     workspace_id: workspaceId,
     role_prompt: rolePrompt || `You are ${name}. Reply TEST_OK.`,
     manager_agent_id: managerAgentId,
-    runtime_spec: runtimeSpecsById.get(id) || null,
+    runtime_spec: executionSpec,
     runtime_config: managerAgentId
       ? { strategy: 'single', permission_mode: 'strict' }
       : null,

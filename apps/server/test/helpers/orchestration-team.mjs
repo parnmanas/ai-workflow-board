@@ -99,16 +99,16 @@ export async function buildTeam(app, getDataSourceToken, teams, opts) {
 
   // Every provisioned identity needs a Runtime Host key registered before a
   // VirtualAgent can subscribe as it.
-  await registerRuntimeHostKeyFor(app, getDataSourceToken, view.orchestrator_agent_id, { workspaceId });
+  await registerRuntimeHostKeyFor(app, getDataSourceToken, view.orchestrator_agent_id, { workspaceId, hostId: host.id, runtime: view.orchestrator_runtime });
   for (const m of view.members) {
-    await registerRuntimeHostKeyFor(app, getDataSourceToken, m.agent_id, { workspaceId });
+    await registerRuntimeHostKeyFor(app, getDataSourceToken, m.agent_id, { workspaceId, hostId: m.runtime.manager_agent_id, runtime: m.runtime });
   }
 
   // P4c-4: 이름은 팀 투영이 합성한 agent_name/orchestrator_name 이다 (Agent 행 없음).
-  const orchestrator = { id: view.orchestrator_agent_id, name: view.orchestrator_name };
+  const orchestrator = { id: view.orchestrator_agent_id, name: view.orchestrator_name, runtime_spec: view.orchestrator_runtime };
   const memberRows = [];
   for (const m of view.members) {
-    memberRows.push({ id: m.agent_id, name: m.agent_name, role_label: m.role_label });
+    memberRows.push({ id: m.agent_id, name: m.agent_name, role_label: m.role_label, runtime_spec: m.runtime });
   }
 
   return {

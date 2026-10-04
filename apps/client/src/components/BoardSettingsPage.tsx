@@ -946,13 +946,11 @@ interface DefaultRoleHoldersEditorProps {
 function RuntimeDefaultSection({
   roles,
   workspaceId,
-  onAddAgent,
   onAddRuntime,
 }: {
   roles: Array<{ slug: string; name: string }>;
 
   workspaceId: string;
-  onAddAgent(slug: string, id: string): void;
   onAddRuntime(slug: string, spec: Record<string, any>): void;
 }) {
   const [slug, setSlug] = useState(roles.some((r) => r.slug === 'assignee') ? 'assignee' : (roles[0]?.slug ?? ''));
@@ -1017,15 +1015,6 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, workspaceId, 
     return label || 'runtime';
   };
 
-  const addAgent = (slug: string, agentId: string) => {
-    if (!agentId) return;
-    setDraft((prev) => {
-      const list = prev[slug] ? [...prev[slug]] : [];
-      if (list.some((h) => h.agent_id === agentId)) return prev; // no duplicates
-      list.push({ agent_id: agentId });
-      return { ...prev, [slug]: list };
-    });
-  };
   const removeHolder = (slug: string, idx: number) => {
     setDraft((prev) => {
       const list = (prev[slug] || []).filter((_, i) => i !== idx);
@@ -1079,8 +1068,6 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, workspaceId, 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {roles.map((role) => {
           const holders = draft[role.slug] || [];
-          const takenAgentIds = new Set(holders.map((h) => h.agent_id).filter(Boolean) as string[]);
-          const available = agents.filter((a) => !takenAgentIds.has(a.id));
           return (
             <div key={role.id}>
               <label style={labelStyle}>{role.name} <span style={{ textTransform: 'none', opacity: 0.7 }}>({role.slug})</span></label>
@@ -1104,24 +1091,7 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, workspaceId, 
                     </button>
                   </span>
                 ))}
-                <select
-                  value=""
-                  onChange={(e) => { addAgent(role.slug, e.target.value); e.target.value = ''; }}
-                  style={{
-                    background: tokens.colors.surface,
-                    border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md,
-                    padding: '6px 8px',
-                    color: tokens.colors.textStrong,
-                    fontSize: 12,
-                    fontFamily: 'inherit',
-                  }}
-                >
-                  <option value="">+ Add agent…</option>
-                  {available.map((a) => (
-                    <option key={a.id} value={a.id}>{formatAgentDisplayName(a)}</option>
-                  ))}
-                </select>
+
               </div>
             </div>
           );
@@ -1136,7 +1106,6 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, workspaceId, 
         roles={roles}
 
         workspaceId={workspaceId}
-        onAddAgent={(slug, id) => addAgent(slug, id)}
         onAddRuntime={(slug, spec) => setDraft((prev) => {
           const list = prev[slug] ? [...prev[slug]] : [];
           list.push({ runtime: spec });

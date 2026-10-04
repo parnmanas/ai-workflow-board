@@ -56,7 +56,7 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-e2e' });
   // The schedule dispatches to this agent; we also subscribe to SSE as it.
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker' });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const runtimeHostKey = runtimeHostKeyForAgent(agent.id);
   assert.ok(runtimeHostKey, 'scheduled Agent must be owned by a Runtime Host fixture');
 
@@ -69,7 +69,7 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   const schedule = await svc.create({
     workspaceId: ws.id,
     name: 'e2e nightly task',
-    targetAgentId: agent.id,
+    targetRuntime: agent.runtime_spec,
     taskPrompt: TASK_PROMPT,
     intervalMs: 30 * 60_000,
     createdBy: 'e2e',

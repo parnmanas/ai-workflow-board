@@ -1,3 +1,4 @@
+import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 // Workspace scheduler REST surface (ticket 1927ed4a — client UI backend) —
 // exercises the create → get → run-now → update → list → delete round-trip over
 // the HTTP controller that backs the Workspace Settings editor. The MCP tools
@@ -37,7 +38,7 @@ test('Workspace schedule REST: create → get → run-now → update → list �
   const { getDataSourceToken, AuthService } = modules;
 
   const { ws } = await setupKanbanScene(app, getDataSourceToken, { workspaceName: 'ws-sched-rest' });
-  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker' });
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const admin = await createUser(app, getDataSourceToken, { name: 'sched-admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
 
@@ -51,14 +52,14 @@ test('Workspace schedule REST: create → get → run-now → update → list �
   const created = await client.req('POST', '', {
     workspace_id: ws.id,
     name: 'nightly housekeeping',
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     task_prompt: 'Run the nightly housekeeping checklist.',
     interval_ms: 3_600_000,
   });
   assert.equal(created.status, 201, `create should 201: ${JSON.stringify(created.json)}`);
   const sched = created.json;
   assert.ok(sched.id, 'created schedule has an id');
-  assert.equal(sched.target_agent_id, agent.id, 'snake_case target_agent_id mapped through');
+  assert.equal(sched.target_agent_id, runtimeIdentityKey(agent.runtime_spec), 'target key is derived from the runtime');
   assert.equal(sched.task_prompt, 'Run the nightly housekeeping checklist.');
   assert.equal(sched.interval_ms, 3_600_000);
   assert.equal(sched.cron, null);
@@ -70,7 +71,7 @@ test('Workspace schedule REST: create → get → run-now → update → list �
 
   step('cadence validation: both cron + interval → 400');
   const bothErr = await client.req('POST', '', {
-    workspace_id: ws.id, name: 'bad', target_agent_id: agent.id, task_prompt: 'x',
+    workspace_id: ws.id, name: 'bad', target_runtime: agent.runtime_spec, task_prompt: 'x',
     cron: '0 3 * * *', interval_ms: 5000,
   });
   assert.equal(bothErr.status, 400, 'both cadences must 400');

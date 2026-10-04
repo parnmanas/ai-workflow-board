@@ -664,6 +664,7 @@ export const api = {
     title: string; description?: string; priority?: string; status?: string;
     assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
     labels?: string[]; channel_ids?: string[];
+    role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }>;
   }) =>
     request<any>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
 

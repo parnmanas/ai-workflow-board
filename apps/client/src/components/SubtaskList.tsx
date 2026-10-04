@@ -1,17 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { Droppable } from '@hello-pangea/dnd';
-import { Ticket, RuntimeParticipant } from '../types';
+import { Ticket } from '../types';
 import { tokens } from '../tokens';
-import { formatAgentDisplayName } from '../utils/agentName';
+import DeclareRuntimeSection from './runtime/DeclareRuntimeSection';
 
 interface ChildTicketListProps {
   parentTicket: Ticket;
-  agents: RuntimeParticipant[];
   maxDepth: number; // max allowed depth for this parent's children
   // Optional flat list of root tickets on the board, used by the
   // "Link existing" picker. Self and current children are filtered out.
   boardTickets?: Ticket[];
-  onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => void;
+  onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }> }) => void;
   onUpdateChild: (childId: string, data: Record<string, any>) => void;
   onDeleteChild: (childId: string) => void;
   // Adopt an existing ticket as a subtask of this parent.
@@ -34,12 +33,13 @@ const statusColors: Record<string, string> = {
 
 type AddMode = null | 'new' | 'link';
 
-export default function ChildTicketList({ parentTicket, agents, maxDepth, boardTickets, onCreateChild, onUpdateChild, onDeleteChild, onReparentChild, onSelectChild }: ChildTicketListProps) {
+export default function ChildTicketList({ parentTicket, maxDepth, boardTickets, onCreateChild, onUpdateChild, onDeleteChild, onReparentChild, onSelectChild }: ChildTicketListProps) {
   const children = parentTicket.children || [];
   const [addMode, setAddMode] = useState<AddMode>(null);
   const [createForm, setCreateForm] = useState({
-    title: '', description: '', priority: 'medium', assignee: '', reporter: '',
+    title: '', description: '', priority: 'medium',
   });
+  const [assigneeRuntime, setAssigneeRuntime] = useState<Record<string, any> | null>(null);
   const [createErrors, setCreateErrors] = useState<{ title?: string; description?: string }>({});
   const [linkQuery, setLinkQuery] = useState('');
 
@@ -113,10 +113,10 @@ export default function ChildTicketList({ parentTicket, agents, maxDepth, boardT
       title: createForm.title.trim(),
       description: createForm.description.trim(),
       priority: createForm.priority,
-      assignee: createForm.assignee,
-      reporter: createForm.reporter,
+      ...(assigneeRuntime ? { role_assignments: [{ role_slug: 'assignee', runtime: assigneeRuntime }] } : {}),
     });
-    setCreateForm({ title: '', description: '', priority: 'medium', assignee: '', reporter: '' });
+    setCreateForm({ title: '', description: '', priority: 'medium' });
+    setAssigneeRuntime(null);
     setCreateErrors({});
     setAddMode(null);
   };
@@ -335,19 +335,16 @@ export default function ChildTicketList({ parentTicket, agents, maxDepth, boardT
               <div style={{ fontSize: '11px', color: tokens.colors.danger, marginTop: 2 }}>{createErrors.title}</div>
             )}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          <div>
             <select value={createForm.priority} onChange={e => setCreateForm({ ...createForm, priority: e.target.value })} style={inputStyle}>
               <option value="low">Low</option>
               <option value="medium">Medium</option>
               <option value="high">High</option>
               <option value="critical">Critical</option>
             </select>
-            <select value={createForm.assignee} onChange={e => setCreateForm({ ...createForm, assignee: e.target.value })} style={inputStyle}>
-              <option value="">Unassigned</option>
-              {/* Agent Manager(type='manager')는 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김. */}
-              {agents.filter(a => a.is_active && a.type !== 'manager').map(a => <option key={a.id} value={a.name}>{formatAgentDisplayName(a)}</option>)}
-            </select>
           </div>
+          {parentTicket.workspace_id && <DeclareRuntimeSection workspaceId={parentTicket.workspace_id} onResolved={setAssigneeRuntime} />}
+          {assigneeRuntime && <div style={{ fontSize: 12 }}>Assignee: {assigneeRuntime.label || assigneeRuntime.cli} <button type="button" onClick={() => setAssigneeRuntime(null)}>Clear</button></div>}
           <div>
             <textarea
               value={createForm.description}
@@ -366,7 +363,7 @@ export default function ChildTicketList({ parentTicket, agents, maxDepth, boardT
           </div>
           <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
             <button
-              onClick={() => { setAddMode(null); setCreateErrors({}); setCreateForm({ title: '', description: '', priority: 'medium', assignee: '', reporter: '' }); }}
+              onClick={() => { setAddMode(null); setCreateErrors({}); setCreateForm({ title: '', description: '', priority: 'medium' }); setAssigneeRuntime(null); }}
               style={{
                 background: 'transparent', color: tokens.colors.textSecondary, border: `1px solid ${tokens.colors.border}`,
                 borderRadius: tokens.radii.md, padding: '4px 10px', fontSize: '12px', cursor: 'pointer',

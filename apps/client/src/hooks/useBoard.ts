@@ -224,7 +224,7 @@ export function useBoard(boardId: string = '') {
     await withLocalAction(() => api.setTicketRoleAssignment(ticketId, roleId, holder));
   };
 
-  const createChildTicket = async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => {
+  const createChildTicket = async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string; role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }> }) => {
     await withLocalAction(() => api.createChildTicket(parentId, data));
   };
 

@@ -198,6 +198,7 @@ export interface QaOnFailureTicketConfig {
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   // Ticket-lifecycle dedupe (ticket 64b9cbaf). DEFAULT is 'per_open_ticket'.
   // 'per_open_ticket'— (DEFAULT) if an open qa-failure fix ticket for this

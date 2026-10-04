@@ -76,6 +76,7 @@ function normalizeOnFailureTicket(cfg: any): SecurityOnFailureTicketConfig | nul
   if (cfg.column_name != null && String(cfg.column_name).trim()) out.column_name = String(cfg.column_name).trim();
   if (VALID_PRIORITIES.includes(cfg.priority)) out.priority = cfg.priority;
   if (cfg.assignee_id != null && String(cfg.assignee_id).trim()) out.assignee_id = String(cfg.assignee_id).trim();
+  if (cfg.assignee_runtime) out.assignee_runtime = normalizeRuntimeSpec(cfg.assignee_runtime, 'Failure ticket runtime');
   if (Array.isArray(cfg.labels)) out.labels = cfg.labels.map((l: any) => String(l)).filter(Boolean);
   out.min_severity = VALID_SEVERITIES.includes(cfg.min_severity) ? cfg.min_severity : 'high';
   out.dedupe = cfg.dedupe === 'per_open_ticket' ? 'per_open_ticket' : 'per_run';

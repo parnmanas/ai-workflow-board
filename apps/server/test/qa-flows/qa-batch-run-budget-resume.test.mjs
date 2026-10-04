@@ -46,7 +46,7 @@ process.env.PORT = process.env.QA_BATCH_RUN_BUDGET_RESUME_PORT || '0';
 function scenarioPayload(wsId, agentId, name) {
   return {
     workspace_id: wsId,
-    target_agent_id: agentId,
+    target_runtime: agentId,
     name,
     qa_driver: 'http-api',
     steps: [{ idx: 0, action: `noop for ${name}`, expect: 'ok' }],
@@ -78,8 +78,8 @@ test('QA schedule tick resumes a batch wedged on a transient run-budget rejectio
   t.after(() => { void mcp.close().catch(() => {}); });
 
   step('Create 2 QA scenarios for the schedule');
-  const s0 = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.id, 'resume-s0'));
-  const s1 = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.id, 'resume-s1'));
+  const s0 = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.runtime_spec, 'resume-s0'));
+  const s1 = await mcp.callTool('create_qa_scenario', scenarioPayload(ws.id, qaAgent.runtime_spec, 'resume-s1'));
   assert.ok(!s0?.isError && s0.id, `create s0 failed: ${JSON.stringify(s0)}`);
   assert.ok(!s1?.isError && s1.id, `create s1 failed: ${JSON.stringify(s1)}`);
 

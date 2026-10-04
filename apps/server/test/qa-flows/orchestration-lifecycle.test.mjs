@@ -1109,7 +1109,7 @@ test('Orchestration: 완료 조건 게이트가 완료를 차단하고, step은 
     workspace_id: ws.id,
     name: 'Notify on mission end',
     prompt: 'The mission ended — post a summary.',
-    target_agent_id: member.id,
+    target_runtimes: [member.runtime_spec],
   });
 
   step('구조화된 완료 조건, 커스텀 workspace 루트, post_actions 2개(실재/댕글링)를 갖는 미션');
@@ -1241,7 +1241,7 @@ test('Orchestration: post-action 크래시 복구 — reaper가 미처리 pendin
     workspace_id: ws.id,
     name: 'Crash-recovery notify',
     prompt: 'Recovered after a simulated crash.',
-    target_agent_id: member.id,
+    target_runtimes: [member.runtime_spec],
   });
 
 
@@ -1331,7 +1331,7 @@ test('Orchestration: post-action 크래시 복구 — dispatch() 성공 직후·
     workspace_id: ws.id,
     name: 'Crash-linkage notify',
     prompt: 'Already dispatched before the simulated crash.',
-    target_agent_id: member.id,
+    target_runtimes: [member.runtime_spec],
   });
 
 
@@ -1426,7 +1426,7 @@ test('Orchestration: post-action 리퍼가 최신순 상한을 넘는 오래된 
     workspace_id: ws.id,
     name: 'Starvation-regression notify',
     prompt: 'Old mission, should still be recovered.',
-    target_agent_id: member.id,
+    target_runtimes: [member.runtime_spec],
   });
 
 

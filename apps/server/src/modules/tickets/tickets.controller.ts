@@ -482,6 +482,11 @@ export class TicketsController {
       });
     }
 
+    if (Array.isArray(body.role_assignments) && body.role_assignments.length) {
+      await this._applyRoleAssignments(child.id, child.workspace_id, body.role_assignments);
+      Object.assign(child, await this.ticketRepo.findOneByOrFail({ id: child.id }));
+    }
+
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: child.id, action: 'created',
       ticket_id: parent.depth === 0 ? parentId : parent.parent_id || parentId,

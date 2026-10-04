@@ -90,6 +90,15 @@ test('prerequisite completion cannot redispatch a linked chat duplicate', async 
   assert.equal(duplicate.pending_user_action, false);
   const persistedDuplicate = await ticketRepo.findOne({ where: { id: duplicate.id } });
   assert.equal(persistedDuplicate.canonical_ticket_id, canonical.id);
+  const childResponse = await fetch(`http://localhost:${port}/api/tickets/${canonical.id}/children`, {
+    method: 'POST', headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Runtime child', description: 'Uses the copied template settings', role_assignments: [{ role_slug: 'assignee', runtime }] }),
+  });
+  assert.equal(childResponse.status, 201, await childResponse.clone().text());
+  const child = await childResponse.json();
+  const childHolder = await ds.getRepository('TicketRoleAssignment').findOne({ where: { ticket_id: child.id, holder_key: `runtime:${runtimeIdentityKey(runtime)}` } });
+  assert.equal(childHolder?.runtime_spec?.working_dir, runtime.working_dir);
+  assert.equal(childHolder?.agent_id, null);
   const decisionRepo = ds.getRepository('TicketDuplicateDecision');
   assert.equal(await decisionRepo.count({
     where: { report_ticket_id: duplicate.id, candidate_ticket_id: canonical.id, outcome: 'auto_linked' },

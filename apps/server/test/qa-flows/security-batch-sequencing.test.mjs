@@ -26,7 +26,7 @@ process.env.PORT = process.env.SECURITY_BATCH_SEQ_PORT || '0';
 function profilePayload(wsId, agentId, name) {
   return {
     workspace_id: wsId,
-    target_agent_id: agentId,
+    target_runtime: agentId,
     name,
     scan_driver: 'code-review',
     scope_mode: 'full',
@@ -51,7 +51,7 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   const names = ['batch-p0', 'batch-p1', 'batch-p2'];
   const profiles = [];
   for (const n of names) {
-    const p = await mcp.callTool('create_security_profile', profilePayload(ws.id, agent.id, n));
+    const p = await mcp.callTool('create_security_profile', profilePayload(ws.id, agent.runtime_spec, n));
     assert.ok(!p?.isError && p.id, `create ${n} failed: ${JSON.stringify(p)}`);
     profiles.push(p);
   }

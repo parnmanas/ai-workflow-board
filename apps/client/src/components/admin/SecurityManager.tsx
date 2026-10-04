@@ -1205,7 +1205,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
   const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
   const [oftPriority, setOftPriority] = useState<SecurityOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
   const [oftMinSeverity, setOftMinSeverity] = useState<SecuritySeverity>(oft?.min_severity ?? 'high');
-  const [oftAssigneeId, setOftAssigneeId] = useState(oft?.assignee_id ?? '');
+  const [oftRuntime, setOftRuntime] = useState<Record<string, any> | null>(oft?.assignee_runtime ?? null);
   const [oftColumnId, setOftColumnId] = useState(oft?.column_id ?? '');
   const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
   const [oftDedupe, setOftDedupe] = useState<SecurityOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
@@ -1227,7 +1227,7 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
           priority: oftPriority,
           min_severity: oftMinSeverity,
           dedupe: oftDedupe,
-          ...(oftAssigneeId ? { assignee_id: oftAssigneeId } : {}),
+          ...(oftRuntime ? { assignee_runtime: oftRuntime } : {}),
           ...(oftColumnId.trim() ? { column_id: oftColumnId.trim() } : {}),
           ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
           ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
@@ -1385,13 +1385,10 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
                   />
                 </div>
               </div>
-              <Select
-                label="담당자 (assignee — 비우면 프로파일 타깃 에이전트)"
-                placeholder="— 프로파일 타깃 에이전트 사용 —"
-                value={oftAssigneeId}
-                options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-                onChange={(e) => setOftAssigneeId((e.target as HTMLSelectElement).value)}
-              />
+              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 현재 타깃 설정 사용)</div>
+              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftRuntime} onResolved={setOftRuntime} />
+              {oftRuntime && <div style={{ fontSize: 12 }}>{oftRuntime.label || oftRuntime.cli} <button type="button" onClick={() => setOftRuntime(null)}>초기화</button></div>}
+
               <Input label="컬럼 ID (권장, 이름 변경에 안전)" value={oftColumnId} onChange={(e) => setOftColumnId((e.target as HTMLInputElement).value)} />
               <Input label="컬럼 이름 (호환용, 비우면 첫 active 컬럼)" value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
               <Input label="Board ID (비우면 run/프로파일 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />

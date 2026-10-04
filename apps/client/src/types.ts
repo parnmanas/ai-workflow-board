@@ -529,6 +529,7 @@ export interface QaOnFailureTicketConfig {
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   dedupe?: 'per_run' | 'per_open_ticket';
   title_template?: string;
@@ -832,6 +833,7 @@ export interface SecurityOnFailureTicketConfig {
   column_name?: string;
   priority?: 'low' | 'medium' | 'high' | 'critical';
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   /** Severity gate (default 'high'). critical > high > medium > low > info. */
   min_severity?: SecuritySeverity;
@@ -1215,6 +1217,7 @@ export interface HandoffPipeline {
 }
 
 export interface Ticket {
+  workspace_id?: string;
   id: string; // GUID
   column_id: string | null; // GUID — references BoardColumn.id, null for child tickets
   parent_id: string | null; // GUID — references parent Ticket.id

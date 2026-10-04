@@ -48,7 +48,7 @@ interface TicketPanelProps {
   // button can show "Saving…" until the round trip completes.
   onUpdate: (id: string, data: Record<string, any>) => void | Promise<void>;
   onDelete: (id: string) => void;
-  onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => void;
+  onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string; role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }> }) => void;
   onDeleteChild: (childId: string) => void;
   // Adopt an existing ticket as a subtask of `parentId`. Distinct from
   // onCreateChild (which makes a new ticket).
@@ -3703,7 +3703,6 @@ export default function TicketPanel({
             {/* Child Tickets (Subtasks) */}
             <ChildTicketList
               parentTicket={activeTicket}
-              agents={agents}
               maxDepth={2}
               boardTickets={boardTickets}
               onCreateChild={onCreateChild}

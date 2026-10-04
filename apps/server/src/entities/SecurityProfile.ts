@@ -214,6 +214,7 @@ export interface SecurityOnFailureTicketConfig {
   priority?: 'low' | 'medium' | 'high' | 'critical';
   /** Assignee for the fix ticket; falls back to the profile's target agent. */
   assignee_id?: string;
+  assignee_runtime?: Record<string, any>;
   labels?: string[];
   /**
    * Severity gate. A ticket is filed only if the run has a finding whose

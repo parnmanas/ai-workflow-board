@@ -1171,7 +1171,7 @@ export class AgentManagerController {
       const callerHost = (req as any).currentHostId
         ?? (req as any).apiKey?.host_id
         ?? null;
-      if (!callerHost) {
+      if (!callerHost || (req as any).currentRuntimeKey) {
         return res.status(403).json({ error: 'suppressed outcome requires a manager agent' });
       }
     }

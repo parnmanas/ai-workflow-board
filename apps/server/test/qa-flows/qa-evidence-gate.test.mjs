@@ -27,7 +27,7 @@ process.env.PORT = process.env.QA_EVIDENCE_GATE_PORT || '0';
 async function makeScenario(mcp, seedKey, { ws, board, agent, seed }) {
   const [payload] = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     board_id: board.id,
     only: [seedKey],
   });

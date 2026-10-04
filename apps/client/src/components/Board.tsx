@@ -335,7 +335,7 @@ export default function Board() {
     return true;
   }, [confirm, wrapAction, deleteTicket]);
 
-  const handleCreateChild = useCallback(async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string }) => {
+  const handleCreateChild = useCallback(async (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string; role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }> }) => {
     await wrapAction(() => createChildTicket(parentId, data), 'Subtask created');
   }, [wrapAction, createChildTicket]);
 

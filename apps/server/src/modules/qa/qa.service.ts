@@ -61,6 +61,7 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
     column_name: input.column_name ? String(input.column_name) : undefined,
     priority,
     assignee_id: input.assignee_id ? String(input.assignee_id) : undefined,
+    assignee_runtime: input.assignee_runtime ? normalizeRuntimeSpec(input.assignee_runtime, 'Failure ticket runtime') : undefined,
     labels,
     dedupe,
     title_template: input.title_template ? String(input.title_template) : undefined,

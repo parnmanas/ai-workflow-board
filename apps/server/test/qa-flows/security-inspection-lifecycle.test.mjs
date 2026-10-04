@@ -36,7 +36,7 @@ test('security inspection: profile CRUD + run roundtrip + incremental baseline a
     workspace_id: ws.id,
     name: 'AWB self code-review',
     description: 'baseline inspection',
-    target_agent_id: agent.id,
+    target_runtime: agent.runtime_spec,
     scan_driver: 'code-review',
     scope_mode: 'incremental',
     checklist: [

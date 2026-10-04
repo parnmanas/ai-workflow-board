@@ -1,3 +1,4 @@
+import { runtimeIdentityKey } from '../../dist/common/runtime-spec.js';
 // QA flow: scenario-QA run lifecycle (QaScenario / QaRun).
 //
 // The scenario-QA feature shipped with the full CRUD + run surface but no
@@ -62,7 +63,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
     'seed catalogue should ship a meaningful set');
   const payloads = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
-    target_agent_id: qaAgent.id,
+    target_runtime: qaAgent.runtime_spec,
     board_id: board.id,
     only: ['ticket-lifecycle'],
   });
@@ -77,7 +78,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   assert.ok(!scenario?.isError, `create_qa_scenario failed: ${JSON.stringify(scenario)}`);
   assert.ok(scenario.id, 'scenario has an id');
   assert.equal(scenario.steps.length, createArgs.steps.length, 'steps round-trip intact');
-  assert.equal(scenario.target_agent_id, qaAgent.id);
+  assert.equal(scenario.target_agent_id, runtimeIdentityKey(qaAgent.runtime_spec));
 
   // ── prompt determinism (qa-prompt regression) ────────────────────────────────
   step('renderQaRunPrompt is deterministic for identical inputs');
@@ -165,7 +166,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   step('Representative scenarios each run start → record → complete');
   const breadth = seed.buildScenarioCreatePayloads({
     workspace_id: ws.id,
-    target_agent_id: qaAgent.id,
+    target_runtime: qaAgent.runtime_spec,
     board_id: board.id,
     only: ['chat-room-messaging', 'benchmark-lifecycle'],
   });

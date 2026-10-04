@@ -33,14 +33,16 @@ export class AgentAuthGuard implements CanActivate {
         const apiKey = dbResult.apiKey;
         // Paired Hosts supervise executions across workspaces; ordinary keys
         // retain their workspace scope.
-        const isManagerKey = !!apiKey.host_id;
+        const runtimeKey = apiKey.host_id ? /^runtime:.*:(rt-[0-9a-f]{16})$/.exec(apiKey.name || '')?.[1] : undefined;
+        const isManagerKey = !!apiKey.host_id && !runtimeKey;
         // Inject workspace_id from the API key record for workspace-scoped queries
         request.currentWorkspaceId = isManagerKey ? null : apiKey.workspace_id || null;
         // Also expose the resolved ApiKey row + caller identity so
         // downstream controllers (e.g. fs-browser response receiver) can
         // identify WHICH host/agent is calling without a second lookup.
         request.apiKey = apiKey;
-        request.currentAgentId = apiKey.host_id || null;
+        request.currentAgentId = runtimeKey || apiKey.host_id || null;
+        request.currentRuntimeKey = runtimeKey || null;
         request.currentHostId = apiKey.host_id || null;
         return true;
       }
