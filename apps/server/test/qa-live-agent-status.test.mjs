@@ -18,7 +18,7 @@
 // This guard proves: (1) _emit merges qaTasks into the wire active_tasks tagged
 // kind:'qa'; (2) qa_task_changed add/remove drives a live agent_status with the
 // QA entry gained/dropped; (3) the producer (qa-run.service) + consumer wiring
-// (agent-status.service) + client wholesale-trust are all present.
+// (agent-status.service) remain wired. Retired Agent UI is covered by client Hosts tests.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +29,6 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(__dirname, '..', 'src');
 const DIST = path.join(__dirname, '..', 'dist');
-const CLIENT_SRC = path.join(__dirname, '..', '..', 'client', 'src');
 
 async function loadDist(relParts) {
   const url = 'file://' + path.join(DIST, ...relParts);
@@ -186,14 +185,4 @@ test('static: AgentStatusService consumes qa_task_changed and merges QA into _em
   assert.match(code, /removeListener\(\s*'qa_task_changed'/, 'must detach the listener on destroy');
   assert.match(code, /_qaTaskList\(status\.agent_id\)/, '_emit must merge the QA task list');
   assert.ok(code.includes("register('agentStatus.qaTasks'"), 'must register the qaTasks size gauge');
-});
-
-test('static: client trusts SSE active_tasks wholesale (no QA re-attach append)', () => {
-  // P4c-4: AgentsPage/AgentDetailModal 삭제 — 후계 표면은 AgentManagerPage 다.
-  const page = fs.readFileSync(path.join(CLIENT_SRC, 'components', 'admin', 'AgentManagerPage.tsx'), 'utf8');
-  // must forward payload.active_tasks (it previously dropped it).
-  assert.match(page, /if \(agent\.active_tasks\?\.length\) return agent\.active_tasks/, 'AgentManagerPage must forward payload.active_tasks');
-  // must not re-append preserved kind:'qa' entries — that append can
-  // never let SSE remove a completed QA run.
-  assert.doesNotMatch(page, /filter\(\(t\)\s*=>\s*t\.kind === 'qa'\)/, 'AgentManagerPage must not re-attach kind:qa (wholesale trust)');
 });
