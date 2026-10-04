@@ -8,8 +8,10 @@
 //   5. 공급자가 꺼져 있거나 키가 틀리면 409 + 사유 — 대체 경로로 조용히 넘어가지 않는다.
 //   6. 음성 알림: 서버 이벤트(세션 턴 실패)가 받는 사용자의 SSE 에만 `voice_announcement` 로 가고,
 //      소리는 그 사용자만 /api/voice/announcements/:id/audio 로 받는다.
-//   7. Operator 지정: admin 만 지정·해제하고, 필수 셋(manager_id · cli · session_id)이 없으면 400.
+//   7. Operators: 이름을 붙여 여러 개 등록한다. admin 만 등록·수정·해제하고, 필수 셋(manager_id · cli ·
+//      session_id)과 이름이 없으면 400, 같은 세션·겹치는 이름/별칭은 409.
 //   8. 음성 키(secret)만 바꿔도 설정 캐시가 바로 버려진다.
+//   9. 웨이크워드(이름 부르기) 청취는 자체 호스팅 STT 에서만 받고, operator 이름은 언제나 용어집에 실린다.
 //
 // 네트워크 없이: OpenAI 호환 공급자의 base_url 을 이 테스트가 띄운 가짜 서버로 둔다.
 // 실행: node --test --test-force-exit test/voice-http.test.mjs (dist 필요)
@@ -169,24 +171,36 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   const notYours = await call(`${base}/api/voice/announcements/${announcement.id}/audio`, { headers: plainAuth });
   assert.equal(notYours.status, 403, 'voice.use is required before ownership is even checked');
 
-  // 7. Operator 지정
-  assert.deepEqual((await call(`${base}/api/voice/operator`, { headers: adminAuth })).body, { operator: null });
-  const badPin = await call(`${base}/api/voice/operator`, { method: 'PUT', headers: { ...adminAuth, ...json }, body: JSON.stringify({ manager_id: 'host-1' }) });
-  assert.equal(badPin.status, 400);
-  const pinned = await call(`${base}/api/voice/operator`, {
-    method: 'PUT', headers: { ...adminAuth, ...json },
-    body: JSON.stringify({ manager_id: 'host-1', cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator' }),
+  // 7. Operators
+  const operatorsUrl = `${base}/api/voice/operators`;
+  const register = (body, auth = adminAuth) => call(operatorsUrl, { method: 'POST', headers: { ...auth, ...json }, body: JSON.stringify(body) });
+  const patchOperator = (id, body, auth = adminAuth) => call(`${operatorsUrl}/${id}`, { method: 'PATCH', headers: { ...auth, ...json }, body: JSON.stringify(body) });
+  assert.deepEqual((await call(operatorsUrl, { headers: adminAuth })).body, { operators: [] });
+  assert.equal((await register({ name: 'Jarvis', manager_id: 'host-1' })).body.error, 'operator_session_required');
+  assert.equal((await register({ name: ' ', manager_id: 'host-1', cli: 'claude', session_id: 's1' })).body.error, 'operator_name_required');
+  const jarvis = await register({
+    name: 'Jarvis', aliases: '자비스, 쟈비스, jarvis', manager_id: 'host-1', cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator',
   });
-  assert.equal(pinned.status, 200);
-  assert.equal(pinned.body.operator.pinned_by, admin.id);
-  const readBack = await call(`${base}/api/voice/operator`, { headers: adminAuth });
-  assert.deepEqual(
-    { ...readBack.body.operator, pinned_at: 'x' },
-    { manager_id: 'host-1', cli: 'claude', session_id: 's1', cwd: '/home/parn/awb-operator', title: 'Operator', pinned_at: 'x', pinned_by: admin.id },
-  );
-  assert.equal((await call(`${base}/api/voice/operator`, { method: 'PUT', headers: { ...plainAuth, ...json }, body: '{}' })).status, 403);
-  assert.deepEqual((await call(`${base}/api/voice/operator`, { method: 'DELETE', headers: adminAuth })).body, { operator: null });
-  assert.deepEqual((await call(`${base}/api/voice/operator`, { headers: adminAuth })).body, { operator: null });
+  assert.equal(jarvis.status, 201, jarvis.buf.toString());
+  assert.equal(jarvis.body.operator.created_by, admin.id);
+  assert.deepEqual(jarvis.body.operator.aliases, ['자비스', '쟈비스'], 'an alias equal to the name is dropped');
+  const friday = await register({ name: 'Friday', manager_id: 'host-2', cli: 'codex', session_id: 's2' });
+  assert.equal(friday.status, 201);
+  const sameSession = await register({ name: 'Other', manager_id: 'host-1', cli: 'claude', session_id: 's1' });
+  assert.deepEqual([sameSession.status, sameSession.body.error], [409, 'operator_session_taken']);
+  const sameName = await register({ name: 'JAR VIS', manager_id: 'host-3', cli: 'claude', session_id: 's3' });
+  assert.deepEqual([sameName.status, sameName.body.error], [409, 'operator_name_taken'], 'case and spaces do not make a new name');
+  const aliasClash = await patchOperator(friday.body.operator.id, { aliases: ['자비스'] });
+  assert.deepEqual([aliasClash.status, aliasClash.body.error], [409, 'operator_name_taken'], 'an alias may not call another operator');
+  const renamed = await patchOperator(friday.body.operator.id, { name: '프라이데이', aliases: ['Friday'] });
+  assert.equal(renamed.status, 200, renamed.buf.toString());
+  assert.deepEqual([renamed.body.operator.name, renamed.body.operator.aliases, renamed.body.operator.session_id], ['프라이데이', ['Friday'], 's2']);
+  assert.equal((await patchOperator('nope', { name: 'x' })).status, 404);
+  assert.equal((await register({ name: 'Mine', manager_id: 'h', cli: 'claude', session_id: 'x' }, plainAuth)).status, 403);
+  assert.equal((await patchOperator(friday.body.operator.id, { name: 'x' }, plainAuth)).status, 403);
+  assert.equal((await call(`${operatorsUrl}/${friday.body.operator.id}`, { method: 'DELETE', headers: plainAuth })).status, 403);
+  const listed = await call(operatorsUrl, { headers: adminAuth });
+  assert.deepEqual(listed.body.operators.map((op) => op.name), ['Jarvis', '프라이데이']);
 
   // 8. 키(secret)만 바꿔도 곧바로 반영 — OpenAI 키를 지우면 OpenAI 본가 base_url 에서는 준비 안 됨이 된다.
   await call(`${base}/api/admin/settings`, {
@@ -211,4 +225,29 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   });
   assert.equal(unknown.status, 409);
   assert.equal(unknown.body.error, 'voice_tts_unknown_provider');
+
+  // 9. 웨이크워드 — 상시 청취는 자체 호스팅 STT 에서만. 클라우드 엔진이면 이유와 함께 거절한다.
+  const wakeClip = { method: 'POST', headers: { ...adminAuth, 'Content-Type': 'audio/wav' }, body: Buffer.from('RIFF-wake') };
+  const wakeOnCloud = await call(`${base}/api/voice/transcribe?purpose=wake`, wakeClip);
+  assert.deepEqual([wakeOnCloud.status, wakeOnCloud.body.error], [409, 'voice_wake_needs_self_hosted']);
+  config = await call(`${base}/api/voice/config`, { headers: adminAuth });
+  assert.equal(config.body.wake.ready, false);
+  assert.match(config.body.wake.error, /self-hosted/);
+  await call(`${base}/api/admin/settings`, {
+    method: 'PATCH', headers: { ...adminAuth, ...json },
+    body: JSON.stringify({ settings: { 'voice.stt.provider': 'local', 'voice.local.base_url': fake.url } }),
+  });
+  config = await call(`${base}/api/voice/config`, { headers: adminAuth });
+  assert.deepEqual(config.body.wake, { ready: true, error: null });
+  fake.seen.length = 0;
+  const heard = await call(`${base}/api/voice/transcribe?purpose=wake`, wakeClip);
+  assert.equal(heard.status, 200, heard.buf.toString());
+  assert.equal(heard.body.provider, 'local');
+  const wakeUpstream = fake.seen.find((x) => x.url === '/v1/audio/transcriptions');
+  assert.ok(
+    wakeUpstream.body.includes(Buffer.from('AWB, rolf, Jarvis, 자비스, 쟈비스, 프라이데이, Friday.')),
+    'operator names and aliases ride the vocabulary so the engine spells them as registered',
+  );
+  const removed = await call(`${operatorsUrl}/${jarvis.body.operator.id}`, { method: 'DELETE', headers: adminAuth });
+  assert.deepEqual(removed.body.operators.map((op) => op.name), ['프라이데이']);
 });

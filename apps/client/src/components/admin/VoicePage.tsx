@@ -1,9 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
+import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
+import { useAgentSessionsNav } from '../../hooks/useAgentSessionsNav';
 import { tokens } from '../../tokens';
-import type { VoiceConfigView, VoiceOptionView, VoiceTranscript } from '../../types';
+import type { VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript } from '../../types';
 import { loadVoiceConfig } from '../../voice/useVoice';
+import { useVoiceOperators } from '../../voice/operator';
+import OperatorDialog from '../../voice/OperatorDialog';
+import { sessionPath } from '../sessions/sessionList.logic';
+import { runtimeLabel } from '../sessions/sessionTranscript.logic';
 import { startVoiceRecording, voiceRecordingSupported, type ActiveRecording } from '../../voice/recorder';
 import { Button, Card, Input, Select, Textarea } from '../common';
 import {
@@ -414,6 +421,51 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
 
 // ─── 페이지 ─────────────────────────────────────────────────────────────────
 
+/**
+ * Operators — 이름 붙은 세션들(docs/voice-operator.md "Operator"). 등록은 세션 화면의 ☆ Operator 에서 한다
+ * (그 세션에 지침을 보내야 해서). 여기서는 이름·별칭을 고치고, 장비에서 사라진 세션의 등록을 푼다.
+ */
+function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) {
+  const operators = useVoiceOperators(true);
+  const { currentWorkspaceId } = useAuth();
+  const { hosts } = useAgentSessionsNav(currentWorkspaceId ?? null);
+  const navigate = useNavigate();
+  const [editing, setEditing] = useState<VoiceOperator | null>(null);
+  const hostName = (id: string) => hosts.find((h) => h.manager_id === id)?.name || id.slice(0, 8);
+  return (
+    <Card padding="20px">
+      <div style={sectionTitle}>Operators</div>
+      <div style={sectionHint}>
+        Agent sessions with a name. Switch on name calling in the sidebar (OPERATORS → 👂) and say "헤이 &lt;name&gt;" or
+        "&lt;name&gt;야" — the operator wakes, keeps listening without its name, and goes back to sleep when it decides the
+        conversation is over. Register one from a session's header (☆ Operator).
+        {wake && !wake.ready && wake.error ? <><br /><span style={{ color: tokens.colors.warningLight }}>{wake.error}</span></> : null}
+      </div>
+      {operators.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: tokens.colors.textMuted }}>No operator yet — open a session and press ☆ Operator.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {operators.map((op) => (
+            <div key={op.id} data-operator-id={op.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: tokens.colors.textPrimary }}>🎙 {op.name}</div>
+                <div style={{ fontSize: 11.5, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {op.aliases.length ? `also: ${op.aliases.join(', ')} · ` : ''}{hostName(op.manager_id)} · {runtimeLabel(op.cli)}{op.title ? ` · ${op.title}` : ''}
+                </div>
+              </div>
+              {currentWorkspaceId && (
+                <Button variant="ghost" size="sm" onClick={() => navigate(sessionPath(`/ws/${currentWorkspaceId}`, op.manager_id, op.cli, op.session_id))}>Open</Button>
+              )}
+              <Button variant="secondary" size="sm" onClick={() => setEditing(op)}>Edit</Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <OperatorDialog open={!!editing} operator={editing} onClose={() => setEditing(null)} />
+    </Card>
+  );
+}
+
 export default function VoicePage() {
   const { showToast } = useToast();
   const [values, setValues] = useState<Record<string, string>>({});
@@ -510,6 +562,8 @@ export default function VoicePage() {
           <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving}>{saving ? 'Saving…' : 'Save'}</Button>
         </div>
       </Card>
+
+      <OperatorsCard wake={status?.wake} />
 
       <SttLab providers={status?.lab?.stt ?? []} />
 

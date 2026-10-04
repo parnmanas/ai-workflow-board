@@ -320,6 +320,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - 설정이 비었거나 공급자 이름이 틀리거나 키가 없으면 409 + 사유다. 다른 공급자로 조용히 넘어가는 대체 경로를 만들지 말 것.
 - 엔진은 Admin → Voice 의 lab(STT 비교 · TTS 블라인드 테스트)으로 고른다. 상세 · 로드맵(음성 알림, operator, Android 앱): `docs/voice-operator.md`.
 - 셀프호스팅 엔진(ragnar: Qwen3-ASR + Qwen3-TTS)은 `services/voice-server/`(npm 워크스페이스 밖, Python)에 있고 AWB 는 `local` 어댑터로 그 게이트웨이만 부른다 — 모델·목소리 교체는 게이트웨이/`voices.json` 쪽 일이지 AWB 코드 변경이 아니다.
+- **Operator 는 이름 붙은 Agent Session 여러 개**(`operator.sessions`, `/api/voice/operators`)이고, "헤이 <이름>" 으로 깨운다. 깨우는 말은 키워드 모델이 아니라 셀프호스팅 STT 로 받아 적은 **글자로** 확인한다(`apps/client/src/voice/wake.logic.ts`, 상시 청취는 `?purpose=wake` 로 `local` 엔진에서만). 잠들기는 화면이 낱말로 추측하지 않고 **operator 가 문맥으로 정해 답 끝에 `[[sleep]]`** 을 붙인다 — 그 표시를 바꾸면 지침(`operatorBrief`) · 화면(`splitSleepMarker`) · 서버 낭독 정리(`SLEEP_MARKER_RE`) 셋을 같이 바꿀 것. 이름만 한 발화로는 깨우지 않는다(엔진이 용어집을 읊는 메아리 때문). 상세: `docs/voice-operator.md` → "이름 부르기 · 잠들기".
 
 ## Skills (AWB 기능)
 

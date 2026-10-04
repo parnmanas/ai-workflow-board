@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { encrypt } from '../dist/services/encryption.service.js';
 import { invalidateVoiceConfig } from '../dist/modules/voice/voice-config.js';
-import { VoiceError, VoiceService } from '../dist/modules/voice/voice.service.js';
+import { VoiceError, VoiceService, isVocabularyEcho } from '../dist/modules/voice/voice.service.js';
 import { azureSsml } from '../dist/modules/voice/providers/azure.js';
 import { elevenLabsKeyterms } from '../dist/modules/voice/providers/elevenlabs.js';
 
@@ -24,7 +24,8 @@ function makeService(settings) {
     key,
     value: key.endsWith('.api_key') && value ? encrypt(value) : value,
   }));
-  const dataSource = { getRepository: () => ({ find: async () => rows }) };
+  // 설정 행은 find 로, operator 목록(operator.sessions)은 findOne 으로 읽는다 — 여기는 operator 가 없다.
+  const dataSource = { getRepository: () => ({ find: async () => rows, findOne: async () => null }) };
   const logs = [];
   const log = { warn: (...a) => logs.push(['warn', ...a]), error: (...a) => logs.push(['error', ...a]), info() {}, debug() {} };
   invalidateVoiceConfig();
@@ -307,4 +308,30 @@ test('speech requests are bounded; speakable chunks come from the shared normali
   assert.deepEqual(service.speakable('네. 끝났어요.'), ['네. 끝났어요.']);
   await assert.rejects(() => service.synthesize(''), (e) => e.code === 'voice_text_empty');
   await assert.rejects(() => service.synthesize('가'.repeat(2001)), (e) => e.status === 413);
+});
+
+test('a transcript that only recites the vocabulary is an echo of the context, not speech', () => {
+  const terms = ['AWB', 'rolf', 'Agent Manager', '자비스', 'Jarvis'];
+  assert.equal(isVocabularyEcho('자비스, Jarvis.', terms), true, 'measured: Qwen3-ASR on the first 1.5s of "헤이 자비스"');
+  assert.equal(isVocabularyEcho('AWB, rolf, Agent Manager.', terms), true);
+  assert.equal(isVocabularyEcho('롤프', terms), false, 'one word can be an answer');
+  assert.equal(isVocabularyEcho('rolf.', terms), false);
+  assert.equal(isVocabularyEcho('헤이 자비스.', terms), false, 'a real call has a word that is not a term');
+  assert.equal(isVocabularyEcho('rolf 랑 ragnar', terms), false);
+  assert.equal(isVocabularyEcho('', terms), false);
+});
+
+test('transcribe drops a vocabulary echo (the lab still sees the raw answer)', async () => {
+  const { fetchImpl } = recordFetch(() => new Response(JSON.stringify({ text: 'AWB, rolf.' }), { status: 200 }));
+  const { service } = makeService({
+    'voice.stt.provider': 'local',
+    'voice.local.base_url': 'http://ragnar:8410/v1',
+    'voice.stt.terms': 'AWB, rolf',
+  });
+  service.fetchImpl = fetchImpl;
+  const out = await service.transcribe(audio, 'audio/wav', undefined, 'wake');
+  assert.deepEqual([out.text, out.ignored], ['', 'vocabulary_echo']);
+  const lab = await service.transcribe(audio, 'audio/wav', { provider: 'local' });
+  assert.equal(lab.text, 'AWB, rolf.');
+  assert.equal(lab.ignored, undefined);
 });

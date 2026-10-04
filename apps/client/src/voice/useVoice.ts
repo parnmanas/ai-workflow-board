@@ -4,6 +4,7 @@ import type { VoiceConfigView } from '../types';
 import { speechPlayer, type SpeechState } from './speechPlayer';
 import { voiceRecordingSupported } from './recorder';
 import { startHandsFree, type HandsFreeSession } from './handsFree';
+import { wakeStore } from './wakeState';
 
 /**
  * 음성 설정은 서버가 정한다(엔진·키). 화면은 "쓸 수 있는가" 만 알면 된다 — 한 번 받아 두고 1분 동안
@@ -70,9 +71,15 @@ export type ConversationPhase =
  *   읽기가 끝나면 저절로 다시 듣는다.
  * - `liveCaptions` 면 말하는 동안 지금까지의 구간을 1.5초마다 받아써 자막으로 보여 준다(엔진을 그만큼
  *   더 부르므로 무료인 셀프호스팅 엔진에서만 켠다).
- * - 화면을 떠나면 마이크를 닫는다. 탭이 숨으면 멈췄다가 돌아오면 다시 듣는다.
+ * - 화면을 떠나면 마이크를 닫는다. 탭이 숨으면 멈췄다가 돌아오면 다시 듣는다 — 단, 이름을 불러 깨운
+ *   대화(`keepListeningWhenHidden`)는 숨어 있어도 듣는다. 켜 둔 단말을 스피커처럼 쓰는 경우다.
+ * - 켜져 있는 동안 마이크를 잡아 둔다(`wakeStore.claimMic`) — 이름 부르기의 상시 청취가 같은 마이크를
+ *   따로 열지 않게.
  */
-export function useHandsFreeConversation(onText: (text: string) => void, options: { liveCaptions: boolean }) {
+export function useHandsFreeConversation(
+  onText: (text: string) => void,
+  options: { liveCaptions: boolean; keepListeningWhenHidden?: boolean },
+) {
   const [phase, setPhaseState] = useState<ConversationPhase>('off');
   const [caption, setCaption] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +93,9 @@ export function useHandsFreeConversation(onText: (text: string) => void, options
   onTextRef.current = onText;
   const liveRef = useRef(options.liveCaptions);
   liveRef.current = options.liveCaptions;
+  const keepHiddenRef = useRef(!!options.keepListeningWhenHidden);
+  keepHiddenRef.current = !!options.keepListeningWhenHidden;
+  const releaseMicRef = useRef<(() => void) | null>(null);
   const speech = useSpeechState();
 
   const setPhase = useCallback((next: ConversationPhase) => {
@@ -93,20 +103,30 @@ export function useHandsFreeConversation(onText: (text: string) => void, options
     setPhaseState(next);
   }, []);
 
+  const releaseMic = useCallback(() => {
+    releaseMicRef.current?.();
+    releaseMicRef.current = null;
+  }, []);
+
   const stop = useCallback(() => {
     const session = sessionRef.current;
     sessionRef.current = null;
     void session?.destroy();
+    releaseMic();
     setCaption('');
     setLevel(0);
     setPhase('off');
-  }, [setPhase]);
+  }, [setPhase, releaseMic]);
 
-  const start = useCallback(async () => {
+  /** `fromGesture` — 사용자가 눌러서 켠다(그 제스처로 낭독기를 깨운다). 이름 부르기로 켜질 때는 아니다. */
+  const start = useCallback(async (fromGesture = true) => {
     if (sessionRef.current || phaseRef.current !== 'off') return;
     setError(null);
-    speechPlayer.stop();
-    speechPlayer.unlock(); // 이 탭이 사용자 제스처다 — 답을 나중에 소리 낼 수 있게
+    if (fromGesture) {
+      speechPlayer.stop();
+      speechPlayer.unlock(); // 이 탭이 사용자 제스처다 — 답을 나중에 소리 낼 수 있게
+    }
+    releaseMicRef.current ??= wakeStore.claimMic();
     setPhase('starting');
     try {
       const session = await startHandsFree({
@@ -150,7 +170,7 @@ export function useHandsFreeConversation(onText: (text: string) => void, options
         },
       });
       if (phaseRef.current === 'off') {
-        void session.destroy(); // 켜는 동안 꺼졌다
+        void session.destroy(); // 켜는 동안 꺼졌다(마이크 잡기는 stop 이 이미 풀었다)
         return;
       }
       sessionRef.current = session;
@@ -158,6 +178,7 @@ export function useHandsFreeConversation(onText: (text: string) => void, options
       if (speechPlayer.state.speaking) void session.pause();
     } catch (err: any) {
       sessionRef.current = null;
+      releaseMic();
       setPhase('off');
       setError(err?.name === 'NotAllowedError'
         ? '마이크 권한이 없습니다 — 브라우저 설정에서 허용해 주세요.'
@@ -188,7 +209,7 @@ export function useHandsFreeConversation(onText: (text: string) => void, options
   useEffect(() => {
     const onVisibility = () => {
       const session = sessionRef.current;
-      if (!session) return;
+      if (!session || keepHiddenRef.current) return;
       if (document.visibilityState === 'hidden') void session.pause();
       else if (!speechPlayer.state.speaking) void session.resume();
     };
@@ -197,7 +218,13 @@ export function useHandsFreeConversation(onText: (text: string) => void, options
   }, []);
 
   // 화면을 떠나면 마이크를 닫는다.
-  useEffect(() => () => { void sessionRef.current?.destroy(); sessionRef.current = null; }, []);
+  useEffect(() => () => {
+    void sessionRef.current?.destroy();
+    sessionRef.current = null;
+    phaseRef.current = 'off';
+    releaseMicRef.current?.();
+    releaseMicRef.current = null;
+  }, []);
 
-  return { phase, caption, error, level, toggle, stop, clearError: () => setError(null), supported: voiceRecordingSupported() };
+  return { phase, caption, error, level, toggle, start, stop, clearError: () => setError(null), supported: voiceRecordingSupported() };
 }

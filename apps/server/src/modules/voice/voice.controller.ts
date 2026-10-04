@@ -1,5 +1,5 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Request, Response } from 'express';
@@ -10,7 +10,13 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { VoiceError, VoiceService } from './voice.service';
 import { VoiceAnnouncerService } from './voice-announcer.service';
-import { parseOperatorInput, readOperator, writeOperator } from './operator-config';
+import {
+  OperatorInputError,
+  createOperatorEntry,
+  patchOperatorEntry,
+  readOperators,
+  updateOperators,
+} from './operator-config';
 
 async function run(res: Response, fn: () => Promise<unknown> | unknown) {
   try {
@@ -63,11 +69,14 @@ export class VoiceController {
     return run(res, () => this.voice.status(isAdmin));
   }
 
-  /** 발화 하나(raw 오디오 본문, Content-Type = 녹음 형식) → `{ text, provider, model, latency_ms }`. */
+  /**
+   * 발화 하나(raw 오디오 본문, Content-Type = 녹음 형식) → `{ text, provider, model, latency_ms }`.
+   * `?purpose=wake` 는 잠든 operator 를 부르는 말을 확인하는 상시 청취다 — 자체 호스팅 엔진에서만 받는다.
+   */
   @Post('transcribe')
-  async transcribe(@Req() req: Request, @Res() res: Response) {
+  async transcribe(@Req() req: Request, @Query('purpose') purpose: string, @Res() res: Response) {
     const { audio, mimeType } = audioBody(req);
-    return run(res, () => this.voice.transcribe(audio, mimeType));
+    return run(res, () => this.voice.transcribe(audio, mimeType, undefined, purpose === 'wake' ? 'wake' : 'utterance'));
   }
 
   /** `{ text }`(화면용 답) → `{ chunks }`(읽을 조각). 엔진을 부르지 않는다. */
@@ -125,40 +134,68 @@ export class VoiceLabController {
 }
 
 /**
- * Operator — 고정된 Agent Session 하나(docs/voice-operator.md "Operator"). 세션 화면에서 지정하고,
- * 사이드바의 OPERATOR 가 그 세션을 연다. 지정·해제는 admin 만 — 사이트를 다루는 에이전트이기 때문이다.
+ * Operators — 이름 붙은 Agent Session 들(docs/voice-operator.md "Operator"). 세션 화면에서 이름을 붙여
+ * 등록하고, 사이드바의 OPERATORS 가 그 세션을 연다. "헤이 <이름>" 으로 부르면 깨어난다.
+ * 등록·수정·해제는 admin 만 — 사이트를 다루는 에이전트이기 때문이다.
  */
 @ApiBearerAuth('user-session')
 @ApiTags('voice')
-@Controller('api/voice/operator')
+@Controller('api/voice/operators')
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.USE_VOICE)
-export class VoiceOperatorController {
+export class VoiceOperatorsController {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
-  private isAdmin(req: Request): boolean {
-    return (req as any).currentUser?.role === 'admin';
+  private denied(req: Request, res: Response): boolean {
+    if ((req as any).currentUser?.role === 'admin') return false;
+    res.status(403).json({ error: 'admin_required', message: 'Only an admin can manage operators.' });
+    return true;
+  }
+
+  private async write(res: Response, fn: () => Promise<unknown>) {
+    try {
+      return res.json(await fn());
+    } catch (err) {
+      if (err instanceof OperatorInputError) return res.status(err.status).json({ error: err.code, message: err.message });
+      throw err;
+    }
   }
 
   @Get()
-  async get(@Res() res: Response) {
-    return res.json({ operator: await readOperator(this.dataSource) });
+  async list(@Res() res: Response) {
+    return res.json({ operators: await readOperators(this.dataSource) });
   }
 
-  /** `{ manager_id, cli, session_id, cwd?, title? }` — 이 세션을 operator 로 지정한다. */
-  @Put()
-  async set(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    if (!this.isAdmin(req)) return res.status(403).json({ error: 'admin_required', message: 'Only an admin can choose the operator.' });
-    const value = parseOperatorInput(body, (req as any).currentUser.id);
-    if (!value) return res.status(400).json({ error: 'operator_session_required', message: 'manager_id, cli and session_id are required.' });
-    await writeOperator(this.dataSource, value);
-    return res.json({ operator: value });
+  /** `{ name, aliases?, manager_id, cli, session_id, cwd?, title? }` — 이 세션을 이 이름의 operator 로 등록한다. */
+  @Post()
+  async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    if (this.denied(req, res)) return;
+    return this.write(res, () => updateOperators(this.dataSource, (list) => {
+      const operator = createOperatorEntry(body, (req as any).currentUser.id, list);
+      return { next: [...list, operator], result: { operator } };
+    }));
   }
 
-  @Delete()
-  async clear(@Req() req: Request, @Res() res: Response) {
-    if (!this.isAdmin(req)) return res.status(403).json({ error: 'admin_required', message: 'Only an admin can choose the operator.' });
-    await writeOperator(this.dataSource, null);
-    return res.json({ operator: null });
+  /** `{ name?, aliases?, title? }` */
+  @Patch(':id')
+  async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
+    if (this.denied(req, res)) return;
+    return this.write(res, () => updateOperators(this.dataSource, (list) => {
+      const current = list.find((op) => op.id === id);
+      if (!current) throw new OperatorInputError(404, 'operator_not_found', 'No such operator.');
+      const operator = patchOperatorEntry(current, body, list);
+      return { next: list.map((op) => (op.id === id ? operator : op)), result: { operator } };
+    }));
+  }
+
+  /** 등록만 푼다 — 세션은 그 장비에 그대로 남는다. */
+  @Delete(':id')
+  async remove(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    if (this.denied(req, res)) return;
+    return this.write(res, () => updateOperators(this.dataSource, (list) => {
+      if (!list.some((op) => op.id === id)) throw new OperatorInputError(404, 'operator_not_found', 'No such operator.');
+      const next = list.filter((op) => op.id !== id);
+      return { next, result: { operators: next } };
+    }));
   }
 }

@@ -119,22 +119,33 @@ agent-manager 가 맡는 것은 **operator 세션의 실행**뿐이다(아래 Op
 CLI 선택·권한 릴레이·스트리밍이 이미 있고 chat 모드의 기본 표면이다. 기록이 호스트에 있다는 약점은 operator 를
 서버와 같은 상시 장비(rolf)에 두어 상쇄한다. operator 는 admin 전용이다(사이트 권한을 가진 에이전트이므로).
 
-### 설정 (P3 구현)
+### 설정 — 여러 operator, 이름 (P3 구현)
 
 operator 를 고르는 화면을 따로 만들지 않는다 — **세션을 여는 화면이 이미 Host · CLI · 모델 · 작업 폴더를 고른다**
 (새 세션 대화상자의 `RuntimeSelectionFields`, 실행은 agent-manager). 원하는 조합으로 세션을 연 뒤 세션 헤더의
-**☆ Operator** 를 누르면 그 세션이 operator 가 된다(admin). 지정과 함께 operator 지침(아래)을 그 세션의 다음
-프롬프트로 보낸다. 사이드바 맨 위의 **🎙 OPERATOR** 가 어디서든 그 세션을 연다.
+**☆ Operator** 를 누르고 **이름**을 붙이면 그 세션이 operator 가 된다(admin). 등록과 함께 operator 지침(아래)을 그
+세션의 다음 프롬프트로 보낸다. operator 는 **여러 개** 둘 수 있다(예: rolf 의 Claude "자비스", ragnar 의 Codex
+"프라이데이") — 사이드바 맨 위의 **OPERATORS** 가 어디서든 각 세션을 연다.
 
-- 저장: SystemSettings 한 행 `operator.session`(JSON: manager_id · cli · session_id · cwd · title · pinned_at · pinned_by).
-  Admin Settings 정의 목록에는 넣지 않는다 — 손으로 고칠 값이 아니다(`modules/voice/operator-config.ts`).
-- REST: `GET /api/voice/operator`(voice.use) · `PUT` / `DELETE`(admin).
-- CLI 를 바꾸려면 다른 CLI 로 세션을 열어 다시 지정한다 — 이전 세션은 세션 목록에 남고, 컨텍스트는 이어지지 않는다.
+- 이름은 부르는 말(웨이크워드)이다. 음성 인식이 이름을 다른 철자로 적을 수 있어(`Jarvis` → `자비스`) **별칭**을 함께
+  둔다. 이름·별칭은 operator 끼리 겹칠 수 없다(대소문자·공백·문장부호 무시, 409 `operator_name_taken`). 등록
+  대화상자의 **🎙 불러 보기** 가 "헤이 <이름>" 을 실제 엔진으로 받아 적어 보고, 이름이 다르게 적히면 그 철자를 별칭으로
+  더한다 — 키워드 모델 학습 대신 이 확인이 인식률을 정한다.
+- 저장: SystemSettings 한 행 `operator.sessions`(JSON 배열: id · name · aliases · manager_id · cli · session_id · cwd · title ·
+  created_at · created_by · updated_at). 한 개만 두던 시절의 `operator.session` 은 처음 읽을 때 이름 "Operator"(별칭
+  "오퍼레이터")로 옮기고 지운다 — 이름을 바꿔 쓴다. Admin Settings 정의 목록에는 넣지 않는다(`modules/voice/operator-config.ts`).
+- REST: `GET /api/voice/operators`(voice.use) · `POST` / `PATCH /:id` / `DELETE /:id`(admin). 세션 주소는 바꾸지 않는다 —
+  다른 세션이면 새로 등록한다. 읽고-고치고-쓰기는 한 줄로 세운다(`updateOperators`).
+- operator 이름·별칭은 **모든 전사의 용어집에 더한다**(`VoiceService.transcribe`) — 엔진이 등록한 철자로 적게.
+- Admin → Voice 의 **Operators** 카드가 목록을 보여 주고 이름·별칭을 고치거나, 장비에서 사라진 세션의 등록을 푼다.
+- CLI 를 바꾸려면 다른 CLI 로 세션을 열어 등록한다 — 이전 세션은 세션 목록에 남고, 컨텍스트는 이어지지 않는다.
 
 ### 지침 (persona)
 
-지정할 때 보내는 지침(`apps/client/src/voice/operator.ts` `OPERATOR_BRIEF`)의 핵심: 말하기용 요약 먼저 · 삭제/머지/
-재시작 같은 위험 작업은 복창 확인 · 발음이 비슷한 이름(rolf/ralf/ragnar)·숫자는 되묻기 · 상세는 화면이나 티켓으로.
+등록할 때 보내는 지침(`apps/client/src/voice/operator.ts` `operatorBrief(name)`)의 핵심: 그 이름으로 불린다는 것 ·
+말하기용 요약 먼저 · 삭제/머지/재시작 같은 위험 작업은 복창 확인 · 발음이 비슷한 이름(rolf/ralf/ragnar)·숫자는 되묻기 ·
+상세는 화면이나 티켓으로 · **대화를 마치면 답 끝에 `[[sleep]]`**(아래 "이름 부르기 · 잠들기"). 이름을 바꿨거나 긴 세션에서
+지침이 흐려졌으면 등록 대화상자의 "지침 다시 보내기".
 
 첫 프롬프트에만 있는 지침은 컴팩션에 약하므로, 지침은 에이전트에게 작업 폴더의 `AGENTS.md`(+ `@AGENTS.md` 한 줄짜리
 `CLAUDE.md`)로 남기게 한다 — Claude Code·Codex·opencode 가 모두 읽고 컴팩션 뒤에도 다시 읽힌다. 단 **그 파일이 없을 때만**
@@ -147,16 +158,64 @@ operator 를 고르는 화면을 따로 만들지 않는다 — **세션을 여�
 매니저 키는 페어링 때 한 워크스페이스에 묶인다(`mcp/shared/authz.ts` `callerCanAccessWorkspace`). 그대로면 operator 는
 한 워크스페이스만 관리한다.
 
-**operator 로 지정된 세션의 MCP 연결만 그 묶음을 푼다**(`modules/voice/operator-config.ts` `isOperatorConnection`,
+**operator 로 등록된 세션의 MCP 연결만 그 묶음을 푼다**(`modules/voice/operator-config.ts` `isOperatorConnection`,
 `mcp.controller.ts`). 조건은 셋이 다: ① 매니저가 Agent Session 에 주입한 연결(`X-AWB-Client-Type: agent-session`),
-② `X-AWB-Session-Id` 가 지정된 operator 세션, ③ 키가 그 operator Host 의 full 키. 풀린 연결은 Host 신원(장비 단위,
+② `X-AWB-Session-Id` 가 등록된 operator 세션 중 하나, ③ 키가 그 operator Host 의 full 키. 풀린 연결은 Host 신원(장비 단위,
 워크스페이스 없음)으로 판정된다. 판정은 요청마다 다시 한다 — 이미 열린 MCP 세션도 지정·해제 직후의 요청부터 맞는
 범위로 돈다(지정값은 5초 캐시, 지정·해제 때 즉시 버림).
 
 - 이 방식은 agent-manager 를 바꾸지 않는다(SSE contract · 매니저 배포 없음). 처음 생각한 "operator 전용 키를 open RPC 로
   넘기기" 와 신뢰 경계가 같다 — 어느 쪽이든 그 장비의 사용자로 도는 다른 프로세스가 매니저 키를 읽고 같은 헤더를
   만들 수 있다. 그래서 지정은 admin 전용이고, 풀린 연결이 처음 붙을 때 `MCP` 로그를 남긴다.
-- 회귀: `apps/server/test/voice-operator-scope.test.mjs`(지정 전 거부 → 지정 후 허용 → 다른 세션은 거부 → 해제 후 거부).
+- 회귀: `apps/server/test/voice-operator-scope.test.mjs`(등록 전 거부 → 등록 후 허용 → 다른 세션은 거부 → 두 번째 operator 도
+  허용 → 하나를 해제하면 그 하나만 거부), `voice-operators.test.mjs`(옛 단일 값 이전 · 이름 충돌 · 겹친 쓰기).
+
+### 이름 부르기 · 잠들기 (2026-10-04)
+
+"헤이 <이름>" 하고 부르면 그 operator 가 깨어나고, 깨어 있는 동안은 이름 없이 이어서 말한다. 대화를 마치는 말이
+나오면 operator 가 알아듣고 다시 잠든다.
+
+```
+잠듦 ─ 사이드바 OPERATORS 👂 on ─▶ 상시 청취(WakeListener: VAD → /voice/transcribe?purpose=wake → matchWake)
+  │                                         │ "헤이 자비스, 오늘 배포 상태 알려줘"
+  │                                         ▼  신호음 ↑ · 그 세션 화면으로 이동
+  │                              깨어 있음: 대화 모드가 스스로 켜지고 "오늘 배포 상태 알려줘" 가 첫 요청으로 간다
+  │                                         │ 이름 없이 계속 대화(답은 탭이 숨어 있어도 읽는다)
+  └──── 신호음 ↓ ◀── operator 답 끝의 [[sleep]] 을 다 읽은 뒤 · 60초 조용 · 💤/🎙 끄기 · 화면 이탈
+```
+
+- **확인은 글자로 한다.** 키워드 모델(openWakeWord · Porcupine)은 이름마다 따로 학습해야 해서 "이름을 마음대로" 와 맞지
+  않는다. 잠든 동안 들린 발화마다 셀프호스팅 STT(ragnar Qwen3-ASR, 한 발화 ~0.2초)로 받아 적고 맨 앞이 부르는
+  말인지 본다(`apps/client/src/voice/wake.logic.ts` `matchWake`): 앞머리(헤이 · hey · 하이 · 오케이 · 야 …) + 이름, 또는
+  이름 + 부름 조사(…야 · …아). 대소문자·공백·문장부호를 무시하고, 한글은 자모로 풀어 이름 길이에 비례하는 만큼만
+  틀려도 같은 이름으로 본다(재비스 = 자비스). 이름은 낱말 경계에서 끝나야 하고, 문장 중간·이야기("자비스 진짜 좋다")는
+  부름이 아니다.
+- **이름만 한 발화는 부름이 아니다.** Qwen3-ASR 은 짧은 잡음이나 말의 앞부분에 대해 문맥으로 준 용어집을 그대로 읊는다
+  (실측: "헤이 자비스" 앞 1.5초 → "자비스, Jarvis."). 이름 단독을 받으면 기침 한 번에 깨어난다. 서버도 용어 둘 이상만으로 된
+  전사를 메아리로 보고 버린다(`isVocabularyEcho`, 응답 `ignored: 'vocabulary_echo'`; Voice lab 은 날것 그대로).
+- **상시 청취는 셀프호스팅 STT 에서만** 받는다(`?purpose=wake`, 아니면 409 `voice_wake_needs_self_hosted`, `/voice/config` 의
+  `wake.ready`). 깨어 있지 않은 동안 마이크 근처의 모든 말이 엔진으로 가므로, 비용이 들고 대화가 바깥으로 나가는
+  클라우드 엔진에서는 켜지 않는다.
+- **단말마다 켠다**(localStorage `awb.voice.wake`, 사이드바 OPERATORS 머리의 👂). 한 단말에서는 한 탭만 듣는다(Web Lock
+  `awb-voice-wake-listener`). 탭이 숨어 있어도 듣는다 — 켜 둔 단말을 스피커처럼 쓰는 것이 이 기능의 쓰임새다. 무엇을
+  읽는 동안은 쉬고, 대화 모드가 마이크를 쓰는 동안(`wakeStore.claimMic`)은 마이크를 열지 않는다. 브라우저는 사용자
+  동작 전에는 소리 처리를 막으므로, 새로고침 직후에는 화면을 한 번 누르면 시작한다(상태 `tap`).
+- **잠들기는 operator 가 정한다.** "고마워" 같은 낱말로 화면이 추측하지 않는다 — "고마워, 그리고 하나 더" 를 끝으로
+  읽으면 안 된다. 지침이 "대화를 마치는 말이면 짧게 인사하고 답 맨 끝에 `[[sleep]]`" 을 가르치고, 화면은 그 표시를 떼어
+  읽은 뒤(낭독 정리 `toSpeakable` 도 지운다) 잠든다. 긴 세션에서 지침이 요약돼 사라져도 규칙이 남도록 깨어난 뒤 첫 요청
+  앞에 안내 한 줄(`WAKE_PROMPT_NOTE`)을 붙이고, 화면은 그 줄을 떼고 "🎙 불러서 시작" 으로 보여 준다.
+- 그 밖에 잠드는 경우: 답을 기다리거나 읽는 동안이 아닌데 60초 조용(`WAKE_IDLE_SLEEP_MS`), 💤 잠들기 또는 🎙 끄기,
+  그 operator 화면을 떠남(마지막 화면이 닫히면 한 틱 뒤 — React 개발 모드의 붙였다 떼기를 견디게), 깨어났는데
+  10초 안에 화면이 열리지 않음.
+- 깨어 있는 동안 다시 이름을 부르면 이름만 떼고 보낸다. **다른 operator 를 부르면 그쪽이 깨어난다**(화면 이동).
+  군소리("음", "어")는 보내지 않는다 — "네" 는 확인 대답이라 보낸다.
+- 검증: 헤드리스 Chromium 가짜 마이크에 ragnar TTS 로 만든 "헤이 자비스." / "오늘 배포 상태 알려줘." / "고마워, 이제 됐어." 를
+  넣고 실제 ragnar ASR 로 — 듣기 시작 1.6초 → 이름 인식 216ms → 깨어나 세션 화면·대화 모드까지 0.3초 → 첫 요청(안내 한 줄
+  포함) 전송 → 두 번째 말은 답 뒤로 큐 → `[[sleep]]` 답에 잠듦 → 다시 "Hey, 자비스." 로 깨어남.
+- 회귀: `apps/client/test/voice-wake.test.mjs`(부르는 말 · 메아리 · 철자 틀림 · 잠들기 표시 · 탭 상태),
+  `apps/server/test/voice-gateway.test.mjs`(메아리), `voice-http.test.mjs`(purpose=wake 거절/허용, 용어집의 이름).
+- 남은 것: 앱(P4)에서는 화면이 꺼져 있어도 들어야 한다 — 브라우저 탭으로는 안 되고 네이티브 서비스(Foreground Service +
+  같은 VAD/전사 경로)가 맡는다.
 
 ### 먼저 말 걸기
 
@@ -217,9 +276,9 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 |---|---|---|
 | P1 음성 게이트웨이 + 웹 대화 | `modules/voice`(공급자 · 설정 · 전사 · 합성 · `toSpeakable`), Agent Session 컴포저 마이크 + 응답 낭독, Voice lab | 세션 화면에서 말로 묻고 답을 듣는다. Voice lab 으로 엔진을 확정한다 |
 | P2 음성 알림 (웹 · Telegram) | announcer, `voice_announcement`, 클립 캐시, 사용자 설정, 아래 공백 메우기 | 다른 화면에 있을 때 세션 종료 · 미션 종료를 말로 듣는다 |
-| P3 operator | 세션 고정(☆ Operator) · 사이드바 진입점 · 지침 · 사이트 전체 권한. 남은 것: `notify_user`(턴 도중 먼저 말 걸기) | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
+| P3 operator | 이름 붙은 operator 여러 개(☆ Operator) · 사이드바 진입점 · 지침 · 사이트 전체 권한 · 이름 부르기/잠들기. 남은 것: `notify_user`(턴 도중 먼저 말 걸기) | 웹·앱 어디서든 operator 를 불러 사이트 작업을 시킨다 |
 | P4 Android 앱 | `apps/mobile`, 디바이스 등록, FCM, 재생 서비스 | 폰이 잠겨 있어도 작업 종료를 말로 듣고, 앱에서 operator 와 대화한다 |
-| P5 (선택) | iOS, 실시간 음성 프런트(GPT-Live client delegation), wake word | — |
+| P5 (선택) | iOS, 실시간 음성 프런트(GPT-Live client delegation) | — |
 
 ## P1 구현 — 음성 게이트웨이 + 세션 음성 대화
 

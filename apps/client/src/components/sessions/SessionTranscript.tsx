@@ -109,7 +109,7 @@ const summaryStyle: React.CSSProperties = {
   userSelect: 'none',
 };
 
-function PromptBlock({ text }: { text: string }) {
+function PromptBlock({ text, voice }: { text: string; voice?: boolean }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
       <div
@@ -127,6 +127,11 @@ function PromptBlock({ text }: { text: string }) {
           wordBreak: 'break-word',
         }}
       >
+        {voice && (
+          <div data-prompt-voice="wake" style={{ fontSize: 10.5, color: tokens.colors.textMuted, marginBottom: 3 }} title="이름을 불러 깨운 뒤의 첫 요청 — 음성 대화 안내 한 줄이 함께 갔습니다">
+            🎙 불러서 시작
+          </div>
+        )}
         {text}
       </div>
     </div>
@@ -910,7 +915,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
       {blocks.map((block) => {
         switch (block.kind) {
           case 'prompt':
-            return <PromptBlock key={block.key} text={block.text} />;
+            return <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
           case 'assistant':
             return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} />;
           case 'reasoning':
