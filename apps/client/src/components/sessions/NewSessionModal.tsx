@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import RuntimeSelectionFields, { emptyRuntimeSelection, type RuntimeSelectionValue } from '../runtime/RuntimeSelectionFields';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { AgentSessionConfigOption, AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
@@ -60,6 +61,8 @@ function rememberCwd(managerId: string, cli: string, cwd: string): void {
 export default function NewSessionModal({ open, onClose, hosts, initialManagerId, initialCli, initialCwd, onCreated }: NewSessionModalProps) {
   const [managerId, setManagerId] = useState('');
   const [cli, setCli] = useState('');
+  const [selection, setSelection] = useState<RuntimeSelectionValue>(emptyRuntimeSelection());
+  const selectionEdited = useRef(false);
   const [cwd, setCwd] = useState('');
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
@@ -68,6 +71,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   // 세션 설정(approval 모드·모델). 선택지는 어댑터가 살아 있어야 알 수 있어 서버가 마지막 목록을
   // 캐시해 준다 — 그래서 세션을 열기 전에도 고를 수 있다. 고른 값은 호스트×CLI 에 기억되고,
   // 이 세션을 포함해 이후 열리는 모든 세션에 다시 걸린다(프로세스가 회수돼도 유지된다).
+  const [settingsLoading, setSettingsLoading] = useState(false);
   const [knownOptions, setKnownOptions] = useState<AgentSessionConfigOption[]>([]);
   const [chosenConfig, setChosenConfig] = useState<Record<string, string | boolean>>({});
 
@@ -75,6 +79,8 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   // 보고 기본값을 채우게 하려는 것이지, 열려 있는 동안 되돌리려는 것이 아니다.
   useEffect(() => {
     if (open) return;
+    selectionEdited.current = false;
+    setSelection(emptyRuntimeSelection());
     setManagerId('');
     setCli('');
     setCwd('');
@@ -108,18 +114,29 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       return;
     }
     let cancelled = false;
+    setSettingsLoading(true);
+    setKnownOptions([]);
+    setChosenConfig({});
     void (async () => {
       try {
         const settings = await api.getHostCliSettings(managerId, cli);
         if (cancelled) return;
         setKnownOptions(settings.known_config_options ?? []);
         setChosenConfig(settings.default_config ?? {});
+        if (!selectionEdited.current) {
+          const model = settings.known_config_options?.find((o) => o.category === 'model');
+          const effort = settings.known_config_options?.find((o) => o.category === 'thought_level');
+          setSelection((prev) => ({ ...prev,
+            model: model ? String(settings.default_config?.[model.config_id] || '') || null : null,
+            effort: effort ? String(settings.default_config?.[effort.config_id] || '') || null : null,
+          }));
+        }
       } catch {
         if (cancelled) return;
         // 설정을 못 읽어도 세션은 열 수 있어야 한다 — 선택기만 감춘다.
         setKnownOptions([]);
         setChosenConfig({});
-      }
+      } finally { if (!cancelled) setSettingsLoading(false); }
     })();
     return () => { cancelled = true; };
   }, [open, managerId, cli]);
@@ -130,7 +147,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   // 모달에서 고르는 것은 세션의 성격을 정하는 둘뿐이다(그 밖의 설정은 세션 헤더에서 바꾼다).
   const modalOptions = useMemo(
     () => withHostModelOption(knownOptions, hostModels.models, hostModels.labels)
-      .filter((o) => o.type === 'select' && (o.category === 'mode' || o.category === 'model') && o.options.length > 0),
+      .filter((o) => o.type === 'select' && (o.category === 'mode') && o.options.length > 0),
     [knownOptions, hostModels.models, hostModels.labels],
   );
 
@@ -148,7 +165,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   }, [managerId, cli]);
 
   const create = async () => {
-    if (!managerId || !cli || creating) return;
+    if (!managerId || !cli || creating || settingsLoading) return;
     const trimmed = cwd.trim();
     if (!trimmed) {
       setError('A working directory on the Runtime Host is required.');
@@ -158,11 +175,17 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     setError(null);
     try {
       // 고른 설정을 먼저 기억시킨다 — 매니저는 세션을 연 직후 이 값을 다시 걸고, 다음에 다시 열 때도 쓴다.
-      const changed = Object.fromEntries(
+      const changed: Record<string, string | boolean | null> = Object.fromEntries(
         modalOptions
           .map((o) => [o.config_id, chosenConfig[o.config_id]] as const)
           .filter(([, value]) => typeof value === 'string' && value),
       );
+      const modelOption = withHostModelOption(knownOptions, hostModels.models, hostModels.labels).find((o) => o.category === 'model');
+      const effortOption = knownOptions.find((o) => o.category === 'thought_level');
+      if (selection.effort && !effortOption) throw new Error('이 CLI의 effort 설정을 아직 확인할 수 없습니다. 세션 설정에서 지원 여부를 확인하세요.');
+      if (selection.model && !modelOption) throw new Error('이 CLI의 model 설정을 아직 확인할 수 없습니다.');
+      if (modelOption && (selection.model || selectionEdited.current)) changed[modelOption.config_id] = selection.model;
+      if (effortOption && (selection.effort || selectionEdited.current)) changed[effortOption.config_id] = selection.effort;
       if (Object.keys(changed).length) {
         await api.setHostCliSettings(managerId, cli, host?.cli_settings?.[cli]?.id ?? null, changed);
       }
@@ -185,7 +208,7 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
       footer={(
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="secondary" onClick={onClose} disabled={creating}>Cancel</Button>
-          <Button variant="primary" onClick={() => void create()} disabled={!managerId || !cli || creating} loading={creating}>
+          <Button variant="primary" onClick={() => void create()} disabled={!managerId || !cli || creating || settingsLoading} loading={creating}>
             Start session
           </Button>
         </div>
@@ -197,25 +220,19 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
           see in a terminal there. Output streams here and tool permissions are yours to approve.
         </p>
 
-        <div>
-          <label htmlFor="new-session-host" style={labelStyle}>Runtime Host</label>
-          <select id="new-session-host" style={selectStyle} value={managerId} disabled={hosts.length === 0 && !managerId} onChange={(e) => setManagerId(e.target.value)}>
-            {hosts.length === 0 && !managerId && <option value="">No Runtime Host is connected</option>}
-            {selectedHostMissing && <option value={managerId}>Reconnecting…</option>}
-            {hosts.map((h) => (
-              <option key={h.manager_id} value={h.manager_id}>{h.name}{h.hostname && h.hostname !== h.name ? ` (${h.hostname})` : ''}</option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label htmlFor="new-session-cli" style={labelStyle}>CLI</label>
-          <select id="new-session-cli" style={selectStyle} value={cli} disabled={!host || host.clis.length === 0} onChange={(e) => setCli(e.target.value)}>
-            {!host && cli && <option value={cli}>{runtimeLabel(cli)}</option>}
-            {(!host || host.clis.length === 0) && !cli && <option value="">No ACP-capable CLI on this host</option>}
-            {host?.clis.map((c) => <option key={c} value={c}>{runtimeLabel(c)}</option>)}
-          </select>
-        </div>
+        <RuntimeSelectionFields session idPrefix="new-session"
+          value={{ ...selection, host_id: managerId, cli }}
+          hosts={hosts.map((h) => ({ id: h.manager_id, name: h.name, clis: h.clis }))}
+          disabled={creating}
+          modelConfigId={knownOptions.find((o) => o.category === 'model')?.config_id}
+          effortOptions={knownOptions.find((o) => o.category === 'thought_level')?.options?.map((o) => ({ value: o.value, label: o.name }))}
+          onChange={(next, source) => {
+            selectionEdited.current = source !== 'host' && source !== 'cli';
+            setSelection(next);
+            if (next.host_id !== managerId) setCwd('');
+            setManagerId(next.host_id); setCli(next.cli);
+          }}
+        />
 
         <div>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>

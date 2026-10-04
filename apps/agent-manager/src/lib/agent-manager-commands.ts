@@ -8,7 +8,7 @@
 //                                      // (NOT the target managed agent — see below)
 //     command:      'spawn_agent' | 'stop_agent' | 'restart_agent'
 //                 | 'restart_all_agents'
-//                 | 'set_working_dir' | 'reload_config'
+//                 | 'reload_config'
 //                 | 'update_plugins' | 'refresh_mcp_config'
 //                 | 'update_manager' | 'restart_manager',
 //     args:         Record<string, any>,   // command-specific (e.g. { working_dir })
@@ -79,7 +79,6 @@ type CommandKind =
   | 'stop_agent'
   | 'restart_agent'
   | 'restart_all_agents'
-  | 'set_working_dir'
   | 'reload_config'
   | 'update_plugins'
   | 'refresh_mcp_config'
@@ -132,7 +131,6 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'stop_agent',
   'restart_agent',
   'restart_all_agents',
-  'set_working_dir',
   'reload_config',
   'update_plugins',
   'refresh_mcp_config',
@@ -373,8 +371,6 @@ export class AgentManagerCommandHandler {
         return this.#restartAgent(payload);
       case 'restart_all_agents':
         return this.#restartAllAgents(payload);
-      case 'set_working_dir':
-        return this.#setWorkingDir(payload);
       case 'reload_config':
         return this.#reloadConfig();
       case 'update_plugins':
@@ -982,33 +978,6 @@ export class AgentManagerCommandHandler {
     return `restart_all_agents → ${restarted} restarted, ${failed.length} failed${failNote}`;
   }
 
-  async #setWorkingDir(payload: AgentManagerCommandPayload): Promise<string> {
-    const agentId = this.#targetAgentId(payload, 'set_working_dir');
-    const workingDir = String(payload.args?.working_dir ?? '').trim();
-    if (!workingDir) throw new Error('set_working_dir: working_dir is empty');
-
-    // If we don't yet know about the agent, hydrate from AWB so we capture
-    // its name/cli; that way the next heartbeat reports a sensible record.
-    if (!this.#deps.registry.get(agentId)) {
-      const remote = await fetchAgentRecord(this.#config, agentId);
-      this.#deps.registry.upsert({
-        agent_id: agentId,
-        name: remote?.name ?? agentId.slice(0, 8),
-        cli: remote?.type ?? DEFAULT_CLI_ID,
-        working_dir: workingDir,
-      });
-    } else {
-      this.#deps.registry.setWorkingDir(agentId, workingDir);
-    }
-    // Heal the hot-path context registry too. The heartbeat registry above is the
-    // status source of truth, but EventDispatcher roots subagent cwd + 규약 ②/③
-    // worktree/run folders off the CONTEXT registry — leaving it stale means every
-    // dispatch until the next spawn_agent still uses the OLD working_dir (the exact
-    // drift that placed GameClient QA runs at the wrong base). No-op when the agent
-    // has no live context yet (never spawned since this manager booted).
-    const healed = this.#deps.contextRegistry?.setWorkingDir(agentId, workingDir) ?? false;
-    return `set_working_dir: agent=${agentId.slice(0, 8)} cwd=${workingDir}${healed ? ' (context cache healed)' : ''}`;
-  }
 
   /**
    * ticket 6ff827cb requirement 3 — apply an extend/release keep-alive grant

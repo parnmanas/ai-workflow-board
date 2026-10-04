@@ -1,3 +1,5 @@
+import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
+import { buildDataSourceOptions } from './db';
 import 'dotenv/config';
 import 'reflect-metadata';
 import { join } from 'path';
@@ -44,6 +46,7 @@ async function bootstrap() {
   // preSyncPostgres above). Ticket 3c3b17a3.
   await preSyncSqljsOpenIntents();
 
+  await preSyncAgentCleanup(buildDataSourceOptions());
   const app = await NestFactory.create(AppModule);
 
   // Listen for SIGTERM/SIGINT and await NestJS lifecycle hooks (onModuleDestroy)

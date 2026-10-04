@@ -26,6 +26,7 @@ test/agent-session-open-status-race.test.mjs
 test/agent-session-rpc-redeliver.test.mjs
 test/agent-sessions.test.mjs
 test/agent-status-supervisor-eviction.test.mjs
+test/agent-templates.test.mjs
 test/agent-workload-same-second-move.test.mjs
 test/allocation-staleness-clock.test.mjs
 test/api-keys-leak.test.mjs

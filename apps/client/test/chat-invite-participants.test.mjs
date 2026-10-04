@@ -173,13 +173,13 @@ function mountPicker(props) {
     getUsers: api.getUsers,
     getAgents: api.getAgents,
     addChatRoomParticipants: api.addChatRoomParticipants,
-    listOrchestrationRuntimeHosts: api.listOrchestrationRuntimeHosts,
+    listTemplateHosts: api.listTemplateHosts,
     validateRuntimeSpec: api.validateRuntimeSpec,
   };
   api.getUsers = async () => USERS;
   api.getAgents = async () => AGENTS;
   // P4c-4: 에이전트 초대는 runtime 선언으로 들어간다 — Host 카탈로그 스텁.
-  api.listOrchestrationRuntimeHosts = async () => [{ manager_agent_id: 'host-1', manager_name: 'host-one' }];
+  api.listTemplateHosts = async () => [{ id: 'host-1', name: 'host-one' }];
   api.validateRuntimeSpec = async (_ws, spec) => ({
     ok: true,
     spec: {
@@ -282,7 +282,7 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
 
     // 에이전트는 runtime 선언으로 추가한다 (Agent 목록 표면 없음).
     const toggle = [...picker.container.querySelectorAll('label')]
-      .find((l) => l.textContent.includes('Runtime으로 지정'));
+      .find((l) => l.textContent.includes('실행 설정 · Agent 템플릿 선택'));
     assert.ok(toggle, 'runtime 선언 토글이 없다');
     click(toggle.querySelector('input[type="checkbox"]'));
     await flush();
@@ -307,7 +307,7 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
     });
     await flush();
     const resolveBtn = [...picker.container.querySelectorAll('button')]
-      .find((b) => b.textContent.includes('Resolve'));
+      .find((b) => b.textContent.includes('이 설정 사용'));
     assert.ok(resolveBtn, 'Resolve 버튼이 없다');
     click(resolveBtn);
     await flush();

@@ -1,3 +1,4 @@
+import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
 /**
  * Database compatibility module
  *
@@ -1080,6 +1081,7 @@ export async function initDb() {
   // Collapse any pre-existing duplicate open dispatch_intents before synchronize
   // creates the partial unique index (ticket 3c3b17a3).
   await preSyncSqljsOpenIntents();
+  await preSyncAgentCleanup(buildDataSourceOptions());
   await AppDataSource.initialize();
   // Ticket 6ca4894a — Postgres/MySQL에서는 no-op(그쪽은 AppOntologyDataSource가 null).
   await initOntologyDb();

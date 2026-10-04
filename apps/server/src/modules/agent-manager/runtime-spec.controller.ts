@@ -47,15 +47,7 @@ export class RuntimeSpecController {
     // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 행 없음).
     const host = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
     if (!host) {
-      const link = await this.dataSource.getRepository(ApiKey).findOne({
-        where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-        select: { agent_id: true, host_id: true },
-      });
-      const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-      const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-      if (!linked) {
-        return res.status(400).json({ ok: false, error: `Runtime Host ${spec.manager_agent_id} does not exist` });
-      }
+      return res.status(400).json({ ok: false, error: `Runtime Host ${spec.manager_agent_id} does not exist` });
     }
 
     if (spec.credential_id) {

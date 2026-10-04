@@ -158,50 +158,6 @@ export interface BoardMoveOptions {
   actor_name?: string;
 }
 
-/**
- * How to treat the agent's ApiKey rows (api_keys.agent_id = agent) whose
- * `workspace_id` differs from the destination after the move:
- *   migrate — re-stamp ApiKey.workspace_id to dest (default; keeps the keys live).
- *   clear   — null the keys' agent_id (detach; keys survive but stop authing as this agent).
- *   refuse  — block the move while any such key exists (operator must resolve first).
- */
-export type AgentApiKeyPolicy = 'migrate' | 'clear' | 'refuse';
-
-/**
- * What to do with cross-workspace references that the move would create:
- * role assignments + denormalized assignee/reporter/reviewer ids on tickets
- * that do NOT live in the destination workspace.
- *   block — refuse the move and report each offending ticket (default; symmetric
- *           with the board move's companion-agent blocker).
- *   clear — delete those role-assignment rows and blank the denormalized ids so
- *           no source-workspace ticket is left pointing at a now-foreign agent.
- */
-export type AgentCrossRefPolicy = 'block' | 'clear';
-
-export interface AgentMoveOptions {
-  /** ApiKey re-scoping policy (default 'migrate'). */
-  api_key_policy?: AgentApiKeyPolicy;
-  /** Cross-workspace reference policy (default 'block'). */
-  cross_ref_policy?: AgentCrossRefPolicy;
-  actor_id?: string;
-  actor_name?: string;
-}
-
-export interface AgentMovePreview {
-  agent: { id: string; name: string };
-  source_workspace: { id: string; name: string } | null;
-  target_workspace: { id: string; name: string };
-  counts: { api_keys: number; copied: number; cleared: number; cross_refs: number };
-  items: MovePreviewItem[];
-  /** Non-empty → commit is refused. Structured so the client can render an
-   *  inline remedy per blocker; `message` preserves the legacy string. */
-  blockers: MoveBlocker[];
-  api_key_policy: AgentApiKeyPolicy;
-  cross_ref_policy: AgentCrossRefPolicy;
-  /** false for dry-run preview, true once the transaction has committed. */
-  committed: boolean;
-}
-
 /** Internal error type so blockers abort the commit transaction cleanly. */
 export class WorkspaceMoveBlockedError extends Error {
   constructor(public readonly blockers: MoveBlocker[]) {
@@ -257,47 +213,6 @@ export class WorkspaceMoveService {
     await this.activityService.logActivity({
       entity_type: 'board',
       entity_id: result.board.id,
-      action: 'moved',
-      field_changed: 'workspace',
-      old_value: result.source_workspace?.name || result.source_workspace?.id || '',
-      new_value: result.target_workspace.name || result.target_workspace.id,
-      ticket_id: '',
-      actor_id: opts.actor_id,
-      actor_name: opts.actor_name,
-    });
-    return result;
-  }
-
-  /** Dry-run: compute the full agent-move plan and report without writing. */
-  async previewAgentMove(
-    agentId: string,
-    targetWorkspaceId: string,
-    opts: AgentMoveOptions = {},
-  ): Promise<AgentMovePreview> {
-    return this.runAgentMove(this.dataSource.manager, agentId, targetWorkspaceId, opts, false);
-  }
-
-  /**
-   * Commit: move the agent to another workspace atomically in a single
-   * transaction. Throws WorkspaceMoveBlockedError (and rolls back) if any
-   * blocker is present, so the move is all-or-nothing.
-   *
-   * NOTE: the agent-manager `reload_config` SSE dispatch is the caller's
-   * responsibility (it needs the in-memory InstanceRegistry, which this
-   * DB-pure service deliberately doesn't depend on) — see
-   * AgentsController.moveToWorkspace / the move_agent_to_workspace MCP tool.
-   */
-  async commitAgentMove(
-    agentId: string,
-    targetWorkspaceId: string,
-    opts: AgentMoveOptions = {},
-  ): Promise<AgentMovePreview> {
-    const result = await this.dataSource.transaction((mgr) =>
-      this.runAgentMove(mgr, agentId, targetWorkspaceId, opts, true),
-    );
-    await this.activityService.logActivity({
-      entity_type: 'agent',
-      entity_id: result.agent.id,
       action: 'moved',
       field_changed: 'workspace',
       old_value: result.source_workspace?.name || result.source_workspace?.id || '',
@@ -896,33 +811,4 @@ export class WorkspaceMoveService {
   // ──────────────────────────────────────────────────────────────────────────
 
   // P4c-4: agent 이동 retired (Agent 테이블 없음).
-  private async runAgentMove(
-    mgr: RepoScope,
-    agentId: string,
-    targetWorkspaceId: string,
-    opts: AgentMoveOptions,
-    apply: boolean,
-  ): Promise<AgentMovePreview> {
-    void mgr; void agentId; void targetWorkspaceId; void opts; void apply;
-    throw new Error('Agent moves were removed in P4c-4 (Agent table dropped)');
-  }
-
-
-
-
-  /**
-   * (D) Actions in workspaces OTHER than dest that target this agent become
-   * cross-workspace after the move. Actions are operator config (not
-   * auto-migrated, to avoid duplicating scheduled jobs), so they are surfaced
-   * as warnings only.
-   *
-   * 대상 판정은 `target_agent_id` 컬럼 매칭이 아니라
-   * `actionTargetAgentIds()` 로 한다 (티켓 fc3906c5). 다중 대상 Action에서 이
-   * 에이전트가 **대표(첫 원소)가 아닌** 위치에 있으면 컬럼 매칭으로는 안 잡혀,
-   * 정작 경고가 필요한 cross-workspace 상황이 조용히 넘어간다. 대상 배열은 JSON
-   * 문자열이라 SQL 로 정확히 매칭하기 어렵고 Action 행 수는 작으므로, 전부 읽어
-   * 메모리에서 정확히 거른다.
-   */
-
-
 }

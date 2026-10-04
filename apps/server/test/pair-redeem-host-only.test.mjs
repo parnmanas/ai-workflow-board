@@ -51,7 +51,8 @@ test('pair/redeem mints a host-only identity with no Agent row', async (t) => {
   assert.equal(await ds.query(`SELECT name FROM sqlite_master WHERE type='table' AND name='agents'`).then((r) => r.length), 0, 'agents table is gone');
   const keyRow = await ds.getRepository('ApiKey').findOne({ where: { host_id: redeemed.host_id } });
   assert.ok(keyRow, 'api key row exists');
-  assert.equal(keyRow.agent_id, null, 'key has no agent binding');
+  assert.equal('agent_id' in keyRow, false, 'key has no legacy Agent field');
+  assert.equal(await ds.createQueryRunner().hasColumn('api_keys', 'agent_id'), false);
 
   // 그 키 + Host id 로 하트비트가 통과하고 registry 에 host_id 가 찍힌다.
   const hbRes = await fetch(

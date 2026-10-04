@@ -60,6 +60,8 @@ export class AddActionFanOutTargets1760000000084 implements MigrationInterface {
       'CREATE INDEX IF NOT EXISTS idx_action_runs_batch_id ON action_runs (batch_id)',
     );
 
+    if (!await queryRunner.hasColumn('actions', 'target_agent_id')) return;
+
     // 기존 단일 대상 → 배열 백필. 아직 비어 있는 행만 건드리므로 재실행해도
     // 이미 다중 대상으로 편집된 Action을 덮어쓰지 않는다. agent id는 UUID라
     // JSON 이스케이프가 필요한 문자가 들어갈 수 없다.

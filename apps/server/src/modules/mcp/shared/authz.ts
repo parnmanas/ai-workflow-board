@@ -133,27 +133,13 @@ export async function callerCanAccessWorkspace(
 export async function resolveCallerIdentityRow(
   dataSource: DataSource | EntityManager,
   agentId: string | undefined,
-): Promise<{ kind: 'host' | 'legacy'; id: string; name: string; workspace_id: string | null } | null> {
+): Promise<{ kind: 'host'; id: string; name: string; workspace_id: string | null } | null> {
   if (!agentId) return null;
   const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: agentId } });
   if (host) {
     return { kind: 'host', id: host.id, name: host.name, workspace_id: host.workspace_id ?? null };
   }
-  if (!isUuidShapedId(agentId)) return null;
-  // 같은 agent_id 로 키가 여러 개일 수 있다(로테이션) — host 바인딩이 있는
-  // 행을 우선한다. findOne 은 그 중 임의의 하나를 돌려줘 host 바인딩이
-  // 있어도 못 찾을 수 있다.
-  const links = await dataSource.getRepository(ApiKey).find({
-    where: { agent_id: agentId },
-    select: { agent_id: true, host_id: true, workspace_id: true },
-  });
-  const link = links.find((l) => !!l.host_id) ?? links[0];
-  if (link?.host_id) {
-    const linked = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: link.host_id } });
-    if (linked) {
-      return { kind: 'legacy', id: agentId, name: linked.name, workspace_id: link.workspace_id ?? linked.workspace_id ?? null };
-    }
-  }
+
   return null;
 }
 

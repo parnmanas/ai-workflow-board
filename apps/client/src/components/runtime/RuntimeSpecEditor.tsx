@@ -1,18 +1,13 @@
+import RuntimeSelectionFields from './RuntimeSelectionFields';
 import React, { useEffect, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import type { Credential } from '../../types';
-import { Button, Input, Select } from '../common';
+import { Input, Select } from '../common';
 import { tokens } from '../../tokens';
 import {
-  cliModelSelectable,
   cliSupportsBackendProfile,
   cliSupportsCredential,
 } from '../../cli/catalog';
-import { cliModelChoices, useHostModels } from '../../cli/hostModels';
-import RuntimeConfigFields, {
-  buildRuntimeConfig,
-  runtimeSelectionFromAgent,
-} from '../admin/RuntimeConfigFields';
 import {
   emptyRuntimeSpec,
   isAbsoluteHostPath,
@@ -56,9 +51,6 @@ export default function RuntimeSpecEditor({
 }: RuntimeSpecEditorProps) {
   const set = (patch: Partial<RuntimeSpecDraft>) => onChange({ ...value, ...patch });
   const [credentials, setCredentials] = useState<Credential[]>([]);
-  const hostModels = useHostModels(value.manager_agent_id || null, value.cli || null);
-  const models = hostModels.models;
-  const labels = hostModels.labels;
 
   useEffect(() => {
     let cancelled = false;
@@ -76,66 +68,16 @@ export default function RuntimeSpecEditor({
 
   return (
     <div>
-      <Select
-        label="Runtime Host"
-        value={value.manager_agent_id}
-        disabled={disabled}
-        options={[
-          { value: '', label: '선택…' },
-          ...hosts.map((h) => ({ value: h.id, label: h.name })),
-        ]}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ manager_agent_id: e.target.value })}
+      <RuntimeSelectionFields
+        value={{ host_id: value.manager_agent_id, cli: value.cli, model: value.model,
+          effort: value.runtime_config.extra?.effort || null, runtime_config: value.runtime_config }}
+        hosts={hosts} disabled={disabled}
+        onChange={(next) => set({ manager_agent_id: next.host_id, cli: next.cli, model: next.model,
+          runtime_config: { ...next.runtime_config, extra: { ...next.runtime_config.extra, effort: next.effort } },
+          ...(next.host_id !== value.manager_agent_id ? { working_dir: '', credential_id: null } : {}),
+          ...(next.cli !== value.cli ? { credential_id: null, cli_runtime_profile: null } : {}),
+        })}
       />
-
-      <div style={{ marginTop: 12 }}>
-        <RuntimeConfigFields
-          value={runtimeSelectionFromAgent(value.cli, value.runtime_config as any)}
-          onChange={(sel) => {
-            set({
-              cli: sel.runtime,
-              runtime_config: (buildRuntimeConfig(sel) ?? { strategy: 'single', permission_mode: 'approve' }) as any,
-            });
-          }}
-          disabled={disabled}
-        />
-      </div>
-
-      {cliModelSelectable(value.cli) && (
-        <div style={{ marginTop: 12 }}>
-          {models.length > 0 ? (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-              <div style={{ flex: 1 }}>
-                <Select
-                  label="Model"
-                  value={value.model || ''}
-                  disabled={disabled}
-                  options={[
-                    { value: '', label: 'Default — CLI 가 정함' },
-                    ...cliModelChoices(models, labels, value.model).map((m) => ({ value: m.value, label: m.label })),
-                  ]}
-                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ model: e.target.value || null })}
-                />
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={disabled || hostModels.refreshing}
-                onClick={() => { void hostModels.refresh(); }}
-              >
-                {hostModels.refreshing ? '새로고침 중…' : '새로고침'}
-              </Button>
-            </div>
-          ) : (
-            <Input
-              label="Model"
-              value={value.model || ''}
-              disabled={disabled}
-              placeholder="비워두면 CLI 기본값 (예: opus)"
-              onChange={(e) => set({ model: (e.target as HTMLInputElement).value.trim() || null })}
-            />
-          )}
-        </div>
-      )}
 
       <div style={{ marginTop: 12 }}>
         <Input

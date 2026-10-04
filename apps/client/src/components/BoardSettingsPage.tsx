@@ -80,7 +80,6 @@ export default function BoardSettingsPage() {
   // picker/목록이 <manager>/<agent> 로 식별 가능하게 렌더된다 (ticket d95821b2).
   const [agents, setAgents] = useState<Array<{ id: string; name: string; manager_name?: string }>>([]);
   // P4b: runtime 선언 → 매칭용 full 행 (manager 포함).
-  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   useEffect(() => {
     let cancelled = false;
     Promise.resolve([] as any[])
@@ -88,9 +87,7 @@ export default function BoardSettingsPage() {
       .then((rows) => {
         if (cancelled) return;
         setAgents((rows || []).filter((a: any) => a.type !== 'manager').map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
-        setAgentsFull((rows || []) as any[]);
       })
-      .catch(() => { if (!cancelled) { setAgents([]); setAgentsFull([]); } });
     return () => { cancelled = true; };
   }, [wsId]);
 
@@ -315,7 +312,7 @@ export default function BoardSettingsPage() {
           board={board}
           workspaceRoles={workspaceRoles}
           agents={agents}
-          agentsFull={agentsFull}
+
           workspaceId={wsId ?? board.workspace_id}
           onSave={async (next) => {
             try {
@@ -937,7 +934,7 @@ interface DefaultRoleHoldersEditorProps {
   workspaceRoles: Array<{ id: string; slug: string; name: string; is_builtin: boolean; position: number }>;
   agents: Array<{ id: string; name: string; manager_name?: string }>;
   /** P4b: runtime 선언 → 매칭용 full 행. */
-  agentsFull: Array<any>;
+
   workspaceId: string;
   onSave(next: DefaultHolderMap | null): Promise<void>;
 }
@@ -948,13 +945,12 @@ interface DefaultRoleHoldersEditorProps {
  */
 function RuntimeDefaultSection({
   roles,
-  agentsFull,
   workspaceId,
   onAddAgent,
   onAddRuntime,
 }: {
   roles: Array<{ slug: string; name: string }>;
-  agentsFull: Array<any>;
+
   workspaceId: string;
   onAddAgent(slug: string, id: string): void;
   onAddRuntime(slug: string, spec: Record<string, any>): void;
@@ -989,17 +985,16 @@ function RuntimeDefaultSection({
       </select>
       <DeclareRuntimeSection
         workspaceId={workspaceId}
-        agentsFull={agentsFull}
-        onResolved={(id, created, spec) => {
-          if (created && spec) onAddRuntime(slug, spec);
-          else if (id) onAddAgent(slug, id);
+
+        onResolved={(spec) => {
+          onAddRuntime(slug, spec);
         }}
       />
     </div>
   );
 }
 
-function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, agentsFull, workspaceId, onSave }: DefaultRoleHoldersEditorProps) {
+function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, workspaceId, onSave }: DefaultRoleHoldersEditorProps) {
   const [draft, setDraft] = useState<DefaultHolderMap>(() => parseDefaultHolderMap(board.default_role_assignments));
   const [busy, setBusy] = useState(false);
 
@@ -1139,7 +1134,7 @@ function DefaultRoleHoldersEditor({ board, workspaceRoles, agents, agentsFull, w
       {/* P4c-3b: runtime 선언 → 매칭되면 agent id, 새로우면 runtime holder로 추가. */}
       <RuntimeDefaultSection
         roles={roles}
-        agentsFull={agentsFull}
+
         workspaceId={workspaceId}
         onAddAgent={(slug, id) => addAgent(slug, id)}
         onAddRuntime={(slug, spec) => setDraft((prev) => {

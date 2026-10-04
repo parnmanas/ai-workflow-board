@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import DeclareRuntimeSection from './runtime/DeclareRuntimeSection';
-import { Ticket, Agent, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec, ClaudeBackendProfile } from '../types';
+import { Ticket, RuntimeParticipant, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec, ClaudeBackendProfile } from '../types';
 import { api, TicketRoleAssignmentRow, ConsensusView, ConsensusParty, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -28,7 +28,7 @@ export interface WorkspaceRoleSummary {
 interface TicketPanelProps {
   ticket: Ticket;
   columnName: string;
-  agents: Agent[];
+  agents: RuntimeParticipant[];
   users?: User[];
   channels: Channel[];
   // The full workspace role catalog. Drives one row per role on the panel,
@@ -167,12 +167,11 @@ const holderDraftKey = (h: HolderDraft): string => {
  */
 function TicketRuntimeSection({
   roles,
-  agentsFull,
   workspaceId,
   onAdd,
 }: {
   roles: Array<{ id: string; slug: string; name: string }>;
-  agentsFull: Array<any>;
+
   workspaceId: string;
   onAdd(roleId: string, draft: HolderDraft): void;
 }) {
@@ -197,11 +196,10 @@ function TicketRuntimeSection({
       </select>
       <DeclareRuntimeSection
         workspaceId={workspaceId}
-        agentsFull={agentsFull}
-        onResolved={(id, created, spec) => {
+
+        onResolved={(spec) => {
           if (!roleId) return;
-          if (created && spec) onAdd(roleId, { agent_id: null, user_id: null, runtime: spec });
-          else if (id) onAdd(roleId, { agent_id: id, user_id: null });
+          onAdd(roleId, { agent_id: null, user_id: null, runtime: spec });
         }}
       />
     </div>
@@ -2860,7 +2858,7 @@ export default function TicketPanel({
               {/* P4c-4: runtime 선언 → 선택한 역할의 draft에 holder 추가. */}
               <TicketRuntimeSection
                 roles={(workspaceRoles || []).slice().sort((a, b) => a.position - b.position)}
-                agentsFull={agents as any[]}
+
                 workspaceId={workspaceId || ''}
                 onAdd={(roleId, draft) => setRoleDrafts(prev => ({ ...prev, [roleId]: [...(prev[roleId] ?? (holdersByRoleId.get(roleId) || []).map(holderToDraft)), draft] }))}
               />

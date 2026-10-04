@@ -50,7 +50,6 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
   const [scenarios, setScenarios] = useState<QaScenarioListItem[]>([]);
   const [agents, setAgents] = useState<QaAgent[]>([]);
   // P4b: runtime 선언 → Agent 매칭용 full 행 (표시용 agents 와 별도 보관).
-  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   const [selected, setSelected] = useState<QaScenario | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [editing, setEditing] = useState<QaScenario | 'new' | null>(null);
@@ -69,7 +68,7 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
   const [deployments, setDeployments] = useState<Deployment[]>([]);
 
   const load = useCallback(async () => {
-    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]); setAgentsFull([]); return; }
+    if (!effectiveWorkspaceId) { setScenarios([]); setSchedules([]); setDeployments([]);  return; }
     try {
       const [list, agentList, scheduleList, deploymentList] = await Promise.all([
         api.listQaScenarios(effectiveWorkspaceId),
@@ -80,7 +79,6 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
       setScenarios(list);
       setAgents((agentList || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
       // P4b: runtime 선언 → 매칭용 full 행 보관.
-      setAgentsFull((agentList || []) as any[]);
       setSchedules(scheduleList || []);
       setDeployments(deploymentList || []);
     } catch (err: any) {
@@ -226,7 +224,7 @@ export default function QaManager({ workspaceId, allScopes = false }: QaManagerP
           scenario={editing === 'new' ? null : editing}
           workspaceId={effectiveWorkspaceId}
           agents={agents}
-          agentsFull={agentsFull}
+
           onClose={() => setEditing(null)}
           onSaved={async (saved) => {
             setEditing(null);
@@ -1122,19 +1120,18 @@ interface ScenarioEditorProps {
   workspaceId: string;
   agents: QaAgent[];
   /** P4b: runtime 선언 → 매칭용 full 행. */
-  agentsFull: Array<any>;
+
   onClose: () => void;
   onSaved: (s: QaScenario) => void;
 }
 
-function ScenarioEditor({ scenario, workspaceId, agents, agentsFull, onClose, onSaved }: ScenarioEditorProps) {
+function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: ScenarioEditorProps) {
   const { showToast } = useToast();
   const [name, setName] = useState(scenario?.name ?? '');
   const [description, setDescription] = useState(scenario?.description ?? '');
-  const [targetAgentId, setTargetAgentId] = useState(scenario?.target_agent_id ?? (agents[0]?.id ?? ''));
   // P4c-3b: spec-direct target (DeclareRuntimeSection에서 새 spec이 오면 세팅).
   // select를 직접 고르면 초기화된다 (agent 경로).
-  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>(null);
+  const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>((scenario as any)?.target_runtime ?? null);
   const [qaDriver, setQaDriver] = useState(scenario?.qa_driver ?? 'browser');
   // Deployment-awareness target environment (ticket 8ce72b18).
   const [targetEnvironment, setTargetEnvironment] = useState(scenario?.target_environment ?? '');
@@ -1185,7 +1182,7 @@ function ScenarioEditor({ scenario, workspaceId, agents, agentsFull, onClose, on
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
-    if (!targetAgentId && !pendingSpec) { showToast('Target agent is required', 'error'); return; }
+    if (!pendingSpec) { showToast('Target agent is required', 'error'); return; }
     let steps: any; let config: any;
     try { steps = stepsText.trim() ? JSON.parse(stepsText) : []; } catch { showToast('Steps must be valid JSON array', 'error'); return; }
     try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast('Driver config must be valid JSON', 'error'); return; }
@@ -1223,9 +1220,7 @@ function ScenarioEditor({ scenario, workspaceId, agents, agentsFull, onClose, on
     try {
       let saved: QaScenario;
       // P4c-3b: pendingSpec이 있으면 spec-direct 저장 (서버가 identity 키 매김).
-      const targetPayload = pendingSpec
-        ? { target_agent_id: undefined, target_runtime: pendingSpec }
-        : { target_agent_id: targetAgentId, target_runtime: undefined };
+      const targetPayload = { target_runtime: pendingSpec };
       if (scenario) {
         saved = await api.updateQaScenario(scenario.id, {
           workspace_id: workspaceId, name, description, ...targetPayload,
@@ -1273,22 +1268,14 @@ function ScenarioEditor({ scenario, workspaceId, agents, agentsFull, onClose, on
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <Input label="Name" value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} />
         <Input label="Description" value={description} onChange={(e) => setDescription((e.target as HTMLInputElement).value)} />
-        <Select
-          label="Target QA agent"
-          placeholder="— select —"
-          value={targetAgentId}
-          options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-          onChange={(e) => { setTargetAgentId((e.target as HTMLSelectElement).value); setPendingSpec(null); }}
-        />
-        {/* P4c-3b: runtime 선언 → 매칭되면 agent id, 새로우면 spec-direct 저장. */}
         <DeclareRuntimeSection
+          initialValue={pendingSpec}
           workspaceId={workspaceId}
-          agentsFull={agentsFull}
-          onResolved={(id, created, spec) => {
-            setTargetAgentId(id);
-            setPendingSpec(created ? spec : null);
+
+          onResolved={(spec) => {
+            setPendingSpec(spec);
             showToast(
-              created ? 'Runtime spec으로 저장됩니다 (Agent 행 없음)' : '기존 Agent와 매칭되었습니다',
+              '실행 설정을 적용했습니다',
               'success',
             );
           }}

@@ -58,24 +58,3 @@ export function specSummary(spec: Partial<RuntimeSpecDraft>, hostName?: string):
   const leaf = workingDirLeaf((spec.working_dir || '').trim());
   return `${host}/${cli}${model ? `:${model}` : ''}${leaf ? ` @${leaf}` : ''}`;
 }
-
-/**
- * 선언된 spec에 정확히 일치하는 기존 Agent 행 찾기 (P4 전환 전까지의 과도기
- * 매칭 — Host+CLI+model+dir+credential 5키 일치). 찾으면 그 id를 쓰고,
- * 없으면 호출자가 createAgent로 만든다. 순서 보장 없음 — 첫 일치 반환.
- */
-export function matchAgentForSpec(
-  agents: Array<{ id: string; manager_agent_id?: string | null; type?: string; model?: string | null; working_dir?: string; credential_id?: string | null }>,
-  spec: Pick<RuntimeSpecDraft, 'manager_agent_id' | 'cli' | 'model' | 'working_dir' | 'credential_id'>,
-): string | null {
-  const norm = (v: string | null | undefined) => (v || '').trim();
-  for (const a of agents) {
-    if (norm(a.manager_agent_id) !== norm(spec.manager_agent_id)) continue;
-    if (norm(a.type).toLowerCase() !== norm(spec.cli).toLowerCase()) continue;
-    if (norm(a.model) !== norm(spec.model)) continue;
-    if (norm(a.working_dir) !== norm(spec.working_dir)) continue;
-    if (norm(a.credential_id) !== norm(spec.credential_id)) continue;
-    return a.id;
-  }
-  return null;
-}

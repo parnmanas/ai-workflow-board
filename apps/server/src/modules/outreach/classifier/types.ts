@@ -25,8 +25,8 @@ export interface ClassificationContext {
   workspaceId: string;
   channelId: string;
   channelKind: OutreachChannelKind;
-  /** OutreachChannel.classifier_agent_id — null means "stay rule-based". */
-  classifierAgentId: string | null;
+  /** OutreachChannel.classifier_runtime — null means "stay rule-based". */
+  classifierRuntime: Record<string, any> | null;
 }
 
 /**

@@ -24,15 +24,7 @@ export class ApiKey {
   @Column({ type: 'varchar', nullable: true, default: null })
   key_prefix: string | null;
 
-  // P4c-4: retired audit column (Agent 테이블 없음 — 신규 키는 항상 NULL).
-  // 실FK 없음. 이력 조회용으로만 남긴다.
-  @Column({ type: 'varchar', nullable: true, default: null })
-  agent_id: string | null;
-
-  // Host 바인딩 지속 키 (P0, A안). pairing redeem이 manager Agent 행과 함께
-  // RuntimeHost 행을 만들고 이 컬럼에 그 id를 stamped한다. 평문 varchar로
-  // 두어 실FK를 늘리지 않는다 — 마이그레이션 FK 11개 불변.
-  // P4에서 agent_id가 제거되면 이쪽이 유일한 바인딩이 된다.
+  // Runtime Host owning this credential.
   @Column({ type: 'varchar', nullable: true, default: null })
   host_id: string | null;
 

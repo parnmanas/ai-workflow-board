@@ -113,7 +113,13 @@ export function validateAgentRuntimeConfig(
     if (!raw.extra || typeof raw.extra !== 'object' || Array.isArray(raw.extra)) {
       return invalid('Runtime extra configuration must be an object');
     }
-    config.extra = raw.extra as Record<string, unknown>;
+    const extra = raw.extra as Record<string, unknown>;
+    if (extra.effort != null) {
+      if (typeof extra.effort !== 'string' || !extra.effort.trim() || extra.effort.length > 250) return invalid('Invalid effort');
+      if (!CLI_CATALOG.find((entry) => entry.id === runtime)?.effort?.keys.includes('effort')) return invalid('This CLI does not support a launch effort override');
+    }
+    config.extra = { ...extra };
+
   }
   return config;
 }

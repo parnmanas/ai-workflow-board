@@ -1538,15 +1538,7 @@ export class TicketsController {
       }
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: (runtime as any).manager_agent_id } });
-      if (!hostRow) {
-        const link = await this.dataSource.getRepository(ApiKey).findOne({
-          where: [{ agent_id: (runtime as any).manager_agent_id }, { host_id: (runtime as any).manager_agent_id }],
-          select: { agent_id: true, host_id: true },
-        });
-        const hostId = link?.host_id ?? (link?.agent_id ? (runtime as any).manager_agent_id : null);
-        const linked = hostId ? await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: hostId } }) : null;
-        if (!linked) return res.status(400).json({ error: 'runtime references an unknown Runtime Host' });
-      }
+      if (!hostRow) return res.status(400).json({ error: 'Runtime Host not found' });
     } else if (agent_id && user_id) {
       return res.status(400).json({ error: 'cannot set both agent_id and user_id' });
     }

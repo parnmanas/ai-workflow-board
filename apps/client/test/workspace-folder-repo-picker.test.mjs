@@ -85,7 +85,7 @@ function optionLabels(select) {
 /** DeclareRuntimeSection 에 Host/CLI/dir 을 채워 Resolve 한다 (P4c-4 대상 선언). */
 async function declareRuntime(container) {
   const toggle = [...container.querySelectorAll('label')]
-    .find((l) => l.textContent.includes('Runtime으로 지정'));
+    .find((l) => l.textContent.includes('실행 설정 · Agent 템플릿 선택'));
   assert.ok(toggle, 'runtime 선언 토글이 없다');
   click(toggle.querySelector('input[type="checkbox"]'));
   await flush();
@@ -98,7 +98,7 @@ async function declareRuntime(container) {
   change(hostSelect, 'host-1');
   change(cliSelect, 'claude');
   typeInto(dirInput, '/wt/repo-test');
-  const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('Resolve'));
+  const resolveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('이 설정 사용'));
   assert.ok(resolveBtn, 'Resolve 버튼이 없다');
   click(resolveBtn);
 }
@@ -127,7 +127,7 @@ async function renderActions(t, {
     listResources,
     listRepoBranches,
     // P4c-4: 신규 Action 저장에는 실행 대상이 필수 — runtime 선언 스텁.
-    listOrchestrationRuntimeHosts: async () => [{ manager_agent_id: 'host-1', manager_name: 'host-one' }],
+    listTemplateHosts: async () => [{ id: 'host-1', name: 'host-one' }],
     validateRuntimeSpec: async (_ws, spec) => ({
       ok: true,
       spec: { manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: spec.working_dir, credential_id: null, label: '', role_prompt: '' },
@@ -373,7 +373,7 @@ test('QA 시나리오 폼도 같은 드롭다운으로 repo 를 지정하고 알
   const updated = [];
   const scenario = {
     id: 'qa-1', workspace_id: WS, name: '로그인 시나리오', description: '',
-    target_agent_id: 'agent-1', qa_driver: 'browser', qa_driver_config: {}, steps: [], tags: [],
+    target_agent_id: 'rt-0123456789abcdef', target_runtime: { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/repo', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, qa_driver: 'browser', qa_driver_config: {}, steps: [], tags: [],
     enabled: true, target_environment: '', on_failure_ticket: null, qa_phases: null,
     workspace_folder: '', repo_ref: { resource_id: 'repo-deleted' },
     checkout_mode: 'reuse', build_mode: 'cold_then_warm', last_built_commit: null,
@@ -418,7 +418,7 @@ test('Security 프로파일 폼도 같은 드롭다운으로 repo·브랜치를 
   const updated = [];
   const profile = {
     id: 'sec-1', workspace_id: WS, name: '월간 감사', description: '',
-    target_agent_id: 'agent-1', target_resource_id: null, scan_driver: 'code-audit',
+    target_agent_id: 'rt-0123456789abcdef', target_runtime: { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/repo', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, target_resource_id: null, scan_driver: 'code-audit',
     scan_driver_config: {}, scope_mode: 'incremental', checklist: [], tags: [],
     enabled: true, max_runs: 20, on_failure_ticket: null,
     workspace_folder: '', repo_ref: null,

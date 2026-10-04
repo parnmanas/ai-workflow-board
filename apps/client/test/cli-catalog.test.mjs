@@ -100,7 +100,8 @@ test('catalog facts match the previously hardcoded tables', () => {
   assert.deepEqual(cliEffortKeys('claude'), ['effort', 'ultracode', 'model']);
   assert.deepEqual(cliEffortKeys('deepseek'), ['effort', 'ultracode', 'model']);
   assert.equal(cliDescriptor('deepseek').effort.slice_key, 'claude');
-  for (const id of ['codex', 'antigravity', 'pi', 'opencode']) assert.deepEqual(cliEffortKeys(id), ['model'], id);
+  assert.deepEqual(cliEffortKeys('codex'), ['model', 'effort']);
+  for (const id of ['antigravity', 'pi', 'opencode']) assert.deepEqual(cliEffortKeys(id), ['model'], id);
   assert.deepEqual(cliEffortKeys('hermes'), []);
   assert.deepEqual(cliEffortKeys('custom'), []);
   // runtime config knobs + collaboration (ex `runtime === 'hermes'`)
@@ -208,7 +209,7 @@ test('effort editor: one block per CLI with its own effort slice; slice_key CLIs
   assert.ok(!blocks.some((b) => b.id === 'deepseek'), 'deepseek reads the claude slice — no block of its own');
   assert.ok(!blocks.some((b) => b.id === 'hermes'), 'hermes has no effort concept');
   assert.deepEqual(blocks[0], { id: 'claude', label: 'Claude Code', keys: ['effort', 'ultracode', 'model'] });
-  for (const b of blocks.slice(1)) assert.deepEqual(b.keys, ['model'], b.id);
+  for (const b of blocks.slice(1)) assert.deepEqual(b.keys, b.id === 'codex' ? ['model', 'effort'] : ['model'], b.id);
   // Adding an effort-capable CLI to the catalog adds a block without a code change.
   setCliCatalog([...STATIC_CLI_CATALOG, {
     ...STATIC_CLI_CATALOG.find((d) => d.id === 'pi'),

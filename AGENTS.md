@@ -292,6 +292,13 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **replan 은 그래프도 additive(ticket 301018c5)**: `submit_orchestration_plan`이 `graph`/`graph_template` 없이 다시 들어오면 확정된 `graph_spec`을 **보존**하고 새 step만 고립 node로 편입한다(`carryGraphThroughReplan()`). 예전엔 `graphFromWavePlan`으로 통째 재생성해 conditional/loop_back과 그동안의 patch가 오류·경고 없이 사라졌다. 보존 경로도 patch와 마찬가지로 전용 검증을 만들지 말고 결과 전체를 `validateGraphSpec()`에 다시 통과시킬 것 — 누락 step을 고립 node로 채우는 건 검증기가 이미 하는 일이다. 이 보존이 성립하는 근거는 **plan에서 step이 사라지지 않는다**는 불변식(재제출은 누락 키 보존, `cancel`은 status만 변경, `listSteps`는 상태 미필터)이므로, step을 실제 삭제하는 경로를 만들면 여기도 함께 고쳐야 한다. 폐기는 `reset_graph: true`로만 명시하고, 그때만 `graph_revision`이 0으로 리셋된다.
 - Reference: `docs/orchestration.md`
 
+## Agent templates (2026-10 cleanup)
+
+- `AgentTemplate` is a reusable preference in Hosts, with host/cli/model/effort/runtime_config only. Never put working_dir, lifecycle or execution identity on templates.
+- `RuntimeSelectionFields` is the shared selection UI. Loading a template copies preferences; inline RuntimeSpecs and session folders own execution settings independently.
+- The legacy Agent table, key/assistant references, duplicate Action/QA/Security/Schedule/Feature target columns and per-Agent skill bindings are retired. Response/SSE `agent_id` names on execution records are runtime identity keys, not template IDs.
+- `preSyncAgentCleanup` preserves Host pairing aliases before synchronize; migration 1760000000090 performs the same idempotent cleanup. New skills bind to `RuntimeSkillAssignment.runtime_key`; classifiers use `OutreachChannel.classifier_runtime`.
+
 ## Agent Sessions (CLI 직접 세션)
 
 - Chat 과 **별개 표면**: Runtime Host 장비에 있는 CLI(Claude Code / Codex / Hermes)의 세션을 AWB 화면에서 직접 몬다. 단위는 **(Runtime Host, CLI, 네이티브 세션 id)** 이고 **AWB 는 세션 내용을 저장하지 않는다** — 목록·기록은 매니저가 CLI 홈(`~/.claude/projects`, `~/.codex/sessions`)에서 읽어 reverse RPC 로 답하고, 라이브 턴의 스트림만 driver 사용자에게 SSE 로 중계한다. 그 장비에서 터미널로 쓰던 세션도 그대로 뜬다. chat 모드 기본 랜딩이 `/ws/:wsId/sessions` 다. ChatRoom 은 그대로(다자간 대화 + run dispatch 버스) — 세션 기능을 방(room)에 분기로 얹지 말 것.

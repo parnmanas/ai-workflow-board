@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { runtimeIdentityKey, parseRuntimeSpec } from '../common/runtime-spec';
+import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/workspace-folder-options';
 
 /**
@@ -17,6 +18,14 @@ import { CheckoutMode, BuildMode, WorkspaceFolderRepoRef } from '../common/works
  */
 @Entity('qa_scenarios')
 export class QaScenario {
+  @AfterLoad()
+  @BeforeInsert()
+  @BeforeUpdate()
+  refreshRuntimeIdentity(): void {
+    const spec = parseRuntimeSpec(this.target_runtime);
+    this.target_agent_id = spec ? runtimeIdentityKey(spec) : '';
+  }
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
@@ -40,14 +49,9 @@ export class QaScenario {
   steps: QaScenarioStep[] | null;
 
   // The QA agent that runs this scenario (dispatched via ChatRoom, like Action).
-  @Column({ type: 'varchar' })
-  target_agent_id: string;
+  /** Computed dispatch keys. Runtime specs below are the persisted source of truth. */
+  target_agent_id: string = '';
 
-  /**
-   * Snapshot of the target's runtime at save time (P2c dual-write).
-   * `target_agent_id`와 항상 함께 쓴다. P4에서 dispatch가 이쪽을 읽으면
-   * `target_agent_id`는 제거된다. 그 전까지 읽는 쪽은 없다.
-   */
   @Column({ type: 'simple-json', nullable: true, default: null })
   target_runtime: Record<string, any> | null;
 

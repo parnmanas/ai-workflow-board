@@ -6,7 +6,6 @@ import {
   emptyRuntimeSpec,
   isAbsoluteHostPath,
   isRuntimeSpecComplete,
-  matchAgentForSpec,
   specSummary,
   workingDirLeaf,
 } from '../src/runtime/runtimeSpec.ts';
@@ -40,15 +39,4 @@ test('summary renders host/cli/model/leaf', () => {
 test('workingDirLeaf takes last segment', () => {
   assert.equal(workingDirLeaf('/a/b/c'), 'c');
   assert.equal(workingDirLeaf('C:\\a\\b'), 'b');
-});
-
-test('matchAgentForSpec matches the 5-key tuple', () => {
-  const agents = [
-    { id: 'a1', manager_agent_id: 'h1', type: 'Claude', model: 'opus', working_dir: '/w', credential_id: null },
-    { id: 'a2', manager_agent_id: 'h1', type: 'claude', model: null, working_dir: '/w', credential_id: null },
-  ];
-  const spec = { manager_agent_id: 'h1', cli: 'claude', model: 'opus', working_dir: '/w', credential_id: null };
-  assert.equal(matchAgentForSpec(agents, spec), 'a1');
-  assert.equal(matchAgentForSpec(agents, { ...spec, model: 'other' }), null);
-  assert.equal(matchAgentForSpec(agents, { ...spec, manager_agent_id: 'h2' }), null);
 });

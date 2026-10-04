@@ -212,6 +212,7 @@ export class CodexCliAdapter extends CliAdapter {
     rolePrompt,
     taskText,
     model,
+    effort,
     mcpAttribution,
     cwd,
     cliHomeDir,
@@ -318,6 +319,7 @@ export class CodexCliAdapter extends CliAdapter {
         // Per-agent default model (Agent.model). Omitted when unset so codex
         // keeps its configured default — preserves prior behaviour.
         ...(model ? ['--model', model] : []),
+        ...(effort ? ['-c', `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
         '--skip-git-repo-check',
         '--json',
         ...codexPermissionArgs(permission, harness),

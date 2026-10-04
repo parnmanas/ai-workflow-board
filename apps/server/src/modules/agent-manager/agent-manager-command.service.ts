@@ -131,18 +131,7 @@ export class AgentManagerCommandService {
     void issuedBy;
     let hostId: string | null = null;
     const direct = await this.hostRepo.findOne({ where: { id: targetAgentId } });
-    if (direct) {
-      hostId = direct.id;
-    } else {
-      const link = await this.apiKeyRepo.findOne({
-        where: { agent_id: targetAgentId },
-        select: { agent_id: true, host_id: true },
-      });
-      if (link?.host_id) {
-        const linked = await this.hostRepo.findOne({ where: { id: link.host_id } });
-        if (linked) hostId = linked.id;
-      }
-    }
+    hostId = direct?.id ?? null;
     if (!hostId) return { ok: false, reason: 'agent_not_found' };
     const inst = this.resolveLiveManagerInstance(hostId);
     if (!inst) return { ok: false, reason: 'manager_offline' };

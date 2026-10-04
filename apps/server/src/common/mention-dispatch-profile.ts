@@ -154,16 +154,7 @@ export async function resolveMentionTarget(
     // P4c-4: Agent 행 없음 — Host 직접 조회 후 api_keys 페어링 링크.
     const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: memberId } });
     let displayName: string | null = host?.name ?? null;
-    if (!displayName) {
-      const link = await dataSource.getRepository(ApiKey).findOne({
-        where: { agent_id: memberId },
-        select: { agent_id: true, host_id: true },
-      });
-      if (link?.host_id) {
-        const linked = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: link.host_id } });
-        displayName = linked?.name ?? null;
-      }
-    }
+
     if (!displayName) return null;
     // P2 시절 agent 홀더 스냅샷이 assignment 행에 남아 있으면 실행 정체성으로
     // 쓴다 (테이블은 다르므로 drop 후에도 살아 있다).

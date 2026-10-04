@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { runtimeIdentityKey, parseRuntimeSpec } from '../common/runtime-spec';
+import { AfterLoad, BeforeInsert, BeforeUpdate, Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 
 /**
  * WorkspaceSchedule — a general-purpose "do this task at this time" trigger for a
@@ -50,6 +51,14 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 @Entity('workspace_schedules')
 @Index(['workspace_id', 'enabled'])
 export class WorkspaceSchedule {
+  @AfterLoad()
+  @BeforeInsert()
+  @BeforeUpdate()
+  refreshRuntimeIdentity(): void {
+    const spec = parseRuntimeSpec(this.target_runtime);
+    this.target_agent_id = spec ? runtimeIdentityKey(spec) : '';
+  }
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
@@ -65,17 +74,9 @@ export class WorkspaceSchedule {
   @Column({ type: 'varchar' })
   name: string;
 
-  // The single agent this schedule dispatches the task to. Action 형태
-  // (`action_id` 설정)에서는 **비어 있다** — 대상은 Action 이 정한다.
-  @Column({ type: 'varchar', default: '' })
-  target_agent_id: string;
+  /** Computed dispatch keys. Runtime specs below are the persisted source of truth. */
+  target_agent_id: string = '';
 
-  /**
-   * Snapshot of the target's runtime at save time (P2c dual-write).
-   * `target_agent_id`와 항상 함께 쓴다. Action 형태에서는 둘 다 비어 있다.
-   * P4에서 dispatch가 이쪽을 읽으면 `target_agent_id`는 제거된다.
-   * 그 전까지 읽는 쪽은 없다.
-   */
   @Column({ type: 'simple-json', nullable: true, default: null })
   target_runtime: Record<string, any> | null;
 

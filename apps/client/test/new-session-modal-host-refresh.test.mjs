@@ -141,11 +141,12 @@ const SETTINGS = {
 
 function stubSettingsApi(t, { settings = SETTINGS } = {}) {
   const calls = { get: [], put: [], open: [] };
-  const original = { get: api.getHostCliSettings, put: api.setHostCliSettings, open: api.openHostSession };
+  const original = { models: api.getHostModels, get: api.getHostCliSettings, put: api.setHostCliSettings, open: api.openHostSession };
+  api.getHostModels = async (id) => ({ manager_agent_id: id, models: { codex: ['gpt-a', 'gpt-b'] }, labels: {}, available_models_at: new Date().toISOString() });
   api.getHostCliSettings = async (managerId, cli) => { calls.get.push([managerId, cli]); return { ...settings, manager_id: managerId, cli }; };
   api.setHostCliSettings = async (managerId, cli, credentialId, defaultConfig) => { calls.put.push({ managerId, cli, credentialId, defaultConfig }); return settings; };
   api.openHostSession = async (managerId, cli, input) => { calls.open.push({ managerId, cli, input }); return { manager_id: managerId, cli, session_id: 's-new', status: 'ready' }; };
-  t.after(() => { api.getHostCliSettings = original.get; api.setHostCliSettings = original.put; api.openHostSession = original.open; });
+  t.after(() => { api.getHostModels = original.models; api.getHostCliSettings = original.get; api.setHostCliSettings = original.put; api.openHostSession = original.open; });
   return calls;
 }
 

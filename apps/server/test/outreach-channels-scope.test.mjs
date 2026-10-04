@@ -69,19 +69,10 @@ describe('Outreach channels — workspace scope contract', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  // P4c-4: classifier 정체성은 Host 행 + api_keys 링크다.
-  // uuid agent id 를 돌려준다 — 호출부는 예전처럼 `.id` 로 쓴다.
-  async function makeHostAgent(workspaceId, name) {
-    const { randomUUID } = await import('node:crypto');
-    const hostRepo = dataSource.getRepository(RuntimeHost);
-    const host = await hostRepo.save(hostRepo.create({ name: `host-${name}`, hostname: 'outreach-test', workspace_id: workspaceId }));
-    const agentId = randomUUID();
-    const keyRepo = dataSource.getRepository(ApiKey);
-    await keyRepo.save(keyRepo.create({
-      name: `link-${name}`, key: `hash-${name}`, key_prefix: 't***',
-      agent_id: agentId, host_id: host.id, scope: 'full', workspace_id: workspaceId,
-    }));
-    return { id: agentId };
+  async function makeRuntime(name) {
+    const repo = dataSource.getRepository(RuntimeHost);
+    const host = await repo.save(repo.create({ name, hostname: 'outreach-test' }));
+    return { manager_agent_id: host.id, cli: 'codex', working_dir: '/tmp/project', folder_scope: 'shared', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
   }
 
   it('rejects creating a channel with a credential from a DIFFERENT workspace', async () => {
@@ -129,44 +120,37 @@ describe('Outreach channels — workspace scope contract', () => {
     assert.match(res.body.error, /target_board_id must reference a board in this workspace/);
   });
 
-  it('rejects a classifier_agent_id belonging to a DIFFERENT workspace', async () => {
+  it('rejects a classifier runtime with a credential from another workspace', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
-    const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-agent-a' }));
-    const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-agent-b' }));
-    const agentB = await makeHostAgent(wsB.id, 'agent-b');
-
+    const wsA = await wsRepo.save(wsRepo.create({ name: 'ws-runtime-a' }));
+    const wsB = await wsRepo.save(wsRepo.create({ name: 'ws-runtime-b' }));
+    const credRepo = dataSource.getRepository(Credential);
+    const credential = await credRepo.save(credRepo.create({ workspace_id: wsB.id, name: 'private', provider: 'codex', encrypted_data: '' }));
+    const runtime = { ...await makeRuntime('host-private'), credential_id: credential.id };
     const res = response();
-    await controller.create({
-      workspace_id: wsA.id, kind: 'github', name: 'channel agent scope', classifier_agent_id: agentB.id,
-    }, res);
+    await controller.create({ workspace_id: wsA.id, kind: 'github', name: 'scoped', classifier_runtime: runtime }, res);
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /classifier_agent_id must belong to this workspace/);
+    assert.match(res.body.error, /not available in this workspace scope/);
   });
 
-  it('accepts a classifier_agent_id belonging to the SAME workspace', async () => {
+  it('saves a classifier runtime on a global Host without an Agent row', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
-    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-agent-same' }));
-    const agent = await makeHostAgent(ws.id, 'agent-same');
-
+    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-runtime' }));
+    const runtime = await makeRuntime('host-classifier');
     const res = response();
-    await controller.create({
-      workspace_id: ws.id, kind: 'github', name: 'channel agent same-scope', classifier_agent_id: agent.id,
-    }, res);
+    await controller.create({ workspace_id: ws.id, kind: 'github', name: 'runtime', classifier_runtime: runtime }, res);
     assert.equal(res.statusCode, 201);
-    assert.equal(res.body.classifier_agent_id, agent.id);
+    assert.equal(res.body.classifier_runtime.manager_agent_id, runtime.manager_agent_id);
+    assert.equal(res.body.classifier_agent_id, undefined);
   });
 
-  it('allows a GLOBAL agent (workspace_id=null) as classifier_agent_id for any workspace channel', async () => {
+  it('rejects a classifier runtime whose host does not exist', async () => {
     const wsRepo = dataSource.getRepository(Workspace);
-    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-agent-global' }));
-    const globalAgent = await makeHostAgent(null, 'global-agent');
-
+    const ws = await wsRepo.save(wsRepo.create({ name: 'ws-missing-host' }));
+    const runtime = { ...await makeRuntime('host-unused'), manager_agent_id: 'missing' };
     const res = response();
-    await controller.create({
-      workspace_id: ws.id, kind: 'github', name: 'channel agent global-scope', classifier_agent_id: globalAgent.id,
-    }, res);
-    assert.equal(res.statusCode, 201);
-    assert.equal(res.body.classifier_agent_id, globalAgent.id);
+    await controller.create({ workspace_id: ws.id, kind: 'github', name: 'missing', classifier_runtime: runtime }, res);
+    assert.equal(res.statusCode, 400);
   });
 
   it('a channel created in workspace A is not visible when listing workspace B', async () => {

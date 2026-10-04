@@ -347,7 +347,7 @@ export class EventsController implements OnModuleDestroy {
             // P4c-4: host-only 키는 agent 바인딩이 없다 — Host id 를 agentId
             // 자리에 넣어 legacy uuid 스코프 비교가 null 추락하지 않게 한다.
             // host-affinity 분기는 아래 hostId 로 탄다.
-            agentId: keyResult.apiKey.agent_id ?? keyResult.apiKey.host_id ?? undefined,
+            agentId: keyResult.apiKey.host_id ?? undefined,
             // P4c-2b: host-affinity 분기용. 구 키에는 host_id가 없어 undefined.
             hostId: keyResult.apiKey.host_id ?? undefined,
           };
@@ -367,20 +367,8 @@ export class EventsController implements OnModuleDestroy {
       const hostRow = authIdentity.agentId
         ? await this.hostRepo.findOne({ where: { id: authIdentity.agentId } })
         : null;
-      let linked: { id: string } | null = null;
-      if (!hostRow && authIdentity.agentId) {
-        const link = await this.apiKeyRepo.findOne({
-          where: { agent_id: authIdentity.agentId },
-          select: { agent_id: true, host_id: true },
-        }).catch(() => null);
-        if (link?.host_id) {
-          linked = await this.hostRepo.findOne({ where: { id: link.host_id } });
-        }
-      }
-      if (!hostRow && !linked) {
-        throw new UnauthorizedException('Runtime Host credentials are required');
-      }
-      fanoutHostId = hostRow?.id ?? linked?.id ?? null;
+      if (!hostRow) throw new UnauthorizedException('Runtime Host credentials are required');
+      fanoutHostId = hostRow.id;
     }
 
     this.clientCount++;
@@ -402,21 +390,6 @@ export class EventsController implements OnModuleDestroy {
     // 연결당 1회 조회라 이벤트 핫 패스는 그대로 O(1) 이다. rt- 멤버는 기존
     // host-affinity 분기로 배달된다.
     let managedAgentIds: Set<string> | undefined = undefined;
-    if (fanoutHostId) {
-      try {
-        const links = await this.apiKeyRepo.find({
-          where: { host_id: fanoutHostId },
-          select: { agent_id: true },
-        });
-        const ids = links
-          .map((l) => l.agent_id)
-          .filter((id): id is string => !!id && id !== fanoutHostId);
-        if (ids.length > 0) managedAgentIds = new Set(ids);
-      } catch {
-        // 조회 실패는 직접 주소 배달로 축소 (fail-closed, 연결은 유지).
-        managedAgentIds = undefined;
-      }
-    }
 
     const identity: SubscriberIdentity = {
       ...authIdentity,

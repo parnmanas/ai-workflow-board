@@ -77,7 +77,7 @@ function normalizeOnFailureTicket(input: any): QaOnFailureTicketConfig | null {
  * without an N+1 fetch-runs-per-scenario. Computed in QaService.list via a
  * single qa_runs query keyed on the listed scenario ids.
  */
-export interface QaScenarioListItem extends QaScenario {
+export interface QaScenarioListItem extends Omit<QaScenario, 'refreshRuntimeIdentity'> {
   last_run_at: string | null;
   last_run_status: QaRunStatus | null;
   /** Total retained runs for the scenario (bounded by max_runs). */
@@ -213,24 +213,11 @@ export class QaService {
       // P4c-4: Host 직접 조회 후 api_keys 페어링 링크 (Agent 테이블 없음).
       const hostRow = await this.hostRepo.findOne({ where: { id: spec.manager_agent_id } });
       if (!hostRow) {
-        const link = await this.dataSource.getRepository(ApiKey).findOne({
-          where: [{ agent_id: spec.manager_agent_id }, { host_id: spec.manager_agent_id }],
-          select: { agent_id: true, host_id: true },
-        });
-        const hostId = link?.host_id ?? (link?.agent_id ? spec.manager_agent_id : null);
-        const linked = hostId ? await this.hostRepo.findOne({ where: { id: hostId } }) : null;
-        if (!linked) throw makeError(400, 'target_runtime references an unknown Runtime Host');
+        throw makeError(400, 'target_runtime references an unknown Runtime Host');
       }
       return { target_agent_id: runtimeIdentityKey(spec), target_runtime: { ...spec } };
     }
-    // P4c-4: uuid 타겟은 Host/링크 해소 (Agent 행 없음, 스냅샷 없음).
-    if (!targetAgentId) throw makeError(400, 'target_agent_id is required');
-    const agent = await resolveCallerIdentityRow(this.dataSource, targetAgentId);
-    if (!agent) throw makeError(400, 'target agent not found');
-    if (!agentIsVisibleInWorkspace(agent.workspace_id, workspaceId)) {
-      throw makeError(400, 'target agent belongs to a different workspace');
-    }
-    return { target_agent_id: targetAgentId, target_runtime: null };
+    throw makeError(400, 'target_runtime is required; Agent references are no longer supported');
   }
 
   async create(input: CreateScenarioInput): Promise<QaScenario> {

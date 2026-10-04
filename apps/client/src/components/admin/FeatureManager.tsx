@@ -37,7 +37,6 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
   const [detail, setDetail] = useState<Feature | null>(null);
   const [agents, setAgents] = useState<AgentOpt[]>([]);
   // P4b: runtime 선언 → 매칭용 full 행.
-  const [agentsFull, setAgentsFull] = useState<Array<any>>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -71,7 +70,6 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
       try {
         const list: any[] = [];
         setAgents((list || []).map((a: any) => ({ id: a.id, name: a.name, manager_name: a.manager_name })));
-        setAgentsFull((list || []) as any[]);
       } catch { /* non-fatal — planner defaults server-side */ }
     })();
   }, [workspaceId]);
@@ -185,7 +183,7 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
         footer={
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: tokens.spacing.sm }}>
             <Button variant="ghost" onClick={() => setShowCreate(false)} disabled={busy}>취소</Button>
-            <Button variant="primary" onClick={submitIntake} disabled={busy || !title.trim() || !requirement.trim()}>
+            <Button variant="primary" onClick={submitIntake} disabled={busy || !title.trim() || !requirement.trim() || !plannerSpec}>
               {busy ? '제출 중…' : '제출 → 기획 착수'}
             </Button>
           </div>
@@ -208,21 +206,14 @@ export default function FeatureManager({ workspaceId, boardId }: { workspaceId?:
               }}
             />
           </div>
-          <Select
-            label="기획 담당 에이전트 (planner)"
-            value={plannerId}
-            onChange={(e) => setPlannerId(e.target.value)}
-            placeholder="미지정 시 서버 기본값(호출자)"
-            options={agents.map((a) => ({ value: a.id, label: formatAgentDisplayName(a) }))}
-          />
           {/* P4c-3b: runtime 선언 → 매칭되면 id, 새로우면 spec-direct 저장. */}
           {workspaceId && (
             <DeclareRuntimeSection
               workspaceId={workspaceId}
-              agentsFull={agentsFull}
-              onResolved={(id, created, spec) => {
-                setPlannerId(id);
-                setPlannerSpec(created ? spec : null);
+
+              onResolved={(spec) => {
+                setPlannerId('');
+                setPlannerSpec(spec);
               }}
             />
           )}

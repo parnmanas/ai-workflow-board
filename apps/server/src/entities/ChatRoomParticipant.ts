@@ -23,16 +23,11 @@ export class ChatRoomParticipant {
   @Column({ type: 'varchar' })
   participant_type: string;
 
-  // User.id or Agent.id depending on participant_type
+  // User id or runtime identity key depending on participant_type
   @Column({ type: 'varchar' })
   participant_id: string;
 
-  /**
-   * Snapshot of the agent participant's runtime at join time (P2b dual-write).
-   * `runtimeSpecFromAgentRow()`가 참가 추가 시점에 복사. user 참가자는 null.
-   * P4에서 dispatch가 이쪽을 읽으면 participant의 agent 참조는 제거된다.
-   * 그 전까지 읽는 쪽은 없다.
-   */
+  /** Inline runtime declaration; human participants carry null. */
   @Column({ type: 'simple-json', nullable: true, default: null })
   runtime_spec: Record<string, any> | null;
 

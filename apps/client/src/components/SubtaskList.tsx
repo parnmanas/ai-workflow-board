@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { Droppable } from '@hello-pangea/dnd';
-import { Ticket, Agent } from '../types';
+import { Ticket, RuntimeParticipant } from '../types';
 import { tokens } from '../tokens';
 import { formatAgentDisplayName } from '../utils/agentName';
 
 interface ChildTicketListProps {
   parentTicket: Ticket;
-  agents: Agent[];
+  agents: RuntimeParticipant[];
   maxDepth: number; // max allowed depth for this parent's children
   // Optional flat list of root tickets on the board, used by the
   // "Link existing" picker. Self and current children are filtered out.

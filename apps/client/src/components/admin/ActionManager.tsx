@@ -493,7 +493,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
             <div style={{ marginTop: 8 }}>
               <DeclareRuntimeSection
                 workspaceId={effectiveWorkspaceId}
-                onResolved={(_id, _created, spec) => {
+                onResolved={(spec) => {
                   if (spec) {
                     setPendingSpecs((prev) => {
                       if (prev.some((s) => JSON.stringify(s) === JSON.stringify(spec))) return prev;

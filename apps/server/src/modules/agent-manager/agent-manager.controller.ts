@@ -53,7 +53,6 @@ const ALLOWED_COMMANDS: ReadonlySet<AgentManagerCommand> = new Set([
   'stop_agent',
   'restart_agent',
   'restart_all_agents',
-  'set_working_dir',
   'reload_config',
   'update_plugins',
   'refresh_mcp_config',
@@ -1007,7 +1006,6 @@ export class AgentManagerController {
 
     const apiKey = await this.apiKeyService.createApiKey({
       name: `agent-manager:${hostname}:${rec.id}`,
-      agent_id: null,
       host_id: host.id,
       scope: 'full',
       workspace_id: rec.workspace_id,
@@ -1060,7 +1058,7 @@ export class AgentManagerController {
   @UseGuards(AgentAuthGuard)
   @ApiOperation({ summary: 'Manager → server: ack the outcome of a control command' })
   async commandAck(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.host_id || null;
     const command_id = typeof body?.command_id === 'string' ? body.command_id : '';
     const status = body?.status === 'ok' ? 'ok' : body?.status === 'error' ? 'error' : null;
     if (!command_id || !status) {
@@ -1149,7 +1147,7 @@ export class AgentManagerController {
   @UseGuards(AgentAuthGuard)
   @ApiOperation({ summary: 'Manager → server: agent_trigger 결과 보고 (processed|nack|suppressed)' })
   async dispatchAck(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.host_id || null;
     const ticket_id = String(body?.ticket_id || '').trim();
     const role = String(body?.role || '').trim();
     const trigger_id = String(body?.trigger_id || '').trim();
@@ -1220,7 +1218,7 @@ export class AgentManagerController {
   @UseGuards(AgentAuthGuard)
   @ApiOperation({ summary: 'Manager → server: per-(agent,ticket,role) output-liveness heartbeat' })
   async reportOutputLiveness(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.host_id || null;
     const items: any[] = Array.isArray(body?.items) ? body.items : [body];
     let recorded = 0;
     for (const it of items) {
@@ -1255,7 +1253,7 @@ export class AgentManagerController {
   @UseGuards(AgentAuthGuard)
   @ApiOperation({ summary: 'Manager → server: per-(agent,ticket) graph_ vs native tool-call sample' })
   async reportToolCallTelemetry(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.host_id || null;
     const agentId = String(body?.agent_id || callerAgentId || '').trim();
     const ticketId = String(body?.ticket_id || '').trim();
     const role = String(body?.role || '').trim();
@@ -1487,7 +1485,7 @@ export class AgentManagerController {
   @UseGuards(PermissionGuard)
   @RequirePermission(PERMISSIONS.ADMIN_ACCESS)
   @ApiOperation({
-    summary: 'Send a control command (spawn/stop/restart/set_working_dir/reload_config) to a manager instance',
+    summary: 'Send a control command (spawn/stop/restart/reload_config) to a manager instance',
   })
   async sendCommand(
     @Param('id') id: string,
@@ -1671,7 +1669,7 @@ export class AgentManagerController {
     req: Request,
     instanceId: string,
   ): { instance_id: string } | { error: string; status: number } {
-    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.host_id || null;
     if (!callerAgentId) return { error: 'unauthenticated', status: 401 };
     const id = String(instanceId || '').trim();
     if (!id) return { error: 'instance_id is required', status: 400 };
@@ -1750,7 +1748,7 @@ export class AgentManagerController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.agent_id || null;
+    const callerAgentId = (req as any).currentAgentId || (req as any).apiKey?.host_id || null;
     // 신원 없는 호출은 여기서만 거부한다 — `/command/ack` 등 다른 매니저 엔드포인트는
     // identity 가 없으면 소유권 검사를 건너뛰는데(AGENT_DEV_MODE 에서 가드가 아예
     // 붙이지 않는다), 이 엔드포인트가 내주는 값은 **root 비밀번호**다. "누가
@@ -1912,7 +1910,6 @@ export class AgentManagerController {
     }
     const issued = await this.apiKeyService.createApiKey({
       name: `runtime:${label}:${key}`,
-      agent_id: null,
       host_id: hostId,
       scope: 'full',
       workspace_id: workspaceId,

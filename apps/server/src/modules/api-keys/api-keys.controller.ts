@@ -33,7 +33,7 @@ export class ApiKeysController {
 
   @Post()
   async create(@Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const { name, agent_id, scope, expires_in_days } = body;
+    const { name, scope, expires_in_days } = body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
     let expires_at: Date | null = null;
@@ -43,7 +43,7 @@ export class ApiKeysController {
     }
 
     const result = await this.apiKeyService.createApiKey({
-      name, agent_id: agent_id || null, scope: scope || 'full', expires_at, workspace_id: workspaceId || '',
+      name, scope: scope || 'full', expires_at, workspace_id: workspaceId || '',
     });
 
     return res.status(201).json({
@@ -54,12 +54,11 @@ export class ApiKeysController {
 
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @CurrentWorkspaceId() workspaceId: string | null, @Res() res: Response) {
-    const { name, scope, is_active, agent_id, expires_in_days } = body;
+    const { name, scope, is_active, expires_in_days } = body;
     const updates: any = {};
     if (name !== undefined) updates.name = name;
     if (scope !== undefined) updates.scope = scope;
     if (is_active !== undefined) updates.is_active = is_active;
-    if (agent_id !== undefined) updates.agent_id = agent_id;
     if (expires_in_days !== undefined) {
       if (expires_in_days === null || expires_in_days === 0) {
         updates.expires_at = null;

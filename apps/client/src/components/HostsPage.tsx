@@ -1,4 +1,5 @@
 import React from 'react';
+import AgentTemplatesPanel from './runtime/AgentTemplatesPanel';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
@@ -17,7 +18,7 @@ export default function HostsPage() {
       />
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 24, background: tokens.colors.surface }}>
         {canManage ? (
-          <AgentManagerPage />
+          <><AgentTemplatesPanel /><AgentManagerPage /></>
         ) : (
           <PermissionNotice title="관리자 권한이 필요합니다" message="Runtime Host 관리에는 관리자 권한이 필요합니다." />
         )}

@@ -16,7 +16,6 @@ import {
   isRuntimeIdentityKey,
   normalizeRuntimeSpec,
   runtimeIdentityKey,
-  runtimeSpecFromAgentRow,
   type HolderRef,
   type RuntimeSpec,
 } from '../../common/runtime-spec';
