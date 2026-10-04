@@ -3513,9 +3513,12 @@ export interface VoiceAnnouncementEvent {
   event_type: 'voice_announcement';
   id: string;
   user_id: string;
+  /** `operator_report`(operator 가 작업 보고를 요약) · `operator_reply`(operator 의 답) · `session_*` · `mission_*`. */
   kind: string;
   text: string;
   target: VoiceAnnouncementTarget;
+  /** operator 가 쓴 글이면 그 operator. */
+  operator?: { id: string; name: string };
   created_at: string;
 }
 

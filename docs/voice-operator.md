@@ -226,14 +226,49 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 
 ## 음성 알림
 
+### 작업 보고 — 세션 소식은 operator 가 전한다 (2026-10-04)
+
+세션마다 따로 말하지 않는다. AWB 를 거쳐 연결된 세션(driver 가 있는 Agent Session)의 턴이 끝나거나(오류 포함)
+사용자의 승인·답을 기다리면, **AWB 가 그것을 알아채 operator 에게 보고**하고, operator 가 쓴 요약이 사용자에게
+소리(+토스트)로 간다. 말하는 것은 operator 하나다.
+
+```
+세션 턴 종료 · 오류 · 승인/질문 대기 (agent_session_update/event — 서버가 이미 안다)
+   │  사용자가 그 세션 화면을 보고 있으면 끝 (VoicePresenceService — 화면이 30초마다 알린다)
+   ▼
+OperatorReportService: 받을 operator = 같은 호스트(여럿이면 최근 대화) → 없으면 가장 최근에 대화한 operator
+   │  바쁘면(사용자와 대화 중) 줄 세웠다가 한가해지면 묶어서 한 번에
+   ▼
+operator 세션에 대신 보낸 프롬프트 "[AWB 작업 보고] … 1. 완료 — rolf / Codex · '배포 정리' · 12분 …"
+   ▼  (operator 가 1~2문장 요약)
+voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙 자비스: …" + 낭독, 누르면 그 세션으로
+```
+
+- **감지는 AWB 가 한다(MCP 자가보고가 아니다).** 턴 종료·승인 대기는 AWB 가 이미 정확히 알고, 승인 대기로 멈춘
+  세션은 MCP 도구를 부를 수도 없으며, 에이전트마다 "끝나면 보고해" 를 지키길 기대할 수 없다.
+- 받을 operator 는 `routeOperators()`(`modules/voice/operator-report.ts`). "대화" 는 사용자가 시작한 operator 턴이다 —
+  AWB 가 보낸 보고 턴은 세지 않는다. 시각은 `OperatorEntry.last_conversation_at` 에 1분 간격으로 남는다(재시작 뒤에도).
+- 보고는 `AgentSessionsService.promptOnBehalf()` — 화면이 보낸 것처럼 driver 의 라이브 전사에 프롬프트 행도 흘린다.
+  워크스페이스는 등록 때 화면의 것(`OperatorEntry.workspace_id`, 그 워크스페이스의 CLI 설정·credential 로 연다).
+  전사는 보고 프롬프트를 "📋 AWB 작업 보고 · n건" 으로 접는다.
+- **조용히 버리지 않는다.** operator 에게 닿지 못하면(호스트 꺼짐) 다음 후보로, 아무도 안 되거나 operator 가 보고 턴을
+  실패·10분 무응답하면, 승인·질문 보고가 바쁜 operator 를 2분 넘게 기다리면(요청은 15분이면 취소된다), 나머지는
+  20분 넘게 기다리면 — 아래 템플릿 문장으로 직접 알린다. 등록된 operator 가 없으면 예전처럼 직접 알린다.
+- operator 자신의 턴은 보고하지 않는다. 사용자가 그 operator 화면을 떠나 있을 때 끝난 대화 턴은 operator 의 답 자체를
+  들려준다(`operator_reply`). operator 가 사용자의 승인을 기다리면 직접 알린다.
+- 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림이 읽는다), 깨어 있는 대화를 맡은
+  화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
+- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침) — 사용자가 세션 화면에서 답하거나, 말로
+  지시한다. 말로 승인까지 대신하게 하는 도구는 아직 없다.
+- 회귀: `apps/server/test/voice-operator-reports.test.mjs`(라우팅 · 보고 문장 · 요약 전달 · 보고 있음 · 바쁨/묶음 ·
+  다음 후보 · 직접 알림으로 되돌리기 · operator 자신의 턴 · 화면과의 계약).
+
 ### 출처 이벤트 (기본값)
 
 | 이벤트 | 조건 | 대상 | 예 |
 |---|---|---|---|
-| `agent_session_update` reason `turn_finished` | 턴이 30초 이상, 사용자가 그 세션을 보고 있지 않음 | driver | "롤프 클로드 세션 '배포 스크립트' 작업이 끝났어요." |
-| 같은 이벤트, status `awaiting_permission` / `awaiting_input` | — | driver | "… 세션에서 확인이 필요해요." |
-| reason `turn_failed` | — | driver | "… 세션이 오류로 멈췄어요." |
-| operator 세션 턴 종료 | 대화 화면이 열려 있지 않음 | driver | 응답의 말하기용 요약 |
+| 세션 턴 종료·오류·승인/질문 대기 | 사용자가 그 세션을 보고 있지 않음 | driver | **operator 의 요약**(위 "작업 보고"). operator 가 없으면: "롤프 클로드 세션 '배포 스크립트' 작업이 끝났어요."(턴 30초 이상) · "… 세션에서 확인이 필요해요." · "… 세션이 오류로 멈췄어요." |
+| operator 세션 턴 종료 | 그 operator 화면을 보고 있지 않음 | driver | operator 의 답(`operator_reply`) |
 | `orchestration_update` status `completed` / `failed` / `cancelled` | — | 미션 `created_by` | "미션 '…'이 끝났어요. 12개 중 12개 성공." |
 | 미션 사용자 확인 대기 | — | 기존 confirm-notify 수신자 | "미션 '…'에서 확인이 필요해요." |
 | `notify_user` | — | 지정 사용자 | 본문 |

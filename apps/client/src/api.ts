@@ -2230,6 +2230,10 @@ export const api = {
     request<{ operator: VoiceOperator }>(`/voice/operators/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteVoiceOperator: (id: string) =>
     request<{ operators: VoiceOperator[] }>(`/voice/operators/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** 이 탭이 보고 있는 세션 — 서버는 보고 있는 세션의 완료를 operator 에게 보고하지 않는다. */
+  reportVoicePresence: async (input: { tab_id: string; session: { manager_id: string; cli: string; session_id: string } | null; visible: boolean }): Promise<void> => {
+    await fetchOk('/voice/presence', { method: 'PUT', body: JSON.stringify(input), contentType: 'application/json' });
+  },
   /** 음성 알림의 소리 — 받는 사람만, 서버가 처음 요청될 때 합성한다. */
   getVoiceAnnouncementAudio: async (id: string): Promise<Blob> =>
     (await fetchOk(`/voice/announcements/${encodeURIComponent(id)}/audio`)).blob(),

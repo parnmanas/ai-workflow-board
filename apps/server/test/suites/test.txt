@@ -273,6 +273,7 @@ test/user-mention-sse-flat-shape-guard.test.mjs
 test/voice-announcer.test.mjs
 test/voice-gateway.test.mjs
 test/voice-http.test.mjs
+test/voice-operator-reports.test.mjs
 test/voice-operator-scope.test.mjs
 test/voice-operators.test.mjs
 test/voice-speakable.test.mjs

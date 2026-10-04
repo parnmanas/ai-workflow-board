@@ -1157,5 +1157,7 @@ export interface VoiceAnnouncementPayload {
   kind: string;
   text: string;
   target: VoiceAnnouncementTarget;
+  /** operator 가 쓴 글이면(`operator_report` · `operator_reply`) 그 operator. */
+  operator?: { id: string; name: string };
   created_at: string;
 }

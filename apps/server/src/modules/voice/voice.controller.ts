@@ -1,5 +1,5 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Request, Response } from 'express';
@@ -10,6 +10,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { VoiceError, VoiceService } from './voice.service';
 import { VoiceAnnouncerService } from './voice-announcer.service';
+import { VoicePresenceService } from './voice-presence.service';
 import {
   OperatorInputError,
   createOperatorEntry,
@@ -60,6 +61,7 @@ export class VoiceController {
   constructor(
     private readonly voice: VoiceService,
     private readonly announcer: VoiceAnnouncerService,
+    private readonly presence: VoicePresenceService,
   ) {}
 
   /** 엔진이 켜져 있고 쓸 수 있는가. admin 에게는 Voice lab 이 비교할 공급자 목록도 준다. */
@@ -89,6 +91,23 @@ export class VoiceController {
   @Post('speech')
   async speech(@Body() body: any, @Res() res: Response) {
     return sendAudio(res, () => this.voice.synthesize(typeof body?.text === 'string' ? body.text : ''));
+  }
+
+  /**
+   * 이 탭이 지금 보고 있는 세션 — `{ tab_id, session: { manager_id, cli, session_id } | null, visible }`.
+   * 보고 있는 세션의 완료는 operator 에게 보고하지 않는다. 화면이 바뀔 때와 30초마다 온다.
+   */
+  @Put('presence')
+  async reportPresence(@Body() body: any, @Req() req: Request, @Res() res: Response) {
+    const str = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+    const tabId = str(body?.tab_id, 64);
+    if (!tabId) return res.status(400).json({ error: 'tab_id_required', message: 'tab_id is required.' });
+    const s = body?.session;
+    const session = s && str(s.manager_id, 128) && str(s.cli, 64) && str(s.session_id, 256)
+      ? { manager_id: str(s.manager_id, 128), cli: str(s.cli, 64), session_id: str(s.session_id, 256) }
+      : null;
+    this.presence.update((req as any).currentUser.id, tabId, session, body?.visible !== false);
+    return res.status(204).end();
   }
 
   /** 음성 알림(`voice_announcement`)의 소리 — 받는 사람만. 처음 요청될 때 합성한다. */
@@ -170,8 +189,11 @@ export class VoiceOperatorsController {
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     if (this.denied(req, res)) return;
+    // 화면의 워크스페이스를 같이 남긴다 — 서버가 대신 보고를 보낼 때 이 워크스페이스의 CLI 설정으로 연다.
+    const header = req.headers['x-workspace-id'];
+    const workspaceId = String(Array.isArray(header) ? header[0] : header ?? '');
     return this.write(res, () => updateOperators(this.dataSource, (list) => {
-      const operator = createOperatorEntry(body, (req as any).currentUser.id, list);
+      const operator = createOperatorEntry({ ...body, workspace_id: workspaceId }, (req as any).currentUser.id, list);
       return { next: [...list, operator], result: { operator } };
     }));
   }

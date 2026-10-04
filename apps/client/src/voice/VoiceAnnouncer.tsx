@@ -19,6 +19,10 @@ const KEY_PREFIX = 'announcement:';
  * 말하는 조건: 서버에 TTS 가 준비돼 있고, 이 단말에서 "Speak work updates" 가 켜져 있고, 지금 그
  * 세션을 보고 있지 않고, 이 탭이 알림을 먼저 집었을 때. 글자는 토스트로도 보여 주고(누르면 그 화면으로),
  * 소리는 대화 낭독을 끊지 않고 줄을 선다.
+ *
+ * 세션의 작업 소식은 operator 가 요약해서 전한다(`operator_report` — 서버가 operator 에게 보고하고 그 답을
+ * 보낸다). 누르면 소식의 주인공인 세션으로 간다. operator 화면에서 그 보고 턴을 다시 읽지 않는 것은 세션
+ * 화면의 몫이다(자기가 보낸 턴만 읽는다).
  */
 export default function VoiceAnnouncer() {
   const config = useVoiceConfig();
@@ -52,7 +56,9 @@ export default function VoiceAnnouncer() {
       const viewing = isViewingTarget(data.target, visible);
       if (!(await claimAnnouncement(data.id, visible)) || viewing) return;
       const path = announcementPath(data.target, workspaceId);
-      showToast(data.text, 'info', { durationMs: 8000, ...(path ? { onClick: () => navigate(path) } : {}) });
+      // operator 가 쓴 글이면(작업 보고 요약 · operator 의 답) 누가 말하는지 붙인다.
+      const text = data.operator ? `🎙 ${data.operator.name}: ${data.text}` : data.text;
+      showToast(text, 'info', { durationMs: data.operator ? 12000 : 8000, ...(path ? { onClick: () => navigate(path) } : {}) });
       speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), `${KEY_PREFIX}${data.id}`);
     })();
   }, [navigate, showToast]));

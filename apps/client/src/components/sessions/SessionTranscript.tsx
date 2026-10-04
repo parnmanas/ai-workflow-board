@@ -109,6 +109,25 @@ const summaryStyle: React.CSSProperties = {
   userSelect: 'none',
 };
 
+/** AWB 가 operator 에게 보낸 작업 보고 — 사람이 쓴 말이 아니라서 접어 두고, 펼치면 원문을 보여 준다. */
+function ReportPromptBlock({ text }: { text: string }) {
+  const count = (text.match(/^\d+\. /gm) || []).length;
+  return (
+    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+      <details
+        data-block="operator-report"
+        style={{
+          maxWidth: 'min(760px, 85%)', padding: '6px 11px', borderRadius: tokens.radii.lg, fontSize: 12.5,
+          background: tokens.colors.surface, border: `1px dashed ${tokens.colors.border}`, color: tokens.colors.textSecondary,
+        }}
+      >
+        <summary style={{ cursor: 'pointer' }}>📋 AWB 작업 보고{count ? ` · ${count}건` : ''}</summary>
+        <div style={{ marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, color: tokens.colors.textMuted }}>{text}</div>
+      </details>
+    </div>
+  );
+}
+
 function PromptBlock({ text, voice }: { text: string; voice?: boolean }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -915,7 +934,9 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
       {blocks.map((block) => {
         switch (block.kind) {
           case 'prompt':
-            return <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
+            return block.report
+              ? <ReportPromptBlock key={block.key} text={block.text} />
+              : <PromptBlock key={block.key} text={block.text} voice={block.voice} />;
           case 'assistant':
             return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} />;
           case 'reasoning':

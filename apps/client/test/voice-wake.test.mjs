@@ -200,3 +200,24 @@ test('a wake whose operator page never opens falls back asleep', (t) => {
   t.mock.timers.tick(1_500);
   assert.equal(wakeStore.state.mode, 'sleeping');
 });
+
+// ─── 전사에서 보이는 모습 ───────────────────────────────────────────────────
+import { buildTranscript } from '../src/components/sessions/sessionTranscript.logic.ts';
+import { OPERATOR_REPORT_PREFIX, isOperatorReportPrompt } from '../src/voice/wake.logic.ts';
+
+test('the transcript folds AWB work reports, hides the wake note and the sleep marker', () => {
+  const ev = (id, type, payload, turn_id) => ({ id, seq: 0, turn_id, type, payload, created_at: '2026-10-04T00:00:00.000Z' });
+  const blocks = buildTranscript([
+    ev('a', 'user_prompt', { text: withWakeNote('오늘 배포 상태 알려줘') }, 't1'),
+    ev('b', 'text', { text: '모두 정상이에요. [[sleep]]' }, 't1'),
+    ev('c', 'user_prompt', { text: `${OPERATOR_REPORT_PREFIX} 다른 세션 소식 1건입니다.\n\n1. 완료 — rolf / Codex` }, 't2'),
+    ev('d', 'text', { text: '롤프 세션이 끝났어요.' }, 't2'),
+  ]);
+  const prompts = blocks.filter((b) => b.kind === 'prompt');
+  assert.deepEqual(prompts.map((b) => [b.text.split('\n')[0], !!b.voice, !!b.report]), [
+    ['오늘 배포 상태 알려줘', true, false],
+    [`${OPERATOR_REPORT_PREFIX} 다른 세션 소식 1건입니다.`, false, true],
+  ]);
+  assert.equal(blocks.find((b) => b.kind === 'assistant').text, '모두 정상이에요.');
+  assert.equal(isOperatorReportPrompt('그냥 질문'), false);
+});

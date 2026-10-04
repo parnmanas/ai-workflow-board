@@ -1161,6 +1161,32 @@ export class AgentSessionsService implements OnModuleDestroy {
     return { turn_id: turnId, live };
   }
 
+  /**
+   * 서버가 사용자 대신 보내는 프롬프트 — operator 에게 가는 작업 보고(docs/voice-operator.md "작업 보고").
+   * 화면이 보낸 프롬프트는 화면이 자기 전사에 그려 두지만 이것은 화면을 거치지 않으므로, driver 의 라이브
+   * 전사에 프롬프트 행을 같이 흘려 보낸다(매니저는 라이브 프롬프트를 되돌려 보내지 않는다 — 기록에는 남는다).
+   */
+  async promptOnBehalf(
+    workspaceId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    text: string,
+  ): Promise<{ turn_id: string; live: AgentSessionLiveSnapshot }> {
+    const result = await this.prompt(workspaceId, userId, managerId, cli, sessionId, text);
+    const createdAt = new Date().toISOString();
+    activityEvents.emit('agent_session_event', {
+      manager_id: managerId,
+      cli,
+      session_id: sessionId,
+      driver_user_id: userId,
+      event: { id: `server-prompt:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text }, created_at: createdAt },
+      timestamp: createdAt,
+    });
+    return result;
+  }
+
   async decidePermission(
     workspaceId: string,
     userId: string,
