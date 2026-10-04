@@ -172,6 +172,53 @@ test('openai: gpt-transcribe gets languages[]/keywords[]; a self-hosted server g
   assert.deepEqual(form.getAll('keywords[]'), []);
 });
 
+test('local (self-hosted awb-voice-server): own URL and key, language + prompt, gateway-chosen default voice', async () => {
+  const mp3 = Buffer.from('ID3local');
+  const { calls, fetchImpl } = recordFetch((url) => {
+    if (url.endsWith('/audio/transcriptions')) return new Response(JSON.stringify({ text: '롤프 상태 알려줘' }), { status: 200 });
+    if (url.endsWith('/audio/voices')) {
+      return new Response(JSON.stringify({ voices: [{ id: 'sohee', name: 'Sohee', language: 'ko', gender: 'female', request: { secret: 1 } }], default: 'sohee' }), { status: 200 });
+    }
+    return new Response(mp3, { status: 200, headers: { 'content-type': 'audio/mpeg' } });
+  });
+  const { service } = makeService({
+    'voice.stt.provider': 'local',
+    'voice.tts.provider': 'local',
+    'voice.local.base_url': 'http://192.168.0.6:8410/v1/',
+    'voice.local.api_key': 'ragnar-key',
+    // OpenAI 클라우드 설정은 그대로 둔다 — 셀프호스팅과 동시에 설정해 둘 수 있어야 한다.
+    'voice.openai.api_key': 'sk-cloud',
+    'voice.stt.languages': 'ko,en',
+    'voice.stt.terms': 'AWB, rolf',
+  });
+  service.fetchImpl = fetchImpl;
+  const status = await service.status(true);
+  assert.equal(status.stt.ready, true);
+  assert.equal(status.tts.ready, true, 'the gateway owns the default voice — no voice setting needed');
+  assert.ok(status.lab.stt.includes('local') && status.lab.stt.includes('openai'));
+
+  const out = await service.transcribe(audio, 'audio/webm;codecs=opus');
+  assert.equal(out.text, '롤프 상태 알려줘');
+  assert.equal(calls[0].url, 'http://192.168.0.6:8410/v1/audio/transcriptions');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer ragnar-key');
+  const form = calls[0].init.body;
+  assert.equal(form.get('model'), null, 'blank model = the server default');
+  assert.equal(form.get('language'), 'ko');
+  assert.equal(form.get('prompt'), 'AWB, rolf.');
+  assert.equal(form.get('file').name, 'utterance.webm', 'the gateway decodes whatever the browser recorded');
+
+  const spoken = await service.synthesize('배포가 끝났어요.');
+  assert.ok(spoken.audio.equals(mp3));
+  assert.equal(calls.at(-1).url, 'http://192.168.0.6:8410/v1/audio/speech');
+  assert.deepEqual(JSON.parse(calls.at(-1).init.body), { input: '배포가 끝났어요.', voice: 'default', response_format: 'mp3', language: 'ko' });
+
+  const voices = await service.listVoices('local');
+  assert.deepEqual(voices, [{ id: 'sohee', name: 'Sohee', language: 'ko', gender: 'female' }], 'backend request details stay on the server');
+
+  const { service: unset } = makeService({ 'voice.stt.provider': 'local' });
+  assert.match((await unset.status(false)).stt.error, /Self-hosted voice server URL is not set/);
+});
+
 test('tts: provider requests carry the configured voice/model and return the audio bytes', async () => {
   const mp3 = Buffer.from('ID3fake');
   const { calls, fetchImpl } = recordFetch((url) => {

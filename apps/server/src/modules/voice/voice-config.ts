@@ -13,14 +13,14 @@ import { decrypt } from '../../services/encryption.service';
  * 의미를 아는 곳은 이 모듈 하나다.
  */
 
-export const STT_PROVIDERS = ['soniox', 'elevenlabs', 'openai'] as const;
-export const TTS_PROVIDERS = ['elevenlabs', 'typecast', 'azure', 'google', 'openai'] as const;
+export const STT_PROVIDERS = ['soniox', 'elevenlabs', 'openai', 'local'] as const;
+export const TTS_PROVIDERS = ['elevenlabs', 'typecast', 'azure', 'google', 'openai', 'local'] as const;
 export type SttProviderId = typeof STT_PROVIDERS[number];
 export type TtsProviderId = typeof TTS_PROVIDERS[number];
 export type VoiceProviderId = SttProviderId | TtsProviderId;
 
 /** 키를 가진 공급자 — Voice lab 이 비교할 수 있는 대상. */
-export const KEYED_PROVIDERS = ['soniox', 'elevenlabs', 'typecast', 'azure', 'google', 'openai'] as const;
+export const KEYED_PROVIDERS = ['soniox', 'elevenlabs', 'typecast', 'azure', 'google', 'openai', 'local'] as const;
 export type KeyedProviderId = typeof KEYED_PROVIDERS[number];
 
 export const VOICE_SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
@@ -95,9 +95,19 @@ export const VOICE_SETTING_DEFINITIONS: Record<string, { description: string; is
     default_value: '',
   },
   'voice.openai.base_url': {
-    description: 'Base URL of the OpenAI-compatible audio API. Point at a self-hosted server (vLLM, speaches) to use local models.',
+    description: 'Base URL of the OpenAI audio API (or another OpenAI-compatible server).',
     is_secret: false,
     default_value: 'https://api.openai.com/v1',
+  },
+  'voice.local.base_url': {
+    description: 'Base URL of the self-hosted voice server (awb-voice-server on ragnar, OpenAI-compatible), e.g. http://192.168.0.6:8410/v1',
+    is_secret: false,
+    default_value: '',
+  },
+  'voice.local.api_key': {
+    description: 'Bearer key of the self-hosted voice server. Stored encrypted. Leave blank if the server has none.',
+    is_secret: true,
+    default_value: '',
   },
 };
 
@@ -107,6 +117,8 @@ export interface VoiceConfig {
   keys: Record<KeyedProviderId, string>;
   azureRegion: string;
   openaiBaseUrl: string;
+  /** 셀프호스팅 음성 서버 주소(끝 `/` 없이). 비어 있으면 그 공급자는 꺼진 것이다. */
+  localBaseUrl: string;
 }
 
 function list(raw: string): string[] {
@@ -140,9 +152,11 @@ export function parseVoiceConfig(rows: Record<string, string | null | undefined>
       azure: get('voice.azure.api_key'),
       google: get('voice.google.api_key'),
       openai: get('voice.openai.api_key'),
+      local: get('voice.local.api_key'),
     },
     azureRegion: get('voice.azure.region').trim(),
     openaiBaseUrl: (get('voice.openai.base_url').trim() || 'https://api.openai.com/v1').replace(/\/+$/, ''),
+    localBaseUrl: get('voice.local.base_url').trim().replace(/\/+$/, ''),
   };
 }
 

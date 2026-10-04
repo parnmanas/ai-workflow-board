@@ -1,0 +1,16 @@
+[Unit]
+Description=AWB voice gateway — the LAN-facing STT/TTS API AWB's `local` adapter calls
+After=network-online.target awb-voice-asr.service awb-voice-tts.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/voice-server
+# AWB_VOICE_KEY (bearer key), ASR_URL, TTS_URL, TTS_MODEL live here (mode 600).
+EnvironmentFile=%h/.config/awb-voice/env
+ExecStart=%h/.venvs/voice-asr/bin/uvicorn awb_voice_server:app --host ${VOICE_BIND} --port 8410 --workers 1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

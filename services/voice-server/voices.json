@@ -1,0 +1,33 @@
+{
+  "default": "sohee",
+  "voices": [
+    {
+      "id": "sohee",
+      "name": "Sohee — 한국어 여성(기본)",
+      "language": "ko",
+      "gender": "female",
+      "request": { "voice": "sohee", "language": "Korean" }
+    },
+    {
+      "id": "sohee-calm",
+      "name": "Sohee — 차분하게 또박또박",
+      "language": "ko",
+      "gender": "female",
+      "request": { "voice": "sohee", "language": "Korean", "instructions": "차분하고 또박또박하게, 업무 보고하듯이 말해 주세요." }
+    },
+    {
+      "id": "sohee-bright",
+      "name": "Sohee — 밝고 경쾌하게",
+      "language": "ko",
+      "gender": "female",
+      "request": { "voice": "sohee", "language": "Korean", "instructions": "밝고 경쾌한 목소리로, 조금 빠르게 말해 주세요." }
+    },
+    {
+      "id": "ryan",
+      "name": "Ryan — 영어 남성",
+      "language": "en",
+      "gender": "male",
+      "request": { "voice": "ryan", "language": "English" }
+    }
+  ]
+}

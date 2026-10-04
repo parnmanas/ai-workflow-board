@@ -1,0 +1,20 @@
+[Unit]
+Description=AWB voice — Qwen3-ASR speech-to-text (vLLM, localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Same toolchain environment as the host's main vLLM service: FlashInfer JIT-compiles
+# kernels on first start and needs the venv's ninja plus the Python headers.
+Environment=PATH=%h/.venvs/voice-asr/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CPATH=%h/.local/python3.12-headers/usr/include/python3.12:%h/.local/python3.12-headers/usr/include
+Environment=MAX_JOBS=4
+# Unified memory is shared with the LLM server (0.48) — keep this one small.
+ExecStart=%h/.venvs/voice-asr/bin/vllm serve Qwen/Qwen3-ASR-1.7B --served-model-name qwen3-asr --host 127.0.0.1 --port 8411 --gpu-memory-utilization 0.08 --max-model-len 4096 --max-num-seqs 4 --enforce-eager
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

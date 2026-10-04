@@ -319,6 +319,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - 화면용 답을 소리로 바꾸는 규칙은 `modules/voice/speakable.ts` 의 `toSpeakable()` 한 곳이다 — 세션 낭독 · 음성 알림 · 앱이 모두 이것을 지난다. 경로마다 따로 다듬지 말 것.
 - 설정이 비었거나 공급자 이름이 틀리거나 키가 없으면 409 + 사유다. 다른 공급자로 조용히 넘어가는 대체 경로를 만들지 말 것.
 - 엔진은 Admin → Voice 의 lab(STT 비교 · TTS 블라인드 테스트)으로 고른다. 상세 · 로드맵(음성 알림, operator, Android 앱): `docs/voice-operator.md`.
+- 셀프호스팅 엔진(ragnar: Qwen3-ASR + Qwen3-TTS)은 `services/voice-server/`(npm 워크스페이스 밖, Python)에 있고 AWB 는 `local` 어댑터로 그 게이트웨이만 부른다 — 모델·목소리 교체는 게이트웨이/`voices.json` 쪽 일이지 AWB 코드 변경이 아니다.
 
 ## Skills (AWB 기능)
 

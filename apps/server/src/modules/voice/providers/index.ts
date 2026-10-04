@@ -2,6 +2,7 @@ import type { SttProviderId, TtsProviderId } from '../voice-config';
 import { azureTts } from './azure';
 import { elevenLabsStt, elevenLabsTts } from './elevenlabs';
 import { googleTts } from './google';
+import { localStt, localTts } from './local';
 import { openAiStt, openAiTts } from './openai';
 import { sonioxStt } from './soniox';
 import { typecastTts } from './typecast';
@@ -12,6 +13,7 @@ export const STT_PROVIDER_IMPLS: Record<SttProviderId, SttProvider> = {
   soniox: sonioxStt,
   elevenlabs: elevenLabsStt,
   openai: openAiStt,
+  local: localStt,
 };
 
 export const TTS_PROVIDER_IMPLS: Record<TtsProviderId, TtsProvider> = {
@@ -20,4 +22,5 @@ export const TTS_PROVIDER_IMPLS: Record<TtsProviderId, TtsProvider> = {
   azure: azureTts,
   google: googleTts,
   openai: openAiTts,
+  local: localTts,
 };

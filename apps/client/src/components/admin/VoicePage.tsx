@@ -28,6 +28,7 @@ const STT_OPTIONS = [
   { value: 'soniox', label: 'Soniox' },
   { value: 'elevenlabs', label: 'ElevenLabs Scribe' },
   { value: 'openai', label: 'OpenAI / OpenAI-compatible' },
+  { value: 'local', label: 'Self-hosted (ragnar)' },
 ];
 const TTS_OPTIONS = [
   { value: 'none', label: 'Off' },
@@ -36,6 +37,7 @@ const TTS_OPTIONS = [
   { value: 'azure', label: 'Azure Speech' },
   { value: 'google', label: 'Google Cloud TTS' },
   { value: 'openai', label: 'OpenAI / OpenAI-compatible' },
+  { value: 'local', label: 'Self-hosted (ragnar)' },
 ];
 const PROVIDER_KEYS: Array<{ key: string; label: string }> = [
   { key: 'voice.soniox.api_key', label: 'Soniox API key' },
@@ -46,6 +48,8 @@ const PROVIDER_KEYS: Array<{ key: string; label: string }> = [
   { key: 'voice.google.api_key', label: 'Google Cloud API key' },
   { key: 'voice.openai.api_key', label: 'OpenAI API key' },
   { key: 'voice.openai.base_url', label: 'OpenAI base URL' },
+  { key: 'voice.local.base_url', label: 'Self-hosted server URL' },
+  { key: 'voice.local.api_key', label: 'Self-hosted server key' },
 ];
 
 const sectionTitle: React.CSSProperties = { fontSize: 15, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 };
