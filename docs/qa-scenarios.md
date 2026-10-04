@@ -11,45 +11,43 @@ The catalogue itself is data, defined once in
 and seeded into a live workspace with
 [`apps/server/scripts/seed-qa-scenarios.mjs`](../apps/server/scripts/seed-qa-scenarios.mjs).
 
-> **Driver.** Every starter scenario uses the `awb-mcp` driver: the QA agent
-> drives AWB's own MCP/REST surface (the `http-api` driver contract in
+> **Driver.** Most starter scenarios use the `awb-mcp` driver (the two `visual-*`
+> scenarios use `browser`): the QA agent drives AWB's own MCP/REST surface (the `http-api` driver contract in
 > [`docs/qa-driver-guide.md`](./qa-driver-guide.md) §6) and records evidence with
 > `save_resource` + `record_qa_step`. The step `mcp_tool` fields are real AWB MCP
 > tool names so the agent runs them verbatim; `params` carry `{{placeholder}}`
 > tokens the agent fills from run context.
 
-## Coverage map (scenario → feature → admin self-test source)
+## Coverage map (scenario → feature → backing test)
 
-| # | Scenario `key` | Feature area | Backing self-test(s) |
-|---|---|---|---|
-| 1 | `ticket-lifecycle` | Ticket lifecycle + role-routed triggers + terminal stamp + auto-advance | `ticket-lifecycle`, `auto-advance-unassigned` |
-| 2 | `comment-mention-trigger` | Comment triggers + scoped `@[role:…]` mentions | `comment-trigger`, `comment-mention` |
-| 3 | `chat-room-messaging` | Chat rooms: participants, messages, attachment, cursor paging, search | `multi-user-chat`, `chat-message-read`, `chat-attachments` |
-| 4 | `mcp-agent-roundtrip` | Closed loop: SSE trigger → agent calls MCP tools | `mcp-agent-roundtrip` |
-| 5 | `action-run` | Action authoring + dispatch + FIFO run history | `on-ticket-done-hook` |
-| 6 | `benchmark-lifecycle` | Benchmark run → per-dimension score upsert → leaderboards | `benchmark-scoring`, `benchmark-lifecycle`, `benchmark-dispatch` |
-| 7 | `board-pause-resume` | Board pause gate drops triggers; resume restores | `board-pause` |
-| 8 | `archive-unarchive` | Archive removes from reads + detector; unarchive restores | `archive-edge-paths` |
-| 9 | `workspace-board-move` | Cross-workspace board move re-stamps board/columns/tickets | `workspace-move-board` |
-| 10 | `column-role-policy-auto-advance` | Column role routing + auto-advance vs HALT-unassigned | `auto-advance-unassigned`, `auto-advance-halt-unassigned`, `column-role-policy` |
-| 11 | `backlog-promotion` | Focus-gated, chain-aware backlog promotion | `backlog-promotion-chain`, `workflow-state-cap`, `focus-selector-chain-head` |
-| 12 | `resource-media-attachment` | Resource upload + comment media attachment (evidence path) | `comment-media-e2e` |
-| 13 | `hermes-live-chat-delivery` | Live-host smoke test: one real chat message to the deployed Hermes Agent, graded for genuine reply vs. allowlisted fail-closed notice (ticket 7a4b14b4, hardening from a837879c) | `apps/agent-manager/test/hermes-chat-dispatch-success.test.mjs` / `-failure.test.mjs` |
+| # | Scenario `key` | Driver | Feature area | Backing test / recipe |
+|---|---|---|---|---|
+| 1 | `ticket-lifecycle` | `awb-mcp` | Fixed status lanes (`todo → in_progress → review → done`), terminal stamp set on entering `done` and cleared on reopen; the probe has no assignee so it is never dispatched | `ticket-lifecycle` |
+| 2 | `chat-room-messaging` | `awb-mcp` | Chat rooms: participants, messages, attachment, cursor paging, search | `multi-user-chat`, `chat-message-read`, `chat-attachments` |
+| 3 | `mcp-agent-roundtrip` | `awb-mcp` | Closed loop: a `todo` ticket with a live assignee is dispatched (`agent_trigger`) → the agent calls MCP tools (`add_comment` + `move_ticket`) | `mcp-agent-roundtrip` |
+| 4 | `action-run` | `awb-mcp` | Action authoring + dispatch + FIFO run history | `on-ticket-done-hook` |
+| 5 | `archive-unarchive` | `awb-mcp` | Archive removes a ticket from the live ticket list; unarchive restores it | `archive-edge-paths` |
+| 6 | `resource-media-attachment` | `awb-mcp` | Resource upload + comment media attachment (evidence path) | `comment-media-e2e` |
+| 7 | `visual-core-screens` | `browser` | Screenshots of the core screens (login → Tickets → ticket panel → chat → QA → Resources → Projects) | `apps/server/scripts/qa-visual-capture.mjs` |
+| 8 | `visual-ticket-journey-video` | `browser` | mp4 recording of a ticket journey; exercises the `/api/resources/:id/raw` Range-streaming path | `apps/server/scripts/qa-visual-capture.mjs --record-video` |
+| 9 | `hermes-live-chat-delivery` | `awb-mcp` | Live-host smoke test: one real chat message to the deployed Hermes Agent, graded for genuine reply vs. allowlisted fail-closed notice (ticket 7a4b14b4, hardening from a837879c) | `apps/agent-manager/test/hermes-chat-dispatch-success.test.mjs` / `-failure.test.mjs` |
+
+Names in the last column without a path are `apps/server/test/qa-flows/<name>.test.mjs`.
 
 ### Self-test coverage NOT yet mirrored as a scenario
 
-These admin self-tests stay unit-level for now (they exercise internal services
-directly or are scale/security probes that don't map cleanly to a
-user-journey scenario). Listed so the gap is explicit, not silently dropped:
+These self-tests stay unit-level for now (they exercise internal services
+directly or are scale/protocol probes that don't map cleanly to a user-journey
+scenario). Listed so the gap is explicit, not silently dropped:
 
-- `large-data`, `multi-agent-concurrency` — scale / concurrency budgets.
-- `stuck-ticket-detector`, `column-role-policy` (enrichment half) — detector sweeps.
-- `focus-collapse-per-agent`, `workflow-focus-selector` — focus-selector internals.
-- `self-improvement-remote-auth` — spoofed-header auth gate.
-- `prompt-template-refresh`, `prompt-template-refresh-integrate` — migrations.
-- `workspace-move-agent` — agent move (credential/api-key carry).
-- `terminal-reopen-guard`, `unpend-emits-trigger`, `self-trigger-guard`,
-  `comment-content-projection`, `mcp-schema-version`, `mcp-tools-surface`.
+- `large-data` — scale budget.
+- `comment-mention`, `comment-content-projection`, `comment-pagination` —
+  comment internals.
+- `mcp-schema-version`, `mcp-tools-surface` — MCP protocol surface.
+
+Most other `test/qa-flows/*` files (orchestration, QA/Security batches,
+workspace schedules, Postgres race tests …) are service-level regressions rather
+than user journeys.
 
 ## Seeding (reproducibility)
 
@@ -62,9 +60,8 @@ compiled catalogue exists, then run the seeder against a live AWB:
 node apps/server/scripts/seed-qa-scenarios.mjs \
   --base-url http://localhost:7701 \
   --workspace <workspace_id> \
-  --agent <target_qa_agent_id> \
-  --board <board_id>            # optional; omit for workspace-scope
-  # --api-key <agent_key>       # or run against MCP_DEV_MODE
+  --runtime <runtime-spec.json>   # the QA agent's RuntimeSpec (target_runtime)
+  # --api-key <agent_key>         # or run against MCP_DEV_MODE
   # --only ticket-lifecycle,chat-room-messaging
   # --dry-run
 ```
@@ -76,16 +73,16 @@ than duplicating. `--dry-run` prints the CREATE/UPDATE plan without writing.
 ### Documented MCP-call bundle (manual alternative)
 
 Without the script, the same result is a loop of MCP calls — for each catalogue
-entry: `list_qa_scenarios(workspace_id, board_id)` to find a row whose `tags`
+entry: `list_qa_scenarios(workspace_id)` to find a row whose `tags`
 contain `key:<key>`, then `update_qa_scenario(scenario_id, …)` if found else
-`create_qa_scenario(workspace_id, board_id, name, description, steps, target_agent_id, qa_driver, qa_driver_config, tags, max_runs)`.
+`create_qa_scenario(workspace_id, name, description, steps, target_runtime, qa_driver, qa_driver_config, tags, max_runs)`.
 The `steps`, `tags`, and `qa_driver*` values come straight from
 `QA_SEED_SCENARIOS` in `qa-seed-scenarios.ts`.
 
 ## Running a scenario
 
 `start_qa_run(scenario_id)` creates a `QaRun` + a `ChatRoom`, adds the scenario's
-`target_agent_id`, and posts the rendered step prompt (`qa-prompt.ts`). The agent
+target agent (`target_runtime`), and posts the rendered step prompt (`qa-prompt.ts`). The agent
 then, per step: drives the `awb-mcp` driver, uploads evidence with `save_resource`,
 and calls `record_qa_step(run_id, idx, status, log, artifact_resource_ids)`. It
 finishes with `complete_qa_run(run_id, status, summary)`. Re-running is just
@@ -101,14 +98,13 @@ registered in the admin `run-flows` harness under category `Flow-QA`.
 
 A scenario whose stages have wildly different normal durations — a Unity drive is
 `import` (seconds) → `build` (minutes) → `run` (hours) — should NOT live under a
-single run-wide timeout. Define an ordered **phase model** on the board (or
-override it on the scenario) and the run's stages each get their own timeout. Full
+single run-wide timeout. Define an ordered **phase model** on the scenario and
+the run's stages each get their own timeout. Full
 reference: [`docs/qa-phases.md`](./qa-phases.md).
 
 Authoring such a scenario adds two things on top of the normal loop:
 
-1. **Declare the phases** — board-level via `update_board(qa_phases)`, or
-   scenario-level via `create_qa_scenario` / `update_qa_scenario(qa_phases)`:
+1. **Declare the phases** — via `create_qa_scenario` / `update_qa_scenario(qa_phases)`:
 
    ```jsonc
    { "phases": [

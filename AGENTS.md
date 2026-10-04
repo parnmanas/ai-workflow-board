@@ -183,6 +183,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - `@CreateDateColumn()` and `@UpdateDateColumn()` for timestamps
 - `@ManyToOne()`, `@OneToMany()` for relationships
 - `@JoinColumn()` for foreign key specification
+- **인덱스는 엔티티에 선언한다.** synchronize(항상 켜짐)는 메타데이터에 없는 인덱스를 부팅마다 지운다 — 마이그레이션에서 raw `CREATE INDEX` 로만 만든 인덱스는 다음 부팅에 사라진다(운영에서 `uq_skills_global_slug` 가 그렇게 없어져 있었다). 부분 인덱스도 `@Index(name, cols, { unique, where })` 로 선언하라(SQLite 도 지원). 컬럼을 지울 때 그 컬럼을 `where` 에 쓰는 인덱스는 pre-sync 에서 먼저 drop 해야 같은 부팅에 다시 만들어진다.
 - **배럴 export 와 이관 레지스트리 등록은 한 쌍이다.** `apps/server/src/entities/index.ts` 에 `export { Foo } from './Foo';` 를 넣었으면 **같은 커밋에서** `apps/server/src/modules/migration/migration-entity-registry.ts` 의 `MIGRATION_ENTITY_ORDER` 에도 클래스명을 추가하라. 빠뜨리면 (1) **동일 빌드끼리도** migration preflight 가 항상 실패해 main CI 가 red 가 되고, (2) `resolveMigrationEntity()` 가 그 이름을 거부해 해당 테이블이 인스턴스 이관에서 **조용히** 빠진다.
 - 배치 위치는 FK 위상 순서(부모 먼저)를 따른다. 실제 DB FK 는 7개뿐이고 그 목록은 레지스트리 파일 상단 주석에 있다 — `@ManyToOne`/`@JoinColumn` 없이 평문 varchar 로만 참조하는 엔티티라면 순서는 사실상 자유다.
 - ⚠️ `MIGRATION_CONTROL_ENTITY_REASONS` 는 **도피처가 아니다.** 누락 엔티티를 여기 넣으면 preflight 는 green 이 되지만(`comparePreflight()` 가 CONTROL 이름을 소스 쪽에서 먼저 걸러낸다) 그 테이블은 이관에서 **영구히** 빠진다. 이관 기능 자신의 제어 상태이고 도착지에서 재생성되는 테이블에만 쓰고, 사유를 함께 적어라.

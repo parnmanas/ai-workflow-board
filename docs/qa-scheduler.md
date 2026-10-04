@@ -82,7 +82,7 @@ tick 은 `QaRunReaperService`/`DbRetentionService` 패턴 그대로:
 ## REST / MCP
 
 ```
-GET    /api/qa/schedules?workspace_id=..[&board_id=..]
+GET    /api/qa/schedules?workspace_id=..
 GET    /api/qa/schedules/:id?workspace_id=..
 POST   /api/qa/schedules                     { workspace_id, name, scope, scenario_ids?, cron|interval_ms, .. }
 PATCH  /api/qa/schedules/:id                 { workspace_id, ..부분 갱신.. }

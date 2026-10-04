@@ -131,11 +131,11 @@ tick 은 `SecurityRunReaperService`/`QaScheduleService` 패턴 그대로:
 
 ```
 # 수동 전체 점검 (batch)
-POST   /api/security/batches                  { workspace_id, board_id?, profile_ids?[], all?, stop_on_fail? }
+POST   /api/security/batches                  { workspace_id, profile_ids?[], all?, stop_on_fail? }
 GET    /api/security/batches/:id?workspace_id=..
 
 # 스케줄
-GET    /api/security/schedules?workspace_id=..[&board_id=..]
+GET    /api/security/schedules?workspace_id=..
 GET    /api/security/schedules/:id?workspace_id=..
 POST   /api/security/schedules                { workspace_id, name, kind?, scope, profile_ids?, cron|interval_ms, .. }
 PATCH  /api/security/schedules/:id            { workspace_id, ..부분 갱신(kind 포함).. }

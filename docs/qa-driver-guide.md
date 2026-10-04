@@ -1,6 +1,6 @@
 # Custom QA Driver Guide
 
-AWB ships a **scenario-based QA feature** (ticket `3c655d20`): each board's feature can
+AWB ships a **scenario-based QA feature** (ticket `3c655d20`): each feature under test can
 have a **QA driver** — an MCP server that actually operates and observes that feature —
 and the QA engine drives it the same way regardless of whether the feature is a web app,
 a game client, or a plain REST API.
@@ -25,12 +25,12 @@ The data model and dispatch mirror Actions 1:1:
 QaScenario (definition)  ──start_qa_run──▶  QaRun (one execution)  ──▶  results accumulate
   steps[] (visualized)                       step_results[] (pass/fail)     screenshots/video
   qa_driver + config                         room_id (agent runs here)      = existing Resource ids
-  target_agent_id                            re-run = new QaRun (history)
+  target_runtime (the QA agent)              re-run = new QaRun (history)
 ```
 
 1. A user/agent calls `start_qa_run(scenario_id)` (MCP) or `POST /api/qa/scenarios/:id/run`
-   (REST). AWB creates a `QaRun` row + a `ChatRoom`, adds the scenario's `target_agent_id`
-   as a participant, and posts a **rendered step prompt** (see `qa-prompt.ts`).
+   (REST). AWB creates a `QaRun` row + a `ChatRoom`, adds the scenario's target agent
+   (`target_runtime`) as a participant, and posts a **rendered step prompt** (see `qa-prompt.ts`).
 2. The QA agent reads the prompt — it lists the scenario steps and instructs the agent to
    drive the **`qa_driver`** MCP step by step.
 3. For each step the agent: performs the action via the driver, captures evidence,
@@ -90,7 +90,7 @@ Notes:
 
 ## 4. Reference driver: Browser (Playwright)
 
-For web-feature boards. Playwright (or an equivalent) exposed as an MCP.
+For web features. Playwright (or an equivalent) exposed as an MCP.
 
 - **`qa_driver`**: `browser`
 - **`qa_driver_config`**: `{ "start_url": "https://app.example.com", "viewport": {"width":1280,"height":800}, "record_video": true }`
@@ -131,7 +131,7 @@ shells out to `ffmpeg` (or `$QA_FFMPEG`). It maps onto the contract as:
 Two gotchas this helper encodes, learned from running it end-to-end (ticket 91cee9f7):
 
 - **Navigate inside the SPA, not by full page load.** AWB uses BrowserRouter (history mode).
-  A direct `Page.navigate` to a deep route (`/ws/:ws/boards/:board/qa`) can hit the server
+  A direct `Page.navigate` to a deep route (`/ws/:ws/qa`) can hit the server
   before the SPA fallback and return a JSON 404 — depending on the static-serving setup
   (observed under Express 5). Load `/` once (authenticated), then drive route changes with
   `history.pushState(...); dispatchEvent(new PopStateEvent('popstate'))` so React Router swaps
@@ -147,15 +147,18 @@ Two gotchas this helper encodes, learned from running it end-to-end (ticket 91ce
 ```
 node apps/server/scripts/qa-visual-capture.mjs \
   --base-url https://awb.example:7700 --email qa@awb.local --password … \
-  --workspace <ws> --board <board> --ticket <ticket> \
+  --workspace <ws> --ticket <ticket> \
   --out /tmp/qa-shots --record-video --ffmpeg /path/to/ffmpeg
 ```
+
+It captures login, Tickets (`/ws/:ws/tickets`), the ticket detail
+(`?ticket=<id>`), chat, QA, Projects, Resources and workspace settings.
 
 ---
 
 ## 5. Reference driver: Game client (Unity `host` MCP)
 
-For game-client boards, map the already-connected Unity **`host`** MCP onto the contract.
+For game clients, map the already-connected Unity **`host`** MCP onto the contract.
 
 - **`qa_driver`**: `game-client`
 - **`qa_driver_config`**: `{ "executable": "Game.exe", "window_title": "MyGame", "unity_log_dir": "~/AppData/.../Player.log" }`
@@ -225,7 +228,7 @@ And finalizes with `complete_qa_run(status, summary)`.
 
 ## 8. Auto-generating scenarios
 
-"Make a scenario from the board's feature MCP" is an **agent task**, not a server feature:
+"Make a scenario from a feature's driver MCP" is an **agent task**, not a server feature:
 point the QA agent at a target driver, have it `introspect` the driver's tools / explore
 the UI, draft `steps[]`, and persist via `create_qa_scenario`. The same driver contract
 makes this uniform across browser / game-client / http-api targets.

@@ -129,7 +129,6 @@ The Runtime Host validates native delegation events and permission requests:
 - total child, iteration, depth, and concurrency limits;
 - exact child tool and skill subsets;
 - no child terminal ticket transitions;
-- no child consensus decisions;
 - proposal-only skill changes.
 
 Violations emit `collaboration/denied` and cancel the parent run. ChildRun
@@ -140,7 +139,8 @@ start/finish records contain bounded, sanitized telemetry for the AWB UI.
 AWB, not Hermes, is the skill authority:
 
 1. An administrator publishes an immutable SkillVersion.
-2. An exact version is assigned by Agent and optional board/role scope.
+2. An exact version is assigned to a runtime identity within a workspace
+   (`RuntimeSkillAssignment.runtime_key` = `runtimeIdentityKey(spec)`).
 3. Dispatch creates a deterministic RunSkillSnapshot.
 4. The snapshot locks after dispatch acknowledgement.
 5. The Runtime Host verifies snapshot and file digests.
@@ -155,9 +155,11 @@ Never let a runtime modify an active version in place.
 Use AWB as the primary UI:
 
 - **Runtime Hosts**: process/capability/health administration;
-- **Agents**: durable responsibilities and runtime policy;
+- **Tickets / Orchestration**: durable responsibilities (a ticket's assignee, a
+  team slot) and their runtime policy (the RuntimeSpec);
 - **Skills**: versions, assignments, quarantine, and proposals;
-- **Agent detail → ChildRuns**: bounded Hermes collaboration history.
+- **ChildRuns**: bounded Hermes collaboration history
+  (`GET /api/workspaces/:workspaceId/runs/:runId/children`; no dedicated screen).
 
 Hermes Dashboard, WebUI, or OpenAI-compatible frontends can help runtime
 diagnosis and experimentation, but should not become a second control plane.

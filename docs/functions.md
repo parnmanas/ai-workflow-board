@@ -12,17 +12,16 @@ They complement Actions:
 
 ## Scope
 
-Functions use one database model. There are no separate Global, Workspace, or
-Board Function types.
+Functions use one database model. There are no separate Global and Workspace
+Function types, and there is no Board layer (boards were removed — see
+[`tickets.md`](tickets.md)).
 
-| `workspace_id` | `board_id` | Meaning | Management surface |
-|---|---|---|---|
-| `NULL` | `NULL` | Global, inherited by every workspace | Functions menu |
-| workspace UUID | `NULL` | Available only in that workspace | Functions menu |
-| workspace UUID | board UUID | Available only on that board | Board Functions route |
+| `workspace_id` | Meaning | Management surface |
+|---|---|---|
+| `NULL` | Global, inherited by every workspace | Functions menu |
+| workspace UUID | Available only in that workspace | Functions menu |
 
-Resolution is by stable `key`: Board overrides Workspace, and Workspace
-overrides Global. Scope cannot be moved in place; create/delete an override
+Resolution is by stable `key`: Workspace overrides Global. Scope cannot be moved in place; create/delete an override
 instead so run history remains unambiguous.
 
 ## Definition contract
@@ -37,7 +36,7 @@ Every Function has:
 - enabled/built-in flags.
 
 Every execution writes a `workflow_function_runs` row containing the exact
-Function version, scope, actor, ticket/board context, inputs, outputs, evidence,
+Function version, scope, actor, ticket context, inputs, outputs, evidence,
 idempotency key, errors, and timestamps. Pipeline child runs point to their
 parent run.
 
@@ -61,17 +60,18 @@ run user-authored shell text.
 ## Built-ins shipped now
 
 - `system.noop`: connectivity check and pipeline echo step.
-- `workflow.ticket_snapshot`: immutable evidence of the ticket/column state.
-- `workflow.verify_children_complete`: fails closed when a direct child is not
-  in a terminal column.
+- `workflow.ticket_snapshot`: immutable evidence of the ticket state (status,
+  `is_done`, project, parent, version).
+- `workflow.verify_children_complete`: fails closed when a direct child ticket
+  is not `done`.
 - `workflow.verify_required_functions`: fails closed when configured Function
   keys have no successful run for the ticket.
 
 ## Function catalogue
 
 Function definitions use the shared catalog scope described in
-[`catalog-scopes.md`](catalog-scopes.md). A key resolves in Board → Workspace →
-Global order. The Workspace Functions page requests `include_shadowed=true` so an
+[`catalog-scopes.md`](catalog-scopes.md). A key resolves in Workspace → Global
+order. The Workspace Functions page requests `include_shadowed=true` so an
 operator can inspect and edit every definition instead of seeing only the
 effective winner.
 
@@ -83,12 +83,9 @@ worktrees, or tickets behind.
 
 - `workflow.preflight_transition`
 - `workflow.verify_children_complete`
-- `workflow.verify_review_approval`
-- `workflow.verify_consensus`
 - `workflow.verify_required_functions`
 - `workflow.complete_ticket`
 - `workflow.reopen_ticket`
-- `workflow.handoff_ticket`
 - `workflow.block_ticket`
 - `workflow.request_human_decision`
 - `git.resolve_repository_context`
@@ -109,7 +106,7 @@ worktrees, or tickets behind.
 - `git.bump_submodule_pointer`
 
 `workflow.complete_ticket` should be a pipeline whose blocking verification and
-integration steps all succeed before the ticket is moved to a terminal column.
+integration steps all succeed before the ticket is moved to `done`.
 Branch/worktree deletion belongs after integration verification, never merely
 after an Agent says it merged.
 
@@ -127,7 +124,6 @@ after an Agent says it merged.
 - `deploy.execute`
 - `deploy.verify`
 - `deploy.rollback`
-- `workflow.detect_stuck_ticket`
 - `workflow.reconcile_dispatch`
 - `workflow.recover_interrupted_run`
 - `workflow.expire_stale_approval`
@@ -153,7 +149,7 @@ after an Agent says it merged.
 The durable target is a Function binding layer:
 
 - event: `manual`, `before_transition`, `after_transition`, or `schedule`;
-- workspace/board/source-column/destination-column filters;
+- workspace / tag / project / source-status / destination-status filters;
 - blocking or asynchronous mode;
 - optional condition;
 - `required_for_transition`.
@@ -169,7 +165,7 @@ not diverge by caller.
 
 - `list_functions`
 - `get_function`
-- `save_function` (Workspace or Board scope)
+- `save_function` (Workspace scope only)
 - `delete_function` (caller Workspace-authored only)
 - `execute_function`
 - `list_function_runs`

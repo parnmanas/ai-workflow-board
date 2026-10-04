@@ -50,6 +50,17 @@ started in `priority` → `position` → `created_at` order when a slot frees up
 `workspace.dispatch_paused_at` (non-null) stops all ticket dispatch in the
 workspace — humans can still edit, comment and move tickets.
 
+Never dispatched regardless of status: checklist children, archived and pending
+tickets, and confirmed duplicates (`canonical_ticket_id` set) — a duplicate is
+worked through its canonical ticket and is closed with it
+(`resolved_from_canonical`) without running its own done hooks. Entering
+`done` also releases `operational_dedupe_key`, so a later request with the same
+key files new work instead of folding into the finished ticket.
+
+The assignee RuntimeSpec is checked on write the same way team slots are: an
+unknown `cli_runtime_profile` or a credential the workspace cannot use is a
+400, not a dispatch-time failure.
+
 ## Project
 
 A project is one git repository plus the knowledge every feature needs to work
@@ -88,7 +99,9 @@ the project on that machine:
 
 ## REST (user session)
 
-All under `/api`. Workspace header `X-Workspace-Id` as before.
+All under `/api`. Workspace header `X-Workspace-Id` as before. For non-admins
+a `/workspaces/:wsId/...` path must name the same workspace as the header
+(403 otherwise), and a `/tickets/:id/...` of another workspace answers 404.
 
 ### Tickets
 | Method | Path | Body / query | Response |
@@ -98,7 +111,7 @@ All under `/api`. Workspace header `X-Workspace-Id` as before.
 | GET | `/tickets/:id` | | full ticket (as before + fields above, `project` summary, children, comments…) |
 | PATCH | `/tickets/:id` | any of `title, description, priority, tags, project_id, base_branch, assignee, prompt_text, pending_*, next_ticket_id, on_done_action_ids` | full ticket |
 | PATCH | `/tickets/:id/move` | `{ status, position? }` | full ticket |
-| POST | `/tickets/:id/trigger` | `{}` | `{ ok, dispatched, reason? }` — manual Run |
+| POST | `/tickets/:id/trigger` | `{}` | `{ ok, dispatched, reason? }` — manual Run. `reason`: `unassigned`, `pending`, `archived`, `duplicate`, `workspace_paused`, `host_offline`, `agent_busy`, `queued`, `status_<s>` |
 | POST | `/tickets/:parentId/children` | `{ title, description?, tags? }` | child |
 | POST | `/tickets/:id/archive` · `/unarchive` · DELETE `/tickets/:id` | | as before |
 | comments / attachments / prerequisites / read-state / presence / typing | unchanged paths | | |

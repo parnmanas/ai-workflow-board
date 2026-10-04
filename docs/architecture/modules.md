@@ -19,59 +19,85 @@ follow-up.
 
 ```
 AppModule
-├── DatabaseModule          ← TypeORM DataSource (global via forRoot)
-├── SharedServicesModule    ← @Global() cross-cutting services
-├── ServeStaticModule       ← client SPA, cache-control headers
-├── AuthModule              /api/auth/*
-├── WorkspacesModule        /api/workspaces/*
-├── BoardsModule            /api/boards/*
-├── ColumnsModule           /api/columns/*
-├── TicketsModule           /api/tickets/*
-├── UsersModule             /api/users/*
-├── AgentsModule            /api/agents/*
-├── AgentManagerModule       /api/agent-manager/*, /api/admin/agent-manager/*
-├── SkillsModule             /api/workspaces/:workspaceId/skills/*
-├── PromptTemplatesModule   /api/prompt-templates/*
-├── ChannelsModule          /api/channels/*
-├── ApiKeysModule           /api/api-keys/*
-├── ActivityModule          /api/activity/*
-├── AgentApiModule          /api/agent/*   (X-Agent-Key auth)
-├── QaModule                /api/qa/*      (admin)
-├── HealthModule            /api/health
-├── McpModule               /mcp           (+ McpServicesModule)
-├── AdminModule             /api/admin/*   (admin gated)
-├── EventsModule            /api/events/stream (SSE)
-├── ChatRoomsModule         /api/chat-rooms/*
-├── AgentSessionsModule     /api/agent-sessions/* + /api/agent/sessions/*
-├── ResourcesModule         /api/resources/*
-├── CredentialsModule       /api/credentials/*
-├── AgentLogsModule         /api/agent-logs/*
-├── WorkspaceRolesModule    /api/workspaces/:workspaceId/roles/*
-└── MentionsModule          /api/workspaces/:id/mentions/*
+├── DatabaseModule              ← TypeORM DataSource (forRoot + every entity via forFeature)
+├── SharedServicesModule        ← @Global() cross-cutting services
+├── ServeStaticModule           ← client SPA, cache-control headers
+├── AuthModule                  /api/auth/*
+├── WorkspacesModule            /api/workspaces/*
+├── ProjectsModule              /api/workspaces/:wsId/projects, /api/projects/*   (@Global — ProjectsService)
+├── TicketsModule               /api/workspaces/:wsId/tickets, /api/tickets/*
+├── UsersModule                 /api/users/*
+├── AgentsModule                TicketService + TicketDispatchService; /api/subagent-monitor/*, fs-browser, child-runs
+├── ChannelsModule              /api/channels/*
+├── ApiKeysModule               /api/keys/*
+├── ActivityModule              /api/activity, /api/tickets/:ticketId/activity
+├── AgentApiModule              /api/agent/*   (X-Agent-Key auth)
+├── QaModule                    /api/admin/qa/*  (admin flow-test runner)
+├── QaScenarioModule            /api/qa/*
+├── SecurityProfileModule       /api/security/*
+├── HealthModule                /api/health
+├── McpModule                   /mcp           (+ McpServicesModule, BuildsModule, DeploymentsModule)
+├── AdminModule                 /api/admin/*, /api/claude-backend-profiles, /api/diagnostics
+├── EventsModule                /api/events/stream (SSE)
+├── ChatRoomsModule             /api/chat-rooms/*
+├── AgentSessionsModule         /api/agent-sessions/* + /api/agent/sessions/*
+├── TerminalsModule             /api/terminals/* + /api/agent/terminals/*
+├── CliCatalogModule            /api/cli-catalog
+├── VoiceModule                 /api/voice/*
+├── ResourcesModule             /api/resources/*
+├── ActionsModule               /api/actions/*
+├── CredentialsModule           /api/credentials/*, /api/agent-manager/cli-login/*
+├── AgentLogsModule             /api/agent/error-logs, /api/admin/agent-logs
+├── MentionsModule              /api/workspaces/:id/mentions/*
+├── AgentManagerModule          /api/agent-manager/*, /api/agent-templates, /api/runtime-specs   (+ @Global InstanceRegistryModule)
+├── UserChannelsModule          /api/me/channels/*, /api/admin/users/:userId/channels
+├── WorkspaceScheduleModule     /api/workspace-schedules/*
+├── WorkflowFunctionsModule     /api/functions/*
+├── SkillsModule                /api/workspaces/:workspaceId/skills/*, /api/admin/skill-registry/*
+├── ArtifactRefsModule          /api/artifact-refs
+├── OutreachModule              /api/outreach-channels/*
+├── OrchestrationModule         /api/orchestration/*
+├── OntologyModule              /api/ontology/*
+└── MigrationModule             /api/admin/migration/*, /api/migration/export/*
 ```
+
+There is no Boards, Columns, PromptTemplates or WorkspaceRoles module any more —
+boards, columns, prompt templates and ticket role assignments were removed (see
+[`docs/tickets.md`](../tickets.md)). Ticket writes live in `TicketService`, ticket
+dispatch in `TicketDispatchService`; both are provided by `AgentsModule`.
 
 ---
 
-## Global module — `SharedServicesModule`
+## Global modules
+
+### `SharedServicesModule`
 
 `@Global()` — imported by `AppModule`, available to every module's DI
 graph without explicit `imports`.
 
 | Entity repositories | Providers (@Injectable) | Exports (injectable from anywhere) |
 |---|---|---|
-| ActivityLog, ApiKey, Agent, AgentChannelIdentity, Channel, Comment, Ticket, User, BoardColumn, RelationTuple | ActivityService, AuthService, ApiKeyService, DiscordService, LogService, NotificationService, SystemCommentService, ReBACService, MentionService | ActivityService, AuthService, ApiKeyService, LogService, ReBACService, MentionService |
+| ActivityLog, AgentErrorLog, ApiKey, Channel, Comment, Ticket, User, RelationTuple, UserChannel, SystemSetting | ActivityService, AuthService, ApiKeyService, DbRetentionService, DiscordService, LogService, MemoryMetricsRegistry, MemoryWatchdogService, AgentConnectivityRegistry, SqljsFlushService, OntologySqljsFlushService, NotificationService, SystemCommentService, ReBACService, MentionService, PresenceService, Discord/Slack/Telegram user providers, NotificationProviderRegistry, UserChannelDispatcherService, InstanceQuiesceService | ActivityService, AuthService, ApiKeyService, DiscordService, LogService, MemoryMetricsRegistry, AgentConnectivityRegistry, ReBACService, MentionService, PresenceService, NotificationProviderRegistry, UserChannelDispatcherService, InstanceQuiesceService |
 
-**Providers not exported** (intentional): `DiscordService` (consumed only
-by `NotificationService`, a sibling provider in the same module);
-`NotificationService` + `SystemCommentService` (event-listener
-singletons — they subscribe to `activityEvents` in `OnModuleInit` and run
-as background listeners for the app's lifetime; nothing injects them).
+**Providers not exported** (intentional): `NotificationService` +
+`SystemCommentService` (event-listener singletons — they subscribe to
+`activityEvents` in `OnModuleInit` and run as background listeners for the
+app's lifetime; nothing injects them), and the timer-driven
+`DbRetentionService`, `MemoryWatchdogService`, `SqljsFlushService`,
+`OntologySqljsFlushService`.
 
-Membership audit (2026-04-18): consumer counts for exported services —
-LogService 15, ApiKeyService 7, ActivityService 6, ReBACService 5,
-AuthService 5, MentionService 2. Services with lower counts (Embedding,
-GitHub, Mentions-in-doubt) are scoped to feature modules instead of
-polluting the global exports list.
+### `ProjectsModule`
+
+`@Global()` — `ProjectsService` (projects + per-host main clone folders,
+`ProjectHostFolder`) is resolved by tickets, dispatch, QA/Security/Actions,
+orchestration, ontology and MCP tools, so it is global rather than imported
+everywhere. Controller: `ProjectsController`. Contract: [`docs/tickets.md`](../tickets.md) → "Project".
+
+### `InstanceRegistryModule`
+
+`@Global()` — provides/exports `InstanceRegistryService` (the live Runtime Host
+heartbeat registry). Imported once by `AgentManagerModule`; chat rooms, agents
+and events reach it without an import edge.
 
 ---
 
@@ -81,28 +107,42 @@ polluting the global exports list.
 
 | Imports | Controllers | Notes |
 |---|---|---|
-| `TypeOrmModule.forFeature([ApiKey])`, `AgentsModule`, `McpServicesModule` | `McpController` | Streamable HTTP transport at `/mcp`. Builds `ToolContext` with DI-injected services and hands it to `registerAllTools(server, ctx)`. |
+| `TypeOrmModule.forFeature([ApiKey])`, `AgentsModule`, `McpServicesModule`, `ChatRoomsModule`, `ActionsModule`, `QaScenarioModule`, `BuildsModule`, `DeploymentsModule`, `SecurityProfileModule`, `WorkspaceScheduleModule`, `WorkflowFunctionsModule`, `ArtifactRefsModule`, `OutreachModule`, `OrchestrationModule`, `AgentManagerModule`, `OntologyModule`, `VoiceModule`, `AgentSessionsModule` | `McpController` | Streamable HTTP transport at `/mcp`. Builds `ToolContext` with DI-injected services and hands it to `registerAllTools(server, ctx)`. |
 
 ### `McpServicesModule`
 
 | Providers | Exports | Notes |
 |---|---|---|
-| `EmbeddingService`, `GitHubConnectorService` | `EmbeddingService`, `GitHubConnectorService` | Narrow-scope module — services used only inside `modules/mcp/*`. Previously global providers; moved out of `SharedServicesModule` to reduce blast radius. |
+| `EmbeddingService`, `GitHubConnectorService` | `EmbeddingService`, `GitHubConnectorService` | Narrow-scope module — services used only inside `modules/mcp/*`. |
+
+`BuildsModule` (`BuildArtifactService`) and `DeploymentsModule`
+(`DeploymentService`, `DeploymentController` at `/api/deployments`) are not in
+`AppModule` directly; they enter through `McpModule` (and `MigrationModule`).
 
 ### `AgentsModule`
 
 | Imports | Controllers | Providers | Exports |
 |---|---|---|---|
-| Agent/workload/dispatch/ChildRun entities, `forwardRef(AgentManagerModule)`, `ChatRoomsModule`, `ColumnPoliciesModule`, `SkillsModule` | `AgentsController`, `FsBrowserController`, `SubagentMonitorController`, `ChildRunsController`, `AgentChildRunsController` | Agent connection, allocation, workload, dispatch, supervision, status, and `ChildRunService` | Shared Agent execution state plus `ChildRunService` |
+| RuntimeHost, ApiKey, Ticket, Subagent, SubagentLogLine, AgentUsageDailyRollup, CiRedAlert, ChildRun repositories; `forwardRef(AgentManagerModule)`, `ChatRoomsModule`, `SkillsModule` | `FsBrowserController`, `SubagentMonitorController`, `ChildRunsController`, `AgentChildRunsController` | `TicketDispatchService`, `TicketService`, `TicketDuplicateService`, `TicketPrerequisitesService`, `CiWaitService`, `CiWaitResumeService`, `CiHealthMonitorService`, `AgentConnectionService`, `AgentStatusService`, `AgentUsageService`, `AgentAutostartService`, `FsBrowserService`, `SubagentMonitorService`, `ChildRunService`, guards | everything above except `AgentAutostartService` and the guards |
 
-`ChildRunService` persists bounded Hermes collaboration telemetry. ChildRuns
-are children of a durable run and are deliberately not Agent identities.
-`AgentsModule` is imported by `McpModule` so tools can reach trigger,
-connection, and status state.
+`AgentsModule` is the home of the ticket mutation layer and the dispatcher
+(they share one DI graph): `TicketService` is the one write path for tickets,
+`TicketDispatchService` the one place that emits `agent_trigger` for a ticket.
+`TicketsModule`, `AgentApiModule`, `OutreachModule`, QA/Security and `McpModule`
+import `AgentsModule` for them. `ChildRunService` persists bounded Hermes
+collaboration telemetry — ChildRuns are children of a durable run and are
+deliberately not Agent identities. (The Agent-row CRUD controller was removed
+with the Agent table, P4c-4.)
 
 ---
 
 ## Feature modules (alphabetical)
+
+### `ActionsModule`
+- Imports: Action, ActionRun, ActionApproval, ChatRoom(+Participant/Message), TicketAttachment, RuntimeHost, Workspace, User, Ticket, Comment, ActivityLog repositories; `ChatRoomsModule`, `SharedServicesModule`, `AgentsModule`
+- Controllers: `ActionsController`
+- Providers: `ActionsService`, `ActionRunReaperService`, `OnTicketDoneActionService` (fires on a ticket entering `done` — [`docs/on-ticket-done-action-hook.md`](../on-ticket-done-action-hook.md))
+- Exports: `ActionsService`
 
 ### `ActivityModule`
 - Controllers: `ActivityController`
@@ -111,86 +151,76 @@ connection, and status state.
   `SharedServicesModule` export chain.
 
 ### `AdminModule`
-- Imports: `TypeOrmModule.forFeature([User, Workspace, SystemSetting])`
-- Controllers: `LogsController`, `PendingUsersController`, `SettingsController`
+- Imports: `TypeOrmModule.forFeature([User, Workspace, SystemSetting, ClaudeBackendProfile])`, `forwardRef(AgentsModule)` (workflow health reads `AgentUsageService`)
+- Controllers: `DiagnosticsController`, `PublicDiagnosticsController`, `LogsController`, `PendingUsersController`, `SettingsController`, `WorkflowHealthController`, `ClaudeBackendProfilesController`, `ClaudeBackendProfileCatalogController`
 - Providers: `AuthGuard`, `AdminGuard`, `PermissionGuard`
 
 ### `AgentApiModule`
-- Imports: `TypeOrmModule.forFeature([Board, BoardColumn, Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, UserMention])`
-- Controllers: `AgentApiController`
-- Providers: `AgentAuthGuard`, `ChatRoomsService`, `RoomCrudService`, `RoomMembershipService`, `RoomMessagingService`
-- Re-instantiates the chat-room services here rather than importing
-  `ChatRoomsModule` because agent auth uses `X-Agent-Key` (different
-  guard surface) and the controllers split is intentional.
+- Imports: `TypeOrmModule.forFeature([Ticket, Comment, ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, UserMention, TicketAttachment, ActivityLog])`, `ChatRoomsModule`, `AgentsModule` (`TicketService` for the chat "ordinary work" fallback tickets)
+- Controllers: `AgentApiController` (`/api/agent/*`, `X-Agent-Key`)
+- Providers: `AgentAuthGuard`
 
 ### `AgentLogsModule`
-- Imports: `TypeOrmModule.forFeature([AgentErrorLog, Agent])`
+- Imports: `TypeOrmModule.forFeature([AgentErrorLog])`
 - Controllers: `AgentLogsUploadController`, `AgentLogsAdminController`
 - Providers: `AgentLogsService`, `AgentAuthGuard`, `AuthGuard`, `AdminGuard`
 
 ### `AgentManagerModule`
-
-- Imports: Agent/API-key/credential/ticket/resource repositories,
-  `forwardRef(AgentsModule)`, `SkillsModule`
-- Controller: `AgentManagerController`
-- Providers: pairing, instance/capability registry, command ledger/dispatch,
-  drift monitor, and auth guards
-- Exports: `InstanceRegistryService`, `PairingService`,
-  `AgentManagerCommandService`
+- Imports: `forwardRef(AgentsModule)`, `InstanceRegistryModule`, `SkillsModule`, `TypeOrmModule.forFeature([AgentTemplate, RuntimeHost, AgentSessionCliSetting, ApiKey, Credential, Ticket, Workspace])`
+- Controllers: `AgentTemplatesController`, `AgentManagerController`, `HostModelsController`, `RuntimeSpecController`
+- Providers: `PairingService`, `CommandLedgerService`, `SudoTicketService`, `PrivilegedCommandService`, `AgentManagerCommandService`, `HostModelsService`, `ManagerDriftMonitorService`, guards
+- Exports: `PairingService`, `AgentManagerCommandService`, `PrivilegedCommandService`, `CommandLedgerService`, `HostModelsService`
 - Architectural name: **Runtime Host**. The module and route names remain
-  compatibility aliases.
-- Runtime-authenticated child start/finish endpoints persist ChildRuns only
-  after verifying that the caller owns the parent Agent.
+  compatibility aliases. Serves the project git credential to managers
+  (`GET /api/agent-manager/projects/:projectId/git-credential`).
+
+### `AgentSessionsModule`
+- Imports: `TypeOrmModule.forFeature([RuntimeHost, AgentSessionCliSetting, Credential, ClaudeBackendProfile])`, `forwardRef(AgentManagerModule)` (shares the `HostModelsService` singleton)
+- Controllers: `AgentSessionsController` (`/api/agent-sessions/hosts/*`, user), `AgentSessionsAgentController` (`/api/agent/sessions/*`, `X-Agent-Key`)
+- Providers: `AgentSessionsService`, guards
+- Exports: `AgentSessionsService`
+- Agent Session (CLI 직접 세션) — 엔티티 없는 상태 없는 중계자(reverse RPC + 라이브 SSE). ChatRoomsModule 과 독립. `docs/agent-sessions.md`.
 
 ### `ApiKeysModule`
-- Controllers: `ApiKeysController`
+- Controllers: `ApiKeysController` (`/api/keys`)
 - Providers: `AuthGuard`, `PermissionGuard`
 - `ApiKeyService` comes from `SharedServicesModule`.
 
-### `AuthModule`
-- Imports: `TypeOrmModule.forFeature([User, Workspace])`
-- Controllers: `AuthController`
-- `AuthService` / `ApiKeyService` / `ReBACService` come from `SharedServicesModule`.
+### `ArtifactRefsModule`
+- Imports: `TypeOrmModule.forFeature([Ticket, Action, WorkflowFunction, Workspace, WorkspaceSchedule])`
+- Controllers: `ArtifactRefsController`; Providers/Exports: `ArtifactRefsService`
+- Resolves `#[type:id|name]` references — [`docs/entity-references.md`](../entity-references.md).
 
-### `BoardsModule`
-- Imports: `TypeOrmModule.forFeature([Board, BoardColumn, Ticket])`, `PromptTemplatesModule`, `forwardRef(AgentsModule)` (focus-tickets 의 AgentWorkloadService), `WorkspaceRolesModule` (보드 카드 멀티홀더 `role_holders` 프로젝션 — T6)
-- Controllers: `BoardsController`
-- Providers: `AuthGuard`, `AdminGuard`, `WorkspaceMoveService`
+### `AuthModule`
+- Imports: `TypeOrmModule.forFeature([User, Workspace, SystemSetting])`
+- Controllers: `AuthController`; Providers: `GoogleOAuthService`
+- `AuthService` / `ApiKeyService` / `ReBACService` come from `SharedServicesModule`.
 
 ### `ChannelsModule`
 - Imports: `TypeOrmModule.forFeature([Channel])`
 - Controllers: `ChannelsController`
 - Providers: `AuthGuard`, `PermissionGuard`
 
-### `AgentSessionsModule`
-- Imports: `TypeOrmModule.forFeature([Agent])` (+ global `InstanceRegistryService`)
-- Controllers: `AgentSessionsController` (`/api/agent-sessions/hosts/*`, user), `AgentSessionsAgentController` (`/api/agent/sessions/*`, `X-Agent-Key`)
-- Providers: `AgentSessionsService`, `AuthGuard`, `PermissionGuard`, `AgentAuthGuard`
-- Exports: `AgentSessionsService`
-- Agent Session (CLI 직접 세션) — 엔티티 없는 상태 없는 중계자(reverse RPC + 라이브 SSE). ChatRoomsModule 과 독립. `docs/agent-sessions.md`.
-
 ### `ChatRoomsModule`
-- Imports: `TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Agent, Ticket, UserMention])`, `SharedServicesModule`
+- Imports: `TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Ticket, UserMention, TicketAttachment, Workspace, OrchestrationMission])`, `SharedServicesModule`, `ArtifactRefsModule`
 - Controllers: `ChatRoomsController`
-- Providers: `ChatRoomsService`, `RoomCrudService`, `RoomMembershipService`, `RoomMessagingService`, `AuthGuard`, `PermissionGuard`
-- Exports: `ChatRoomsService`, `RoomCrudService`, `RoomMembershipService`, `RoomMessagingService`
+- Providers / Exports: `RoomCrudService`, `RoomMembershipService`, `RoomMessagingService`
 
-### `ColumnsModule`
-- Imports: `TypeOrmModule.forFeature([BoardColumn])`
-- Controllers: `ColumnsController`
-- Providers: `AuthGuard`
+### `CliCatalogModule`
+- Controllers: `CliCatalogController` — serves the server CLI catalogue (`common/cli-catalog.ts`).
 
 ### `CredentialsModule`
-- Imports: `TypeOrmModule.forFeature([Credential])`
-- Controllers: `CredentialsController`
-- Providers: `AuthGuard`, `PermissionGuard`
+- Imports: `TypeOrmModule.forFeature([Credential, CliLoginSession])`, `AgentManagerModule`
+- Controllers: `CredentialsController`, `CliLoginAgentController`
+- Providers: `CliLoginSessionService`, `CliLoginSessionReaperService`, guards
 
 ### `EventsModule`
-- Imports: `TypeOrmModule.forFeature([Ticket, BoardColumn])`
+- Imports: `TypeOrmModule.forFeature([Ticket, Workspace, RuntimeHost, ApiKey])`, `AgentManagerModule`
 - Controllers: `EventsController`
 - `EventsController` owns the single SSE endpoint `/api/events/stream`
   and the table-driven event registry (`event-registry.ts`). Keepalive
-  ping fires every 15s to survive reverse-proxy idle timeout.
+  ping fires every 15s to survive reverse-proxy idle timeout. The ticket-change
+  event keeps its historical name `board_update`.
 
 ### `HealthModule`
 - Controllers: `HealthController`
@@ -200,62 +230,108 @@ connection, and status state.
 - Controllers: `MentionsController`
 - Providers: `MentionsService`, `AuthGuard`
 - `MentionService` (the parser) is separate — lives in
-  `SharedServicesModule` exports because both `TicketsModule` and
+  `SharedServicesModule` exports because both ticket comments and
   `ChatRoomsModule` need it at dispatch time. `MentionsService` is
   the CRUD service for the `user_mentions` inbox.
 
-### `PromptTemplatesModule`
-- Imports: `TypeOrmModule.forFeature([PromptTemplate])`
-- Controllers: `PromptTemplatesController`
-- Providers: `AuthGuard`, `PermissionGuard`
+### `MigrationModule`
+- Imports: `TypeOrmModule.forFeature([MigrationRun])`, `DeploymentsModule`
+- Controllers: `MigrationExportController`, `MigrationImportController`
+- Providers: `MigrationRunService`, `MigrationExportGuard`, guards
+- Live instance import. Entity coverage is pinned by `migration-entity-registry.ts`.
+
+### `OntologyModule`
+- Imports: `TypeOrmModule.forFeature([Credential])` (graph tables live on their own DataSource)
+- Controllers: `OntologyController`
+- Providers / Exports: extraction, resolver, query, lifecycle, incremental-scheduler and stale-sweep services
+- Graphs are keyed by the repository's project id — [`docs/ontology-graph/DESIGN.md`](../ontology-graph/DESIGN.md).
+
+### `OrchestrationModule`
+- Imports: Orchestration{Team,TeamMember,Mission,Step,Event}, ChatRoom(+Participant/Message), RuntimeHost, ApiKey, Action, ActionRun, Workspace, Credential repositories; `ChatRoomsModule`, `AgentManagerModule`, `ActionsModule`, `SharedServicesModule`
+- Controllers: `OrchestrationController`
+- Providers: `OrchestrationTeamService`, `OrchestrationHostsService`, `OrchestrationMissionService`, `OrchestrationConfirmNotifyService`, `OrchestrationRunnerService`, `OrchestrationReaperService`
+- Exports: `OrchestrationTeamService`, `OrchestrationMissionService`, `OrchestrationRunnerService`
+- The mission project (main clone folder per member host) comes from the global `ProjectsService` — [`docs/orchestration.md`](../orchestration.md).
+
+### `OutreachModule`
+- Imports: OutreachChannel, OutreachInboundItem, OutreachOutboundPost, Credential, Ticket, ChatRoom, ChatRoomParticipant repositories; `AgentsModule` (`TicketService` for report tickets), `ChatRoomsModule`
+- Controllers: `OutreachController`
+- Providers: ingest/polling/channel services, `ClassificationBridgeService`, `AgentDispatchClassifier`, publisher, resolve notifier, release consistency
+- Exports: `ClassificationBridgeService`
 
 ### `QaModule`
-- Imports: `TypeOrmModule.forFeature([Workspace, Board, BoardColumn, Ticket, Comment, User, Agent, AgentChannelIdentity, Channel, ApiKey, ActivityLog])`
-- Controllers: `QaController`
+- Controllers: `QaController` (`/api/admin/qa`)
 - Providers: `AuthGuard`, `AdminGuard`
-- Admin-gated QA test surface.
+- Admin-gated flow-test runner (`test/qa-flows/*`).
+
+### `QaScenarioModule`
+- Imports: QaScenario, QaRun, QaRunBatch, QaSchedule, ChatRoom(+Participant/Message), TicketAttachment, RuntimeHost, Ticket, Comment, Resource repositories; `ChatRoomsModule`, `AgentsModule`, `SharedServicesModule`
+- Controllers: `QaScenarioController` (`/api/qa`)
+- Providers: `QaService`, `QaRunService`, `QaRunReaperService`, `QaRunBatchReaperService`, `QaFailureTicketService`, `QaRerunOnFixService`, `QaScheduleService`
+- Exports: all of those except `QaRerunOnFixService`
 
 ### `ResourcesModule`
-- Imports: `TypeOrmModule.forFeature([Resource])`
-- Controllers: `ResourcesController`
+- Imports: `TypeOrmModule.forFeature([Resource, Credential])`
+- Controllers: `ResourcesController`, `ResourceMediaController`
 - Providers: `AuthGuard`, `PermissionGuard`
+- Repositories are Projects, not Resources — `type='repository'` is rejected.
+
+### `SecurityProfileModule`
+- Imports: SecurityProfile, SecurityRun, SecurityRunBatch, SecuritySchedule, ChatRoom(+Participant/Message), TicketAttachment, RuntimeHost, Ticket, Comment, Resource repositories; `ChatRoomsModule`, `AgentsModule`, `SharedServicesModule`
+- Controllers: `SecurityProfileController` (`/api/security`)
+- Providers / Exports: `SecurityProfileService`, `SecurityRunService`, `SecurityRunReaperService`, `SecurityFailureTicketService`, `SecurityScheduleService`
 
 ### `SkillsModule`
+- Imports: `Skill`, `SkillVersion`, `RuntimeSkillAssignment`, `RunSkillSnapshot`, `SkillProposal`, `SkillTap` repositories
+- Controllers: `SkillsController`, `SkillRegistryController`
+- Providers: `SkillsService`, `RunSkillSnapshotService`, `SkillSyncService`, `SkillTapService`, `BuiltinSkillPackService`
+- Exports: `SkillsService`, `RunSkillSnapshotService`, `SkillTapService`, `BuiltinSkillPackService`
+- Owns immutable version publication, exact-version assignments to a runtime
+  identity (`runtime_key`), quarantine, deterministic run snapshots, and
+  human-reviewed proposals. Runtime MCP clients can propose changes but cannot
+  approve, publish, or assign a skill.
 
-- Imports: `Skill`, `SkillVersion`, `AgentSkillAssignment`,
-  `RunSkillSnapshot`, `SkillProposal`, and `Agent` repositories
-- Controller: `SkillsController`
-- Providers / Exports: `SkillsService`, `RunSkillSnapshotService`
-- Owns immutable version publication, scoped exact-version assignments,
-  quarantine, deterministic run snapshots, and human-reviewed proposals.
-- Runtime MCP clients can propose changes but cannot approve, publish, or
-  assign a skill.
+### `TerminalsModule`
+- Imports: `TypeOrmModule.forFeature([RuntimeHost])`
+- Controllers: `TerminalsController` (user), `TerminalsAgentController` (`X-Agent-Key`)
+- Providers / Exports: `TerminalsService` — `docs/terminals.md`.
 
 ### `TicketsModule`
-- Imports: `TypeOrmModule.forFeature([Ticket, BoardColumn, Comment, Agent, Board, UserMention, TicketReadState, TicketAttachment])`, `AgentsModule` (`/api/tickets/:id/trigger` 의 TriggerLoopService), `WorkspaceRolesModule` (합의 이동 게이트 `evaluateConsensusMoveGate` + `GET /:id/consensus`, `POST /:id/consensus/{propose,vote}` REST 브릿지)
-- Controllers: `TicketsController`
-- Providers: `AuthGuard`, `TicketArchiverService`
+- Imports: `TypeOrmModule.forFeature([Ticket, Comment, UserMention, TicketReadState, TicketAttachment])`, `AgentsModule` (`TicketService` / `TicketDispatchService` / `TicketDuplicateService`), `ArtifactRefsModule`
+- Controllers: `TicketsController` (`/api/workspaces/:wsId/tickets`, `/api/tickets/*` incl. `/move`, `/trigger`, children, comments, attachments, prerequisites)
+- Providers: `AuthGuard`, `TicketArchiverService` (auto-archive by `workspace.auto_archive_days`)
+
+### `UserChannelsModule`
+- Imports: `TypeOrmModule.forFeature([UserChannel])`
+- Controllers: `UserChannelsController`; Providers: `UserChannelsService`, guards
 
 ### `UsersModule`
 - Imports: `TypeOrmModule.forFeature([User])`
 - Controllers: `UsersController`
 - Providers: `AuthGuard`, `PermissionGuard`
 
-### `WorkspaceRolesModule`
-- Imports: `TypeOrmModule.forFeature([WorkspaceRole, TicketRoleAssignment, Agent, User])`
-- Controllers: `WorkspaceRolesController` (`/api/workspaces/:workspaceId/roles`)
-- Providers / Exports: `WorkspaceRolesService`, `TicketRoleAssignmentService`
-- 멀티홀더 `role_assignments` 의 홈 — 한 (ticket, role) 을 여러 agent/user 가
-  공동 보유할 수 있고(T1 유니크 인덱스 완화), 합의 판정(`consensus.service`)과
-  보드 카드 `role_holders` 프로젝션(T6)이
-  `TicketRoleAssignmentService.resolveGroupedForTicket` 를 통해 이 모듈을 소비한다.
+### `VoiceModule`
+- Imports: `AgentSessionsModule`
+- Controllers: `VoiceController`, `VoiceLabController`, `VoiceOperatorsController`
+- Providers: `VoiceService`, `VoiceAnnouncerService`, `OperatorReportService`, `OperatorDecisionService`, `VoicePresenceService`
+- Exports: `VoiceService`, `VoiceAnnouncerService`, `OperatorDecisionService` — `docs/voice-operator.md`.
+
+### `WorkflowFunctionsModule`
+- Imports: `TypeOrmModule.forFeature([WorkflowFunction, WorkflowFunctionRun, Ticket])`, `ActionsModule`
+- Controllers: `WorkflowFunctionsController`; Providers/Exports: `WorkflowFunctionsService`
+
+### `WorkspaceScheduleModule`
+- Imports: `TypeOrmModule.forFeature([WorkspaceSchedule, ChatRoom, ChatRoomParticipant, RuntimeHost, Action])`, `ChatRoomsModule`, `ActionsModule`, `SharedServicesModule`
+- Controllers: `WorkspaceScheduleController`; Providers/Exports: `WorkspaceScheduleService`
 
 ### `WorkspacesModule`
-- Imports: `TypeOrmModule.forFeature([Workspace, Board, BoardColumn, Ticket, User, Agent])`
+- Imports: `TypeOrmModule.forFeature([Workspace, Ticket, User])`
 - Controllers: `WorkspacesController`
 - Providers: `AuthGuard`
-- Hosts the `/api/workspaces/:id/mention-candidates` endpoint that
-  powers the client-side `@`-mention autocomplete composer.
+- Workspace settings now also hold what used to be per-board: `language`,
+  `max_concurrent_tickets_per_agent`, `auto_archive_days`, `dispatch_paused_at`,
+  `harness_config`. Hosts the `/api/workspaces/:id/mention-candidates`
+  endpoint that powers the client-side `@`-mention autocomplete composer.
 
 ---
 
@@ -263,8 +339,9 @@ connection, and status state.
 
 - **`@Global()` only for truly cross-cutting services.** If a service is
   consumed only inside one feature's folder, it lives in that feature's
-  module, not in `SharedServicesModule`. Global services currently
-  exported: 6 (Log, Auth, ApiKey, Activity, ReBAC, Mention).
+  module, not in `SharedServicesModule`. The other two `@Global()` modules
+  (`ProjectsModule`, `InstanceRegistryModule`) each export exactly one
+  service that half the app needs.
 - **Listener-only providers** (NotificationService, SystemCommentService)
   stay as non-exported providers — they subscribe to `activityEvents` in
   `OnModuleInit` and run for the app's lifetime; exporting them from

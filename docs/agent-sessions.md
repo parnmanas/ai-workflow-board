@@ -17,7 +17,7 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 | 단위 | 방(room) — DM/그룹 + Action/QA/Mission run 방 등 9종이 한 엔티티에 다중화 | (Runtime Host, CLI, 네이티브 세션 id) |
 | 저장 | AWB DB (chat_room_messages) | 없음 — CLI 홈의 세션 파일이 원본 |
 | 에이전트 답변 | `send_chat_room_message` MCP 툴 호출로만 | ACP 스트림(text/tool/permission) 그대로 |
-| 프롬프트 | 매 턴 보드 정책 프롬프트로 래핑, DB 히스토리를 재조립 | 사용자 텍스트가 그대로 `session/prompt` |
+| 프롬프트 | 매 턴 AWB 정책 프롬프트로 래핑, DB 히스토리를 재조립 | 사용자 텍스트가 그대로 `session/prompt` |
 | 실행 identity | AWB Agent(격리 cli-home, per-agent 키) | 장비 운영자의 CLI 홈 그대로 |
 | 권한 | CLI 어댑터는 사전 결정(tier) | `session/request_permission` 을 사용자에게 릴레이 |
 | 의존 모듈 | 16개 모듈이 dispatch 버스로 재사용 | 없음 — 독립 모듈 |
@@ -436,7 +436,7 @@ cache_write` 로 계산한다.
 찍지 않는다**: 예전 화면이 `total 0` 을 찍어 claude 가 "토큰을 안 쓴 것"처럼 보였고,
 `in 2` 만 보여 실제로 쓴 3.6만 토큰이 화면에서 사라져 있었다(운영 보고 2026-09-26).
 
-주의: 보드/채팅 subagent 실행의 사용량 집계(`subagents` 테이블 → 관리자 워크플로
+주의: 티켓/채팅 subagent 실행의 사용량 집계(`subagents` 테이블 → 관리자 워크플로
 헬스)는 **다른 경로**다(`lib/cli-adapters/*.extractUsage`). 그쪽은 아직 이 정규화를
 쓰지 않아 codex 의 `input_tokens` 가 캐시를 포함한 채 저장된다 — 필드를 각각 따로
 보여 주므로 화면상 오류는 없지만, 두 경로를 합산하려면 먼저 통일해야 한다.
@@ -552,3 +552,67 @@ CLI 설정 패널과 새 세션 모달의 `model` 선택지는 두 출처를 합
 OpenCode history queries project only transcript fields inside SQLite before `opencode db` serializes them. Tool metadata and attachments that the transcript does not consume must not cross this boundary; tool input/output and text are bounded for display. Message rows contribute only their role. This preserves the native database, image-part handling, tool status, usage and conversation text while avoiding large irrelevant payloads (Ralf: 691 parts, about 80 MB, mostly tool metadata, exceeded the 10-second command limit).
 
 A requested history query that times out, cannot launch OpenCode, or returns invalid JSON reports `history_read_failed` through the existing RPC error path. It must never return a successful empty transcript or a cached title with zero events after a query failure. Listing and optional usage/error diagnostics remain best-effort.
+
+## 화면 공통 규칙 (세션 · 채팅 · 티켓 · 미션)
+
+세션 화면에서 시작돼 다른 작업 표면까지 묶인 클라이언트 규칙 두 가지다. 세션만의 규칙이
+아니라 네 표면 모두에 적용된다.
+
+### 진행 표시 (session / chat / ticket / mission)
+
+"이게 지금 돌고 있나, 내가 뭘 해야 하나, 끝났나?" 는 네 표면에서 같은 질문이고,
+화면도 **같은 색·같은 단어·같은 애니메이션**으로 답해야 한다. 그 어휘의 단일 원천은
+`apps/client/src/activity.ts` 이고, 그리는 것은 `components/common/ActivityIndicator.tsx`
+의 두 프리미티브뿐이다.
+
+| tone | 뜻 | 쓰는 곳 예 |
+| --- | --- | --- |
+| `idle` | 아무 일도 없음 — **점을 찍지 않는다** | 조용한 방, `pending` step, `todo` 티켓 |
+| `queued` | 시작을 기다림 | `ready` step, `starting`/`ready` 세션 |
+| `live` | 지금 돌고 있음 (숨쉬는 점) | `busy` 세션, `running` step/mission, `in_progress` 티켓, 작업 중인 방 |
+| `attention` | **사람이 답해야** 진행됨 (링 펄스) | `awaiting_permission`, `awaiting_user`, `pending_user_action` |
+| `stalled` | 멈춰 있음 | `blocked` step, `paused` mission |
+| `done` / `failed` | 종료 | |
+
+규칙:
+
+- **상태 → tone 번역만** 각 표면이 한다. 색을 그 파일에서 고르지 말 것 — 사이드바 세션
+  행에 자체 색 표가 있어 같은 `busy` 세션이 왼쪽에선 노란 점, 세션 화면에선 보라 pill 로
+  보이던 것이 이 규칙이 생긴 이유다.
+- 애니메이션 두 개는 뜻이 다르다: 숨쉬기(`awb-activity-live`)는 "스스로 진행 중",
+  링(`awb-activity-attention`)은 "사람을 기다림". `attention` 에 숨쉬기를 주면 "곧 알아서
+  될 것"으로 읽혀 정확히 반대 뜻이 된다. 새 `@keyframes` 를 컴포넌트에 인라인으로
+  만들지 말 것(표면마다 다른 속도로 깜빡이던 원인).
+- 좌측 프레임(사이드바 행, 목록 행, 티켓 카드)은 **점**(`ActivityDot`), 우측 프레임
+  헤더는 **점 + 라벨**(`ActivityPill`).
+- 회귀: `apps/client/test/activity-vocabulary.test.mjs` — 네 표면의 "작업 중"이 같은 색
+  값인지, `attention` 이 `live` 가 아닌지, 사이드바가 실제로 점을 그리는지까지 단언한다.
+
+### 대화창의 공유 범위 (chat / mission / session)
+
+대화가 흐르는 표면은 네 개다 — chat 방, mission 대화, mission step 세션, Agent Session
+전사. **무엇을 공유하고 무엇을 공유하지 않는지**를 명시해 둔다. 예전엔 경계가 없어
+"비슷한데 각자"인 코드가 쌓였고, 실제로 증상이 갈렸다(mission 대화만 열 때마다 맨 위에
+머물렀다 — 첫 진입 바닥 고정이 그 파일에만 없었다).
+
+공유한다:
+
+| 조각 | 단일 원천 | 쓰는 곳 |
+| --- | --- | --- |
+| 스크롤/추종 규칙 | `hooks/useConversationScroll.ts` | 네 곳 전부 |
+| 메시지 렌더링(마크다운·첨부·ref 카드·멘션·발신자 그룹핑) | `components/chat/MessageList.tsx` | chat, mission 대화 |
+| 작성기(첨부·멘션·전송) | `components/chat/ChatMessageInput.tsx` | chat, mission 대화 |
+| 진행 상태 표시 | `activity.ts` + `ActivityDot`/`ActivityPill` | 네 곳 전부 |
+
+공유하지 않는다(데이터 계약이 다르다 — 억지로 합치면 한쪽의 계약이 거짓이 된다):
+
+- **읽는 대상**: chat 은 방 메시지, mission 은 메시지 + 실행 이벤트 두 트랙, step 세션은
+  방 기록 + step 이벤트, Agent Session 은 장비 CLI 홈의 네이티브 전사 블록(권한 요청·
+  도구 호출·추론)이다. 그래서 행 렌더러와 페이지네이션 커서는 각자다.
+- **작성기**: Agent Session 은 슬래시 커맨드·모드 선택이 붙은 `SessionComposer` 를 쓴다.
+  멘션·첨부가 없고 커맨드가 있는, 다른 물건이다.
+
+스크롤 규칙을 고칠 일이 있으면 `useConversationScroll` 을 고친다 — 네 화면을 동시에
+고치는 것이다. 회귀는 `apps/client/test/conversation-scroll.test.mjs` 가 규칙 단위로
+(첫 진입 고정 · 근접 추종 · prepend 보정 · 대화 전환 · followPaused · 최신으로 버튼)
+고정하고, 마지막 케이스가 실제 미션 패널로 보고된 증상 자체를 단언한다.

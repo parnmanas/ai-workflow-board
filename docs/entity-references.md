@@ -6,21 +6,31 @@ AWB user-visible text identifies entities with a named, non-notifying reference:
 #[type:<full-uuid>|Human-readable name]
 ```
 
-Supported types are `ticket`, `agent`, `board`, `action`, `function`, and
-`schedule`. The full UUID is required; a shortened ID is never a valid
-reference. `@[agent:…]` remains the notification/dispatch syntax and must not be
-used for a passive link.
+Supported types are `ticket`, `agent`, `action`, `function`, and `schedule`.
+The full UUID is required; a shortened ID is never a valid reference.
+`@[agent:…]` remains the notification/dispatch syntax and must not be used for a
+passive link.
+
+There is no `board` type — boards were removed (see [tickets.md](tickets.md)).
+An old `#[board:…]` token in stored text no longer matches the grammar and is
+rendered as plain text. Projects have no reference type either; name a project
+by its name, or reference the ticket that is about it.
+
+An `agent` reference resolves through the Runtime Host identity (there is no
+Agent table and no agent detail page), so it always renders as a named,
+unlinked reference with the `no_detail_surface` reason.
 
 The server resolves every reference by exact ID in the active workspace,
 replaces an untrusted token label with the canonical entity name, and returns
-the canonical deep link. The client renders the entity kind, canonical name,
-and workspace/board context. Context makes same-named entities distinguishable;
-the full ID remains available in the tooltip.
+the canonical deep link (tickets open `/ws/:wsId/tickets?ticket=<id>`; Actions,
+Functions and Schedules open their workspace page). The client renders the
+entity kind, canonical name, and workspace context. Context makes same-named
+entities distinguishable; the full ID remains available in the tooltip.
 
 If the ID is malformed, missing, outside the active workspace, inaccessible, or
 has no detail surface, AWB does not create a link. It renders the entity kind,
-full display name when known, full stable ID, available workspace/board context,
-and an explicit `연결 불가` reason.
+full display name when known, full stable ID, available workspace context, and
+an explicit `연결 불가` reason.
 
 MCP entity-returning tools include a copy-ready `_ref` alongside raw IDs.
 Prompts require agents to use `_ref` in chat, ticket comments, and Run output.

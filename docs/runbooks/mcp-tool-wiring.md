@@ -6,7 +6,7 @@
 
 ## 왜 이게 필요한가
 
-`resolveAuthzTier`(`apps/server/src/modules/mcp/shared/tool-authz-gate.ts:281-286`)는 모든 `.tool()` 등록을 가로채 네 갈래로 분류한다:
+`resolveAuthzTier`(`apps/server/src/modules/mcp/shared/tool-authz-gate.ts`)는 모든 `.tool()` 등록을 가로채 네 갈래로 분류한다:
 
 1. `TOOL_AUTHZ_TABLE`에 있으면 → 그 티어(`'full'`/`'caller'`) 강제
 2. 없지만 이름이 `delete_*`/`revoke_*` 패턴이면 → `'caller'` (fallback)
@@ -25,7 +25,7 @@
 | d | 소유권 검사 | 핸들러 또는 그 서비스 (게이트가 아님) | 게이트로는 표현 불가 — 빠뜨리면 아무나 남의 리소스 조작 |
 | e | description 명시 | 같은 `server.tool()` 호출의 2번째 인자 | 호출자가 403을 실제로 받아보고서야 권한 경계를 앎 |
 | f | 테스트 재실행 | `apps/server/test/mcp-tool-authz.test.mjs` 등 | 회귀를 CI가 못 잡음 |
-| g | agent-manager 카드-캡처 분류 | `apps/agent-manager/src/lib/ticket-ref-capture.ts` → `TICKET_ACTION_TOOLS`/`TICKET_TOOL_EXCLUSIONS` | 도구 호출이 채팅에 카드로 조용히 드롭됨(authz와 무관한 별도 가드) |
+| g | agent-manager 카드-캡처 분류 | `apps/agent-manager/src/lib/ticket-ref-capture.ts` → `TICKET_ACTION_TOOLS`/`ARTIFACT_ACTION_TOOLS`/`TICKET_TOOL_EXCLUSIONS` | 도구 호출이 채팅에 카드로 조용히 드롭됨(authz와 무관한 별도 가드) |
 
 ### (a) `*-tools.ts` 등록
 
@@ -58,7 +58,7 @@ export function registerFooTools(server: McpServer, ctx: ToolContext): void {
 
 새 도구 이름을 `tool-authz-gate.ts`의 `TOOL_AUTHZ_TABLE`에 `'full'` 또는 `'caller'`로 추가한다.
 
-**`KNOWN_EXISTING_TOOLS`에 추가하지 마라.** 그 Set은 게이트가 작성된 시점에 이미 존재하던 도구의 **동결 스냅샷**이라고 파일 자체 docstring(`tool-authz-gate.ts:166-185`)에 명시돼 있다 — 신규 등록의 집이 아니다. 거기 넣는 건 "안전하다고 판단함"이 아니라 "판단 자체를 안 함"과 같다.
+**`KNOWN_EXISTING_TOOLS`에 추가하지 마라.** 그 Set은 게이트가 작성된 시점에 이미 존재하던 도구의 **동결 스냅샷**이라고 파일 자체 docstring(`tool-authz-gate.ts` 의 `KNOWN_EXISTING_TOOLS` 위 주석)에 명시돼 있다 — 신규 등록의 집이 아니다. (그래서 보드 제거로 사라진 `create_board`/`batch_operations` 같은 이름도 그 스냅샷에는 그대로 남아 있다 — 존재하지 않는 도구의 이름이라 해가 없다.) 거기 넣는 건 "안전하다고 판단함"이 아니라 "판단 자체를 안 함"과 같다.
 
 ### (c) 티어 판단 기준
 
@@ -73,11 +73,11 @@ export function registerFooTools(server: McpServer, ctx: ToolContext): void {
 
 게이트가 표현할 수 있는 건 정적으로 딱 두 단계뿐이다 — `'full'`(DB-backed full-scope caller) / `'caller'`(세션리스만 아니면 통과). **"이 caller가 이 특정 리소스의 소유자인가"는 게이트가 원천적으로 표현하지 못한다** — tool-name→tier 매핑은 호출마다 달라지는 리소스 컨텍스트(어떤 team_id, 어떤 mission_id)를 모른다.
 
-실례 — `create_orchestration_mission`(`orchestration-tools.ts:527-534`): 게이트 티어는 `'caller'`(세션리스만 거름). 진짜 소유권 검사는 핸들러 안에서 직접:
+실례 — `create_orchestration_mission`(`orchestration-tools.ts`): 게이트 티어는 `'caller'`(세션리스만 거름). 진짜 소유권 검사는 핸들러 안에서 직접:
 
 ```ts
 const team = await teamSvc.requireTeamById(args.team_id);
-if (!team.orchestrator_agent_id || team.orchestrator_agent_id !== agentId) {
+if (!team.orchestrator_agent_id || !callerHoldsId(caller, team.orchestrator_agent_id)) {
   return err('you are not the orchestrator of this team — ...', { status: 403 });
 }
 ```
@@ -105,9 +105,9 @@ if (!team.orchestrator_agent_id || team.orchestrator_agent_id !== agentId) {
 
 ### (g) agent-manager 카드-캡처 분류 (authz와 무관한 별도 가드)
 
-`server.tool()`로 새 도구를 등록했다면 **도구 종류와 무관하게** `apps/agent-manager/src/lib/ticket-ref-capture.ts`에서 반드시 분류한다 — `TICKET_ACTION_TOOLS`(채팅에 카드로 캡처) 또는 `TICKET_TOOL_EXCLUSIONS`(캡처 제외, `read`/`non-ticket`/`orchestration` 등 기존 카테고리 중 하나로 사유 명시). **티켓을 만들거나 바꾸지 않는 도구도 예외가 아니다** — EXCLUDE에 사유를 달아 분류하는 것 자체가 "이 도구는 해당 없음"의 정식 표현이고, 분류 자체를 건너뛰는 것과는 다르다(실제로 전체 등록 도구의 대다수가 EXCLUDE다). (a)-(f)는 전부 **서버 authz 가드**고 이건 **agent-manager 쪽 카드-캡처 완전성 가드**로 완전히 별개다 — 도구가 (b)/(c)에서 authz 티어를 정상적으로 받아도 여기서 빠지면 그 도구 호출 결과가 채팅에서 카드로 조용히 드롭된다.
+`server.tool()`로 새 도구를 등록했다면 **도구 종류와 무관하게** `apps/agent-manager/src/lib/ticket-ref-capture.ts`에서 반드시 분류한다 — `TICKET_ACTION_TOOLS`(티켓 행을 바꾸는 도구 — 채팅에 티켓 카드로 캡처), `ARTIFACT_ACTION_TOOLS`(빌드/배포 결과물 카드로 캡처) 또는 `TICKET_TOOL_EXCLUSIONS`(캡처 제외, `read`/`non-ticket`/`orchestration` 등 기존 카테고리 중 하나로 사유 명시). **티켓을 만들거나 바꾸지 않는 도구도 예외가 아니다** — EXCLUDE에 사유를 달아 분류하는 것 자체가 "이 도구는 해당 없음"의 정식 표현이고, 분류 자체를 건너뛰는 것과는 다르다(실제로 전체 등록 도구의 대다수가 EXCLUDE다). (a)-(f)는 전부 **서버 authz 가드**고 이건 **agent-manager 쪽 카드-캡처 완전성 가드**로 완전히 별개다 — 도구가 (b)/(c)에서 authz 티어를 정상적으로 받아도 여기서 빠지면 그 도구 호출 결과가 채팅에서 카드로 조용히 드롭된다.
 
-`apps/agent-manager/test/tool-surface-parity.test.mjs`가 **서버에 등록된 도구 전체**와 `classifiedToolNames()`(EMIT ∪ BATCH ∪ REJECT ∪ ARTIFACT ∪ AGENT ∪ BOARD ∪ EXCLUDE)가 정확히 일치하는지 검사해 미분류 도구를 CI에서 잡는다 — "티켓 관련 도구만 분류하면 된다"는 판단은 이 가드의 실제 조건과 다르다. 실제 사례 — 티켓을 전혀 만들거나 바꾸지 않는 신규 orchestration 도구 3종(`create_orchestration_mission`/`list_orchestration_missions`/`list_orchestration_teams`, 셋 다 결국 `TICKET_TOOL_EXCLUSIONS`의 `orchestration` 카테고리로 분류)조차 이 분류를 빠뜨려 CI가 7회 연속 red였다(#[ticket:c13db9e7-fec3-42e8-a7ef-36f784f2be8a|CI red: parnmanas/ai-workflow-board@main — CI]).
+`apps/agent-manager/test/tool-surface-parity.test.mjs`가 **서버에 등록된 도구 전체**와 `classifiedToolNames()`(EMIT `TICKET_ACTION_TOOLS` ∪ ARTIFACT `ARTIFACT_ACTION_TOOLS` ∪ EXCLUDE `TICKET_TOOL_EXCLUSIONS` — 보드 모델의 BATCH/REJECT/BOARD 버킷은 `batch_operations`/`reject_handoff`/`get_board_summary` 와 함께 사라졌다)가 정확히 일치하는지 검사해 미분류 도구를 CI에서 잡는다 — "티켓 관련 도구만 분류하면 된다"는 판단은 이 가드의 실제 조건과 다르다. 실제 사례 — 티켓을 전혀 만들거나 바꾸지 않는 신규 orchestration 도구 3종(`create_orchestration_mission`/`list_orchestration_missions`/`list_orchestration_teams`, 셋 다 결국 `TICKET_TOOL_EXCLUSIONS`의 `orchestration` 카테고리로 분류)조차 이 분류를 빠뜨려 CI가 7회 연속 red였다(#[ticket:c13db9e7-fec3-42e8-a7ef-36f784f2be8a|CI red: parnmanas/ai-workflow-board@main — CI]).
 
 이 테스트는 소스가 아니라 `dist/lib/ticket-ref-capture.js`(컴파일된 산출물)를 import하므로 **먼저 빌드**해야 한다:
 

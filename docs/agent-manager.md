@@ -7,7 +7,7 @@ independent Agent and not an agent hierarchy.
 
 ## AWB entity references
 
-User-visible Ticket, Agent, Board, Action, Function, and Schedule references use
+User-visible Ticket, Agent, Action, Function, and Schedule references use
 `#[type:<full-uuid>|Human-readable name]`, never a shortened ID alone. MCP
 results expose the canonical token as `_ref`; use that value in chat, comments,
 and Run results. See [entity-references.md](entity-references.md) for resolution,
@@ -133,7 +133,7 @@ edited data reaches the host.
 ### Permission tier → CLI flags (ticket 5851e435)
 
 `runtime_config.permission_mode` (Agent trust) is the **source of truth** for
-execution privilege on every runtime, not just Hermes. The board/workspace
+execution privilege on every runtime, not just Hermes. The workspace
 harness `permission_mode` is a second, older layer; the two are folded into one
 effective policy by `resolveEffectivePermissionPolicy()`
 (`apps/agent-manager/src/lib/permission-policy.ts`), which every dispatch entry
@@ -223,10 +223,10 @@ instance heartbeat → server `RuntimeCapabilityDescriptor` → the
 managed-agent runtime-config form.
 
 Pending is never created for a CLI-internal permission/trust dialog. Claude's
-workspace-trust preflight (ticket 48aeab6e) now blocks only when the board
-harness explicitly asked for a non-bypass mode **and** Agent trust did not
-override it to `trusted` — an agent whose trust alone is `approve`/`strict` on
-a board that never configured a harness is not gated.
+workspace-trust preflight (ticket 48aeab6e) now blocks only when the
+workspace harness explicitly asked for a non-bypass mode **and** Agent trust did
+not override it to `trusted` — an agent whose trust alone is `approve`/`strict`
+in a workspace that never configured a harness is not gated.
 
 The effective policy and the spawned argv are written to the manager log on
 every spawn. Argv redaction decides by **position, then schema** — never by the
@@ -251,6 +251,29 @@ The effective-policy line is subject to the same rule. A rejected Agent trust
 value is arbitrary input that may itself be a token, so it is never quoted back:
 the log carries `len=<N> sha256=<8hex>` (correlation only, not a secrecy
 guarantee) and the raw string is not kept on the policy object at all.
+
+## Harness config
+
+`harness_config` is a **workspace** setting (schema:
+`apps/server/src/common/harness-config.ts`; set via `PATCH /api/workspaces/:id`
+or the MCP `update_workspace` tool). There is no board layer any more — the
+workspace value is the whole harness. Ticket dispatch ships it on every
+`agent_trigger`, with the workspace `language` instruction appended to
+`system_prompt_append`. A null harness means "spawn exactly as before".
+
+| key | how the manager applies it |
+| --- | --- |
+| `system_prompt_append` | Appended after the role prompt, never replacing it (`--append-system-prompt` on claude; folded into the prompt by codex/opencode, which have no such flag) |
+| `allowed_tools` | Extra `--allowedTools` entries on top of the adapter's baseline allowlist (claude) |
+| `disallowed_tools` | `--disallowedTools` (claude) |
+| `model` | Model override; beats the spec's model at the spawn site, so every adapter with a model flag gets it |
+| `fallback_models` | Manager-side retry chain (`[primary, ...fallback_models]`), not a CLI flag |
+| `permission_mode` | The older permission layer under Agent trust — see "Permission tier → CLI flags" above |
+
+Each adapter declares the keys it can express in `harnessKeys()`
+(`apps/agent-manager/src/lib/cli-adapters/`); the rest are logged and skipped,
+never a reason to refuse the spawn. Adding or renaming a key is a server ↔
+agent-manager contract change — same PR on both sides.
 
 ## Capability and health reporting
 
@@ -511,8 +534,8 @@ install degrades to that instead of breaking the manager). Details: `docs/termin
 - MCP requests include Agent id, AWB run id, client type, and strategy.
 - Skill files are materialized privately after digest verification.
 - ChildRun metadata and summaries are bounded and secret-sanitized.
-- ChildRuns cannot perform terminal ticket transitions, consensus actions, or
-  skill publication.
+- ChildRuns cannot perform terminal ticket transitions (`move_ticket` and the
+  other status-changing tools) or skill publication.
 
 ## Durable send outbox
 
@@ -663,9 +686,12 @@ drain 카운터는 **트리거를 건 세션 자신을 포함한다**(`main.ts` 
 2. **죽은 매니저가 대시보드에서 정상으로 보인다.** 하트비트가 끊기면 인스턴스가
    레지스트리에서 스윕되는데, `ManagerDriftMonitorService` 는 인스턴스 부재를 드리프트
    "해소"로 기록한다. 즉 나쁜 빌드로 fleet 이 죽는 순간 경보가 아니라 해소가 찍힌다.
-3. **self-update 로 끊긴 세션의 재개가 보장되지 않는다.** `DispatchReconcilerService` 는 role
-   holder 가 컬럼 진입 이후 응답한 적이 있으면 그 role 을 재시드하지 않는다. 착수 직후
-   claim + 코멘트를 남기는 관례상, 장시간 작업 중 죽은 세션이 정확히 이 조건에 걸린다.
+3. **self-update 로 끊긴 세션은 즉시 재개되지 않는다.** 예전의 `DispatchReconcilerService`
+   (컬럼 진입 이후 응답한 role holder 는 재시드하지 않던 경로)는 보드와 함께 제거됐다. 지금
+   `in_progress` 티켓은 `TicketDispatchService` 의 supervisor 가 맡는다 — 살아 있는 strand 도
+   활동도 없이 `workspace.supervisor_stale_ms`(기본 30분)가 지나면 force respawn 으로
+   재전송하고, 진전 없이 3회(`MAX_SUPERVISOR_REDISPATCHES`) 재전송하면 사람에게 넘긴다(pend).
+   따라서 끊긴 티켓 세션은 최대 그 시간만큼 멈춰 있다가 재개된다.
 
 ### 부팅 정리 실패와 감시 밖 재기동 (2026-10-03 ralf)
 
@@ -727,8 +753,8 @@ Hosts → Agent 템플릿 → 템플릿 등록 stores reusable launch preference
 model, effort and execution strategy/permissions. A template has no working
 folder, workspace ownership, lifecycle, API key or dispatch identity. Selecting
 one copies its settings into the current form; edits and deletion never rewrite
-existing executions. Sessions, chat participants, board roles, team slots and
-Action/QA/Security/Schedule editors share `RuntimeSelectionFields`. Model lists
+existing executions. Sessions, chat participants, ticket assignees, team slots
+and Action/QA/Security/Schedule editors share `RuntimeSelectionFields`. Model lists
 still come exclusively from `useHostModels`.
 
 The optional **Agent 템플릿** selector starts at **사용 안 함**: execution settings
@@ -756,8 +782,8 @@ temporary session is started to probe unknown models. Until that model has been
 reported, the dropdown offers the CLI default and marks any saved value as
 unverified. Changing the model clears the previous effort. Session creation uses
 the reported configuration ID, and non-session execution respects the CLI
-catalog's launch-effort capability. Board effort presets remain abstract dropdown
-mappings because they are not tied to a particular Host/model.
+catalog's launch-effort capability. Ticket dispatch sends `effort_preset: null`;
+a ticket's effort rides its assignee spec (`runtime.runtime_config.extra.effort`).
 
 Migration `1760000000090` removes the legacy `agents` table (including
 `working_dir`), `api_keys.agent_id`, `workspaces.assistant_agent_id`, and duplicate

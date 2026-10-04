@@ -39,7 +39,7 @@ workspace에 복사한다. 그 순간부터 fork가 shadow하고, **그 아래�
 
 - `SkillVersion`은 불변이다. 변경은 **새 버전 append**이며 기존 버전을 수정하거나
   삭제하지 않는다.
-- `AgentSkillAssignment`는 특정 `skill_version_id`를 **핀** 한다.
+- `RuntimeSkillAssignment`(workspace × runtime identity key)는 특정 `skill_version_id`를 **핀** 한다.
 - 런 시작 시 `RunSkillSnapshot`이 manifest를 고정(pinned → locked)한다.
 
 따라서 **어떤 동기화도 이미 배정된 에이전트가 읽는 내용을 바꾸지 못한다.** 새
@@ -130,7 +130,7 @@ key·custom tag가 포함된 임의 YAML을 실행할 이유가 없다. 최상�
 | Workspace REST | `.../skills.controller.ts` |
 | Admin REST | `.../skill-registry.controller.ts` |
 | 런 manifest 고정 | `.../run-skill-snapshot.service.ts` |
-| 마이그레이션 | `apps/server/src/database/migrations/1760000000077-GlobalSkillScope.ts` |
+| 유일성 | `apps/server/src/entities/Skill.ts` 의 부분 유니크 인덱스 `uq_skills_global_slug` / `uq_skills_workspace_slug` (엔티티에 선언해야 synchronize 가 지우지 않는다) |
 
 ## 테스트
 

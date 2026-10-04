@@ -11,9 +11,6 @@ go through the formatters below; the snapshot label travels with the row.)
 
 An agent with no manager (a Runtime Host / manager identity itself, or a
 historical / non-executable identity) renders as its **bare name, with no
-prefix**.
-An agent with no manager (a Runtime Host / manager identity itself, or a
-historical / non-executable identity) renders as its **bare name, with no
 prefix**. Nothing else is ever acceptable — not a bare leaf name for a managed
 agent, not a raw agent UUID, not a hand-rolled `${a.manager_name}/${a.name}`.
 
@@ -23,15 +20,38 @@ roster prompt.
 
 (P4c-4: the `Agent` table is dropped, so the server can no longer resolve a
 managed uuid to a leaf name — the leaf lives only in denormalized snapshots
-(ticket holders, chat participants) and `rt-` spec labels, never in a row the
+(chat participants) and RuntimeSpec labels, never in a row the
 read-side resolvers (`hostNameById` in `apps/server/src/utils/agent-name.ts`)
 can join to. A linked legacy uuid therefore resolves to its **Host's bare
 name** — the Host IS the execution identity, so this is unambiguous, not a
 bare leaf: there is no leaf on screen to confuse. `rt-` slots render their spec
 `label` (P4c-3b rule, unchanged). Snapshot-carried `{ name, manager_name }`
-pairs (ticket holders, session dashboards) still render `<Manager>/<Agent>`
+pairs (chat participants, session dashboards) still render `<Manager>/<Agent>`
 via the client `agentIdentityLabel`/`formatAgentDisplayName` helpers —
 that contract is unchanged where the data exists.)
+
+## Ticket assignee — `<Host>/<label>`
+
+A ticket's single assignee is a RuntimeSpec, not an Agent row
+([tickets.md](../tickets.md)). Its display is the spec `label` under its Runtime
+Host's name: **`<Host>/<label>`**, or the bare label when the host name cannot
+be resolved. A raw host uuid is never rendered as a name.
+
+- **Server**: every full ticket and every list row carries `assignee_name`,
+  computed from the `RuntimeHost` row named by `assignee.manager_agent_id` —
+  `TicketService.serialize` (`apps/server/src/modules/tickets/ticket.service.ts`)
+  for list/card rows and `loadTicketFull`
+  (`apps/server/src/modules/mcp/shared/ticket-parsing.ts`) for the detail. MCP
+  `list_tickets` / `get_ticket` return the same field. `''` = unassigned.
+- **Client**: `assigneeDisplayName(spec, hostNames)` in
+  `apps/client/src/tickets/assignee.ts` (label → `<folder leaf>/<cli>` fallback,
+  then `formatAgentDisplayName`), with host names from the shared
+  `useHostNames()` hook (`apps/client/src/runtime/useHostNames.ts`). The ticket
+  artifact card prefers the server's `assignee_name` and falls back to the
+  helper. The assignee filter on the Tickets page groups by `assignee_key`
+  (`runtimeIdentityKey(spec)`) and labels each option with the same helper.
+
+Do not join `${host}/${spec.label}` by hand anywhere else.
 
 ## The two formatters — never inline the format
 
@@ -75,8 +95,8 @@ at least once.
   writers pass through (e.g. `OrchestrationMissionService.recordEvent` resolves
   `actor_name` for every `actor_type: 'agent'` caller) over patching N call
   sites that will drift.
-- **Non-agent actors must survive verbatim.** System labels
-  (`BacklogPromotionService`), user names, and deleted rows have no Agent row.
+- **Non-agent actors must survive verbatim.** System labels (`AWB` on
+  dispatcher activity rows), user names, and deleted rows have no Agent row.
   The resolvers return `null` / omit them from the map for exactly this reason —
   always fall back to the stored value rather than overwriting it.
 

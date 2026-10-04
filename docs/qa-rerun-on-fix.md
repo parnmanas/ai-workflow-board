@@ -10,16 +10,16 @@ Closes the automation loop:
 
 ```
 QA run fails
-  → QaFailureTicketService files a fix ticket (labels: qa-failure, auto, qa-scenario:<id>[, qa-rerun:<n>])
-    → a human/agent fixes it and moves the ticket to Done (terminal column)
+  → QaFailureTicketService files a fix ticket (tags: qa-failure, auto, qa-scenario:<id>[, qa-rerun:<n>])
+    → a human/agent fixes it and moves the ticket to `done` (the terminal status)
       → QaRerunOnFixService re-runs the SAME scenario (server-side, deterministic)
         → pass  → loop ends naturally (no new ticket)
         → fail  → a new fix ticket is filed at generation n+1 … repeat
           → generation reaches max_rerun_attempts → loop HALTS with a "human intervention needed" comment
 ```
 
-Nothing here parses an agent prompt. The trigger is a column move to a terminal
-column, exactly like the on-ticket-done Action hook, and the rerun is a direct
+Nothing here parses an agent prompt. The trigger is a status change into
+`done`, exactly like the on-ticket-done Action hook, and the rerun is a direct
 `QaRunService.startQaRun` call.
 
 ## Moving parts
@@ -36,20 +36,24 @@ column, exactly like the on-ticket-done Action hook, and the rerun is a direct
 | `Ticket.qa_rerun_dispatched_at` | entity | idempotency stamp (once per terminal entry) |
 | `QaRun.rerun_generation` | entity | generation stamped on each rerun (0 = first run) |
 | `QaRun.tested_commit` / `.tested_environment` | entity | server-authoritative evidence: what was live when the run was dispatched |
-| `qa-rerun:<n>` ticket label | label convention | generation carrier: fix-ticket → run → next fix-ticket |
-| `fix-commit:<sha>` ticket label | label convention | the commit the fact-gate looks for in the environment's deployment |
+| `qa-rerun:<n>` ticket tag | tag convention | generation carrier: fix-ticket → run → next fix-ticket |
+| `fix-commit:<sha>` ticket tag | tag convention | the commit the fact-gate looks for in the environment's deployment |
 
 ## Scope guard — what is eligible
 
-`QaRerunOnFixService` only fires for a ticket that, on entering a terminal column,
-carries **all** of:
+`QaRerunOnFixService` only fires for a ticket that, on entering `done`,
+carries **all** of these tags:
 
 - `qa-failure` **and** `auto` (the default markers `QaFailureTicketService` stamps), **and**
-- a `qa-scenario:<id>` label (the scenario back-reference), **and**
+- a `qa-scenario:<id>` tag (the scenario back-reference), **and**
 - whose scenario still has `on_failure_ticket.enabled` **and** `rerun_on_fix === true`.
 
-A human who happens to drag a hand-labelled ticket to Done can't trigger a run —
+A human who happens to move a hand-tagged ticket to `done` can't trigger a run —
 the scenario opt-in and the full marker set are both required.
+
+If a scenario customises `on_failure_ticket.tags`, keep `qa-failure` and `auto`
+in the list: the service only stamps those defaults when `tags` is unset, while
+`qa-scenario:<id>` is always added.
 
 ## Idempotency
 
@@ -64,19 +68,19 @@ AND (qa_rerun_dispatched_at IS NULL OR qa_rerun_dispatched_at < terminal_entered
 ```
 
 So each distinct terminal **entry** fires at most once. Re-ordering a ticket
-within Done does not re-fire (terminal_entered_at unchanged); leaving Done and
+within `done` does not re-fire (terminal_entered_at unchanged); leaving `done` and
 returning re-stamps terminal_entered_at and fires again — bounded only by the
 generation cap below.
 
 ## Convergence
 
 Each rerun carries a generation = `(fix-ticket generation) + 1`, read from the
-Done ticket's highest `qa-rerun:<n>` label (absent = generation 0). The cap fires
+done ticket's highest `qa-rerun:<n>` tag (absent = generation 0). The cap fires
 when the generation **reaching Done** is `>= max_rerun_attempts`:
 
 | Event | Ticket gen read | Action (max=3) |
 |-------|-----------------|----------------|
-| Original failure → fix ticket | (filed at gen 0, no label) | — |
+| Original failure → fix ticket | (filed at gen 0, no tag) | — |
 | gen-0 fix ticket → Done | 0 | rerun at **gen 1** |
 | gen-1 fix ticket → Done | 1 | rerun at **gen 2** |
 | gen-2 fix ticket → Done | 2 | rerun at **gen 3** |
@@ -111,9 +115,9 @@ Mitigations, in order of preference. This order is the one the code declares —
    the fix ticket's Done edge: it waits until that environment's live deployment
    actually carries the fix, and fires the instant a matching `report_deployment`
    (or the server's own self-report) lands. "Carries the fix" means the deployment
-   **includes** the sha from a `fix-commit:<sha>` ticket label — the deployed commit
+   **includes** the sha from a `fix-commit:<sha>` ticket tag — the deployed commit
    itself, or one of its recorded ancestors, matched prefix-wise so a short sha
-   works. With no such label it falls back to deploy-freshness ordering: a
+   works. With no such tag it falls back to deploy-freshness ordering: a
    deployment that went live at/after the fix's Done instant counts. Nothing here
    is a hardcoded duration, so it cannot drift when the real deploy time does.
    ⚠️ The gate is **inert without `target_environment`** — with the environment
@@ -133,7 +137,7 @@ Mitigations, in order of preference. This order is the one the code declares —
       the rerun still fires once after N seconds (logged as "fallback cap reached —
       firing without a confirmed deploy") instead of waiting forever.
 3. **Trust Done = deployed** — an arrangement rather than a knob: only enable
-   `rerun_on_fix` on boards/flows where a ticket reaches Done *after* deployment is
+   `rerun_on_fix` for flows where a ticket reaches `done` *after* deployment is
    confirmed. Then delay 0 with no gate is safe.
 4. **Branch-scoped QA** (still future) — point the scenario driver at the fix's
    branch preview instead of the deployed environment. **This is not what

@@ -4,9 +4,13 @@ Claude backend profiles keep the agent type, executable, stream-json session,
 AWB MCP tools, heartbeat, and tool loop on Claude CLI. They change only the LLM
 endpoint and model used by that CLI.
 
-Profiles are stored in Workspace Settings. Selection inherits in this order:
-one-run manager override (when supplied), Agent, Board, then Workspace default.
-`none` explicitly keeps Claude's normal Anthropic configuration. A selected
+Profiles are one instance-wide list (`ClaudeBackendProfile`, managed on the
+**Claude Profiles** settings page). Selection is a two-step chain
+(`resolveClaudeBackendProfileForDispatch`, `apps/server/src/common/claude-backend-registry.ts`):
+the run's RuntimeSpec pin (`cli_runtime_profile` on a ticket assignee, chat
+participant, mention target, …), then the instance default
+(`claude_backend_profiles.default` system setting). There is no Board or
+Workspace layer. `none` explicitly keeps Claude's normal Anthropic configuration. A selected
 profile is a public declarative snapshot on SSE; `credential_ref` is an id and
 the referenced secret is resolved only on the manager host.
 
@@ -134,7 +138,7 @@ carry it split into two roles:
 Set `env` to override any of those variables individually (e.g. a genuinely
 multi-model backend).
 
-A board's harness `fallback_models` (a model-retry chain for transient
+The workspace harness `fallback_models` (a model-retry chain for transient
 usage-limit / model-unavailable deaths) is ignored while a profile is bound:
 the profile serves exactly one model behind one endpoint, so there is nothing
 else on that backend to fall back to, and those entries were never validated
@@ -227,5 +231,5 @@ rejected. Put the value in a Credential, reference its id with
 Reserved AWB and CLI-home variables cannot be overridden. Secrets are not
 returned in profile REST/SSE payloads or logs.
 
-Changing a Workspace, Board, or Agent selection affects newly spawned
+Changing a RuntimeSpec pin or the instance default affects newly spawned
 sessions. Restart an already-running managed agent/session to apply it.

@@ -1,11 +1,12 @@
 # Orchestration mode (팀 기반 자율 업무 오케스트레이션)
 
-칸반 보드와 **같은 레벨**의 두 번째 작업 표면이다. 보드가 "티켓이 컬럼을 이동하며
-역할별 Agent 를 깨우는" 모델이라면, 오케스트레이션은 **"업무 하나를 팀에 통째로
-맡기면, 오케스트레이터 Agent 가 런타임에 계획을 세우고 팀원에게 나눠 실행한다"** 는
-모델이다.
+티켓 풀(Tickets)과 **같은 레벨**의 두 번째 작업 표면이다. 티켓이 "고정 status 위에서
+담당 Agent 한 명이 티켓 하나를 처리하는" 모델이라면(`docs/tickets.md`), 오케스트레이션은
+**"업무 하나를 팀에 통째로 맡기면, 오케스트레이터 Agent 가 런타임에 계획을 세우고
+팀원에게 나눠 실행한다"** 는 모델이다.
 
-- UI: `/ws/:wsId/orchestration` (Missions) · `/ws/:wsId/orchestration/teams` (Teams)
+- UI: `/ws/:wsId/orchestration` (Missions) · `/ws/:wsId/teams` (Teams; 예전
+  `/ws/:wsId/orchestration/teams` 는 redirect)
 - 서버: `apps/server/src/modules/orchestration/`
 - MCP 툴: `apps/server/src/modules/mcp/tools/orchestration-tools.ts`
 - 테스트: `test/orchestration-plan-dag.test.mjs`, `test/qa-flows/orchestration-lifecycle.test.mjs`
@@ -80,9 +81,38 @@ Host 가 바뀌면 identity key 자체가 바뀐다. 이전 키의 cli-home/api 
 공유 사실과 금지 행위(트리 리셋·브랜치 전환·`git clean -fdx`)를 알린다. 파괴적 동시
 편집을 하는 멤버는 `max_concurrent: 1` 로 두는 것이 안전하다.
 
-Mission 은 **티켓이 아니다.** 티켓 수명주기는 컬럼 이동이 구동하지만 Mission 은
-런타임에 작성·수정되는 계획이 구동한다. 두 모델을 한 엔티티에 욱여넣으면
-"step 이 어느 컬럼에 있는가" 같은 답 없는 질문이 생기므로 별도 테이블로 둔다.
+Mission 은 **티켓이 아니다.** 티켓 수명주기는 고정 status 와 담당자 한 명이 구동하지만
+Mission 은 런타임에 작성·수정되는 계획이 구동한다. 두 모델을 한 엔티티에 욱여넣으면
+"step 이 티켓 status 의 어디에 있는가" 같은 답 없는 질문이 생기므로 별도 테이블로 둔다.
+
+### 미션 프로젝트 — 호스트마다 다른 main clone 폴더
+
+미션은 `repo_ref`(`{ project_id?, url?, branch? }`,
+`common/workspace-folder-options.ts`)로 작업할 **Project** 를 가리킨다. 이관 전
+레코드의 `resource_id` 는 같은 id 의 `project_id` 로 읽힌다(repository Resource 가
+같은 id 로 Project 가 됐다). branch 는 `repo_ref.branch` → Project 의
+`default_branch` → 원격 HEAD 순.
+
+Project 는 Runtime Host 마다 자기 **main clone 폴더**(`ProjectHostFolder`)를 갖고, 그
+경로는 장비마다 다르다. 그래서 프롬프트는 읽는 쪽이 실제로 도는 Host 기준으로 폴더를
+적는다(`orchestration-project.ts` → `loadMissionProject()` / `projectFolderForHost()`,
+렌더는 `orchestration-prompt.ts`):
+
+- **플래닝 브리핑**: 로스터의 멤버마다 `project main clone on this host` 줄로 그 멤버
+  Host 의 폴더를 적고(없으면 "none registered — 다른 Host 의 경로를 주지 말 것"),
+  오케스트레이터 자신의 Host 폴더도 따로 적는다. step 지시문에는 다른 멤버 Host 의
+  절대 경로 대신 project 루트 기준 상대 경로를 쓰라고 지시한다.
+- **step work order**: `Project: <name>` 블록이 그 멤버 Host 의 main clone 폴더를
+  "이 장비의 정식 체크아웃"으로 명시하고, 그 폴더가 지금 작업폴더(shared)와 같은지,
+  isolated step 의 체크아웃과 어떤 관계인지, 그 안에서 reset/clean/브랜치 전환을 하지
+  말라는 것까지 적는다. 폴더가 등록되지 않은 Host 면 "추측하지 말고 다른 Host 경로를
+  쓰지 말라"고 적는다.
+- **팀 slot 편집기**: working_dir 옆에 "Project folder on this host"
+  (`ProjectFolderHelper`)를 띄워, 그 Host 에 등록된 project 폴더를 slot 의
+  working_dir 로 바로 고를 수 있다.
+
+따라서 서로 다른 Host 의 멤버가 폴더를 추측할 일이 없다. 폴더 등록은 Projects 화면
+(`PUT /api/projects/:id/host-folders/:hostId`)에서 한다.
 
 ---
 
@@ -974,8 +1004,8 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 > subagent 스폰 전에 `<working_dir>/.awb/orch/<mission-leaf>/<step_key>` 를
 > 프로비저닝(clone/fetch+ff-pull 또는 폴더만 생성)하고 그 경로를 cwd 로 고정한다.
 > `OrchestrationMission.workspace_folder`(루트, 기본값 `<mission id 8자>`) /
-> `repo_ref` / `checkout_mode` 로 제어한다. `RunProvisionKind` 화이트리스트와
-> idle-sweep(`.awb/act`/`.awb/chat`와 동일한 정책)에 `'orchestration'` 이
+> `repo_ref`(`project_id` 우선, 위 "미션 프로젝트") / `checkout_mode` 로 제어한다.
+> `RunProvisionKind` 화이트리스트와 idle-sweep(`.awb/act`/`.awb/chat`와 동일한 정책)에 `'orchestration'` 이
 > 추가됐다. Mission 은 `method`(수행 방식), 구조화된 `completion_criteria`
 > 체크리스트(전원 met 이어야 `complete_orchestration_mission(status:"completed")`
 > 통과 — `acceptance_criteria` prose 는 그대로 유지), `post_actions`(완료 후
@@ -1041,8 +1071,7 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 미션을 먼저 조회한다.
 
 에이전트 생성 경로는 사람(REST) 경로보다 좁은 가드 4종을 추가로 통과해야 한다 —
-이 엔티티엔 `board_id`/`ticket` 이 없어 `hard_budget_config` 예산 가드를 못 걸기
-때문에(스코프 설계는 별도 티켓), 대신 다음이 팬아웃 상한 역할을 한다:
+미션에는 티켓 단위 예산 가드가 걸리지 않으므로, 대신 다음이 팬아웃 상한 역할을 한다:
 
 | 가드 | 내용 |
 | --- | --- |

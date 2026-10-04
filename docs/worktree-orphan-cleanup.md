@@ -15,9 +15,20 @@ were removed. Observed debris (2026-07-09):
 - **Linux host** (Rolf/codex, GameClient/txiv): ~51 orphans
 - **Windows host** (Ralf/claude, GameClient/txiv): ~20 orphans
 
-The manager now fixes every worktree at `<working_dir>/.awb/wt/<slug>` and
-reclaims it at Done (terminal cleanup) and archive (규약 ⑤), so this is a
-one-shot backfill, not a recurring job.
+The manager now fixes every ticket worktree at a known place and reclaims it
+when the ticket enters `done` (terminal cleanup) and on archive (규약 ⑤), so this
+is a one-shot backfill, not a recurring job:
+
+- **Project with a main clone folder on this host** (`ProjectHostFolder`, shipped
+  as `base_repo.main_clone_dir` on `agent_trigger` — see [tickets.md](tickets.md)):
+  `<main_clone>/.awb/wt/<ticket8>`. The main clone itself is the operator's
+  checkout and is never reset, cleaned, checked out or detached; `.awb/` is added
+  to its `.git/info/exclude`. Every main clone the manager has provisioned from
+  is remembered in **`main-clones.json`** in the manager home
+  (`$AWB_AGENT_MANAGER_HOME`), so terminal/archive cleanup and the sweeps still
+  find those worktrees when the REST ticket no longer names the folder.
+- **Otherwise**: `<working_dir>/.awb/wt/<slug>`, cut from the manager-owned base
+  clone under `<working_dir>/.awb/base/`.
 
 ## The tool
 
@@ -34,8 +45,8 @@ no build step, runs identically on Linux and Windows.
   (default 24) — a live subagent checkout is touched constantly (checkout on
   spawn, file writes while running, `index`/`HEAD` on any git op), a stale orphan
   is not. Logged `SKIP (recently active)`. This is the guard that stops a
-  **clean + merged idle** worktree (an idle reviewer, a just-merged strand, a
-  freshly-spawned one) from slipping past the dirty/unmerged skips — those only
+  **clean + merged idle** worktree (an idle session waiting on a comment, a
+  just-merged strand, a freshly-spawned one) from slipping past the dirty/unmerged skips — those only
   protect worktrees that have *pending* work.
 - **Never touches** the main worktree or anything under `.awb/wt/` · `.awb/qa/`
   (the current convention, including the reusable `.awb/wt/shared`).
@@ -47,9 +58,11 @@ no build step, runs identically on Linux and Windows.
 
 ## Procedure
 
-1. **Identify the repos.** For a GameClient agent, the repo is the agent's
-   `working_dir` (or its repo root). You can pass the working_dir directly — the
-   script resolves the repo root with `git rev-parse --show-toplevel`.
+1. **Identify the repos.** For a project with a main clone folder on this host,
+   the repo is that folder (the paths are listed in the manager home's
+   `main-clones.json`). Otherwise it is the agent's `working_dir` (or its repo
+   root). You can pass either directly — the script resolves the repo root with
+   `git rev-parse --show-toplevel`.
 
 2. **Dry-run first** (default). Review the `WOULD-REMOVE` / `SKIP` lines:
 
@@ -108,8 +121,8 @@ in flight). Those are **live** — the agent-manager process holds them as runni
 subagents' working directories. A default sweep therefore **ignores** that root;
 you must opt in with `--include-manager-root`.
 
-Because a clean, merged, *idle* worktree (an idle reviewer waiting on a
-bounce-back, a strand that just merged, one freshly spawned) is not protected by
+Because a clean, merged, *idle* worktree (an idle session waiting on a human
+comment, a strand that just merged, one freshly spawned) is not protected by
 the dirty/unmerged skips, removing it while the manager is running would
 `git worktree remove --force` a live subagent's cwd out from under it → the
 worker dies with **exit 143** (the exact death the `.awb/wt/` convention exists
@@ -137,9 +150,9 @@ node apps/agent-manager/scripts/cleanup-orphan-worktrees.mjs \
 
 | 경로 | 대상 범위 | 무엇을 회수하나 |
 |---|---|---|
-| **terminal cleanup** — `EventDispatcher.#cleanupTerminalTicketWorktrees` → `WorktreeManager.cleanupTerminalTicketGit` (`apps/agent-manager/src/lib/event-dispatcher.ts`) | 그 매니저가 관리하는 **모든** agent 의 `working_dir` (`managedAgentContexts.list()` 를 순회하며 `working_dir` 로 dedupe) | 티켓 worktree + 그 worktree 가 물고 있던 로컬/origin `ticket/<uuid>-*` ref |
-| **archive 회수 (규약 ⑤)** — `EventDispatcher.#cleanupArchivedTicketWorkspace` → `WorktreeManager.removeTicketWorktrees` / `removeTicketRunWorkspace` | 위와 같은 범위 | 티켓 worktree + QA/Security run workspace. **branch ref 는 건드리지 않는다** |
-| **10분 주기 sweep** — `apps/agent-manager/src/main.ts` 의 `sweepWorktrees()` → `WorktreeManager.sweep` | 위와 같은 범위 | idle + clean 인 worktree **만**. branch ref 는 건드리지 않는다 |
+| **terminal cleanup** — `EventDispatcher.#cleanupTerminalTicketWorktrees` → `WorktreeManager.cleanupTerminalTicketGit` (`apps/agent-manager/src/lib/event-dispatcher.ts`) | 그 매니저가 관리하는 **모든** agent 의 `working_dir` (`managedAgentContexts.list()` 를 순회하며 `working_dir` 로 dedupe) + `main-clones.json` 에 기록된 main clone 폴더 + REST 티켓의 `base_repo.main_clone_dir` | 티켓 worktree + 그 worktree 가 물고 있던 로컬/origin `ticket/<uuid>-*` ref |
+| **archive 회수 (규약 ⑤)** — `EventDispatcher.#cleanupArchivedTicketWorkspace` → `WorktreeManager.removeTicketWorktrees` / `removeTicketRunWorkspace` | 위와 같은 범위 (main clone 은 기록된 폴더 + 이벤트의 `main_clone_dir` 힌트) | 티켓 worktree + QA/Security run workspace. **branch ref 는 건드리지 않는다** |
+| **10분 주기 sweep** — `apps/agent-manager/src/main.ts` 의 `sweepWorktrees()` → `WorktreeManager.sweep` | agent `working_dir` + `main-clones.json` 의 main clone 폴더 | idle + clean 인 worktree **만**. branch ref 는 건드리지 않는다 |
 | **런북** — 이 문서의 `apps/agent-manager/scripts/cleanup-orphan-worktrees.mjs` | 운영자가 지정한 repo | 수동 |
 
 즉 **ref 를 지우는 자동 경로는 terminal cleanup 하나뿐**이고, 나머지 셋은 전부
@@ -148,13 +161,13 @@ checkout 만 회수한다.
 ### 결정
 
 1. **회수 주체는 "그 home 을 관리하는 agent-manager 인스턴스"다.** assignee 세션도
-   AWB 서버도 아니다. terminal cleanup 을 여는 `board_update` 는 board 스코프
-   브로드캐스트다 — `apps/server/src/modules/events/event-registry.ts` 의
-   `filter: (env, id) => !id.boardId || env.scope.board_id === id.boardId` 는
+   AWB 서버도 아니다. terminal cleanup 을 여는 `board_update`(보드 제거 뒤에도 wire
+   호환 때문에 이름만 남은 티켓 변경 이벤트)는 필터 없는 브로드캐스트다 —
+   `apps/server/src/modules/events/event-registry.ts` 의 `filter: () => true` 는
    인스턴스도 agent 도 타깃하지 않는다. 그래서 연결된 **모든** 매니저가 같은
-   terminal 이벤트를 받고, 각자 자기 관리 범위의 home 을 정리한다. 따라서 같은
-   매니저 아래 여러 agent home 이 있으면 그 전부가 이미 커버된다 — 이건 구멍이
-   아니다.
+   `done` 진입 이벤트를 받고, 각자 자기 관리 범위의 home 과 main clone 을
+   정리한다. 따라서 같은 매니저 아래 여러 agent home 이 있으면 그 전부가 이미
+   커버된다 — 이건 구멍이 아니다.
 
 2. **구멍은 "terminal 이벤트 시점에 연결돼 있지 않던 매니저의 home"이다.
    여기에는 담당 주체가 없다 — 이것이 확정된 결론이며, 새 주체를 만들지 않는다.**
@@ -181,9 +194,9 @@ checkout 만 회수한다.
 ### 정상 보류와 실제 오류의 분리 (ticket 62407d4e)
 
 위 3번의 알림 중 **가장 흔한 형태 하나는 이제 아예 발행되지 않는다.** 원격 ref 가
-이미 없고(담당자가 Merging step 5 에서 지웠다) 살아 있는 worktree 가 로컬 ref 를 물고
-있어 지울 수 없는 상태 — Done 진입과 같은 순간에 리뷰 디스패치가
-per-ticket worktree 를 다시 프로비저닝하면 그대로 발생한다 — 는 **정상 보류**다.
+이미 없고(담당자가 work order 의 Land 단계에서 지웠다) 살아 있는 worktree 가 로컬 ref 를
+물고 있어 지울 수 없는 상태 — `done` 진입 시점에 그 티켓의 worktree 가 아직 다시
+쓰이고 있으면 그대로 발생한다 — 는 **정상 보류**다.
 커밋은 base 에 들어가 있고 원격도 정리된 뒤라 잃는 것이 없으며, 그 checkout 이 끝나면
 10분 sweep 이 회수한다. `TerminalTicketCleanupReport.benignHolds` 로 분리되고,
 이것만 남으면 매니저는 티켓에 코멘트를 쓰지 않고 로그만 남긴다. 실제 오류가 함께
@@ -249,9 +262,11 @@ base 클론의 primary HEAD 는 `#freeBaseBranch` 가 detach 해 둔 시점에 �
 
 ### 회수되는 checkout 의 형태 (ticket 7b384c10)
 
-`merging_workflow` 는 step 3 에서 base branch 체크아웃을, step 5 에서 로컬 feature
-branch 삭제를 지시한다. 그래서 정상 완료한 티켓 worktree 는 `[main]`(또는
-detached) 상태로 남는다 — 이건 **기대 상태이지 소유권 부정 근거가 아니다.**
+내장 티켓 work order(`apps/server/src/common/ticket-work-order.ts`)의 5단계(Land —
+직접 merge 하는 project)는 worktree 안에서 base branch 를 체크아웃해 fast-forward 한
+뒤 feature branch 를 로컬·origin 에서 삭제하라고 지시한다. 그래서 정상 완료한 티켓
+worktree 는 `[main]`(또는 detached) 상태로 남는다 — 이건 **기대 상태이지 소유권 부정
+근거가 아니다.**
 terminal cleanup 은 경로 소유권과 branch 소유권을 분리해 판정한다: 경로가
 확정되면 checkout 을 회수하고, ref 삭제는 full UUID 가 들어간 `ticket/<uuid>-*`
 에만 허용한다. clean 이 아니거나, detached HEAD 가 base 에 포함되지 않거나,

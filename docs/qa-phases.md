@@ -22,17 +22,17 @@ import  (tens of seconds)  →  build  (tens of minutes)  →  run  (hours)
 ```
 
 A single timeout either false-reaps the long `run` stage or never catches a hang
-in the short `import` stage. The **phase model** lets a board (or, overriding it,
-a scenario) declare an ordered list of phases, each with its **own**
+in the short `import` stage. The **phase model** lets a scenario declare an
+ordered list of phases, each with its **own**
 `timeout_sec`, so the reaper judges *"is THIS phase overdue?"* instead of *"is the
 whole run overdue?"*.
 
-`qa_phases = null` everywhere → no phase model → legacy single-`running`
+`qa_phases = null` on the scenario → no phase model → legacy single-`running`
 behavior, fully regression-safe.
 
 ## The config shape
 
-Stored as a JSON text column on **Board** and **QaScenario** (`qa_phases`). The
+Stored as a JSON text column on **QaScenario** (`qa_phases`). The
 write schema is [`QaPhasesSchema`](../apps/server/src/modules/qa/qa-phases.ts):
 
 ```jsonc
@@ -53,23 +53,23 @@ write schema is [`QaPhasesSchema`](../apps/server/src/modules/qa/qa-phases.ts):
 
 The read path ([`parseQaPhases`](../apps/server/src/modules/qa/qa-phases.ts))
 **fails safe**: a malformed/empty/unparseable config falls back to `null` (never
-throws mid-sweep, so one bad board can't break reaping for everyone), and
+throws mid-sweep, so one bad scenario can't break reaping for everyone), and
 malformed individual phase entries are dropped; duplicate ids collapse to the
 first occurrence.
 
-### Precedence — scenario ?? board ?? null
+### Resolution — scenario only
 
-`resolveQaPhases(scenario.qa_phases, board.qa_phases)` returns the **scenario**
-config when set, else the **board** config, else `null` — mirroring
-`resolveLivenessPolicy`. A scenario can therefore narrow or replace the board's
-phases for one specific run shape.
+`resolveQaPhases(scenario.qa_phases)` returns the scenario's config, or `null`
+when it has none or it is malformed. There is no board layer any more (boards
+were removed — see [tickets.md](tickets.md)), so a phase model is always declared
+on the scenario it applies to.
 
 ## Relationship to `liveness_policy`
 
 Phases and the liveness policy are **two layers of the same registry**, resolved
 together per run by the reaper:
 
-1. **An explicit `liveness_policy` always wins.** If a board/scenario set
+1. **An explicit `liveness_policy` always wins.** If the scenario set
    `heartbeat_deadline` (or any explicit policy), that policy is used even when
    phases are defined.
 2. **Otherwise, defining `qa_phases` is enough.** When no explicit policy is set
@@ -78,7 +78,7 @@ together per run by the reaper:
 3. **Otherwise** → the built-in `zero_progress` default (legacy behavior).
 
 ```
-explicit liveness_policy (scenario ?? board)
+explicit liveness_policy (scenario)
   └─ none → qa_phases defined?  → phase_timeouts
               └─ no             → zero_progress (default)
 ```
@@ -114,8 +114,7 @@ the run entered it (`current_phase_at`):
 
 | Step | Tool | Effect on the run |
 |---|---|---|
-| Define phases (board) | `update_board` `qa_phases` | Board-level model; auto-selects `phase_timeouts` |
-| Define/override (scenario) | `create_qa_scenario` / `update_qa_scenario` `qa_phases` | Scenario model wins over board |
+| Define phases | `create_qa_scenario` / `update_qa_scenario` `qa_phases` | Scenario-level model; auto-selects `phase_timeouts` |
 | Start, stamp opening phase | `start_qa_run` `initial_phase: "import"` | `current_phase`/`current_phase_at` + first `phase_history` entry seeded at dispatch |
 | Transition | `set_qa_phase` `{ run_id, phase: "build" }` | Re-stamps `current_phase`/`current_phase_at` (resets the clock), closes the prior `phase_history` entry's `left_at`, appends the new one |
 | Finalize | `complete_qa_run` `{ status, summary }` | Terminal status; transitions rejected afterward |
@@ -132,7 +131,7 @@ transition — that's what the RunDetail timeline renders.
 ### Worked MCP flow
 
 ```
-update_board        { board_id, qa_phases: { phases: [import 600, build 1800, run 3600] } }
+update_qa_scenario  { scenario_id, qa_phases: { phases: [import 600, build 1800, run 3600] } }
 start_qa_run        { scenario_id, initial_phase: "import" }            → run_id
   … import work …
 set_qa_phase        { run_id, phase: "build" }     # build clock starts here, not at run start
@@ -152,7 +151,7 @@ The end-to-end behavior is locked down by deterministic tests that drive the
 **real** services (no mocked time logic):
 
 - [`test/qa-phases.test.mjs`](../apps/server/test/qa-phases.test.mjs) — foundation
-  units: parse/normalize/fail-safe, resolve precedence, `phase_timeouts`
+  units: parse/normalize/fail-safe, resolution, `phase_timeouts`
   auto-selection, per-phase reap decision, fallback, `setPhase` bookkeeping.
 - [`test/qa-phases-e2e.test.mjs`](../apps/server/test/qa-phases-e2e.test.mjs) —
   stitches `QaRunService.setPhase` → `QaRunReaperService.runOnce` over a shared
@@ -170,22 +169,22 @@ Both are wired into `npm test` (`apps/server`).
 the deploy host re-checks-out `origin/main` into its own worktree (detached), reinstalls
 dependencies, rebuilds and restarts the server before that commit is live. So confirm the
 instance you are replaying against actually exposes `set_qa_phase`,
-`start_qa_run.initial_phase` and `update_board.qa_phases` on its live MCP surface (all
-three have been deployed since 2026-09). Then this is the on-a-real-board replay:
+`start_qa_run.initial_phase` and `update_qa_scenario.qa_phases` on its live MCP
+surface. Then this is the live replay:
 
-1. `update_board { board_id, qa_phases: { phases: [{id:"import",timeout_sec:30},{id:"build",timeout_sec:120},{id:"run",timeout_sec:600}] } }`
+1. `create_qa_scenario` (or `update_qa_scenario` on an existing one) with
+   `qa_phases: { phases: [{id:"import",timeout_sec:30},{id:"build",timeout_sec:120},{id:"run",timeout_sec:600}] }`
    — short `import` so a reap is observable without a long wait.
-2. `create_qa_scenario` (or reuse one) pinned to the board.
-3. `start_qa_run { scenario_id, initial_phase: "import" }` → note `run_id`.
-4. `get_qa_run` → assert `current_phase: "import"`, `phase_history[0].left_at: null`.
-5. **Reset proof:** wait > 30s (past `import`), then `set_qa_phase { run_id, phase: "build" }`.
+2. `start_qa_run { scenario_id, initial_phase: "import" }` → note `run_id`.
+3. `get_qa_run` → assert `current_phase: "import"`, `phase_history[0].left_at: null`.
+4. **Reset proof:** wait > 30s (past `import`), then `set_qa_phase { run_id, phase: "build" }`.
    `get_qa_run` → `current_phase: "build"`, `current_phase_at` fresh,
    `phase_history[0].left_at` closed. The run is **not** reaped though `import`
    overran — the transition reset the clock.
-6. **Independent-timeout proof:** leave it in `build` past 120s without
+5. **Independent-timeout proof:** leave it in `build` past 120s without
    transitioning (or `POST /api/qa/runs/reap` to force a sweep). The run goes
    `error` with a summary naming **phase 'Build'**.
-7. **Regression:** a scenario/board with `qa_phases: null` behaves exactly as
+6. **Regression:** a scenario with `qa_phases: null` behaves exactly as
    before (single `running`, `zero_progress` fuses).
 
 > Reaper cadence: `QA_RUN_REAPER_SWEEP_MS` (default 30m). For a live replay either
