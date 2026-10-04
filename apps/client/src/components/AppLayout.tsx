@@ -12,6 +12,7 @@ import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { TicketMetaProvider } from '../contexts/TicketMetaContext';
+import VoiceAnnouncer from '../voice/VoiceAnnouncer';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import type { ChatRoomListItem } from '../types';
@@ -286,6 +287,8 @@ export default function AppLayout() {
     // 하나만 마운트해 채팅 카드(S2/S3)가 우측 패널을 구동하게 한다.
     <BoardStreamProvider>
     <NotificationProvider>
+    {/* 음성 알림 — 화면을 그리지 않고 모든 화면에서 산다(docs/voice-operator.md). */}
+    <VoiceAnnouncer />
     <ArtifactPanelProvider>
     <TicketMetaProvider>
     <TicketArtifactController>

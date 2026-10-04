@@ -44,6 +44,7 @@ import {
   TerminalRequestPayload,
   TerminalUpdatePayload,
   TerminalOutputPayload,
+  VoiceAnnouncementPayload,
 } from '../../common/types/stream-events';
 import { DEFAULT_WORKTREE_MODE } from '../../common/worktree-config';
 import { DEFAULT_CLI_ID } from '../../common/cli-catalog';
@@ -1514,6 +1515,32 @@ export const EVENT_TYPES: EventDefinition[] = [
     },
     filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
     flatten: (env) => ({ event_type: 'terminal_output', ...(env.payload as object), timestamp: env.timestamp }),
+  },
+
+  // ───────── voice_announcement ─────────
+  // 음성 알림(docs/voice-operator.md) — 일이 끝났다는 말 한 줄. UI 전용, 받는 사용자에게만.
+  // 소리는 싣지 않고 화면이 /api/voice/announcements/:id/audio 로 받아 간다. agent-manager 는
+  // 구독하지 않는다 — SSE contract 무관.
+  {
+    eventType: 'voice_announcement',
+    emitterEvent: 'voice_announcement',
+    map(event: any) {
+      const payload: VoiceAnnouncementPayload = {
+        id: event.id,
+        user_id: event.user_id,
+        kind: event.kind,
+        text: event.text,
+        target: event.target,
+        created_at: event.created_at,
+      };
+      return {
+        payload,
+        scope: { user_id: event.user_id },
+        timestamp: event.created_at,
+      };
+    },
+    filter: (env, identity) => identity.type === 'user' && !!env.scope.user_id && env.scope.user_id === identity.userId,
+    flatten: (env) => ({ event_type: 'voice_announcement', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
 ];

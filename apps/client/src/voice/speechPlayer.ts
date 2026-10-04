@@ -2,6 +2,8 @@ import { api } from '../api';
 
 /**
  * 낭독기. 탭 안에서 **한 번에 한 목소리**만 낸다 — 새 낭독이 오면 이전 것을 끊는다(최신 답이 우선).
+ * 음성 알림(`enqueueClip`)은 끊지 않고 **줄을 선다** — 대화 답을 듣는 중에 알림이 끼어들지 않고,
+ * 답이 끝나면 차례로 나온다. 사용자가 말하기 시작하면(`stop`) 줄까지 비운다 — 조용히 하라는 뜻이다.
  *
  * 텍스트는 서버가 읽을 조각으로 나누고(`/voice/speakable` — 마크다운·코드·식별자 정리는 서버의
  * toSpeakable 한 곳에서), 조각마다 합성해(`/voice/speech`) 차례로 튼다. 한 조각을 트는 동안 다음
@@ -31,6 +33,7 @@ class SpeechPlayer {
   #endCurrent: (() => void) | null = null;
   #state: SpeechState = { speaking: false, key: null, error: null };
   #listeners = new Set<Listener>();
+  #queue: Array<{ key: string; fetch: () => Promise<Blob> }> = [];
 
   get state(): SpeechState {
     return this.#state;
@@ -62,8 +65,14 @@ class SpeechPlayer {
     el.play().then(() => el.pause()).catch(() => undefined);
   }
 
-  /** 읽기를 멈춘다. 사용자가 말하기 시작하면(barge-in) 곧바로 부른다. */
+  /** 읽기를 멈추고 기다리던 알림도 버린다. 사용자가 말하기 시작하면(barge-in) 곧바로 부른다. */
   stop(): void {
+    this.#queue = [];
+    this.#interrupt();
+  }
+
+  /** 지금 나오는 소리만 끊는다(줄 선 알림은 남는다). */
+  #interrupt(): void {
     this.#generation += 1;
     const el = this.#audio;
     if (el) {
@@ -117,7 +126,7 @@ class SpeechPlayer {
    * 실패는 상태(error)로 남기고 던지지 않는다 — 낭독 실패가 대화를 막으면 안 된다.
    */
   async speak(text: string, key: string): Promise<void> {
-    this.stop();
+    this.#interrupt();
     const generation = this.#generation;
     this.#set({ speaking: true, key, error: null });
     const stale = () => generation !== this.#generation;
@@ -143,12 +152,43 @@ class SpeechPlayer {
     } catch (err: any) {
       if (stale()) return;
       this.#releaseUrl();
-      const message = err?.name === 'NotAllowedError'
-        ? '브라우저가 자동 재생을 막았습니다 — 화면을 한 번 누른 뒤 다시 시도하세요.'
-        : (err?.message || '읽기에 실패했습니다');
-      this.#set({ speaking: false, key, error: message });
+      this.#set({ speaking: false, key, error: playbackError(err) });
+    }
+    void this.#drain();
+  }
+
+  /** 미리 합성된 소리 하나(음성 알림)를 줄 세운다. 지금 아무것도 안 나오면 바로 튼다. */
+  enqueueClip(fetchClip: () => Promise<Blob>, key: string): void {
+    this.#queue.push({ key, fetch: fetchClip });
+    if (!this.#state.speaking) void this.#drain();
+  }
+
+  async #drain(): Promise<void> {
+    while (!this.#state.speaking && this.#queue.length) {
+      const item = this.#queue.shift()!;
+      this.#interrupt();
+      const generation = this.#generation;
+      this.#set({ speaking: true, key: item.key, error: null });
+      try {
+        const blob = await item.fetch();
+        if (generation !== this.#generation) return;
+        await this.#play(blob, generation);
+        if (generation !== this.#generation) return;
+        this.#releaseUrl();
+        this.#set({ speaking: false, key: item.key, error: null });
+      } catch (err: any) {
+        if (generation !== this.#generation) return;
+        this.#releaseUrl();
+        this.#set({ speaking: false, key: item.key, error: playbackError(err) });
+      }
     }
   }
+}
+
+function playbackError(err: any): string {
+  return err?.name === 'NotAllowedError'
+    ? '브라우저가 자동 재생을 막았습니다 — 화면을 한 번 누른 뒤 다시 시도하세요.'
+    : (err?.message || '읽기에 실패했습니다');
 }
 
 export const speechPlayer = new SpeechPlayer();

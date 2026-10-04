@@ -14,6 +14,8 @@ import {
   shouldSpeakFinishedTurn,
   turnAnswerText,
 } from '../src/voice/turnAnswer.logic.ts';
+// 서버 사본(음성 알림이 답의 첫머리를 싣는 데 쓴다) — 두 앱이 코드를 나눠 쓰지 않아 사본이 둘이다.
+import { TurnAnswerTracker as ServerTurnAnswerTracker } from '../../server/src/modules/voice/turn-answer.ts';
 
 let seq = 0;
 function ev(type, payload = {}, turn_id = 't1') {
@@ -66,4 +68,20 @@ test('cancelled or empty turns are not spoken', () => {
   assert.equal(shouldSpeakFinishedTurn({ turnId: 't', stopReason: 'end_turn', answer: '' }), false);
   assert.equal(shouldSpeakFinishedTurn({ turnId: 't', stopReason: 'end_turn', answer: '끝났어요.' }), true);
   assert.equal(shouldSpeakFinishedTurn({ turnId: 't', stopReason: 'max_tokens', answer: '잘린 답' }), true);
+});
+
+test('the server copy of the rule gives the same answers as the client (they must not drift)', () => {
+  const fixtures = [
+    [ev('text', { text: '확인해 볼게요.' }, 'x1'), ev('tool_call', {}, 'x1'), ev('text', { text: '두 개예요.' }, 'x1'), ev('turn', { phase: 'finished' }, 'x1')],
+    [ev('text', { text: '배포를 마쳤어요.' }, 'x2'), ev('tool_call', {}, 'x2'), ev('plan', {}, 'x2'), ev('turn', { phase: 'finished', stop_reason: 'end_turn' }, 'x2')],
+    [ev('tool_call', {}, 'x3'), ev('text', { text: '백그라운드.' }, 'x3'), ev('tool_update', {}, 'x3'), ev('turn', { phase: 'finished', stop_reason: 'cancelled' }, 'x3')],
+    [ev('permission_request', {}, 'x4'), ev('turn', { phase: 'finished', stop_reason: 'error' }, 'x4')],
+  ];
+  for (const events of fixtures) {
+    const client = new TurnAnswerTracker();
+    const server = new ServerTurnAnswerTracker();
+    const a = events.map((e) => client.push(e)).filter(Boolean);
+    const b = events.map((e) => server.push(e)).filter(Boolean);
+    assert.deepEqual(b, a);
+  }
 });

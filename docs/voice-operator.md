@@ -225,9 +225,28 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
   비동기 API 를 붙인다. ElevenLabs Scribe · OpenAI 는 mp4/m4a 를 받는다.
 - 회귀: `apps/server/test/voice-{speakable,gateway,http}.test.mjs`, `apps/client/test/voice-{turn-answer,lab}.test.mjs`.
 
+## P2 구현 — 음성 알림 (웹)
+
+| 층 | 무엇 | 위치 |
+|---|---|---|
+| 감지 | `VoiceAnnouncerService` 가 activity 이벤트를 듣는다 — `agent_session_update`(turn_finished · turn_failed · 권한/질문 대기), `agent_session_event`(답의 첫머리를 모은다), `orchestration_update` 의 `last_event.type`(mission_completed · mission_failed · mission_cancelled · confirm_notified) | `modules/voice/voice-announcer.service.ts` |
+| 문장 | 템플릿(ko/en — `voice.stt.languages` 첫 언어). 답·요약이 있으면 `toSpeakable` 로 160자까지 덧붙인다. 조사는 고정 명사 뒤에만 단다(제목 받침과 무관하게 맞게) | `modules/voice/announcement-text.ts` |
+| 대상 | 세션 → driver. 미션 → 사람이 만들었으면 그 사람, 에이전트가 만들었으면 워크스페이스 owner(소리는 member 전원까지 넓히지 않는다) | 같은 서비스 |
+| 발행 | SSE `voice_announcement`(user-only, 받는 사용자만 — agent-manager 무관). TTS 가 준비되지 않았으면 보내지 않는다 | `event-registry.ts` |
+| 소리 | `GET /api/voice/announcements/:id/audio` — 받는 사람만, **처음 요청될 때 한 번** 합성(듣는 화면이 없으면 엔진을 부르지 않는다). 메모리에 2시간 | `voice.controller.ts` |
+| 화면 | `VoiceAnnouncer`(AppLayout, 모든 화면): 알림 설정 "Speak work updates"(단말별, 기본 켬)가 켜져 있으면 토스트(누르면 그 화면) + 소리. 탭이 여럿이면 **먼저 집은 한 탭만**(Web Locks + localStorage 표시, 숨은 탭은 700ms 양보). **보고 있는 세션의 알림은 말하지 않는다**(그 화면이 이미 답을 읽는다). 대화 낭독을 끊지 않고 줄을 서고, 말하기 시작하면 줄까지 비운다 | `voice/VoiceAnnouncer.tsx`, `voice/announcements.ts`, `voice/speechPlayer.ts` |
+
+- 기준: 턴이 **30초 이상** 걸렸을 때만 알린다(시작을 못 봤으면 긴 것으로 친다). 사용자가 멈춘 턴은 알리지 않고, 오류는 길이와
+  무관하게 알린다. 같은 세션의 "확인 필요" 는 1분에 한 번.
+- "읽을 답" 규칙의 서버 사본(`modules/voice/turn-answer.ts`)은 화면 규칙과 같아야 한다 —
+  `apps/client/test/voice-turn-answer.test.mjs` 가 두 구현을 같은 입력으로 돌린다.
+- 회귀: `apps/server/test/voice-announcer.test.mjs`, `voice-http.test.mjs`(SSE 전달 · 소리 소유권),
+  `apps/client/test/voice-announcements.test.mjs`.
+- 남은 것: 브라우저가 꺼져 있으면 들을 곳이 없다 → Android 앱(P4)의 푸시. Telegram 전달은 그 전에 필요해지면 붙인다.
+
 ## 메워야 할 공백 (2026-10-04 코드 기준)
 
-- 작업 종료가 어떤 알림으로도 나가지 않는다 — 토스트·외부 알림은 멘션·채팅·댓글뿐이다(`contexts/NotificationContext.tsx`).
+- ~~작업 종료가 어떤 알림으로도 나가지 않는다~~ — P2 의 음성 알림이 세션·미션 종료를 다룬다(토스트 포함). 외부 채널(Telegram 등)로는 아직 안 나간다.
 - `agent_session_update` 는 driver 가 있을 때만 발행된다(`agent-sessions.service.ts` `emitUpdate`) — 서버 재시작 뒤
   세션을 다시 열기 전에는 종료를 놓친다.
 - `orchestration_update` 에 소유자 필드가 없다 — announcer 는 `OrchestrationMission.created_by` 를 직접 읽는다.

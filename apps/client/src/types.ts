@@ -3502,6 +3502,21 @@ export interface VoiceConfigView {
   lab?: { stt: string[]; tts: string[] };
 }
 
+/** 음성 알림(`voice_announcement` SSE) — 서버 `VoiceAnnouncementPayload` 와 같은 모양. */
+export type VoiceAnnouncementTarget =
+  | { type: 'session'; manager_id: string; cli: string; session_id: string }
+  | { type: 'mission'; workspace_id: string; mission_id: string };
+
+export interface VoiceAnnouncementEvent {
+  event_type: 'voice_announcement';
+  id: string;
+  user_id: string;
+  kind: string;
+  text: string;
+  target: VoiceAnnouncementTarget;
+  created_at: string;
+}
+
 /** 공급자 API 가 알려 준 목소리(Voice lab 의 목소리 고르기). */
 export interface VoiceOptionView {
   id: string;

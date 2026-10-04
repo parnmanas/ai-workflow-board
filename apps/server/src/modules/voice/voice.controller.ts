@@ -1,5 +1,5 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Get, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
@@ -7,6 +7,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { VoiceError, VoiceService } from './voice.service';
+import { VoiceAnnouncerService } from './voice-announcer.service';
 
 async function run(res: Response, fn: () => Promise<unknown> | unknown) {
   try {
@@ -47,7 +48,10 @@ async function sendAudio(res: Response, fn: () => Promise<{ audio: Buffer; conte
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.USE_VOICE)
 export class VoiceController {
-  constructor(private readonly voice: VoiceService) {}
+  constructor(
+    private readonly voice: VoiceService,
+    private readonly announcer: VoiceAnnouncerService,
+  ) {}
 
   /** 엔진이 켜져 있고 쓸 수 있는가. admin 에게는 Voice lab 이 비교할 공급자 목록도 준다. */
   @Get('config')
@@ -73,6 +77,13 @@ export class VoiceController {
   @Post('speech')
   async speech(@Body() body: any, @Res() res: Response) {
     return sendAudio(res, () => this.voice.synthesize(typeof body?.text === 'string' ? body.text : ''));
+  }
+
+  /** 음성 알림(`voice_announcement`)의 소리 — 받는 사람만. 처음 요청될 때 합성한다. */
+  @Get('announcements/:id/audio')
+  async announcementAudio(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
+    const userId = (req as any).currentUser.id as string;
+    return sendAudio(res, async () => ({ ...(await this.announcer.audio(id, userId)), provider: 'announcement' }));
   }
 }
 

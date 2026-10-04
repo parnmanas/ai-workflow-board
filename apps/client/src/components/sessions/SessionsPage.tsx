@@ -27,6 +27,7 @@ import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
 import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voice/useVoice';
 import { speechPlayer } from '../../voice/speechPlayer';
 import { TurnAnswerTracker, shouldSpeakFinishedTurn } from '../../voice/turnAnswer.logic';
+import { sessionTargetKey, setViewingSession } from '../../voice/announcements';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -403,6 +404,11 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   useEffect(() => () => {
     if (speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();
   }, [speechKeyPrefix]);
+  // 이 세션을 보고 있는 동안에는 이 세션에 대한 음성 알림을 말하지 않는다(답은 여기서 읽는다).
+  useEffect(() => {
+    setViewingSession(sessionTargetKey(managerId, cli, sessionId));
+    return () => setViewingSession(null);
+  }, [managerId, cli, sessionId]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** 첨부 이미지가 나중에 디코딩되며 높이를 키울 때 바닥을 유지하기 위한 내용 래퍼. */
   const contentRef = useRef<HTMLDivElement | null>(null);

@@ -2219,6 +2219,9 @@ export const api = {
   /** 이미 읽을 문장으로 다듬은 조각 하나를 소리로. */
   synthesizeVoice: async (text: string): Promise<Blob> =>
     (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
+  /** 음성 알림의 소리 — 받는 사람만, 서버가 처음 요청될 때 합성한다. */
+  getVoiceAnnouncementAudio: async (id: string): Promise<Blob> =>
+    (await fetchOk(`/voice/announcements/${encodeURIComponent(id)}/audio`)).blob(),
   /** Voice lab(admin) — 키가 있는 공급자를 골라 같은 발화/문장을 비교한다. */
   voiceLabTranscribe: async (provider: string, audio: Blob, model?: string): Promise<VoiceTranscript> => {
     const query = new URLSearchParams({ provider, ...(model ? { model } : {}) });

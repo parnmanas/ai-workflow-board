@@ -50,7 +50,8 @@ export type StreamEventType =
   | 'agent_session_event'    // Agent Session: 트랜스크립트 이벤트 1건(text/tool/permission/…) — UI 전용, 소유자만
   | 'terminal_request'       // Terminal(Runtime Host 셸): 서버 → agent-manager 제어(open/attach/input/resize/close) — 대상 agent 스코프
   | 'terminal_update'        // Terminal: 라이브 터미널 상태 변경(status/cwd/title/크기) — UI 전용, driver 만
-  | 'terminal_output';       // Terminal: PTY 출력 청크 — UI 전용, driver 만
+  | 'terminal_output'        // Terminal: PTY 출력 청크 — UI 전용, driver 만
+  | 'voice_announcement';    // Voice: 일이 끝났다는 음성 알림 한 줄 — UI 전용, 받는 사용자만
 
 export interface StreamEventScope {
   board_id?: string;
@@ -1137,4 +1138,24 @@ export interface TerminalOutputPayload {
   terminal_id: string;
   driver_user_id: string;
   chunk: TerminalOutputChunk;
+}
+
+// ─── Voice announcement (docs/voice-operator.md "음성 알림") ───────────────
+
+/** 알림이 가리키는 곳 — 화면이 경로를 만들고, 보고 있는 세션이면 알림을 걸러 낸다. */
+export type VoiceAnnouncementTarget =
+  | { type: 'session'; manager_id: string; cli: string; session_id: string }
+  | { type: 'mission'; workspace_id: string; mission_id: string };
+
+/**
+ * UI 전용(받는 사용자만). 소리는 싣지 않는다 — 화면이 `GET /api/voice/announcements/:id/audio` 로
+ * 받아 간다(듣는 화면이 없으면 합성도 하지 않는다). agent-manager 는 구독하지 않는다.
+ */
+export interface VoiceAnnouncementPayload {
+  id: string;
+  user_id: string;
+  kind: string;
+  text: string;
+  target: VoiceAnnouncementTarget;
+  created_at: string;
 }

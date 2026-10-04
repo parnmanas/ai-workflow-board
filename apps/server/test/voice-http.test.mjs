@@ -6,6 +6,8 @@
 //   3. /transcribe 는 raw 오디오 본문을 그대로 받아(http-body-parsers) 공급자에 multipart 로 넘긴다.
 //   4. /speakable → /speech 가 화면의 낭독 흐름 그대로 동작하고, 오디오 바이트가 그대로 돌아온다.
 //   5. 공급자가 꺼져 있거나 키가 틀리면 409 + 사유 — 대체 경로로 조용히 넘어가지 않는다.
+//   6. 음성 알림: 서버 이벤트(세션 턴 실패)가 받는 사용자의 SSE 에만 `voice_announcement` 로 가고,
+//      소리는 그 사용자만 /api/voice/announcements/:id/audio 로 받는다.
 //
 // 네트워크 없이: OpenAI 호환 공급자의 base_url 을 이 테스트가 띄운 가짜 서버로 둔다.
 // 실행: node --test --test-force-exit test/voice-http.test.mjs (dist 필요)
@@ -15,6 +17,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
 import { createUser } from './helpers/fixtures.mjs';
+import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
@@ -56,13 +59,15 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   t.after(() => fake.close());
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
-  const { getDataSourceToken, AuthService } = modules;
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
   const base = `http://localhost:${port}`;
 
   const admin = await createUser(app, getDataSourceToken, { name: 'admin', role: 'admin' });
   const plain = await createUser(app, getDataSourceToken, { name: 'plain', role: 'user' });
-  const adminAuth = { Authorization: `Bearer ${app.get(AuthService).createSession(admin.id)}` };
-  const plainAuth = { Authorization: `Bearer ${app.get(AuthService).createSession(plain.id)}` };
+  const adminToken = app.get(AuthService).createSession(admin.id);
+  const plainToken = app.get(AuthService).createSession(plain.id);
+  const adminAuth = { Authorization: `Bearer ${adminToken}` };
+  const plainAuth = { Authorization: `Bearer ${plainToken}` };
   const json = { 'Content-Type': 'application/json' };
 
   // 1. 권한
@@ -138,6 +143,29 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   });
   assert.equal(labNoKey.status, 409);
   assert.match(labNoKey.body.message, /ElevenLabs API key is not set/);
+
+  // 6. 음성 알림 — 세션 턴이 오류로 끝나면 driver 에게만 간다.
+  const adminStream = await openSseStream(port, adminToken, {});
+  const plainStream = await openSseStream(port, plainToken, {});
+  t.after(() => { adminStream.close(); plainStream.close(); });
+  activityEvents.emit('agent_session_update', {
+    session: { manager_id: 'host-1', manager_name: 'rolf', cli: 'claude', session_id: 's1', title: '배포', status: 'error', driver_user_id: admin.id },
+    reason: 'turn_failed',
+    driver_user_id: admin.id,
+    timestamp: new Date().toISOString(),
+  });
+  const frame = await adminStream.waitFor('voice_announcement', () => true, 5000);
+  const announcement = typeof frame.data === 'string' ? JSON.parse(frame.data) : frame.data;
+  assert.equal(announcement.kind, 'session_turn_failed');
+  assert.equal(announcement.text, "rolf의 Claude Code 세션 '배포'에서 오류가 났어요.");
+  assert.deepEqual(announcement.target, { type: 'session', manager_id: 'host-1', cli: 'claude', session_id: 's1' });
+  const leaked = await plainStream.drainOfType('voice_announcement', 300);
+  assert.equal(leaked.length, 0, 'other users never see it');
+  const announcementAudio = await call(`${base}/api/voice/announcements/${announcement.id}/audio`, { headers: adminAuth });
+  assert.equal(announcementAudio.status, 200);
+  assert.equal(announcementAudio.buf.toString(), 'ID3-fake-mp3');
+  const notYours = await call(`${base}/api/voice/announcements/${announcement.id}/audio`, { headers: plainAuth });
+  assert.equal(notYours.status, 403, 'voice.use is required before ownership is even checked');
 
   // 5. 모르는 공급자 이름은 대체하지 않고 거절한다.
   await call(`${base}/api/admin/settings`, {
