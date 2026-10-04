@@ -24,6 +24,9 @@ import type { SessionPrompt } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
+import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voice/useVoice';
+import { speechPlayer } from '../../voice/speechPlayer';
+import { TurnAnswerTracker, shouldSpeakFinishedTurn } from '../../voice/turnAnswer.logic';
 import {
   appendLiveEvent,
   buildTranscript,
@@ -380,6 +383,26 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
+
+  // ── 음성 (docs/voice-operator.md) ── 턴이 끝나면 답을 소리로 읽는다. 엔진은 서버 설정이고,
+  // 읽을지 말지는 이 단말의 선택이다. 핸들러는 ref 로 최신 값을 본다(구독을 다시 걸지 않게).
+  const voiceConfig = useVoiceConfig();
+  const ttsReady = !!voiceConfig?.tts.ready;
+  const [readReplies, setReadReplies] = useReadRepliesSetting();
+  const speech = useSpeechState();
+  const speakPrefsRef = useRef({ readReplies, ttsReady });
+  speakPrefsRef.current = { readReplies, ttsReady };
+  // 말로 물으면 답도 소리로 — "읽기" 를 켜 두지 않았어도 마지막 프롬프트가 음성이었으면 읽는다.
+  const lastPromptSpokenRef = useRef(false);
+  // 라이브 스트림만 따라간다 — 화면의 이벤트 배열은 창 상한으로 앞이 잘려 긴 턴의 답을 잃을 수 있다.
+  const answerTrackerRef = useRef<TurnAnswerTracker | null>(null);
+  if (!answerTrackerRef.current) answerTrackerRef.current = new TurnAnswerTracker();
+  const speechKeyPrefix = `${managerId}/${cli}/${sessionId}:`;
+  const speakingHere = speech.speaking && !!speech.key?.startsWith(speechKeyPrefix);
+  // 다른 화면으로 가면 이 세션의 낭독을 멈춘다 — 무엇을 읽는지 보이지 않는 소리는 소음이다.
+  useEffect(() => () => {
+    if (speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();
+  }, [speechKeyPrefix]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** 첨부 이미지가 나중에 디코딩되며 높이를 키울 때 바닥을 유지하기 위한 내용 래퍼. */
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -414,7 +437,22 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   useBoardStreamEvent('agent_session_event', useCallback((data: AgentSessionEventEvent) => {
     if (!matches(data) || !data.event) return;
     setEvents((prev) => appendLiveEvent(prev, data.event));
-  }, [matches]));
+    // 보고 있는 화면에서만 읽는다. 다른 화면에 있을 때 알리는 것은 음성 알림의 몫이다.
+    const finished = answerTrackerRef.current?.push(data.event);
+    const prefs = speakPrefsRef.current;
+    if (finished && (prefs.readReplies || lastPromptSpokenRef.current) && prefs.ttsReady && shouldSpeakFinishedTurn(finished)
+      && document.visibilityState === 'visible') {
+      void speechPlayer.speak(finished.answer, `${speechKeyPrefix}${finished.turnId}`);
+    }
+  }, [matches, speechKeyPrefix]));
+
+  // 낭독 실패(자동 재생 차단 · 엔진 오류)는 조용히 삼키지 않는다.
+  const shownSpeechErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    const err = speech.key?.startsWith(speechKeyPrefix) ? speech.error : null;
+    if (err && err !== shownSpeechErrorRef.current) showToast(err, 'error');
+    shownSpeechErrorRef.current = err;
+  }, [speech.error, speech.key, speechKeyPrefix, showToast]);
 
   // SSE 가 끊겼다 붙으면(대개 서버 재시작) 그 사이의 라이브 이벤트는 받지 못했다 — 서버는
   // 세션을 저장하지 않으므로 그만큼이 화면에서 통째로 빈다. 다시 읽어 매니저의 기록·상태로
@@ -543,6 +581,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
 
   const send = useCallback(async (prompt: SessionPrompt) => {
+    lastPromptSpokenRef.current = !!prompt.spoken;
     const images = prompt.images.map(({ base64, mime_type }) => ({ base64, mime_type }));
     const optimisticText = prompt.text || (images.length ? `[${images.length} image(s)]` : '');
     try {
@@ -807,6 +846,27 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </select>
         )}
         <div style={{ display: 'flex', gap: 6 }}>
+          {ttsReady && (
+            <Button
+              variant={readReplies || speakingHere ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-pressed={readReplies}
+              onClick={() => {
+                if (speakingHere) { speechPlayer.stop(); return; }
+                const next = !readReplies;
+                setReadReplies(next);
+                // 이 클릭이 사용자 제스처다 — 나중에(턴이 끝났을 때) 제스처 없이 재생할 수 있게 깨워 둔다.
+                if (next) speechPlayer.unlock();
+              }}
+              title={speakingHere
+                ? '지금 읽는 것을 멈춥니다'
+                : readReplies
+                  ? '턴이 끝나면 답을 소리로 읽습니다 — 누르면 끕니다'
+                  : '턴이 끝나면 답을 소리로 읽게 합니다 — 꺼져 있어도 🎙 로 물은 답은 읽습니다'}
+            >
+              {speakingHere ? '■ Stop reading' : readReplies ? '🔊 Read aloud' : '🔈 Read aloud'}
+            </Button>
+          )}
           {canConnect(status) && !connecting && (
             <Button variant="primary" size="sm" onClick={() => void connect(false)} title="Start the CLI process for this session on the Runtime Host and load its settings">
               {status === 'error' ? 'Reconnect' : 'Connect'}
@@ -873,6 +933,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         commands={commands}
         onSend={send}
         onCancel={() => void cancel()}
+        voiceInput={voiceConfig?.stt.ready ? { autoSend: true } : null}
       />
     </>
   );

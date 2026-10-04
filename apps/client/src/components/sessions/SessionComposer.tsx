@@ -3,6 +3,7 @@ import { tokens } from '../../tokens';
 import type { AgentSessionCommand } from '../../types';
 import { applySlashCommand, matchSlashCommands } from './sessionTranscript.logic';
 import { readFileAsBase64 } from '../chat/utils/attachments';
+import { useVoiceDictation } from '../../voice/useVoice';
 
 /**
  * Agent Session 프롬프트 입력. Chat 의 ChatMessageInput 과 달리 방/멘션에
@@ -46,6 +47,8 @@ export interface SessionPromptImage {
 export interface SessionPrompt {
   text: string;
   images: SessionPromptImage[];
+  /** 말로 보낸 프롬프트 — 말로 물으면 답도 소리로 듣는다(세션 화면이 읽기 여부를 정할 때 쓴다). */
+  spoken?: boolean;
 }
 
 export interface SessionComposerProps {
@@ -57,6 +60,11 @@ export interface SessionComposerProps {
   commands?: AgentSessionCommand[];
   onSend: (prompt: SessionPrompt) => Promise<void> | void;
   onCancel: () => void;
+  /**
+   * 음성 입력 — 서버에 STT 가 준비돼 있을 때만 준다(없으면 마이크 버튼이 나오지 않는다).
+   * 전사된 글자는 입력창의 글자 뒤에 붙고, `autoSend` 면 곧바로 보낸다(턴 중이면 큐로).
+   */
+  voiceInput?: { autoSend: boolean } | null;
 }
 
 function promptLabel(p: SessionPrompt): string {
@@ -65,7 +73,7 @@ function promptLabel(p: SessionPrompt): string {
   return '';
 }
 
-export default function SessionComposer({ disabled, busy, placeholder, hint, commands, onSend, onCancel }: SessionComposerProps) {
+export default function SessionComposer({ disabled, busy, placeholder, hint, commands, onSend, onCancel, voiceInput }: SessionComposerProps) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<SessionPromptImage[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -205,9 +213,10 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   const canSend = text.trim().length > 0 || images.some((p) => p.base64);
   const stillReading = images.some((p) => !p.base64);
 
-  const submit = useCallback(async () => {
+  /** `overrideText` — 음성 전사처럼 입력창을 거치지 않고 바로 보낼 글자(그때는 말로 보낸 프롬프트다). */
+  const submit = useCallback(async (overrideText?: string) => {
     const ready = images.filter((p) => p.base64);
-    const value: SessionPrompt = { text: text.trim(), images: ready };
+    const value: SessionPrompt = { text: (overrideText ?? text).trim(), images: ready, ...(overrideText !== undefined ? { spoken: true } : {}) };
     if ((!value.text && !ready.length) || disabled || sending || stillReading) return;
     if (busy) {
       setQueueBoth([...queueRef.current, value]);
@@ -227,6 +236,24 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       setSending(false);
     }
   }, [text, images, disabled, busy, sending, stillReading, onSend, setQueueBoth, revokeImages]);
+
+  const dictation = useVoiceDictation(useCallback((spoken: string) => {
+    const merged = [text.trim(), spoken].filter(Boolean).join(' ');
+    // 보낼 수 없는 순간(다른 전송 중 · 이미지 읽는 중)이면 버리지 않고 입력창에 남긴다.
+    if (voiceInput?.autoSend && !stillReading && !sending && !disabled) {
+      void submit(merged);
+      return;
+    }
+    setText(merged);
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(merged.length, merged.length);
+    });
+  }, [text, voiceInput?.autoSend, stillReading, sending, disabled, submit]));
+  const showMic = !!voiceInput && dictation.supported;
+  const recording = dictation.phase === 'recording';
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
@@ -327,6 +354,9 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       {attachError && (
         <div style={{ fontSize: 11.5, color: tokens.colors.warning, marginBottom: 6 }}>{attachError}</div>
       )}
+      {showMic && dictation.error && (
+        <div role="status" style={{ fontSize: 11.5, color: tokens.colors.warning, marginBottom: 6 }}>{dictation.error}</div>
+      )}
       {popupOpen && (
         <ul
           role="listbox"
@@ -393,6 +423,30 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         >
           📎
         </button>
+        {showMic && (
+          <button
+            type="button"
+            onClick={dictation.toggle}
+            disabled={locked || dictation.phase === 'transcribing'}
+            aria-label={recording ? 'Stop recording and send' : 'Speak a prompt'}
+            aria-pressed={recording}
+            title={recording
+              ? '다시 누르면 녹음을 끝내고 글자로 바꿔 보냅니다'
+              : dictation.phase === 'transcribing' ? '글자로 바꾸는 중…' : '눌러서 말하기 — 다시 누르면 끝납니다'}
+            style={{
+              height: 40, minWidth: 40, padding: '0 10px', borderRadius: tokens.radii.lg,
+              border: `1px solid ${recording ? tokens.colors.danger : tokens.colors.border}`,
+              background: recording ? `${tokens.colors.danger}22` : tokens.colors.surface,
+              color: recording ? tokens.colors.dangerLight : locked ? tokens.colors.textMuted : tokens.colors.textSecondary,
+              fontSize: 16, cursor: locked ? 'not-allowed' : 'pointer',
+              // 입력 크기를 테두리 그림자로 — 듣고 있다는 것을 눈으로 확인한다.
+              boxShadow: recording ? `0 0 0 ${Math.round(2 + dictation.level * 8)}px ${tokens.colors.danger}33` : 'none',
+              transition: 'box-shadow 80ms linear',
+            }}
+          >
+            {dictation.phase === 'transcribing' ? '…' : recording ? '■' : '🎙'}
+          </button>
+        )}
         <textarea
           ref={ref}
           value={text}
@@ -462,7 +516,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         </button>
       </div>
       <div style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
-        {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
+        {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 tap to speak, tap again to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
       </div>
     </div>
   );

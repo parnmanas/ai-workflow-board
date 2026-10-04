@@ -3483,6 +3483,41 @@ export interface AgentSessionEventEvent {
   timestamp: string;
 }
 
+// ─── Voice (docs/voice-operator.md) ─────────────────────────────────────────
+// 서버 `apps/server/src/modules/voice` 의 `/api/voice/config` 응답.
+
+export interface VoiceEngineStatus {
+  /** 설정된 공급자 id. 'none' 이면 꺼져 있다. */
+  provider: string;
+  /** 바로 쓸 수 있는가(공급자를 알고 키가 있다). */
+  ready: boolean;
+  /** ready 가 아닐 때의 사유 — 화면에 그대로 보여 준다. */
+  error: string | null;
+}
+
+export interface VoiceConfigView {
+  stt: VoiceEngineStatus;
+  tts: VoiceEngineStatus & { voice: string };
+  /** admin 에게만 — 키가 있어 Voice lab 이 비교할 수 있는 공급자. */
+  lab?: { stt: string[]; tts: string[] };
+}
+
+/** 공급자 API 가 알려 준 목소리(Voice lab 의 목소리 고르기). */
+export interface VoiceOptionView {
+  id: string;
+  name: string;
+  language?: string;
+  gender?: string;
+  preview_url?: string;
+}
+
+export interface VoiceTranscript {
+  text: string;
+  provider: string;
+  model: string;
+  latency_ms: number;
+}
+
 // ─── Terminal (Runtime Host 셸) ────────────────────────────────────────────
 // 서버 contract: apps/server/src/common/types/terminals.ts. 터미널은 매니저의 PTY
 // 프로세스이고 살아 있는 동안만 존재한다 — 기록이 없으므로 목록에 죽은 것은 없다.

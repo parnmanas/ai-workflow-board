@@ -100,7 +100,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, VoiceConfigView, VoiceOptionView, VoiceTranscript } from './types';
 import type { ArtifactRefType } from './utils/artifactRef';
 
 const BASE = '/api';
@@ -203,6 +203,30 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw error;
   }
   return res.json();
+}
+
+/**
+ * JSON 이 아닌 본문(오디오)을 주고받는 요청. 실패는 `request` 와 같은 모양(message · code · status)으로 던진다.
+ * `contentType` 을 주면 그 형식의 바이트를 그대로 보낸다.
+ */
+async function fetchOk(path: string, init: RequestInit & { contentType?: string } = {}): Promise<Response> {
+  const { contentType, ...rest } = init;
+  const headers = getAuthHeaders();
+  if (contentType) headers['Content-Type'] = contentType;
+  const res = await fetch(`${BASE}${path}`, { ...rest, headers: { ...headers, ...(rest.headers as Record<string, string> | undefined) } });
+  if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem('auth_token');
+      window.dispatchEvent(new Event('auth-expired'));
+    }
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const error = new Error(err.message || err.error || 'Request failed') as Error & { code?: string; status?: number };
+    if (err.code) error.code = err.code;
+    else if (typeof err.error === 'string') error.code = err.error;
+    error.status = res.status;
+    throw error;
+  }
+  return res;
 }
 
 export const api = {
@@ -2181,6 +2205,33 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/close`,
       { method: 'POST' },
     ),
+
+  // ─── Voice (docs/voice-operator.md) ──────────────────────────────────
+  // 서버: apps/server/src/modules/voice. 엔진 키는 서버에만 있고, 화면은 녹음한 바이트를 보내
+  // 글자를 받고, 글자를 보내 소리를 받는다.
+  getVoiceConfig: () => request<VoiceConfigView>('/voice/config'),
+  /** 발화 하나를 글자로. 녹음 형식(webm/mp4)을 그대로 보낸다. */
+  transcribeVoice: async (audio: Blob): Promise<VoiceTranscript> =>
+    (await fetchOk('/voice/transcribe', { method: 'POST', body: audio, contentType: audio.type || 'application/octet-stream' })).json(),
+  /** 화면용 답 → 읽을 조각들(서버의 toSpeakable + splitSpeakable). 읽을 것이 없으면 빈 배열. */
+  voiceSpeakable: (text: string) =>
+    request<{ chunks: string[] }>('/voice/speakable', { method: 'POST', body: JSON.stringify({ text }) }),
+  /** 이미 읽을 문장으로 다듬은 조각 하나를 소리로. */
+  synthesizeVoice: async (text: string): Promise<Blob> =>
+    (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
+  /** Voice lab(admin) — 키가 있는 공급자를 골라 같은 발화/문장을 비교한다. */
+  voiceLabTranscribe: async (provider: string, audio: Blob, model?: string): Promise<VoiceTranscript> => {
+    const query = new URLSearchParams({ provider, ...(model ? { model } : {}) });
+    return (await fetchOk(`/voice/lab/transcribe?${query.toString()}`, { method: 'POST', body: audio, contentType: audio.type || 'application/octet-stream' })).json();
+  },
+  voiceLabVoices: (provider: string) =>
+    request<{ voices: VoiceOptionView[] }>(`/voice/lab/voices?provider=${encodeURIComponent(provider)}`),
+  voiceLabSpeech: async (input: { provider: string; text: string; voice?: string; model?: string }): Promise<{ blob: Blob; latencyMs: number }> => {
+    const startedAt = performance.now();
+    const res = await fetchOk('/voice/lab/speech', { method: 'POST', body: JSON.stringify(input), contentType: 'application/json' });
+    const blob = await res.blob();
+    return { blob, latencyMs: Math.round(performance.now() - startedAt) };
+  },
 
   // ─── Terminals (Runtime Host 셸) ──────────────────────────────────────
   // 서버: apps/server/src/modules/terminals. 살아 있는 터미널만 다룬다 — 기록이 없으므로

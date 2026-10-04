@@ -12,6 +12,7 @@ import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { sessionStore, DEFAULT_MAX_SESSIONS } from '../../modules/mcp/internal/session-store';
 import { callRemoteMcpTool } from '../../modules/mcp/shared/remote-mcp-client';
+import { VOICE_SETTING_DEFINITIONS, invalidateVoiceConfig } from '../voice/voice-config';
 
 const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
@@ -66,6 +67,8 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
     is_secret: true,
     default_value: '',
   },
+  // 음성 게이트웨이 — 의미는 voice 모듈이 안다(docs/voice-operator.md).
+  ...VOICE_SETTING_DEFINITIONS,
 };
 
 /**
@@ -79,6 +82,7 @@ function applyLiveSettingChange(key: string, rawValue: string): void {
     const n = parseInt(rawValue, 10);
     if (Number.isFinite(n) && n > 0) sessionStore.setMaxSessions(n);
   }
+  if (key.startsWith('voice.')) invalidateVoiceConfig();
 }
 
 @ApiBearerAuth('user-session')

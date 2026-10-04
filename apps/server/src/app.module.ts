@@ -46,6 +46,7 @@ import { MigrationModule } from './modules/migration/migration.module';
 import { AgentSessionsModule } from './modules/agent-sessions/agent-sessions.module';
 import { TerminalsModule } from './modules/terminals/terminals.module';
 import { CliCatalogModule } from './modules/cli-catalog/cli-catalog.module';
+import { VoiceModule } from './modules/voice/voice.module';
 
 @Module({
   imports: [
@@ -104,6 +105,7 @@ import { CliCatalogModule } from './modules/cli-catalog/cli-catalog.module';
     AgentSessionsModule,
     TerminalsModule,
     CliCatalogModule,
+    VoiceModule,
     ResourcesModule,
     ActionsModule,
     CredentialsModule,

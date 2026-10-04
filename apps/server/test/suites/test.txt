@@ -270,6 +270,9 @@ test/unpend-dispatch-grep.test.mjs
 test/use-pr-dispatch-render.test.mjs
 test/user-channel-dispatcher.test.mjs
 test/user-mention-sse-flat-shape-guard.test.mjs
+test/voice-gateway.test.mjs
+test/voice-http.test.mjs
+test/voice-speakable.test.mjs
 test/workflow-focus-selector-guard.test.mjs
 test/workflow-state-cap-guard.test.mjs
 test/workspace-folder-traversal-guard.test.mjs
