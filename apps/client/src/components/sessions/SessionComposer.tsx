@@ -4,6 +4,7 @@ import type { AgentSessionCommand } from '../../types';
 import { applySlashCommand, matchSlashCommands } from './sessionTranscript.logic';
 import { readFileAsBase64 } from '../chat/utils/attachments';
 import { useHandsFreeConversation, type ConversationPhase } from '../../voice/useVoice';
+import { WAKE_IDLE_SLEEP_MS } from '../../voice/wake.logic';
 
 /**
  * Agent Session 프롬프트 입력. Chat 의 ChatMessageInput 과 달리 방/멘션에
@@ -64,8 +65,33 @@ export interface SessionComposerProps {
    * 음성 입력 — 서버에 STT 가 준비돼 있을 때만 준다(없으면 마이크 버튼이 나오지 않는다).
    * 🎙 를 켜면 대화 모드다: 말을 멈출 때마다 그 발화가 글자로 바뀌어 곧바로 전송된다(턴 중이면 큐로).
    * `liveCaptions` 면 말하는 동안 실시간 자막을 보여 준다(엔진을 더 부르므로 무료 엔진에서만).
+   * `wake` 는 이 세션이 operator 일 때 — 이름으로 불려 깨어나면 대화 모드가 스스로 켜진다.
    */
-  voiceInput?: { liveCaptions: boolean } | null;
+  voiceInput?: { liveCaptions: boolean; wake?: VoiceWakeBinding | null } | null;
+}
+
+/**
+ * 이름 부르기(docs/voice-operator.md "이름 부르기 · 잠들기")와 컴포저의 연결. 깨어 있는 동안 대화 모드를
+ * 켜 두고, 사용자가 마이크를 끄거나 오래 조용하면 잠든다.
+ */
+export interface VoiceWakeBinding {
+  /** operator 이름 — 상태 줄에 보인다. */
+  name: string;
+  /** 깨어 있다. true 가 되면 대화 모드를 켜고, false 가 되면(잠듦) 끈다. */
+  awake: boolean;
+  /** 부르는 말에 이어 한 말 — 대화 모드가 켜지면 곧바로 보낸다. 한 번만 준다. */
+  takeFirstPrompt(): string | null;
+  /** 들은 말 → 보낼 글. 부르는 말을 떼고, 다른 operator 를 부르면 그리로 넘긴다. null 이면 보내지 않는다. */
+  transformUtterance(text: string): string | null;
+  /** 사용자가 마이크를 끄거나(`mic-off`) 오래 조용하면(`idle`) — 잠든다. */
+  onSleep(reason: 'mic-off' | 'idle'): void;
+}
+
+/** 깨어 있는 동안의 상태 줄 — 이름 없이 말하면 된다는 것과 언제 잠드는지를 알려 준다. */
+function awakePhaseLabel(phase: ConversationPhase, name: string): string {
+  if (phase === 'listening') return `🟢 ${name} 깨어 있음 — 이름 없이 말하면 됩니다 (${Math.round(WAKE_IDLE_SLEEP_MS / 1000)}초 조용하면 잠듭니다)`;
+  if (phase === 'starting') return `🟢 ${name} 깨어나는 중…`;
+  return CONVERSATION_PHASE_LABEL[phase];
 }
 
 const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
@@ -247,7 +273,17 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
     }
   }, [text, images, disabled, busy, sending, stillReading, onSend, setQueueBoth, revokeImages]);
 
-  const conversation = useHandsFreeConversation(useCallback((spoken: string) => {
+  const wake = voiceInput?.wake ?? null;
+  const awake = !!wake?.awake;
+  const wakeRef = useRef(wake);
+  wakeRef.current = wake;
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+
+  const conversation = useHandsFreeConversation(useCallback((heard: string) => {
+    const binding = wakeRef.current;
+    const spoken = binding?.awake ? binding.transformUtterance(heard) : heard;
+    if (!spoken) return;
     const merged = [text.trim(), spoken].filter(Boolean).join(' ');
     // 보낼 수 없는 순간(다른 전송 중 · 이미지 읽는 중)이면 버리지 않고 입력창에 남긴다.
     if (!stillReading && !sending && !disabled) {
@@ -255,9 +291,45 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
       return;
     }
     setText(merged);
-  }, [text, stillReading, sending, disabled, submit]), { liveCaptions: !!voiceInput?.liveCaptions });
+  }, [text, stillReading, sending, disabled, submit]), { liveCaptions: !!voiceInput?.liveCaptions, keepListeningWhenHidden: awake });
   const showMic = !!voiceInput && conversation.supported;
   const conversing = conversation.phase !== 'off';
+
+  // 깨어나면 대화 모드를 켜고 부르는 말에 이어 한 말을 보낸다. 잠들면 끈다.
+  const { start: startConversation, stop: stopConversation } = conversation;
+  const startedByWakeRef = useRef(false);
+  useEffect(() => {
+    if (!showMic) return;
+    if (awake) {
+      if (!startedByWakeRef.current) {
+        startedByWakeRef.current = true;
+        void startConversation(false);
+      }
+      const first = wakeRef.current?.takeFirstPrompt();
+      if (first) void submitRef.current(first);
+    } else if (startedByWakeRef.current) {
+      startedByWakeRef.current = false;
+      stopConversation();
+    }
+  }, [awake, showMic, startConversation, stopConversation]);
+
+  // 깨어 있는데 대화 모드가 꺼졌다(사용자가 🎙 를 껐거나 마이크를 못 열었다) — 잠든다.
+  const prevPhaseRef = useRef(conversation.phase);
+  useEffect(() => {
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = conversation.phase;
+    if (awake && prev !== 'off' && conversation.phase === 'off') {
+      startedByWakeRef.current = false;
+      wakeRef.current?.onSleep('mic-off');
+    }
+  }, [conversation.phase, awake]);
+
+  // 깨어 있는 동안 아무 말이 없으면 잠든다. 답을 기다리거나 읽는 동안·큐가 남은 동안은 세지 않는다.
+  useEffect(() => {
+    if (!awake || conversation.phase !== 'listening' || busy || sending || queue.length > 0) return;
+    const timer = setTimeout(() => wakeRef.current?.onSleep('idle'), WAKE_IDLE_SLEEP_MS);
+    return () => clearTimeout(timer);
+  }, [awake, conversation.phase, busy, sending, queue.length]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
@@ -372,11 +444,24 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             fontSize: 12, color: tokens.colors.textSecondary,
           }}
         >
-          <span style={{ flexShrink: 0, color: conversation.phase === 'hearing' ? tokens.colors.dangerLight : tokens.colors.textMuted }}>
-            {CONVERSATION_PHASE_LABEL[conversation.phase]}
+          <span style={{ flexShrink: 0, color: conversation.phase === 'hearing' ? tokens.colors.dangerLight : awake ? tokens.colors.successLight : tokens.colors.textMuted }}>
+            {awake && wake ? awakePhaseLabel(conversation.phase, wake.name) : CONVERSATION_PHASE_LABEL[conversation.phase]}
           </span>
           {conversation.caption && (
             <span style={{ flex: 1, minWidth: 0, color: tokens.colors.textPrimary, fontStyle: 'italic' }}>{conversation.caption}</span>
+          )}
+          {awake && (
+            <button
+              type="button"
+              onClick={() => wakeRef.current?.onSleep('mic-off')}
+              title="지금 잠듭니다 — 다시 이름을 부르면 깨어납니다"
+              style={{
+                marginLeft: 'auto', flexShrink: 0, padding: '1px 8px', fontSize: 11.5, borderRadius: 999, cursor: 'pointer',
+                border: `1px solid ${tokens.colors.border}`, background: 'transparent', color: tokens.colors.textSecondary,
+              }}
+            >
+              💤 잠들기
+            </button>
           )}
         </div>
       )}

@@ -79,9 +79,15 @@ function hasTerminalPunctuation(s: string): boolean {
  * 마크다운 답 → 읽을 문장. 줄 단위 구조(제목·목록·인용)는 표지만 떼고 문장으로 이어 붙인다 —
  * 목록 항목에 끝맺음이 없으면 엔진이 숨을 쉬지 않고 한 문장으로 읽으므로 마침표를 보탠다.
  */
+/**
+ * operator 가 "이제 대화를 마무리한다" 고 답에 붙이는 표시(docs/voice-operator.md "잠들기"). 화면이
+ * 그걸 보고 다시 잠든다 — 귀로 들을 말이 아니다. 화면 쪽 정의는 `apps/client/src/voice/wake.logic.ts`.
+ */
+export const SLEEP_MARKER_RE = /\[\[\s*sleep\s*\]\]/gi;
+
 export function toSpeakable(markdown: string, maxChars: number = DEFAULT_MAX_SPEAKABLE_CHARS): string {
   if (!markdown) return '';
-  const withoutCode = stripFencedCode(markdown.replace(/\r\n?/g, '\n'));
+  const withoutCode = stripFencedCode(markdown.replace(/\r\n?/g, '\n').replace(SLEEP_MARKER_RE, ''));
   const sentences: string[] = [];
   for (const raw of withoutCode.split('\n')) {
     if (isTableLine(raw)) continue;

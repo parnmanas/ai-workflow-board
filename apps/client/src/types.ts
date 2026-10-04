@@ -3498,6 +3498,8 @@ export interface VoiceEngineStatus {
 export interface VoiceConfigView {
   stt: VoiceEngineStatus;
   tts: VoiceEngineStatus & { voice: string };
+  /** operator 를 이름으로 부르는 상시 청취를 켤 수 있는가(자체 호스팅 STT 에서만). */
+  wake: { ready: boolean; error: string | null };
   /** admin 에게만 — 키가 있어 Voice lab 이 비교할 수 있는 공급자. */
   lab?: { stt: string[]; tts: string[] };
 }
@@ -3517,15 +3519,21 @@ export interface VoiceAnnouncementEvent {
   created_at: string;
 }
 
-/** Operator — 고정된 Agent Session 하나(서버 `operator-config.ts` 의 `OperatorSession`). */
+/** Operator — 이름 붙은 Agent Session(서버 `operator-config.ts` 의 `OperatorEntry`). */
 export interface VoiceOperator {
+  id: string;
+  /** 부르는 이름 — "헤이 <name>". */
+  name: string;
+  /** 음성 인식이 이름을 적을 수 있는 다른 철자들. */
+  aliases: string[];
   manager_id: string;
   cli: string;
   session_id: string;
   cwd: string;
   title: string;
-  pinned_at: string;
-  pinned_by: string;
+  created_at: string;
+  created_by: string;
+  updated_at: string;
 }
 
 /** 공급자 API 가 알려 준 목소리(Voice lab 의 목소리 고르기). */

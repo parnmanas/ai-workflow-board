@@ -2210,20 +2210,26 @@ export const api = {
   // 서버: apps/server/src/modules/voice. 엔진 키는 서버에만 있고, 화면은 녹음한 바이트를 보내
   // 글자를 받고, 글자를 보내 소리를 받는다.
   getVoiceConfig: () => request<VoiceConfigView>('/voice/config'),
-  /** 발화 하나를 글자로. 녹음 형식(webm/mp4)을 그대로 보낸다. */
-  transcribeVoice: async (audio: Blob): Promise<VoiceTranscript> =>
-    (await fetchOk('/voice/transcribe', { method: 'POST', body: audio, contentType: audio.type || 'application/octet-stream' })).json(),
+  /**
+   * 발화 하나를 글자로. 녹음 형식(webm/mp4/wav)을 그대로 보낸다. `purpose: 'wake'` 는 잠든 operator 를
+   * 부르는 말인지 확인하는 상시 청취다 — 서버가 자체 호스팅 엔진일 때만 받는다.
+   */
+  transcribeVoice: async (audio: Blob, purpose: 'utterance' | 'wake' = 'utterance'): Promise<VoiceTranscript> =>
+    (await fetchOk(`/voice/transcribe${purpose === 'wake' ? '?purpose=wake' : ''}`, { method: 'POST', body: audio, contentType: audio.type || 'application/octet-stream' })).json(),
   /** 화면용 답 → 읽을 조각들(서버의 toSpeakable + splitSpeakable). 읽을 것이 없으면 빈 배열. */
   voiceSpeakable: (text: string) =>
     request<{ chunks: string[] }>('/voice/speakable', { method: 'POST', body: JSON.stringify({ text }) }),
   /** 이미 읽을 문장으로 다듬은 조각 하나를 소리로. */
   synthesizeVoice: async (text: string): Promise<Blob> =>
     (await fetchOk('/voice/speech', { method: 'POST', body: JSON.stringify({ text }), contentType: 'application/json' })).blob(),
-  /** Operator(고정된 Agent Session) — 지정·해제는 admin 만. */
-  getVoiceOperator: () => request<{ operator: VoiceOperator | null }>('/voice/operator'),
-  setVoiceOperator: (input: { manager_id: string; cli: string; session_id: string; cwd?: string; title?: string }) =>
-    request<{ operator: VoiceOperator }>('/voice/operator', { method: 'PUT', body: JSON.stringify(input) }),
-  clearVoiceOperator: () => request<{ operator: null }>('/voice/operator', { method: 'DELETE' }),
+  /** Operators(이름 붙은 Agent Session) — 등록·수정·해제는 admin 만. */
+  listVoiceOperators: () => request<{ operators: VoiceOperator[] }>('/voice/operators'),
+  createVoiceOperator: (input: { name: string; aliases: string[]; manager_id: string; cli: string; session_id: string; cwd?: string; title?: string }) =>
+    request<{ operator: VoiceOperator }>('/voice/operators', { method: 'POST', body: JSON.stringify(input) }),
+  updateVoiceOperator: (id: string, input: { name?: string; aliases?: string[]; title?: string }) =>
+    request<{ operator: VoiceOperator }>(`/voice/operators/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  deleteVoiceOperator: (id: string) =>
+    request<{ operators: VoiceOperator[] }>(`/voice/operators/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /** 음성 알림의 소리 — 받는 사람만, 서버가 처음 요청될 때 합성한다. */
   getVoiceAnnouncementAudio: async (id: string): Promise<Blob> =>
     (await fetchOk(`/voice/announcements/${encodeURIComponent(id)}/audio`)).blob(),

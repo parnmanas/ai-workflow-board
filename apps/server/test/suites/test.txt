@@ -274,6 +274,7 @@ test/voice-announcer.test.mjs
 test/voice-gateway.test.mjs
 test/voice-http.test.mjs
 test/voice-operator-scope.test.mjs
+test/voice-operators.test.mjs
 test/voice-speakable.test.mjs
 test/workflow-focus-selector-guard.test.mjs
 test/workflow-state-cap-guard.test.mjs

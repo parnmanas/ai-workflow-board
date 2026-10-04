@@ -80,6 +80,12 @@ test('splitSpeakable breaks an over-long sentence at commas, then spaces', () =>
   assert.equal(chunks.join(' ').replace(/\s+/g, ' '), long.replace(/\s+/g, ' ').trim());
 });
 
+test("the operator's sleep marker is a signal for the screen, never something to say", () => {
+  assert.equal(toSpeakable('알겠습니다, 필요하면 다시 불러 주세요. [[sleep]]'), '알겠습니다, 필요하면 다시 불러 주세요.');
+  assert.equal(toSpeakable('좋아요.\n\n[[ SLEEP ]]'), '좋아요.');
+  assert.equal(toSpeakable('[[sleep]]'), '', 'a marker alone has nothing to say');
+});
+
 test('splitSpeakable of nothing is nothing', () => {
   assert.deepEqual(splitSpeakable(''), []);
   assert.deepEqual(splitSpeakable('   '), []);

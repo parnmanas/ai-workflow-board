@@ -13,6 +13,7 @@ import {
 } from './voice-config';
 import { STT_PROVIDER_IMPLS, TTS_PROVIDER_IMPLS } from './providers';
 import { VoiceProviderError, type ProviderContext, type SttProvider, type TtsProvider, type VoiceOption } from './providers/types';
+import { operatorNameKey, operatorVocabulary } from './operator-config';
 
 /** 한 번의 합성 요청에 싣는 글자 상한 — 화면은 220자 조각으로 보낸다. lab 의 긴 문장까지 받는다. */
 export const MAX_SPEECH_TEXT_CHARS = 2000;
@@ -37,14 +38,45 @@ export interface VoiceEngineStatus {
 export interface VoiceStatusView {
   stt: VoiceEngineStatus;
   tts: VoiceEngineStatus & { voice: string };
+  /** operator 를 이름으로 부르는 상시 청취를 켤 수 있는가(자체 호스팅 STT 에서만). */
+  wake: { ready: boolean; error: string | null };
   lab?: { stt: string[]; tts: string[] };
 }
+
+/** 발화를 왜 보내는가 — 대화 입력(`utterance`)이거나, 잠든 operator 를 부르는 말인지 확인(`wake`). */
+export type TranscribePurpose = 'utterance' | 'wake';
+
+/**
+ * 상시 청취(웨이크워드 확인)를 받는 STT. 깨어 있지 않은 동안 마이크 근처의 **모든 말**이 엔진으로
+ * 가므로, 비용이 들고 대화가 바깥으로 나가는 클라우드 엔진에서는 받지 않는다.
+ */
+export const WAKE_STT_PROVIDERS: readonly SttProviderId[] = ['local'];
 
 export interface VoiceTranscriptView {
   text: string;
   provider: string;
   model: string;
   latency_ms: number;
+  /** 엔진의 답을 버렸으면 그 이유 — `vocabulary_echo`(용어집을 읊었을 뿐이다). text 는 ''. */
+  ignored?: 'vocabulary_echo';
+}
+
+/**
+ * 짧은 잡음이나 말의 앞부분만 든 구간에 대해 엔진이 **문맥으로 준 용어집을 그대로 읊는** 경우가 있다
+ * (실측: Qwen3-ASR 이 "헤이 자비스" 앞 1.5초에 "자비스, Jarvis." 를 냈다). 용어 둘 이상만으로 된 전사는 그
+ * 메아리로 본다 — 잠든 동안의 상시 청취에서 메아리가 이름으로 읽혀 깨어나지 않게, 대화 중에는 메아리가
+ * 요청으로 가지 않게. 용어 하나("롤프")는 대답일 수 있어 남긴다.
+ */
+export function isVocabularyEcho(text: string, terms: readonly string[]): boolean {
+  const vocabulary = new Set<string>();
+  for (const term of terms) {
+    for (const part of [term, ...term.split(/\s+/)]) {
+      const key = operatorNameKey(part);
+      if (key) vocabulary.add(key);
+    }
+  }
+  const tokens = text.split(/[\s,.!?;:·、。…]+/u).map(operatorNameKey).filter(Boolean);
+  return tokens.length >= 2 && tokens.every((token) => vocabulary.has(token));
 }
 
 function isSttProvider(id: string): id is SttProviderId {
@@ -130,7 +162,14 @@ export class VoiceService {
         }, config.tts.provider),
         voice: config.tts.voice,
       },
+      wake: { ready: false, error: null },
     };
+    try {
+      this.assertWakeAllowed(config);
+      view.wake.ready = view.stt.ready;
+    } catch (err) {
+      view.wake.error = err instanceof VoiceError ? err.message : null;
+    }
     if (includeLab) {
       view.lab = {
         stt: STT_PROVIDERS.filter((id) => !STT_PROVIDER_IMPLS[id].missing(config)),
@@ -140,19 +179,51 @@ export class VoiceService {
     return view;
   }
 
-  /** 발화 오디오 → 글자. `override` 는 Voice lab 이 공급자·모델을 골라 비교할 때만 쓴다. */
-  async transcribe(audio: Buffer, mimeType: string, override?: { provider?: string; model?: string }): Promise<VoiceTranscriptView> {
+  /** operator 이름은 인식을 돕는 덤이다 — 목록을 못 읽어도 전사는 한다(사유는 남긴다). */
+  private async operatorTerms(): Promise<string[]> {
+    try {
+      return await operatorVocabulary(this.dataSource);
+    } catch (err: any) {
+      this.logService.warn('Voice', 'Could not read operator names for the speech vocabulary', { error: err?.message || String(err) });
+      return [];
+    }
+  }
+
+  private assertWakeAllowed(config: VoiceConfig): void {
+    if (!WAKE_STT_PROVIDERS.includes(config.stt.provider as SttProviderId)) {
+      throw new VoiceError(409, 'voice_wake_needs_self_hosted',
+        'Calling an operator by name listens all the time, so it only runs on the self-hosted speech-to-text engine (Admin → Voice → Self-hosted).');
+    }
+  }
+
+  /**
+   * 발화 오디오 → 글자. `override` 는 Voice lab 이 공급자·모델을 골라 비교할 때만 쓴다.
+   * operator 이름은 언제나 용어집에 더한다 — 부르는 이름을 엔진이 알아듣게.
+   */
+  async transcribe(
+    audio: Buffer,
+    mimeType: string,
+    override?: { provider?: string; model?: string },
+    purpose: TranscribePurpose = 'utterance',
+  ): Promise<VoiceTranscriptView> {
     if (!audio?.length) throw new VoiceError(400, 'voice_audio_empty', 'The request carried no audio.');
     const config = await this.config();
+    if (purpose === 'wake') this.assertWakeAllowed(config);
     const providerId = override?.provider || config.stt.provider;
     const provider = this.resolveStt(config, providerId);
     const model = override?.model || config.stt.model || provider.defaultModel;
+    const terms = [...new Set([...config.stt.terms, ...(await this.operatorTerms())])];
     const startedAt = Date.now();
     const text = await this.callUpstream(provider.id, TRANSCRIBE_TIMEOUT_MS, (signal) => provider.transcribe(
-      { audio, mimeType: mimeType || 'application/octet-stream', model, languages: config.stt.languages, terms: config.stt.terms },
+      { audio, mimeType: mimeType || 'application/octet-stream', model, languages: config.stt.languages, terms },
       this.context(config, signal),
     ));
-    return { text: text.trim(), provider: provider.id, model, latency_ms: Date.now() - startedAt };
+    const latency_ms = Date.now() - startedAt;
+    // Voice lab 은 엔진의 날것을 비교하는 곳이라 거르지 않는다.
+    if (!override && isVocabularyEcho(text, terms)) {
+      return { text: '', provider: provider.id, model, latency_ms, ignored: 'vocabulary_echo' };
+    }
+    return { text: text.trim(), provider: provider.id, model, latency_ms };
   }
 
   /** 화면용 답 → 읽을 조각들. 읽을 것이 없으면 빈 배열(호출자는 말하지 않는다). */

@@ -20,7 +20,7 @@ import PageHeader from '../PageHeader';
 import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import SessionComposer from './SessionComposer';
-import type { SessionPrompt } from './SessionComposer';
+import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
@@ -28,7 +28,11 @@ import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voi
 import { speechPlayer } from '../../voice/speechPlayer';
 import { TurnAnswerTracker, shouldSpeakFinishedTurn } from '../../voice/turnAnswer.logic';
 import { sessionTargetKey, setViewingSession } from '../../voice/announcements';
-import { OPERATOR_BRIEF, announceOperatorChanged, isOperatorSession, useVoiceOperator } from '../../voice/operator';
+import { operatorBrief, operatorForSession, useVoiceOperators } from '../../voice/operator';
+import OperatorDialog from '../../voice/OperatorDialog';
+import { playEarcon } from '../../voice/earcon';
+import { isFillerUtterance, matchWake, splitSleepMarker, withWakeNote } from '../../voice/wake.logic';
+import { useWakeState, wakeStore } from '../../voice/wakeState';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   appendLiveEvent,
@@ -402,11 +406,20 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   if (!answerTrackerRef.current) answerTrackerRef.current = new TurnAnswerTracker();
   const speechKeyPrefix = `${managerId}/${cli}/${sessionId}:`;
   const speakingHere = speech.speaking && !!speech.key?.startsWith(speechKeyPrefix);
-  // Operator — 이 세션을 사이트 관리 에이전트로 지정한다(admin). 사이드바 OPERATOR 가 여기를 연다.
+  // Operator — 이 세션에 이름을 붙여 사이트 관리 에이전트로 등록한다(admin). 사이드바 OPERATORS 가
+  // 여기를 열고, "헤이 <이름>" 으로 부르면 여기서 깨어난다(docs/voice-operator.md "이름 부르기 · 잠들기").
   const { hasPermission } = useAuth();
-  const canPinOperator = !!voiceConfig && hasPermission('admin.access');
-  const operator = useVoiceOperator(!!voiceConfig);
-  const isOperator = isOperatorSession(operator, managerId, cli, sessionId);
+  const canManageOperators = !!voiceConfig && hasPermission('admin.access');
+  const operators = useVoiceOperators(!!voiceConfig);
+  const thisOperator = operatorForSession(operators, managerId, cli, sessionId);
+  const [operatorDialogOpen, setOperatorDialogOpen] = useState(false);
+  const wake = useWakeState();
+  const awakeHere = !!thisOperator && wake.mode === 'awake' && wake.operatorId === thisOperator.id;
+  const wakeRefs = useRef({ awake: awakeHere, operator: thisOperator, operators });
+  wakeRefs.current = { awake: awakeHere, operator: thisOperator, operators };
+  // 이 operator 의 화면이 열려 있는 동안 등록한다 — 떠나면 잠든다.
+  const thisOperatorId = thisOperator?.id ?? null;
+  useEffect(() => (thisOperatorId ? wakeStore.attach(thisOperatorId) : undefined), [thisOperatorId]);
   // 다른 화면으로 가면 이 세션의 낭독을 멈춘다 — 무엇을 읽는지 보이지 않는 소리는 소음이다.
   useEffect(() => () => {
     if (speechPlayer.state.key?.startsWith(speechKeyPrefix)) speechPlayer.stop();
@@ -451,12 +464,22 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     if (!matches(data) || !data.event) return;
     setEvents((prev) => appendLiveEvent(prev, data.event));
     // 보고 있는 화면에서만 읽는다. 다른 화면에 있을 때 알리는 것은 음성 알림의 몫이다.
+    // 이름을 불러 깨운 대화는 탭이 숨어 있어도 읽는다 — 켜 둔 단말을 스피커처럼 쓰는 경우다.
     const finished = answerTrackerRef.current?.push(data.event);
+    if (!finished) return;
+    // operator 가 대화를 마무리하면 답 끝에 잠들기 표시를 붙인다 — 다 읽은 뒤에 잠든다.
+    const { text: answer, sleep } = splitSleepMarker(finished.answer);
+    const { awake, operator: op } = wakeRefs.current;
+    const goToSleep = () => {
+      if (!sleep || !awake || !op) return;
+      playEarcon('sleep');
+      wakeStore.sleep(op.id);
+    };
     const prefs = speakPrefsRef.current;
-    if (finished && (prefs.readReplies || lastPromptSpokenRef.current) && prefs.ttsReady && shouldSpeakFinishedTurn(finished)
-      && document.visibilityState === 'visible') {
-      void speechPlayer.speak(finished.answer, `${speechKeyPrefix}${finished.turnId}`);
-    }
+    const speak = prefs.ttsReady && shouldSpeakFinishedTurn({ ...finished, answer })
+      && (awake || ((prefs.readReplies || lastPromptSpokenRef.current) && document.visibilityState === 'visible'));
+    if (speak) void speechPlayer.speak(answer, `${speechKeyPrefix}${finished.turnId}`).then(goToSleep);
+    else goToSleep();
   }, [matches, speechKeyPrefix]));
 
   // 낭독 실패(자동 재생 차단 · 엔진 오류)는 조용히 삼키지 않는다.
@@ -593,12 +616,20 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   // 어댑터가 mode 를 config option 으로도 주면(category 'mode') 그쪽을 쓰고 옛 mode 셀렉트는 숨긴다.
   const showLegacyModeSelect = !!live && live.available_modes.length > 0 && !configOptions.some((o) => o.category === 'mode');
 
+  // 깨어난 뒤 처음 말로 보내는 요청에는 음성 대화 안내 한 줄을 붙인다(깨어날 때마다 한 번).
+  const notedWakeRef = useRef(0);
   const send = useCallback(async (prompt: SessionPrompt) => {
     lastPromptSpokenRef.current = !!prompt.spoken;
+    let text = prompt.text;
+    const { wokeAt } = wakeStore.state;
+    if (prompt.spoken && text && wakeRefs.current.awake && notedWakeRef.current !== wokeAt) {
+      notedWakeRef.current = wokeAt;
+      text = withWakeNote(text);
+    }
     const images = prompt.images.map(({ base64, mime_type }) => ({ base64, mime_type }));
-    const optimisticText = prompt.text || (images.length ? `[${images.length} image(s)]` : '');
+    const optimisticText = text || (images.length ? `[${images.length} image(s)]` : '');
     try {
-      const result = await api.promptHostSession(managerId, cli, sessionId, prompt.text, images);
+      const result = await api.promptHostSession(managerId, cli, sessionId, text, images);
       setLive(result.live);
       setEvents((prev) => appendLiveEvent(prev, {
         id: `local:${result.turn_id}`, seq: 0, turn_id: result.turn_id, type: 'user_prompt', payload: { text: optimisticText }, created_at: new Date().toISOString(),
@@ -612,35 +643,39 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
     }
   }, [managerId, cli, sessionId, showToast]);
 
-  const toggleOperator = useCallback(async () => {
-    try {
-      if (isOperator) {
-        if (!(await confirm({ title: 'Operator 지정을 해제할까요?', message: '세션은 그대로 남고, 사이드바의 OPERATOR 만 사라집니다.', confirmLabel: '해제' }))) return;
-        await api.clearVoiceOperator();
-        announceOperatorChanged();
-        showToast('Operator 지정을 해제했습니다.', 'info');
-        return;
-      }
-      const ok = await confirm({
-        title: '이 세션을 Operator 로 지정할까요?',
-        message: (
-          <span>
-            사이드바의 OPERATOR 가 어디서든 이 세션을 엽니다. 지정과 함께 operator 지침(말로 듣기 좋은 답,
-            되돌리기 어려운 일은 복창 확인 등)을 이 세션의 다음 프롬프트로 보냅니다.
-            {operator ? <><br /><br />지금의 operator 지정은 이 세션으로 바뀝니다.</> : null}
-          </span>
-        ),
-        confirmLabel: '지정하고 지침 보내기',
-      });
-      if (!ok) return;
-      await api.setVoiceOperator({ manager_id: managerId, cli, session_id: sessionId, cwd, title });
-      announceOperatorChanged();
-      await send({ text: OPERATOR_BRIEF, images: [] });
-      showToast('Operator 로 지정했습니다.', 'success');
-    } catch (err: any) {
-      showToast(err?.message || 'Operator 지정에 실패했습니다', 'error');
-    }
-  }, [isOperator, confirm, operator, managerId, cli, sessionId, cwd, title, send, showToast]);
+  const sendBrief = useCallback((name: string) => {
+    void send({ text: operatorBrief(name), images: [] }).catch(() => undefined); // 실패는 send 가 토스트로 알린다
+  }, [send]);
+
+  // 깨어 있는 동안 컴포저의 대화 모드와 잇는다.
+  const wakeBinding = useMemo<VoiceWakeBinding | null>(() => {
+    if (!thisOperator) return null;
+    const id = thisOperator.id;
+    return {
+      name: thisOperator.name,
+      awake: awakeHere,
+      takeFirstPrompt: () => wakeStore.takeFirstPrompt(id),
+      transformUtterance: (heard) => {
+        if (isFillerUtterance(heard)) return null;
+        const match = matchWake(heard, wakeRefs.current.operators);
+        if (!match) return heard;
+        if (match.operator.id === id) {
+          // 깨어 있는데 또 불렀다 — 이름만 떼고 보낸다. 이름만 불렀으면 듣고 있다고 신호음으로 답한다.
+          if (!match.rest) playEarcon('wake');
+          return match.rest || null;
+        }
+        // 다른 operator 를 불렀다 — 그쪽이 깨어난다.
+        playEarcon('wake');
+        wakeStore.wake(match.operator.id, match.rest || null);
+        navigate(sessionPath(`/ws/${wsId}`, match.operator.manager_id, match.operator.cli, match.operator.session_id));
+        return null;
+      },
+      onSleep: () => {
+        playEarcon('sleep');
+        wakeStore.sleep(id);
+      },
+    };
+  }, [thisOperator, awakeHere, navigate, wsId]);
 
   const decide = useCallback(async (requestId: string, optionId: string | null) => {
     setDecidingRequestId(requestId);
@@ -889,18 +924,18 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </select>
         )}
         <div style={{ display: 'flex', gap: 6 }}>
-          {canPinOperator && (
+          {canManageOperators && (
             <Button
-              variant={isOperator ? 'secondary' : 'ghost'}
+              variant={thisOperator ? 'secondary' : 'ghost'}
               size="sm"
-              aria-pressed={isOperator}
-              disabled={!isOperator && busy}
-              onClick={() => void toggleOperator()}
-              title={isOperator
-                ? '이 세션이 사이트 관리 operator 입니다 — 누르면 지정을 해제합니다'
-                : busy ? '턴이 끝난 뒤에 지정할 수 있습니다(지침을 다음 프롬프트로 보냅니다)' : '이 세션을 사이트 관리 operator 로 지정합니다'}
+              aria-pressed={!!thisOperator}
+              disabled={!thisOperator && busy}
+              onClick={() => setOperatorDialogOpen(true)}
+              title={thisOperator
+                ? `이 세션은 operator "${thisOperator.name}" 입니다 — 이름·별칭을 고치거나 해제합니다`
+                : busy ? '턴이 끝난 뒤에 등록할 수 있습니다(지침을 다음 프롬프트로 보냅니다)' : '이 세션에 이름을 붙여 operator 로 등록합니다 — "헤이 <이름>" 으로 부르면 깨어납니다'}
             >
-              {isOperator ? '★ Operator' : '☆ Operator'}
+              {thisOperator ? `★ ${thisOperator.name}` : '☆ Operator'}
             </Button>
           )}
           {ttsReady && (
@@ -990,8 +1025,22 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         commands={commands}
         onSend={send}
         onCancel={() => void cancel()}
-        voiceInput={voiceConfig?.stt.ready ? { liveCaptions: voiceConfig.stt.provider === 'local' } : null}
+        voiceInput={voiceConfig?.stt.ready ? { liveCaptions: voiceConfig.stt.provider === 'local', wake: wakeBinding } : null}
       />
+      {canManageOperators && (
+        <OperatorDialog
+          open={operatorDialogOpen}
+          onClose={() => setOperatorDialogOpen(false)}
+          operator={thisOperator}
+          session={{ manager_id: managerId, cli, session_id: sessionId, cwd, title }}
+          onSaved={(saved, { created, sendBrief: brief }) => {
+            if (brief) sendBrief(saved.name);
+            showToast(created ? `"${saved.name}" 을(를) operator 로 등록했습니다 — "헤이 ${saved.name}" 으로 부르세요.` : 'Operator 를 고쳤습니다.', 'success');
+          }}
+          onRemoved={() => showToast('Operator 등록을 해제했습니다 — 세션은 그대로 남습니다.', 'info')}
+          onSendBrief={sendBrief}
+        />
+      )}
     </>
   );
 }
