@@ -20,6 +20,7 @@ import {
 } from './sidebarRoomsPaging';
 import {
   activeWorkGroupKey,
+  buildTicketsNavItem,
   buildWorkNavGroups,
   type WorkNavGroup,
   type WorkNavGroupKey,
@@ -46,7 +47,6 @@ interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
   wsId: string | null;
-  boards: { id: string; name: string }[];
   rooms: ChatRoomListItem[];
   roomsLoading: boolean;
   containerRef?: React.Ref<HTMLElement>;
@@ -89,13 +89,12 @@ export default function Sidebar({
   isOpen,
   onClose,
   wsId,
-  boards,
   rooms,
   roomsLoading,
   containerRef,
 }: SidebarProps) {
   const { user, logout, hasPermission } = useAuth();
-  const { counts, countsLoaded, markTicketsReadForBoard } = useNotifications();
+  const { counts, countsLoaded, markAllTicketsReadLocal } = useNotifications();
   const { showToast } = useToast();
   const { teams, missions, teamsLoading, missionsLoading } = useWorkNavLists(wsId);
   const navigate = useNavigate();
@@ -115,7 +114,7 @@ export default function Sidebar({
 
   // 사이드바 폴드 상태 — 저장본에서 초기화한다. **접기 지점은 빠짐없이 여기서
   // 복원된다**; 하나라도 빠지면 그 메뉴만 새로고침마다 펼쳐져 돌아온다(실제로
-  // Teams/Orchestrations/Boards 와 호스트 아래 작업 폴더가 그랬다).
+  // Teams/Orchestrations 와 호스트 아래 작업 폴더가 그랬다).
   const [foldInit] = React.useState(loadSidebarFold);
   const [sessionsCollapsed, setSessionsCollapsed] = React.useState(() => foldInit.sessions);
   const [chatsCollapsed, setChatsCollapsed] = React.useState(() => foldInit.chats);
@@ -128,15 +127,14 @@ export default function Sidebar({
   const [hostSessions, setHostSessions] = React.useState<Record<string, { groups: CwdGroup[]; loading: boolean; loaded: boolean }>>({});
   const loadAttemptedRef = React.useRef<Set<string>>(new Set());
 
-  // 워크스페이스 전체 "모두 읽음" (티켓 628f4b39) — 보드 스코프 버전은
-  // "보드"가 명확한 Board 페이지 자체(Board.tsx)에 있고, 여기는 "모든
-  // 보드를 한 번에"가 의미를 갖는 유일한 곳이다.
+  // 워크스페이스 전체 "모두 읽음" (티켓 628f4b39) — Tickets 페이지의 배너와 같은
+  // 동작(서버 upsert 먼저, 그다음 로컬 배지).
   const handleMarkAllTicketsRead = async () => {
     setMarkingAllTicketsRead(true);
     try {
       await api.markAllTicketsRead();
-      markTicketsReadForBoard();
-      showToast('모든 보드의 읽지 않은 코멘트를 읽음으로 표시했습니다', 'success');
+      markAllTicketsReadLocal();
+      showToast('읽지 않은 티켓 코멘트를 모두 읽음으로 표시했습니다', 'success');
     } catch (err: any) {
       showToast(err?.message || '읽음 처리에 실패했습니다', 'error');
     } finally {
@@ -182,8 +180,9 @@ export default function Sidebar({
 
   const workspaceSections: Array<{ title: string; items: NavItem[] }> = [
     {
-      // Teams / Orchestrations / Boards 는 목록을 서브메뉴로 펴는 계층형 그룹이라
-      // 평평한 items 가 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
+      // Tickets(워크스페이스 전체 티켓 풀)는 맨 위 평평한 행으로, Teams /
+      // Orchestrations 는 목록을 서브메뉴로 펴는 계층형 그룹이라 평평한 items 가
+      // 아니라 workGroups 로 따로 그린다(티켓 03ca8b5b).
       title: 'Work',
       items: [
         // P4c-4: AI Agents 표면 제거 (Agent 테이블 삭제) — 실행 주체는
@@ -211,13 +210,9 @@ export default function Sidebar({
     {
       title: 'Knowledge',
       items: [
+        // 저장소(repository) — 티켓/미션/QA 가 가리키는 프로젝트와 Host 별 메인 클론 폴더.
+        { key: 'projects', path: `${workspaceBase}/projects`, label: 'Projects', icon: 'P' },
         { key: 'resources', path: `${workspaceBase}/resources`, label: 'Resources', icon: 'R' },
-        {
-          key: 'prompt-templates',
-          path: `${workspaceBase}/prompt-templates`,
-          label: 'Prompt Templates',
-          icon: 'P',
-        },
         {
           key: 'ontology-graph',
           path: `${workspaceBase}/ontology-graph`,
@@ -247,7 +242,6 @@ export default function Sidebar({
           ? [{ key: 'workspace-settings', path: `${workspaceBase}/settings/workspace`, label: 'Workspace', icon: 'W' }]
           : []),
         { key: 'members', path: `${workspaceBase}/settings/members`, label: 'Members', icon: 'M' },
-        { key: 'roles', path: `${workspaceBase}/settings/roles`, label: 'Roles', icon: 'R' },
         { key: 'credentials', path: `${workspaceBase}/settings/credentials`, label: 'Credentials', icon: 'C' },
         { key: 'channels', path: `${workspaceBase}/settings/channels`, label: 'Channels', icon: 'N' },
         { key: 'api-keys', path: `${workspaceBase}/settings/api-keys`, label: 'API Keys', icon: 'K' },
@@ -574,17 +568,19 @@ export default function Sidebar({
     );
   };
 
-  // WORK 계층 — Teams / Orchestrations / Boards 를 그 순서대로, 각자의 목록을
-  // 서브메뉴로 펴서 보여준다(티켓 03ca8b5b).
+  // WORK — 맨 위 Tickets 한 줄(워크스페이스 전체 미읽음 배지), 그다음 Teams /
+  // Orchestrations 를 그 순서대로 각자의 목록을 서브메뉴로 펴서 보여준다(티켓 03ca8b5b).
+  const ticketsNav = buildTicketsNavItem({
+    workspaceBase,
+    pathname: location.pathname,
+    ticketUnreadTotal: counts.tickets.total,
+  });
   const workGroups = buildWorkNavGroups({
     workspaceBase,
     pathname: location.pathname,
     selectedTeamId: searchParams.get('team'),
     teams,
     missions,
-    boards,
-    boardUnread: counts.tickets.perBoard,
-    ticketUnreadTotal: counts.tickets.total,
     teamsLoading,
     missionsLoading,
   });
@@ -594,14 +590,14 @@ export default function Sidebar({
   // 그룹은 그대로 둔다.
   //
   // **최초 렌더에서는 펴지 않는다.** 예전에는 마운트에서도 돌아서, 저장된 폴드를
-  // 복원해도 "지금 보고 있는 화면이 속한 그룹" 하나는 매번 다시 펼쳐졌다 — Boards 를
-  // 접어 둔 채 보드에서 새로고침하면 Boards 가 도로 펴졌다. 새로고침은 "이동" 이
+  // 복원해도 "지금 보고 있는 화면이 속한 그룹" 하나는 매번 다시 펼쳐졌다 — 그룹을
+  // 접어 둔 채 그 화면에서 새로고침하면 도로 펴졌다. 새로고침은 "이동" 이
   // 아니라 **같은 자리로 돌아오는 것**이므로, 저장된 상태가 이긴다.
   const activeGroupKey = activeWorkGroupKey(workGroups);
   // "이동했는가" 의 기준은 **경로**다. 효과 실행 횟수로 세면 안 된다 — `activeGroupKey`
-  // 는 팀·미션·보드 목록이 늦게 도착하면서 mount 이후에 null → 'boards' 로 채워지므로,
+  // 는 팀·미션 목록이 늦게 도착하면서 mount 이후에 null → 'teams' 로 채워지므로,
   // "첫 실행만 건너뛰기" 는 엉뚱한 실행을 소비하고 정작 값이 생겼을 때 펴 버린다
-  // (실측: Boards 를 접어 둔 채 /boards 에서 새로고침하면 도로 펴졌다).
+  // (실측: 그룹을 접어 둔 채 그 화면에서 새로고침하면 도로 펴졌다).
   const mountedPathRef = React.useRef(location.pathname);
   React.useEffect(() => {
     if (!activeGroupKey) return;
@@ -812,7 +808,7 @@ export default function Sidebar({
         style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
       >
         {/* OPERATORS — HOSTS 와 같은 높이의 메뉴 줄이고, 등록된 operator 들이 그 아래 한 단계 들여 나온다
-            (WORK 의 Teams/Boards 목록과 같은 모양). 섹션 머리(SESSIONS · CHAT …)로 두면 그 아래 오는
+            (WORK 의 Teams/Orchestrations 목록과 같은 모양). 섹션 머리(SESSIONS · CHAT …)로 두면 그 아래 오는
             HOSTS 줄까지 operator 묶음처럼 보인다. 줄을 누르면 목록을 펴고 접는다 — operator 를 모아 보는
             화면은 따로 없다(관리는 Admin → Voice). */}
         {operators.length > 0 && wsId && (() => {
@@ -1276,6 +1272,7 @@ export default function Sidebar({
                   )}
                 </div>
 
+                {!isCollapsed && section.title === 'Work' && workspaceBase && renderNavItem(ticketsNav)}
                 {!isCollapsed && section.title === 'Work' && workGroups.map(renderWorkGroup)}
                 {!isCollapsed && section.items.map((item) => renderNavItem(item))}
               </section>

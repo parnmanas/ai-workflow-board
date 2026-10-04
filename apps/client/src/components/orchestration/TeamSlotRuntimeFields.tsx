@@ -11,6 +11,7 @@ import type {
 } from '../../types';
 import { Button, Input, Select } from '../common';
 import DirectoryPicker from '../admin/DirectoryPicker';
+import ProjectFolderHelper from '../runtime/ProjectFolderHelper';
 import {
   EMPTY_RUNTIME_SELECTION,
   buildRuntimeConfig,
@@ -265,6 +266,22 @@ export default function TeamSlotRuntimeFields({
           )}
         </div>
       )}
+      {/* "Project folder on this host" (docs/tickets.md → Main clone folder per
+          host): members on different hosts each get the project's checkout on
+          THEIR machine instead of guessing the path. Host id + legacy alias are
+          both matched, like `host` above. */}
+      <ProjectFolderHelper
+        workspaceId={workspaceId}
+        hostIds={[value.manager_agent_id, host?.manager_agent_id, host?.legacy_agent_id]}
+        currentDir={value.working_dir}
+        disabled={disabled}
+        onPick={(path) => {
+          // A folder that is not among this host's known folders can only be
+          // shown by the free-text input — switch to it so the pick is visible.
+          setCustomFolder(!folderOptions.some((f) => f.path === path));
+          patch({ working_dir: path });
+        }}
+      />
       {folderMates.length > 0 && (
         <Hint tone="accent">
           This folder is also used by <strong>{folderMates.join(', ')}</strong> on the same host. With scope

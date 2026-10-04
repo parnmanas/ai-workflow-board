@@ -8,7 +8,9 @@ import { relativeTime } from '../../utils/time';
 import { QaPhaseRowsEditor, parseQaPhasesValue, qaPhasesError, formatDuration } from '../QaPhasesEditor';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
-import { canOpenTicketOnBoard, ticketBoardPath } from '../../utils/ticketBoardLink';
+import { canOpenTicket, ticketPath } from '../../utils/ticketPath';
+import OnFailureTicketTargetFields from './OnFailureTicketTargetFields';
+import { onFailureTicketFromForm, onFailureTicketToForm, type OnFailureTicketForm } from './onFailureTicket.logic';
 import {
   WorkspaceFolderOptions,
   initWorkspaceFolderState,
@@ -39,7 +41,7 @@ function statusVariant(s: string) {
 }
 
 /**
- * Board QA panel — isomorphic to the Actions panel (ActionManager). Lists QA
+ * QA panel — isomorphic to the Actions panel (ActionManager). Lists QA
  * scenarios, runs them, and visualizes each scenario as an ordered step flow
  * with per-step pass/fail badges + screenshot thumbnails, plus run history.
  */
@@ -711,8 +713,7 @@ function ScenarioDetail({ scenario, workspaceId, agentName, onBack, onRun, runni
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ src: string; kind: 'image' | 'video' } | null>(null);
 
-  // Definition-level override. A Board execution context can still contribute
-  // phases on the server, but reusable scenarios no longer own a Board.
+  // Phases are defined on the scenario only (null = legacy single timeout).
   const resolvedPhases = parseQaPhasesValue(scenario.qa_phases);
 
   const loadRuns = useCallback(async () => {
@@ -852,7 +853,7 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
   );
   const runLevelArtifactIds = (run.artifact_resource_ids ?? []).filter((id) => !stepArtifactIds.has(id));
   const ticketRef = run.auto_ticket_id
-    ? { id: run.auto_ticket_id, board_id: run.board_id, workspace_id: run.workspace_id }
+    ? { id: run.auto_ticket_id, workspace_id: run.workspace_id }
     : null;
 
   return (
@@ -885,9 +886,9 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
           </span>
         )}
         {ticketRef && (
-          canOpenTicketOnBoard(ticketRef) ? (
+          canOpenTicket(ticketRef) ? (
             <a
-              href={ticketBoardPath(ticketRef)}
+              href={ticketPath(ticketRef.workspace_id, ticketRef.id)}
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
               title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
             >
@@ -896,9 +897,9 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
           ) : (
             <span
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="이 티켓이 속한 보드를 찾을 수 없어 이동할 수 없습니다"
+              title="이 티켓의 워크스페이스를 알 수 없어 이동할 수 없습니다"
             >
-              생성된 티켓 #{ticketRef.id.slice(0, 8)} (보드 없음)
+              생성된 티켓 #{ticketRef.id.slice(0, 8)}
             </span>
           )
         )}
@@ -936,7 +937,7 @@ function RunDetail({ run, phases, onPreview }: { run: QaRun; phases: QaPhasesCon
 /**
  * Phase timeline for a QA run (ticket 90cc22f7). Renders run.phase_history: one
  * row per phase the run entered, with entered→left, elapsed, and a progress bar
- * vs that phase's timeout (resolved from the scenario ?? board qa_phases config).
+ * vs that phase's timeout (from the scenario's qa_phases config).
  * The active phase of an in-flight run shows a live elapsed-vs-timeout gauge that
  * turns amber as it nears the limit and red once over — the same threshold the
  * reaper uses to error-close a hung phase. If the reaper error-closed the run on a
@@ -1146,15 +1147,10 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
   const patchWf = (patch: Partial<WorkspaceFolderFormState>) => setWf((prev) => ({ ...prev, ...patch }));
 
   // On-failure auto-ticket policy (실패 시 → 티켓 생성).
+  // The ticket joins the workspace ticket pool (status / tags / project).
   const oft = scenario?.on_failure_ticket ?? null;
-  const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
-  const [oftPriority, setOftPriority] = useState<QaOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
-  const [oftRuntime, setOftRuntime] = useState<Record<string, any> | null>(oft?.assignee_runtime ?? null);
-  const [oftColumnId, setOftColumnId] = useState(oft?.column_id ?? '');
-  const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
-  const [oftDedupe, setOftDedupe] = useState<QaOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
-  const [oftBoardId, setOftBoardId] = useState(oft?.board_id ?? '');
-  const [oftLabels, setOftLabels] = useState((oft?.labels ?? []).join(', '));
+  const [oftForm, setOftForm] = useState<OnFailureTicketForm>(() => onFailureTicketToForm(oft));
+  const patchOft = (patch: Partial<OnFailureTicketForm>) => setOftForm((prev) => ({ ...prev, ...patch }));
   // QA → fix → QA closed loop (ticket 467dbc7a).
   const [oftRerunOnFix, setOftRerunOnFix] = useState(!!oft?.rerun_on_fix);
   const [oftMaxRerun, setOftMaxRerun] = useState(String(oft?.max_rerun_attempts ?? 3));
@@ -1163,22 +1159,11 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
   // the fix before re-running, instead of the fixed rerun_delay_seconds.
   const [oftDeploymentGate, setOftDeploymentGate] = useState(!!oft?.deployment_gate);
 
-  // Per-scenario QA phases override (ticket 90cc22f7). Off = inherit the board's
-  // qa_phases (or legacy single-timeout). On = these phases win for this scenario.
+  // Per-scenario QA phases (ticket 90cc22f7). Off = no phase model (legacy
+  // single-timeout run). On = the run moves through these phases.
   const initialPhases = parseQaPhasesValue(scenario?.qa_phases);
-  const [phasesOverride, setPhasesOverride] = useState(!!initialPhases);
+  const [phasesEnabled, setPhasesEnabled] = useState(!!initialPhases);
   const [qaPhases, setQaPhases] = useState<QaPhase[]>(initialPhases?.phases ?? []);
-  // Board default for the inherit preview. Fetched lazily; null = none/unknown.
-  const [boardPhases, setBoardPhases] = useState<QaPhase[] | null>(null);
-  useEffect(() => {
-    const bid = scenario?.on_failure_ticket?.board_id ?? null;
-    if (!bid) { setBoardPhases(null); return; }
-    let cancelled = false;
-    api.getBoard(bid)
-      .then((b) => { if (!cancelled) setBoardPhases(parseQaPhasesValue((b as any)?.qa_phases)?.phases ?? null); })
-      .catch(() => { if (!cancelled) setBoardPhases(null); });
-    return () => { cancelled = true; };
-  }, [scenario?.on_failure_ticket?.board_id]);
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('Name is required', 'error'); return; }
@@ -1189,16 +1174,10 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
     const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
     // Build the on-failure policy. Disabled → send an explicit { enabled:false }
     // so an existing policy is turned off (rather than left untouched).
-    const onFailureTicket: QaOnFailureTicketConfig = oftEnabled
+    const baseOft = onFailureTicketFromForm(oftForm, oft);
+    const onFailureTicket = (oftForm.enabled
       ? {
-          enabled: true,
-          priority: oftPriority,
-          dedupe: oftDedupe,
-          ...(oftRuntime ? { assignee_runtime: oftRuntime } : {}),
-          ...(oftColumnId.trim() ? { column_id: oftColumnId.trim() } : {}),
-          ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
-          ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
-          ...(oftLabels.trim() ? { labels: oftLabels.split(',').map((l) => l.trim()).filter(Boolean) } : {}),
+          ...baseOft,
           rerun_on_fix: oftRerunOnFix,
           ...(oftRerunOnFix ? {
             max_rerun_attempts: Math.max(0, parseInt(oftMaxRerun, 10) || 0),
@@ -1206,12 +1185,12 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
             deployment_gate: oftDeploymentGate,
           } : {}),
         }
-      : { enabled: false };
+      : baseOft) as QaOnFailureTicketConfig;
     const wfPayload = buildWorkspaceFolderPayload(wf);
-    // QA phases override: off OR empty → null (inherit board / legacy); on with
-    // rows → validate against the WRITE contract before sending.
+    // QA phases: off OR empty → null (legacy single timeout); on with rows →
+    // validate against the WRITE contract before sending.
     let qaPhasesPayload: QaPhasesConfig | null = null;
-    if (phasesOverride && qaPhases.length > 0) {
+    if (phasesEnabled && qaPhases.length > 0) {
       const phaseErr = qaPhasesError(qaPhases);
       if (phaseErr) { showToast(phaseErr, 'error'); return; }
       qaPhasesPayload = { phases: qaPhases };
@@ -1309,57 +1288,28 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
         {/* 작업폴더 옵션 (workspace_folder / repo_ref / checkout_mode / build_mode) */}
         <WorkspaceFolderOptions kind="qa" state={wf} onChange={patchWf} workspaceId={workspaceId} />
 
-        {/* QA phases override (ticket 90cc22f7) */}
+        {/* QA phases (ticket 90cc22f7) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
             <input
               type="checkbox"
-              checked={phasesOverride}
-              onChange={(e) => {
-                setPhasesOverride(e.target.checked);
-                // Seed the editor from the board default when first enabling an
-                // override so the operator edits a copy rather than an empty list.
-                if (e.target.checked && qaPhases.length === 0 && boardPhases?.length) {
-                  setQaPhases(boardPhases.map((p) => ({ ...p })));
-                }
-              }}
+              checked={phasesEnabled}
+              onChange={(e) => setPhasesEnabled(e.target.checked)}
             />
-            QA phases 시나리오 override
+            QA phases 사용
           </label>
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
-            {phasesOverride
-              ? '이 시나리오 전용 phase 정의입니다 — board 기본값을 덮어씁니다.'
-              : 'board 기본값을 상속합니다. 체크하면 이 시나리오만의 phase 를 정의할 수 있습니다.'}
+            {phasesEnabled
+              ? 'run 이 아래 phase 순서대로 진행되고, phase 마다 자기 timeout 으로 감시됩니다.'
+              : 'phase 없이 단일 timeout(legacy) 으로 실행합니다. 체크하면 이 시나리오의 phase 를 정의할 수 있습니다.'}
           </div>
 
-          {/* board 기본값 미리보기 (inherit 상태일 때) */}
-          {!phasesOverride && (
-            <div style={{ fontSize: 12, color: tokens.colors.textSecondary, margin: '8px 0 0 24px' }}>
-              {boardPhases && boardPhases.length > 0 ? (
-                <>
-                  <span style={{ color: tokens.colors.textMuted }}>상속되는 board phases: </span>
-                  {boardPhases.map((p, i) => (
-                    <span key={p.id}>
-                      {i > 0 && ' → '}
-                      <span style={{ fontWeight: 600 }}>{p.label || p.id}</span>
-                      <span style={{ color: tokens.colors.textMuted }}> ({formatDuration(p.timeout_sec)})</span>
-                    </span>
-                  ))}
-                </>
-              ) : (
-                <span style={{ color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-                  board 에 phase 정의 없음 → 단일 timeout(legacy) 사용.
-                </span>
-              )}
-            </div>
-          )}
-
-          {phasesOverride && (
+          {phasesEnabled && (
             <div style={{ marginTop: 10, paddingLeft: 24 }}>
               <QaPhaseRowsEditor phases={qaPhases} onChange={setQaPhases} />
               {qaPhases.length === 0 && (
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
-                  phase 가 없으면 override 가 비워져 저장 시 board 기본값을 상속합니다.
+                  phase 가 없으면 저장 시 비워져 단일 timeout(legacy) 으로 실행됩니다.
                 </div>
               )}
               {qaPhases.length > 0 && qaPhasesError(qaPhases) && (
@@ -1374,48 +1324,23 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
         {/* 실패 시 → 티켓 생성 (on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-            <input type="checkbox" checked={oftEnabled} onChange={(e) => setOftEnabled(e.target.checked)} />
+            <input type="checkbox" checked={oftForm.enabled} onChange={(e) => patchOft({ enabled: e.target.checked })} />
             실패 시 → 수정 티켓 자동 생성
           </label>
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
             run 이 failed/error 로 끝나면 실패 증거(스텝 로그 + 스크린샷 링크)를 담은 수정 티켓을 자동 생성합니다.
           </div>
-          {oftEnabled && (
+          {oftForm.enabled && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10, paddingLeft: 24 }}>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <div style={{ flex: 1 }}>
-                  <Select
-                    label="Priority"
-                    value={oftPriority}
-                    options={[
-                      { value: 'low', label: 'low' },
-                      { value: 'medium', label: 'medium' },
-                      { value: 'high', label: 'high' },
-                      { value: 'critical', label: 'critical' },
-                    ]}
-                    onChange={(e) => setOftPriority((e.target as HTMLSelectElement).value as QaOnFailureTicketConfig['priority'])}
-                  />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <Select
-                    label="중복 방지 (dedupe)"
-                    value={oftDedupe}
-                    options={[
-                      { value: 'per_run', label: 'per_run (run당 1개)' },
-                      { value: 'per_open_ticket', label: 'per_open_ticket (열린 티켓에 코멘트)' },
-                    ]}
-                    onChange={(e) => setOftDedupe((e.target as HTMLSelectElement).value as QaOnFailureTicketConfig['dedupe'])}
-                  />
-                </div>
-              </div>
-              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 현재 타깃 설정 사용)</div>
-              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftRuntime} onResolved={setOftRuntime} />
-              {oftRuntime && <div style={{ fontSize: 12 }}>{oftRuntime.label || oftRuntime.cli} <button type="button" onClick={() => setOftRuntime(null)}>초기화</button></div>}
-
-              <Input label="컬럼 ID (권장, 이름 변경에 안전)" value={oftColumnId} onChange={(e) => setOftColumnId((e.target as HTMLInputElement).value)} />
-              <Input label="컬럼 이름 (호환용, 비우면 첫 active 컬럼)" value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
-              <Input label="Board ID (비우면 run/시나리오 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />
-              <Input label="Labels (comma — 비우면 qa-failure, auto)" value={oftLabels} onChange={(e) => setOftLabels((e.target as HTMLInputElement).value)} />
+              <OnFailureTicketTargetFields
+                workspaceId={workspaceId}
+                form={oftForm}
+                onChange={patchOft}
+                defaultTagsHint="비우면 qa-failure, auto 태그로 생성됩니다."
+              />
+              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)</div>
+              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
+              {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>초기화</button></div>}
 
               {/* QA → fix → QA 닫힌 루프 (재실행) */}
               <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 10, marginTop: 2 }}>
@@ -1424,7 +1349,7 @@ function ScenarioEditor({ scenario, workspaceId, agents, onClose, onSaved }: Sce
                   수정 티켓 Done 시 → 시나리오 자동 재실행
                 </label>
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
-                  자동 생성된 수정 티켓이 terminal 컬럼에 들어가면 서버가 같은 시나리오를 결정적으로 재실행합니다.
+                  자동 생성된 수정 티켓이 Done 이 되면 서버가 같은 시나리오를 결정적으로 재실행합니다.
                   pass 면 종료(새 티켓 없음), 재실패면 새 수정 티켓 + 세대 카운터 증가, max 도달 시 중단 코멘트.
                   {' '}⚠️ QA 는 <b>돌고 있는 서버</b>를 검증합니다 — main→prod auto-deploy 지연이 있으면 재실행 지연(초)을 배포 시간만큼 주세요.
                 </div>

@@ -1,10 +1,9 @@
 // 실브라우저(jsdom) 스모크: 아티팩트 → 실제 화면 이동 시 Artifact 패널이 닫힌다.
 //
-// 아티팩트에서 "보드에서 열기"(TicketArtifact) 같은 링크를 누르면 목적지가 그
+// 아티팩트에서 "티켓 열기"(TicketArtifact) 같은 링크를 누르면 목적지가 그
 // 아티팩트를 대체하므로 패널은 접혀야 한다 — 열린 채로 두면 방금 떠나온 내용이
-// 본문을 덮은 채 남는다. 두 컨테이너(Ticket/Board)는 같은 규약을 따르므로 각각
-// 실마운트해 (a) 실제로 navigate 하고 (b) 패널이 닫히는지 함께 고정한다.
-// (P4c-4: Agent 컨테이너 삭제 — Agent 표면 없음.)
+// 본문을 덮은 채 남는다. 컨테이너를 실마운트해 (a) 실제로 navigate 하고 (b) 패널이
+// 닫히는지 함께 고정한다. (P4c-4: Agent 컨테이너 삭제, board-less: Board 컨테이너 삭제.)
 //
 // 실행:  node --import tsx --test apps/client/test/smoke-artifact-close-on-navigate.test.mjs
 import test from 'node:test';
@@ -16,7 +15,6 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ArtifactPanelProvider, useArtifactPanel } from '../src/contexts/ArtifactPanelContext.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
 import TicketArtifact from '../src/components/TicketArtifact.tsx';
-import BoardArtifact from '../src/components/BoardArtifact.tsx';
 import { api } from '../src/api.ts';
 
 const h = React.createElement;
@@ -78,64 +76,33 @@ function clickButton(view, label) {
   return btn;
 }
 
-test('TicketArtifact "보드에서 열기" — 보드로 이동하고 패널이 닫힌다', async () => {
+test('TicketArtifact "티켓 열기" — Tickets 페이지의 그 티켓으로 이동하고 패널이 닫힌다', async () => {
   const { dom, uninstall } = setupEnv();
   const orig = api.getTicket;
+  const origHosts = api.listTemplateHosts;
   api.getTicket = async () => ({
-    id: 't1', title: '샘플 티켓', board_id: 'b1', workspace_id: 'w1', comments: [],
+    id: 't1', title: '샘플 티켓', workspace_id: 'w1', status: 'todo', tags: [], comments: [],
   });
+  api.listTemplateHosts = async () => [];
   try {
     const view = renderArtifact(h(TicketArtifact, { ticketId: 't1' }), '샘플 티켓');
     await flush();
     assert.match(view.container.textContent, /OPEN/, '초기엔 패널이 열려 있다');
 
-    await act(async () => { clickButton(view, '보드에서 열기'); });
+    await act(async () => { clickButton(view, '티켓 열기'); });
     await flush();
 
     assert.match(
       view.container.querySelector('[data-testid="loc"]').textContent,
-      /^\/ws\/w1\/boards\/b1\?ticket=t1$/,
-      '보드 딥링크로 이동한다',
+      /^\/ws\/w1\/tickets\?ticket=t1$/,
+      'Tickets 페이지 딥링크로 이동한다',
     );
     assert.match(view.container.textContent, /CLOSED/, '이동 후 패널이 닫힌다');
     view.unmount();
   } finally {
     api.getTicket = orig;
+    api.listTemplateHosts = origHosts;
     uninstall();
     dom.cleanup();
   }
 });
-
-test('BoardArtifact 티켓 링크 — 그 티켓으로 이동하고 패널이 닫힌다', async () => {
-  const { dom, uninstall } = setupEnv();
-  const orig = api.getBoard;
-  api.getBoard = async () => ({
-    id: 'b1',
-    name: '샘플 보드',
-    workspace_id: 'w1',
-    columns: [
-      { id: 'c1', name: 'Todo', tickets: [{ id: 't9', title: '보드 안 티켓', comments: [] }] },
-    ],
-  });
-  try {
-    const view = renderArtifact(h(BoardArtifact, { boardId: 'b1' }), '샘플 보드');
-    await flush();
-    assert.match(view.container.textContent, /OPEN/);
-
-    await act(async () => { clickButton(view, '보드 안 티켓'); });
-    await flush();
-
-    assert.match(
-      view.container.querySelector('[data-testid="loc"]').textContent,
-      /^\/ws\/w1\/boards\/b1\?ticket=t9$/,
-      '해당 티켓 딥링크로 이동한다',
-    );
-    assert.match(view.container.textContent, /CLOSED/, '이동 후 패널이 닫힌다');
-    view.unmount();
-  } finally {
-    api.getBoard = orig;
-    uninstall();
-    dom.cleanup();
-  }
-});
-

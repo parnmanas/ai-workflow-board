@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../../api';
-import type { OntologyGraphProgressEvent, OntologyGraphSnapshotResponse, OntologyGraphStatusResponse, Resource } from '../../types';
+import type { OntologyGraphProgressEvent, OntologyGraphSnapshotResponse, OntologyGraphStatusResponse } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { tokens } from '../../tokens';
@@ -9,6 +9,7 @@ import PageHeader from '../PageHeader';
 import { Button, EmptyState, Input, Select } from '../common';
 import { freshnessBadge, type FreshnessTone } from './freshness';
 import OntologyGraphCanvas from './OntologyGraphCanvas';
+import { useProjects } from '../../projects/useProjects';
 
 // tokens.colors 조합만 사용(hex 리터럴 금지) — 아래 4개 쌍(success/danger/
 // warning/info Light 변형 on surface)은 contrast.test.mjs가 이미
@@ -26,14 +27,18 @@ const POLL_MS = 3000;
 /**
  * Ontology Graph UI 셸(ticket d22b83b4, DESIGN.md 축 5) — 라우트/사이드바
  * 진입점. 캔버스 렌더러는 별도 게이트 티켓(32973924)의 몫이라 여기서는
- * repo+folder 선택 → graph_status 프로비저닝 → 프레시니스 배지만 다룬다.
+ * project+folder 선택 → graph_status 프로비저닝 → 프레시니스 배지만 다룬다.
+ *
+ * 저장소는 Project 다(docs/tickets.md). 프로젝트는 옛 repository Resource 와 같은
+ * id 로 이관됐고 그래프도 그 id 로 키잉돼 있으므로, 상태/로깅 API 의 `resourceId`
+ * 자리에 project.id 를 그대로 넘긴다.
  */
 export default function OntologyGraphPage() {
   const { wsId = '' } = useParams<{ wsId: string }>();
   const { showToast } = useToast();
 
-  const [repos, setRepos] = useState<Resource[]>([]);
-  const [resourceId, setResourceId] = useState('');
+  const { projects } = useProjects(wsId);
+  const [projectId, setProjectId] = useState('');
   const [folderPath, setFolderPath] = useState('');
   const [statusResp, setStatusResp] = useState<OntologyGraphStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -42,22 +47,17 @@ export default function OntologyGraphPage() {
   const [graphError, setGraphError] = useState('');
   const [graphLoading, setGraphLoading] = useState(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 같은 (resource_id, folder_path) 선택에 대해 재방문 로그를 중복 기록하지
+  // 같은 (project id, folder_path) 선택에 대해 재방문 로그를 중복 기록하지
   // 않기 위한 마지막 로깅 키 — 폴링 tick마다가 아니라 "사람이 다른
   // repo/folder를 골랐을 때"만 1회 기록되게 한다.
   const loggedViewKey = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!wsId) return;
-    api.listResources(wsId, 'repository').then(setRepos).catch(() => setRepos([]));
-  }, [wsId]);
-
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
-      if (!wsId || !resourceId) return;
+      if (!wsId || !projectId) return;
       if (!opts?.silent) setLoading(true);
       try {
-        const resp = await api.getOntologyGraphStatus(wsId, { resourceId, folderPath });
+        const resp = await api.getOntologyGraphStatus(wsId, { resourceId: projectId, folderPath });
         setStatusResp(resp);
       } catch (e: any) {
         if (!opts?.silent) showToast(e?.message || 'Failed to load graph status', 'error');
@@ -65,29 +65,29 @@ export default function OntologyGraphPage() {
         if (!opts?.silent) setLoading(false);
       }
     },
-    [wsId, resourceId, folderPath, showToast],
+    [wsId, projectId, folderPath, showToast],
   );
 
-  // 선택이 바뀔 때마다 상태를 다시 불러온다 — 최초 (resource_id, folder_path)
+  // 선택이 바뀔 때마다 상태를 다시 불러온다 — 최초 (project id, folder_path)
   // 참조라면 이 호출 자체가 자동 프로비저닝+빌드 킥오프다(resolveOrProvision,
   // graph_status MCP 툴과 동일 계약).
   useEffect(() => {
-    if (!resourceId) { setStatusResp(null); return; }
+    if (!projectId) { setStatusResp(null); return; }
     setStatusResp(null);
     setSnapshot(null);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, resourceId, folderPath]);
+  }, [wsId, projectId, folderPath]);
 
   // 휴먼 그래프뷰 재방문 텔레메트리(Done-when) — 폴링이 아니라 실제로 다른
   // repo/folder를 선택했을 때만 1회 기록.
   useEffect(() => {
-    if (!wsId || !resourceId) return;
-    const key = `${resourceId}::${folderPath}`;
+    if (!wsId || !projectId) return;
+    const key = `${projectId}::${folderPath}`;
     if (loggedViewKey.current === key) return;
     loggedViewKey.current = key;
-    api.logOntologyGraphViewOpened(wsId, { resourceId, folderPath }).catch(() => { /* 텔레메트리 실패는 조용히 무시 */ });
-  }, [wsId, resourceId, folderPath]);
+    api.logOntologyGraphViewOpened(wsId, { resourceId: projectId, folderPath }).catch(() => { /* 텔레메트리 실패는 조용히 무시 */ });
+  }, [wsId, projectId, folderPath]);
 
   // "Build/Refresh Graph" 액션(리뷰 지적, 승인 블로커) — load()(GET
   // /status)는 조회+최초 프로비저닝만 할 뿐, 이미 존재하는(ready/stale/
@@ -97,7 +97,7 @@ export default function OntologyGraphPage() {
   // 킥오프한 뒤, 그 결과(대개 status='building')를 반영하도록 load()를
   // 다시 불러 폴링을 재개시킨다.
   const handleBuildOrRefresh = useCallback(async () => {
-    if (!wsId || !resourceId) return;
+    if (!wsId || !projectId) return;
     if (!statusResp) {
       void load();
       return;
@@ -111,7 +111,7 @@ export default function OntologyGraphPage() {
       setRefreshing(false);
     }
     void load({ silent: true });
-  }, [wsId, resourceId, statusResp, load, showToast]);
+  }, [wsId, projectId, statusResp, load, showToast]);
 
   // building 동안만 폴링 — ready/error/stale 도달 즉시 멈춘다
   // (MissionDetailPage.tsx의 isLive 안전망 폴링과 같은 자세).
@@ -177,7 +177,7 @@ export default function OntologyGraphPage() {
           <Button
             variant="primary"
             onClick={() => void handleBuildOrRefresh()}
-            disabled={!resourceId || loading || refreshing || isBuilding}
+            disabled={!projectId || loading || refreshing || isBuilding}
           >
             {statusResp ? 'Refresh Graph' : 'Build Graph'}
           </Button>
@@ -187,12 +187,12 @@ export default function OntologyGraphPage() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <Select
-            label="Repository"
-            value={resourceId}
-            onChange={(e) => setResourceId(e.target.value)}
+            label="Project"
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
             options={[
-              { value: '', label: repos.length ? 'Select a repository…' : 'No repository resources in this workspace yet', disabled: true },
-              ...repos.map((r) => ({ value: r.id, label: r.name })),
+              { value: '', label: projects.length ? 'Select a project…' : 'No projects in this workspace yet', disabled: true },
+              ...projects.map((p) => ({ value: p.id, label: p.name })),
             ]}
           />
           <Input
@@ -203,14 +203,14 @@ export default function OntologyGraphPage() {
           />
         </div>
 
-        {!resourceId && (
+        {!projectId && (
           <EmptyState
-            title="Pick a repository"
-            description="Select a repository resource (and optionally a folder) to build or view its Ontology Graph."
+            title="Pick a project"
+            description="Select a project (and optionally a folder) to build or view the Ontology Graph of its repository."
           />
         )}
 
-        {resourceId && badge && (
+        {projectId && badge && (
           <div
             style={{
               padding: '12px 16px',
@@ -231,28 +231,28 @@ export default function OntologyGraphPage() {
           </div>
         )}
 
-        {resourceId && statusResp?.status === 'error' && (
+        {projectId && statusResp?.status === 'error' && (
           <EmptyState
             title="Graph build failed"
             description={statusResp.error || 'The last build attempt failed — try Refresh Graph to retry.'}
           />
         )}
 
-        {resourceId && loading && <EmptyState title="Loading graph" description="Checking the graph build and loading its latest snapshot…" />}
-        {resourceId && !loading && graphLoading && <EmptyState title="Loading graph" description="Preparing the latest bounded graph snapshot…" />}
+        {projectId && loading && <EmptyState title="Loading graph" description="Checking the graph build and loading its latest snapshot…" />}
+        {projectId && !loading && graphLoading && <EmptyState title="Loading graph" description="Preparing the latest bounded graph snapshot…" />}
 
-        {resourceId && graphError && (
+        {projectId && graphError && (
           <EmptyState title="Graph could not be loaded" description={graphError} />
         )}
 
-        {resourceId && snapshot && snapshot.nodes.length === 0 && (
+        {projectId && snapshot && snapshot.nodes.length === 0 && (
           <EmptyState
             title="Graph is empty"
-            description="The build completed but produced no active nodes. Refresh the graph after checking the selected repository and folder."
+            description="The build completed but produced no active nodes. Refresh the graph after checking the selected project and folder."
           />
         )}
 
-        {resourceId && snapshot && snapshot.nodes.length > 0 && (
+        {projectId && snapshot && snapshot.nodes.length > 0 && (
           <>
             <div style={{ color: tokens.colors.textSecondary, fontSize: tokens.typography.fontSizeXs }}>
               {snapshot.nodes.length.toLocaleString()} nodes · {snapshot.edges.length.toLocaleString()} edges

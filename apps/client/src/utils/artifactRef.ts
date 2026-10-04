@@ -1,11 +1,13 @@
+// `board` was dropped with boards (docs/tickets.md) — an old `#[board:…]` token
+// in a stored message now renders as plain text.
 export const ARTIFACT_REF_TYPES = [
-  'ticket', 'agent', 'board', 'action', 'function', 'schedule',
+  'ticket', 'agent', 'action', 'function', 'schedule',
 ] as const;
 
 export type ArtifactRefType = typeof ARTIFACT_REF_TYPES[number];
 export const UUID_PATTERN = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
 export const ARTIFACT_TOKEN_RE =
-  new RegExp(`#\\[(ticket|agent|board|action|function|schedule):(${UUID_PATTERN})\\|([^\\]\\r\\n]+)\\]`, 'g');
+  new RegExp(`#\\[(ticket|agent|action|function|schedule):(${UUID_PATTERN})\\|([^\\]\\r\\n]+)\\]`, 'g');
 
 export interface ParsedArtifactRef {
   type: ArtifactRefType;

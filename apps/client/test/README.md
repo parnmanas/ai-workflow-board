@@ -24,7 +24,8 @@ node --import tsx --test apps/client/test/chat-participants.test.mjs
 
 | 파일 | 대상 | 실제 구동 코드 |
 |------|------|----------------|
-| `on-done-reorder-dirty.test.mjs` | Run-on-Done 재정렬 dirty 판정 (티켓 59afc55a) | 로직 미러 (`TicketPanel.tsx` 와 동기화 유지) |
+| `on-done-reorder-dirty.test.mjs` | Run-on-Done 재정렬 dirty 판정 (티켓 59afc55a) | **실제** `components/ticketPanel/ticketDraft.ts` (미러 아님) |
+| `ticket-panel-draft.test.mjs` | TicketPanel Save/Discard draft → `PATCH /tickets/:id` 바디, 태그 풀, 담당자 표시 폴백 | **실제** `components/ticketPanel/ticketDraft.ts` (미러 아님) |
 | `chat-participants.test.mjs` | 채팅 참여자 경합/반영/후보 제외 (티켓 6dfb5921) | **실제** `chat/utils/participantFlow.ts` (미러 아님) |
 | `composer-send.test.mjs` | 컴포저 전송 후 focus 복귀 게이팅 + 전송 중 paste 첨부 경합 (티켓 e0567bb3) | **실제** `chat/utils/composerSend.ts` (미러 아님) |
 

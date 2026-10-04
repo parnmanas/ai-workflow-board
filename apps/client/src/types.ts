@@ -1,3 +1,8 @@
+import type { TicketStatus, TicketPriority } from './tickets/status';
+import type { RuntimeSpecDraft } from './runtime/runtimeSpec';
+
+export type { TicketStatus, TicketPriority, RuntimeSpecDraft };
+
 export interface User {
   id: string; // GUID
   name: string;
@@ -131,30 +136,9 @@ export interface AgentSubagentRollup {
 
 export type CatalogScope = 'global' | 'workspace';
 
-export interface PromptTemplate {
-  id: string; // GUID
-  workspace_id: string | null;
-  board_id: string | null;
-  scope: CatalogScope;
-  name: string;
-  description: string;
-  content: string;
-  category: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface BuiltinPromptDefault {
-  name: string;
-  description: string;
-  content: string;
-  category: string;
-  column_match: string;
-}
-
 /**
- * Repo Resource / Workspace 의 clone 정책(ticket bddb63ee). 모든 키가 optional 이며
- * 지정하지 않은 키는 Repo Resource → Workspace → 시스템 기본값 순으로 흘러내린다.
+ * Project / Workspace 의 clone 정책(ticket bddb63ee). 모든 키가 optional 이며
+ * 지정하지 않은 키는 Project → Workspace → 시스템 기본값 순으로 흘러내린다.
  */
 export interface ClonePolicy {
   /** clone 전체 wall-clock 예산(초). 60~86400. 시스템 기본값 3600(60분). */
@@ -172,45 +156,24 @@ export interface ClonePolicy {
 export interface Resource {
   id: string;
   workspace_id: string | null;
-  board_id: string | null;
   scope: CatalogScope;
   credential_id: string | null;
   name: string;
   description: string;
-  type: 'repository' | 'document' | 'image' | 'link';
+  // Repositories are Projects now (docs/tickets.md) — not a Resource type.
+  type: 'document' | 'image' | 'link';
   url: string;
   content: string;
   file_data: string;
   file_name: string;
   file_mimetype: string;
   tags: string[];
-  // For type='repository': the branch tickets default to when no per-ticket
-  // base_branch is set. Empty leaves the choice to git's `origin/HEAD`.
-  default_branch?: string;
-  // For type='repository': per-repo clone policy (ticket bddb63ee). The server
-  // returns it PARSED (an object, not the stored JSON text) and merges it over
-  // the workspace default at dispatch. null / absent = no override → the system
-  // defaults apply (clone timeout 3600s = 60min, idle timeout disabled, full clone).
-  clone_policy?: ClonePolicy | null;
   created_at: string;
   updated_at: string;
 }
 
-// 티켓 base repository의 임베디드 스냅샷 — 서버 loadTicketFull이
-// ticket.base_repo_resource_id로 채우거나, 그게 비어 있으면 board/workspace
-// environment_config의 default repo로 백필한다(ticket 112ea3c5) — 둘 다
-// resolve 안 될 때만 null.
-export interface TicketBaseRepo {
-  id: string;
-  name: string;
-  url: string;
-  default_branch: string;
-  type: string;
-}
-
 // One "blocked-by another ticket" link (ticket 48d14fff). The dependent
-// ticket (`ticket_id`) stays parked until `prerequisite_ticket_id` reaches a
-// terminal column. `prerequisite` is the server-hydrated snapshot used by the
+// ticket (`ticket_id`) stays parked until `prerequisite_ticket_id` is `done`. `prerequisite` is the server-hydrated snapshot used by the
 // detail panel to render a status pill without a second round-trip; it is
 // null only for a stale link whose prereq row was deleted.
 export interface TicketPrerequisiteRow {
@@ -222,15 +185,15 @@ export interface TicketPrerequisiteRow {
   prerequisite?: {
     id: string;
     title: string;
-    column_id: string | null;
-    column_name: string;
-    is_terminal: boolean;
+    status: TicketStatus;
+    /** Prerequisite is `done` — it no longer holds the dependent. */
+    is_done: boolean;
     archived_at: string | null;
   } | null;
 }
 
-// Result of GET /api/resources/:id/branches — git ls-remote output for a
-// repository resource, with the default branch (if configured) pinned first.
+// Result of GET /api/projects/:id/branches — git ls-remote output for a
+// project's repository, with the default branch (if configured) pinned first.
 export interface RepoBranch {
   name: string;
   sha: string;
@@ -309,7 +272,6 @@ export interface RepoFileContent {
 export interface Action {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   name: string;
   description: string;
   prompt: string;
@@ -384,7 +346,6 @@ export type WorkflowFunctionRisk = 'read' | 'write' | 'destructive' | 'high_impa
 export interface WorkflowFunction {
   id: string;
   workspace_id: string | null;
-  board_id: string | null;
   scope: CatalogScope;
   key: string;
   version: number;
@@ -411,7 +372,6 @@ export interface WorkflowFunctionRun {
   function_key: string;
   function_version: number;
   workspace_id: string;
-  board_id: string | null;
   ticket_id: string | null;
   parent_run_id: string | null;
   actor_type: string;
@@ -429,73 +389,6 @@ export interface WorkflowFunctionRun {
   completed_at: string | null;
   created_at: string;
   deduplicated?: boolean;
-}
-
-// ─── Feature/Epic intake (ticket aae7644c) ─────────────────────────────────
-export type FeatureStatus =
-  | 'draft'
-  | 'planning'
-  | 'proposed'
-  | 'approved'
-  | 'running'
-  | 'done'
-  | 'rejected';
-
-export interface FeatureProposedTicket {
-  key: string;
-  title: string;
-  description?: string;
-  priority?: 'low' | 'medium' | 'high' | 'critical';
-  labels?: string[];
-  effort_preset?: string | null;
-  column_name?: string;
-  assignee_id?: string;
-  reporter_id?: string;
-  reviewer_id?: string;
-}
-
-export interface FeatureChainEdge {
-  from: string;
-  to: string;
-}
-
-export interface FeatureChainProposal {
-  summary?: string;
-  tickets: FeatureProposedTicket[];
-  edges?: FeatureChainEdge[];
-}
-
-export interface FeatureRollupTicket {
-  id: string;
-  title: string;
-  column_id: string | null;
-  column_name: string | null;
-  terminal: boolean;
-}
-
-export interface FeatureRollup {
-  total: number;
-  done: number;
-  tickets: FeatureRollupTicket[];
-}
-
-export interface Feature {
-  id: string;
-  workspace_id: string;
-  board_id: string | null;
-  title: string;
-  requirement: string;
-  status: FeatureStatus;
-  planner_agent_id: string;
-  proposal: FeatureChainProposal | null;
-  generated_ticket_ids: string[];
-  planning_room_id: string;
-  feedback: string;
-  source_chat_room_id: string;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-  rollup?: FeatureRollup;
 }
 
 // ─── Scenario-based QA (ticket 3c655d20) ───────────────────────────────────
@@ -516,25 +409,39 @@ export interface QaScenarioStep {
 export type CheckoutMode = 'reuse' | 'fresh';
 export type BuildMode = 'cold_then_warm' | 'always_cold' | 'always_warm';
 
+// repo_ref of a QA scenario / Security profile / Action (docs/tickets.md):
+// `project_id` replaces the old repository-Resource `resource_id` (projects were
+// migrated with the same id, so a stored `resource_id` still names the project
+// — read it as a fallback, never write it).
 export interface WorkspaceFolderRepoRef {
+  project_id?: string;
+  /** @deprecated legacy stored key — read-only fallback for `project_id`. */
   resource_id?: string;
   url?: string;
   branch?: string;
 }
 
+// On-failure auto-ticket (docs/tickets.md → QA / Security failure tickets).
+// No board/column any more: the ticket lands in the workspace pool with
+// `status` (todo | backlog), `tags` and an optional `project_id`. Assignee:
+// `assignee_runtime` → else the scenario/profile target → else the project's
+// default_assignee. Stored rows may still carry the old `labels` key — read it
+// as a fallback for `tags`, never write it.
+export type OnFailureTicketStatus = 'todo' | 'backlog';
+
 export interface QaOnFailureTicketConfig {
   enabled: boolean;
-  board_id?: string;
-  column_id?: string;
-  column_name?: string;
-  priority?: 'low' | 'medium' | 'high' | 'critical';
-  assignee_id?: string;
+  project_id?: string;
+  status?: OnFailureTicketStatus;
+  priority?: TicketPriority;
   assignee_runtime?: Record<string, any>;
+  tags?: string[];
+  /** @deprecated legacy stored key — read-only fallback for `tags`. */
   labels?: string[];
   dedupe?: 'per_run' | 'per_open_ticket';
   title_template?: string;
   // QA → fix → QA closed loop (ticket 467dbc7a). When rerun_on_fix is on, the
-  // server re-runs this scenario once its auto-filed fix ticket reaches a terminal column,
+  // server re-runs this scenario once its auto-filed fix ticket is `done`,
   // capped at max_rerun_attempts (default 3) reruns. rerun_delay_seconds defers
   // each rerun so a main→prod deploy can land first (deploy-timing gate).
   rerun_on_fix?: boolean;
@@ -574,7 +481,6 @@ export interface QaPhaseHistoryEntry {
 export interface QaScenario {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   name: string;
   description: string;
   steps: QaScenarioStep[];
@@ -598,9 +504,8 @@ export interface QaScenario {
   // Deployment.environment name this scenario validates. '' = not env-bound.
   target_environment: string;
   // Per-scenario QA phases override (ticket 90cc22f7). Same JSON wire convention
-  // as Board.qa_phases (the server may ship the parsed object or the raw string);
-  // when set, scenario-level config wins over the board's qa_phases. null/absent
-  // = inherit the board default (or fall back to legacy single-timeout).
+  // as harness_config (the server may ship the parsed object or the raw string).
+  // null/absent = legacy single-timeout run.
   qa_phases?: QaPhasesConfig | string | null;
   created_at: string;
   updated_at: string;
@@ -623,23 +528,6 @@ export interface Deployment {
   source: 'self_report' | 'webhook' | 'mcp' | 'poll' | 'manual';
   reported_by: string;
   deployed_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-// Board Lessons / Runbook (ticket 9d0d6ac4). A board-scoped knowledge entry;
-// active lessons are auto-injected into the board's dispatch prompts server-side.
-export interface BoardLesson {
-  id: string;
-  workspace_id: string | null;
-  board_id: string;
-  title: string;
-  body: string;
-  tags: string[];
-  source_ticket_id: string | null;
-  active: boolean;
-  hit_count: number;
-  created_by: string;
   created_at: string;
   updated_at: string;
 }
@@ -668,7 +556,6 @@ export interface QaRun {
   id: string;
   scenario_id: string;
   workspace_id: string;
-  board_id: string | null;
   status: QaRunStatus;
   room_id: string;
   step_results: QaStepResult[];
@@ -689,7 +576,7 @@ export interface QaRun {
   started_at: string | null;
   finished_at: string | null;
   // Multi-phase QA run tracking (ticket 90cc22f7). Populated once the resolved
-  // qa_phases config (scenario ?? board) is non-null and the run sets a phase.
+  // scenario qa_phases config is non-null and the run sets a phase.
   // current_phase = active phase id (null = legacy single-timeout run);
   // current_phase_at = phase entry instant (the active phase's deadline baseline);
   // phase_history = ordered transition log driving the RunDetail timeline.
@@ -710,7 +597,6 @@ export type QaRunBatchStatus = 'running' | 'done' | 'aborted';
 export interface QaRunBatch {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   scenario_ids: string[];
   run_ids: string[];
   current_index: number;
@@ -740,7 +626,6 @@ export type QaScheduleScope = 'all' | 'selected';
 export interface QaSchedule {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   name: string;
   scope: QaScheduleScope;
   scenario_ids: string[];
@@ -768,13 +653,11 @@ export interface QaSchedule {
  * run 기록을 전부 Action 이 정의하므로 앞의 두 값은 비어 있다.
  * Cadence is exactly one of `cron` (5-field UTC) or `interval_ms`.
  * `next_run_at`/`last_run_at`/`last_room_id` track firing; `last_room_id`
- * deep-links to the most recent dispatched conversation. `board_id` is optional
- * context (null = workspace-scoped); it does not affect WHEN the schedule fires.
+ * deep-links to the most recent dispatched conversation.
  */
 export interface WorkspaceSchedule {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   name: string;
   target_agent_id: string;
   task_prompt: string;
@@ -828,12 +711,12 @@ export interface SecurityChecklistItem {
  */
 export interface SecurityOnFailureTicketConfig {
   enabled: boolean;
-  board_id?: string;
-  column_id?: string;
-  column_name?: string;
-  priority?: 'low' | 'medium' | 'high' | 'critical';
-  assignee_id?: string;
+  project_id?: string;
+  status?: OnFailureTicketStatus;
+  priority?: TicketPriority;
   assignee_runtime?: Record<string, any>;
+  tags?: string[];
+  /** @deprecated legacy stored key — read-only fallback for `tags`. */
   labels?: string[];
   /** Severity gate (default 'high'). critical > high > medium > low > info. */
   min_severity?: SecuritySeverity;
@@ -844,7 +727,6 @@ export interface SecurityOnFailureTicketConfig {
 export interface SecurityProfile {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   name: string;
   description: string;
   checklist: SecurityChecklistItem[] | null;
@@ -906,7 +788,6 @@ export interface SecurityRun {
   id: string;
   profile_id: string;
   workspace_id: string;
-  board_id: string | null;
   status: SecurityRunStatus;
   room_id: string;
   findings: SecurityFinding[] | null;
@@ -938,7 +819,6 @@ export type SecurityRunBatchStatus = 'running' | 'done' | 'aborted';
 export interface SecurityRunBatch {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   profile_ids: string[];
   run_ids: string[];
   current_index: number;
@@ -974,7 +854,6 @@ export type SecurityScheduleKind = 'scan' | 'checklist_refresh';
 export interface SecuritySchedule {
   id: string;
   workspace_id: string;
-  board_id: string | null;
   name: string;
   kind: SecurityScheduleKind;
   scope: SecurityScheduleScope;
@@ -996,7 +875,6 @@ export interface Credential {
   id: string;
   // null = global (instance-level) credential shared across all workspaces.
   workspace_id: string | null;
-  board_id: string | null;
   // 'global' credentials are inherited by every workspace; 'workspace' ones are
   // owned by the active workspace. Unlike the other catalog kinds this is
   // mutable in place — the Edit dialog lets a holder of
@@ -1171,114 +1049,62 @@ export interface Comment {
   last_repeated_at?: string | null;
 }
 
-// Cross-board handoff relay (ticket ac21a745). One hop = create a follow-up on
-// `target_board_id` when the carrying ticket completes. Mirrors the server
-// HandoffHop zod shape (common/handoff-spec-config.ts).
-export interface HandoffHop {
-  target_board_id: string;
-  target_column_name?: string;
-  title_template?: string;
-  description_template?: string;
-  assignee_id?: string;
-  reporter_id?: string;
-  reviewer_id?: string;
-  labels?: string[];
-  priority?: string;
-  effort_preset?: string;
-  carry_attachments?: boolean;
-  carry_attachment_ids?: string[];
+// Project summary the server hydrates onto a full ticket read (loadTicketFull)
+// so the panel's project/base-branch pickers render without a second fetch.
+export interface TicketProjectSummary {
+  id: string;
+  name: string;
+  repo_url: string;
+  default_branch: string;
+  use_pr?: boolean;
+  host_folders?: ProjectHostFolder[];
 }
 
-export interface HandoffSpec {
-  hops: HandoffHop[];
-}
-
-// One stage of a handoff relay, as returned by GET /tickets/:id/handoff-pipeline.
-export interface HandoffPipelineStage {
-  ticket_id: string;
-  title: string;
-  board_id: string;
-  board_name: string;
-  column_id: string | null;
-  column_name: string;
-  is_terminal: boolean;
-  status: string;
-  is_followup: boolean;
-  is_rejection: boolean;
-  source_ticket_id: string;
-  pending_on_tickets: boolean;
-  remaining_hops: number;
-  created_at: string;
-}
-
-export interface HandoffPipeline {
-  root_ticket_id: string;
-  stages: HandoffPipelineStage[];
-}
-
+// Board-less ticket (docs/tickets.md). One workspace-wide pool: a fixed
+// `status` instead of a column, free-form `tags`, an optional `project_id`, and
+// ONE assignee RuntimeSpec that does the whole ticket. Children (sub-tasks) are
+// a checklist the assignee works through — they have no assignee of their own.
 export interface Ticket {
   workspace_id?: string;
   id: string; // GUID
-  column_id: string | null; // GUID — references BoardColumn.id, null for child tickets
   parent_id: string | null; // GUID — references parent Ticket.id
   depth: number; // 0=root, 1=subtask, 2=sub-subtask
   title: string;
   description: string;
-  priority: 'low' | 'medium' | 'high' | 'critical';
-  status: string; // todo, in_progress, done
-  assignee: string;
-  reporter: string;
-  assignee_id: string; // GUID — references User.id
-  reporter_id: string; // GUID — references User.id
-  reviewer_id: string; // GUID — references User.id
-  labels: string[];
+  priority: TicketPriority;
+  status: TicketStatus;
+  // Free-form classification (kind, area, old board name, …). Filterable (AND).
+  tags: string[];
+  // Which repository the work is about. null = not about a repo.
+  project_id: string | null;
+  project?: TicketProjectSummary | null;
+  // Branch the work starts from. Empty → the project's default_branch.
+  base_branch?: string;
+  // The one agent that does the ticket. null = unassigned (never dispatched).
+  assignee: RuntimeSpecDraft | null;
+  // runtimeIdentityKey(assignee) or '' — the assignee filter key.
+  assignee_key: string;
+  // Server-resolved `<Host>/<label>` display name (full ticket reads only).
+  assignee_name?: string;
   channel_ids: string[]; // GUID array — references Channel.id
   // Phase 1 ticket prompt snapshot (D-17 / ROLE-08)
   prompt_text?: string;
-  // Repository resource the ticket builds against (set via the picker in the
-  // detail tab). The agent uses this + base_branch to pull the right base
-  // before cutting its feature branch. Empty when the ticket is non-code.
-  base_repo_resource_id?: string;
-  base_branch?: string;
-  // Server-hydrated snapshot of base_repo_resource_id (loadTicketFull only).
-  // Carries url + default_branch so the picker UI doesn't need a second
-  // round-trip per ticket open.
-  base_repo?: TicketBaseRepo | null;
-  // Optional pointer to the ticket TriggerLoopService should auto-trigger
-  // once this one lands on a terminal column. Cleared/empty → no chain.
+  // Optional pointer to the next ticket picked up once this one is `done`.
   next_ticket_id?: string | null;
   // Per-ticket on-done action binding (ticket 16a6339c, method "a"). Action
-  // ids dispatched exactly once when THIS ticket lands on a terminal column —
-  // independent of board/label-scoped policy. Server stores it as a JSON
-  // string but decodes to an array on every read path (loadTicketFull /
-  // parseTicket), so the client always sees string[]. Empty array = no binding.
+  // ids dispatched exactly once when THIS ticket enters `done`. Server stores
+  // it as a JSON string but decodes to an array on every read path, so the
+  // client always sees string[]. Empty array = no binding.
   on_done_action_ids?: string[];
-  // Abstract effort preset id (resolved against the board's effort_presets at
-  // dispatch into per-CLI options). null/empty = "no effort override", spawn
-  // exactly as before. Not a CLI flag — the server maps it per CLI.
-  effort_preset?: string | null;
-  // Per-run Claude backend override. null inherits; "none" is explicit
-  // native Anthropic; otherwise an allowed global profile id.
-  cli_runtime_profile?: string | null;
-  // Cross-board handoff relay (ticket ac21a745). Decoded to an object on every
-  // read path (loadTicketFull / parseTicket / board projection). When it has
-  // hops, completing this ticket auto-creates a follow-up on the first hop's
-  // board carrying this ticket's deliverable context; the follow-up inherits the
-  // remaining hops. `{ hops: [] }` / omitted = no relay.
-  handoff_spec?: HandoffSpec;
-  // Relay lineage back-pointer — set on a ticket AUTO-CREATED as a handoff
-  // follow-up; points at the source ticket whose completion produced it. Empty
-  // for tickets not born from a handoff. Powers reverse rejection + pipeline.
-  handoff_source_ticket_id?: string;
-  // Ticket parked awaiting user intervention (ticket a57517be). When true the
-  // server drops every agent_trigger for this ticket, the focus selector
-  // skips it, and the board view renders a high-visibility outline + badge.
-  // The detail panel surfaces a dedicated "User" tab with the reason, set_at,
-  // set_by, and an "Unpend" action button.
+  // Ticket parked awaiting user intervention (ticket a57517be). Any pending
+  // flag blocks dispatch. The detail panel surfaces a dedicated "User" tab with
+  // the reason, set_at, set_by, and an "Unpend" action button.
   pending_user_action?: boolean;
   pending_reason?: string;
   pending_set_at?: string | null;
   pending_set_by?: string;
+  // Parked on an external CI run (await_ci_run) — auto-resumes server-side.
+  pending_ci_wait?: boolean;
   // 서버가 미결 duplicate decision 행을 확인해 계산한 원인 플래그다.
   // 후보 배열만으로 판정하면 과거 후보가 다른 pending UI에 재노출될 수 있다.
   duplicate_decision_pending?: boolean;
@@ -1292,20 +1118,15 @@ export interface Ticket {
     matched_signals: string[];
   }>;
   // "Blocked by another ticket" flag (ticket 48d14fff) — distinct from
-  // pending_user_action so the board/panel render a separate badge and the
-  // trigger loop auto-resumes when every prerequisite lands on a terminal
-  // column (no human unpend). `prerequisites` is the hydrated link set
-  // (loadTicketFull only). `prerequisite_count` is the cheap total-link count
-  // attached to board listings so the card can show a dependency badge
-  // without loading the full set.
+  // pending_user_action; auto-resumes when every prerequisite is `done`.
+  // `prerequisites` is the hydrated link set (loadTicketFull only);
+  // `prerequisite_count` is the cheap count on list rows.
   pending_on_tickets?: boolean;
   prerequisites?: TicketPrerequisiteRow[];
   prerequisite_count?: number;
-  // Server-hydrated snapshot of next_ticket_id (loadTicketFull only) —
-  // title + current column name so the Next Ticket picker can render the
-  // link without a second round-trip. null when unset or when the linked
-  // ticket is missing / lives in another workspace.
-  next_ticket?: { id: string; title: string; column_name: string } | null;
+  // Server-hydrated snapshot of next_ticket_id (loadTicketFull only). null when
+  // unset or when the linked ticket is missing / lives in another workspace.
+  next_ticket?: { id: string; title: string; status: TicketStatus } | null;
   created_by: string; // Name of the creator (user or agent)
   created_by_type: 'user' | 'agent' | ''; // Creator type
   created_by_id: string; // GUID — references User.id or Agent.id
@@ -1314,191 +1135,121 @@ export interface Ticket {
   comments: Comment[];
   // bounded 코멘트 로드 신호: detail GET(loadTicketFull commentLimit)은 `comments`
   // 의 최신 페이지만 싣고, 더 오래된 코멘트가 있으면 이 값을 true 로 세팅한다.
-  // 패널은 probe fetch 없이 scroll-load-older 를 켤 수 있다. 전체 eager-load
-  // 경로(MCP get_ticket, agent-api)에는 없음(이미 전체 코멘트가 있음).
+  // 패널은 probe fetch 없이 scroll-load-older 를 켤 수 있다.
   comments_has_more?: boolean;
   // 서버 계산 stale-open-question 플래그(bounded detail 로드). 오래된 미답변
-  // 질문이 로드된 코멘트 윈도우 밖에 있어도 패널 헤더 배지가 보드 카드와
-  // 일치하도록 한다. 전체 eager-load 경로에는 없음.
+  // 질문이 로드된 코멘트 윈도우 밖에 있어도 패널 헤더 배지가 카드와 일치하도록 한다.
   has_stale_open_question?: boolean;
   // File attachments stored directly on the ticket (NOT via Resources).
   // Populated as metadata only by `loadTicketFull` — `file_data` is fetched
   // on demand via getTicketAttachment.
   attachments?: TicketAttachmentMeta[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Column {
-  id: string; // GUID
-  board_id: string; // GUID — references Board.id
-  name: string;
-  position: number;
-  color: string;
-  description: string;
-  is_terminal: boolean;
-  kind?: '' | 'intake' | 'active' | 'review' | 'merging' | 'terminal';
-  role_routing?: string;
-  unassigned_policy: 'halt' | 'skip' | 'skip_if_ticket_staffed';
-  process_subtasks: boolean;
-  tickets: Ticket[];
-  created_at: string;
-}
-
-export interface Board {
-  id: string; // GUID
-  workspace_id: string; // GUID — references Workspace.id
-  name: string;
-  description: string;
-  cli_runtime_profile?: string | null;
-  routing_config: string; // JSON: { [columnName]: 'assignee' | 'reporter' | 'reviewer' }
-  column_prompts?: string | null; // JSON: { [columnId: string]: promptTemplateId: string }
-  // Max distinct tickets one agent can be actively working on at once
-  // under this board. Default 1; raise per-board when concurrent local-repo
-  // work is safe. Drives the trigger gate on the server side and the
-  // defensive cap on the manager side.
-  max_concurrent_tickets_per_agent?: number;
-  columns: Column[];
-  created_at: string;
-  updated_at: string;
   archived_at?: string | null;
-  // Board-wide soft pause. When set, the server drops every agent_trigger
-  // for tickets on this board and BacklogPromotionService becomes a no-op.
-  // UI surfaces a banner + flips Pause ↔ Resume on the index card.
-  paused_at?: string | null;
-  // Per-board self-improvement mode. 'off' (default) suppresses the
-  // post-done reviewer dispatch; 'same_board' / 'remote_awb' / 'both' opt in
-  // and choose where the reviewer files follow-up improvement tickets.
-  self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
-  // Per-board benchmark mode. 'off' (default) is an ordinary board; 'on' turns
-  // the board into a benchmark host — candidate children get scored by
-  // evaluator agents on review entry and the Leaderboard panel renders.
-  benchmark_mode?: 'off' | 'on';
-  // Per-board worktree layout (worktree 규약 chain). 'per_ticket' (default) gives
-  // each ticket its own worktree under `<working_dir>/.awb/wt/<ticket8>/`;
-  // 'shared' reuses one worktree at `.awb/wt/shared/`.
-  worktree_mode?: 'per_ticket' | 'shared';
-  // Per-board PR usage (worktree 규약 chain). false (default) → direct
-  // fast-forward merge on the Merging boundary; true → the opt-in PR path.
+  // Set when the ticket enters `done`, cleared when it leaves.
+  terminal_entered_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ─── Ticket list rows (GET /workspaces/:wsId/tickets) ──────────────────────
+// The list ships a lightened row per root ticket: the comment relation is
+// projected to what a card renders (count + stale-open-question badge) and
+// children are nested two levels. The detail panel re-fetches the full Ticket
+// via getTicket. Typed explicitly so a card reading a dropped field (comment
+// body, author, …) fails to build instead of reading `undefined`.
+export type TicketCardComment = Pick<Comment, 'id' | 'type' | 'status' | 'created_at'>;
+
+export interface TicketCard {
+  id: string;
+  workspace_id?: string;
+  parent_id: string | null;
+  depth?: number;
+  title: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  tags: string[];
+  project_id: string | null;
+  base_branch?: string;
+  assignee: RuntimeSpecDraft | null;
+  assignee_key: string;
+  position: number;
+  pending_user_action?: boolean;
+  pending_reason?: string;
+  pending_on_tickets?: boolean;
+  pending_ci_wait?: boolean;
+  archived_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  comments: TicketCardComment[];
+  prerequisite_count?: number;
+  children: TicketCard[];
+}
+
+export interface TicketTagCount {
+  tag: string;
+  count: number;
+}
+
+export interface TicketListResponse {
+  tickets: TicketCard[];
+  tags: TicketTagCount[];
+}
+
+// ─── Projects (docs/tickets.md → Project) ──────────────────────────────────
+// One git repository + the knowledge every feature needs to work on it.
+// Replaces Resources of type='repository' (migrated with the same id).
+
+/** The main clone folder of a project on one Runtime Host. */
+export interface ProjectHostFolder {
+  host_id: string;
+  path: string;
+  /** Display name of the host when the server joins it (optional). */
+  host_name?: string;
+}
+
+export interface Project {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  repo_url: string;
+  default_branch: string;
+  credential_id: string | null;
+  // Parsed object (project ⊕ workspace default at dispatch). null = no override.
+  clone_policy: ClonePolicy | null;
+  use_pr: boolean;
+  instructions: string;
+  // Applied to new tickets of this project that name no assignee.
+  default_assignee: RuntimeSpecDraft | null;
+  host_folders: ProjectHostFolder[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** Body of POST /workspaces/:wsId/projects and PATCH /projects/:id. */
+export interface ProjectInput {
+  name?: string;
+  repo_url?: string;
+  description?: string;
+  default_branch?: string;
+  credential_id?: string | null;
+  clone_policy?: ClonePolicy | null;
   use_pr?: boolean;
-  // Auto-archive policy: null/absent disables, 1..365 archives Done-column
-  // tickets that have been idle for N days — where "idle" means no Done-entry,
-  // edit, or comment newer than N days (GREATEST(terminal_entered_at,
-  // updated_at, newest comment) older than the cutoff). Server enforces the
-  // range; UI maps a disabled toggle to null and re-introduces the previous
-  // days value when toggled back on.
-  auto_archive_days?: number | null;
-  // Per-board agent harness override. Raw JSON string of HarnessConfig (same
-  // wire convention as routing_config / column_prompts — the client parses).
-  // Keys set here override the workspace default per key at dispatch; null/
-  // absent = no override.
-  harness_config?: string | null;
-  // Per-board abstract effort presets. Stored JSON-encoded (same wire
-  // convention as harness_config — the client parses); null/absent falls back
-  // to BUILTIN_EFFORT_PRESETS for display. A ticket's `effort_preset` (a preset
-  // id) is resolved against this at dispatch into per-CLI options.
-  effort_presets?: EffortPresetsConfig | string | null;
-  // Per-board output language (i18n). Human-readable language name (e.g.
-  // "Korean") folded into the agent's system prompt at dispatch so its
-  // comments / chat / commit messages are written in that language. null/
-  // absent = no override (agent default, English).
-  language?: string | null;
-  // Per-board environment setup (ticket 354d336b). Stored JSON-encoded (same
-  // wire convention as harness_config — the client parses); null/absent = no
-  // override. At dispatch the agent-manager provisions the environment
-  // (clone/update repos under the agent home, run setup commands, inject
-  // env_vars) before spawning the subagent.
-  environment_config?: string | null;
-  // Per-board QA phases model (ticket 90cc22f7). Stored JSON-encoded (same wire
-  // convention as harness_config / effort_presets — the client parses); null/
-  // absent = no phase model → legacy single-timeout QA runs. A scenario's
-  // qa_phases overrides this per-scenario (see QaScenario.qa_phases).
-  qa_phases?: QaPhasesConfig | string | null;
-  // Per-board DEFAULT role holders (ticket d94a1b87). Stored JSON-encoded map
-  // of role slug → array of holders ({ agent_id } | { user_id }); null/absent =
-  // no defaults. At ticket-creation time every role the caller left unstaffed
-  // is filled from this map so a new ticket lands on the loop without a human
-  // wiring assignee/reviewer/reporter. The client parses the string.
-  default_role_assignments?: string | null;
+  instructions?: string;
+  default_assignee?: RuntimeSpecDraft | Record<string, any> | null;
 }
 
-// Stored JSON-encoded in Board.environment_config (per-board override) and
-// Workspace.environment_config (workspace default). Simplified in ticket
-// 8fbe90e9 to a repository-Resource picker: the ONLY field an operator sets is
-// each repository's resource_id; the server derives url / default_branch /
-// credential from the Resource and owns worktree checkout. Older boards may
-// still have legacy keys stored (env_vars, setup_commands, per-repo url/branch/
-// target_dir/post_clone_commands, setup_timeout_seconds, version) — the editor
-// tolerates and ignores them on load, and re-saving drops them. This TS shape
-// is the WRITE shape only; the read/resolve path stays permissive server-side.
-export interface EnvironmentRepository {
-  // Repository Resource id (type='repository'); the server expands it to a
-  // concrete url / default_branch / credential at dispatch.
-  resource_id: string;
+export interface ProjectTestConnectionResult {
+  ok: boolean;
+  branches?: RepoBranch[];
+  default_branch?: string;
+  error?: string;
 }
-export interface EnvironmentConfig {
-  repositories?: EnvironmentRepository[];
-}
-
-// ─── Effort presets (abstract effort → per-CLI options) ─────────
-// A Ticket carries an ABSTRACT effort option (a preset id), NOT CLI-specific
-// flags. The board defines the presets; each preset maps to per-CLI options.
-// Mirror of the server-side contract — both sides must agree byte-for-byte on
-// these JSON keys. Which keys each CLI honours comes from the CLI catalog
-// (`cli/catalog.ts` → `effort.keys`): claude gets effort + ultracode + model;
-// model-only CLIs get `model` (other keys gracefully skipped at dispatch).
-export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
-
-/** One CLI's slice of a preset. Which keys apply is a catalog fact. */
-export interface EffortCliOptions {
-  effort?: EffortLevel;
-  ultracode?: boolean;
-  model?: string;
-}
-
-export interface EffortPreset {
-  id: string;    // stable slug, e.g. 'standard'
-  label: string; // human label shown in UI
-  // Named keys kept for compatibility with existing callers; the index
-  // signature lets slices for CLIs this build doesn't know survive a
-  // load → edit → save round-trip untouched.
-  // claude: real `--effort` flag (session-level) + `ultracode` PROMPT keyword
-  // (appended to the task text, NOT a flag) + optional `--model`.
-  claude?: EffortCliOptions;
-  // codex / antigravity / pi / opencode: model-only (`-m`/`--model`).
-  codex?: EffortCliOptions;
-  antigravity?: EffortCliOptions;
-  pi?: EffortCliOptions;
-  opencode?: EffortCliOptions;
-  [cli: string]: string | EffortCliOptions | undefined;
-}
-
-export interface EffortPresetsConfig {
-  default: string;           // preset id
-  presets: EffortPreset[];
-}
-
-// Resolved object the server ships on the SSE agent_trigger payload as
-// `effort_preset` — the single matched preset (or board default), or null.
-export type ResolvedEffortPreset = EffortPreset;
-
-// Builtin presets used for display when a board has none stored. Identical to
-// the server-side BUILTIN_EFFORT_PRESETS — keep in sync.
-export const BUILTIN_EFFORT_PRESETS: EffortPresetsConfig = {
-  default: 'standard',
-  presets: [
-    { id: 'light',    label: 'Light',    claude: { effort: 'low' } },
-    { id: 'standard', label: 'Standard', claude: { effort: 'medium' } },
-    { id: 'deep',     label: 'Deep',     claude: { effort: 'high' } },
-    { id: 'max',      label: 'Max',      claude: { effort: 'max', ultracode: true } },
-  ],
-};
 
 // Agent harness configuration (ticket 7122600c). Mirror of the server-side
 // zod schema in apps/server/src/common/harness-config.ts — keep in sync.
-// Stored JSON-encoded in Board.harness_config (per-board override) and
-// Workspace.harness_config (workspace default); resolution is key-level
-// (board wins per key it sets).
+// Stored JSON-encoded in Workspace.harness_config (shipped on every ticket
+// dispatch of the workspace).
 export interface HarnessConfig {
   system_prompt_append?: string; // merged into subagent --append-system-prompt
   allowed_tools?: string[];      // claude CLI --allowedTools
@@ -1538,95 +1289,29 @@ export interface RuntimeProfileConfig {
   };
 }
 
-// ─── Board-GET card projections ──────────────────────────────
-// The board GET (GET /api/boards/:id) ships a *lightened* payload for the
-// kanban cards: each ticket's `comments` relation is projected down to only
-// the fields a card renders (count + the stale-open-question badge), and the
-// full thread is fetched separately via getTicket (loadTicketFull) when a card
-// is opened. These types make that projection explicit so the contract is
-// enforced at compile time — a card consumer that reads a dropped field
-// (content / author / author_type / parent_id / metadata / attachments) fails
-// to build instead of silently reading `undefined` at runtime. Mirror of the
-// server projection in apps/server/src/modules/boards/boards.controller.ts
-// (BoardCardComment); keep the two field lists in sync. Perf ticket b3812637
-// introduced the projection; hardening ticket 24bbd0ad typed it.
-export type BoardCardComment = Pick<Comment, 'id' | 'ticket_id' | 'type' | 'status' | 'created_at'>;
-
-// Compact multi-holder role projection on a board card (T6 다중담당자 아바타).
-// One entry per role that has ≥1 holder; `holders` carries every holder so the
-// card renders an avatar stack with a "+N" overflow. Mirror of the server
-// projection in apps/server/src/modules/boards/boards.controller.ts
-// (BoardCardRoleHolders) — keep the two field lists in sync. Present only on the
-// card pipeline; the detail panel reads full role_assignments via getTicket.
-export interface BoardCardRoleHolders {
-  role_slug: string;
-  role_name: string;
-  holders: Array<{ type: 'agent' | 'user'; id: string; name: string }>;
-}
-
-// A ticket as it appears on a board card: identical to the full Ticket except
-// its `comments` (and recursively its `children`) carry only the narrow
-// projection. The detail panel re-fetches the full Ticket via getTicket, so
-// only the card pipeline (useBoard → Board → Column → TicketCard) is typed
-// with this.
-export type BoardCardTicket = Omit<Ticket, 'comments' | 'children'> & {
-  comments: BoardCardComment[];
-  children: BoardCardTicket[];
-  // Multi-holder role holders for the card avatars (T6). Optional so an older
-  // board payload (pre-projection) degrades gracefully to the legacy assignee.
-  role_holders?: BoardCardRoleHolders[];
-};
-
-export type BoardCardColumn = Omit<Column, 'tickets'> & {
-  tickets: BoardCardTicket[];
-};
-
-export type BoardWithCards = Omit<Board, 'columns'> & {
-  columns: BoardCardColumn[];
-};
-
-// Benchmark run lifecycle (ticket 5eb459c4). Mirrors BenchmarkService.RunDetail.
-export interface BenchmarkRunCandidate {
-  candidate_ticket_id: string;
-  assignee_agent_id: string;
-  assignee_name: string;
-  title: string;
-  pending: boolean; // parked (draft, not yet dispatched)
-  column_id: string;
-}
-
-export interface BenchmarkRunDetail {
-  run_ticket_id: string;
-  title: string;
-  state: 'draft' | 'started';
-  started_at: number | null;
-  board_id: string;
-  workspace_id: string;
-  run_column_id: string;
-  candidate_column_id: string;
-  prompt: string;
-  rubric: string;
-  base_repo: string;
-  evaluator_agent_ids: string[];
-  evaluators: Array<{ agent_id: string; name: string }>;
-  candidates: BenchmarkRunCandidate[];
-}
-
 export interface Workspace {
   id: string; // GUID
   name: string;
   description: string;
-  boards: Board[];
-  board_count?: number;
-  // Workspace-wide default agent harness. Raw JSON string of HarnessConfig;
-  // boards override it per key via Board.harness_config.
+  // Workspace-wide agent harness, shipped on every ticket dispatch. Raw JSON
+  // string of HarnessConfig.
   harness_config?: string | null;
   // Workspace 기본 repo clone 정책(ticket bddb63ee). harness_config 와 같이 원문
-  // JSON 문자열로 내려오며, Repo Resource 가 키 단위로 덮는다.
+  // JSON 문자열로 내려오며, Project 가 키 단위로 덮는다.
   clone_policy?: string | null;
-  // AWB 어시스턴트 에이전트 id (에픽 bf65ca00 · S2). null/미포함 = 미지정 —
-  // Chat-first 랜딩은 임의 에이전트를 고르지 않고 관리자에게 지정을 안내하는 empty
-  // state 를 렌더한다. 설정은 관리자 전용 workspace PATCH 로만 가능.
+  // ─── Ticket dispatch settings (moved from boards — docs/tickets.md) ───
+  // Output language for agents working a ticket here ("Korean", …). null = agent default.
+  language?: string | null;
+  // Distinct non-pending in_progress tickets one agent identity works at once (≥1, default 1).
+  max_concurrent_tickets_per_agent?: number;
+  // Done tickets idle for this many days are archived. null = disabled; 1..365.
+  auto_archive_days?: number | null;
+  // Non-null = ticket dispatch is paused for the whole workspace (ISO timestamp).
+  dispatch_paused_at?: string | null;
+  // GET /workspaces list rows: number of tickets in the pool.
+  ticket_count?: number;
+  // GET /workspaces/:id: tickets per status.
+  ticket_counts?: Partial<Record<TicketStatus, number>>;
   created_at: string;
   updated_at: string;
 }
@@ -1848,16 +1533,12 @@ export interface ChatMessageArtifactRef {
   commit?: string;  // 커밋 SHA
   url?: string;     // 배포 base_url 등
 }
-// F-3 (ticket 3ca88253): agent/board 상태 카드 ref. server 의 stream-events.ts 와
+// F-3 (ticket 3ca88253): agent 상태 카드 ref. server 의 stream-events.ts 와
 // 동일 shape — id(+표시용 라벨)만 싣고, 카드 클릭 시 클라이언트가 최신 상세를 다시
 // fetch 한다(TicketRefCard/TicketArtifact 와 동일 패턴).
 export interface ChatMessageAgentRef {
   agent_id: string;
   name?: string;
-}
-export interface ChatMessageBoardRef {
-  board_id: string;
-  title?: string;
 }
 export interface ChatMessageTicketAction {
   kind: 'unpend';
@@ -1868,7 +1549,6 @@ export interface ChatRoomMessageMetadata {
   ticket_refs?: ChatMessageTicketRef[];
   artifact_refs?: ChatMessageArtifactRef[];
   agent_refs?: ChatMessageAgentRef[];
-  board_refs?: ChatMessageBoardRef[];
   ticket_action?: ChatMessageTicketAction;
 }
 
@@ -2057,7 +1737,6 @@ export interface AgentLiveSession {
   ip: string;
   plugin_version: string;
   user_agent: string;
-  board_id: string | null;
   instance_id?: string;
   manager_agent_id?: string;
   manager_name?: string;
@@ -2590,103 +2269,7 @@ export interface ManagedAgentCreateBody {
   cli_runtime_profile?: string | null;
 }
 
-// ─── Cross-workspace board move (ticket 8882056b) ───────────────
-// Mirror of the server's WorkspaceMoveService.BoardMovePreview /
-// MovePreviewItem. The dry-run preview and the committed result share the
-// same shape so the UI renders one report type for both.
-export interface BoardMovePreviewItem {
-  /**
-   * restamp — hard UPDATE of workspace_id on a board-owned row
-   * copy     — workspace-shared dep duplicated into dest (non-destructive)
-   * reuse    — workspace-shared dep already present in dest, id remapped
-   * remap    — a referencing id rewritten (role_id, template id, channel id)
-   * carry    — companion agent moved along with the board
-   * warn     — something the operator should know (cleared dangling link, …)
-   * block    — a hard stop; commit is refused while any block item exists
-   */
-  kind: 'restamp' | 'copy' | 'reuse' | 'remap' | 'carry' | 'warn' | 'block';
-  entity:
-    | 'board' | 'column' | 'ticket' | 'prompt_template' | 'action' | 'resource'
-    | 'workspace_role' | 'role_assignment' | 'channel' | 'agent' | 'api_key' | 'credential';
-  id: string;
-  detail: string;
-}
-
-// ─── Inline blocker remedies (ticket 9efa643b) ──────────────────
-// Mirror of the server's WorkspaceMoveService.MoveRemedy / MoveBlocker. A
-// blocked preview now ships structured blockers (code + entity refs +
-// remedies[]) so each move UI can render an inline fix next to the bullet.
-// `message` preserves the legacy human-readable string.
-export interface MoveRemedy {
-  action: string; // e.g. 'drop_companion_agent', 'unassign_from_tickets', 'set_cross_ref_policy', 'set_api_key_policy', 'clear_credential'
-  label: string;
-  /** repreview — flip a local move option + re-run the dry-run preview (no write).
-   *  mutation  — confirm, POST …/move-to-workspace/remedy, then re-preview. */
-  kind: 'repreview' | 'mutation';
-  params?: Record<string, any>;
-}
-
-export interface MoveBlocker {
-  code: string;
-  message: string;
-  agent_id?: string;
-  ticket_ids?: string[];
-  fields?: string[];
-  credential_id?: string;
-  api_key_ids?: string[];
-  remedies: MoveRemedy[];
-}
-
-export interface BoardMovePreview {
-  board: { id: string; name: string };
-  source_workspace: { id: string; name: string } | null;
-  target_workspace: { id: string; name: string };
-  counts: { columns: number; tickets: number; copied: number; remapped: number; restamped: number };
-  items: BoardMovePreviewItem[];
-  /** Non-empty → commit is refused. Structured blockers carry inline remedies;
-   *  `message` is the legacy human-readable reason. */
-  blockers: MoveBlocker[];
-  carry_agents: boolean;
-  /** false for a dry-run preview, true once the transaction has committed. */
-  committed: boolean;
-}
-
-// ─── Cross-workspace agent move (ticket 868ead64) ───────────────
-
 // ─── Workflow Health (ticket 3970db66 — /admin/workflow-health/*) ──────────
-
-export interface WorkflowHealthActiveStorm {
-  ticket_id: string;
-  title: string;
-  board_id: string;
-  board_name: string;
-  workspace_id: string;
-  pending_reason: string;
-  pending_set_at: string | null;
-  /** Participating agent_ids, read back from the halt event's snapshot. */
-  agent_ids: string[];
-  /** Loop 시작점 — 이 스톰의 최초 사망 시각(halt 이벤트 스냅샷에서 역산). */
-  first_death_at: string | null;
-}
-
-export interface WorkflowHealthRespawnCount {
-  ticket_id: string;
-  title: string;
-  role: string;
-  board_id: string;
-  board_name: string;
-  deaths: number;
-  agent_ids: string[];
-}
-
-export interface WorkflowHealthSuppressionStats {
-  respawn_storm: { total_halts: number; total_twins: number };
-  comment_pingpong: {
-    total: number;
-    /** Keyed by reason: repeated_waiting_without_work_target | pending_user_action | duplicate_terminal_acknowledgement */
-    by_reason: Record<string, number>;
-  };
-}
 
 export interface WorkflowHealthTicketUsage {
   ticket_id: string;
@@ -2720,16 +2303,12 @@ export interface WorkflowHealthTokenUsage {
   estimated_saved_usd: number | null;
 }
 
+// Board-less rollup (docs/tickets.md → Workflow health): only the usage rollups
+// survive — storms / respawns / suppressions went with the respawn-storm
+// detector, and there is no `?board_id=` filter any more.
 export interface WorkflowHealthRollup {
   generated_at: string;
   window_minutes: number;
-  active_storms: WorkflowHealthActiveStorm[];
-  top_respawns: WorkflowHealthRespawnCount[];
-  stale_wait_alerts: number;
-  pending_tickets: number;
-  avg_cycle_time_ms: number | null;
-  qa_pass_trend: { passed: number; failed: number; error: number; total: number };
-  suppression_stats: WorkflowHealthSuppressionStats;
   // null when the usage sub-query itself failed (controller-level defensive
   // catch) — the tile must render an empty/unavailable state, not a zeroed one.
   token_usage: WorkflowHealthTokenUsage | null;
@@ -2882,7 +2461,11 @@ export interface OrchestrationPostAction {
   dispatched_at?: string | null;
 }
 
+// Mission repo (docs/tickets.md): `project_id` replaces the repository-Resource
+// `resource_id` (same ids after migration — read `resource_id` as a fallback).
 export interface OrchestrationRepoRef {
+  project_id?: string;
+  /** @deprecated legacy stored key — read-only fallback for `project_id`. */
   resource_id?: string;
   url?: string;
   branch?: string;

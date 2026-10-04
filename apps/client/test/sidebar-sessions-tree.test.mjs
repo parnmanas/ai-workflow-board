@@ -113,7 +113,7 @@ function installFetchStub({ hosts, sessionsByCli, permissions, control = {} }) {
     }
     if (path.includes('/orchestration/teams') || path.includes('/orchestration/missions')) return json([]);
     if (path.includes('/tickets/unread-counts')) {
-      return json({ total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} });
+      return json({ total: 0, perTicket: {} });
     }
     if (path.includes('/chat/unread-counts')) return json({ total: 0, perRoom: {} });
     if (path.includes('/mentions/unread')) return json({ count: 0, items: [] });
@@ -143,7 +143,7 @@ async function flush(times = 12) {
 
 async function mountSidebar(t, options = {}) {
   const {
-    entry = `${BASE}/boards`,
+    entry = `${BASE}/tickets`,
     hosts = [HOST],
     sessionsByCli = DEFAULT_SESSIONS_BY_CLI,
     permissions = ['agent_sessions.use'],
@@ -192,7 +192,6 @@ async function mountSidebar(t, options = {}) {
                 isOpen: false,
                 onClose: () => {},
                 wsId: WS_ID,
-                boards: [],
                 rooms: [],
                 roomsLoading: false,
               }),

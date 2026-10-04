@@ -1,4 +1,5 @@
 import RuntimeSelectionFields from './RuntimeSelectionFields';
+import ProjectFolderHelper from './ProjectFolderHelper';
 import React, { useEffect, useState } from 'react';
 import { api, getActiveWorkspaceId } from '../../api';
 import type { Credential } from '../../types';
@@ -30,6 +31,11 @@ interface RuntimeSpecEditorProps {
   workspaceId?: string;
   /** 폴더 공유 스코프 선택이 필요할 때만 (mission/step 계열). 기본 false. */
   showFolderScope?: boolean;
+  /**
+   * "Use project folder" helper under the working dir (pick a project → its
+   * main clone folder on the selected host). Default true; pass false to hide.
+   */
+  showProjectFolderHelper?: boolean;
   disabled?: boolean;
 }
 
@@ -47,6 +53,7 @@ export default function RuntimeSpecEditor({
   hosts,
   workspaceId,
   showFolderScope = false,
+  showProjectFolderHelper = true,
   disabled = false,
 }: RuntimeSpecEditorProps) {
   const set = (patch: Partial<RuntimeSpecDraft>) => onChange({ ...value, ...patch });
@@ -88,6 +95,15 @@ export default function RuntimeSpecEditor({
           onChange={(e) => set({ working_dir: (e.target as HTMLInputElement).value })}
         />
         {dirError && <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 4 }}>{dirError}</div>}
+        {showProjectFolderHelper && (
+          <ProjectFolderHelper
+            workspaceId={workspaceId}
+            hostIds={value.manager_agent_id}
+            currentDir={value.working_dir}
+            disabled={disabled}
+            onPick={(path) => set({ working_dir: path })}
+          />
+        )}
       </div>
 
       {cliSupportsCredential(value.cli) && (

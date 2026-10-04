@@ -5,8 +5,8 @@ import { tokens } from '../../tokens';
 /**
  * 공용 헤더 액션 컴포넌트 (board-ux-guidelines §2).
  *
- * `headerActionStyle` 인라인 스타일이 Board.tsx / BenchmarkLeaderboardPage.tsx 에
- * 복제돼 있던 것을 단일 컴포넌트로 추출한 것. hover/active/disabled/state-active
+ * `headerActionStyle` 인라인 스타일이 여러 페이지 헤더에 복제돼 있던 것을 단일
+ * 컴포넌트로 추출한 것. hover/active/disabled/state-active
  * 동작과 좁은 폭 icon-only 축약, 토큰 일관 적용을 한곳에서 책임진다.
  *
  * 렌더 타깃 추상화: `to`(라우터 Link) 또는 `onClick`(button) 중 하나를 받아

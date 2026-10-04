@@ -4,9 +4,8 @@ import { Button } from './common';
 import { QaPhase, QaPhasesConfig } from '../types';
 
 /**
- * Shared QA-phases editing UI (ticket 90cc22f7). The board-level editor (Board
- * Settings) and the per-scenario override (QaManager scenario form) both render
- * the same row editor — only the surrounding "save / inherit" chrome differs.
+ * QA-phases editing UI (ticket 90cc22f7), rendered by the QaManager scenario
+ * form — phases are defined per scenario (there is no wider default layer).
  *
  * Client read-parse mirrors the server fail-safe READ contract
  * (apps/server/src/modules/qa/qa-phases.ts parseQaPhases): accept either the

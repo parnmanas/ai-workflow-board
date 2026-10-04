@@ -1,24 +1,24 @@
 // Orchestration Mission 모달의 repo_ref 피커 회귀 테스트 (티켓 eb9cdd1c).
 //
-// 예전엔 이 모달만 공용 블록을 쓰지 않아, 작업 저장소를 지정하려면
-// "Resource id (preferred)" placeholder 에 repo 리소스의 UUID 를 직접 타이핑해야
-// 했다. 선행 티켓 af31e92d 가 Action/QA/Security 세 화면에서 없앤 원시 UUID 입력이
-// 여기 한 곳에 남아 있었다.
+// 예전엔 이 모달만 공용 블록을 쓰지 않아, 작업 저장소를 지정하려면 repo 리소스의
+// UUID 를 직접 타이핑해야 했다. 저장소가 repository Resource 에서 Project 로
+// 옮겨간 뒤(docs/tickets.md) 피커는 프로젝트 목록을 보여주고 `repo_ref.project_id`
+// 를 쓴다. 이관 전 레코드의 `resource_id` 는 같은 id 이므로 선택값으로 읽기만 한다.
 //
 // 소스 문자열/정규식 검사가 아니라 jsdom 으로 MissionFormModal 을 실제 렌더링해
 // 선택·입력을 태우고, 그 결과 화면 상태와 create/update 페이로드를 단언한다
 // (보드 교훈: UI 동작 완료 기준은 렌더링 상호작용으로 검증).
 //
 // 고정하는 계약:
-//   1. UUID 를 한 글자도 타이핑하지 않고 드롭다운만으로 repo 와 브랜치를 지정해
+//   1. UUID 를 한 글자도 타이핑하지 않고 드롭다운만으로 프로젝트와 브랜치를 지정해
 //      저장할 수 있고, 재편집 시 그 선택이 이름·URL 라벨로 복원된다.
-//   2. 목록에 없는/삭제된 resource_id 를 가진 기존 미션을 편집·저장해도 값이
-//      유실되지 않는다 — 로딩 중이나 조회 실패 중에도 "알 수 없는 리소스" 로
+//   2. 목록에 없는/삭제된 project_id 를 가진 기존 미션을 편집·저장해도 값이
+//      유실되지 않는다 — 로딩 중이나 조회 실패 중에도 "알 수 없는 프로젝트" 로
 //      오단정하지 않는다.
 //   3. 목록을 못 받는 사용자(권한 없음 등)도 폼이 동작한다 — 조용한 빈 목록 폴백 +
 //      수동 입력.
-//   4. 페이로드 규칙(resource_id 우선 → url+branch → null)이 생성/편집 두 경로에서
-//      동일하다.
+//   4. 페이로드 규칙(project_id 우선 → url+branch → null)이 생성/편집 두 경로에서
+//      동일하고, 레거시 resource_id 는 project_id 로만 나간다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,9 +28,15 @@ import { MissionFormModal } from '../src/components/orchestration/OrchestrationP
 
 const WS = 'ws-1';
 
+const project = (id, name, repo_url, default_branch) => ({
+  id, workspace_id: WS, name, description: '', repo_url, default_branch, credential_id: null,
+  clone_policy: null, use_pr: false, instructions: '', default_assignee: null, host_folders: [],
+  created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(),
+});
+
 const REPOS = [
-  { id: 'repo-awb', workspace_id: WS, name: 'AWB', type: 'repository', url: 'https://github.com/parnmanas/ai-workflow-board.git', default_branch: 'main' },
-  { id: 'repo-game', workspace_id: WS, name: 'GameClient', type: 'repository', url: 'https://github.com/example/game-client.git', default_branch: 'develop' },
+  project('repo-awb', 'AWB', 'https://github.com/parnmanas/ai-workflow-board.git', 'main'),
+  project('repo-game', 'GameClient', 'https://github.com/example/game-client.git', 'develop'),
 ];
 
 const BRANCHES = { branches: [{ name: 'main', sha: 'a1' }, { name: 'release', sha: 'b2' }], default_branch: 'main' };
@@ -54,8 +60,8 @@ function button(container, label) {
 }
 
 function repoSelect(container) {
-  const el = container.querySelector('select[aria-label="저장소 리소스 선택"]');
-  assert.ok(el, '저장소 리소스 드롭다운이 없습니다.');
+  const el = container.querySelector('select[aria-label="프로젝트 선택"]');
+  assert.ok(el, '프로젝트 드롭다운이 없습니다.');
   return el;
 }
 
@@ -138,21 +144,21 @@ const TEAMS = [
  */
 async function mountModal(t, {
   mission = null,
-  listResources = async () => REPOS,
-  listRepoBranches = async () => BRANCHES,
+  listProjects = async () => REPOS,
+  listProjectBranches = async () => BRANCHES,
 } = {}) {
   const dom = setupDom();
   const created = [];
   const updated = [];
   const originals = {
-    listResources: api.listResources,
-    listRepoBranches: api.listRepoBranches,
+    listProjects: api.listProjects,
+    listProjectBranches: api.listProjectBranches,
     listActions: api.listActions,
     createOrchestrationMission: api.createOrchestrationMission,
     updateOrchestrationMission: api.updateOrchestrationMission,
   };
-  api.listResources = listResources;
-  api.listRepoBranches = listRepoBranches;
+  api.listProjects = listProjects;
+  api.listProjectBranches = listProjectBranches;
   api.listActions = async () => [];
   api.createOrchestrationMission = async (data) => { created.push(data); return baseMission({ ...data, id: 'mission-new' }); };
   api.updateOrchestrationMission = async (id, data) => { updated.push({ id, data }); return baseMission({ ...data, id }); };
@@ -190,30 +196,30 @@ function fillRequired(container) {
 
 // ── 1. 드롭다운만으로 지정 → 저장 → 재편집 복원 ─────────────────────────────
 
-test('새 미션 — UUID 를 타이핑하지 않고 드롭다운만으로 repo 와 브랜치를 지정해 저장한다', async (t) => {
+test('새 미션 — UUID 를 타이핑하지 않고 드롭다운만으로 프로젝트와 브랜치를 지정해 저장한다', async (t) => {
   const { container, created } = await mountModal(t);
 
   const select = repoSelect(container);
   assert.deepEqual(
     [...select.options].map((o) => o.textContent),
     [
-      '— 지정 안 함 (board/workspace 환경설정 repo 재사용) —',
+      '— 지정 안 함 —',
       'AWB · https://github.com/parnmanas/ai-workflow-board.git',
       'GameClient · https://github.com/example/game-client.git',
     ],
-    '등록된 repo 리소스가 이름·URL 라벨로 나열되고, 빈 값이 명시적 선택지로 있다',
+    '등록된 프로젝트가 이름·URL 라벨로 나열되고, 빈 값이 명시적 선택지로 있다',
   );
-  assert.equal(select.value, '', '기본값은 지정 안 함 — board/workspace 환경설정 repo 재사용');
+  assert.equal(select.value, '', '기본값은 지정 안 함');
 
   change(select, 'repo-awb');
   await flush();
 
   const branchSelect = container.querySelector('select[aria-label="브랜치 선택"]');
-  assert.ok(branchSelect, '리소스를 고르면 브랜치도 드롭다운으로 고를 수 있다');
+  assert.ok(branchSelect, '프로젝트를 고르면 브랜치도 드롭다운으로 고를 수 있다');
   assert.deepEqual(
     [...branchSelect.options].map((o) => o.textContent),
-    ['— 저장소 기본 브랜치 (main) —', 'main', 'release'],
-    'listRepoBranches 결과가 기본 브랜치 안내와 함께 나열된다',
+    ['— 프로젝트 기본 브랜치 (main) —', 'main', 'release'],
+    'listProjectBranches 결과가 기본 브랜치 안내와 함께 나열된다',
   );
   change(branchSelect, 'release');
 
@@ -224,24 +230,24 @@ test('새 미션 — UUID 를 타이핑하지 않고 드롭다운만으로 repo 
   assert.equal(created.length, 1, '생성이 실제로 전송된다');
   assert.deepEqual(
     created[0].repo_ref,
-    { resource_id: 'repo-awb', branch: 'release' },
-    '고른 리소스와 브랜치가 그대로 payload 에 실린다',
+    { project_id: 'repo-awb', branch: 'release' },
+    '고른 프로젝트와 브랜치가 그대로 payload 에 실린다',
   );
 
   // UUID 를 타이핑할 자리가 애초에 없어야 한다 — 목록이 정상일 때 수동 입력은 숨는다.
   assert.equal(
-    Boolean(container.querySelector('input[aria-label="resource_id 직접 입력"]')),
+    Boolean(container.querySelector('input[aria-label="project_id 직접 입력"]')),
     false,
     '목록을 정상적으로 받은 상태에서는 원시 id 입력이 노출되지 않는다',
   );
 });
 
-test('저장된 미션을 다시 열면 고른 repo/브랜치가 이름·URL 라벨로 복원된다', async (t) => {
-  const mission = baseMission({ repo_ref: { resource_id: 'repo-awb', branch: 'release' } });
+test('저장된 미션을 다시 열면 고른 프로젝트/브랜치가 이름·URL 라벨로 복원된다', async (t) => {
+  const mission = baseMission({ repo_ref: { project_id: 'repo-awb', branch: 'release' } });
   const { container } = await mountModal(t, { mission });
 
   const select = repoSelect(container);
-  assert.equal(select.value, 'repo-awb', '저장된 resource_id 가 선택 상태로 복원된다');
+  assert.equal(select.value, 'repo-awb', '저장된 project_id 가 선택 상태로 복원된다');
   assert.equal(
     selectedLabel(select),
     'AWB · https://github.com/parnmanas/ai-workflow-board.git',
@@ -252,18 +258,37 @@ test('저장된 미션을 다시 열면 고른 repo/브랜치가 이름·URL 라
   assert.equal(branchSelect.value, 'release', '저장된 브랜치도 복원된다');
 });
 
-// ── 2. 목록에 없는 resource_id 보존 ────────────────────────────────────────
+test('이관 전 레코드의 resource_id 는 같은 프로젝트로 읽히고, 저장하면 project_id 로 나간다', async (t) => {
+  // 프로젝트는 repository Resource 와 같은 id 로 이관됐다(docs/tickets.md) — 저장된
+  // `resource_id` 는 읽기 폴백이고, 다시 쓰지 않는다.
+  const mission = baseMission({ repo_ref: { resource_id: 'repo-awb', branch: 'release' } });
+  const { container, updated } = await mountModal(t, { mission });
 
-test('삭제된/목록에 없는 resource_id 를 가진 미션을 편집·저장해도 값이 유실되지 않는다', async (t) => {
-  const mission = baseMission({ repo_ref: { resource_id: 'deleted-repo', branch: 'main' } });
+  const select = repoSelect(container);
+  assert.equal(select.value, 'repo-awb', 'resource_id 가 프로젝트 선택으로 복원된다');
+  assert.equal(selectedLabel(select), 'AWB · https://github.com/parnmanas/ai-workflow-board.git');
+
+  click(button(container, 'Save'));
+  await flush();
+  assert.deepEqual(
+    updated[0].data.repo_ref,
+    { project_id: 'repo-awb', branch: 'release' },
+    '레거시 resource_id 는 다시 쓰지 않는다 — 같은 id 가 project_id 로 나간다',
+  );
+});
+
+// ── 2. 목록에 없는 project_id 보존 ─────────────────────────────────────────
+
+test('삭제된/목록에 없는 project_id 를 가진 미션을 편집·저장해도 값이 유실되지 않는다', async (t) => {
+  const mission = baseMission({ repo_ref: { project_id: 'deleted-repo', branch: 'main' } });
   const { container, updated } = await mountModal(t, { mission });
 
   const select = repoSelect(container);
   assert.equal(select.value, 'deleted-repo', '목록에 없어도 선택 상태로 남는다');
   assert.equal(
     selectedLabel(select),
-    '알 수 없는 리소스 (deleted-repo)',
-    '목록을 다 받아본 뒤이므로 "알 수 없는 리소스" 로 표시한다',
+    '알 수 없는 프로젝트 (deleted-repo)',
+    '목록을 다 받아본 뒤이므로 "알 수 없는 프로젝트" 로 표시한다',
   );
 
   // repo 를 건드리지 않고 다른 필드만 고쳐 저장한다 — 이 경로에서 값이 날아가면
@@ -275,25 +300,25 @@ test('삭제된/목록에 없는 resource_id 를 가진 미션을 편집·저장
   assert.equal(updated.length, 1, '편집 저장이 실제로 전송된다');
   assert.deepEqual(
     updated[0].data.repo_ref,
-    { resource_id: 'deleted-repo', branch: 'main' },
-    '목록에 없는 resource_id 와 branch 가 그대로 되돌아간다',
+    { project_id: 'deleted-repo', branch: 'main' },
+    '목록에 없는 project_id 와 branch 가 그대로 되돌아간다',
   );
 });
 
-test('리소스 목록을 불러오는 중에는 저장된 id 를 "알 수 없는 리소스" 로 오단정하지 않는다', async (t) => {
+test('프로젝트 목록을 불러오는 중에는 저장된 id 를 "알 수 없는 프로젝트" 로 오단정하지 않는다', async (t) => {
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
-  const mission = baseMission({ repo_ref: { resource_id: 'repo-awb', branch: 'main' } });
+  const mission = baseMission({ repo_ref: { project_id: 'repo-awb', branch: 'main' } });
   const { container } = await mountModal(t, {
     mission,
-    listResources: () => pending,
+    listProjects: () => pending,
   });
 
   const select = repoSelect(container);
   assert.equal(select.value, 'repo-awb', '로딩 중에도 저장된 값은 선택 상태다');
   assert.equal(
     selectedLabel(select),
-    'repo-awb (리소스 목록 불러오는 중…)',
+    'repo-awb (프로젝트 목록 불러오는 중…)',
     '아직 목록을 못 봤으므로 없다고 단정하지 않는다',
   );
 
@@ -307,23 +332,23 @@ test('리소스 목록을 불러오는 중에는 저장된 id 를 "알 수 없�
 
 // ── 3. 조회 실패 폴백 ──────────────────────────────────────────────────────
 
-test('리소스 목록 조회가 실패해도 폼이 동작한다 — 값 보존 + 수동 입력 폴백', async (t) => {
-  const mission = baseMission({ repo_ref: { resource_id: 'repo-awb', branch: 'main' } });
+test('프로젝트 목록 조회가 실패해도 폼이 동작한다 — 값 보존 + 수동 입력 폴백', async (t) => {
+  const mission = baseMission({ repo_ref: { project_id: 'repo-awb', branch: 'main' } });
   const { container, updated } = await mountModal(t, {
     mission,
-    listResources: async () => { throw new Error('Forbidden'); },
-    listRepoBranches: async () => { throw new Error('Forbidden'); },
+    listProjects: async () => { throw new Error('Forbidden'); },
+    listProjectBranches: async () => { throw new Error('Forbidden'); },
   });
 
   const select = repoSelect(container);
   assert.equal(select.value, 'repo-awb', '조회 실패에도 저장된 값은 선택 상태로 남는다');
   assert.equal(
     selectedLabel(select),
-    'repo-awb (리소스 목록을 불러오지 못했습니다)',
-    '실패 상태에서도 "알 수 없는 리소스" 로 오단정하지 않는다',
+    'repo-awb (프로젝트 목록을 불러오지 못했습니다)',
+    '실패 상태에서도 "알 수 없는 프로젝트" 로 오단정하지 않는다',
   );
 
-  const manual = container.querySelector('input[aria-label="resource_id 직접 입력"]');
+  const manual = container.querySelector('input[aria-label="project_id 직접 입력"]');
   assert.ok(manual, '목록을 못 쓰는 상태에서는 예전처럼 id 를 직접 넣을 수 있다');
   assert.equal(manual.value, 'repo-awb');
 
@@ -335,14 +360,14 @@ test('리소스 목록 조회가 실패해도 폼이 동작한다 — 값 보존
   await flush();
   assert.deepEqual(
     updated[0].data.repo_ref,
-    { resource_id: 'repo-awb', branch: 'hotfix' },
+    { project_id: 'repo-awb', branch: 'hotfix' },
     '폴백 경로로 입력한 값도 그대로 전송된다',
   );
 });
 
 // ── 4. 페이로드 규칙 ───────────────────────────────────────────────────────
 
-test('repo 를 지정하지 않으면 repo_ref 는 null 이다 — board/workspace 환경설정 repo 재사용', async (t) => {
+test('저장소를 지정하지 않으면 repo_ref 는 null 이다', async (t) => {
   const { container, created } = await mountModal(t);
   fillRequired(container);
   click(button(container, 'Create & brief orchestrator'));
@@ -352,9 +377,9 @@ test('repo 를 지정하지 않으면 repo_ref 는 null 이다 — board/workspa
   assert.equal(created[0].repo_ref, null, '빈 값은 명시적으로 null 로 나간다');
 });
 
-test('리소스를 고르면 URL 은 payload 에서 빠진다 — 화면 안내와 서버 우선순위를 일치시킨다', async (t) => {
-  // 서버 resolveRunRepo() 는 url 을 resource_id 보다 먼저 본다. 둘 다 실어 보내면
-  // "리소스를 선택하면 이 URL 은 무시됩니다" 라는 이 폼의 안내와 정반대로 동작한다.
+test('프로젝트를 고르면 URL 은 payload 에서 빠진다 — 화면 안내와 서버 우선순위를 일치시킨다', async (t) => {
+  // 서버는 url 을 project_id 보다 먼저 본다. 둘 다 실어 보내면 "프로젝트를 선택하면
+  // 이 URL 은 무시됩니다" 라는 이 폼의 안내와 정반대로 동작한다.
   const mission = baseMission({ repo_ref: { url: 'https://legacy.test/old.git' } });
   const { container, updated } = await mountModal(t, { mission });
 
@@ -368,12 +393,12 @@ test('리소스를 고르면 URL 은 payload 에서 빠진다 — 화면 안내�
   await flush();
   assert.deepEqual(
     updated[0].data.repo_ref,
-    { resource_id: 'repo-game' },
-    'resource_id 만 나간다 — url 은 동시에 실리지 않는다',
+    { project_id: 'repo-game' },
+    'project_id 만 나간다 — url 은 동시에 실리지 않는다',
   );
 });
 
-test('리소스 없이 URL 만 지정하면 url+branch 로 나간다', async (t) => {
+test('프로젝트 없이 URL 만 지정하면 url+branch 로 나간다', async (t) => {
   const { container, created } = await mountModal(t);
 
   typeInto(container.querySelector('input[aria-label="repo URL"]'), 'https://example.test/repo.git');
@@ -386,16 +411,15 @@ test('리소스 없이 URL 만 지정하면 url+branch 로 나간다', async (t)
   assert.deepEqual(
     created[0].repo_ref,
     { url: 'https://example.test/repo.git', branch: 'trunk' },
-    '리소스로 등록되지 않은 저장소는 url+branch 경로로 나간다',
+    '프로젝트로 등록되지 않은 저장소는 url+branch 경로로 나간다',
   );
 });
 
-// ── 5. "지정 안 함" 은 실제로 환경설정 repo 재사용이어야 한다 (리뷰 지적) ──────
+// ── 5. "지정 안 함" 은 실제로 저장소 미지정이어야 한다 (리뷰 지적) ──────────────
 //
-// 드롭다운의 빈 옵션 라벨은 "board/workspace 환경설정 repo 재사용" 이라고 말한다.
-// 그런데 저장소 선택을 비울 때 url 을 남겨두면 `buildRepoRefPayload` 가 그 url 을
-// 활성 repo 로 내보내서, 라벨과 정반대로 URL checkout 이 계속된다. 특히
-// `{resource_id + url}` 레코드에서는 그때까지 resource 에 가려져 있던 url 이
+// 저장소 선택을 비울 때 url 을 남겨두면 `buildRepoRefPayload` 가 그 url 을 활성
+// repo 로 내보내서, "지정 안 함" 라벨과 정반대로 URL checkout 이 계속된다. 특히
+// `{project_id + url}` 레코드에서는 그때까지 프로젝트에 가려져 있던 url 이
 // "지정 안 함" 을 고르는 순간 오히려 되살아난다.
 
 test('URL 로 지정된 미션에서 "지정 안 함" 을 고르면 repo_ref 가 null 이 된다', async (t) => {
@@ -416,15 +440,15 @@ test('URL 로 지정된 미션에서 "지정 안 함" 을 고르면 repo_ref 가
   assert.equal(
     updated[0].data.repo_ref,
     null,
-    '"지정 안 함" 은 환경설정 repo 재사용이어야 한다 — 남은 url 이 계속 체크아웃되면 안 된다',
+    '"지정 안 함" 은 저장소 미지정이어야 한다 — 남은 url 이 계속 체크아웃되면 안 된다',
   );
 });
 
-test('resource_id 와 url 이 함께 저장된 미션에서 "지정 안 함" 을 골라도 url 이 되살아나지 않는다', async (t) => {
-  // MCP 등으로 두 필드가 함께 저장된 레코드. resource 선택 중에는 url 이 payload 에서
+test('project_id 와 url 이 함께 저장된 미션에서 "지정 안 함" 을 골라도 url 이 되살아나지 않는다', async (t) => {
+  // MCP 등으로 두 필드가 함께 저장된 레코드. 프로젝트 선택 중에는 url 이 payload 에서
   // 빠져 있다가, 선택을 비우는 순간 활성화되면 사용자가 지정한 적 없는 저장소를
   // 체크아웃하게 된다.
-  const mission = baseMission({ repo_ref: { resource_id: 'repo-awb', url: 'https://legacy.test/old.git' } });
+  const mission = baseMission({ repo_ref: { project_id: 'repo-awb', url: 'https://legacy.test/old.git' } });
   const { container, updated } = await mountModal(t, { mission });
 
   assert.equal(repoSelect(container).value, 'repo-awb');

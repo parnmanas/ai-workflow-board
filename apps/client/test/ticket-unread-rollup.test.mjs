@@ -1,9 +1,9 @@
 // TicketCard 미읽음 뱃지 롤업 순수 로직 테스트 (티켓 628f4b39).
 //
 // sumUnread 는 counts.tickets.perTicket(코멘트의 ticket_id — child/grandchild
-// 일 수 있음)을 board 카드가 실제로 렌더하는 ROOT 티켓 단위로 말아 올린다.
-// 서브태스크는 보드에 자기 카드가 없으므로, 이 롤업이 없으면 서브태스크 코멘트가
-// 보드/사이드바 뱃지 합계엔 잡히는데 어느 카드에서도 보이지 않는 불일치가 생긴다.
+// 일 수 있음)을 Tickets 페이지 카드/행이 실제로 렌더하는 ROOT 티켓 단위로 말아 올린다.
+// 서브태스크는 자기 카드가 없으므로, 이 롤업이 없으면 서브태스크 코멘트가
+// 사이드바 뱃지 합계엔 잡히는데 어느 카드에서도 보이지 않는 불일치가 생긴다.
 // fetch·라우팅·React 렌더 없는 순수 함수라 하니스 불필요 (sidebar-rooms-paging.
 // test.mjs 와 동일 패턴).
 import test from 'node:test';

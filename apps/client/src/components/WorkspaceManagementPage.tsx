@@ -8,7 +8,6 @@ import PageHeader from './PageHeader';
 import FunctionManager from './admin/FunctionManager';
 import CredentialManager from './admin/CredentialManager';
 import ResourceManager from './admin/ResourceManager';
-import PromptTemplateManager from './admin/PromptTemplateManager';
 import ActionManager from './admin/ActionManager';
 import QaManager from './admin/QaManager';
 import SecurityManager from './admin/SecurityManager';
@@ -20,7 +19,6 @@ export type WorkspaceManagementKind =
   | 'functions'
   | 'credentials'
   | 'resources'
-  | 'prompt-templates'
   | 'actions'
   | 'qa'
   | 'security'
@@ -31,7 +29,6 @@ const PAGE_INFO: Record<WorkspaceManagementKind, { title: string; description: s
   functions: { title: 'Functions', description: 'Global and current Workspace function definitions.', scopedDefinition: true },
   credentials: { title: 'Credentials', description: 'Global and current Workspace credentials.', scopedDefinition: true },
   resources: { title: 'Resources', description: 'Global and current Workspace resources.', scopedDefinition: true },
-  'prompt-templates': { title: 'Prompt Templates', description: 'Global and current Workspace prompt templates.', scopedDefinition: true },
   actions: { title: 'Actions', description: 'Actions owned by the current Workspace.' },
   qa: { title: 'QA', description: 'QA scenarios and schedules owned by the current Workspace.' },
   security: { title: 'Security', description: 'Security profiles and schedules owned by the current Workspace.' },
@@ -78,8 +75,6 @@ export default function WorkspaceManagementPage({ kind }: { kind: WorkspaceManag
         return <CredentialManager {...definitionProps} workspaceName={workspace?.name} />;
       case 'resources':
         return <ResourceManager {...definitionProps} />;
-      case 'prompt-templates':
-        return <PromptTemplateManager {...definitionProps} />;
       case 'actions':
         return <ActionManager workspaceId={wsId} />;
       case 'qa':

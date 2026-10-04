@@ -68,7 +68,6 @@ test('settings remain one click away and own canonical nested routes', () => {
   for (const segment of [
     'workspace',
     'members',
-    'roles',
     'credentials',
     'channels',
     'api-keys',
@@ -80,6 +79,11 @@ test('settings remain one click away and own canonical nested routes', () => {
 
   assert.match(sidebarSource, /label:\s*'User Administration'/);
   assert.match(sidebarSource, /label:\s*'System Settings'/);
+
+  // Workspace roles 는 보드와 함께 없어졌다(docs/tickets.md) — 메뉴도 라우트도 없다.
+  assert.doesNotMatch(sidebarSource, /settings\/roles/);
+  assert.doesNotMatch(appSource, /path="settings\/roles"/);
+  assert.doesNotMatch(appSource, /WorkspaceRolesPage/);
 });
 
 test('desktop always keeps the primary sidebar visible', () => {
@@ -87,7 +91,7 @@ test('desktop always keeps the primary sidebar visible', () => {
   assert.doesNotMatch(appLayoutSource, /const drawerMode = isMobile \|\| mode === 'chat'/);
 });
 
-test('WORK 은 Teams / Orchestrations / Boards 를 독립 라우트로 갖고 예전 경로는 리다이렉트로 남는다', () => {
+test('WORK 은 Tickets / Teams / Orchestrations 를 독립 라우트로 갖고 예전 경로는 리다이렉트로 남는다', () => {
   // 티켓 03ca8b5b — Teams 가 Orchestrations 하위에서 WORK 최상위로 승격됐다.
   // 렌더 계약은 sidebar-work-hierarchy.test.mjs 가 실제 마운트로 검증하고,
   // 여기서는 라우트 "등록" 자체(그 테스트가 볼 수 없는 부분)를 고정한다.
@@ -98,4 +102,19 @@ test('WORK 은 Teams / Orchestrations / Boards 를 독립 라우트로 갖고 �
 
   // 사이드바에는 단수 'Orchestration' 라벨이 남지 않는다.
   assert.doesNotMatch(sidebarSource, /label: 'Orchestration'/);
+});
+
+test('보드가 없어졌다: /tickets · /projects 라우트가 있고 예전 /boards/* 는 Tickets 로 리다이렉트된다', () => {
+  // docs/tickets.md — 워크스페이스 티켓 풀 하나 + 저장소는 Projects.
+  assert.match(appSource, /path="tickets" element=\{<TicketsPage \/>\}/);
+  assert.match(appSource, /path="projects" element=\{<ProjectsPage \/>\}/);
+  assert.match(appSource, /path="boards\/\*" element=\{<LegacyBoardsRedirect \/>\}/);
+  for (const gone of ['BoardsIndexPage', 'BoardSettingsPage', 'BoardArchivePage', 'BoardFeaturesPage', 'BenchmarkLeaderboardPage', 'prompt-templates']) {
+    assert.doesNotMatch(appSource, new RegExp(gone), `${gone} 라우트가 남아 있다`);
+  }
+  // 사이드바: Knowledge 에 Projects, Prompt Templates 는 없다.
+  assert.match(sidebarSource, /key: 'projects', path: `\$\{workspaceBase\}\/projects`/);
+  assert.doesNotMatch(sidebarSource, /Prompt Templates/);
+  // 워크스페이스를 바꿀 때 섹션이 없으면 기본 랜딩(sessions)으로 간다 — 'boards' 가 아니다.
+  assert.doesNotMatch(appLayoutSource, /\/boards/);
 });

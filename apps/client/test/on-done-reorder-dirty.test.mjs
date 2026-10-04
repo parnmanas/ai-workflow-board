@@ -5,43 +5,66 @@
 // dirty ticket field, otherwise TicketPanel's Save button never enables and
 // the new order is silently dropped (criterion b).
 //
-// The original code reused `channelIdsEqual`, which sorts both arrays before
-// comparing and is therefore order-INSENSITIVE. This test pins the difference:
-// the order-sensitive comparator must flag a reorder-only change as dirty,
-// while the order-insensitive one masks it.
+// The original code reused the channel-id comparator, which sorts both arrays
+// before comparing and is therefore order-INSENSITIVE. This test pins the
+// difference against the real helpers the panel uses
+// (src/components/ticketPanel/ticketDraft.ts).
 //
-// These helpers mirror TicketPanel.tsx verbatim. Keep them in sync.
+// 실행:  node --import tsx --test apps/client/test/on-done-reorder-dirty.test.mjs
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-// Order-INSENSITIVE — correct for channel_ids (a set), wrong for on_done order.
-const channelIdsEqual = (a, b) => {
-  if (a.length !== b.length) return false;
-  const sa = [...a].sort();
-  const sb = [...b].sort();
-  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
-  return true;
+import {
+  computeDirtyTicketFields,
+  draftFromTicket,
+  idsEqualOrdered,
+  idsEqualUnordered,
+  moveItem,
+} from '../src/components/ticketPanel/ticketDraft.ts';
+
+const ticket = (on_done_action_ids) => ({
+  title: 'T',
+  description: '',
+  priority: 'medium',
+  tags: [],
+  project_id: null,
+  base_branch: '',
+  assignee: null,
+  channel_ids: [],
+  next_ticket_id: null,
+  on_done_action_ids,
+});
+
+// Mirrors how the panel decides the field is dirty: the full draft diff.
+const onDoneDirty = (draftIds, savedIds) => {
+  const saved = ticket(savedIds);
+  const draft = { ...draftFromTicket(saved), onDoneActionIds: draftIds };
+  return 'on_done_action_ids' in computeDirtyTicketFields(draft, saved);
 };
-
-// Order-SENSITIVE — what on_done_action_ids must use.
-const idsEqualOrdered = (a, b) =>
-  a.length === b.length && a.every((v, i) => v === b[i]);
-
-// Mirrors the on_done_action_ids branch of TicketPanel's dirtyTicketFields.
-const onDoneDirty = (draft, saved) => !idsEqualOrdered(draft, saved || []);
 
 test('reorder-only change is flagged dirty (criterion b)', () => {
   const saved = ['a', 'b', 'c'];
   const reordered = ['c', 'a', 'b'];
 
-  // The bug: the old sorted comparator treats a reorder as a no-op.
-  assert.equal(channelIdsEqual(reordered, saved), true,
+  // The bug: the sorted comparator treats a reorder as a no-op.
+  assert.equal(idsEqualUnordered(reordered, saved), true,
     'precondition: order-insensitive compare masks the reorder');
+  assert.equal(idsEqualOrdered(reordered, saved), false);
 
   // The fix: order-sensitive compare sees the change → field is dirty → Save enables.
   assert.equal(onDoneDirty(reordered, saved), true,
     'reorder-only must be dirty so update_ticket persists the new order');
+});
+
+test('the ↑/↓ buttons produce a reorder the draft diff picks up', () => {
+  const saved = ['a', 'b', 'c'];
+  const movedDown = moveItem(saved, 0, 1);
+  assert.deepEqual(movedDown, ['b', 'a', 'c']);
+  assert.equal(onDoneDirty(movedDown, saved), true);
+  // Out-of-range moves are no-ops (same array back).
+  assert.equal(moveItem(saved, 0, -1), saved);
+  assert.equal(moveItem(saved, 2, 3), saved);
 });
 
 test('identical order is NOT dirty (no spurious saves)', () => {

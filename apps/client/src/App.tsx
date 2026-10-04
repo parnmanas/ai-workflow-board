@@ -11,19 +11,16 @@ import { tokens } from './tokens';
 
 // 라우트 단위 코드 스플리팅: 무거운 페이지 컴포넌트를 지연 로드해 초기 번들을
 // 작게 유지한다 (티켓 33a8ccc4 — 1.18MB 단일 청크 경고 해소).
-const Board = lazy(() => import('./components/Board'));
+// Tickets — 워크스페이스 전체 티켓 풀(보드 없음, docs/tickets.md). Kanban/List 두 뷰.
+const TicketsPage = lazy(() => import('./components/tickets/TicketsPage'));
+// Projects — 저장소 + Host 별 메인 클론 폴더(repository Resource 를 대체).
+const ProjectsPage = lazy(() => import('./components/projects/ProjectsPage'));
 const AdminPage = lazy(() => import('./components/admin/AdminPage'));
 const ChatPage = lazy(() => import('./components/ChatPage'));
-const BoardSettingsPage = lazy(() => import('./components/BoardSettingsPage'));
-const BoardArchivePage = lazy(() => import('./components/BoardArchivePage'));
-const BoardFeaturesPage = lazy(() => import('./components/BoardFeaturesPage'));
-const BenchmarkLeaderboardPage = lazy(() => import('./components/BenchmarkLeaderboardPage'));
-const BoardsIndexPage = lazy(() => import('./components/BoardsIndexPage'));
 const WorkspaceUsersPage = lazy(() => import('./components/WorkspaceUsersPage'));
 const WorkspaceChannelsPage = lazy(() => import('./components/WorkspaceChannelsPage'));
 const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPage'));
 const WorkspaceManagementPage = lazy(() => import('./components/WorkspaceManagementPage'));
-const WorkspaceRolesPage = lazy(() => import('./components/WorkspaceRolesPage'));
 const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
@@ -79,6 +76,17 @@ export function WorkspaceDefaultRedirect() {
 export function WorkspaceSectionRedirect() {
   const { search } = useLocation();
   return <Navigate to={`sessions${search}`} replace />;
+}
+
+// Boards are gone (docs/tickets.md). Every old board URL — the index, a board,
+// and its features/settings/archive/leaderboard sub-pages — lands on the
+// workspace Tickets page. The query string is kept so a bookmarked or
+// notification deep link (`/boards/<id>?ticket=<id>&comment=<id>`) still opens
+// the ticket (and scrolls to the comment).
+export function LegacyBoardsRedirect() {
+  const { wsId } = useParams<{ wsId: string }>();
+  const { search } = useLocation();
+  return <Navigate to={`/ws/${wsId}/tickets${search}`} replace />;
 }
 
 function LegacyCatalogRedirect() {
@@ -204,7 +212,9 @@ function AppContent() {
             <Route path="sessions" element={<WorkspacedRedirect to="sessions" />} />
             <Route path="hosts" element={<WorkspacedRedirect to="hosts" />} />
             <Route path="terminals" element={<WorkspacedRedirect to="terminals" />} />
-            <Route path="board/settings" element={<WorkspacedRedirect to="boards" />} />
+            <Route path="board/settings" element={<WorkspacedRedirect to="tickets" />} />
+            <Route path="boards" element={<WorkspacedRedirect to="tickets" />} />
+            <Route path="tickets" element={<WorkspacedRedirect to="tickets" />} />
 
             {/* Admin routes — all management pages live here */}
             <Route path="admin/*" element={<AdminPage />} />
@@ -221,12 +231,8 @@ function AppContent() {
               <Route path="terminals" element={<TerminalsPage />} />
               <Route path="terminals/:managerId" element={<TerminalsPage />} />
               <Route path="terminals/:managerId/:terminalId" element={<TerminalsPage />} />
-              <Route path="boards" element={<BoardsIndexPage />} />
-              <Route path="boards/:boardId" element={<Board />} />
-              <Route path="boards/:boardId/features" element={<BoardFeaturesPage />} />
-              <Route path="boards/:boardId/settings" element={<BoardSettingsPage />} />
-              <Route path="boards/:boardId/archive" element={<BoardArchivePage />} />
-              <Route path="boards/:boardId/leaderboard" element={<BenchmarkLeaderboardPage />} />
+              <Route path="tickets" element={<TicketsPage />} />
+              <Route path="boards/*" element={<LegacyBoardsRedirect />} />
               <Route path="teams" element={<OrchestrationTeamsPage />} />
               <Route path="orchestration" element={<OrchestrationPage />} />
               <Route path="orchestration/teams" element={<LegacyOrchestrationTeamsRedirect />} />
@@ -238,7 +244,7 @@ function AppContent() {
               <Route path="channels" element={<Navigate to="settings/channels" replace />} />
               <Route path="api-keys" element={<Navigate to="settings/api-keys" replace />} />
               <Route path="catalog" element={<LegacyCatalogRedirect />} />
-              <Route path="prompt-templates" element={<WorkspaceManagementPage kind="prompt-templates" />} />
+              <Route path="projects" element={<ProjectsPage />} />
               <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
               <Route path="ontology-graph" element={<OntologyGraphPage />} />
               <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
@@ -247,11 +253,9 @@ function AppContent() {
               <Route path="qa" element={<WorkspaceManagementPage kind="qa" />} />
               <Route path="security" element={<WorkspaceManagementPage kind="security" />} />
               <Route path="schedules" element={<WorkspaceManagementPage kind="schedules" />} />
-              <Route path="roles" element={<Navigate to="settings/roles" replace />} />
               <Route path="settings" element={<SettingsOverviewPage />} />
               <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
               <Route path="settings/members" element={<WorkspaceUsersPage />} />
-              <Route path="settings/roles" element={<WorkspaceRolesPage />} />
               <Route path="settings/credentials" element={<WorkspaceManagementPage kind="credentials" />} />
               <Route path="settings/channels" element={<WorkspaceChannelsPage />} />
               <Route path="settings/api-keys" element={<WorkspaceApiKeysPage />} />

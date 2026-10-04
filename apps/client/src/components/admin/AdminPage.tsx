@@ -22,7 +22,7 @@ const pageTitles: Record<string, { title: string; description?: string }> = {
     title: 'Skill Registry',
     description: 'Global skills, the built-in pack, and external git taps',
   },
-  'workflow-health': { title: 'Workflow Health', description: 'Automation suppression, respawn storms, QA trends, and token usage' },
+  'workflow-health': { title: 'Workflow Health', description: 'Agent token usage and cost — recent window and all-time' },
   settings: { title: 'Settings', description: 'System configuration' },
   voice: { title: 'Voice', description: 'Speech engines for voice input, spoken replies and announcements — and the lab to choose them' },
   migration: { title: 'Live Import', description: 'Pull this instance\'s data from a live source AWB server' },

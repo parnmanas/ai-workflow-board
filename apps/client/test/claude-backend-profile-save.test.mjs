@@ -268,7 +268,7 @@ test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 �
 
 test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범위를 보여준다', async (t) => {
   const { container } = await renderManager(t, { profiles: [existingProfile] });
-  const impact = { global_default: false, workspaces: ['w1'], boards: [{ id: 'b1' }], agents: [], runs: [] };
+  const impact = { global_default: false, workspaces: ['w1'], agents: [], runs: [{ id: 'r1' }] };
   const deleted = [];
   let confirmCalls = 0;
   const originalConfirm = window.confirm;
@@ -291,7 +291,9 @@ test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범
   // 다이얼로그 본문에 프로필 이름과 참조 요약이 함께 있어야 한다.
   assert.match(document.body.textContent, /프로필을 삭제할까요\?/);
   assert.match(document.body.textContent, /워크스페이스 1개/);
-  assert.match(document.body.textContent, /보드 1개/);
+  assert.match(document.body.textContent, /티켓 재정의 1건/);
+  // 보드는 사라졌다 — 참조 요약이 보드 수를 세면 안 된다.
+  assert.doesNotMatch(document.body.textContent, /보드 \d+개/);
   assert.equal(deleted.length, 0, '확인 전에는 삭제하지 않아야 합니다.');
 
   const confirmButton = [...document.body.querySelectorAll('button')]
@@ -351,12 +353,7 @@ test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화�
   );
   assert.match(managementPage, /Profiles are global/, '전역 단일 스코프임을 설명해야 합니다.');
 
-  const boardSettings = await read('BoardSettingsPage.tsx');
-  assert.equal(
-    boardSettings.includes('Inherit workspace'), false,
-    '보드 프로필 셀렉트의 상속 대상은 더 이상 워크스페이스가 아닙니다.',
-  );
-  assert.match(boardSettings, /Inherit global default/, '상속 대상은 전역 기본값이어야 합니다.');
+  // (BoardSettingsPage 는 보드 개념 제거와 함께 삭제 — 검사 대상에서 제외.)
 
   // 해석 체인에서 사라진 단계를 다시 약속하는 셀렉트가 없어야 한다.
   // (ManagedAgentDialog 는 P4c-3b, AgentsPage 는 P4c-4 에서 삭제 — 검사 대상에서 제외.)

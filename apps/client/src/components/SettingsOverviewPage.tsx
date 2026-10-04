@@ -31,7 +31,7 @@ export default function SettingsOverviewPage() {
       items: [
         {
           title: 'Workspace Settings',
-          description: 'Assistant agent and default agent harness configuration.',
+          description: 'Ticket dispatch, language, agent harness and clone policy defaults.',
           path: `/ws/${wsId}/settings/workspace`,
           icon: 'W',
           adminOnly: true,
@@ -41,12 +41,6 @@ export default function SettingsOverviewPage() {
           description: 'People who can access this workspace.',
           path: `/ws/${wsId}/settings/members`,
           icon: 'M',
-        },
-        {
-          title: 'Roles',
-          description: 'Workflow roles, prompts, and role ordering.',
-          path: `/ws/${wsId}/settings/roles`,
-          icon: 'R',
         },
       ],
     },

@@ -3,16 +3,17 @@ import type { ActivityView } from '../activity';
 
 // 사이드바 WORK 섹션의 계층 모델 (티켓 03ca8b5b).
 //
-// WORK 는 Teams / Orchestrations / Boards 세 개의 독립 최상위 메뉴를 그 순서대로
-// 노출하고, 각 메뉴는 해당 엔티티 목록을 서브메뉴로 편다. active 판정을 이 순수
-// 모듈로 뽑아낸 이유는 두 가지다:
+// WORK 는 맨 위에 평평한 Tickets 메뉴(워크스페이스 전체 티켓 풀 — 보드는 없어졌다,
+// docs/tickets.md) 하나와, Teams / Orchestrations 두 개의 계층형 최상위 메뉴를
+// 그 순서대로 노출한다. 계층형 메뉴는 해당 엔티티 목록을 서브메뉴로 편다. active
+// 판정을 이 순수 모듈로 뽑아낸 이유는 두 가지다:
 //  - 최상위 메뉴 경로끼리 접두사가 겹치면(예전 /orchestration/teams) 두 메뉴가
 //    동시에 active 로 보이는 버그가 난다 — 소유 경로 판정을 한곳에 모은다.
 //  - 렌더 없이 순서·경로·active·empty 상태를 그대로 단언할 수 있다.
 
 /**
- * 목록이 바뀌었음을 사이드바에 알리는 window 이벤트 이름. 보드가 이미 쓰는
- * `boards-changed` 와 같은 패턴 — 페이지가 쏘고 사이드바가 듣는다.
+ * 목록이 바뀌었음을 사이드바에 알리는 window 이벤트 이름 — 페이지가 쏘고
+ * 사이드바가 듣는다.
  */
 export const TEAMS_CHANGED_EVENT = 'orchestration-teams-changed';
 export const MISSIONS_CHANGED_EVENT = 'orchestration-missions-changed';
@@ -33,7 +34,7 @@ export interface WorkNavChild {
   badgeLabel?: string;
 }
 
-export type WorkNavGroupKey = 'teams' | 'orchestrations' | 'boards';
+export type WorkNavGroupKey = 'teams' | 'orchestrations';
 
 export interface WorkNavGroup {
   key: WorkNavGroupKey;
@@ -60,11 +61,6 @@ export interface WorkNavInput {
   selectedTeamId?: string | null;
   teams: Array<{ id: string; name: string }>;
   missions: Array<{ id: string; title: string; status?: string }>;
-  boards: Array<{ id: string; name: string }>;
-  /** 보드별 읽지 않은 티켓 코멘트 수. */
-  boardUnread?: Record<string, number>;
-  /** 워크스페이스 전체 읽지 않은 티켓 코멘트 수(Boards 최상위 배지). */
-  ticketUnreadTotal?: number;
   teamsLoading?: boolean;
   missionsLoading?: boolean;
 }
@@ -84,7 +80,39 @@ function isUnder(pathname: string, path: string): boolean {
 }
 
 /**
- * 최상위 메뉴 3개 + 서브메뉴를 요구된 순서(Teams → Orchestrations → Boards)로
+ * WORK 맨 위의 평평한 Tickets 메뉴. 배지는 워크스페이스 전체 읽지 않은 티켓
+ * 코멘트 수다(보드별 롤업은 보드와 함께 없어졌다).
+ */
+export interface TicketsNavItem {
+  key: 'tickets';
+  label: string;
+  icon: string;
+  path: string;
+  active: boolean;
+  badge: number;
+  badgeLabel: string;
+}
+
+export function buildTicketsNavItem(input: {
+  workspaceBase: string;
+  pathname: string;
+  ticketUnreadTotal?: number;
+}): TicketsNavItem {
+  const path = `${input.workspaceBase}/tickets`;
+  const total = input.ticketUnreadTotal || 0;
+  return {
+    key: 'tickets',
+    label: 'Tickets',
+    icon: '#',
+    path,
+    active: !!input.workspaceBase && isUnder(input.pathname, path),
+    badge: total,
+    badgeLabel: `읽지 않은 티켓 코멘트 ${total}건`,
+  };
+}
+
+/**
+ * 계층형 최상위 메뉴 2개 + 서브메뉴를 요구된 순서(Teams → Orchestrations)로
  * 만든다. 순서 자체가 요구사항이므로 배열 리터럴 순서를 바꾸지 말 것.
  */
 export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
@@ -94,16 +122,12 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
     selectedTeamId = null,
     teams,
     missions,
-    boards,
-    boardUnread = {},
-    ticketUnreadTotal = 0,
     teamsLoading = false,
     missionsLoading = false,
   } = input;
 
   const teamsPath = `${workspaceBase}/teams`;
   const orchestrationsPath = `${workspaceBase}/orchestration`;
-  const boardsPath = `${workspaceBase}/boards`;
 
   return [
     {
@@ -138,25 +162,6 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
       })),
       emptyLabel: 'No missions yet',
       loading: missionsLoading,
-    },
-    {
-      key: 'boards',
-      label: 'Boards',
-      icon: 'B',
-      path: boardsPath,
-      active: isUnder(pathname, boardsPath),
-      badge: ticketUnreadTotal,
-      badgeLabel: `읽지 않은 티켓 코멘트 ${ticketUnreadTotal}건`,
-      children: boards.map((board) => ({
-        id: board.id,
-        label: board.name,
-        path: `${boardsPath}/${board.id}`,
-        active: isUnder(pathname, `${boardsPath}/${board.id}`),
-        badge: boardUnread[board.id],
-        badgeLabel: `${board.name} 읽지 않은 코멘트 ${boardUnread[board.id] || 0}건`,
-      })),
-      emptyLabel: 'No boards yet',
-      loading: false,
     },
   ];
 }

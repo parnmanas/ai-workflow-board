@@ -7,11 +7,11 @@
 // 카운트 0" 과 "다른 세션의 ticket_reads_cleared SSE 수신 → 로컬 카운트 수렴"
 // 경로 자체는 아무것도 고정하지 않았다. 이 파일이 그 갭을 메운다.
 //
-// 여기서 고정하는 계약:
-//   1. 초기 unread 응답으로 보드/티켓 카운트가 채워진다
-//   2. 보드 read-all(서버 호출 + markTicketsReadForBoard) 후 로컬 카운트가 0
+// 여기서 고정하는 계약 (board-less: unread-counts 는 `{ total, perTicket }` 만 — docs/tickets.md):
+//   1. 초기 unread 응답으로 티켓 카운트가 채워진다(perBoard 는 없다)
+//   2. read-all(서버 호출 — 바디 없음 + markAllTicketsReadLocal) 후 로컬 카운트가 0
 //   3. 다른 세션에서 emit 된 ticket_reads_cleared SSE 를 받으면 재조회 없이
-//      로컬 카운트가 수렴한다(보드 스코프 / 워크스페이스 전체 둘 다)
+//      로컬 카운트가 수렴한다
 //   4. user_id 불일치(다른 사용자) 이벤트는 무시한다
 //   5. workspace_id 불일치(다른 워크스페이스) 이벤트는 무시한다
 //
@@ -48,8 +48,6 @@ function makeInitialTicketCounts() {
   return {
     total: 5,
     perTicket: { 't1': 5 },
-    perBoard: { 'board-a': 5 },
-    ticketBoard: { 't1': 'board-a' },
   };
 }
 
@@ -82,8 +80,8 @@ async function mountHarness(t, { ticketCounts } = {}) {
   api.getUnreadMentions = async () => ({ count: 0, items: [] });
   api.getChatUnreadCounts = async () => ({ total: 0, perRoom: {} });
   api.getTicketUnreadCounts = async () => ticketCounts ?? makeInitialTicketCounts();
-  api.markAllTicketsRead = async (boardId) => {
-    markAllTicketsReadCalls.push(boardId);
+  api.markAllTicketsRead = async (...args) => {
+    markAllTicketsReadCalls.push(args);
     return { updated: 5 };
   };
 
@@ -106,31 +104,31 @@ async function mountHarness(t, { ticketCounts } = {}) {
   return { capture, markAllTicketsReadCalls, FakeEventSource };
 }
 
-test('초기 unread 응답 → 보드/티켓 카운트가 존재한다', async (t) => {
+test('초기 unread 응답 → 티켓 카운트가 존재하고 보드 롤업은 없다', async (t) => {
   const { capture } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
-  assert.deepEqual(capture.current.counts.tickets.perBoard, { 'board-a': 5 });
   assert.deepEqual(capture.current.counts.tickets.perTicket, { t1: 5 });
+  assert.equal('perBoard' in capture.current.counts.tickets, false);
+  assert.equal(typeof capture.current.markTicketsReadForBoard, 'undefined', '보드 스코프 read-all 은 없어졌다');
 });
 
-test('보드 read-all(서버 호출 + markTicketsReadForBoard) 후 로컬 카운트가 0이 된다', async (t) => {
+test('read-all(서버 호출 + markAllTicketsReadLocal) 후 로컬 카운트가 0이 된다', async (t) => {
   const { capture, markAllTicketsReadCalls } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
 
-  // Board.tsx의 handleMarkBoardRead 와 동일한 순서: 서버 upsert 먼저, 그 다음
+  // Tickets 페이지/사이드바의 "모두 읽음" 과 동일한 순서: 서버 upsert 먼저, 그 다음
   // 로컬 상태 클리어.
   await act(async () => {
-    await api.markAllTicketsRead('board-a');
-    capture.current.markTicketsReadForBoard('board-a');
+    await api.markAllTicketsRead();
+    capture.current.markAllTicketsReadLocal();
   });
 
-  assert.deepEqual(markAllTicketsReadCalls, ['board-a']);
+  assert.deepEqual(markAllTicketsReadCalls, [[]], 'read-all 은 board 인자 없이 호출된다');
   assert.equal(capture.current.counts.tickets.total, 0, 'read-all 후 로컬 총합이 0이어야 한다');
-  assert.deepEqual(capture.current.counts.tickets.perBoard, {}, 'board-a 뱃지가 사라져야 한다');
   assert.deepEqual(capture.current.counts.tickets.perTicket, {});
 });
 
-test('다른 세션에서 emit 된 ticket_reads_cleared(보드 스코프) 수신 시 재조회 없이 로컬 카운트가 수렴한다', async (t) => {
+test('다른 세션에서 emit 된 ticket_reads_cleared 수신 시 재조회 없이 로컬 카운트가 수렴한다', async (t) => {
   const { capture, FakeEventSource } = await mountHarness(t);
   assert.equal(capture.current.counts.tickets.total, 5);
 
@@ -141,7 +139,6 @@ test('다른 세션에서 emit 된 ticket_reads_cleared(보드 스코프) 수신
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
       workspace_id: WS_ID,
-      board_id: 'board-a',
       updated: 5,
       read_at: new Date().toISOString(),
     });
@@ -149,17 +146,12 @@ test('다른 세션에서 emit 된 ticket_reads_cleared(보드 스코프) 수신
   });
 
   assert.equal(capture.current.counts.tickets.total, 0, '다른 기기에서의 read-all 도 이 세션 뱃지를 0으로 수렴시켜야 한다');
-  assert.deepEqual(capture.current.counts.tickets.perBoard, {});
+  assert.deepEqual(capture.current.counts.tickets.perTicket, {});
 });
 
-test('ticket_reads_cleared(워크스페이스 전체, board_id=null) 수신 시 모든 보드가 함께 0이 된다', async (t) => {
+test('예전 서버가 보내던 board_id 가 실려 와도 워크스페이스 전체가 0이 된다', async (t) => {
   const { capture, FakeEventSource } = await mountHarness(t, {
-    ticketCounts: {
-      total: 8,
-      perTicket: { t1: 5, t2: 3 },
-      perBoard: { 'board-a': 5, 'board-b': 3 },
-      ticketBoard: { t1: 'board-a', t2: 'board-b' },
-    },
+    ticketCounts: { total: 8, perTicket: { t1: 5, t2: 3 } },
   });
   assert.equal(capture.current.counts.tickets.total, 8);
 
@@ -168,7 +160,7 @@ test('ticket_reads_cleared(워크스페이스 전체, board_id=null) 수신 시 
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
       workspace_id: WS_ID,
-      board_id: null,
+      board_id: 'board-a',
       updated: 8,
       read_at: new Date().toISOString(),
     });
@@ -176,7 +168,6 @@ test('ticket_reads_cleared(워크스페이스 전체, board_id=null) 수신 시 
   });
 
   assert.equal(capture.current.counts.tickets.total, 0);
-  assert.deepEqual(capture.current.counts.tickets.perBoard, {});
   assert.deepEqual(capture.current.counts.tickets.perTicket, {});
 });
 
@@ -189,7 +180,6 @@ test('다른 사용자(user_id 불일치)의 ticket_reads_cleared 는 무시한�
     es.emit('ticket_reads_cleared', {
       user_id: 'someone-else',
       workspace_id: WS_ID,
-      board_id: 'board-a',
       updated: 5,
       read_at: new Date().toISOString(),
     });
@@ -208,7 +198,6 @@ test('다른 워크스페이스(workspace_id 불일치)의 ticket_reads_cleared 
     es.emit('ticket_reads_cleared', {
       user_id: USER_ID,
       workspace_id: 'other-workspace',
-      board_id: 'board-a',
       updated: 5,
       read_at: new Date().toISOString(),
     });

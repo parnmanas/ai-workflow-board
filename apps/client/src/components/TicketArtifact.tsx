@@ -6,13 +6,16 @@ import { renderMarkdown } from './chat/utils/markdown';
 import { ErrorState } from './common';
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useCloseArtifactPanel } from '../contexts/ArtifactPanelContext';
-import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink';
+import { canOpenTicket, ticketPath } from '../utils/ticketPath';
+import { ticketStatusLabel } from '../tickets/status';
+import { assigneeDisplayName } from '../tickets/assignee';
+import { useHostNames } from '../runtime/useHostNames';
 
 /**
  * 티켓 Artifact 상세 (에픽 bf65ca00 · Phase 1 · S3).
  *
  * 채팅/코멘트 티켓 카드(TicketRefCard) 클릭 시 우측 Artifact 패널 본문으로 주입되는
- * 경량 read-only 뷰다. 편집기인 TicketPanel(30+ props·Board 결합)을 그대로 끌어오지
+ * 경량 read-only 뷰다. 편집기인 TicketPanel(20+ props·Tickets 페이지 결합)을 그대로 끌어오지
  * 않고, 같은 프리미티브(tokens·renderMarkdown·배지)로 상세를 읽기 전용 렌더한다 —
  * 대화 맥락을 유지한 채 상세를 확인하는 Phase 1 목적에 맞춘 최소 표면. 편집/승인/결과물
  * 카드 등 처리 액션은 후속(F-2)에서 확장한다.
@@ -21,12 +24,12 @@ import { canOpenTicketOnBoard, ticketBoardPath } from '../utils/ticketBoardLink'
  * 마크업을 react-dom/server 로 회귀 테스트하고(jsdom 없이), fetch·부수효과는 컨테이너가
  * 담당한다(ArtifactPanel 선례).
  *
- * "보드에서 열기" 버튼(티켓 7815a958): 뷰는 onOpenOnBoard 콜백이 주어질 때만 버튼을
- * 렌더한다(ErrorState 의 onRetry 와 동일한 선택적 렌더 관례). 활성/비활성은 ticket.
- * board_id(서버 GET /tickets/:id 가 column_id→BoardColumn 을 걸어 붙인 필드)와
- * archived_at 으로만 판단하는 순수 파생값이라 SSR 테스트로 고정할 수 있다. 실제
- * navigate() 호출(다른 workspace/board 로도 이동 가능해야 함 — 티켓 28258c75 의 URL
- * 기반 workspace 전환과 동일 계약)은 useNavigate 를 쓰는 컨테이너가 담당한다.
+ * "티켓 열기" 버튼(티켓 7815a958): 뷰는 onOpen 콜백이 주어질 때만 버튼을 렌더한다
+ * (ErrorState 의 onRetry 와 동일한 선택적 렌더 관례). 티켓은 워크스페이스 하나의
+ * 풀에 있으므로(docs/tickets.md) 활성/비활성은 ticket.workspace_id 유무만으로 정해지는
+ * 순수 파생값이라 SSR 테스트로 고정할 수 있다 — 보관된 티켓도 Tickets 페이지가 id 로
+ * 열어 준다. 실제 navigate() 호출(다른 workspace 로도 이동 가능해야 함 — 티켓 28258c75
+ * 의 URL 기반 workspace 전환과 동일 계약)은 useNavigate 를 쓰는 컨테이너가 담당한다.
  */
 
 export type TicketArtifactState =
@@ -81,18 +84,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function roleNames(ticket: any, slug: string): string[] {
-  const assignments = Array.isArray(ticket?.role_assignments) ? ticket.role_assignments : [];
-  const names = assignments
-    .filter((r: any) => r?.slug === slug && r?.holder?.name)
-    .map((r: any) => r.holder.name as string);
-  if (names.length > 0) return names;
-  // 폴백: role_assignments 가 비어 있으면 비정규화 표시 필드(assignee/reporter)를 쓴다.
-  const legacy = slug === 'assignee' ? ticket?.assignee : slug === 'reporter' ? ticket?.reporter : null;
-  return legacy ? [String(legacy)] : [];
-}
-
 const PRIORITY_TONE: Record<string, 'danger' | 'accent' | 'muted'> = {
+  critical: 'danger',
   high: 'danger',
   medium: 'accent',
   low: 'muted',
@@ -102,18 +95,20 @@ const PRIORITY_TONE: Record<string, 'danger' | 'accent' | 'muted'> = {
  * 순수 표현 컴포넌트 — 부수효과 없음. 상태는 전부 props 로 받는다.
  * disconnected 는 SSE 단절 시 로드 뷰 상단에 "실시간 갱신 일시중단" 배너를 띄운다
  * (컨테이너가 useBoardStream().isConnected 를 주입). onRetry 는 오류 상태에서
- * 재시도 버튼을 노출한다.
+ * 재시도 버튼을 노출한다. hostNames 는 담당자 spec 을 `<Host>/<label>` 로 그리는 데 쓴다.
  */
 export function TicketArtifactView({
   state,
   disconnected,
   onRetry,
-  onOpenOnBoard,
+  onOpen,
+  hostNames,
 }: {
   state: TicketArtifactState;
   disconnected?: boolean;
   onRetry?: () => void;
-  onOpenOnBoard?: () => void;
+  onOpen?: () => void;
+  hostNames?: Record<string, string>;
 }) {
   if (state.status === 'loading') {
     return (
@@ -130,24 +125,20 @@ export function TicketArtifactView({
   }
 
   const t = state.ticket || {};
-  const labels: string[] = Array.isArray(t.labels) ? t.labels : [];
+  const tags: string[] = Array.isArray(t.tags) ? t.tags : [];
   const children: any[] = Array.isArray(t.children) ? t.children : [];
   const comments: any[] = Array.isArray(t.comments) ? t.comments : [];
-  const assignees = roleNames(t, 'assignee');
-  const reporters = roleNames(t, 'reporter');
-  const reviewers = roleNames(t, 'reviewer');
+  // The server resolves `<Host>/<label>` (assignee_name); fall back to the
+  // client formatter (host catalog) for older payloads.
+  const assignee = (t.assignee ? t.assignee_name : '') || assigneeDisplayName(t.assignee, hostNames);
+  const projectName: string = t.project?.name || '';
   // 시스템 코멘트는 노이즈라 상세 요약에선 걸러 최근 사람/에이전트 발화만 몇 개 보여준다.
   const visibleComments = comments.filter((c) => c?.author_type !== 'system').slice(-4);
 
-  // "보드에서 열기" 활성/비활성 — board_id 를 못 찾았거나(고아 column/삭제된 column)
-  // 티켓이 아카이브돼 있으면(보드 컬럼 조회가 기본적으로 archived_at IS NULL 만 보여줘
-  // 이동해도 아무것도 열리지 않는다) 비활성 + 안내 문구로 대체한다(완료기준 #4).
-  const canOpenOnBoard = canOpenTicketOnBoard(t);
-  const openOnBoardHint = !t.board_id
-    ? '이 티켓이 속한 보드를 찾을 수 없습니다.'
-    : t.archived_at
-      ? '보관된 티켓은 보드에서 바로 열 수 없습니다.'
-      : undefined;
+  // "티켓 열기" 활성/비활성 — 티켓의 workspace 를 모르면(구 응답·고아 행) 주소를 만들 수
+  // 없으므로 비활성 + 안내 문구로 대체한다(완료기준 #4).
+  const canOpen = canOpenTicket(t);
+  const openHint = canOpen ? undefined : '이 티켓이 속한 워크스페이스를 찾을 수 없습니다.';
 
   return (
     <div style={{ padding: tokens.spacing.lg, display: 'flex', flexDirection: 'column', gap: tokens.spacing.lg }}>
@@ -184,23 +175,25 @@ export function TicketArtifactView({
         </h2>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
           {t.priority && <Chip tone={PRIORITY_TONE[String(t.priority)] || 'default'}>{String(t.priority)}</Chip>}
-          {t.status && <Chip tone="muted">{String(t.status)}</Chip>}
-          {labels.map((l) => (
-            <Chip key={l} tone="accent">{l}</Chip>
+          {t.status && <Chip tone="muted">{ticketStatusLabel(String(t.status))}</Chip>}
+          {t.archived_at && <Chip tone="muted">보관됨</Chip>}
+          {projectName && <Chip>{projectName}</Chip>}
+          {tags.map((tag) => (
+            <Chip key={tag} tone="accent">#{tag}</Chip>
           ))}
         </div>
       </div>
 
-      {onOpenOnBoard && (
+      {onOpen && (
         // disabled 네이티브 버튼은 브라우저에 따라 title 호버 툴팁이 안 뜨는 경우가
         // 있어(포인터 이벤트가 아예 안 걸림), 안내 문구는 감싸는 span 에도 올려 마우스
         // 사용자에게 항상 뜨게 한다. 스크린리더 경로는 버튼 자체의 aria-label 이 맡는다.
-        <span title={!canOpenOnBoard ? openOnBoardHint : undefined} style={{ alignSelf: 'flex-start' }}>
+        <span title={!canOpen ? openHint : undefined} style={{ alignSelf: 'flex-start' }}>
           <button
             type="button"
-            onClick={canOpenOnBoard ? onOpenOnBoard : undefined}
-            disabled={!canOpenOnBoard}
-            aria-label={openOnBoardHint ? `보드에서 열기 — ${openOnBoardHint}` : '보드에서 열기'}
+            onClick={canOpen ? onOpen : undefined}
+            disabled={!canOpen}
+            aria-label={openHint ? `티켓 열기 — ${openHint}` : '티켓 열기'}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -209,28 +202,25 @@ export function TicketArtifactView({
               fontSize: tokens.typography.fontSizeMd,
               fontWeight: 600,
               fontFamily: 'inherit',
-              color: canOpenOnBoard ? tokens.colors.accentSubtle : tokens.colors.textMuted,
-              background: canOpenOnBoard ? tokens.overlays.accentSoft : tokens.colors.surfaceCard,
-              border: `1px solid ${canOpenOnBoard ? tokens.colors.accent : tokens.colors.border}`,
+              color: canOpen ? tokens.colors.accentSubtle : tokens.colors.textMuted,
+              background: canOpen ? tokens.overlays.accentSoft : tokens.colors.surfaceCard,
+              border: `1px solid ${canOpen ? tokens.colors.accent : tokens.colors.border}`,
               borderRadius: tokens.radii.md,
-              cursor: canOpenOnBoard ? 'pointer' : 'not-allowed',
+              cursor: canOpen ? 'pointer' : 'not-allowed',
             }}
           >
             <span aria-hidden="true">↗</span>
-            보드에서 열기
+            티켓 열기
           </button>
         </span>
       )}
 
-      {(assignees.length > 0 || reporters.length > 0 || reviewers.length > 0) && (
-        <Section title="담당">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13, color: tokens.colors.textSecondary }}>
-            {assignees.length > 0 && <div><span style={{ color: tokens.colors.textMuted }}>담당자 </span>{assignees.join(', ')}</div>}
-            {reporters.length > 0 && <div><span style={{ color: tokens.colors.textMuted }}>보고자 </span>{reporters.join(', ')}</div>}
-            {reviewers.length > 0 && <div><span style={{ color: tokens.colors.textMuted }}>리뷰어 </span>{reviewers.join(', ')}</div>}
-          </div>
-        </Section>
-      )}
+      <Section title="담당">
+        <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
+          <span style={{ color: tokens.colors.textMuted }}>담당자 </span>
+          {assignee || '미지정 — 디스패치되지 않음'}
+        </div>
+      </Section>
 
       {t.description && (
         <Section title="설명">
@@ -262,7 +252,7 @@ export function TicketArtifactView({
                   color: tokens.colors.textSecondary,
                 }}
               >
-                <Chip tone={c.status === 'done' ? 'muted' : 'accent'}>{c.status || 'todo'}</Chip>
+                <Chip tone={c.status === 'done' ? 'muted' : 'accent'}>{ticketStatusLabel(c.status || 'todo')}</Chip>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</span>
               </div>
             ))}
@@ -302,6 +292,7 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
   const { isConnected } = useBoardStream();
   const navigate = useNavigate();
   const closeArtifact = useCloseArtifactPanel();
+  const hostNames = useHostNames();
 
   // showLoading=false 는 이미 로드된 상세의 백그라운드 재조회용 — 성공 시에만
   // 교체하고 실패는 무시해 실시간 갱신이 화면을 깜빡이거나 오류로 덮지 않게 한다.
@@ -342,17 +333,17 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
 
   const retry = useCallback(() => load(true), [load]);
 
-  // 다른 workspace/board 의 티켓이어도 URL 에 명시적 wsId 를 실어 이동한다 —
+  // 다른 workspace 의 티켓이어도 URL 에 명시적 wsId 를 실어 이동한다 —
   // AppLayout 의 URL→state 동기화 effect(티켓 28258c75)가 currentWorkspaceId·
-  // X-Workspace-Id 헤더를 그 즉시 맞춰준다. `?ticket=` 쿼리는 Board.tsx 가 이미
-  // 소비하는 딥링크 계약(MentionInboxBadge 등과 동일)이라 그대로 재사용한다.
-  // 이동 후 패널을 접는다 — 목적지(보드에서 열린 그 티켓)가 이 아티팩트를 대체하므로
-  // 열린 채로 두면 방금 떠나온 내용이 본문을 덮고 남는다.
-  const openOnBoard = useCallback(() => {
+  // X-Workspace-Id 헤더를 그 즉시 맞춰준다. `?ticket=` 쿼리는 Tickets 페이지가
+  // 소비하는 딥링크 계약(MentionInboxBadge·알림과 동일, utils/ticketPath)이다.
+  // 이동 후 패널을 접는다 — 목적지(Tickets 페이지에서 열린 그 티켓)가 이 아티팩트를
+  // 대체하므로 열린 채로 두면 방금 떠나온 내용이 본문을 덮고 남는다.
+  const openTicket = useCallback(() => {
     if (state.status !== 'loaded') return;
     const t = state.ticket || {};
-    if (!canOpenTicketOnBoard(t)) return;
-    navigate(ticketBoardPath(t));
+    if (!canOpenTicket(t)) return;
+    navigate(ticketPath(t.workspace_id, t.id));
     closeArtifact();
   }, [state, navigate, closeArtifact]);
 
@@ -361,7 +352,8 @@ export default function TicketArtifact({ ticketId }: { ticketId: string }) {
       state={state}
       disconnected={!isConnected}
       onRetry={retry}
-      onOpenOnBoard={openOnBoard}
+      onOpen={openTicket}
+      hostNames={hostNames}
     />
   );
 }

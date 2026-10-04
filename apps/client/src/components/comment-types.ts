@@ -105,7 +105,7 @@ export function resolveCommentType(raw: string | null | undefined): CommentType 
 // extension could pull this from per-workspace settings.
 export const STALE_QUESTION_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
-// Pure derived check — no network. The board endpoint already eagerly
+// Pure derived check — no network. The ticket list endpoint already eagerly
 // fetches `ticket.comments`, so callers can ask this question on every
 // ticket card without an extra round-trip.
 export function hasStaleOpenQuestion(

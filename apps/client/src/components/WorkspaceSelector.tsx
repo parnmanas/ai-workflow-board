@@ -6,25 +6,19 @@ import { useConfirm } from '../contexts/ConfirmContext';
 interface WorkspaceSelectorProps {
   workspaces: Workspace[];
   currentWorkspaceId: string | null;
-  currentBoardName?: string;
-  currentBoardId?: string | null;
   onSelect: (workspaceId: string) => void;
-  onCreate: (name: string, description?: string, boardName?: string) => Promise<void>;
+  onCreate: (name: string, description?: string) => Promise<void>;
   onDelete: (workspaceId: string) => Promise<void>;
   onUpdate: (workspaceId: string, data: { name?: string; description?: string }) => Promise<void>;
-  onUpdateBoard?: (boardId: string, data: { name?: string }) => Promise<void>;
 }
 
 export default function WorkspaceSelector({
   workspaces,
   currentWorkspaceId,
-  currentBoardName,
-  currentBoardId,
   onSelect,
   onCreate,
   onDelete,
   onUpdate,
-  onUpdateBoard,
 }: WorkspaceSelectorProps) {
   const confirm = useConfirm();
   const [showDropdown, setShowDropdown] = useState(false);
@@ -32,28 +26,22 @@ export default function WorkspaceSelector({
   const [showEdit, setShowEdit] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [newBoardName, setNewBoardName] = useState('');
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
-  const [editBoardName, setEditBoardName] = useState('');
 
   const currentWs = workspaces.find(w => w.id === currentWorkspaceId);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    await onCreate(newName.trim(), newDesc.trim(), newBoardName.trim() || undefined);
+    await onCreate(newName.trim(), newDesc.trim());
     setNewName('');
     setNewDesc('');
-    setNewBoardName('');
     setShowCreate(false);
   };
 
   const handleEdit = async () => {
     if (!currentWorkspaceId || !editName.trim()) return;
     await onUpdate(currentWorkspaceId, { name: editName.trim(), description: editDesc.trim() });
-    if (onUpdateBoard && currentBoardId && editBoardName.trim()) {
-      await onUpdateBoard(currentBoardId, { name: editBoardName.trim() });
-    }
     setShowEdit(false);
   };
 
@@ -61,7 +49,7 @@ export default function WorkspaceSelector({
     if (!currentWorkspaceId) return;
     const ok = await confirm({
       title: 'Delete workspace',
-      message: 'Are you sure you want to delete this workspace? All boards and tickets will be deleted.',
+      message: 'Are you sure you want to delete this workspace? All tickets and projects will be deleted.',
     });
     if (!ok) return;
     await onDelete(currentWorkspaceId);
@@ -71,7 +59,6 @@ export default function WorkspaceSelector({
     if (currentWs) {
       setEditName(currentWs.name);
       setEditDesc(currentWs.description || '');
-      setEditBoardName(currentBoardName || '');
       setShowEdit(true);
       setShowDropdown(false);
     }
@@ -138,9 +125,11 @@ export default function WorkspaceSelector({
               onMouseLeave={e => { if (ws.id !== currentWorkspaceId) (e.currentTarget.style.background = 'transparent'); }}
             >
               <span style={{ fontSize: '13px', color: tokens.colors.textStrong, fontWeight: 500 }}>{ws.name}</span>
-              <span style={{ marginLeft: 'auto', fontSize: '11px', color: tokens.colors.textMuted }}>
-                {(ws as any).board_count ?? ws.boards?.length ?? 0} board{((ws as any).board_count ?? ws.boards?.length ?? 0) !== 1 ? 's' : ''}
-              </span>
+              {typeof ws.ticket_count === 'number' && (
+                <span style={{ marginLeft: 'auto', fontSize: '11px', color: tokens.colors.textMuted }}>
+                  {ws.ticket_count} ticket{ws.ticket_count !== 1 ? 's' : ''}
+                </span>
+              )}
             </div>
           ))}
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, padding: 4, display: 'flex', gap: 4 }}>
@@ -210,17 +199,6 @@ export default function WorkspaceSelector({
               style={{
                 width: '100%', padding: '10px 12px', borderRadius: tokens.radii.lg,
                 background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
-                color: tokens.colors.textStrong, fontSize: '14px', marginBottom: 8, boxSizing: 'border-box',
-              }}
-            />
-            <input
-              value={newBoardName}
-              onChange={e => setNewBoardName(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleCreate()}
-              placeholder={newName ? `${newName} Board` : 'Board name (optional)'}
-              style={{
-                width: '100%', padding: '10px 12px', borderRadius: tokens.radii.lg,
-                background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
                 color: tokens.colors.textStrong, fontSize: '14px', marginBottom: 16, boxSizing: 'border-box',
               }}
             />
@@ -266,17 +244,6 @@ export default function WorkspaceSelector({
               onChange={e => setEditDesc(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleEdit()}
               placeholder="Description (optional)"
-              style={{
-                width: '100%', padding: '10px 12px', borderRadius: tokens.radii.lg,
-                background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
-                color: tokens.colors.textStrong, fontSize: '14px', marginBottom: 8, boxSizing: 'border-box',
-              }}
-            />
-            <input
-              value={editBoardName}
-              onChange={e => setEditBoardName(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleEdit()}
-              placeholder={editName ? `${editName} Board` : 'Board name'}
               style={{
                 width: '100%', padding: '10px 12px', borderRadius: tokens.radii.lg,
                 background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,

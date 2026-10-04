@@ -2,15 +2,12 @@ import type { AgentTemplate } from './types';
 import type { CliDescriptor } from './cli/catalog';
 import type { HostModelsView } from './cli/hostModels';
 import type {
-  PromptTemplate,
   Resource,
   ClonePolicy,
   Action,
   ActionRun,
   WorkflowFunction,
   WorkflowFunctionRun,
-  Feature,
-  HandoffPipeline,
   QaScenario,
   QaScenarioListItem,
   QaRun,
@@ -62,15 +59,19 @@ import type {
   TicketAttachmentMeta,
   TicketPrerequisiteRow,
   UserNotificationChannel,
-  BoardWithCards,
-  BoardMovePreview,
-  BenchmarkRunDetail,
   HarnessConfig,
-  EffortPresetsConfig,
-  EnvironmentConfig,
   QaPhasesConfig,
-  BoardLesson,
   Comment,
+  Ticket,
+  TicketStatus,
+  TicketPriority,
+  TicketListResponse,
+  TicketTagCount,
+  Project,
+  ProjectInput,
+  ProjectTestConnectionResult,
+  RepoBranch,
+  Workspace,
   RepoRefs,
   RepoCommitSummary,
   RepoCommitDetail,
@@ -190,20 +191,26 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       window.dispatchEvent(new Event('auth-expired'));
     }
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    // Prefer the server's human-readable `message` (structured errors — the
-    // consensus gate / review-approval guard — set it) so toasts show a legible
+    // Prefer the server's human-readable `message` (structured errors set it)
+    // so toasts show a legible
     // reason instead of a machine slug; fall back to the `error` slug, then a
     // generic string. The machine-readable `code`/`error` slug + HTTP status are
     // preserved on the thrown error so callers can still branch on the *kind* of
     // failure instead of pattern-matching the message.
-    const error = new Error(err.message || err.error || 'Request failed') as Error & { code?: string; status?: number };
+    const error = new Error(err.message || err.error || 'Request failed') as ApiError;
     if (err.code) error.code = err.code;
     else if (typeof err.error === 'string') error.code = err.error;
     error.status = res.status;
+    // Structured 4xx bodies carry details beyond the slug (e.g. 409
+    // `project_in_use` → per-kind reference counts); keep them reachable.
+    error.body = err;
     throw error;
   }
   return res.json();
 }
+
+/** Error thrown by `request` — `code` is the server slug, `body` the parsed JSON error body. */
+export type ApiError = Error & { code?: string; status?: number; body?: any };
 
 /**
  * JSON 이 아닌 본문(오디오)을 주고받는 요청. 실패는 `request` 와 같은 모양(message · code · status)으로 던진다.
@@ -242,7 +249,7 @@ export const api = {
     refs: Array<{ type: ArtifactRefType; id: string }>,
   ) => request<Array<{
     type: ArtifactRefType; id: string; available: boolean; label: string; deepLink: string | null;
-    workspaceName?: string; boardName?: string; reason?: string;
+    workspaceName?: string; reason?: string;
   }>>('/artifact-refs/resolve', {
     method: 'POST',
     body: JSON.stringify({ workspace_id: workspaceId, refs }),
@@ -296,12 +303,23 @@ export const api = {
     request<{ permissions: Record<string, { label: string; description: string; group: string }>; role_defaults: Record<string, string[]> }>('/auth/permissions'),
 
   // ─── Workspaces ────────────────────────────────────────
-  getWorkspaces: () => request<any[]>('/workspaces'),
-  getWorkspace: (id: string) => request<any>(`/workspaces/${id}`),
-  createWorkspace: (data: { name: string; description?: string; board_name?: string }) =>
+  getWorkspaces: () => request<Workspace[]>('/workspaces'),
+  getWorkspace: (id: string) => request<Workspace>(`/workspaces/${id}`),
+  createWorkspace: (data: { name: string; description?: string }) =>
     request<any>('/workspaces', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspace: (id: string, data: { name?: string; description?: string; harness_config?: HarnessConfig | null; clone_policy?: ClonePolicy | null }) =>
-    request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateWorkspace: (id: string, data: {
+    name?: string;
+    description?: string;
+    harness_config?: HarnessConfig | null;
+    clone_policy?: ClonePolicy | null;
+    // Ticket dispatch settings (docs/tickets.md → Workspace settings).
+    language?: string | null;
+    max_concurrent_tickets_per_agent?: number;
+    auto_archive_days?: number | null;
+    /** ISO timestamp pauses all ticket dispatch in the workspace; null resumes. */
+    dispatch_paused_at?: string | null;
+  }) =>
+    request<Workspace>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWorkspace: (id: string) =>
     request<any>(`/workspaces/${id}`, { method: 'DELETE' }),
   getWorkspaceMembers: (wsId: string) =>
@@ -334,263 +352,29 @@ export const api = {
   setDefaultClaudeBackendProfile: (profile_id: string | null) =>
     request<any>('/admin/claude-backend-profiles/default', { method: 'PATCH', body: JSON.stringify({ profile_id }) }),
 
-  // ─── Workspace Roles (v0.34) ───────────────────────────
-  // Workspace-scoped workflow role catalog. The three legacy slugs
-  // (`assignee`/`reporter`/`reviewer`) are seeded with `is_builtin: true` per
-  // workspace; admins can rename / re-prompt them or add custom slugs. A
-  // role can't be deleted while any ticket assignment still references it.
-  listWorkspaceRoles: (wsId: string) =>
-    request<any[]>(`/workspaces/${wsId}/roles`),
-  createWorkspaceRole: (wsId: string, data: { slug: string; name: string; role_prompt?: string; description?: string; position?: number }) =>
-    request<any>(`/workspaces/${wsId}/roles`, { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkspaceRole: (
-    wsId: string,
-    roleId: string,
-    data: { slug?: string; name?: string; role_prompt?: string; description?: string; position?: number },
-  ) =>
-    request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteWorkspaceRole: (wsId: string, roleId: string) =>
-    request<any>(`/workspaces/${wsId}/roles/${roleId}`, { method: 'DELETE' }),
-  // Bulk reorder — server rewrites position to 0..N-1 in the given order.
-  // Order propagates to TicketPanel / ColumnManager / TriggerMenu via the
-  // same `position` field they already sort on.
-  reorderWorkspaceRoles: (wsId: string, orderedRoleIds: string[]) =>
-    request<any[]>(`/workspaces/${wsId}/roles/reorder`, {
-      method: 'PATCH',
-      body: JSON.stringify({ ordered_role_ids: orderedRoleIds }),
-    }),
-
-  // ─── Ticket Role Assignments (v0.34) ───────────────────
-  // Per-ticket holder for each WorkspaceRole. The legacy
-  // assignee/reporter/reviewer triple is mirrored from the builtin slugs;
-  // custom slugs are *only* visible through this endpoint.
-  listTicketRoleAssignments: (ticketId: string) =>
-    request<TicketRoleAssignmentRow[]>(`/tickets/${ticketId}/role-assignments`),
-  setTicketRoleAssignment: (
-    ticketId: string,
-    roleId: string,
-    holder: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> },
-  ) =>
-    request<{ assignments: TicketRoleAssignmentRow[] }>(
-      `/tickets/${ticketId}/role-assignments/${roleId}`,
-      { method: 'PUT', body: JSON.stringify(holder) },
-    ),
-
-  // ─── 다중담당자·합의 (T6) ───────────────────────────────
-  // 합의 상태 READ + 이동 제안/투표/override. 서버는 이 REST 브릿지로 MCP 전용
-  // 합의 로직을 브라우저에 노출한다. 투표가 합의를 성립시키면 서버가 auto-execute
-  // 로 실제 이동하고 응답 `moved` 에 반영한다.
-  getTicketConsensus: (ticketId: string) =>
-    request<ConsensusView>(`/tickets/${ticketId}/consensus`),
-  proposeTicketMove: (ticketId: string, targetColumnId: string, content?: string) =>
-    request<{ proposal_id: string; target_column: { id: string; name: string }; consensus: ConsensusStateView }>(
-      `/tickets/${ticketId}/consensus/propose`,
-      { method: 'POST', body: JSON.stringify({ target_column_id: targetColumnId, content }) },
-    ),
-  recordTicketConsensusVote: (
-    ticketId: string,
-    payload: { status: 'agree' | 'object'; proposal_id?: string | null; override?: boolean; content?: string },
-  ) =>
-    request<{ consensus: ConsensusStateView; moved: { proposal_id: string; to_column_id: string; to_column_name: string | null } | null }>(
-      `/tickets/${ticketId}/consensus/vote`,
-      { method: 'POST', body: JSON.stringify(payload) },
-    ),
-
-  // ─── Boards ────────────────────────────────────────────
-  // Returns the lightened board payload — each ticket's `comments` is the
-  // narrow BoardCardComment projection, not the full thread (perf ticket
-  // b3812637). The detail panel fetches the full Ticket via getTicket.
-  getBoard: (id: string) => request<BoardWithCards>(`/boards/${id}`),
-  getBoardFocusTickets: (boardId: string) =>
-    request<{ focus_tickets: Array<{ agent_id: string; agent_name: string; role: string; ticket_id: string }> }>(
-      `/boards/${boardId}/focus-tickets`,
-    ),
-  getBoards: (workspaceId?: string) =>
-    request<any[]>(workspaceId ? `/boards?workspace_id=${workspaceId}` : '/boards'),
-  createBoard: (data: { name: string; description?: string; workspace_id: string }) =>
-    request<any>('/boards', { method: 'POST', body: JSON.stringify(data) }),
-  updateBoard: (
-    id: string,
-    data: {
-      name?: string;
-      description?: string;
-      routing_config?: Record<string, string[]>;
-      column_prompts?: Record<string, string> | null;
-      max_concurrent_tickets_per_agent?: number;
-      self_improvement_mode?: 'off' | 'same_board' | 'remote_awb' | 'both';
-      benchmark_mode?: 'off' | 'on';
-      // Per-board worktree layout (worktree 규약 chain). 'per_ticket' (default)
-      // → one worktree per ticket; 'shared' → one reused worktree.
-      worktree_mode?: 'per_ticket' | 'shared';
-      // Per-board PR usage (worktree 규약 chain). false (default) → direct ff
-      // merge; true → the opt-in PR path. Server validates and 400s a non-boolean.
-      use_pr?: boolean;
-      auto_archive_days?: number | null;
-      harness_config?: HarnessConfig | null;
-      cli_runtime_profile?: string | null;
-      // Abstract effort presets (per-CLI option mapping). null clears the
-      // board override; the server falls back to BUILTIN_EFFORT_PRESETS.
-      effort_presets?: EffortPresetsConfig | null;
-      // Per-board output language (i18n). Empty string / null clears the
-      // override (agents fall back to their default, English).
-      language?: string | null;
-      // Per-board environment setup (ticket 354d336b). null clears the board
-      // override. The server validates it (strict zod) and 400s a typo.
-      environment_config?: EnvironmentConfig | null;
-      // Per-board QA phases model (ticket 90cc22f7). null clears the override
-      // (legacy single-timeout); the server validates it (zod) and 400s a typo.
-      qa_phases?: QaPhasesConfig | null;
-      // Per-board DEFAULT role holders (ticket d94a1b87): { [roleSlug]: [{ agent_id }
-      // | { user_id }], … }. null or {} clears. The server validates the shape
-      // AND that each slug/holder exists (400s a typo). Filled into any role the
-      // caller left unstaffed at ticket-create time.
-      default_role_assignments?: Record<string, Array<{ agent_id?: string; user_id?: string }>> | null;
-    },
-  ) =>
-    request<any>(`/boards/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  // Benchmark leaderboard reads (ticket 684c012b). Run-scoped aggregation
-  // (per-candidate score table) when runTicketId is given; workspace-wide
-  // agent leaderboard otherwise.
-  getBenchmarkRunLeaderboard: (runTicketId: string) =>
-    request<any>(`/benchmark/runs/${runTicketId}/leaderboard`),
-  getBenchmarkLeaderboard: (workspaceId?: string) =>
-    request<any>(workspaceId ? `/benchmark/leaderboard?workspace_id=${workspaceId}` : '/benchmark/leaderboard'),
-  // Benchmark run lifecycle (ticket 5eb459c4). createBenchmarkRun makes a DRAFT
-  // (candidates parked, not dispatched); startBenchmarkRun dispatches them. The
-  // Option-A edit policy is enforced server-side — updateBenchmarkRun on a
-  // started run rejects prompt/rubric/evaluator changes + candidate removal (422).
-  getBenchmarkRun: (runId: string) =>
-    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}`),
-  createBenchmarkRun: (data: {
-    board_id: string;
-    prompt: string;
-    title?: string;
-    rubric?: string;
-    base_repo?: string;
-    candidate_agent_ids?: string[];
-    evaluator_agent_ids?: string[];
-    candidate_column_name?: string;
-  }) =>
-    request<BenchmarkRunDetail>('/benchmark/runs', { method: 'POST', body: JSON.stringify(data) }),
-  updateBenchmarkRun: (runId: string, data: {
-    title?: string;
-    prompt?: string;
-    rubric?: string;
-    base_repo?: string;
-    candidate_agent_ids?: string[];
-    evaluator_agent_ids?: string[];
-    candidate_column_name?: string;
-  }) =>
-    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  startBenchmarkRun: (runId: string) =>
-    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}/start`, { method: 'POST' }),
-  addBenchmarkCandidates: (runId: string, candidateAgentIds: string[]) =>
-    request<BenchmarkRunDetail>(`/benchmark/runs/${runId}/candidates`, {
-      method: 'POST',
-      body: JSON.stringify({ candidate_agent_ids: candidateAgentIds }),
-    }),
-  deleteBoard: (id: string) =>
-    request<any>(`/boards/${id}`, { method: 'DELETE' }),
-  // Cross-workspace board move (ticket 8882056b). dry_run=true (default)
-  // returns the BoardMovePreview report without writing; dry_run=false commits
-  // atomically. Admin-only on the server. A blocked commit rejects with 409.
-  moveBoard: (
-    boardId: string,
-    targetWorkspaceId: string,
-    opts?: { dryRun?: boolean; carryAgents?: boolean; excludeAgentIds?: string[] },
-  ) =>
-    request<BoardMovePreview>(`/boards/${boardId}/move-to-workspace`, {
-      method: 'POST',
-      body: JSON.stringify({
-        target_workspace_id: targetWorkspaceId,
-        dry_run: opts?.dryRun !== false,
-        carry_agents: !!opts?.carryAgents,
-        // ticket 9efa643b — per-agent carry exclusion (drop_companion_agent remedy)
-        exclude_agent_ids: opts?.excludeAgentIds ?? [],
-      }),
-    }),
-  // ticket 9efa643b — execute a structured move-blocker remedy inline from the
-  // board-move preview. Returns { ok, action, affected }; the UI re-previews
-  // afterward so the resolved blocker disappears.
-  moveBoardRemedy: (boardId: string, action: string, params: Record<string, any>) =>
-    request<{ ok: boolean; action: string; affected: number }>(
-      `/boards/${boardId}/move-to-workspace/remedy`,
-      { method: 'POST', body: JSON.stringify({ action, params }) },
-    ),
-  getArchivedBoards: (workspaceId: string) =>
-    request<any[]>(`/boards?workspace_id=${workspaceId}&include_archived=true`),
-  archiveBoard: async (boardId: string) =>
-    request<any>(`/boards/${boardId}/archive`, { method: 'POST' }),
-  restoreBoard: async (boardId: string) =>
-    request<any>(`/boards/${boardId}/restore`, { method: 'POST' }),
-  // Board pause: server flips Board.paused_at and drops every agent_trigger
-  // for tickets on this board until resumed. Idempotent — re-calling pause
-  // refreshes the timestamp.
-  pauseBoard: async (boardId: string) =>
-    request<any>(`/boards/${boardId}/pause`, { method: 'POST' }),
-  resumeBoard: async (boardId: string) =>
-    request<any>(`/boards/${boardId}/resume`, { method: 'POST' }),
-  // ─── Board Lessons / Runbook (ticket 9d0d6ac4) ───────────
-  // Board-scoped knowledge base. Active lessons are auto-injected into the
-  // board's dispatch prompts server-side; these back the Settings > Lessons UI.
-  listBoardLessons: (boardId: string, includeInactive = false) =>
-    request<BoardLesson[]>(
-      `/boards/${boardId}/lessons${includeInactive ? '?include_inactive=true' : ''}`,
-    ),
-  createBoardLesson: (
-    boardId: string,
-    data: { title: string; body: string; tags?: string[]; source_ticket_id?: string },
-  ) =>
-    request<BoardLesson>(`/boards/${boardId}/lessons`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  updateBoardLesson: (
-    boardId: string,
-    lessonId: string,
-    data: {
-      title?: string;
-      body?: string;
-      tags?: string[];
-      source_ticket_id?: string;
-      active?: boolean;
-    },
-  ) =>
-    request<BoardLesson>(`/boards/${boardId}/lessons/${lessonId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(data),
-    }),
-  deleteBoardLesson: (boardId: string, lessonId: string) =>
-    request<{ success: boolean }>(`/boards/${boardId}/lessons/${lessonId}`, {
-      method: 'DELETE',
-    }),
-  // Archived-ticket surface — distinct from board archive (Board.archived_at)
-  // and the active ticket list (which filters archived_at IS NOT NULL).
-  listArchivedTickets: async (
-    boardId: string,
-    opts?: { cursor?: string; limit?: number; q?: string },
-  ) => {
-    const params = new URLSearchParams();
-    if (opts?.cursor) params.set('cursor', opts.cursor);
-    if (opts?.limit) params.set('limit', String(opts.limit));
-    if (opts?.q) params.set('q', opts.q);
-    const qs = params.toString();
-    return request<{ tickets: any[]; next_cursor: string | null }>(
-      `/boards/${boardId}/archived-tickets${qs ? `?${qs}` : ''}`,
+  // ─── Tickets (docs/tickets.md) ─────────────────────────
+  // One workspace-wide pool. The list returns root tickets only (children are
+  // nested two levels on each row) plus the tag counts of the matching set.
+  listTickets: (wsId: string, filters: TicketListQuery = {}) => {
+    const qs = ticketListQueryString(filters);
+    return request<TicketListResponse>(
+      `/workspaces/${encodeURIComponent(wsId)}/tickets${qs ? `?${qs}` : ''}`,
     );
   },
+  /** Tag suggestions across the whole workspace pool (tag picker), most used first. */
+  listTicketTags: (wsId: string) =>
+    request<{ tags: TicketTagCount[] }>(`/workspaces/${encodeURIComponent(wsId)}/ticket-tags`),
+  createTicket: (wsId: string, data: TicketCreateInput) =>
+    request<Ticket>(`/workspaces/${encodeURIComponent(wsId)}/tickets`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   archiveTicket: async (ticketId: string) =>
     request<any>(`/tickets/${ticketId}/archive`, { method: 'POST' }),
   unarchiveTicket: async (ticketId: string) =>
     request<any>(`/tickets/${ticketId}/unarchive`, { method: 'POST' }),
   getTicket: async (ticketId: string) =>
-    request<any>(`/tickets/${ticketId}`),
-  // Cross-board handoff pipeline rollup (ticket ac21a745). Given any ticket in a
-  // relay, returns every stage across boards (root walk-up + follow-up walk-down)
-  // so the detail panel can render the relay without hopping boards. REST bridge
-  // for the MCP get_handoff_pipeline (the client never speaks MCP directly).
-  getHandoffPipeline: async (ticketId: string) =>
-    request<HandoffPipeline>(`/tickets/${ticketId}/handoff-pipeline`),
+    request<Ticket>(`/tickets/${ticketId}`),
   // 티켓(root/하위)의 커서 페이지네이션 코멘트. `before` 는 코멘트 id 이고, 서버는
   // (created_at, id) 커서를 따라가 그보다 오래된 코멘트를 최신순으로 최대 `limit`개
   // 반환한다. detail 패널이 getTicket 의 첫 페이지 너머 더 오래된 코멘트를
@@ -602,71 +386,39 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return request<Comment[]>(`/tickets/${ticketId}/comments${suffix}`);
   },
-  getCommentSummary: (ticketId: string) =>
-    request<any>(`/tickets/${ticketId}/comment-summary`),
-  startCommentSummary: (ticketId: string) =>
-    request<any>(`/tickets/${ticketId}/comment-summary`, { method: 'POST' }),
 
-  // ─── Columns ──────────────────────────────────────────
-  createColumn: (boardId: string, data: { name: string; color?: string; description?: string }) =>
-    request<any>(`/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify(data) }),
-  updateColumn: (id: string, data: { name?: string; color?: string; position?: number; description?: string; is_terminal?: boolean; unassigned_policy?: 'halt' | 'skip' | 'skip_if_ticket_staffed'; process_subtasks?: boolean }) =>
-    request<any>(`/columns/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteColumn: (id: string) =>
-    request<any>(`/columns/${id}`, { method: 'DELETE' }),
-
-  // ─── Tickets ───────────────────────────────────────────
-  createTicket: (columnId: string, data: {
-    title: string; description?: string; priority?: string;
-    assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
-    // Abstract effort preset id (resolved per-CLI at dispatch). null/omit = none.
-    effort_preset?: string | null;
-  }) =>
-    request<any>(`/columns/${columnId}/tickets`, { method: 'POST', body: JSON.stringify(data) }),
-
-  // data accepts any ticket field, incl. `effort_preset?: string | null`
-  // (abstract effort preset id; null/'' clears the override).
-  updateTicket: (id: string, data: Record<string, any>) =>
-    request<any>(`/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // data: any of `title, description, priority, tags, project_id, base_branch,
+  // assignee, prompt_text, pending_*, next_ticket_id, on_done_action_ids`.
+  updateTicket: (id: string, data: TicketPatch) =>
+    request<Ticket>(`/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   decideTicketDuplicate: (id: string, data: { action: 'link' | 'keep_independent'; candidate_ticket_id?: string }) =>
     request<any>(`/tickets/${id}/duplicate-decision`, { method: 'POST', body: JSON.stringify(data) }),
 
-  moveTicket: (id: string, targetColumnId: string, targetPosition: number) =>
-    request<any>(`/tickets/${id}/move`, { method: 'PATCH', body: JSON.stringify({ targetColumnId, targetPosition }) }),
-
-  // Re-parent a ticket. parent_id=null promotes back to root (must include
-  // column_id); parent_id=string makes it a subtask. targetPosition is
-  // optional — server clamps and defaults to end-of-list.
-  reparentTicket: (id: string, parent_id: string | null, opts?: { column_id?: string; targetPosition?: number }) =>
-    request<any>(`/tickets/${id}/parent`, {
+  // Status change (replaces the column move). `position` is the index inside
+  // the destination status lane (omit → end of lane).
+  moveTicket: (id: string, status: TicketStatus, position?: number) =>
+    request<Ticket>(`/tickets/${id}/move`, {
       method: 'PATCH',
-      body: JSON.stringify({
-        parent_id,
-        ...(opts?.column_id ? { column_id: opts.column_id } : {}),
-        ...(typeof opts?.targetPosition === 'number' ? { targetPosition: opts.targetPosition } : {}),
-      }),
+      body: JSON.stringify(position === undefined ? { status } : { status, position }),
     }),
 
-  // Move a root ticket to a different board (same workspace). Subtasks travel
-  // with the parent automatically. target_column_id/target_position are
-  // optional — omitting both lands in the destination board's first column at
-  // end-of-list.
-  moveTicketToBoard: (id: string, target_board_id: string, opts?: { target_column_id?: string; target_position?: number }) =>
-    request<any>(`/tickets/${id}/move-to-board`, {
+  // Re-parent a ticket. parent_id=string makes it a subtask; null promotes it
+  // back to a root ticket. Returns the full ticket.
+  reparentTicket: (id: string, parent_id: string | null) =>
+    request<Ticket>(`/tickets/${id}/parent`, {
       method: 'PATCH',
-      body: JSON.stringify({
-        target_board_id,
-        ...(opts?.target_column_id ? { target_column_id: opts.target_column_id } : {}),
-        ...(typeof opts?.target_position === 'number' ? { target_position: opts.target_position } : {}),
-      }),
+      body: JSON.stringify({ parent_id }),
     }),
 
-  triggerAgent: (id: string, role: 'assignee' | 'reporter' | 'reviewer', agent_id?: string) =>
-    request<{ trigger_id: string; ticket_id: string; agent_id: string; role: string; trigger_source: 'manual'; pushed_at: string }>(
-      `/tickets/${id}/trigger`,
-      { method: 'POST', body: JSON.stringify(agent_id ? { role, agent_id } : { role }) },
-    ),
+  // Manual "Run" — asks the dispatcher to (re)send this ticket to its assignee
+  // now. `dispatched: false` carries the `reason` (unassigned, pending, paused,
+  // at capacity, …) for the panel to show.
+  triggerTicket: (id: string) =>
+    request<{ ok: boolean; dispatched: boolean; reason?: string }>(`/tickets/${id}/trigger`, {
+      method: 'POST',
+      body: '{}',
+    }),
 
   deleteTicket: (id: string) =>
     request<any>(`/tickets/${id}`, { method: 'DELETE' }),
@@ -691,13 +443,10 @@ export const api = {
     request<any>(`/tickets/${ticketId}/prerequisites/${prereqId}`, { method: 'DELETE' }),
 
   // ─── Child Tickets (Subtasks) ──────────────────────────
-  createChildTicket: (parentId: string, data: {
-    title: string; description?: string; priority?: string; status?: string;
-    assignee?: string; reporter?: string; assignee_id?: string; reporter_id?: string;
-    labels?: string[]; channel_ids?: string[];
-    role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }>;
-  }) =>
-    request<any>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
+  // Children have no assignee of their own — they are a checklist the parent's
+  // assignee works through.
+  createChildTicket: (parentId: string, data: { title: string; description?: string; tags?: string[] }) =>
+    request<Ticket>(`/tickets/${parentId}/children`, { method: 'POST', body: JSON.stringify(data) }),
 
   // ─── Comments ──────────────────────────────────────────
   // attachments are uploaded in the SAME request as the comment so the user
@@ -850,7 +599,7 @@ export const api = {
   },
   createChannel: (data: {
     name: string; type?: string; bot_token?: string; guild_id?: string;
-    channel_id?: string; board_id?: string;
+    channel_id?: string;
   }) =>
     request<any>('/channels', { method: 'POST', body: JSON.stringify(data) }),
   updateChannel: (id: string, data: Record<string, any>) =>
@@ -900,56 +649,6 @@ export const api = {
     request<any>(`/keys/${id}/revoke`, { method: 'POST' }),
   deleteApiKey: (id: string) =>
     request<any>(`/keys/${id}`, { method: 'DELETE' }),
-
-  // ─── Prompt Templates (Phase 1 ROLE-05) ────────────────
-  listPromptTemplates: (workspace_id: string, options?: { category?: string; id?: string; includeAllScopes?: boolean }) => {
-    const params = new URLSearchParams({ workspace_id });
-    if (options?.category) params.set('category', options.category);
-    if (options?.id) params.set('id', options.id);
-    if (options?.includeAllScopes) params.set('include_all_scopes', 'true');
-    return request<PromptTemplate[]>(`/prompt-templates?${params.toString()}`);
-  },
-  getPromptTemplate: (id: string, workspace_id: string) => {
-    const params = new URLSearchParams({ workspace_id });
-    return request<PromptTemplate>(`/prompt-templates/${id}?${params.toString()}`);
-  },
-  createPromptTemplate: (data: {
-    workspace_id?: string | null;
-    scope?: 'global' | 'workspace';
-    name: string;
-    description?: string;
-    content: string;
-    category?: string;
-  }) =>
-    request<PromptTemplate>('/prompt-templates', { method: 'POST', body: JSON.stringify(data) }),
-  updatePromptTemplate: (
-    id: string,
-    data: {
-      workspace_id?: string | null;
-      scope?: 'global' | 'workspace';
-      name?: string;
-      description?: string;
-      content?: string;
-      category?: string;
-    },
-  ) =>
-    request<PromptTemplate>(`/prompt-templates/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deletePromptTemplate: (id: string, workspace_id: string) => {
-    const params = new URLSearchParams({ workspace_id });
-    return request<{ success: true; id: string }>(`/prompt-templates/${id}?${params.toString()}`, { method: 'DELETE' });
-  },
-  listDefaultPromptTemplates: (workspace_id: string) => {
-    const params = new URLSearchParams({ workspace_id });
-    return request<import('./types').BuiltinPromptDefault[]>(`/prompt-templates/defaults/catalog?${params.toString()}`);
-  },
-  resetDefaultPromptTemplates: (data: {
-    workspace_id: string;
-    names: string[];
-    reset_board_mappings: boolean;
-  }) => request<{ success: true; templates: PromptTemplate[] }>('/prompt-templates/defaults/reset', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }),
 
   // ─── Resources ─────────────────────────────────────────
   listResources: (
@@ -1012,8 +711,6 @@ export const api = {
     file_name?: string;
     file_mimetype?: string;
     tags?: string[];
-    default_branch?: string;
-    clone_policy?: ClonePolicy | null;
   }) =>
     request<Resource>('/resources', { method: 'POST', body: JSON.stringify(data) }),
   updateResource: (
@@ -1031,8 +728,6 @@ export const api = {
       file_mimetype?: string;
       tags?: string[];
       credential_id?: string | null;
-      default_branch?: string;
-      clone_policy?: ClonePolicy | null;
     },
   ) =>
     request<Resource>(`/resources/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -1040,35 +735,55 @@ export const api = {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<{ success: true; id: string }>(`/resources/${id}?${params.toString()}`, { method: 'DELETE' });
   },
-  listRepoBranches: (id: string, workspaceId: string) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<{ branches: { name: string; sha: string }[]; default_branch: string }>(
-      `/resources/${id}/branches?${params.toString()}`,
-    );
-  },
-  testRepoBranches: (data: {
-    workspace_id: string;
-    scope?: 'global' | 'workspace';
-    url: string;
-    credential_id?: string | null;
-    default_branch?: string;
-  }) =>
-    request<{ branches: { name: string; sha: string }[]; default_branch: string }>(
-      '/resources/branches/test',
-      { method: 'POST', body: JSON.stringify(data) },
-    ),
+  // ─── Projects (docs/tickets.md → Project) ─────────────
+  // One git repository + what every feature needs to work on it. Replaces
+  // repository Resources (same ids after migration).
+  listProjects: (wsId: string) =>
+    request<Project[]>(`/workspaces/${encodeURIComponent(wsId)}/projects`),
+  getProject: (id: string) => request<Project>(`/projects/${encodeURIComponent(id)}`),
+  createProject: (wsId: string, data: ProjectInput & { name: string; repo_url: string }) =>
+    request<Project>(`/workspaces/${encodeURIComponent(wsId)}/projects`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateProject: (id: string, data: ProjectInput) =>
+    request<Project>(`/projects/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // 409 `project_in_use` (error.body.counts) unless `force` — see ProjectsPage.
+  deleteProject: (id: string, opts?: { force?: boolean }) =>
+    request<{ ok: boolean }>(`/projects/${encodeURIComponent(id)}${opts?.force ? '?force=1' : ''}`, {
+      method: 'DELETE',
+    }),
+  /** Set the project's main clone folder on one Runtime Host (absolute host path). */
+  setProjectHostFolder: (id: string, hostId: string, path: string) =>
+    request<Project>(`/projects/${encodeURIComponent(id)}/host-folders/${encodeURIComponent(hostId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ path }),
+    }),
+  clearProjectHostFolder: (id: string, hostId: string) =>
+    request<Project>(`/projects/${encodeURIComponent(id)}/host-folders/${encodeURIComponent(hostId)}`, {
+      method: 'DELETE',
+    }),
+  listProjectBranches: (id: string) =>
+    request<{ branches: RepoBranch[]; default_branch: string }>(`/projects/${encodeURIComponent(id)}/branches`),
+  /** Probe a repo URL (+ credential) before saving — returns its branches on success. */
+  testProjectConnection: (data: { repo_url: string; credential_id?: string | null; workspace_id: string }) =>
+    request<ProjectTestConnectionResult>('/projects/test-connection', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
-  // ─── repository git reading (history / diff / file tree) ──────────────
-  // All read from the server's per-Resource bare blobless cache clone. SSH-only
-  // URLs come back as HTTP 422 (code 'ssh_unsupported') — `request` throws the
-  // error message, which the panel renders as a degrade notice.
-  getRepoRefs: (id: string, workspaceId: string, refresh = false) => {
+  // ─── project git reading (history / diff / file tree) ──────────────
+  // Read from the server's per-project bare blobless cache clone. SSH-only URLs
+  // come back as HTTP 422 (code 'ssh_unsupported') — `request` throws the error
+  // message, which the panel renders as a degrade notice. `workspace_id` rides
+  // along as before (same query params as the old resource repo browser).
+  getProjectRefs: (id: string, workspaceId: string, refresh = false) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     if (refresh) params.set('refresh', 'true');
-    return request<RepoRefs>(`/resources/${id}/refs?${params.toString()}`);
+    return request<RepoRefs>(`/projects/${encodeURIComponent(id)}/refs?${params.toString()}`);
   },
   // Cursor pagination: pass the last shown sha as `before` to load older commits.
-  listRepoCommits: (
+  listProjectCommits: (
     id: string,
     workspaceId: string,
     opts?: { ref?: string; limit?: number; before?: string; refresh?: boolean },
@@ -1078,24 +793,24 @@ export const api = {
     if (opts?.limit) params.set('limit', String(opts.limit));
     if (opts?.before) params.set('before', opts.before);
     if (opts?.refresh) params.set('refresh', 'true');
-    return request<{ commits: RepoCommitSummary[] }>(`/resources/${id}/commits?${params.toString()}`);
+    return request<{ commits: RepoCommitSummary[] }>(`/projects/${encodeURIComponent(id)}/commits?${params.toString()}`);
   },
-  getRepoCommit: (id: string, workspaceId: string, sha: string) => {
+  getProjectCommit: (id: string, workspaceId: string, sha: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    return request<RepoCommitDetail>(`/resources/${id}/commits/${encodeURIComponent(sha)}?${params.toString()}`);
+    return request<RepoCommitDetail>(`/projects/${encodeURIComponent(id)}/commits/${encodeURIComponent(sha)}?${params.toString()}`);
   },
-  getRepoTree: (id: string, workspaceId: string, opts?: { ref?: string; path?: string }) => {
+  getProjectTree: (id: string, workspaceId: string, opts?: { ref?: string; path?: string }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     if (opts?.ref) params.set('ref', opts.ref);
     if (opts?.path) params.set('path', opts.path);
     return request<{ ref: string; path: string; entries: RepoTreeEntry[] }>(
-      `/resources/${id}/tree?${params.toString()}`,
+      `/projects/${encodeURIComponent(id)}/tree?${params.toString()}`,
     );
   },
-  getRepoFile: (id: string, workspaceId: string, filePath: string, ref?: string) => {
+  getProjectFile: (id: string, workspaceId: string, filePath: string, ref?: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId, path: filePath });
     if (ref) params.set('ref', ref);
-    return request<RepoFileContent>(`/resources/${id}/file?${params.toString()}`);
+    return request<RepoFileContent>(`/projects/${encodeURIComponent(id)}/file?${params.toString()}`);
   },
 
   // ─── Actions ──────────────────────────────────────────
@@ -1188,7 +903,7 @@ export const api = {
     request<{ success: true; id: string }>(`/functions/${id}`, { method: 'DELETE' }),
   runFunction: (
     id: string,
-    data: { workspace_id: string; board_id?: string; ticket_id?: string; inputs?: Record<string, any>; idempotency_key?: string },
+    data: { workspace_id: string; ticket_id?: string; inputs?: Record<string, any>; idempotency_key?: string },
   ) => request<WorkflowFunctionRun>(`/functions/${id}/run`, { method: 'POST', body: JSON.stringify(data) }),
   listFunctionRuns: (workspaceId: string, options?: { functionId?: string; ticketId?: string; limit?: number }) => {
     const params = new URLSearchParams({ workspace_id: workspaceId, limit: String(options?.limit || 50) });
@@ -1196,31 +911,6 @@ export const api = {
     if (options?.ticketId) params.set('ticket_id', options.ticketId);
     return request<WorkflowFunctionRun[]>(`/functions/runs?${params.toString()}`);
   },
-
-  // ─── Feature/Epic intake (ticket aae7644c) ────────────
-  listFeatures: (workspaceId: string, boardId?: string | null) => {
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (boardId !== undefined && boardId !== null) params.set('board_id', boardId);
-    return request<Feature[]>(`/features?${params.toString()}`);
-  },
-  getFeature: (id: string) => request<Feature>(`/features/${id}`),
-  createFeature: (data: {
-    workspace_id: string;
-    board_id?: string | null;
-    title: string;
-    requirement: string;
-    planner_agent_id?: string;
-    /** P4c-3b: spec-direct planner. */
-    planner_runtime?: Record<string, any>;
-    source_chat_room_id?: string;
-    auto_plan?: boolean;
-  }) => request<Feature>('/features', { method: 'POST', body: JSON.stringify(data) }),
-  approveFeature: (id: string) =>
-    request<Feature>(`/features/${id}/approve`, { method: 'POST', body: '{}' }),
-  rejectFeature: (id: string, feedback: string, replan = true) =>
-    request<Feature>(`/features/${id}/reject`, { method: 'POST', body: JSON.stringify({ feedback, replan }) }),
-  replanFeature: (id: string) =>
-    request<Feature>(`/features/${id}/replan`, { method: 'POST', body: '{}' }),
 
   // ─── Scenario-based QA (ticket 3c655d20) ──────────────
   listQaScenarios: (workspaceId: string) => {
@@ -1248,7 +938,7 @@ export const api = {
     build_mode?: QaScenario['build_mode'];
     // Deployment-awareness target environment (ticket 8ce72b18).
     target_environment?: string;
-    // Per-scenario QA phases override (object to set, null to clear/inherit board).
+    // Per-scenario QA phases override (object to set, null to clear).
     qa_phases?: QaPhasesConfig | null;
   }) => request<QaScenario>('/qa/scenarios', { method: 'POST', body: JSON.stringify(data) }),
   updateQaScenario: (
@@ -1273,7 +963,7 @@ export const api = {
       build_mode?: QaScenario['build_mode'];
       // Deployment-awareness target environment (ticket 8ce72b18).
       target_environment?: string;
-      // Per-scenario QA phases override (object to set, null to clear/inherit board).
+      // Per-scenario QA phases override (object to set, null to clear).
       qa_phases?: QaPhasesConfig | null;
     },
   ) => request<QaScenario>(`/qa/scenarios/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -1303,7 +993,6 @@ export const api = {
   // scenario dispatches now; the rest run one-at-a-time as each finalizes.
   startQaBatch: (data: {
     workspace_id: string;
-    board_id?: string | null;
     scenario_ids?: string[];
     all?: boolean;
     stop_on_fail?: boolean;
@@ -1356,7 +1045,7 @@ export const api = {
   // ─── Workspace schedules (ticket 8845be79 foundation / 1927ed4a UI) ──────────
   // General-purpose agent-task scheduler: when due, the server opens a fresh chat
   // room and sends `task_prompt` to `target_agent_id`. Exactly one of cron /
-  // interval_ms. Workspace-scoped only — board_id is a dead legacy column.
+  // interval_ms. Workspace-scoped only.
   listWorkspaceSchedules: (workspaceId: string) => {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     return request<WorkspaceSchedule[]>(`/workspace-schedules?${params.toString()}`);
@@ -1475,7 +1164,6 @@ export const api = {
   // ─── Sequential security batches ──────────────────────
   startSecurityBatch: (data: {
     workspace_id: string;
-    board_id?: string | null;
     profile_ids?: string[];
     all?: boolean;
     stop_on_fail?: boolean;
@@ -1854,8 +1542,6 @@ export const api = {
     body: {
       skill_version_id: string;
       runtime: Record<string, any>;
-      board_id?: string;
-      role_slug?: string;
     },
   ) =>
     request<unknown>(
@@ -1976,37 +1662,6 @@ export const api = {
     request<{ key: string; value: string; description: string; is_secret: boolean; updated_at: string | null }[]>('/admin/settings'),
   updateSettings: (settings: Record<string, string>) =>
     request<any>('/admin/settings', { method: 'PATCH', body: JSON.stringify({ settings }) }),
-  // Probe the configured remote AWB target for self-improvement filing.
-  // Pings the remote /api/health with the stored X-Agent-Key server-side so
-  // the admin can verify URL + key before relying on the forwarder. Returns
-  // the same shape the controller emits — never echoes the key back.
-  testSelfImprovementRemote: () =>
-    request<{ ok: boolean; status?: number; message: string }>(
-      '/admin/settings/self-improvement/test',
-      { method: 'POST', body: '{}' },
-    ),
-  // Cascade discovery — used by the SettingsManager workspace/board/column
-  // dropdowns. `url` empty (or matching the current origin) routes to local
-  // DB; otherwise the request body is forwarded over MCP to the remote
-  // instance. `api_key` may be omitted/masked when targeting self or when
-  // the admin hasn't edited the saved key (server falls back to the stored
-  // encrypted value in that case).
-  discoverSelfImprovementWorkspaces: (body: { url?: string; api_key?: string }) =>
-    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
-      '/admin/settings/self-improvement/discover/workspaces',
-      { method: 'POST', body: JSON.stringify(body) },
-    ),
-  discoverSelfImprovementBoards: (body: { url?: string; api_key?: string; workspace_id: string }) =>
-    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
-      '/admin/settings/self-improvement/discover/boards',
-      { method: 'POST', body: JSON.stringify(body) },
-    ),
-  discoverSelfImprovementColumns: (body: { url?: string; api_key?: string; board_id: string }) =>
-    request<{ mode: 'local' | 'remote'; items: { id: string; name: string }[] }>(
-      '/admin/settings/self-improvement/discover/columns',
-      { method: 'POST', body: JSON.stringify(body) },
-    ),
-
   // ─── Migration / Live Import (ticket 0f638509) ─────────
   listMigrationRuns: () => request<MigrationRun[]>('/admin/migration/runs'),
   getMigrationRun: (id: string) => request<MigrationRun>(`/admin/migration/runs/${id}`),
@@ -2018,57 +1673,11 @@ export const api = {
   resumeFleetDispatch: () =>
     request<{ quiesced: boolean }>('/admin/migration/quiesce/resume', { method: 'POST' }),
 
-  // ─── Admin Column Policies (ticket f886ada7) ───────────
-  listColumnPolicies: () =>
-    request<{ boards: Array<{
-      board_id: string;
-      board_name: string;
-      workspace_id: string;
-      columns: Array<{
-        id: string;
-        name: string;
-        position: number;
-        kind: string;
-        is_terminal: boolean;
-        role_routing: string[];
-        policies: Array<{
-          id: string;
-          board_id: string;
-          column_id: string;
-          role_slug: string;
-          expected_action: 'move' | 'wait_until_label_removed' | 'terminal';
-          target_column_id: string;
-          gate_labels: string[];
-          max_cycles_without_progress: number;
-          on_violation: 'alert' | 'auto_move' | 'escalate_meta_ticket';
-          enabled: boolean;
-          created_at: string;
-          updated_at: string;
-        }>;
-      }>;
-    }> }>('/admin/column-policies'),
-
-  updateColumnPolicy: (policyId: string, patch: {
-    enabled?: boolean;
-    max_cycles_without_progress?: number;
-    on_violation?: 'alert' | 'auto_move' | 'escalate_meta_ticket';
-    expected_action?: 'move' | 'wait_until_label_removed' | 'terminal';
-    target_column_id?: string;
-    gate_labels?: string[];
-  }) =>
-    request<{ success: boolean; policy: any }>(`/admin/column-policies/${policyId}`, {
-      method: 'PUT',
-      body: JSON.stringify(patch),
-    }),
-
   // ─── Admin Workflow Health ───────────
-  // The rollup embeds active_storms/top_respawns/suppression_stats, so the
-  // controller's narrower /storms, /respawns, /suppressions endpoints are
-  // intentionally left without a dedicated client wrapper here.
-  getWorkflowHealth: (params?: { boardId?: string }) => {
-    const q = params?.boardId ? `?board_id=${encodeURIComponent(params.boardId)}` : '';
-    return request<WorkflowHealthRollup>(`/admin/workflow-health${q}`);
-  },
+  // Usage rollups only (docs/tickets.md → Workflow health) — the storms /
+  // respawns / suppressions views and the board filter are gone.
+  getWorkflowHealth: () =>
+    request<WorkflowHealthRollup>('/admin/workflow-health'),
 
   // All-time/장기 구간 누적 (ticket 090abc77) — workspace는 getAuthHeaders()의
   // ambient X-Workspace-Id 헤더로 해결되므로 여기서 별도로 넘기지 않는다.
@@ -2496,29 +2105,16 @@ export const api = {
   // `{ total, perX }` so the client bookkeeping stays uniform.
   getChatUnreadCounts: (): Promise<{ total: number; perRoom: Record<string, number> }> =>
     request<{ total: number; perRoom: Record<string, number> }>('/chat-rooms/unread-counts'),
-  // `ticketBoard` maps each unread ticket to the board its badge rolls up
-  // into, so the client can decrement the right board when a single ticket
-  // is marked read instead of waiting for the next full refresh.
-  getTicketUnreadCounts: (): Promise<{
-    total: number;
-    perTicket: Record<string, number>;
-    perBoard: Record<string, number>;
-    ticketBoard: Record<string, string>;
-  }> =>
-    request<{
-      total: number;
-      perTicket: Record<string, number>;
-      perBoard: Record<string, number>;
-      ticketBoard: Record<string, string>;
-    }>('/tickets/unread-counts'),
+  // `{ total, perTicket }` — no per-board roll-up any more (docs/tickets.md).
+  getTicketUnreadCounts: (): Promise<{ total: number; perTicket: Record<string, number> }> =>
+    request<{ total: number; perTicket: Record<string, number> }>('/tickets/unread-counts'),
   // 티켓 코멘트 일괄 읽음 처리 — markAllMentionsRead와 같은 아이디어를,
   // UserMention 행 대신 TicketReadState에 upsert하는 방식으로 적용한다.
-  // `boardId`는 그 보드의 관여 티켓만 좁히고, 생략하면 현재 워크스페이스
-  // (X-Workspace-Id 헤더)의 관여 티켓 전체를 읽음 처리한다.
-  markAllTicketsRead: (boardId?: string): Promise<{ updated: number }> =>
+  // 현재 워크스페이스(X-Workspace-Id 헤더)의 관여 티켓 전체를 읽음 처리한다.
+  markAllTicketsRead: (): Promise<{ updated: number }> =>
     request<{ updated: number }>('/tickets/read-all', {
       method: 'POST',
-      body: JSON.stringify(boardId ? { board_id: boardId } : {}),
+      body: '{}',
     }),
   getPendingUsersCount: (): Promise<{ count: number }> =>
     request<{ count: number }>('/admin/pending-users/count'),
@@ -2842,65 +2438,66 @@ export const api = {
     ),
 };
 
-// ─── Ticket role assignment types ─────────────────────────
-export interface TicketRoleAssignmentRow {
-  role: { id: string; slug: string; name: string; position: number; is_builtin: boolean };
-  holder: { type: 'agent' | 'user'; id: string; name: string; runtime?: Record<string, any> } | null;
+// ─── Ticket list / write shapes (docs/tickets.md) ─────────
+export interface TicketListQuery {
+  status?: TicketStatus[];
+  /** AND semantics — a ticket must carry every tag. */
+  tags?: string[];
+  project_id?: string;
+  assignee_key?: string;
+  q?: string;
+  include_archived?: boolean;
+  archived_only?: boolean;
 }
 
-// ─── 다중담당자·합의 뷰 타입 (T6) ─────────────────────────
-// 서버 common/consensus-state 의 ConsensusState + consensus-actions 의
-// ConsensusView 를 미러. party 는 {type,id} 뿐 — 이름은 `names` 맵으로 해석한다.
-export interface ConsensusParty { type: 'agent' | 'user'; id: string; }
-export interface ConsensusStateView {
-  proposalId: string | null;
-  required: ConsensusParty[];
-  agreed: ConsensusParty[];
-  objected: ConsensusParty[];
-  pending: ConsensusParty[];
-  satisfied: boolean;
-  overriddenBy?: ConsensusParty;
-  routingRoleSlugs: string[];
+/** Query string for GET /workspaces/:wsId/tickets (pure — unit tested). */
+export function ticketListQueryString(filters: TicketListQuery): string {
+  const qs = new URLSearchParams();
+  if (filters.status && filters.status.length) qs.set('status', filters.status.join(','));
+  if (filters.tags && filters.tags.length) qs.set('tags', filters.tags.join(','));
+  if (filters.project_id) qs.set('project_id', filters.project_id);
+  if (filters.assignee_key) qs.set('assignee_key', filters.assignee_key);
+  if (filters.q && filters.q.trim()) qs.set('q', filters.q.trim());
+  if (filters.include_archived) qs.set('include_archived', '1');
+  if (filters.archived_only) qs.set('archived_only', '1');
+  return qs.toString();
 }
-export interface ConsensusProposalView {
-  proposal_id: string;
-  target_column_id: string;
-  target_column_name: string | null;
-  by: ConsensusParty;
-  at: number;
+
+export interface TicketCreateInput {
+  title: string;
+  description?: string;
+  status?: TicketStatus;
+  priority?: TicketPriority;
+  tags?: string[];
+  project_id?: string | null;
+  base_branch?: string;
+  assignee?: Record<string, any> | null;
+  prompt_text?: string;
+  position?: number;
 }
-export interface ConsensusView {
-  state: ConsensusStateView;
-  proposal: ConsensusProposalView | null;
-  /** `"type:id" → 표시 이름`. required/agreed/pending 홀더 이름 해석용. */
-  names: Record<string, string>;
-  gate: { blocked: boolean; holder_count: number };
-}
-// consensus_update SSE 프레임(서버 event-registry flatten). 카운트만 실린다 —
-// 상세 홀더 목록은 UI 가 getTicketConsensus 로 재조회.
-export interface ConsensusUpdateEvent {
-  event_type: 'consensus_update';
-  ticket_id: string;
-  workspace_id: string;
-  proposal_id: string | null;
-  satisfied: boolean;
-  required: number;
-  agreed: number;
-  objected: number;
-  pending: number;
-  status: 'agree' | 'object';
-  override: boolean;
-  actor_id: string;
-  actor_name: string;
-  timestamp: string;
+
+export interface TicketPatch {
+  title?: string;
+  description?: string;
+  priority?: TicketPriority;
+  tags?: string[];
+  project_id?: string | null;
+  base_branch?: string;
+  assignee?: Record<string, any> | null;
+  prompt_text?: string;
+  pending_user_action?: boolean;
+  pending_reason?: string;
+  next_ticket_id?: string | null;
+  on_done_action_ids?: string[];
+  channel_ids?: string[];
 }
 
 // ─── Mention types ───────────────────────────────────────
 export interface MentionCandidatesResponse {
   users: Array<{ id: string; name: string; avatar_url: string }>;
-  // ST-7: agent rows carry manager_name when supervised by an
-  // agent-manager so the mention autocompleter can render them as
-  // <ManagerName>/<AgentName>.
+  // With `ticket_id`: the ticket's assignee (id = runtime identity key "rt-…").
+  // Rows carry manager_name (the Runtime Host) so the autocompleter renders
+  // them as <Host>/<label>.
   agents: Array<{
     id: string;
     name: string;
@@ -2908,8 +2505,6 @@ export interface MentionCandidatesResponse {
     manager_agent_id?: string | null;
     manager_name?: string | null;
   }>;
-  // v0.34: workspace roles can resolve to agents *or* users now.
-  role_shortcuts: Array<{ key: string; label: string; resolved_type: 'agent' | 'user'; resolved_id: string }>;
 }
 
 export interface UserMentionItem {
@@ -2918,11 +2513,9 @@ export interface UserMentionItem {
   workspace_id: string;
   source_type: 'comment' | 'chat_message';
   source_id: string;
+  // Comment mentions deep-link via ticket_id (Tickets page `?ticket=`), chat
+  // mentions via room_id.
   ticket_id: string | null;
-  // Resolved board for comment mentions (server-side join through
-  // Ticket → BoardColumn). Null for chat mentions — those deep-link via
-  // room_id instead. Used by MentionInboxBadge to build a navigable URL.
-  board_id: string | null;
   room_id: string | null;
   actor_id: string;
   actor_type: 'user' | 'agent';

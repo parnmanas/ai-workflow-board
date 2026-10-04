@@ -171,7 +171,7 @@ test('⑥ 왼쪽 프레임 — 돌고 있는 세션과 작업 중인 방에 같�
         workspaces: [{ id: WS_ID, name: 'Workspace', slug: null, relations: [] }],
       });
     }
-    if (p.includes('/tickets/unread-counts')) return json({ total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} });
+    if (p.includes('/tickets/unread-counts')) return json({ total: 0, perTicket: {} });
     if (p.includes('/chat-rooms/unread-counts')) return json({ total: 0, perRoom: {} });
     if (p.includes('/mentions/unread')) return json({ count: 0, items: [] });
     return json([]);
@@ -183,14 +183,14 @@ test('⑥ 왼쪽 프레임 — 돌고 있는 세션과 작업 중인 방에 같�
     last_message_sender: null, dm_partner_name: null, dm_partner_type: null,
   };
   const view = mount(
-    h(MemoryRouter, { initialEntries: [`${BASE}/boards`] },
+    h(MemoryRouter, { initialEntries: [`${BASE}/tickets`] },
       h(ToastProvider, null,
         h(AuthProvider, null,
           h(BoardStreamProvider, null,
             h(NotificationProvider, null,
               h(Sidebar, {
                 overlay: false, isOpen: false, onClose: () => {}, wsId: WS_ID,
-                boards: [], rooms: [room], roomsLoading: false,
+                rooms: [room], roomsLoading: false,
               }),
             ),
           ),

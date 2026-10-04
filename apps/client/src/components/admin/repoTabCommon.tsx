@@ -1,7 +1,7 @@
 import React from 'react';
 import { tokens } from '../../tokens';
 
-// History / Files 탭이 공유하는 소품. 두 탭 모두 같은 monospace 와 에러 박스
+// 프로젝트 History / Files 탭(projects/ProjectRepoTabs)이 공유하는 소품. 두 탭 모두 같은 monospace 와 에러 박스
 // 스타일을 쓰므로 한 곳에 모았다.
 
 export const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';

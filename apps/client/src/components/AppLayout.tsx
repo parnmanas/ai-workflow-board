@@ -7,7 +7,7 @@ import { ArtifactPanelProvider } from '../contexts/ArtifactPanelContext';
 import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
 import TicketArtifactController from './TicketArtifactController';
 import { useMediaQuery } from '../hooks/useMediaQuery';
-import { useWorkspaces } from '../hooks/useBoard';
+import { useWorkspaces } from '../hooks/useWorkspaces';
 import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
 import { BoardStreamProvider } from '../contexts/BoardStreamContext';
 import { NotificationProvider } from '../contexts/NotificationContext';
@@ -18,17 +18,20 @@ import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import type { ChatRoomListItem } from '../types';
 
+/** Section a workspace switch lands on when the current route has none (the app's default landing). */
+const DEFAULT_WORKSPACE_SECTION = 'sessions';
+
 /**
  * Persistent authenticated-user shell — Phase 1 FOUND-03 / FOUND-04 / D-10.
  *
  * Renders the Sidebar and a React Router <Outlet /> for the nested child route.
- * Board, Dashboard, Chat, Settings, and Admin are all nested under this layout.
+ * Tickets, Sessions, Chat, Settings, and Admin are all nested under this layout.
  *
  * SSE Reconnect Contract (D-10 architectural intent):
  * This component owns the single authoritative real-time stream subscription
  * via <BoardStreamProvider>, which wraps the <Outlet />. Because AppLayout
  * remains mounted across nested-route changes, the underlying EventSource
- * stays alive while navigating Board → Stub → Board. No downstream component
+ * stays alive while navigating Tickets → Stub → Tickets. No downstream component
  * may instantiate its own EventSource — subscribers pull events through
  * useBoardStream() / useBoardStreamEvent() instead.
  *
@@ -47,7 +50,7 @@ export default function AppLayout() {
   const { currentWorkspaceId: authWorkspaceId, setCurrentWorkspace: setAuthWorkspace } = useAuth();
 
   // Workspace state — AppLayout is the single writer to localStorage.currentWorkspaceId.
-  // Workspace changes navigate to /ws/:wsId/boards via React Router instead of
+  // Workspace changes navigate to /ws/:wsId/<section> via React Router instead of
   // dispatching CustomEvents — URL is now the source of truth for workspace context.
   const {
     workspaces,
@@ -63,9 +66,6 @@ export default function AppLayout() {
   // (ticket dc5c0813, see bootstrapActiveWorkspaceId's doc comment).
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(() => bootstrapActiveWorkspaceId());
 
-  const [currentBoardId, setCurrentBoardId] = useState<string | null>(null);
-  const [currentBoardName, setCurrentBoardName] = useState<string | undefined>(undefined);
-  const [sidebarBoards, setSidebarBoards] = useState<{ id: string; name: string }[]>([]);
   const [sidebarRooms, setSidebarRooms] = useState<ChatRoomListItem[]>([]);
   const [sidebarRoomsLoading, setSidebarRoomsLoading] = useState(false);
 
@@ -130,34 +130,6 @@ export default function AppLayout() {
     }
   }, [workspaces, currentWorkspaceId, params.wsId]);
 
-  // Track boards for sidebar + WorkspaceSelector edit UX
-  const fetchBoards = useCallback((wsId: string) => {
-    let cancelled = false;
-    api.getBoards(wsId).then((boards) => {
-      if (cancelled) return;
-      const activeBoards = boards.filter((b: any) => !b.archived_at);
-      setSidebarBoards(activeBoards.map((b: any) => ({ id: b.id, name: b.name })));
-      if (boards.length > 0) {
-        setCurrentBoardId(boards[0].id);
-        setCurrentBoardName(boards[0].name);
-      } else {
-        setCurrentBoardId(null);
-        setCurrentBoardName(undefined);
-      }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    if (!currentWorkspaceId) {
-      setCurrentBoardId(null);
-      setCurrentBoardName(undefined);
-      setSidebarBoards([]);
-      return;
-    }
-    return fetchBoards(currentWorkspaceId);
-  }, [currentWorkspaceId, fetchBoards]);
-
   const fetchSidebarRooms = useCallback(async (wsId: string) => {
     setSidebarRoomsLoading(true);
     try {
@@ -202,15 +174,6 @@ export default function AppLayout() {
     };
   }, [currentWorkspaceId, fetchSidebarRooms]);
 
-  // Refresh sidebar boards when boards are created/deleted/updated
-  useEffect(() => {
-    const handleBoardRefresh = () => {
-      if (currentWorkspaceId) fetchBoards(currentWorkspaceId);
-    };
-    window.addEventListener('boards-changed', handleBoardRefresh);
-    return () => window.removeEventListener('boards-changed', handleBoardRefresh);
-  }, [currentWorkspaceId, fetchBoards]);
-
   const handleSelectWorkspace = useCallback((wsId: string) => {
     setCurrentWorkspaceId(wsId);
     try { localStorage.setItem('currentWorkspaceId', wsId); } catch {}
@@ -218,21 +181,22 @@ export default function AppLayout() {
     // 이동하지 않는다 — currentWorkspaceId 상태만 갱신해 이후 workspace-scoped
     // 화면으로 이동할 때 새 workspace 를 사용하도록 한다.
     if (isAdminRoute) return;
-    // Preserve the current top-level menu (boards / chat / agents / users / ...)
-    // when switching workspaces. Deeper segments (e.g. boards/:boardId,
-    // agents/:agentId) are scoped to the old workspace and won't resolve in
-    // the new one, so we keep only the first segment after /ws/:wsId/.
+    // Preserve the current top-level menu (tickets / chat / sessions / ...)
+    // when switching workspaces. Deeper segments (e.g. sessions/:managerId,
+    // orchestration/missions/:id) and query params (`?ticket=`) are scoped to
+    // the old workspace and won't resolve in the new one, so we keep only the
+    // first segment after /ws/:wsId/.
     const m = location.pathname.match(/^\/ws\/[^/]+\/([^/]+)/);
-    const section = m?.[1] ?? 'boards';
+    const section = m?.[1] ?? DEFAULT_WORKSPACE_SECTION;
     navigate(`/ws/${wsId}/${section}`);
   }, [navigate, location.pathname, isAdminRoute]);
 
-  const handleCreateWorkspace = useCallback(async (name: string, description?: string, boardName?: string) => {
-    const ws = await createWorkspace(name, description, boardName);
+  const handleCreateWorkspace = useCallback(async (name: string, description?: string) => {
+    const ws = await createWorkspace(name, description);
     if (ws?.id) {
       setCurrentWorkspaceId(ws.id);
       try { localStorage.setItem('currentWorkspaceId', ws.id); } catch {}
-      navigate(`/ws/${ws.id}/boards`);
+      navigate(`/ws/${ws.id}/tickets`);
     }
   }, [createWorkspace, navigate]);
 
@@ -249,15 +213,10 @@ export default function AppLayout() {
       setCurrentWorkspaceId(next);
       if (next) {
         try { localStorage.setItem('currentWorkspaceId', next); } catch {}
-        navigate(`/ws/${next}/boards`);
+        navigate(`/ws/${next}/${DEFAULT_WORKSPACE_SECTION}`);
       }
     }
   }, [deleteWorkspace, refreshWorkspaces, currentWorkspaceId, navigate]);
-
-  const handleUpdateBoard = useCallback(async (boardId: string, data: { name?: string }) => {
-    await api.updateBoard(boardId, data);
-    if (data.name) setCurrentBoardName(data.name);
-  }, []);
 
   // 모바일 드로어 모드를 벗어나 데스크톱으로 확대되면 열린 드로어를 닫는다.
   useEffect(() => {
@@ -300,7 +259,6 @@ export default function AppLayout() {
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         wsId={urlWsId}
-        boards={sidebarBoards}
         rooms={sidebarRooms}
         roomsLoading={sidebarRoomsLoading}
         containerRef={drawerRef}
@@ -346,13 +304,10 @@ export default function AppLayout() {
               <WorkspaceSelector
                 workspaces={workspaces}
                 currentWorkspaceId={currentWorkspaceId}
-                currentBoardName={currentBoardName}
-                currentBoardId={currentBoardId}
                 onSelect={handleSelectWorkspace}
                 onCreate={handleCreateWorkspace}
                 onDelete={handleDeleteWorkspace}
                 onUpdate={handleUpdateWorkspace}
-                onUpdateBoard={handleUpdateBoard}
               />
             )}
             <ArtifactToggleButton />
@@ -379,13 +334,10 @@ export default function AppLayout() {
             <WorkspaceSelector
               workspaces={workspaces}
               currentWorkspaceId={currentWorkspaceId}
-              currentBoardName={currentBoardName}
-              currentBoardId={currentBoardId}
               onSelect={handleSelectWorkspace}
               onCreate={handleCreateWorkspace}
               onDelete={handleDeleteWorkspace}
               onUpdate={handleUpdateWorkspace}
-              onUpdateBoard={handleUpdateBoard}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <ArtifactToggleButton />

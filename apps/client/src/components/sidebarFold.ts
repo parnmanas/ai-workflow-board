@@ -3,7 +3,7 @@
 // **왜 별도 모듈인가**: 예전에는 이 로직이 Sidebar.tsx(1000줄 넘는 컴포넌트) 안에
 // 인라인으로 있었고 테스트가 하나도 없었다. 그래서 "모든 메뉴와 서브메뉴의 폴드를
 // 저장한다" 는 요구가 절반만 구현된 채로 지나갔다 — 섹션·세션·채팅·호스트는 저장되고
-// WORK 의 Teams/Orchestrations/Boards 와 호스트 아래 작업 폴더는 매 새로고침마다
+// WORK 의 Teams/Orchestrations 와 호스트 아래 작업 폴더는 매 새로고침마다
 // 펼쳐진 상태로 돌아왔다. 순수 함수로 떼어 내면 "무엇을 저장하는가" 를 목록으로
 // 고정할 수 있다.
 //
@@ -33,7 +33,7 @@ export interface SidebarFoldSnapshot {
   chats: boolean;
   /** 섹션 헤더(WORK / AUTOMATION / KNOWLEDGE / QUALITY / SETTINGS …) */
   sections: Record<string, boolean>;
-  /** 자식 목록을 펴고 접는 최상위 메뉴 — WORK 의 teams / orchestrations / boards, 그리고 operators */
+  /** 자식 목록을 펴고 접는 최상위 메뉴 — WORK 의 teams / orchestrations, 그리고 operators */
   groups: Record<string, boolean>;
   /** 세션 트리의 Runtime Host */
   hosts: string[];

@@ -19,7 +19,7 @@ import { Button, EmptyState, Input, Modal, Select } from '../common';
 import { relativeTime, shortDuration } from '../../utils/time';
 import { missionStyle, progressPercent } from './status';
 import { MISSIONS_CHANGED_EVENT } from '../workNavigation';
-import { RepoRefPicker, buildRepoRefPayload } from '../admin/WorkspaceFolderOptions';
+import { RepoRefPicker, buildRepoRefPayload, repoRefProjectId } from '../admin/WorkspaceFolderOptions';
 
 /**
  * Mission list — the landing surface of Orchestration mode.
@@ -349,19 +349,19 @@ export function MissionFormModal({
   const [graphEnabled, setGraphEnabled] = useState(false);
   const [confirmPolicy, setConfirmPolicy] = useState<OrchestrationConfirmPolicy>('auto');
   const [userChatMode, setUserChatMode] = useState<OrchestrationUserChatMode>('open');
-  const [repoResourceId, setRepoResourceId] = useState('');
+  const [repoProjectId, setRepoProjectId] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [repoBranch, setRepoBranch] = useState('');
   const [actions, setActions] = useState<Action[]>([]);
 
   // RepoRefPicker 는 평면 상태 + patch 한 벌로 말한다. 저장소를 바꿀 때
-  // { repoResourceId, repoBranch } 처럼 두 필드를 한 번에 보내므로 개별로 반영한다.
+  // { repoProjectId, repoBranch } 처럼 두 필드를 한 번에 보내므로 개별로 반영한다.
   const repoRefState = useMemo(
-    () => ({ repoResourceId, repoUrl, repoBranch }),
-    [repoResourceId, repoUrl, repoBranch],
+    () => ({ repoProjectId, repoUrl, repoBranch }),
+    [repoProjectId, repoUrl, repoBranch],
   );
   const patchRepoRef = useCallback((patch: Partial<typeof repoRefState>) => {
-    if (patch.repoResourceId !== undefined) setRepoResourceId(patch.repoResourceId);
+    if (patch.repoProjectId !== undefined) setRepoProjectId(patch.repoProjectId);
     if (patch.repoUrl !== undefined) setRepoUrl(patch.repoUrl);
     if (patch.repoBranch !== undefined) setRepoBranch(patch.repoBranch);
   }, []);
@@ -383,7 +383,8 @@ export function MissionFormModal({
     setUserChatMode(mission?.user_chat_mode || 'open');
     setCompletionCriteria((mission?.completion_criteria || []).map((c) => ({ key: c.key, description: c.description })));
     setPostActions((mission?.post_actions || []).map((p) => ({ action_id: p.action_id, order: p.order, condition: p.condition })));
-    setRepoResourceId(mission?.repo_ref?.resource_id || '');
+    // project_id 우선, 이관 전 레코드의 resource_id 는 같은 id 라 읽기 폴백(docs/tickets.md).
+    setRepoProjectId(repoRefProjectId(mission?.repo_ref));
     setRepoUrl(mission?.repo_ref?.url || '');
     setRepoBranch(mission?.repo_ref?.branch || '');
     setTeamId(mission?.team_id || teams.find((t) => t.enabled && t.members.length > 0)?.id || teams[0]?.id || '');
@@ -732,10 +733,11 @@ export function MissionFormModal({
             />
             <div>
               <span style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
-                Repo — checked out for every step.
+                Project — the repository checked out for every step. Each step&apos;s work order also tells
+                the member where this project&apos;s main clone folder is on its host.
               </span>
               {/* Action/QA/Security 편집 폼과 같은 피커를 쓴다(티켓 eb9cdd1c) — 검색형
-                  리소스 드롭다운 + 브랜치 드롭다운, 목록에 없는 id 보존, 조회 실패 시
+                  프로젝트 드롭다운 + 브랜치 드롭다운, 목록에 없는 id 보존, 조회 실패 시
                   수동 입력 폴백까지 그대로 승계한다. 여기만 별도 입력을 두면 같은
                   화면이 또 갈라진다. */}
               <RepoRefPicker workspaceId={wsId} state={repoRefState} onChange={patchRepoRef} />

@@ -7,7 +7,6 @@ import { renderMarkdown, handleMentionAwareCopy, type MentionParticipant } from 
 import { base64ToBlob, formatBytes, isImageMime, isVideoMime, triggerBlobDownload } from './utils/attachments';
 import TicketRefCard from './TicketRefCard';
 import ArtifactRefCard from './ArtifactRefCard';
-import BoardRefCard from './BoardRefCard';
 import TicketUnpendActionCard from './TicketUnpendActionCard';
 
 // ─── MessageList ──────────────────────────────────────────────────────────────
@@ -368,18 +367,8 @@ export default function MessageList({ messages, participantCount, participants =
             )}
             {/* P4c-4: agent_refs 채널 제거 (get_agent 삭제로 방출 중단) — 구 메시지
              *  호환용으로 블록 자체를 렌더하지 않는다. */}
-            {/* F-3 (ticket 3ca88253): 보드 현황 카드. 다른 refs 채널과 독립적으로
-             *  방출되므로 별도 블록으로 렌더한다. */}
-            {Array.isArray(msg.metadata?.board_refs) && msg.metadata!.board_refs!.length > 0 && (
-              <div
-                data-board-refs=""
-                style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}
-              >
-                {msg.metadata!.board_refs!.map((ref, idx) => (
-                  <BoardRefCard key={`${ref.board_id}:${idx}`} id={ref.board_id} title={ref.title} />
-                ))}
-              </div>
-            )}
+            {/* 보드 현황 카드(board_refs)는 보드와 함께 없어졌다(docs/tickets.md) — 구 메시지의
+             *  metadata.board_refs 는 렌더하지 않는다. */}
             {/* Legacy inline image thumbnails (pre-attachment-surface messages). */}
             {msgImages.length > 0 && (
               <div style={{ display: 'flex', gap: tokens.spacing.sm, marginTop: tokens.spacing.sm, flexWrap: 'wrap', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>

@@ -53,7 +53,7 @@ const noopOpenArtifact: ArtifactPanelContextValue['openArtifact'] = () => {};
 const noopCloseArtifact: ArtifactPanelContextValue['closeArtifact'] = () => {};
 
 /**
- * F-3 (ticket 3ca88253) — openArtifact 만 필요한 리프 카드(AgentRefCard/BoardRefCard)용
+ * F-3 (ticket 3ca88253) — openArtifact 만 필요한 리프 카드(AgentRefCard 등)용
  * 안전 접근자. 프로바이더 밖에서는 throw 대신 no-op 을 돌려준다 — useOpenTicketArtifact
  * 와 동일한 안전 계약이라 카드가 어느 표면(SSR 계약 테스트 포함)에서도 안전히 렌더된다.
  * 패널 자체를 그리는 셸 컴포넌트(ArtifactPanel/TicketArtifactController)는 프로바이더
@@ -65,7 +65,7 @@ export function useOpenArtifactPanel(): ArtifactPanelContextValue['openArtifact'
 }
 
 /**
- * closeArtifact 만 필요한 아티팩트 본문 컨테이너(TicketArtifact/BoardArtifact/
+ * closeArtifact 만 필요한 아티팩트 본문 컨테이너(TicketArtifact/
  * AgentArtifact)용 안전 접근자. 이들은 실제로는 항상 패널 안(프로바이더 하위)에
  * 렌더되지만, 렌더 계약 테스트는 프로바이더 없이 마운트하므로 throw 대신 no-op 을
  * 돌려주는 useOpenArtifactPanel 과 같은 계약을 따른다.

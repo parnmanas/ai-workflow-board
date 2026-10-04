@@ -19,7 +19,7 @@ export interface SidebarPage<T> {
  * 현재 열려 있는 항목(activeId)이 그 구간 밖에 있을 때만 맨 앞에 얹어 항상
  * 보이게 한다. (본문 목록과 순서가 어긋나지 않도록 재정렬은 하지 않는다.)
  *
- * Chat 방뿐 아니라 WORK 의 Teams/Orchestrations/Boards 서브메뉴도 같은 규칙을
+ * Chat 방뿐 아니라 WORK 의 Teams/Orchestrations 서브메뉴도 같은 규칙을
  * 쓴다(티켓 03ca8b5b) — 목록마다 다른 접기 규칙을 두지 않기 위해 제네릭으로 뺐다.
  */
 export function paginateSidebarItems<T extends { id: string }>(

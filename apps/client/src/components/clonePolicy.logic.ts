@@ -7,13 +7,13 @@ import type { ClonePolicy } from '../types';
 // 여기 있는 함수들이 곧 ClonePolicyEditor 가 실제로 import 해서 쓰는 구현이며,
 // 테스트도 이 모듈을 그대로 검증한다(로직 복제본이 아니다).
 //
-// 같은 ClonePolicy 형태를 두 표면이 편집한다 — Resource 설정(repo별 override)과
+// 같은 ClonePolicy 형태를 두 표면이 편집한다 — Project 설정(프로젝트별 override)과
 // Workspace Settings(워크스페이스 기본값). 저장 대상만 다르므로 필드 매핑과 입력
 // 검증은 이 한 곳에 둔다.
 //
 // 서버 zod 가 최종 검증 권한이며, 여기서는 사용자가 **어느 칸이 잘못됐는지** 알 수
 // 있도록 같은 범위를 미리 확인할 뿐이다. 빈 칸은 "미지정"이라 저장 payload 에서 키
-// 자체가 빠지고, 그러면 Repo Resource → Workspace → 시스템 기본값(clone timeout 3600초,
+// 자체가 빠지고, 그러면 Project → Workspace → 시스템 기본값(clone timeout 3600초,
 // idle 비활성, 전체 clone) 순으로 흘러내린다
 // (그래서 0 과 미지정을 구분해야 하고, 폼 상태를 문자열로 들고 있다).
 

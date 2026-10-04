@@ -23,9 +23,10 @@ import React, {
  * internal subscriber map — no new EventSource is ever created downstream.
  *
  * Design notes:
- * - Opens ONE stream without a ?boardId= filter (app-level subscription), so
- *   workspace/board switches do NOT require reconnecting the EventSource.
- *   Consumers filter by `data.board_id` client-side.
+ * - Opens ONE stream without a per-entity filter (app-level subscription), so
+ *   workspace switches do NOT require reconnecting the EventSource.
+ *   Consumers filter by `data.workspace_id` / `data.ticket_id` client-side.
+ *   (`board_update` keeps its name — it is the ticket-change event.)
  * - Uses EventTarget as an internal pub/sub to broadcast received events to
  *   all hook subscribers without re-rendering the provider itself.
  * - Auto-reconnect with 5s backoff mirrors the previous useBoard() behavior.
@@ -42,7 +43,6 @@ type StreamNamedEventType =
   | 'ticket_presence'  // Tier-1 E — viewer set for a ticket (panel-open indicator)
   | 'subagent_registered' | 'subagent_log' | 'subagent_ended'  // v0.32 subagent monitor
   | 'agent_instance_update'  // Phase 3 Agent Manager dashboard
-  | 'consensus_update'   // 다중담당자·합의 T6 — 합의 배지/패널 라이브 갱신
   | 'orchestration_update'  // 오케스트레이션 — Mission/Step 진행 라이브 갱신
   | 'ticket_reads_cleared'  // 티켓 628f4b39 — 티켓 코멘트 "모두 읽음" 다른 탭/기기 동기화
   | 'cli_login_progress'  // 티켓 b2e79108 — CLI 자동 로그인(device-auth) 진행 상태
@@ -129,8 +129,8 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       window.location.hostname === 'localhost'
         ? `${window.location.protocol}//${window.location.hostname}:7701`
         : '';
-    // NOTE: no boardId query param — this is a workspace-agnostic subscription.
-    // Consumers filter board_update events by data.board_id client-side.
+    // NOTE: no filter query param — this is a workspace-agnostic subscription.
+    // Consumers filter board_update (ticket-change) events client-side.
     const url = `${baseUrl}/api/events/stream?token=${encodeURIComponent(token)}`;
 
     let eventSource: EventSource | null = null;
@@ -214,12 +214,6 @@ export function BoardStreamProvider({ children }: ProviderProps) {
       // Runtime Host dashboard: live instance capability/health updates.
       eventSource.addEventListener('agent_instance_update', (event: MessageEvent) => {
         dispatch('agent_instance_update', event.data);
-      });
-
-      // 다중담당자·합의 T6 — 합의 상태 push(카운트). 티켓 패널이 배지/진행바를
-      // 재조회 없이 갱신하고, 필요 시 getTicketConsensus 로 상세를 당긴다.
-      eventSource.addEventListener('consensus_update', (event: MessageEvent) => {
-        dispatch('consensus_update', event.data);
       });
 
       // 오케스트레이션 — Mission 목록/상세가 재조회 없이 진행 상황을 반영한다.

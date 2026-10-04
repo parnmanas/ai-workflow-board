@@ -14,7 +14,7 @@ export default function LoginPage() {
   // wins the next AppLayout sync and silently swaps in the wrong workspace.
   const pickWorkspace = (wsId: string) => {
     setCurrentWorkspace(wsId);
-    navigate(`/ws/${wsId}/boards`, { replace: true });
+    navigate(`/ws/${wsId}/sessions`, { replace: true });
   };
   const [mode, setMode] = useState<Mode>(needsSetup ? 'setup' : 'login');
   const [form, setForm] = useState({ name: '', email: '', password: '' });

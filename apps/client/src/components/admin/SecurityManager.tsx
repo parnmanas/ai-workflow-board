@@ -11,7 +11,10 @@ import { Button, Input, Select, Modal, Card, ConfirmDialog } from '../common';
 import { relativeTime } from '../../utils/time';
 import { formatAgentDisplayName } from '../../utils/agentName';
 import DeclareRuntimeSection from '../runtime/DeclareRuntimeSection';
-import { canOpenTicketOnBoard, ticketBoardPath } from '../../utils/ticketBoardLink';
+import { canOpenTicket, ticketPath } from '../../utils/ticketPath';
+import { useProjects } from '../../projects/useProjects';
+import OnFailureTicketTargetFields from './OnFailureTicketTargetFields';
+import { onFailureTicketFromForm, onFailureTicketToForm, projectSelectOptions, type OnFailureTicketForm } from './onFailureTicket.logic';
 import {
   WorkspaceFolderOptions,
   initWorkspaceFolderState,
@@ -101,10 +104,10 @@ function SeverityBadge({ severity, size = 'sm' }: { severity: SecuritySeverity; 
   );
 }
 
-/** 'self' (AWB own codebase) vs 'repo' (a checked-out Resource). */
+/** 'self' (AWB own codebase) vs 'repo' (a Project — same id as the old repo Resource). */
 function TargetBadge({ resourceId }: { resourceId: string | null }) {
   return resourceId
-    ? <span title={`repo Resource ${resourceId}`} style={{ display: 'inline-flex' }}><Pill variant="info">repo</Pill></span>
+    ? <span title={`project ${resourceId}`} style={{ display: 'inline-flex' }}><Pill variant="info">repo</Pill></span>
     : <span title="AWB 자체 코드베이스 (agent worktree)" style={{ display: 'inline-flex' }}><Pill variant="neutral">self</Pill></span>;
 }
 
@@ -116,7 +119,7 @@ interface ProfileRow extends SecurityProfileListItem {
 }
 
 /**
- * Board Security panel — sibling of QaManager. Lists security profiles as a
+ * Security panel — sibling of QaManager. Lists security profiles as a
  * status table (driver / target / scope / last result / worst severity /
  * pass-rate), runs them (single or sequential batch), and visualizes each run's
  * findings grouped by severity with evidence galleries + auto-fix-ticket links.
@@ -995,7 +998,7 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
   const grouped = SEVERITY_ORDER.map((sev) => ({ sev, items: findings.filter((f) => f.severity === sev) }))
     .filter((g) => g.items.length > 0);
   const ticketRef = run.auto_ticket_id
-    ? { id: run.auto_ticket_id, board_id: run.board_id, workspace_id: run.workspace_id }
+    ? { id: run.auto_ticket_id, workspace_id: run.workspace_id }
     : null;
 
   return (
@@ -1007,9 +1010,9 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
           {findings.length} finding{findings.length === 1 ? '' : 's'} · {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}
         </span>
         {ticketRef && (
-          canOpenTicketOnBoard(ticketRef) ? (
+          canOpenTicket(ticketRef) ? (
             <a
-              href={ticketBoardPath(ticketRef)}
+              href={ticketPath(ticketRef.workspace_id, ticketRef.id)}
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.danger, textDecoration: 'none', border: `1px solid ${tokens.colors.danger}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
               title="이 실패 run 이 자동 생성한 수정 티켓으로 이동"
             >
@@ -1018,9 +1021,9 @@ function RunDetail({ run, onPreview }: { run: SecurityRun; onPreview: (src: stri
           ) : (
             <span
               style={{ fontSize: 12, fontWeight: 600, color: tokens.colors.textMuted, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.sm, padding: '2px 8px' }}
-              title="이 티켓이 속한 보드를 찾을 수 없어 이동할 수 없습니다"
+              title="이 티켓의 워크스페이스를 알 수 없어 이동할 수 없습니다"
             >
-              티켓 #{ticketRef.id.slice(0, 8)} (보드 없음)
+              티켓 #{ticketRef.id.slice(0, 8)}
             </span>
           )
         )}
@@ -1186,7 +1189,10 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
   const [description, setDescription] = useState(profile?.description ?? '');
   // P4c-3b: spec-direct target (QA와 동일).
   const [pendingSpec, setPendingSpec] = useState<Record<string, any> | null>((profile as any)?.target_runtime ?? null);
+  // Which repo to inspect: '' = AWB itself (self), else a Project id (projects
+  // keep the ids of the old repository Resources, so the field name stays).
   const [targetResourceId, setTargetResourceId] = useState(profile?.target_resource_id ?? '');
+  const { projects, loading: projectsLoading } = useProjects(workspaceId);
   const [scanDriver, setScanDriver] = useState(profile?.scan_driver ?? 'code-review');
   const [scopeMode, setScopeMode] = useState<SecurityScopeMode>(profile?.scope_mode ?? 'incremental');
   const [enabled, setEnabled] = useState(profile?.enabled ?? true);
@@ -1201,16 +1207,11 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
   const patchWf = (patch: Partial<WorkspaceFolderFormState>) => setWf((prev) => ({ ...prev, ...patch }));
 
   // On-failure auto-ticket policy (실패 시 → 티켓 생성), severity-gated.
+  // The ticket joins the workspace ticket pool (status / tags / project).
   const oft = profile?.on_failure_ticket ?? null;
-  const [oftEnabled, setOftEnabled] = useState(!!oft?.enabled);
-  const [oftPriority, setOftPriority] = useState<SecurityOnFailureTicketConfig['priority']>(oft?.priority ?? 'high');
+  const [oftForm, setOftForm] = useState<OnFailureTicketForm>(() => onFailureTicketToForm(oft));
+  const patchOft = (patch: Partial<OnFailureTicketForm>) => setOftForm((prev) => ({ ...prev, ...patch }));
   const [oftMinSeverity, setOftMinSeverity] = useState<SecuritySeverity>(oft?.min_severity ?? 'high');
-  const [oftRuntime, setOftRuntime] = useState<Record<string, any> | null>(oft?.assignee_runtime ?? null);
-  const [oftColumnId, setOftColumnId] = useState(oft?.column_id ?? '');
-  const [oftColumn, setOftColumn] = useState(oft?.column_name ?? '');
-  const [oftDedupe, setOftDedupe] = useState<SecurityOnFailureTicketConfig['dedupe']>(oft?.dedupe ?? 'per_run');
-  const [oftBoardId, setOftBoardId] = useState(oft?.board_id ?? '');
-  const [oftLabels, setOftLabels] = useState((oft?.labels ?? []).join(', '));
 
   const handleSave = async () => {
     if (!name.trim()) { showToast('이름을 입력하세요', 'error'); return; }
@@ -1221,19 +1222,10 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
     try { config = configText.trim() ? JSON.parse(configText) : {}; } catch { showToast('Driver config 는 유효한 JSON 이어야 합니다', 'error'); return; }
     const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
     // Disabled → explicit { enabled:false } so an existing policy is turned off.
-    const onFailureTicket: SecurityOnFailureTicketConfig = oftEnabled
-      ? {
-          enabled: true,
-          priority: oftPriority,
-          min_severity: oftMinSeverity,
-          dedupe: oftDedupe,
-          ...(oftRuntime ? { assignee_runtime: oftRuntime } : {}),
-          ...(oftColumnId.trim() ? { column_id: oftColumnId.trim() } : {}),
-          ...(oftColumn.trim() ? { column_name: oftColumn.trim() } : {}),
-          ...(oftBoardId.trim() ? { board_id: oftBoardId.trim() } : {}),
-          ...(oftLabels.trim() ? { labels: oftLabels.split(',').map((l) => l.trim()).filter(Boolean) } : {}),
-        }
-      : { enabled: false };
+    const baseOft = onFailureTicketFromForm(oftForm, oft);
+    const onFailureTicket = (oftForm.enabled
+      ? { ...baseOft, min_severity: oftMinSeverity }
+      : baseOft) as SecurityOnFailureTicketConfig;
     const maxRunsNum = Math.max(1, parseInt(maxRuns, 10) || 20);
     setSaving(true);
     try {
@@ -1296,10 +1288,15 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
             );
           }}
         />
-        <Input
-          label="Target resource ID (비우면 AWB 자체 코드베이스 = self)"
+        <Select
+          label="점검 대상 (Target)"
           value={targetResourceId}
-          onChange={(e) => setTargetResourceId((e.target as HTMLInputElement).value)}
+          options={projectSelectOptions(
+            projects,
+            targetResourceId,
+            projectsLoading ? 'AWB 자체 코드베이스 (self) — 프로젝트 불러오는 중…' : 'AWB 자체 코드베이스 (self)',
+          )}
+          onChange={(e) => setTargetResourceId((e.target as HTMLSelectElement).value)}
         />
         <div style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}>
@@ -1343,56 +1340,29 @@ function ProfileEditor({ profile, workspaceId, agents, onClose, onSaved }: Profi
         {/* 실패 시 → 티켓 생성 (severity-gated on-failure auto-ticket) */}
         <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-            <input type="checkbox" checked={oftEnabled} onChange={(e) => setOftEnabled(e.target.checked)} />
+            <input type="checkbox" checked={oftForm.enabled} onChange={(e) => patchOft({ enabled: e.target.checked })} />
             실패 시 → 수정 티켓 자동 생성 (severity gate)
           </label>
           <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
             run 이 failed/error 로 끝나고 <b>min_severity 이상</b>의 finding 이 있으면 수정 티켓을 자동 생성합니다. 그 미만이면 run 요약만 남기고 티켓은 만들지 않습니다.
           </div>
-          {oftEnabled && (
+          {oftForm.enabled && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10, paddingLeft: 24 }}>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <div style={{ flex: 1 }}>
-                  <Select
-                    label="최소 severity (gate)"
-                    value={oftMinSeverity}
-                    options={SEVERITY_ORDER.map((s) => ({ value: s, label: s }))}
-                    onChange={(e) => setOftMinSeverity((e.target as HTMLSelectElement).value as SecuritySeverity)}
-                  />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <Select
-                    label="Priority"
-                    value={oftPriority}
-                    options={[
-                      { value: 'low', label: 'low' },
-                      { value: 'medium', label: 'medium' },
-                      { value: 'high', label: 'high' },
-                      { value: 'critical', label: 'critical' },
-                    ]}
-                    onChange={(e) => setOftPriority((e.target as HTMLSelectElement).value as SecurityOnFailureTicketConfig['priority'])}
-                  />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <Select
-                    label="중복 방지 (dedupe)"
-                    value={oftDedupe}
-                    options={[
-                      { value: 'per_run', label: 'per_run (run당 1개)' },
-                      { value: 'per_open_ticket', label: 'per_open_ticket (열린 티켓에 코멘트)' },
-                    ]}
-                    onChange={(e) => setOftDedupe((e.target as HTMLSelectElement).value as SecurityOnFailureTicketConfig['dedupe'])}
-                  />
-                </div>
-              </div>
-              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 현재 타깃 설정 사용)</div>
-              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftRuntime} onResolved={setOftRuntime} />
-              {oftRuntime && <div style={{ fontSize: 12 }}>{oftRuntime.label || oftRuntime.cli} <button type="button" onClick={() => setOftRuntime(null)}>초기화</button></div>}
-
-              <Input label="컬럼 ID (권장, 이름 변경에 안전)" value={oftColumnId} onChange={(e) => setOftColumnId((e.target as HTMLInputElement).value)} />
-              <Input label="컬럼 이름 (호환용, 비우면 첫 active 컬럼)" value={oftColumn} onChange={(e) => setOftColumn((e.target as HTMLInputElement).value)} />
-              <Input label="Board ID (비우면 run/프로파일 보드)" value={oftBoardId} onChange={(e) => setOftBoardId((e.target as HTMLInputElement).value)} />
-              <Input label="Labels (comma — 비우면 기본값)" value={oftLabels} onChange={(e) => setOftLabels((e.target as HTMLInputElement).value)} />
+              <Select
+                label="최소 severity (gate)"
+                value={oftMinSeverity}
+                options={SEVERITY_ORDER.map((s) => ({ value: s, label: s }))}
+                onChange={(e) => setOftMinSeverity((e.target as HTMLSelectElement).value as SecuritySeverity)}
+              />
+              <OnFailureTicketTargetFields
+                workspaceId={workspaceId}
+                form={oftForm}
+                onChange={patchOft}
+                defaultTagsHint="비우면 서버 기본 태그로 생성됩니다."
+              />
+              <div style={{ fontSize: 12 }}>수정 티켓 실행 설정 (비우면 타깃 설정 → 프로젝트 기본 담당자)</div>
+              <DeclareRuntimeSection workspaceId={workspaceId} initialValue={oftForm.assigneeRuntime} onResolved={(spec) => patchOft({ assigneeRuntime: spec })} />
+              {oftForm.assigneeRuntime && <div style={{ fontSize: 12 }}>{oftForm.assigneeRuntime.label || oftForm.assigneeRuntime.cli} <button type="button" onClick={() => patchOft({ assigneeRuntime: null })}>초기화</button></div>}
             </div>
           )}
         </div>

@@ -2,22 +2,25 @@
 //
 // 예전엔 Action/QA/Security 편집 폼에서 작업 저장소를 지정하려면 repo 리소스의
 // UUID 를 자유 텍스트로 직접 타이핑해야 했다. 이 파일은 그 자리를 대신한
-// 검색형 드롭다운이 실제로 사용자 동작으로 굴러가는지를 고정한다.
+// 검색형 드롭다운이 실제로 사용자 동작으로 굴러가는지를 고정한다. 저장소가
+// repository Resource 에서 Project 로 옮겨간 뒤(docs/tickets.md) 목록은 프로젝트이고
+// `repo_ref.project_id` 를 쓴다 — 저장된 레거시 `resource_id` 는 같은 id 라 선택값으로
+// 읽기만 하고 다시 쓰지 않는다.
 //
 // 소스 문자열/정규식 검사가 아니라 jsdom 으로 실제 컴포넌트를 렌더링해
 // 클릭·입력·선택을 태우고, 그 결과로 화면 상태와 create/update 페이로드를 단언한다
 // (보드 교훈: UI 동작 완료 기준은 렌더링 상호작용으로 검증).
 //
 // 고정하는 계약:
-//   1. UUID 타이핑 없이 드롭다운만으로 repo 를 지정해 저장할 수 있고, 재편집 시
+//   1. UUID 타이핑 없이 드롭다운만으로 프로젝트를 지정해 저장할 수 있고, 재편집 시
 //      그 선택이 그대로 복원된다 (Action / QA / Security 세 화면 모두).
-//   2. 목록에 없는 resource_id(삭제된 리소스, 직접 입력된 값)도 보존해 표시하고,
-//      편집·저장해도 유실되지 않는다.
-//   3. 리소스 목록을 못 받는 사용자(권한 없음 등)도 폼이 동작한다 — 조용한 빈 목록
+//   2. 목록에 없는 project_id(삭제된 프로젝트, 직접 입력된 값)도 보존해 표시하고,
+//      편집·저장해도 유실되지 않는다. 레거시 resource_id 는 project_id 로 나간다.
+//   3. 프로젝트 목록을 못 받는 사용자(권한 없음 등)도 폼이 동작한다 — 조용한 빈 목록
 //      폴백 + 수동 입력 유지.
-//   4. 브랜치는 리소스를 고르면 listRepoBranches 로 선택할 수 있고, 실패하면
+//   4. 브랜치는 프로젝트를 고르면 listProjectBranches 로 선택할 수 있고, 실패하면
 //      자유 입력으로 폴백한다.
-//   5. repo_ref 페이로드 규칙(resource_id 우선 → url+branch → null)이 유지된다.
+//   5. repo_ref 페이로드 규칙(project_id 우선 → url+branch → null)이 유지된다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,9 +32,15 @@ import SecurityManager from '../src/components/admin/SecurityManager.tsx';
 
 const WS = 'ws-1';
 
+const project = (id, name, repo_url, default_branch) => ({
+  id, workspace_id: WS, name, description: '', repo_url, default_branch, credential_id: null,
+  clone_policy: null, use_pr: false, instructions: '', default_assignee: null, host_folders: [],
+  created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(),
+});
+
 const REPOS = [
-  { id: 'repo-awb', workspace_id: WS, name: 'AWB', type: 'repository', url: 'https://github.com/parnmanas/ai-workflow-board.git', default_branch: 'main' },
-  { id: 'repo-game', workspace_id: WS, name: 'GameClient', type: 'repository', url: 'https://github.com/example/game-client.git', default_branch: 'develop' },
+  project('repo-awb', 'AWB', 'https://github.com/parnmanas/ai-workflow-board.git', 'main'),
+  project('repo-game', 'GameClient', 'https://github.com/example/game-client.git', 'develop'),
 ];
 
 const BRANCHES = { branches: [{ name: 'main', sha: 'a1' }, { name: 'release', sha: 'b2' }], default_branch: 'main' };
@@ -67,14 +76,14 @@ function fieldByLabel(container, labelText, tag = 'input') {
 }
 
 function repoSelect(container) {
-  const el = container.querySelector('select[aria-label="저장소 리소스 선택"]');
-  assert.ok(el, '저장소 리소스 드롭다운이 없습니다.');
+  const el = container.querySelector('select[aria-label="프로젝트 선택"]');
+  assert.ok(el, '프로젝트 드롭다운이 없습니다.');
   return el;
 }
 
 function repoSearch(container) {
-  const el = container.querySelector('input[aria-label="저장소 리소스 검색"]');
-  assert.ok(el, '저장소 리소스 검색 입력이 없습니다.');
+  const el = container.querySelector('input[aria-label="프로젝트 검색"]');
+  assert.ok(el, '프로젝트 검색 입력이 없습니다.');
   return el;
 }
 
@@ -115,8 +124,8 @@ function stubApi(t, stubs) {
 
 async function renderActions(t, {
   actions = [],
-  listResources = async () => REPOS,
-  listRepoBranches = async () => BRANCHES,
+  listProjects = async () => REPOS,
+  listProjectBranches = async () => BRANCHES,
 } = {}) {
   const dom = setupDom();
   const created = [];
@@ -124,8 +133,8 @@ async function renderActions(t, {
   stubApi(t, {
     listActions: async () => actions,
     getAgents: async () => AGENTS,
-    listResources,
-    listRepoBranches,
+    listProjects,
+    listProjectBranches,
     // P4c-4: 신규 Action 저장에는 실행 대상이 필수 — runtime 선언 스텁.
     listTemplateHosts: async () => [{ id: 'host-1', name: 'host-one' }],
     validateRuntimeSpec: async (_ws, spec) => ({
@@ -152,7 +161,7 @@ function makeAction(overrides = {}) {
   };
 }
 
-test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 repo 와 브랜치를 지정해 저장한다', async (t) => {
+test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 프로젝트와 브랜치를 지정해 저장한다', async (t) => {
   const { container, created } = await renderActions(t);
   click(button(container, '+ New Action'));
   await flush();
@@ -162,17 +171,17 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 repo 와 �
   // 검색으로 후보를 좁힌 뒤 드롭다운에서 고른다 — 어디에도 UUID 를 입력하지 않는다.
   typeInto(repoSearch(container), 'game');
   assert.deepEqual(optionLabels(repoSelect(container)), [
-    '— 지정 안 함 (board/workspace 환경설정 repo 재사용) —',
+    '— 지정 안 함 —',
     'GameClient · https://github.com/example/game-client.git',
-  ], '검색어가 리소스 목록을 좁혀야 합니다.');
+  ], '검색어가 프로젝트 목록을 좁혀야 합니다.');
 
   change(repoSelect(container), 'repo-game');
   await flush();
 
-  // 리소스를 고르면 브랜치도 목록에서 고를 수 있어야 한다.
+  // 프로젝트를 고르면 브랜치도 목록에서 고를 수 있어야 한다.
   const branch = container.querySelector('select[aria-label="브랜치 선택"]');
-  assert.ok(branch, '리소스를 고른 뒤에는 브랜치 드롭다운이 나와야 합니다.');
-  assert.deepEqual(optionLabels(branch), ['— 저장소 기본 브랜치 (main) —', 'main', 'release']);
+  assert.ok(branch, '프로젝트를 고른 뒤에는 브랜치 드롭다운이 나와야 합니다.');
+  assert.deepEqual(optionLabels(branch), ['— 프로젝트 기본 브랜치 (main) —', 'main', 'release']);
   change(branch, 'release');
 
   // P4c-4: 대상 없는 저장은 검증에 막힌다 — runtime 1개를 선언한다.
@@ -183,37 +192,51 @@ test('Actions: UUID 를 타이핑하지 않고 드롭다운만으로 repo 와 �
   await flush();
 
   assert.equal(created.length, 1);
-  assert.deepEqual(created[0].repo_ref, { resource_id: 'repo-game', branch: 'release' });
+  assert.deepEqual(created[0].repo_ref, { project_id: 'repo-game', branch: 'release' });
   assert.equal(created[0].target_runtimes.length, 1, '선언한 runtime 이 함께 저장돼야 한다');
-  // 사용자가 UUID 를 친 적이 없다 — 어떤 자유 텍스트 입력에도 resource id 가 남지 않는다.
+  // 사용자가 UUID 를 친 적이 없다 — 어떤 자유 텍스트 입력에도 project id 가 남지 않는다.
   assert.equal(
-    Boolean(container.querySelector('input[aria-label="resource_id 직접 입력"]')),
+    Boolean(container.querySelector('input[aria-label="project_id 직접 입력"]')),
     false,
-    '자유 텍스트 경로에도 resource_id 직접 입력 필드가 남으면 안 된다',
+    '자유 텍스트 경로에도 project_id 직접 입력 필드가 남으면 안 된다',
   );
 });
 
-test('Actions: 저장된 repo 선택이 재편집 시 이름·URL 라벨로 복원된다', async (t) => {
-  const action = makeAction({ repo_ref: { resource_id: 'repo-awb' } });
+test('Actions: 저장된 프로젝트 선택이 재편집 시 이름·URL 라벨로 복원된다', async (t) => {
+  const action = makeAction({ repo_ref: { project_id: 'repo-awb' } });
   const { container } = await renderActions(t, { actions: [action] });
 
   click(button(container, 'Edit'));
   await flush();
 
   const select = repoSelect(container);
-  assert.equal(select.value, 'repo-awb', '저장된 resource_id 가 선택 상태로 복원돼야 합니다.');
+  assert.equal(select.value, 'repo-awb', '저장된 project_id 가 선택 상태로 복원돼야 합니다.');
   assert.ok(
     optionLabels(select).includes('AWB · https://github.com/parnmanas/ai-workflow-board.git'),
-    '리소스는 이름 + URL 로 식별 가능하게 표시돼야 합니다.',
+    '프로젝트는 이름 + URL 로 식별 가능하게 표시돼야 합니다.',
   );
   assert.ok(
-    !optionLabels(select).some((l) => l.includes('알 수 없는 리소스')),
-    '목록에 있는 리소스를 "알 수 없는 리소스" 로 표시하면 안 됩니다.',
+    !optionLabels(select).some((l) => l.includes('알 수 없는 프로젝트')),
+    '목록에 있는 프로젝트를 "알 수 없는 프로젝트" 로 표시하면 안 됩니다.',
   );
 });
 
-test('Actions: 삭제된(목록에 없는) resource_id 도 보존해 표시하고 저장해도 유실되지 않는다', async (t) => {
-  const action = makeAction({ repo_ref: { resource_id: 'repo-deleted' } });
+test('Actions: 레거시 resource_id 는 같은 프로젝트로 읽히고, 저장하면 project_id 로 나간다', async (t) => {
+  const action = makeAction({ repo_ref: { resource_id: 'repo-awb', branch: 'main' } });
+  const { container, updated } = await renderActions(t, { actions: [action] });
+
+  click(button(container, 'Edit'));
+  await flush();
+
+  assert.equal(repoSelect(container).value, 'repo-awb', 'resource_id 가 프로젝트 선택으로 복원돼야 합니다.');
+  click(button(container, 'Save Changes'));
+  await flush();
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-awb', branch: 'main' },
+    '레거시 resource_id 를 다시 쓰면 안 됩니다 — 같은 id 가 project_id 로 나가야 합니다.');
+});
+
+test('Actions: 삭제된(목록에 없는) project_id 도 보존해 표시하고 저장해도 유실되지 않는다', async (t) => {
+  const action = makeAction({ repo_ref: { project_id: 'repo-deleted' } });
   const { container, updated } = await renderActions(t, { actions: [action] });
 
   click(button(container, 'Edit'));
@@ -222,7 +245,7 @@ test('Actions: 삭제된(목록에 없는) resource_id 도 보존해 표시하�
   const select = repoSelect(container);
   assert.equal(select.value, 'repo-deleted');
   assert.ok(
-    optionLabels(select).includes('알 수 없는 리소스 (repo-deleted)'),
+    optionLabels(select).includes('알 수 없는 프로젝트 (repo-deleted)'),
     `보존 문구가 없습니다: ${JSON.stringify(optionLabels(select))}`,
   );
 
@@ -233,15 +256,15 @@ test('Actions: 삭제된(목록에 없는) resource_id 도 보존해 표시하�
 
   assert.equal(updated.length, 1);
   assert.equal(updated[0].payload.name, '배포 v2');
-  assert.deepEqual(updated[0].payload.repo_ref, { resource_id: 'repo-deleted' },
-    '알 수 없는 resource_id 가 저장 시 유실되면 안 됩니다.');
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-deleted' },
+    '알 수 없는 project_id 가 저장 시 유실되면 안 됩니다.');
 });
 
-test('Actions: 리소스 목록 조회가 실패해도 폼이 동작하고 기존 값이 유실되지 않는다', async (t) => {
-  const action = makeAction({ repo_ref: { resource_id: 'repo-awb' } });
+test('Actions: 프로젝트 목록 조회가 실패해도 폼이 동작하고 기존 값이 유실되지 않는다', async (t) => {
+  const action = makeAction({ repo_ref: { project_id: 'repo-awb' } });
   const { container, updated } = await renderActions(t, {
     actions: [action],
-    listResources: async () => { throw new Error('Forbidden'); },
+    listProjects: async () => { throw new Error('Forbidden'); },
   });
 
   click(button(container, 'Edit'));
@@ -250,26 +273,26 @@ test('Actions: 리소스 목록 조회가 실패해도 폼이 동작하고 기�
   const select = repoSelect(container);
   assert.equal(select.value, 'repo-awb', '조회 실패해도 저장된 값은 선택 상태로 남아야 합니다.');
   assert.ok(
-    optionLabels(select).includes('repo-awb (리소스 목록을 불러오지 못했습니다)'),
-    '목록을 못 받은 것을 "알 수 없는 리소스" 로 단정하면 안 됩니다: '
+    optionLabels(select).includes('repo-awb (프로젝트 목록을 불러오지 못했습니다)'),
+    '목록을 못 받은 것을 "알 수 없는 프로젝트" 로 단정하면 안 됩니다: '
       + JSON.stringify(optionLabels(select)),
   );
 
   // 목록을 못 쓰는 사용자를 위한 수동 입력 경로가 남아 있어야 한다.
-  const manual = container.querySelector('input[aria-label="resource_id 직접 입력"]');
-  assert.ok(manual, '목록 조회 실패 시 resource_id 수동 입력이 제공돼야 합니다.');
+  const manual = container.querySelector('input[aria-label="project_id 직접 입력"]');
+  assert.ok(manual, '목록 조회 실패 시 project_id 수동 입력이 제공돼야 합니다.');
   assert.equal(manual.value, 'repo-awb');
 
   click(button(container, 'Save Changes'));
   await flush();
-  assert.deepEqual(updated[0].payload.repo_ref, { resource_id: 'repo-awb' });
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-awb' });
 });
 
 test('Actions: 브랜치 조회가 실패하면 자유 입력으로 폴백하고 그 값이 저장된다', async (t) => {
-  const action = makeAction({ repo_ref: { resource_id: 'repo-awb' } });
+  const action = makeAction({ repo_ref: { project_id: 'repo-awb' } });
   const { container, updated } = await renderActions(t, {
     actions: [action],
-    listRepoBranches: async () => { throw new Error('ls-remote timeout'); },
+    listProjectBranches: async () => { throw new Error('ls-remote timeout'); },
   });
 
   click(button(container, 'Edit'));
@@ -284,11 +307,11 @@ test('Actions: 브랜치 조회가 실패하면 자유 입력으로 폴백하고
   click(button(container, 'Save Changes'));
   await flush();
 
-  assert.deepEqual(updated[0].payload.repo_ref, { resource_id: 'repo-awb', branch: 'hotfix/urgent' });
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-awb', branch: 'hotfix/urgent' });
 });
 
 test('Actions: 원격에서 사라진 저장 브랜치도 선택 상태로 보존된다', async (t) => {
-  const action = makeAction({ repo_ref: { resource_id: 'repo-awb', branch: 'gone-upstream' } });
+  const action = makeAction({ repo_ref: { project_id: 'repo-awb', branch: 'gone-upstream' } });
   const { container } = await renderActions(t, { actions: [action] });
 
   click(button(container, 'Edit'));
@@ -301,7 +324,7 @@ test('Actions: 원격에서 사라진 저장 브랜치도 선택 상태로 보�
     `보존 문구가 없습니다: ${JSON.stringify(optionLabels(branch))}`);
 });
 
-test('Actions: repo_ref 우선순위 — resource_id 가 있으면 URL 은 무시된다', async (t) => {
+test('Actions: repo_ref 우선순위 — project_id 가 있으면 URL 은 무시된다', async (t) => {
   const action = makeAction({ repo_ref: { url: 'https://github.com/legacy/raw.git', branch: 'trunk' } });
   const { container, updated } = await renderActions(t, { actions: [action] });
 
@@ -316,18 +339,18 @@ test('Actions: repo_ref 우선순위 — resource_id 가 있으면 URL 은 무�
   click(button(container, 'Save Changes'));
   await flush();
 
-  assert.deepEqual(updated[0].payload.repo_ref, { resource_id: 'repo-awb' },
-    'resource_id 가 선택되면 url+branch 는 페이로드에서 빠져야 합니다.');
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-awb' },
+    'project_id 가 선택되면 url+branch 는 페이로드에서 빠져야 합니다.');
 });
 
-test('Actions: repo_ref 우선순위 — resource 없이 URL 만 있으면 url+branch, 둘 다 비면 null', async (t) => {
+test('Actions: repo_ref 우선순위 — 프로젝트 없이 URL 만 있으면 url+branch, 둘 다 비면 null', async (t) => {
   const action = makeAction({ repo_ref: null });
   const { container, updated } = await renderActions(t, { actions: [action] });
 
   click(button(container, 'Edit'));
   await flush();
 
-  // 아무것도 지정하지 않은 상태 → null (환경설정 repo 재사용).
+  // 아무것도 지정하지 않은 상태 → null (저장소 미지정).
   assert.equal(repoSelect(container).value, '');
   click(button(container, 'Save Changes'));
   await flush();
@@ -345,11 +368,11 @@ test('Actions: repo_ref 우선순위 — resource 없이 URL 만 있으면 url+b
 });
 
 test('Actions: URL 이 남아 있어도 "지정 안 함" 을 고르면 repo_ref 가 null 이 된다', async (t) => {
-  // 빈 옵션 라벨은 "환경설정 repo 재사용" 이라고 말한다. 저장소 선택을 비울 때 url 을
-  // 남겨두면 그 url 이 활성 repo 로 나가서 라벨과 정반대로 동작하고, `{resource_id +
-  // url}` 레코드에서는 resource 에 가려져 있던 url 이 오히려 되살아난다
-  // (리뷰 지적, 티켓 eb9cdd1c). 이 피커는 미션 모달과 공유하므로 여기서도 고정한다.
-  const action = makeAction({ repo_ref: { resource_id: 'repo-awb', url: 'https://github.com/example/raw.git' } });
+  // 빈 옵션은 "지정 안 함" 이다. 저장소 선택을 비울 때 url 을 남겨두면 그 url 이
+  // 활성 repo 로 나가서 라벨과 정반대로 동작하고, `{project_id + url}` 레코드에서는
+  // 프로젝트에 가려져 있던 url 이 오히려 되살아난다(리뷰 지적, 티켓 eb9cdd1c). 이
+  // 피커는 미션 모달과 공유하므로 여기서도 고정한다.
+  const action = makeAction({ repo_ref: { project_id: 'repo-awb', url: 'https://github.com/example/raw.git' } });
   const { container, updated } = await renderActions(t, { actions: [action] });
 
   click(button(container, 'Edit'));
@@ -368,14 +391,14 @@ test('Actions: URL 이 남아 있어도 "지정 안 함" 을 고르면 repo_ref 
 
 // ─── QA 시나리오 화면 ──────────────────────────────────────────────────────
 
-test('QA 시나리오 폼도 같은 드롭다운으로 repo 를 지정하고 알 수 없는 id 를 보존한다', async (t) => {
+test('QA 시나리오 폼도 같은 드롭다운으로 프로젝트를 지정하고 알 수 없는 id 를 보존한다', async (t) => {
   const dom = setupDom();
   const updated = [];
   const scenario = {
     id: 'qa-1', workspace_id: WS, name: '로그인 시나리오', description: '',
     target_agent_id: 'rt-0123456789abcdef', target_runtime: { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/repo', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, qa_driver: 'browser', qa_driver_config: {}, steps: [], tags: [],
     enabled: true, target_environment: '', on_failure_ticket: null, qa_phases: null,
-    workspace_folder: '', repo_ref: { resource_id: 'repo-deleted' },
+    workspace_folder: '', repo_ref: { project_id: 'repo-deleted' },
     checkout_mode: 'reuse', build_mode: 'cold_then_warm', last_built_commit: null,
     last_run_at: null, last_run_status: null, run_count: 0,
     created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(),
@@ -385,8 +408,8 @@ test('QA 시나리오 폼도 같은 드롭다운으로 repo 를 지정하고 알
     getAgents: async () => AGENTS,
     listQaSchedules: async () => [],
     listDeployments: async () => [],
-    listResources: async () => REPOS,
-    listRepoBranches: async () => BRANCHES,
+    listProjects: async () => REPOS,
+    listProjectBranches: async () => BRANCHES,
     updateQaScenario: async (id, payload) => { updated.push({ id, payload }); return { ...scenario, ...payload }; },
   });
   const view = mount(React.createElement(QaManager, { workspaceId: WS }));
@@ -399,21 +422,21 @@ test('QA 시나리오 폼도 같은 드롭다운으로 repo 를 지정하고 알
 
   // 목록에 없는 기존 값이 보존된 채로 열린다.
   assert.equal(repoSelect(container).value, 'repo-deleted');
-  assert.ok(optionLabels(repoSelect(container)).includes('알 수 없는 리소스 (repo-deleted)'));
+  assert.ok(optionLabels(repoSelect(container)).includes('알 수 없는 프로젝트 (repo-deleted)'));
 
-  // 드롭다운만으로 실제 리소스로 교체한다.
+  // 드롭다운만으로 실제 프로젝트로 교체한다.
   change(repoSelect(container), 'repo-awb');
   await flush();
   click(button(container, 'Save'));
   await flush();
 
   assert.equal(updated.length, 1);
-  assert.deepEqual(updated[0].payload.repo_ref, { resource_id: 'repo-awb' });
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-awb' });
 });
 
 // ─── Security 프로파일 화면 ────────────────────────────────────────────────
 
-test('Security 프로파일 폼도 같은 드롭다운으로 repo·브랜치를 지정한다', async (t) => {
+test('Security 프로파일 폼도 같은 드롭다운으로 프로젝트·브랜치를 지정한다', async (t) => {
   const dom = setupDom();
   const updated = [];
   const profile = {
@@ -431,8 +454,8 @@ test('Security 프로파일 폼도 같은 드롭다운으로 repo·브랜치를 
     getAgents: async () => AGENTS,
     listSecuritySchedules: async () => [],
     listSecurityRuns: async () => [],
-    listResources: async () => REPOS,
-    listRepoBranches: async () => BRANCHES,
+    listProjects: async () => REPOS,
+    listProjectBranches: async () => BRANCHES,
     updateSecurityProfile: async (id, payload) => { updated.push({ id, payload }); return { ...profile, ...payload }; },
   });
   const view = mount(React.createElement(SecurityManager, { workspaceId: WS }));
@@ -453,5 +476,5 @@ test('Security 프로파일 폼도 같은 드롭다운으로 repo·브랜치를 
   await flush();
 
   assert.equal(updated.length, 1);
-  assert.deepEqual(updated[0].payload.repo_ref, { resource_id: 'repo-game', branch: 'release' });
+  assert.deepEqual(updated[0].payload.repo_ref, { project_id: 'repo-game', branch: 'release' });
 });

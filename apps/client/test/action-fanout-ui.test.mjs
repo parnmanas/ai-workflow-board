@@ -98,7 +98,7 @@ test('목록이 target_agent_ids 를 JSON 문자열로 받아도 화면이 터�
   // 정규화를 빠뜨린 서버 경로(또는 캐시된 구 응답)를 재현한다 — 이 컬럼은 DB 에
   // JSON 문자열로 저장되므로 엔티티가 그대로 흘러나오면 이 형태가 된다.
   api.listActions = async () => [{
-    id: 'action-1', workspace_id: 'ws-1', board_id: null, name: 'CLI 최신화',
+    id: 'action-1', workspace_id: 'ws-1', name: 'CLI 최신화',
     description: '', prompt: '', target_agent_id: 'agent-a',
     target_agent_ids: '["agent-a","agent-b"]',
     schedule_cron: '', trigger: '', trigger_label: '', enabled: true, max_runs: 10,
@@ -134,7 +134,7 @@ test('디스패치 실패 run(room_id=null)은 빈 대화가 아니라 실패로
     getChatRoom: api.getChatRoom,
   };
   const action = {
-    id: 'action-1', workspace_id: 'ws-1', board_id: null, name: 'CLI 최신화',
+    id: 'action-1', workspace_id: 'ws-1', name: 'CLI 최신화',
     description: '', prompt: '', target_agent_id: 'agent-a', target_agent_ids: ['agent-a', 'agent-b'],
     schedule_cron: '', trigger: '', trigger_label: '', enabled: true, max_runs: 10,
     last_run_at: null, workspace_folder: '', repo_ref: null, checkout_mode: 'reuse',

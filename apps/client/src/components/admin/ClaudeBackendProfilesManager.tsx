@@ -10,13 +10,13 @@ const empty = (): ClaudeBackendProfile => ({
   base_url: '', model: '', omit_effort: false, credential_required: false, auth_env: 'ANTHROPIC_AUTH_TOKEN',
 });
 
-/** 삭제 확인 다이얼로그에 넣을 참조 요약. 서버 impact 응답을 사람이 읽는 문장으로. */
+/** 삭제 확인 다이얼로그에 넣을 참조 요약. 서버 impact 응답을 사람이 읽는 문장으로.
+ *  보드가 없어졌으므로 보드 참조 수는 세지 않는다(서버가 아직 보내더라도 무시). */
 function impactSummary(impact: {
-  workspaces?: unknown[]; boards?: unknown[]; agents?: unknown[]; runs?: unknown[]; global_default?: boolean;
+  workspaces?: unknown[]; agents?: unknown[]; runs?: unknown[]; global_default?: boolean;
 }): string {
   const parts = [
     `워크스페이스 ${impact.workspaces?.length ?? 0}개`,
-    `보드 ${impact.boards?.length ?? 0}개`,
     `에이전트 ${impact.agents?.length ?? 0}개`,
     `티켓 재정의 ${impact.runs?.length ?? 0}건`,
   ];
@@ -240,7 +240,7 @@ export default function ClaudeBackendProfilesManager({ workspaceId }: { workspac
           <>
             <strong>{deleteTarget?.name}</strong> 프로필을 삭제합니다. 현재 참조: {deleteSummary}.
             {'\n\n'}
-            참조하던 보드·에이전트·티켓은 핀이 해제되어 전역 기본값을 상속합니다.
+            참조하던 워크스페이스·에이전트·티켓은 핀이 해제되어 전역 기본값을 상속합니다.
           </>
         }
         onConfirm={confirmRemove}

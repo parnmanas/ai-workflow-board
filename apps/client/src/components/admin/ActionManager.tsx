@@ -545,7 +545,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               value={formPrompt}
               onChange={(e) => setFormPrompt(e.target.value)}
               rows={6}
-              placeholder="git commit & push the current changes on branch {{board.name}}"
+              placeholder="git commit & push the current changes in {{workspace.name}}"
               style={{
                 width: '100%',
                 resize: 'vertical',
@@ -560,7 +560,7 @@ export default function ActionManager({ workspaceId }: ActionManagerProps) {
               }}
             />
             <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 4 }}>
-              Variables: <code>{`{{action.name}}`}</code> <code>{`{{run.id}}`}</code> <code>{`{{workspace.name}}`}</code> <code>{`{{board.name}}`}</code> <code>{`{{user.name}}`}</code> <code>{`{{agent.name}}`}</code> <code>{`{{date}}`}</code> <code>{`{{time}}`}</code> <code>{`{{datetime}}`}</code>
+              Variables: <code>{`{{action.name}}`}</code> <code>{`{{run.id}}`}</code> <code>{`{{workspace.name}}`}</code> <code>{`{{user.name}}`}</code> <code>{`{{agent.name}}`}</code> <code>{`{{date}}`}</code> <code>{`{{time}}`}</code> <code>{`{{datetime}}`}</code>
             </div>
           </div>
           <WorkspaceFolderOptions

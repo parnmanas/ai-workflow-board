@@ -1,4 +1,4 @@
-// 사이드바 WORK 계층 실렌더 회귀 테스트 (티켓 03ca8b5b).
+// 사이드바 WORK 계층 실렌더 회귀 테스트 (티켓 03ca8b5b → board-less, docs/tickets.md).
 //
 // 소스 정규식이나 모델 단위 테스트(work-navigation.test.mjs)만으로는 "실제로 그려지고
 // 클릭하면 이동하는가"를 고정하지 못한다 — 목록은 훅이 fetch 로 가져오고, 접기/펼치기와
@@ -6,10 +6,11 @@
 // provider 스택(Router > Toast > Auth > BoardStream > Notification) 위에 마운트한다.
 //
 // 여기서 고정하는 계약:
-//   1. WORK 에 Teams / Orchestrations / Boards 가 그 순서로, 단수 'Orchestration' 없이 보인다
-//   2. 각 메뉴 아래 실제 팀/미션/보드가 서브메뉴로 뜨고, 클릭하면 기존 상세 경로로 이동한다
+//   1. WORK 에 Tickets(평평한 한 줄) / Teams / Orchestrations 가 그 순서로, 단수
+//      'Orchestration' 도 Boards 도 없이 보인다
+//   2. Teams / Orchestrations 아래 실제 팀/미션이 서브메뉴로 뜨고, 클릭하면 기존 상세 경로로 이동한다
 //   3. Teams 화면에서 Orchestrations 가 같이 active 로 보이지 않는다
-//   4. 접기/펼치기가 세 메뉴 모두에서 같게 동작한다
+//   4. 접기/펼치기가 두 계층 메뉴 모두에서 같게 동작한다
 //   5. 목록이 비면 메뉴별 empty state 가 뜬다
 //   6. 이름이 길면 잘려도 title 툴팁으로 전체 이름을 볼 수 있다
 //   7. 축소(드로어/overlay) 사이드바에서도 같은 탐색이 가능하고 이동 후 드로어가 닫힌다
@@ -45,10 +46,6 @@ const DEFAULT_TEAMS = [
 const DEFAULT_MISSIONS = [
   { id: 'm1', title: 'Ship the nav' },
   { id: 'm2', title: 'Backfill telemetry' },
-];
-const DEFAULT_BOARDS = [
-  { id: 'b1', name: 'AWB' },
-  { id: 'b2', name: 'Dashboard' },
 ];
 
 function team(overrides) {
@@ -111,7 +108,7 @@ function installFetchStub(state) {
       });
     }
     if (path.includes('/tickets/unread-counts')) {
-      return json({ total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} });
+      return json({ total: state.ticketUnread || 0, perTicket: state.ticketUnread ? { tx: state.ticketUnread } : {} });
     }
     if (path.includes('/chat/unread-counts')) return json({ total: 0, perRoom: {} });
     if (path.includes('/mentions/unread')) return json({ count: 0, items: [] });
@@ -141,10 +138,10 @@ async function flush(times = 8) {
 
 async function mountSidebar(t, options = {}) {
   const {
-    entry = `${BASE}/boards`,
+    entry = `${BASE}/tickets`,
     teams = DEFAULT_TEAMS,
     missions = DEFAULT_MISSIONS,
-    boards = DEFAULT_BOARDS,
+    ticketUnread = 0,
     overlay = false,
   } = options;
 
@@ -165,7 +162,7 @@ async function mountSidebar(t, options = {}) {
   const { FakeEventSource, uninstall } = installFakeEventSource();
   globalThis.localStorage = dom.window.localStorage;
   localStorage.setItem('auth_token', 'test-token');
-  const state = { teams, missions };
+  const state = { teams, missions, ticketUnread };
   const restoreFetch = installFetchStub(state);
   const closed = { count: 0 };
   probe.pathname = null;
@@ -195,7 +192,6 @@ async function mountSidebar(t, options = {}) {
                   closed.count += 1;
                 },
                 wsId: WS_ID,
-                boards,
                 rooms: [],
                 roomsLoading: false,
               }),
@@ -287,24 +283,31 @@ function subItemLabels(view, label) {
     .filter((text) => !text.startsWith('더보기') && text !== '접기');
 }
 
-test('① WORK 에 Teams / Orchestrations / Boards 가 그 순서로 보이고 단수 표기가 없다', async (t) => {
+test('① WORK 에 Tickets / Teams / Orchestrations 가 그 순서로 보이고 단수 표기도 Boards 도 없다', async (t) => {
   const { view } = await mountSidebar(t);
   const section = workSection(view);
   const labels = buttonsIn(section)
     .map(labelOf)
-    .filter((text) => ['Teams', 'Orchestrations', 'Boards', 'Orchestration'].includes(text));
+    .filter((text) => ['Tickets', 'Teams', 'Orchestrations', 'Boards', 'Orchestration'].includes(text));
 
-  assert.deepEqual(labels, ['Teams', 'Orchestrations', 'Boards']);
+  assert.deepEqual(labels, ['Tickets', 'Teams', 'Orchestrations']);
+  assert.equal(Boolean(subList(view, 'Boards')), false, 'Boards 서브메뉴는 없어졌다');
   assert.ok(!section.textContent.includes('Orchestration '), '단수 Orchestration 표기가 남아 있다');
   assert.doesNotMatch(section.textContent, /Orchestration(?!s)/);
 });
 
-test('② 각 메뉴 아래 실제 팀/미션/보드가 서브메뉴로 뜬다', async (t) => {
+test('② 계층 메뉴 아래 실제 팀/미션이 서브메뉴로 뜬다', async (t) => {
   const { view } = await mountSidebar(t);
 
   assert.deepEqual(subItemLabels(view, 'Teams'), ['Platform squad', 'Ops squad']);
   assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
-  assert.deepEqual(subItemLabels(view, 'Boards'), ['AWB', 'Dashboard']);
+});
+
+test('②-b Tickets 줄은 워크스페이스 전체 읽지 않은 티켓 코멘트 수를 배지로 보인다', async (t) => {
+  const { view } = await mountSidebar(t, { ticketUnread: 4 });
+  const row = groupRow(view, 'Tickets');
+  assert.match(row.textContent, /4/);
+  assert.ok(row.querySelector('[aria-label*="4건"], [title*="4건"]') || /4건/.test(row.innerHTML), '배지 라벨에 건수가 실린다');
 });
 
 test('③ 서브 항목을 누르면 기존 상세 화면 경로로 이동한다', async (t) => {
@@ -312,9 +315,6 @@ test('③ 서브 항목을 누르면 기존 상세 화면 경로로 이동한다
 
   click(findByText(subList(view, 'Orchestrations'), 'Ship the nav'));
   assert.equal(probe.pathname, `${BASE}/orchestration/missions/m1`);
-
-  click(findByText(subList(view, 'Boards'), 'Dashboard'));
-  assert.equal(probe.pathname, `${BASE}/boards/b2`);
 
   click(findByText(subList(view, 'Teams'), 'Ops squad'));
   assert.equal(probe.pathname, `${BASE}/teams`);
@@ -330,8 +330,8 @@ test('④ 최상위 메뉴를 누르면 각자의 목록 화면으로 이동한�
   click(groupRow(view, 'Orchestrations'));
   assert.equal(probe.pathname, `${BASE}/orchestration`);
 
-  click(groupRow(view, 'Boards'));
-  assert.equal(probe.pathname, `${BASE}/boards`);
+  click(groupRow(view, 'Tickets'));
+  assert.equal(probe.pathname, `${BASE}/tickets`);
 });
 
 test('⑤ Teams 화면에서 Orchestrations 가 같이 active 로 보이지 않는다', async (t) => {
@@ -339,7 +339,7 @@ test('⑤ Teams 화면에서 Orchestrations 가 같이 active 로 보이지 않�
 
   assert.equal(groupRow(view, 'Teams').getAttribute('aria-current'), 'page');
   assert.equal(groupRow(view, 'Orchestrations').getAttribute('aria-current'), null);
-  assert.equal(groupRow(view, 'Boards').getAttribute('aria-current'), null);
+  assert.equal(groupRow(view, 'Tickets').getAttribute('aria-current'), null);
 
   // 선택된 팀 서브 항목만 active.
   const teamButtons = buttonsIn(subList(view, 'Teams'));
@@ -363,10 +363,10 @@ test('⑥ 미션 상세 딥링크에서 Orchestrations 와 해당 미션만 acti
   );
 });
 
-test('⑦ 접기/펼치기가 세 메뉴 모두에서 같게 동작한다', async (t) => {
+test('⑦ 접기/펼치기가 두 계층 메뉴 모두에서 같게 동작한다', async (t) => {
   const { view } = await mountSidebar(t);
 
-  for (const label of ['Teams', 'Orchestrations', 'Boards']) {
+  for (const label of ['Teams', 'Orchestrations']) {
     const toggle = workSection(view).querySelector(`button[aria-label="Collapse ${label} list"]`);
     assert.ok(toggle, `${label} 에 접기 토글이 없다`);
     assert.equal(toggle.getAttribute('aria-expanded'), 'true');
@@ -385,11 +385,10 @@ test('⑦ 접기/펼치기가 세 메뉴 모두에서 같게 동작한다', asyn
 });
 
 test('⑧ 목록이 비면 메뉴별 empty state 가 뜬다', async (t) => {
-  const { view } = await mountSidebar(t, { teams: [], missions: [], boards: [] });
+  const { view } = await mountSidebar(t, { teams: [], missions: [] });
 
   assert.match(subList(view, 'Teams').textContent, /No teams yet/);
   assert.match(subList(view, 'Orchestrations').textContent, /No missions yet/);
-  assert.match(subList(view, 'Boards').textContent, /No boards yet/);
 });
 
 test('⑨ 이름이 길어도 전체 이름을 title 툴팁으로 볼 수 있다', async (t) => {
@@ -462,9 +461,9 @@ test('⑬ 접어둔 그룹이라도 그 영역으로 이동하면 다시 펴져 
   click(workSection(view).querySelector('button[aria-label="Collapse Orchestrations list"]'));
   assert.equal(Boolean(subList(view, 'Orchestrations')), false, 'Orchestrations 를 접었는데 서브메뉴가 남아 있다');
 
-  // 그 상태에서 미션 상세로 이동하면 접힘이 풀려 활성 항목이 드러나야 한다.
-  click(findByText(subList(view, 'Boards'), 'AWB'));
-  assert.equal(probe.pathname, `${BASE}/boards/b1`);
+  // 그 상태에서 미션 목록으로 이동하면 접힘이 풀려 활성 항목이 드러나야 한다.
+  click(groupRow(view, 'Tickets'));
+  assert.equal(probe.pathname, `${BASE}/tickets`);
   click(groupRow(view, 'Orchestrations'));
   assert.equal(probe.pathname, `${BASE}/orchestration`);
 
@@ -475,7 +474,7 @@ test('⑬ 접어둔 그룹이라도 그 영역으로 이동하면 다시 펴져 
   // 다른 그룹의 사용자 접힘은 그대로 유지된다.
   click(workSection(view).querySelector('button[aria-label="Collapse Teams list"]'));
   assert.equal(Boolean(subList(view, 'Teams')), false, 'Teams 를 접었는데 서브메뉴가 남아 있다');
-  click(groupRow(view, 'Boards'));
+  click(groupRow(view, 'Tickets'));
   assert.equal(Boolean(subList(view, 'Teams')), false, 'Teams 접힘이 임의로 풀렸다');
 });
 

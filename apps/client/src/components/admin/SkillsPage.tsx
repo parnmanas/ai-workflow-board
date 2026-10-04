@@ -35,8 +35,6 @@ export default function SkillsPage() {
   const [newVersionBody, setNewVersionBody] = useState('');
   const [assignmentRuntime, setAssignmentRuntime] = useState<Record<string, any> | null>(null);
   const [assignmentVersion, setAssignmentVersion] = useState('');
-  const [assignmentBoard, setAssignmentBoard] = useState('');
-  const [assignmentRole, setAssignmentRole] = useState('');
   const [saving, setSaving] = useState(false);
   const [forking, setForking] = useState(false);
 
@@ -133,8 +131,6 @@ export default function SkillsPage() {
       await api.assignSkill(currentWorkspaceId, selected.id, {
         skill_version_id: assignmentVersion,
         runtime: assignmentRuntime,
-        board_id: assignmentBoard,
-        role_slug: assignmentRole,
       });
       showToast('Exact skill version assigned', 'success');
     } catch (error: any) {
@@ -308,8 +304,6 @@ export default function SkillsPage() {
                     <option key={version.id} value={version.id}>v{version.version} · {version.digest.slice(0, 12)}</option>
                   ))}
                 </select>
-                <Input label="Board id (optional)" value={assignmentBoard} onChange={(event) => setAssignmentBoard(event.target.value)} />
-                <Input label="Role slug (optional)" value={assignmentRole} onChange={(event) => setAssignmentRole(event.target.value)} />
                 <Button onClick={assign} loading={saving}>Assign exact version</Button>
               </Card>
             </div>

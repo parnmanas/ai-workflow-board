@@ -15,8 +15,9 @@
 // 라운드트립을 검증한다.
 //
 // repo_ref 입력은 티켓 eb9cdd1c 에서 원시 텍스트 3개 → 공용 RepoRefPicker(검색형
-// 드롭다운)로 바뀌었다. 여기서는 목록을 빈 배열로 스텁해 폴백 경로를 결정적으로
-// 고정하고, 드롭다운 자체의 계약은 mission-form-repo-picker.test.mjs 가 다룬다.
+// 프로젝트 드롭다운)로 바뀌었다. 여기서는 프로젝트 목록을 빈 배열로 스텁해 폴백
+// 경로를 결정적으로 고정하고, 드롭다운 자체의 계약은 mission-form-repo-picker.test.mjs
+// 가 다룬다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -93,15 +94,15 @@ const TEAMS = [
   },
 ];
 
-async function mountModal(t, { mission = null, listResources = async () => [], listRepoBranches = async () => ({ branches: [], default_branch: '' }) } = {}) {
+async function mountModal(t, { mission = null, listProjects = async () => [], listProjectBranches = async () => ({ branches: [], default_branch: '' }) } = {}) {
   const dom = setupDom();
-  const originalListResources = api.listResources;
-  const originalListRepoBranches = api.listRepoBranches;
-  api.listResources = listResources;
-  api.listRepoBranches = listRepoBranches;
+  const originalListProjects = api.listProjects;
+  const originalListProjectBranches = api.listProjectBranches;
+  api.listProjects = listProjects;
+  api.listProjectBranches = listProjectBranches;
   t.after(() => {
-    api.listResources = originalListResources;
-    api.listRepoBranches = originalListRepoBranches;
+    api.listProjects = originalListProjects;
+    api.listProjectBranches = originalListProjectBranches;
   });
   const view = mount(
     React.createElement(MissionFormModal, {
@@ -128,7 +129,7 @@ test('기존 미션 편집 — post_actions/repo_ref가 채워진 미션은 Adva
     post_actions: [
       { action_id: 'action-1', order: 1, condition: 'on_success', status: 'pending', run_id: null, room_id: null, error: '', dispatched_at: null },
     ],
-    repo_ref: { resource_id: 'res-42', branch: 'main' },
+    repo_ref: { project_id: 'res-42', branch: 'main' },
   });
   const { container } = await mountModal(t, { mission });
 
@@ -141,11 +142,11 @@ test('기존 미션 편집 — post_actions/repo_ref가 채워진 미션은 Adva
   assert.ok(conditionSelect, 'condition select가 렌더링된다');
   assert.equal(conditionSelect.value, 'on_success', '기존 post_action의 condition이 그대로 반영된다');
 
-  // 목록이 비어 있으면(권한 없음/등록된 repo 리소스 없음) 예전처럼 id 를 직접 넣을 수
-  // 있어야 하고, 저장된 값이 거기에 그대로 실려 있어야 한다.
-  const resourceInput = container.querySelector('input[aria-label="resource_id 직접 입력"]');
-  assert.ok(resourceInput, '리소스 목록이 비면 resource_id 수동 입력이 제공된다');
-  assert.equal(resourceInput.value, 'res-42', 'repo_ref.resource_id가 폼에 반영된다');
+  // 목록이 비어 있으면(권한 없음/등록된 프로젝트 없음) id 를 직접 넣을 수 있어야
+  // 하고, 저장된 값이 거기에 그대로 실려 있어야 한다.
+  const projectInput = container.querySelector('input[aria-label="project_id 직접 입력"]');
+  assert.ok(projectInput, '프로젝트 목록이 비면 project_id 수동 입력이 제공된다');
+  assert.equal(projectInput.value, 'res-42', 'repo_ref.project_id가 폼에 반영된다');
   const branchSelect = container.querySelector('select[aria-label="브랜치 선택"]');
   assert.ok(branchSelect, 'repo_ref.branch는 브랜치 드롭다운으로 편집한다');
   assert.equal(branchSelect.value, 'main', 'repo_ref.branch가 폼에 반영된다');

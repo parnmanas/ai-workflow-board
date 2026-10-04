@@ -1,13 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { api, getActiveWorkspaceId } from '../../api';
-import type { CatalogScope, ClonePolicy, Resource, Credential, RepoBranch } from '../../types';
-import {
-  ClonePolicyFields,
-  EMPTY_CLONE_POLICY_FORM,
-  clonePolicyToForm,
-  formToClonePolicy,
-  type ClonePolicyFormState,
-} from '../ClonePolicyEditor';
+import type { CatalogScope, Resource, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal, ConfirmDialog } from '../common';
@@ -19,8 +13,9 @@ import ResourceDetailPanel from './ResourceDetailPanel';
 // detail(우)이 둘 다 쓸만하게 보이는 최소 폭.
 const NARROW_BREAKPOINT = 720;
 
+// Git 저장소는 더 이상 Resource 가 아니다 — Projects 화면(docs/tickets.md → Project)
+// 이 같은 id 로 이어받았다. 여기서는 문서/이미지/링크만 다룬다.
 const RESOURCE_TYPES = [
-  { value: 'repository', label: 'Repository', icon: 'R' },
   { value: 'document', label: 'Document', icon: 'D' },
   { value: 'image', label: 'Image', icon: 'I' },
   { value: 'link', label: 'Link', icon: 'L' },
@@ -78,12 +73,7 @@ export default function ResourceManager({
   const [formFileName, setFormFileName] = useState('');
   const [formFileMimetype, setFormFileMimetype] = useState('');
   const [formCredentialId, setFormCredentialId] = useState<string>('');
-  const [formDefaultBranch, setFormDefaultBranch] = useState('');
-  // clone 정책(ticket bddb63ee). 필드 구성·검증은 Workspace Settings 와 공유하는
-  // ClonePolicyEditor 모듈이 소유한다 — 두 표면이 같은 형태를 편집하므로 검증이
-  // 갈라지지 않게 한 곳에 뒀다.
-  const [formClonePolicy, setFormClonePolicy] = useState<ClonePolicyFormState>(EMPTY_CLONE_POLICY_FORM);
-  const [formErrors, setFormErrors] = useState<{ name?: string; clonePolicy?: string }>({});
+  const [formErrors, setFormErrors] = useState<{ name?: string }>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string; kind: 'image' | 'video' } | null>(null);
 
@@ -101,20 +91,6 @@ export default function ResourceManager({
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
-
-  // Branch-test state for the repository form. Lives at the modal level so the
-  // success result can drive the Default Branch picker (dropdown of real refs
-  // when we have them, free-text input otherwise — a not-yet-pushed branch
-  // should still be pinnable).
-  const [branchTestLoading, setBranchTestLoading] = useState(false);
-  const [branchTestError, setBranchTestError] = useState<string | null>(null);
-  const [branchTestResult, setBranchTestResult] = useState<RepoBranch[] | null>(null);
-
-  const resetBranchTest = useCallback(() => {
-    setBranchTestLoading(false);
-    setBranchTestError(null);
-    setBranchTestResult(null);
   }, []);
 
   const effectiveWorkspaceId = workspaceId || (getActiveWorkspaceId() || '');
@@ -223,10 +199,7 @@ export default function ResourceManager({
     setFormFileName('');
     setFormFileMimetype('');
     setFormCredentialId('');
-    setFormDefaultBranch('');
-    setFormClonePolicy(EMPTY_CLONE_POLICY_FORM);
     setFormErrors({});
-    resetBranchTest();
     setEditResource(null);
     setShowForm(true);
   };
@@ -242,10 +215,7 @@ export default function ResourceManager({
     setFormFileName(resource.file_name || '');
     setFormFileMimetype(resource.file_mimetype || '');
     setFormCredentialId(resource.credential_id || '');
-    setFormDefaultBranch(resource.default_branch || '');
-    setFormClonePolicy(clonePolicyToForm(resource.clone_policy));
     setFormErrors({});
-    resetBranchTest();
     setEditResource(resource);
     setShowForm(true);
   };
@@ -254,48 +224,6 @@ export default function ResourceManager({
     setShowForm(false);
     setEditResource(null);
     setFormErrors({});
-    resetBranchTest();
-  };
-
-  // Stale branch-list once the URL or credential changes — the previously
-  // fetched refs no longer describe the new target. Default Branch keeps its
-  // value: the user may have typed it themselves, and we shouldn't clobber.
-  useEffect(() => {
-    resetBranchTest();
-  }, [formUrl, formCredentialId, formType, resetBranchTest]);
-
-  const handleTestBranches = async () => {
-    if (!effectiveWorkspaceId) {
-      setBranchTestError('Select a workspace first.');
-      return;
-    }
-    if (!formUrl.trim()) {
-      setBranchTestError('Enter a repository URL first.');
-      return;
-    }
-    setBranchTestLoading(true);
-    setBranchTestError(null);
-    setBranchTestResult(null);
-    try {
-      const result = await api.testRepoBranches({
-        workspace_id: effectiveWorkspaceId,
-        scope: editResource?.scope || createScope,
-        url: formUrl.trim(),
-        credential_id: formCredentialId || null,
-        default_branch: formDefaultBranch.trim(),
-      });
-      setBranchTestResult(result.branches);
-      // Pre-fill with the remote's first branch when the user hasn't typed
-      // anything — saves a click in the common case where the repo's main
-      // branch is exactly what they want pinned.
-      if (!formDefaultBranch.trim() && result.branches.length > 0) {
-        setFormDefaultBranch(result.branches[0].name);
-      }
-    } catch (err: any) {
-      setBranchTestError(err?.message || 'Failed to list branches');
-    } finally {
-      setBranchTestLoading(false);
-    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -313,16 +241,8 @@ export default function ResourceManager({
   };
 
   const handleSave = async () => {
-    const errors: { name?: string; clonePolicy?: string } = {};
+    const errors: { name?: string } = {};
     if (!formName.trim()) errors.name = 'Name is required.';
-    // clone 정책은 repository 타입에서만 의미가 있다 — 다른 타입에서는 폼에
-    // 노출되지 않으므로 검증도 건너뛰고 저장 시 null 로 지운다.
-    let clonePolicy: ClonePolicy | null = null;
-    if (formType === 'repository') {
-      const built = formToClonePolicy(formClonePolicy);
-      if (!built.ok) errors.clonePolicy = built.error;
-      else clonePolicy = built.value;
-    }
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
       return;
@@ -353,8 +273,6 @@ export default function ResourceManager({
           file_mimetype: formFileMimetype,
           tags: parsedTags,
           credential_id: formCredentialId || null,
-          default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
-          clone_policy: formType === 'repository' ? clonePolicy : null,
         });
         showToast('Resource updated.', 'success');
       } else {
@@ -371,8 +289,6 @@ export default function ResourceManager({
           file_name: formFileName,
           file_mimetype: formFileMimetype,
           tags: parsedTags,
-          default_branch: formType === 'repository' ? formDefaultBranch.trim() : '',
-          clone_policy: formType === 'repository' ? clonePolicy : null,
         });
         showToast('Resource created.', 'success');
       }
@@ -419,7 +335,6 @@ export default function ResourceManager({
 
   const iconBadgeStyle = (type: string): React.CSSProperties => {
     const colorMap: Record<string, string> = {
-      repository: tokens.colors.accent,
       document: tokens.colors.warning || '#e6a817',
       image: '#8b5cf6',
       link: tokens.colors.textSecondary,
@@ -532,13 +447,11 @@ export default function ResourceManager({
 
   const detailPanel = selectedResource ? (
     <ResourceDetailPanel
-      // key=리소스 id: 선택이 바뀌면 패널을 remount 시켜 이전 리소스의 in-flight
-      // 브랜치 조회(git ls-remote 1~3s)가 늦게 resolve 되며 새 리소스 위에 stale
-      // 브랜치를 덮어쓰는 경쟁을 구조적으로 제거한다(unmount 후 setState 는 no-op).
+      // key=리소스 id: 선택이 바뀌면 패널을 remount 시켜 이전 리소스의 상태가 새
+      // 리소스 위로 새지 않게 한다.
       key={selectedResource.id}
       resource={selectedResource}
       credentials={credentials}
-      workspaceId={effectiveWorkspaceId}
       onEdit={startEdit}
       onDelete={setDeleteTarget}
       onPreview={openResourceFile}
@@ -556,9 +469,9 @@ export default function ResourceManager({
     || (
       resourceFormScope !== 'global'
       && credential.workspace_id === effectiveWorkspaceId
-      && credential.board_id === null
     )
   );
+  const projectsHref = effectiveWorkspaceId ? `/ws/${encodeURIComponent(effectiveWorkspaceId)}/projects` : '';
 
   return (
     <div ref={containerRef}>
@@ -600,13 +513,20 @@ export default function ResourceManager({
         <Button variant="primary" size="md" onClick={startCreate}>+ New Resource</Button>
       </div>
 
+      {projectsHref && (
+        <div data-testid="resource-projects-hint" style={{ fontSize: 12, color: tokens.colors.textMuted, marginBottom: 12 }}>
+          Git 저장소는 Resource 가 아니라 <Link to={projectsHref} style={{ color: tokens.colors.accent }}>Projects</Link> 에서
+          관리합니다 (브랜치·히스토리·파일, Host 별 클론 폴더 포함).
+        </div>
+      )}
+
       {loading ? (
         <div style={{ fontSize: '13px', color: tokens.colors.textSecondary, padding: 24 }}>Loading…</div>
       ) : resources.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 24px' }}>
           <div style={{ fontSize: 18, fontWeight: 700, color: tokens.colors.textPrimary, marginBottom: 8 }}>No resources yet</div>
           <div style={{ fontSize: 13, color: tokens.colors.textSecondary }}>
-            Add references like repositories, documents, images, or links.
+            Add references like documents, images, or links.
           </div>
         </div>
       ) : (
@@ -683,7 +603,7 @@ export default function ResourceManager({
               label="Name"
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
-              placeholder="e.g. Main Repository"
+              placeholder="e.g. Design spec"
               error={formErrors.name}
             />
             <div>
@@ -731,245 +651,6 @@ export default function ResourceManager({
               onChange={(e) => setFormUrl(e.target.value)}
               placeholder="https://..."
             />
-          )}
-
-          {formType === 'repository' && (
-            <div>
-              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <Input
-                    label="URL"
-                    value={formUrl}
-                    onChange={(e) => setFormUrl(e.target.value)}
-                    placeholder="https://github.com/owner/repo.git"
-                  />
-                </div>
-                <Button
-                  variant="secondary"
-                  size="md"
-                  onClick={handleTestBranches}
-                  disabled={branchTestLoading || !formUrl.trim()}
-                  loading={branchTestLoading}
-                  type="button"
-                >
-                  Test connection
-                </Button>
-              </div>
-              {branchTestError && (
-                <div
-                  data-testid="resource-branch-test-error"
-                  style={{
-                    fontSize: '12px',
-                    color: tokens.colors.danger,
-                    marginTop: 6,
-                    lineHeight: 1.4,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {branchTestError}
-                </div>
-              )}
-              {!branchTestError && branchTestResult && (
-                <div
-                  data-testid="resource-branch-test-success"
-                  style={{ fontSize: '12px', color: tokens.colors.success, marginTop: 6 }}
-                >
-                  {branchTestResult.length === 0
-                    ? 'Connected — but the remote has no branches.'
-                    : `Connected — ${branchTestResult.length} branch${branchTestResult.length === 1 ? '' : 'es'} found.`}
-                </div>
-              )}
-            </div>
-          )}
-
-          {formType === 'repository' && (
-            <div>
-              <label
-                style={{
-                  fontSize: tokens.typography.fontSizeXs,
-                  fontWeight: tokens.typography.fontWeightSemibold,
-                  color: tokens.colors.textMuted,
-                  textTransform: 'uppercase',
-                  display: 'block',
-                  marginBottom: tokens.spacing.xs,
-                }}
-              >
-                Default Branch
-              </label>
-
-              {/* When Test connection found refs, the listbox is the primary
-                  picker — moved ABOVE the freetext input. Two earlier fixes
-                  (8cc8df2, f3692ea) put a list under a single-line input that
-                  was already auto-filled with the first branch name; the
-                  reporter kept reading "1 row only" because the input is what
-                  the eye lands on after the success banner. Now the count
-                  header + N rows are the primary affordance, and the input
-                  drops below as a secondary "or type a custom name" field.
-
-                  Per-row React key is `b.name` (refs/heads/* names are unique
-                  by git invariant). `b.sha` was the previous key but multiple
-                  branches commonly point at the same commit (e.g. a freshly
-                  cut feature branch shares HEAD with main), and duplicate
-                  keys can drop rows during reconciliation. */}
-              {branchTestResult && branchTestResult.length > 0 && (
-                <div
-                  data-testid="resource-branch-picker"
-                  data-branch-count={branchTestResult.length}
-                  style={{ marginBottom: tokens.spacing.xs }}
-                >
-                  <div
-                    role="status"
-                    aria-live="polite"
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '6px 10px',
-                      background: tokens.colors.surfaceCard,
-                      border: `1px solid ${tokens.colors.border}`,
-                      borderTopLeftRadius: tokens.radii.md,
-                      borderTopRightRadius: tokens.radii.md,
-                      borderBottom: 'none',
-                      fontSize: '11px',
-                      fontWeight: tokens.typography.fontWeightSemibold,
-                      color: tokens.colors.success,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.04em',
-                    }}
-                  >
-                    <span
-                      aria-hidden
-                      style={{
-                        display: 'inline-block',
-                        width: 8,
-                        height: 8,
-                        borderRadius: 4,
-                        background: tokens.colors.success,
-                      }}
-                    />
-                    <span data-testid="resource-branch-picker-count">
-                      {`${branchTestResult.length} branch${branchTestResult.length === 1 ? '' : 'es'} from remote`}
-                    </span>
-                  </div>
-                  <div
-                    role="listbox"
-                    aria-label="Fetched branches"
-                    style={{
-                      background: tokens.colors.surface,
-                      border: `1px solid ${tokens.colors.border}`,
-                      borderBottomLeftRadius: tokens.radii.md,
-                      borderBottomRightRadius: tokens.radii.md,
-                      maxHeight: 180,
-                      overflowY: 'auto',
-                    }}
-                  >
-                    {branchTestResult.map((b, idx) => {
-                      const selected = b.name === formDefaultBranch;
-                      return (
-                        <div
-                          key={b.name}
-                          role="option"
-                          aria-selected={selected}
-                          data-testid={`resource-branch-option-${b.name}`}
-                          onClick={() => setFormDefaultBranch(b.name)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              setFormDefaultBranch(b.name);
-                            }
-                          }}
-                          tabIndex={0}
-                          style={{
-                            padding: '6px 10px',
-                            cursor: 'pointer',
-                            fontSize: tokens.typography.fontSizeMd,
-                            color: selected ? tokens.colors.accentSubtle : tokens.colors.textStrong,
-                            background: selected ? tokens.colors.surfaceCard : 'transparent',
-                            borderTop: idx === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 8,
-                            outline: 'none',
-                          }}
-                        >
-                          <span
-                            aria-hidden
-                            style={{
-                              display: 'inline-block',
-                              width: 8,
-                              height: 8,
-                              borderRadius: 4,
-                              background: selected ? tokens.colors.success : tokens.colors.border,
-                              flexShrink: 0,
-                            }}
-                          />
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
-                            {b.name}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <input
-                value={formDefaultBranch}
-                onChange={(e) => setFormDefaultBranch(e.target.value)}
-                placeholder={
-                  branchTestResult && branchTestResult.length > 0
-                    ? 'Or type a different branch name (e.g. for a not-yet-pushed branch)'
-                    : 'e.g. main (leave blank to fall back to origin/HEAD)'
-                }
-                style={{
-                  background: tokens.colors.surface,
-                  border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: tokens.radii.md,
-                  padding: '8px 10px',
-                  color: tokens.colors.textStrong,
-                  fontSize: tokens.typography.fontSizeMd,
-                  outline: 'none',
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  fontFamily: 'inherit',
-                }}
-              />
-
-              {!branchTestResult && (
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                  Run "Test connection" to load branches from the remote.
-                </div>
-              )}
-              {branchTestResult && branchTestResult.length === 0 && (
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                  Connected — but the remote has no branches yet.
-                </div>
-              )}
-              {branchTestResult && branchTestResult.length > 0 && (
-                <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
-                  Click a branch above to pin as default, or type a custom name.
-                </div>
-              )}
-            </div>
-          )}
-
-          {formType === 'repository' && (
-            <div>
-              <label style={{
-                fontSize: tokens.typography.fontSizeXs,
-                fontWeight: tokens.typography.fontWeightSemibold,
-                color: tokens.colors.textMuted,
-                textTransform: 'uppercase',
-                display: 'block',
-                marginBottom: tokens.spacing.xs,
-              }}>Clone Policy</label>
-              <ClonePolicyFields
-                value={formClonePolicy}
-                onChange={setFormClonePolicy}
-                error={formErrors.clonePolicy}
-              />
-            </div>
           )}
 
           {(formType === 'document' || formType === 'link') && (

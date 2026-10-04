@@ -27,11 +27,11 @@ test('uses canonical resolver label and exact deep link, not the claimed label',
   const { dom, root } = await renderWith({
     type: 'action', id, available: true, label: 'Canonical action',
     deepLink: `/ws/workspace-1/actions?artifact=${id}`,
-    workspaceName: 'Platform', boardName: 'Release board',
+    workspaceName: 'Platform',
   });
   const anchor = dom.window.document.querySelector('a');
   assert.ok(anchor);
-  assert.equal(anchor.textContent.trim(), '▶️ Canonical action · Platform / Release board');
+  assert.equal(anchor.textContent.trim(), '▶️ Canonical action · Platform');
   assert.equal(anchor.getAttribute('href'), `/ws/workspace-1/actions?artifact=${id}`);
   assert.doesNotMatch(anchor.textContent, /Forged/);
   root.unmount();
@@ -57,7 +57,7 @@ for (const reason of ['not_found', 'workspace_access_denied']) {
 test('no_detail_surface renders type, canonical name, context, and unavailable state', async () => {
   const { dom, root } = await renderWith({
     type: 'action', id, available: false, label: 'Canonical action', deepLink: null,
-    workspaceName: 'Platform', boardName: 'Release board', reason: 'no_detail_surface',
+    workspaceName: 'Platform', reason: 'no_detail_surface',
   });
   assert.equal(
       Boolean(dom.window.document.querySelector('a')),
@@ -67,7 +67,7 @@ test('no_detail_surface renders type, canonical name, context, and unavailable s
   const chip = dom.window.document.querySelector('[aria-disabled="true"]');
   assert.ok(chip);
   assert.match(chip.textContent, /action · Canonical action/);
-  assert.match(chip.textContent, /Platform \/ Release board/);
+  assert.match(chip.textContent, / · Platform /);
   assert.match(chip.textContent, /연결 불가: 상세 화면 없음/);
   root.unmount();
 });

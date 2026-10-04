@@ -13,6 +13,8 @@ import { useAuth } from './AuthContext';
 import { useToast } from './ToastContext';
 import { useBoardStreamEvent } from './BoardStreamContext';
 import { renderMentionPreview } from '../utils/mentionPreview';
+import { ticketPath } from '../utils/ticketPath';
+import { ticketStatusLabel } from '../tickets/status';
 import {
   getNotificationPrefs,
   setNotificationPref,
@@ -36,7 +38,7 @@ import {
  *      immediately clears the badge in tab B without waiting for SSE.
  *   4. One place decides "does this event deserve a notification?", so a
  *      chat message announces itself identically whether the user happens
- *      to be on the chat page or on a board. Announcing used to live inside
+ *      to be on the chat page or on the tickets page. Announcing used to live inside
  *      ChatPage, which meant the same event was loud on one route and
  *      silent on every other one.
  *
@@ -55,12 +57,11 @@ export type NotificationSource = 'mentions' | 'chat' | 'tickets' | 'pendingUsers
 interface BadgeCounts {
   mentions: number;
   chat: { total: number; perRoom: Record<string, number> };
+  // `{ total, perTicket }` — tickets are one workspace pool, so there is no
+  // per-board roll-up (docs/tickets.md).
   tickets: {
     total: number;
     perTicket: Record<string, number>;
-    perBoard: Record<string, number>;
-    /** ticketId → boardId, so marking one ticket read decrements the right board. */
-    ticketBoard: Record<string, string>;
   };
   pendingUsers: number;
   agentErrors: number;
@@ -92,11 +93,11 @@ interface NotificationContextValue {
    */
   markRead: (source: NotificationSource, key?: string) => void;
   /**
-   * 한 보드로 롤업되는 모든 티켓-코멘트 뱃지를 0으로 만든다(사이드바/보드
-   * 페이지의 "모두 읽음" 액션) — optimistic, 다른 탭에도 알린다.
-   * `boardId` 를 생략하면 모든 보드를 지운다(워크스페이스 전체 "모두 읽음").
+   * 워크스페이스의 모든 티켓-코멘트 뱃지를 0으로 만든다(사이드바/Tickets
+   * 페이지의 "모두 읽음" 액션 — 서버 read-all 이 성공한 뒤 호출) — optimistic,
+   * 다른 탭에도 알린다.
    */
-  markTicketsReadForBoard: (boardId?: string) => void;
+  markAllTicketsReadLocal: () => void;
   /**
    * Drop `count` mentions from the badge because the server cleared them as a
    * side effect of the caller reading their source (a ticket thread or a chat
@@ -111,7 +112,7 @@ interface NotificationContextValue {
 const empty: BadgeCounts = {
   mentions: 0,
   chat: { total: 0, perRoom: {} },
-  tickets: { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} },
+  tickets: { total: 0, perTicket: {} },
   pendingUsers: 0,
   agentErrors: 0,
 };
@@ -176,7 +177,7 @@ function fireBrowserNotification(req: NotiRequest) {
 // per-browser, not per-user, and every message runs on every tab.
 type BroadcastMsg =
   | { type: 'mark-read'; source: NotificationSource; key?: string }
-  | { type: 'mark-tickets-read-for-board'; boardId?: string }
+  | { type: 'mark-all-tickets-read' }
   | { type: 'mentions-cleared'; count: number }
   | { type: 'refresh' };
 
@@ -245,7 +246,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       currentWorkspaceId ? api.getChatUnreadCounts() : Promise.resolve({ total: 0, perRoom: {} }),
       currentWorkspaceId
         ? api.getTicketUnreadCounts()
-        : Promise.resolve({ total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} }),
+        : Promise.resolve({ total: 0, perTicket: {} }),
       isAdmin ? api.getPendingUsersCount() : Promise.resolve({ count: 0 }),
       isAdmin
         ? api.getAgentErrorsUnseenCount(localStorage.getItem(AGENT_ERRORS_LAST_SEEN_KEY))
@@ -255,11 +256,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       r.status === 'fulfilled' ? r.value : fallback;
     const mentions = unwrap(results[0], { count: 0, items: [] }) as { count: number };
     const chat = unwrap(results[1], { total: 0, perRoom: {} }) as { total: number; perRoom: Record<string, number> };
-    const tickets = unwrap(results[2], { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} }) as {
+    const tickets = unwrap(results[2], { total: 0, perTicket: {} }) as {
       total: number;
       perTicket: Record<string, number>;
-      perBoard: Record<string, number>;
-      ticketBoard?: Record<string, string>;
     };
     const pendingUsers = unwrap(results[3], { count: 0 }) as { count: number };
     const agentErrors = unwrap(results[4], { count: 0 }) as { count: number };
@@ -267,10 +266,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       mentions: mentions.count,
       chat,
       tickets: {
-        total: tickets.total,
+        total: tickets.total || 0,
         perTicket: tickets.perTicket || {},
-        perBoard: tickets.perBoard || {},
-        ticketBoard: tickets.ticketBoard || {},
       },
       pendingUsers: pendingUsers.count,
       agentErrors: agentErrors.count,
@@ -297,7 +294,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       ...prev,
       mentions: 0,
       chat: { total: 0, perRoom: {} },
-      tickets: { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} },
+      tickets: { total: 0, perTicket: {} },
     }));
   }, [currentWorkspaceId, mutateCounts]);
 
@@ -329,26 +326,15 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
             if (was === 0) return prev;
             const { [key]: _removed, ...rest } = prev.tickets.perTicket;
             void _removed;
-            // Keep the board roll-up honest: without this the board badge
-            // held the old number while the ticket's own count was gone.
-            const boardId = prev.tickets.ticketBoard[key];
-            const perBoard = { ...prev.tickets.perBoard };
-            if (boardId && perBoard[boardId] !== undefined) {
-              const next = Math.max(0, perBoard[boardId] - was);
-              if (next === 0) delete perBoard[boardId];
-              else perBoard[boardId] = next;
-            }
             return {
               ...prev,
               tickets: {
                 total: Math.max(0, prev.tickets.total - was),
                 perTicket: rest,
-                perBoard,
-                ticketBoard: prev.tickets.ticketBoard,
               },
             };
           }
-          return { ...prev, tickets: { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} } };
+          return { ...prev, tickets: { total: 0, perTicket: {} } };
         case 'agentErrors':
           return { ...prev, agentErrors: 0 };
         case 'pendingUsers':
@@ -373,33 +359,14 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     mutateCounts((prev) => ({ ...prev, mentions: Math.max(0, prev.mentions - count) }));
   }, [mutateCounts]);
 
-  // 보드 스코프(또는 boardId 생략 시 워크스페이스 전체) "모두 읽음" 액션을
-  // 위한 순수 상태 변경. 티켓 하나만 지우는 applyMarkRead('tickets', key)
-  // 와 달리, ticketBoard 를 훑어 주어진 보드로 롤업되는 모든 티켓을 한 번에
-  // 지운다 — 그래야 보드 뱃지와 그 보드의 모든 TicketCard 뱃지가 N번의
-  // 개별 클리어에 뒤처지지 않고 함께 0으로 떨어진다.
-  const applyMarkTicketsReadForBoard = useCallback((boardId?: string) => {
-    mutateCounts((prev) => {
-      if (!boardId) {
-        return { ...prev, tickets: { total: 0, perTicket: {}, perBoard: {}, ticketBoard: {} } };
-      }
-      const perTicket = { ...prev.tickets.perTicket };
-      const ticketBoard = { ...prev.tickets.ticketBoard };
-      let removed = 0;
-      for (const [ticketId, tBoardId] of Object.entries(prev.tickets.ticketBoard)) {
-        if (tBoardId !== boardId) continue;
-        removed += perTicket[ticketId] || 0;
-        delete perTicket[ticketId];
-        delete ticketBoard[ticketId];
-      }
-      if (removed === 0) return prev;
-      const perBoard = { ...prev.tickets.perBoard };
-      delete perBoard[boardId];
-      return {
-        ...prev,
-        tickets: { total: Math.max(0, prev.tickets.total - removed), perTicket, perBoard, ticketBoard },
-      };
-    });
+  // 워크스페이스 전체 "모두 읽음" 액션을 위한 순수 상태 변경 — 사이드바 배지와
+  // 모든 TicketCard 배지가 N번의 개별 클리어에 뒤처지지 않고 함께 0으로 떨어진다.
+  const applyMarkAllTicketsRead = useCallback(() => {
+    mutateCounts((prev) => (
+      prev.tickets.total === 0 && Object.keys(prev.tickets.perTicket).length === 0
+        ? prev
+        : { ...prev, tickets: { total: 0, perTicket: {} } }
+    ));
   }, [mutateCounts]);
 
   // ─── BroadcastChannel cross-tab sync ────────────────────────────────
@@ -414,8 +381,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         void refresh();
       } else if (msg.type === 'mark-read') {
         applyMarkRead(msg.source, msg.key);
-      } else if (msg.type === 'mark-tickets-read-for-board') {
-        applyMarkTicketsReadForBoard(msg.boardId);
+      } else if (msg.type === 'mark-all-tickets-read') {
+        applyMarkAllTicketsRead();
       } else if (msg.type === 'mentions-cleared') {
         applyMentionsCleared(msg.count);
       }
@@ -424,7 +391,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       bc.close();
       bcRef.current = null;
     };
-  }, [refresh, applyMarkRead, applyMarkTicketsReadForBoard, applyMentionsCleared]);
+  }, [refresh, applyMarkRead, applyMarkAllTicketsRead, applyMentionsCleared]);
 
   const broadcast = useCallback((msg: BroadcastMsg) => {
     try {
@@ -442,13 +409,10 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     [applyMarkRead, broadcast],
   );
 
-  const markTicketsReadForBoard = useCallback(
-    (boardId?: string) => {
-      applyMarkTicketsReadForBoard(boardId);
-      broadcast({ type: 'mark-tickets-read-for-board', boardId });
-    },
-    [applyMarkTicketsReadForBoard, broadcast],
-  );
+  const markAllTicketsReadLocal = useCallback(() => {
+    applyMarkAllTicketsRead();
+    broadcast({ type: 'mark-all-tickets-read' });
+  }, [applyMarkAllTicketsRead, broadcast]);
 
   const noteMentionsCleared = useCallback(
     (count: number) => {
@@ -585,7 +549,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   // 티켓 628f4b39 — ticket_reads_cleared 는 이 "모두 읽음"을 실행한 본인의
   // 다른 탭/기기 세션에만 전달된다(서버 필터가 user_id 로 스코프). 로컬에서
-  // 직접 누른 경우엔 markTicketsReadForBoard 가 이미 상태를 지우고 이
+  // 직접 누른 경우엔 markAllTicketsReadLocal 이 이미 상태를 지우고 이
   // BroadcastChannel 로도 알렸으므로, 여기선 순수 mutator(applyMark...)만
   // 불러 재브로드캐스트 루프를 만들지 않는다 — chat_room_update 읽음 동기화와
   // 동일한 패턴.
@@ -595,7 +559,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     if (!raw?.user_id || raw.user_id !== user.id) return;
     const wsId = wsIdRef.current;
     if (raw?.workspace_id && wsId && raw.workspace_id !== wsId) return;
-    applyMarkTicketsReadForBoard(raw?.board_id || undefined);
+    applyMarkAllTicketsRead();
   });
 
   // board_update carrying an 'activity' with entity_type='comment' and
@@ -611,7 +575,6 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     if (raw?.actor_id && raw.actor_id === user.id) return;
     if (isTicketActive(ticketId)) return;
 
-    const boardId: string | undefined = raw?.board_id || undefined;
     // A ticket with no unread yet isn't in perTicket, and this event doesn't
     // say whether the viewer is involved in it. So: bump what we already
     // track, and let a debounced refetch settle involvement for the rest.
@@ -625,27 +588,20 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     mutateCounts((prev) => {
       const had = prev.tickets.perTicket[ticketId];
       if (had === undefined) return prev;
-      const perBoard = { ...prev.tickets.perBoard };
-      const knownBoard = prev.tickets.ticketBoard[ticketId] || boardId;
-      if (knownBoard) perBoard[knownBoard] = (perBoard[knownBoard] || 0) + 1;
       return {
         ...prev,
         tickets: {
           total: prev.tickets.total + 1,
           perTicket: { ...prev.tickets.perTicket, [ticketId]: had + 1 },
-          perBoard,
-          ticketBoard: knownBoard
-            ? { ...prev.tickets.ticketBoard, [ticketId]: knownBoard }
-            : prev.tickets.ticketBoard,
         },
       };
     });
     announce({
       source: 'tickets',
       title: `New comment from ${raw?.actor_name || 'someone'}`,
-      body: raw?.current_column_name ? `in ${raw.current_column_name}` : '',
+      body: raw?.status ? `in ${ticketStatusLabel(raw.status)}` : '',
       tag: `ticket-comment:${ticketId}`,
-      navigateTo: ticketTarget(wsIdRef.current, boardId, ticketId),
+      navigateTo: ticketTarget(wsIdRef.current, ticketId),
     });
   });
 
@@ -709,11 +665,11 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       requestNotificationPermission,
       refresh,
       markRead,
-      markTicketsReadForBoard,
+      markAllTicketsReadLocal,
       noteMentionsCleared,
       markAgentErrorsSeen,
     }),
-    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, markTicketsReadForBoard, noteMentionsCleared, markAgentErrorsSeen],
+    [counts, countsLoaded, totalUnread, prefs, setPref, notificationPermission, requestNotificationPermission, refresh, markRead, markAllTicketsReadLocal, noteMentionsCleared, markAgentErrorsSeen],
   );
 
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
@@ -750,21 +706,13 @@ export function unwrapStreamEvent(raw: any): any {
 // Kept next to the handlers that raise the notifications so the click target
 // and the announcement can never drift apart.
 
-/** Board deep link consumed by Board.tsx's `?ticket=` effect. */
-function ticketTarget(
-  wsId: string | null,
-  boardId: string | undefined,
-  ticketId: string,
-): string | undefined {
+/** Ticket deep link consumed by the Tickets page's `?ticket=` param. */
+function ticketTarget(wsId: string | null, ticketId: string): string | undefined {
   if (!wsId) return undefined;
-  const t = encodeURIComponent(ticketId);
-  // Without a board the boards index resolves the ticket's board and forwards.
-  return boardId
-    ? `/ws/${wsId}/boards/${encodeURIComponent(boardId)}?ticket=${t}`
-    : `/ws/${wsId}/boards?ticket=${t}`;
+  return ticketPath(wsId, ticketId);
 }
 
-/** Mention deep link — comment mentions land on the board, chat on the room. */
+/** Mention deep link — comment mentions land on the ticket, chat on the room. */
 function mentionTarget(raw: any, wsId: string | null): string | undefined {
   if (!wsId) return undefined;
   if (raw?.source_type === 'chat_message' && raw?.room_id) {
@@ -773,9 +721,7 @@ function mentionTarget(raw: any, wsId: string | null): string | undefined {
     return `/ws/${wsId}/chat/${room}${msg}`;
   }
   if (raw?.source_type === 'comment' && raw?.ticket_id) {
-    const base = ticketTarget(wsId, raw.board_id || undefined, raw.ticket_id);
-    if (!base) return undefined;
-    return raw.source_id ? `${base}&comment=${encodeURIComponent(raw.source_id)}` : base;
+    return ticketPath(wsId, raw.ticket_id, { commentId: raw.source_id || null });
   }
   return undefined;
 }

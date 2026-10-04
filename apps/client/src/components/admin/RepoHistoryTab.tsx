@@ -7,19 +7,19 @@ import { relativeTime } from '../../utils/time';
 import { MONO, ErrorBox } from './repoTabCommon';
 
 // History 탭 — 선택 ref 기준 커밋 리스트(load-older 페이지네이션) + 커밋 클릭 시
-// 변경 파일/diff 상세. 데이터는 서버의 per-resource 캐시 클론(git log/git show)에서
-// 온다. ref 가 바뀌면 부모(ResourceDetailPanel)가 refKey 를 갈아끼워 재조회시킨다.
+// 변경 파일/diff 상세. 데이터는 서버의 per-project 캐시 클론(git log/git show)에서
+// 온다. ref 가 바뀌면 부모(projects/ProjectRepoTabs)가 refKey 를 갈아끼워 재조회시킨다.
 
 const PAGE = 30;
 
 interface RepoHistoryTabProps {
-  resourceId: string;
+  projectId: string;
   workspaceId: string;
   // 선택된 ref(브랜치/태그). 빈 문자열이면 서버가 HEAD 로 해석한다.
   refKey: string;
 }
 
-export default function RepoHistoryTab({ resourceId, workspaceId, refKey }: RepoHistoryTabProps) {
+export default function RepoHistoryTab({ projectId, workspaceId, refKey }: RepoHistoryTabProps) {
   const [commits, setCommits] = useState<RepoCommitSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +38,7 @@ export default function RepoHistoryTab({ resourceId, workspaceId, refKey }: Repo
     setSelectedSha(null);
     setDetail(null);
     try {
-      const res = await api.listRepoCommits(resourceId, workspaceId, { ref: refKey, limit: PAGE });
+      const res = await api.listProjectCommits(projectId, workspaceId, { ref: refKey, limit: PAGE });
       setCommits(res.commits);
       setHasMore(res.commits.length === PAGE);
     } catch (err: any) {
@@ -48,7 +48,7 @@ export default function RepoHistoryTab({ resourceId, workspaceId, refKey }: Repo
     } finally {
       setLoading(false);
     }
-  }, [resourceId, workspaceId, refKey]);
+  }, [projectId, workspaceId, refKey]);
 
   useEffect(() => { loadFirst(); }, [loadFirst]);
 
@@ -57,7 +57,7 @@ export default function RepoHistoryTab({ resourceId, workspaceId, refKey }: Repo
     setLoadingMore(true);
     try {
       const before = commits[commits.length - 1].sha;
-      const res = await api.listRepoCommits(resourceId, workspaceId, { ref: refKey, limit: PAGE, before });
+      const res = await api.listProjectCommits(projectId, workspaceId, { ref: refKey, limit: PAGE, before });
       setCommits((prev) => [...prev, ...res.commits]);
       setHasMore(res.commits.length === PAGE);
     } catch (err: any) {
@@ -66,7 +66,7 @@ export default function RepoHistoryTab({ resourceId, workspaceId, refKey }: Repo
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, commits, resourceId, workspaceId, refKey]);
+  }, [loadingMore, commits, projectId, workspaceId, refKey]);
 
   const openCommit = useCallback(async (sha: string) => {
     setSelectedSha(sha);
@@ -74,14 +74,14 @@ export default function RepoHistoryTab({ resourceId, workspaceId, refKey }: Repo
     setDetailError(null);
     setDetailLoading(true);
     try {
-      const d = await api.getRepoCommit(resourceId, workspaceId, sha);
+      const d = await api.getProjectCommit(projectId, workspaceId, sha);
       setDetail(d);
     } catch (err: any) {
       setDetailError(err?.message || '커밋 상세를 불러오지 못했습니다.');
     } finally {
       setDetailLoading(false);
     }
-  }, [resourceId, workspaceId]);
+  }, [projectId, workspaceId]);
 
   // ── 커밋 상세 뷰 ─────────────────────────────────────────
   if (selectedSha) {

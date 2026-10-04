@@ -44,9 +44,9 @@ import TeamSlotRuntimeFields, {
  * whose members have empty capability blurbs produces noticeably worse plans.
  */
 /**
- * 사이드바 WORK > Teams 서브메뉴가 같은 목록을 그린다(티켓 03ca8b5b). 보드가
- * `boards-changed` 로 하는 것과 같은 방식으로 팀 목록 변경을 방송해, 이 페이지에서
- * 만들고 지운 팀이 사이드바에 즉시 반영되게 한다.
+ * 사이드바 WORK > Teams 서브메뉴가 같은 목록을 그린다(티켓 03ca8b5b). 팀 목록
+ * 변경을 window 이벤트로 방송해, 이 페이지에서 만들고 지운 팀이 사이드바에 즉시
+ * 반영되게 한다.
  */
 function broadcastTeamsChanged() {
   window.dispatchEvent(new CustomEvent(TEAMS_CHANGED_EVENT));

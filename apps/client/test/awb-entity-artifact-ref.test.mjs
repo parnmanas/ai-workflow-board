@@ -11,7 +11,6 @@ import { renderMarkdown } from '../src/components/chat/utils/markdown.tsx';
 const ids = {
   ticket: '11111111-1111-4111-8111-111111111111',
   agent: '22222222-2222-4222-8222-222222222222',
-  board: '33333333-3333-4333-8333-333333333333',
   action: '44444444-4444-4444-8444-444444444444',
   function: '55555555-5555-4555-8555-555555555555',
   schedule: '66666666-6666-4666-8666-666666666666',
@@ -25,9 +24,9 @@ const renderMarkdownText = (input) =>
 
 const occurrences = (text, value) => text.split(value).length - 1;
 
-test('parses all six entity artifact types but SSR never creates an unverified link', () => {
+test('parses all five entity artifact types but SSR never creates an unverified link', () => {
   const input = Object.entries(ids).map(([type, id]) => `#[${type}:${id}|Shared name]`).join(' ');
-  assert.equal(parseArtifactRefs(input).length, 6);
+  assert.equal(parseArtifactRefs(input).length, 5);
   const html = renderMarkdownHtml(input);
   for (const type of Object.keys(ids)) {
     assert.match(html, new RegExp(`data-entity-ref="${type}:${ids[type]}"`));
@@ -73,7 +72,7 @@ test('preserves order and count for multiple artifacts mixed with an agent menti
     'MIDDLE_ONLY',
     `@[agent:${agentId}|Agent Mention]`,
     'AFTER_MENTION_ONLY',
-    `#[board:${ids.board}|Board Two]`,
+    `#[action:${ids.action}|Action Two]`,
     'END_ONLY',
   ].join(' ');
   const html = renderMarkdownHtml(input);
@@ -84,7 +83,7 @@ test('preserves order and count for multiple artifacts mixed with an agent menti
     'MIDDLE_ONLY',
     '@Agent Mention',
     'AFTER_MENTION_ONLY',
-    'Board Two',
+    'Action Two',
     'END_ONLY',
   ];
 
@@ -94,4 +93,13 @@ test('preserves order and count for multiple artifacts mixed with an agent menti
   for (let index = 1; index < ordered.length; index += 1) {
     assert.ok(text.indexOf(ordered[index - 1]) < text.indexOf(ordered[index]));
   }
+});
+
+test('a legacy #[board:…] token (boards were removed) stays plain text', () => {
+  const boardId = '33333333-3333-4333-8333-333333333333';
+  const input = `#[board:${boardId}|Old board]`;
+  assert.equal(parseArtifactRefs(input).length, 0);
+  const html = renderMarkdownHtml(input);
+  assert.doesNotMatch(html, /data-entity-ref/);
+  assert.match(renderMarkdownText(input), /Old board/);
 });

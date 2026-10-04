@@ -4,7 +4,7 @@ import { tokens } from '../../tokens';
 import { ArtifactRefType, workspaceIdFromPath } from '../../utils/artifactRef';
 
 const ICON: Record<ArtifactRefType, string> = {
-  ticket: '🎫', agent: '🤖', board: '📊', action: '▶️', function: 'ƒ', schedule: '🗓️',
+  ticket: '🎫', agent: '🤖', action: '▶️', function: 'ƒ', schedule: '🗓️',
 };
 
 type Resolution = {
@@ -14,7 +14,6 @@ type Resolution = {
   label: string;
   deepLink: string | null;
   workspaceName?: string;
-  boardName?: string;
   reason?: string;
 };
 
@@ -59,7 +58,6 @@ export default function ResolvedArtifactRef({
     title: [
       resolved?.label || claimedLabel,
       resolved?.workspaceName,
-      resolved?.boardName,
       id,
     ].filter(Boolean).join(' · '),
     style: {
@@ -71,7 +69,7 @@ export default function ResolvedArtifactRef({
   };
 
   if (resolved?.available && resolved.deepLink) {
-    const context = [resolved.workspaceName, resolved.boardName].filter(Boolean).join(' / ');
+    const context = resolved.workspaceName || '';
     return (
       <a {...common} href={resolved.deepLink} aria-label={`${type} 열기: ${resolved.label}`}>
         {ICON[type]} {resolved.label}{context ? ` · ${context}` : ''}
@@ -79,7 +77,7 @@ export default function ResolvedArtifactRef({
     );
   }
   const reason = REASON[resolved?.reason || failure] || resolved?.reason || failure;
-  const context = [resolved?.workspaceName, resolved?.boardName].filter(Boolean).join(' / ');
+  const context = resolved?.workspaceName || '';
   return (
     <span {...common} aria-disabled="true">
       {ICON[type]} {type} · {resolved?.label || claimedLabel || type}

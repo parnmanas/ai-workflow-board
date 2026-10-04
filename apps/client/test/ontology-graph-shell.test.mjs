@@ -113,5 +113,15 @@ test('"Refresh Graph"는 GET /status 재호출이 아니라 POST /refresh 커맨
 });
 
 test('Refresh/Build 버튼은 building 중에는 비활성화된다(중복 클릭 UX — 서버 CAS와 별개의 방어선)', () => {
-  assert.match(pageSource, /disabled={!resourceId \|\| loading \|\| refreshing \|\| isBuilding}/);
+  assert.match(pageSource, /disabled={!projectId \|\| loading \|\| refreshing \|\| isBuilding}/);
+});
+
+test('저장소 목록은 Project 다 — repository Resource 를 조회하지 않고, 그래프 키는 같은 id 를 resourceId 자리로 넘긴다(docs/tickets.md)', () => {
+  assert.match(pageSource, /import \{ useProjects \} from '\.\.\/\.\.\/projects\/useProjects'/);
+  assert.match(pageSource, /const \{ projects \} = useProjects\(wsId\)/);
+  assert.doesNotMatch(pageSource, /listResources\(/, 'repository Resource 목록을 읽으면 안 된다');
+  assert.doesNotMatch(pageSource, /'repository'/);
+  // 프로젝트는 옛 repository Resource 와 같은 id 로 이관됐고 그래프도 그 id 로 키잉돼 있다.
+  assert.match(pageSource, /getOntologyGraphStatus\(wsId, \{ resourceId: projectId, folderPath \}\)/);
+  assert.match(pageSource, /logOntologyGraphViewOpened\(wsId, \{ resourceId: projectId, folderPath \}\)/);
 });

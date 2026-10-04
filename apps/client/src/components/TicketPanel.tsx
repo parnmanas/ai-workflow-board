@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import DeclareRuntimeSection from './runtime/DeclareRuntimeSection';
-import { Ticket, RuntimeParticipant, Channel, ActivityLog, Comment, CommentType, User, TicketAttachmentMeta, Resource, RepoBranch, TicketPrerequisiteRow, Action, EffortPreset, EffortPresetsConfig, BUILTIN_EFFORT_PRESETS, HandoffSpec, ClaudeBackendProfile } from '../types';
-import { api, TicketRoleAssignmentRow, ConsensusView, ConsensusParty, getActiveWorkspaceId, rawResourceUrl } from '../api';
+import { Ticket, TicketCard, TicketStatus, RuntimeParticipant, Channel, ActivityLog, Comment, CommentType, User, Resource, TicketPrerequisiteRow, Action } from '../types';
+import { api, getActiveWorkspaceId, rawResourceUrl } from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
@@ -9,7 +8,6 @@ import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import ChildTicketList from './SubtaskList';
 import CommentList from './CommentList';
-import HandoffEditor from './HandoffEditor';
 import { TypingIndicator } from './TypingIndicator';
 import { tokens } from '../tokens';
 import { MentionTextarea, MentionCandidate } from './common/MentionTextarea';
@@ -17,60 +15,46 @@ import { ActivityPill } from './common/ActivityIndicator';
 import { ticketActivity } from '../activity';
 import { ALL_COMMENT_TYPES, COMMENT_TYPE_STYLES, defaultVisibleTypes, resolveCommentType, hasStaleOpenQuestion } from './comment-types';
 import { formatAgentDisplayName } from '../utils/agentName';
-import { isCommentSummaryInProgress } from '../utils/commentSummary';
+import { TICKET_STATUSES, TICKET_PRIORITIES, TICKET_PRIORITY_LABELS, ticketStatusLabel, ticketStatusColor, triggerReasonLabel } from '../tickets/status';
+import { useProjects } from '../projects/useProjects';
+import { useTicketTags } from '../tickets/useTicketTags';
+import { mergeTagSuggestions } from '../tickets/tagInput';
+import type { RuntimeSpecDraft } from '../runtime/runtimeSpec';
+import ResourceReferencePicker from './ticketPanel/ResourceReferencePicker';
+import TagInput from './common/TagInput';
+import ProjectBranchFields from './ticketPanel/ProjectBranchFields';
+import AssigneeSection from './ticketPanel/AssigneeSection';
+import OnDoneActionsField from './ticketPanel/OnDoneActionsField';
+import PrerequisitesField from './ticketPanel/PrerequisitesField';
+import TicketAttachmentsSection from './ticketPanel/TicketAttachmentsSection';
+import {
+  TicketDraft, collectTagPool, computeDirtyTicketFields, draftFromTicket, effectiveAssignee, effectiveTags,
+  openPrerequisiteCount, runtimeSpecEqual, settleSavedDraft,
+} from './ticketPanel/ticketDraft';
 
-export interface WorkspaceRoleSummary {
-  id: string; slug: string; name: string;
-  description?: string; position: number; is_builtin: boolean;
-  role_prompt?: string;
-}
-
-interface TicketPanelProps {
+export interface TicketPanelProps {
   ticket: Ticket;
-  columnName: string;
   agents: RuntimeParticipant[];
   users?: User[];
   channels: Channel[];
-  // The full workspace role catalog. Drives one row per role on the panel,
-  // sorted by position. Empty array → fallback to the legacy hardcoded
-  // assignee/reporter/reviewer trio so the panel stays usable in workspaces
-  // without the v0.34 role catalog yet.
-  workspaceRoles?: WorkspaceRoleSummary[];
-  // Flat list of all root tickets on the board, used by the SubtaskList
-  // "Link existing" picker. Optional so legacy callers don't break.
-  boardTickets?: Ticket[];
-  // The board's columns (id + name), used by the consensus move-proposal
-  // picker (T6) to pick a target column. Optional so legacy callers don't break.
-  boardColumns?: Array<{ id: string; name: string }>;
+  /** Root tickets of the workspace pool currently loaded by the page — next-ticket/prerequisite/"link existing subtask" pickers + tag suggestions. */
+  workspaceTickets?: TicketCard[];
   typingIndicators: Record<string, string | null>;
+  workspaceId?: string;
   onClose: () => void;
-  // May be sync or async — the Save/Discard footer awaits the result so the
-  // button can show "Saving…" until the round trip completes.
+  // May be sync or async. Used as the Save fallback when onSaveDraft is absent.
   onUpdate: (id: string, data: Record<string, any>) => void | Promise<void>;
+  /** Status change (PATCH /tickets/:id/move). Falls back to api.moveTicket when omitted. */
+  onMove?: (ticketId: string, status: TicketStatus) => void | Promise<void>;
   onDelete: (id: string) => void;
-  onCreateChild: (parentId: string, data: { title: string; description?: string; priority?: string; assignee?: string; reporter?: string; role_assignments?: Array<{ role_slug: string; runtime: Record<string, any> }> }) => void;
+  onCreateChild: (parentId: string, data: { title: string; description?: string; tags?: string[] }) => void;
   onDeleteChild: (childId: string) => void;
-  // Adopt an existing ticket as a subtask of `parentId`. Distinct from
-  // onCreateChild (which makes a new ticket).
+  // Adopt an existing ticket as a subtask of `parentId` (distinct from onCreateChild).
   onReparentChild?: (parentId: string, childId: string) => void;
-  // Set (or clear) the holder of a workspace role on this ticket. Mutually
-  // exclusive agent_id / user_id; pass both null/'' to clear. Used by legacy
-  // direct-write call sites (none currently inside the panel — Save batches
-  // role drafts through onSaveDraft below).
-  onSetRoleAssignment?: (ticketId: string, roleId: string, holder: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> }) => void | Promise<void>;
-  // Commit the buffered Save/Discard draft in one shot. MUST reject (throw)
-  // on server failure — the footer relies on the rejection to preserve dirty
-  // state so the user doesn't lose their unsaved edits behind a misleading
-  // success toast. Falls back to per-field onUpdate if omitted (legacy
-  // embedders). MULTI-HOLDER (T6): role edits are delivered as the T1
-  // `role_assignments[]` array (repeated role_slug = multiple holders; a
-  // role_slug with no holder clears the slot), saved atomically through the
-  // ticket PATCH's role_assignments path.
-  onSaveDraft?: (
-    ticketId: string,
-    ticketFields: Record<string, any>,
-    roleAssignments: Array<{ role_slug: string; agent_id?: string; user_id?: string }>,
-  ) => Promise<void>;
+  /** Commit the buffered Save/Discard draft (one PATCH). MUST reject on failure —
+   *  the footer relies on the rejection to keep the dirty state instead of
+   *  showing a misleading success toast. */
+  onSaveDraft?: (ticketId: string, ticketFields: Record<string, any>) => Promise<void>;
   onAddComment: (
     ticketId: string,
     content: string,
@@ -79,21 +63,6 @@ interface TicketPanelProps {
   ) => void;
   onSetCommentStatus?: (ticketId: string, commentId: string, status: 'open' | 'resolved') => void;
   onSelectTicket?: (id: string) => void;
-  // The board this panel is rendered on. Used to filter the destination
-  // picker (you don't move a ticket to its own board) and to detect a
-  // post-move panel close (the ticket is no longer on this board).
-  currentBoardId?: string;
-  // Workspace the current board lives in. Drives the board picker fetch —
-  // we list boards in the same workspace only (the server rejects
-  // cross-workspace moves anyway).
-  workspaceId?: string;
-  // The board's abstract effort presets (raw JSON string or parsed config, or
-  // null). Drives the per-ticket effort-preset picker. null/empty falls back
-  // to BUILTIN_EFFORT_PRESETS for display.
-  effortPresets?: EffortPresetsConfig | string | null;
-  // Move a root ticket to another board. Optional column id picks a specific
-  // column on the target board; omit for the destination's first column.
-  onMoveToBoard?: (ticketId: string, targetBoardId: string, opts?: { target_column_id?: string }) => void;
   // Mention deep-link target — when set, switch to the comments tab and
   // forward to CommentList for scroll-and-highlight. Parent clears it via
   // onScrollToCommentConsumed once the panel has acknowledged the request,
@@ -146,364 +115,6 @@ const priorityColors: Record<string, string> = {
   critical: '#ef4444',
 };
 
-// Multi-holder role draft (T6 다중담당자). Each entry pins exactly one of
-// agent_id / user_id / runtime; a role's draft is its FULL desired holder set.
-// The picker buffers these and Save flushes them as the T1 role_assignments[] array.
-type HolderDraft = { agent_id: string | null; user_id: string | null; runtime?: Record<string, any> | null };
-// Normalize a holder for set comparison + dedupe. Runtime holders key on
-// their identity tuple (stable across edits — the same tuple is the same holder).
-const holderDraftKey = (h: HolderDraft): string => {
-  if (h.agent_id) return `agent:${h.agent_id}`;
-  if (h.user_id) return `user:${h.user_id}`;
-  const r = h.runtime;
-  if (r && typeof r === 'object') {
-    return `runtime:${r.manager_agent_id || ''}:${r.cli || ''}:${r.working_dir || ''}:${r.model || ''}:${r.credential_id || ''}`;
-  }
-  return '';
-};
-/**
- * P4c-4: 역할 선택 + runtime 선언 → draft holder 추가. 매칭되면 agent draft,
- * 새로우면 runtime draft로 해당 역할 draft에 append한다.
- */
-function TicketRuntimeSection({
-  roles,
-  workspaceId,
-  onAdd,
-}: {
-  roles: Array<{ id: string; slug: string; name: string }>;
-
-  workspaceId: string;
-  onAdd(roleId: string, draft: HolderDraft): void;
-}) {
-  const [roleId, setRoleId] = useState(() => roles.find((r) => r.slug === 'assignee')?.id ?? roles[0]?.id ?? '');
-  useEffect(() => {
-    if (!roles.some((r) => r.id === roleId) && roles.length > 0) setRoleId(roles[0].id);
-  }, [roles, roleId]);
-  if (roles.length === 0 || !workspaceId) return null;
-  return (
-    <div style={{ marginTop: 8 }}>
-      <label style={{ display: 'block', fontSize: 11, color: '#8a8a8a', marginBottom: 4 }}>
-        Runtime으로 추가할 역할
-      </label>
-      <select
-        value={roleId}
-        onChange={(e) => setRoleId(e.target.value)}
-        style={{ background: 'transparent', border: '1px solid #333', borderRadius: 6, padding: '4px 6px', fontSize: 11, marginBottom: 8 }}
-      >
-        {roles.map((r) => (
-          <option key={r.id} value={r.id}>{r.name} ({r.slug})</option>
-        ))}
-      </select>
-      <DeclareRuntimeSection
-        workspaceId={workspaceId}
-
-        onResolved={(spec) => {
-          if (!roleId) return;
-          onAdd(roleId, { agent_id: null, user_id: null, runtime: spec });
-        }}
-      />
-    </div>
-  );
-}
-
-// A resolved holder (from a role-assignment row) → its draft shape.
-// P4c-4: rt- holders round-trip as runtime drafts (never as agent_id — the
-// server would reject the unknown id on lookup).
-const holderToDraft = (h: { type: 'agent' | 'user'; id: string; runtime?: Record<string, any> }): HolderDraft => {
-  if (h.type === 'agent') {
-    if ((h as any).runtime && typeof (h as any).runtime === 'object') {
-      return { agent_id: null, user_id: null, runtime: (h as any).runtime };
-    }
-    return { agent_id: h.id, user_id: null };
-  }
-  return { agent_id: null, user_id: h.id };
-};
-
-// Read path for the board's effort presets — degrade malformed/empty input to
-// the builtins, never throw (mirrors the server READ contract). Accepts the
-// raw JSON string the board ships or an already-parsed config.
-function parseEffortPresetList(raw: EffortPresetsConfig | string | null | undefined): EffortPreset[] {
-  if (!raw) return BUILTIN_EFFORT_PRESETS.presets;
-  let cfg: any = raw;
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim();
-    if (!trimmed) return BUILTIN_EFFORT_PRESETS.presets;
-    try { cfg = JSON.parse(trimmed); } catch { return BUILTIN_EFFORT_PRESETS.presets; }
-  }
-  if (!cfg || !Array.isArray(cfg.presets) || cfg.presets.length === 0) {
-    return BUILTIN_EFFORT_PRESETS.presets;
-  }
-  return cfg.presets.filter((p: any) => p && typeof p.id === 'string');
-}
-
-interface TriggerRoleTarget { slug: string; label: string; holderName: string; hasAgent: boolean }
-
-interface MoveToBoardOption {
-  id: string;
-  name: string;
-  columns: { id: string; name: string }[];
-}
-
-function MoveToBoardMenu({
-  open, onClose, boards, busy, onPick, loading,
-}: {
-  open: boolean;
-  onClose: () => void;
-  boards: MoveToBoardOption[];
-  busy: boolean;
-  loading: boolean;
-  onPick: (boardId: string, columnId?: string) => void;
-}) {
-  // Track which board row is expanded to show its column picker. Null means
-  // every row is collapsed (default state on open). Click a board's chevron
-  // to expand; click the row body or the "Move →" hint to move to its first
-  // column without picking.
-  const [expanded, setExpanded] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) setExpanded(null);
-  }, [open]);
-
-  if (!open) return null;
-  return (
-    <>
-      <div
-        onClick={onClose}
-        style={{ position: 'fixed', inset: 0, zIndex: 10 }}
-      />
-      <div
-        style={{
-          position: 'absolute',
-          top: '100%',
-          right: 0,
-          marginTop: 4,
-          minWidth: 260,
-          maxWidth: 320,
-          maxHeight: 360,
-          background: tokens.colors.surfaceCard,
-          border: `1px solid ${tokens.colors.border}`,
-          borderRadius: tokens.radii.md,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
-          zIndex: 11,
-          overflow: 'hidden',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
-        <div
-          style={{
-            padding: '6px 10px',
-            fontSize: '10px',
-            fontWeight: 700,
-            textTransform: 'uppercase',
-            letterSpacing: '0.05em',
-            color: tokens.colors.textMuted,
-            borderBottom: `1px solid ${tokens.colors.border}`,
-            background: tokens.colors.surfaceSubtle,
-            flexShrink: 0,
-          }}
-        >
-          Move to board
-        </div>
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {loading ? (
-            <div style={{ padding: '12px', fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-              Loading boards…
-            </div>
-          ) : boards.length === 0 ? (
-            <div style={{ padding: '12px', fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-              No other boards in this workspace
-            </div>
-          ) : boards.map((b, idx) => {
-            const isExpanded = expanded === b.id;
-            return (
-              <div key={b.id} style={{
-                borderTop: idx === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
-              }}>
-                <div
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '8px 10px',
-                    background: 'transparent',
-                  }}
-                >
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => { if (!busy) { onPick(b.id); onClose(); } }}
-                    style={{
-                      flex: 1,
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      background: 'transparent', border: 'none',
-                      padding: 0,
-                      color: tokens.colors.textStrong,
-                      fontSize: '12px', fontWeight: 600,
-                      cursor: busy ? 'not-allowed' : 'pointer',
-                      textAlign: 'left',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                    title="Move to this board's first column"
-                  >
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setExpanded(isExpanded ? null : b.id)}
-                    style={{
-                      background: 'transparent', border: `1px solid ${tokens.colors.border}`,
-                      borderRadius: tokens.radii.sm, padding: '2px 6px',
-                      color: tokens.colors.textMuted, fontSize: '10px',
-                      cursor: 'pointer',
-                    }}
-                    title="Pick a specific column"
-                  >
-                    {isExpanded ? '▾' : '▸'} column
-                  </button>
-                </div>
-                {isExpanded && (
-                  <div style={{
-                    padding: '4px 10px 8px 18px',
-                    display: 'flex', flexDirection: 'column', gap: 2,
-                    background: tokens.colors.surface,
-                  }}>
-                    {b.columns.length === 0 ? (
-                      <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '4px 0' }}>
-                        No columns
-                      </div>
-                    ) : b.columns.map(c => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        disabled={busy}
-                        onClick={() => { if (!busy) { onPick(b.id, c.id); onClose(); } }}
-                        style={{
-                          background: 'transparent', border: 'none',
-                          padding: '4px 6px',
-                          color: tokens.colors.textSecondary,
-                          fontSize: '11px',
-                          cursor: busy ? 'not-allowed' : 'pointer',
-                          textAlign: 'left',
-                          borderRadius: tokens.radii.sm,
-                        }}
-                        onMouseEnter={e => { if (!busy) e.currentTarget.style.background = tokens.colors.surfaceSubtle; }}
-                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-                      >
-                        → {c.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
-}
-
-function TriggerMenu({
-  open, onClose, roleTargets, busy, onPick,
-}: {
-  open: boolean;
-  onClose: () => void;
-  roleTargets: TriggerRoleTarget[];
-  busy: Record<string, boolean>;
-  onPick: (slug: string, label: string, holderName: string) => void;
-}) {
-  if (!open) return null;
-  return (
-    <>
-      <div
-        onClick={onClose}
-        style={{ position: 'fixed', inset: 0, zIndex: 10 }}
-      />
-      <div
-        style={{
-          position: 'absolute',
-          top: '100%',
-          right: 0,
-          marginTop: 4,
-          minWidth: 200,
-          background: tokens.colors.surfaceCard,
-          border: `1px solid ${tokens.colors.border}`,
-          borderRadius: tokens.radii.md,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
-          zIndex: 11,
-          overflow: 'hidden',
-        }}
-      >
-        <div
-          style={{
-            padding: '6px 10px',
-            fontSize: '10px',
-            fontWeight: 700,
-            textTransform: 'uppercase',
-            letterSpacing: '0.05em',
-            color: tokens.colors.textMuted,
-            borderBottom: `1px solid ${tokens.colors.border}`,
-            background: tokens.colors.surfaceSubtle,
-          }}
-        >
-          Trigger
-        </div>
-        {roleTargets.map(({ slug, label, holderName, hasAgent }, idx) => {
-          const isBusy = !!busy[slug];
-          const disabled = !hasAgent || isBusy;
-          return (
-            <button
-              key={slug}
-              type="button"
-              disabled={disabled}
-              onClick={() => {
-                if (disabled) return;
-                onPick(slug, label, holderName);
-                onClose();
-              }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-                width: '100%',
-                padding: '8px 12px',
-                background: 'transparent',
-                border: 'none',
-                borderTop: idx === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
-                color: disabled ? tokens.colors.textMuted : tokens.colors.textStrong,
-                fontSize: '12px',
-                cursor: disabled ? 'not-allowed' : 'pointer',
-                textAlign: 'left',
-              }}
-              onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = tokens.colors.surfaceSubtle; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
-            >
-              <span style={{ fontWeight: 600 }}>{label}</span>
-              <span style={{ fontSize: '11px', color: tokens.colors.textMuted }}>
-                {isBusy ? 'sending…' : hasAgent ? holderName : 'unassigned'}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      resolve(result.split(',')[1]);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 // Generous client-side ceiling for comment media — mirrors the server's 200MB
 // raw-upload cap (main.ts). Anything larger gets a clear toast at pick time
 // instead of a silent drop or a server round-trip that 413s (ticket ff3e7337).
@@ -523,136 +134,18 @@ type StagedAttachment = {
   resourceId?: string;
 };
 
-// Modal that lists file-backed board/workspace Resources so a comment can
-// reference one instead of re-uploading bytes (ticket ff3e7337 — the
-// design-recommended "reference existing Resource" path).
-function ResourceReferencePicker({
-  loading, error, items, onPick, onClose,
-}: {
-  loading: boolean;
-  error: string | null;
-  items: Resource[];
-  onPick: (r: Resource) => void;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 'min(520px, 92vw)', maxHeight: '70vh', overflow: 'auto',
-          background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
-          borderRadius: tokens.radii.lg, padding: 16, boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <strong style={{ color: tokens.colors.textStrong, fontSize: 14 }}>기존 리소스 첨부</strong>
-          <button onClick={onClose} style={{
-            background: 'transparent', border: 'none', color: tokens.colors.textMuted, cursor: 'pointer', fontSize: 16,
-          }}>{'✕'}</button>
-        </div>
-        {loading && <div style={{ color: tokens.colors.textMuted, fontSize: 12, padding: '12px 0' }}>불러오는 중…</div>}
-        {error && <div style={{ color: tokens.colors.danger, fontSize: 12, padding: '12px 0' }}>{error}</div>}
-        {!loading && !error && items.length === 0 && (
-          <div style={{ color: tokens.colors.textMuted, fontSize: 12, padding: '12px 0' }}>첨부할 수 있는 파일 리소스가 없습니다.</div>
-        )}
-        {!loading && !error && items.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {items.map((r) => {
-              const mt = r.file_mimetype || '';
-              const isImage = mt.startsWith('image/');
-              const isVideo = mt.startsWith('video/');
-              return (
-                <button
-                  key={r.id}
-                  onClick={() => onPick(r)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px',
-                    background: 'transparent', border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md, cursor: 'pointer', textAlign: 'left', width: '100%',
-                  }}
-                >
-                  <span style={{
-                    width: 40, height: 40, flexShrink: 0, borderRadius: tokens.radii.sm,
-                    border: `1px solid ${tokens.colors.border}`, overflow: 'hidden',
-                    background: isVideo ? '#000' : tokens.colors.surfaceCard,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
-                  }}>
-                    {isImage
-                      ? <img src={rawResourceUrl(r.id)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                      : isVideo ? <span>🎬</span> : <span>📎</span>}
-                  </span>
-                  <span style={{ minWidth: 0, flex: 1 }}>
-                    <span style={{ display: 'block', color: tokens.colors.textStrong, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.file_name || r.name}</span>
-                    <span style={{ display: 'block', color: tokens.colors.textMuted, fontSize: 10 }}>{mt || r.type}</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export default function TicketPanel({
-  ticket, columnName, agents, users, channels, workspaceRoles, boardTickets, boardColumns, typingIndicators,
-  onClose, onUpdate, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSetRoleAssignment, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
-  currentBoardId, workspaceId, effortPresets, onMoveToBoard,
+  ticket, agents, channels, workspaceTickets, typingIndicators, workspaceId,
+  onClose, onUpdate, onMove, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSaveDraft, onAddComment, onSetCommentStatus, onSelectTicket,
   scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
-  // ─── Ticket role assignments ────────────────────────────
-  // Per-ticket fetch — the board endpoint doesn't include assignments yet,
-  // and we want fresh data on panel open. Refetch when the ticket id or
-  // updated_at changes so a write through onSetRoleAssignment converges.
-  const [roleAssignments, setRoleAssignments] = useState<TicketRoleAssignmentRow[]>([]);
-  // Buffered role-assignment edits keyed by role id. Drains to the server on
-  // Save (clearing matching keys); cleared wholesale on Discard / ticket
-  // switch. MULTI-HOLDER (T6): each value is the role's FULL desired holder set
-  // (add/remove chips mutate it); Save flushes it as role_assignments[].
-  const [roleDrafts, setRoleDrafts] = useState<Record<string, HolderDraft[]>>({});
   // True while a Save round-trip is in flight — disables the Save/Discard
-  // footer buttons and the role pickers so the user can't fire a second
-  // commit before the first has resolved.
+  // footer and the assignee editor so a second commit can't fire before the
+  // first has resolved.
   const [savingDraft, setSavingDraft] = useState(false);
-
-  // ─── 다중담당자·합의 (T6) ────────────────────────────────
-  // 현재 합의 상태(역할홀더별 agree/pending/object) + 열린 이동 제안. root 티켓만
-  // 대상 — 서버 REST 브릿지(getTicketConsensus)로 조회하고 consensus_update SSE +
-  // updated_at 변화로 라이브 갱신한다.
-  const [consensus, setConsensus] = useState<ConsensusView | null>(null);
-  // propose / vote / override 요청 in-flight — 액션 버튼 중복 클릭 방지.
-  const [consensusBusy, setConsensusBusy] = useState(false);
-  // 이동 제안 대상 컬럼 id(제안 picker 버퍼).
-  const [proposeTarget, setProposeTarget] = useState<string>('');
   const { user } = useAuth();
   const { showToast } = useToast();
   const confirm = useConfirm();
-
-  // Per-role in-flight state for the Re-trigger buttons — prevents
-  // double-fires while the network round trip is pending.
-  const [retriggering, setRetriggering] = useState<Record<string, boolean>>({});
-  const [triggerMenuOpen, setTriggerMenuOpen] = useState(false);
-  const [commentSummary, setCommentSummary] = useState<any>({ status: 'idle' });
-  const [summaryStarting, setSummaryStarting] = useState(false);
-
-  // "Move to board" picker state. Boards in the workspace are loaded lazily
-  // on first menu open and cached for the panel's lifetime so re-opening the
-  // menu is instant. The cache is keyed by workspace_id; if the active
-  // ticket's workspace ever changes (it shouldn't on a single panel mount),
-  // a refetch happens automatically.
-  const [moveBoardMenuOpen, setMoveBoardMenuOpen] = useState(false);
-  const [moveBoardOptions, setMoveBoardOptions] = useState<MoveToBoardOption[]>([]);
-  const [moveBoardLoading, setMoveBoardLoading] = useState(false);
-  const [moveBoardWorkspaceLoaded, setMoveBoardWorkspaceLoaded] = useState<string | null>(null);
-  const [movingToBoard, setMovingToBoard] = useState(false);
 
   // Navigation stack: array of ticket IDs navigated within this panel
   const [navStack, setNavStack] = useState<string[]>([ticket.id]);
@@ -666,43 +159,6 @@ export default function TicketPanel({
 
   // Derive active ticket from the root ticket tree
   const activeTicket = findInTree(ticket, activePanelId) || ticket;
-
-  const refreshCommentSummary = useCallback(async () => {
-    try { setCommentSummary(await api.getCommentSummary(activePanelId)); } catch { /* retry on next poll */ }
-  }, [activePanelId]);
-
-  useEffect(() => { void refreshCommentSummary(); }, [refreshCommentSummary]);
-  useEffect(() => {
-    if (!isCommentSummaryInProgress(commentSummary?.status)) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await api.getCommentSummary(activePanelId);
-        setCommentSummary(next);
-        if (next.status === 'completed') window.location.reload();
-      } catch { /* keep originals visible and poll again */ }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [activePanelId, commentSummary?.status]);
-
-  const handleStartCommentSummary = useCallback(async () => {
-    if (summaryStarting || isCommentSummaryInProgress(commentSummary?.status)) return;
-    const accepted = await confirm({
-      title: 'Replace comments with a summary?',
-      message: 'All existing comments will be replaced by one agent-generated summary after it succeeds. Originals remain unchanged if summarization fails.',
-      confirmLabel: 'Summarize and replace',
-      danger: true,
-    });
-    if (!accepted) return;
-    setSummaryStarting(true);
-    try {
-      const run = await api.startCommentSummary(activePanelId);
-      setCommentSummary(run);
-      showToast(run.status === 'pending' ? 'Comment summary started' : 'Summary already in progress', 'success');
-    } catch (e: any) {
-      setCommentSummary({ status: 'failed', error: e?.message || 'Failed to start summary' });
-      showToast(e?.message || 'Failed to start comment summary', 'error');
-    } finally { setSummaryStarting(false); }
-  }, [activePanelId, commentSummary?.status, confirm, showToast, summaryStarting]);
 
   // 헤더의 Ticket ID pill 클릭 → 현재 활성 티켓의 전체 ID 를 클립보드에 복사.
   // 성공 시 success toast + pill 을 잠깐 초록으로 강조하고, 실패 시 error toast.
@@ -815,148 +271,125 @@ export default function TicketPanel({
     setNavStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
   }, []);
 
-  // Lazy-load workspace boards when the move menu first opens. Excludes the
-  // current board. Each entry carries a flat list of {id, name} columns so
-  // the picker can let the user pick a specific column without a second
-  // round trip per board (api.getBoards alone doesn't include columns).
-  const loadMoveBoardOptions = useCallback(async () => {
-    const wsId = workspaceId || '';
-    if (!wsId) {
-      setMoveBoardOptions([]);
-      return;
-    }
-    if (moveBoardWorkspaceLoaded === wsId) return;
-    setMoveBoardLoading(true);
-    try {
-      const all = await api.getBoards(wsId);
-      const candidates = (all || []).filter((b: any) => !b.archived_at && b.id !== currentBoardId);
-      const detailed = await Promise.all(
-        candidates.map(async (b: any) => {
-          try {
-            const full = await api.getBoard(b.id);
-            const cols = ((full?.columns || []) as any[])
-              .slice()
-              .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-              .map(c => ({ id: c.id, name: c.name }));
-            return { id: b.id, name: b.name, columns: cols } as MoveToBoardOption;
-          } catch {
-            return { id: b.id, name: b.name, columns: [] } as MoveToBoardOption;
-          }
-        }),
-      );
-      setMoveBoardOptions(detailed);
-      setMoveBoardWorkspaceLoaded(wsId);
-    } finally {
-      setMoveBoardLoading(false);
-    }
-  }, [workspaceId, currentBoardId, moveBoardWorkspaceLoaded]);
+  const wsId = workspaceId || activeTicket.workspace_id || getActiveWorkspaceId() || '';
+  const isRoot = activeTicket.depth === 0 && !activeTicket.parent_id;
 
-  const handleOpenMoveBoardMenu = useCallback(() => {
-    setMoveBoardMenuOpen(true);
-    loadMoveBoardOptions().catch(() => { /* loading flag already cleared */ });
-  }, [loadMoveBoardOptions]);
+  // In-flight flags below are keyed by ticket id: the panel is reused across
+  // tickets (and across the child nav stack), so a Run / move / archive still
+  // pending on one ticket must not disable or annotate the next one.
 
-  const handleMoveToBoard = useCallback(async (targetBoardId: string, columnId?: string) => {
-    if (!onMoveToBoard) return;
-    setMovingToBoard(true);
+  // Status moves immediately (not part of the Save draft). The picked status
+  // shows until the refreshed ticket prop lands.
+  const [statusPending, setStatusPending] = useState<{ id: string; status: TicketStatus } | null>(null);
+  const pendingStatus = statusPending?.id === activeTicket.id ? statusPending.status : null;
+  const moveTicket = useCallback(async (ticketId: string, status: TicketStatus) => {
     try {
-      await onMoveToBoard(activeTicket.id, targetBoardId, columnId ? { target_column_id: columnId } : undefined);
-      const dest = moveBoardOptions.find(b => b.id === targetBoardId);
-      const colName = columnId ? dest?.columns.find(c => c.id === columnId)?.name : undefined;
-      showToast(
-        `Moved to ${dest?.name || 'board'}${colName ? ` → ${colName}` : ''}`,
-        'success',
-      );
-      // Ticket is no longer on this board — close the panel so the user
-      // isn't left staring at stale state.
-      onClose();
+      await Promise.resolve(onMove ? onMove(ticketId, status) : api.moveTicket(ticketId, status));
     } catch (e: any) {
       showToast(`Move failed: ${e?.message || 'unknown error'}`, 'error');
-    } finally {
-      setMovingToBoard(false);
     }
-  }, [onMoveToBoard, activeTicket.id, moveBoardOptions, showToast, onClose]);
+  }, [onMove, showToast]);
+  const handleStatusChange = useCallback(async (status: TicketStatus) => {
+    const id = activeTicket.id;
+    if (status === activeTicket.status || pendingStatus) return;
+    setStatusPending({ id, status });
+    try { await moveTicket(id, status); } finally { setStatusPending(cur => (cur?.id === id ? null : cur)); }
+  }, [activeTicket.id, activeTicket.status, pendingStatus, moveTicket]);
 
-  const handleRetrigger = useCallback(async (slug: string, label: string, holderName?: string) => {
-    if (retriggering[slug]) return;
-    setRetriggering(prev => ({ ...prev, [slug]: true }));
+  // Manual "Run" (root tickets only) — asks the dispatcher to (re)send the
+  // ticket to its assignee now. A refusal carries the reason (unassigned,
+  // pending, paused, at capacity, …), kept inline under the assignee too.
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [runRefusal, setRunRefusal] = useState<{ id: string; reason: string } | null>(null);
+  const running = runningId === activeTicket.id;
+  const runNote = runRefusal?.id === activeTicket.id ? runRefusal.reason : null;
+  const handleRun = useCallback(async () => {
+    const id = activeTicket.id;
+    if (runningId === id) return;
+    setRunningId(id);
+    setRunRefusal(null);
     try {
-      const result = await api.triggerAgent(activeTicket.id, slug as any);
-      showToast(`Triggered ${label}${holderName ? ` (${holderName})` : ''}`, 'success');
-      return result;
+      const res = await api.triggerTicket(id);
+      if (res?.dispatched) {
+        showToast('담당자에게 실행을 보냈습니다', 'success');
+      } else {
+        const reason = triggerReasonLabel(res?.reason);
+        setRunRefusal({ id, reason });
+        showToast(res?.reason === 'queued' ? reason : `디스패치되지 않음: ${reason}`, 'info');
+      }
     } catch (e: any) {
-      showToast(`Trigger failed: ${e?.message || 'unknown error'}`, 'error');
+      showToast(`Run failed: ${e?.message || 'unknown error'}`, 'error');
     } finally {
-      setRetriggering(prev => ({ ...prev, [slug]: false }));
+      setRunningId(cur => (cur === id ? null : cur));
     }
-  }, [activeTicket.id, retriggering, showToast]);
+  }, [activeTicket.id, runningId, showToast]);
+
+  const [archivingId, setArchivingId] = useState<string | null>(null);
+  const handleToggleArchive = useCallback(async () => {
+    const id = activeTicket.id;
+    if (archivingId === id) return;
+    const archived = !!activeTicket.archived_at;
+    setArchivingId(id);
+    try {
+      if (archived) await api.unarchiveTicket(id);
+      else await api.archiveTicket(id);
+      showToast(archived ? 'Unarchived' : 'Archived', 'success');
+    } catch (e: any) {
+      showToast(`${archived ? 'Unarchive' : 'Archive'} failed: ${e?.message || 'unknown error'}`, 'error');
+    } finally {
+      setArchivingId(cur => (cur === id ? null : cur));
+    }
+  }, [activeTicket.id, activeTicket.archived_at, archivingId, showToast]);
+  const archiveBusy = archivingId === activeTicket.id;
 
   // ESC key requests close — the real handler is installed below, after
   // requestClose is in scope (which depends on form-draft state declared
   // further down). Closing with unsaved edits prompts.
 
-  // Form state — sync when activeTicket changes.
-  const [title, setTitle] = useState(activeTicket.title);
-  const [description, setDescription] = useState(activeTicket.description);
+  // Detail-tab Save/Discard draft (ticketPanel/ticketDraft.ts). Reset on
+  // ticket switch only — remote updated_at bumps must NOT clobber unsaved edits.
+  const [draft, setDraft] = useState<TicketDraft>(() => draftFromTicket(activeTicket));
+  const setDraftField = useCallback(<K extends keyof TicketDraft>(key: K, value: TicketDraft[K]) => {
+    setDraft(prev => ({ ...prev, [key]: value }));
+  }, []);
+  const draftTags = effectiveTags(draft, activeTicket);
+  const draftAssignee = effectiveAssignee(draft, activeTicket);
   // Dynamic Description textarea sizing: clamp visible rows between 10 and 20,
   // growing with the content (explicit newlines + estimated soft-wrap at ~80
   // cols). Keeps short tickets compact-ish while long ones stay readable
   // without the user having to drag the resize handle every time.
   const descriptionRows = useMemo(() => {
-    const text = description || '';
+    const text = draft.description || '';
     const wrapWidth = 80;
     const visualLines = text.split('\n').reduce(
       (acc, line) => acc + Math.max(1, Math.ceil(line.length / wrapWidth)),
       0,
     );
     return Math.max(10, Math.min(20, visualLines));
-  }, [description]);
-  const [priority, setPriority] = useState(activeTicket.priority);
-  // Abstract effort preset id ('' = board default / no override). Resolved
-  // per-CLI on the server at dispatch; here it's just the preset slug.
-  const [effortPreset, setEffortPreset] = useState<string>(activeTicket.effort_preset || '');
-  const [runtimeProfile, setRuntimeProfile] = useState<string>(activeTicket.cli_runtime_profile || '');
-  const [runtimeProfiles, setRuntimeProfiles] = useState<ClaudeBackendProfile[]>([]);
-  useEffect(() => {
-    if (!workspaceId) { setRuntimeProfiles([]); return; }
-    let alive = true;
-    api.listClaudeBackendProfiles().then(data => {
-      if (alive) setRuntimeProfiles(data.profiles);
-    }).catch(() => { if (alive) setRuntimeProfiles([]); });
-    return () => { alive = false; };
-  }, [workspaceId]);
-  const [reviewerId, setReviewerId] = useState(activeTicket.reviewer_id || '');
-  const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>(activeTicket.channel_ids || []);
-  // Base repository / branch picker state. The repo list is filtered to
-  // type='repository' resources visible from this workspace.
-  // Branch list is fetched lazily when a repo is selected (git ls-remote).
-  const [baseRepoId, setBaseRepoId] = useState<string>(activeTicket.base_repo_resource_id || '');
-  const [baseBranch, setBaseBranch] = useState<string>(activeTicket.base_branch || '');
-  // Next ticket picker — empty string = unset. Drafts are committed via the
-  // same Save/Discard footer as the rest of the form (dirtyTicketFields).
-  const [nextTicketId, setNextTicketId] = useState<string>(activeTicket.next_ticket_id || '');
-  // Per-ticket on-done action binding (ticket 16a6339c). `onDoneActionIds` is
-  // the draft set the picker mutates; committed via the Save/Discard footer
-  // (dirtyTicketFields) as `update_ticket(on_done_action_ids=[...])`. The
-  // candidate list is every Action in the workspace — method (a) dispatch only
-  // checks workspace + enabled, so any workspace Action is
-  // validly bindable here.
-  const [onDoneActionIds, setOnDoneActionIds] = useState<string[]>(activeTicket.on_done_action_ids || []);
-  // Cross-board handoff relay draft (ticket ac21a745). null = no relay. Committed
-  // via the same Save/Discard footer (dirtyTicketFields) as update_ticket(handoff_spec).
-  const [handoffSpec, setHandoffSpec] = useState<HandoffSpec | null>(
-    activeTicket.handoff_spec && (activeTicket.handoff_spec.hops || []).length > 0 ? activeTicket.handoff_spec : null,
+  }, [draft.description]);
+
+  const { projects, loading: projectsLoading } = useProjects(wsId || null);
+  // The workspace list wins; until it loads, the full ticket's own project
+  // summary (it carries host_folders) still lets the assignee editor prefill
+  // the project's folder on the chosen host.
+  const draftProject = useMemo(
+    () => projects.find(p => p.id === draft.projectId)
+      || (activeTicket.project && activeTicket.project.id === draft.projectId ? activeTicket.project : null),
+    [projects, draft.projectId, activeTicket.project],
+  );
+  // Tag suggestions: every tag in the loaded pool, most used first.
+  // plus the workspace-wide `/ticket-tags` counts (the page may be filtered).
+  const workspaceTags = useTicketTags(wsId || null);
+  const tagPool = useMemo(
+    () => mergeTagSuggestions(collectTagPool(workspaceTickets), workspaceTags),
+    [workspaceTickets, workspaceTags],
   );
   const [actionOptions, setActionOptions] = useState<Action[]>([]);
-  const [repoOptions, setRepoOptions] = useState<Resource[]>([]);
-  const [branchOptions, setBranchOptions] = useState<RepoBranch[]>([]);
-  const [branchesLoading, setBranchesLoading] = useState(false);
-  const [branchesError, setBranchesError] = useState<string | null>(null);
   const [commentContent, setCommentContent] = useState('');
   // Staged attachments — kept in memory until the user hits Send. Two kinds:
   //   • file     — a freshly picked File, uploaded as a Resource on Send (raw
   //                bytes, no base64-in-JSON, so large videos don't 413).
-  //   • resource — a reference to an already-uploaded board/workspace Resource.
+  //   • resource — a reference to an already-uploaded workspace Resource.
   // On Send, files upload first; then the comment POST carries only
   // attachment_resource_ids (never the bytes), which is what fixes the 10MB
   // body 413 that silently dropped video comments (ticket ff3e7337).
@@ -1003,11 +436,8 @@ export default function TicketPanel({
   // set. Seeded from activeTicket.prerequisites (present only on the
   // loadTicketFull path), then refreshed via api.listPrerequisites so the
   // section is authoritative regardless of which load path supplied the prop.
-  // prereqPickId / prereqReason back the inline "add prerequisite" picker.
   const [prereqRows, setPrereqRows] = useState<TicketPrerequisiteRow[]>(activeTicket.prerequisites || []);
   const [prereqBusy, setPrereqBusy] = useState(false);
-  const [prereqPickId, setPrereqPickId] = useState<string>('');
-  const [prereqReason, setPrereqReason] = useState<string>('');
   const [prereqError, setPrereqError] = useState<string | null>(null);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   // Modal preview can be an image OR a video — discriminate by mimetype so
@@ -1016,37 +446,15 @@ export default function TicketPanel({
   const [imagePreview, setImagePreview] = useState<{ src: string; mimetype?: string } | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
 
-  // Ticket-level attachments — file_data is fetched on demand (download/preview)
-  // so the metadata list can stay cheap. Seeded from the ticket payload, then
-  // refreshed via api.listTicketAttachments after each mutation so concurrent
-  // edits across tabs converge.
-  const [ticketAttachments, setTicketAttachments] = useState<TicketAttachmentMeta[]>(activeTicket.attachments || []);
   const [duplicateDecisionBusy, setDuplicateDecisionBusy] = useState(false);
   const [duplicateDecisionDone, setDuplicateDecisionDone] = useState(false);
-  const [attachmentBusy, setAttachmentBusy] = useState(false);
-  const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   // Form drafts reset on ticket switch only. Remote updates (updated_at
   // bumps from cross-tab edits, comments, etc.) must NOT clobber the user's
   // unsaved edits — the Save/Discard footer is the only commit/rollback
   // path now that the panel buffers all field edits.
   useEffect(() => {
-    setTitle(activeTicket.title);
-    setDescription(activeTicket.description);
-    setPriority(activeTicket.priority);
-    setEffortPreset(activeTicket.effort_preset || '');
-    setRuntimeProfile(activeTicket.cli_runtime_profile || '');
-    setSelectedChannelIds(activeTicket.channel_ids || []);
-    setBaseRepoId(activeTicket.base_repo_resource_id || '');
-    setBaseBranch(activeTicket.base_branch || '');
-    setNextTicketId(activeTicket.next_ticket_id || '');
-    setOnDoneActionIds(activeTicket.on_done_action_ids || []);
-    setHandoffSpec(
-      activeTicket.handoff_spec && (activeTicket.handoff_spec.hops || []).length > 0 ? activeTicket.handoff_spec : null,
-    );
-    setBranchOptions([]);
-    setBranchesError(null);
-    setRoleDrafts({});
+    setDraft(draftFromTicket(activeTicket));
     setCommentContent('');
     setCommentAttachments([]);
     setPendingReasonDraft(activeTicket.pending_reason || '');
@@ -1057,6 +465,7 @@ export default function TicketPanel({
     // deep-link from a mention notification — that lives in the comments
     // tab and the dedicated effect below routes there).
     setActiveTab(activeTicket.pending_user_action ? 'user' : 'detail');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTicket.id]);
 
   const handleDuplicateDecision = useCallback(async (candidateId: string | null) => {
@@ -1080,45 +489,16 @@ export default function TicketPanel({
   // Mention deep-link override — when a comment id is queued (at panel mount
   // or arriving on the currently-open ticket), jump to the comments tab so
   // the scroll-and-highlight has somewhere to land. Skip the null clear:
-  // Board.tsx resets scrollToCommentId after the highlight fires, and re-
+  // the page resets scrollToCommentId after the highlight fires, and re-
   // running the form-drafts reset above would wipe the user's unsaved edits
   // and snap the tab back to detail mid-highlight.
   useEffect(() => {
     if (scrollToCommentId) setActiveTab('comments');
   }, [scrollToCommentId]);
 
-  // Authoritative server-side facts — the reviewer id and the attachment list
-  // — keep refreshing on updated_at because they have no client-side draft
-  // concept. The form drafts above are isolated from this stream.
-  useEffect(() => {
-    setReviewerId(activeTicket.reviewer_id || '');
-    // Seed from the ticket payload (only loadTicketFull populates this; the
-    // board listing doesn't), then fetch fresh metadata so the list is
-    // always authoritative regardless of which load path supplied the prop.
-    setTicketAttachments(activeTicket.attachments || []);
-    setAttachmentError(null);
-    let cancelled = false;
-    api.listTicketAttachments(activeTicket.id)
-      .then(rows => { if (!cancelled) setTicketAttachments(rows || []); })
-      .catch(() => { /* keep seeded list — non-blocking */ });
-    return () => { cancelled = true; };
-  }, [activeTicket.id, activeTicket.updated_at]);
-
-  // Cross-tab sync — board_update fires on every activity event, so refresh
-  // the attachments list when our ticket is the target. Filtering by
-  // field_changed='attachment' avoids refetching on unrelated updates
-  // (assignee change, comment add, etc.).
-  useBoardStreamEvent('board_update', useCallback((data: any) => {
-    if (!data || data.ticket_id !== activeTicket.id) return;
-    if (data.field_changed !== 'attachment') return;
-    api.listTicketAttachments(activeTicket.id)
-      .then(rows => setTicketAttachments(rows || []))
-      .catch(() => { /* non-blocking */ });
-  }, [activeTicket.id]));
-
   // Auto-route to the User tab when this ticket transitions into pending state
   // from elsewhere (agent flipped pending_user_action while the panel is open).
-  // The activeTicket prop is bumped via board refresh on the same SSE event,
+  // The activeTicket prop is bumped via the page's refresh on the same SSE event,
   // so this effect catches the transition without needing to listen to SSE
   // directly. Conservative: only switch when not already on Comments/Activity
   // (avoid stealing focus mid-read).
@@ -1166,7 +546,7 @@ export default function TicketPanel({
   // Resume posts the user's response (if any) as a regular ticket comment
   // BEFORE flipping pending_user_action off, so the comment lands in the
   // thread before the dispatch loop wakes the assignee on the next trigger.
-  // onAddComment is fire-and-forget per its prop type but Board's wrapper
+  // onAddComment is fire-and-forget per its prop type but the page's wrapper
   // returns a Promise; Promise.resolve normalises the await target so we
   // sequence reliably either way.
   const handleUnpendTicket = useCallback(async () => {
@@ -1185,14 +565,12 @@ export default function TicketPanel({
   }, [activeTicket.id, userResponseDraft, onAddComment]);
 
   // Load the prerequisite link set (ticket 48d14fff). Seeds from the ticket
-  // payload first (loadTicketFull populates it; the board listing doesn't),
-  // then fetches fresh so the section is authoritative. Refetched on
-  // updated_at so an agent adding/clearing a prereq elsewhere converges here.
+  // payload first (only the full ticket read populates it), then fetches fresh
+  // so the section is authoritative. Refetched on updated_at so an agent
+  // adding/clearing a prereq elsewhere converges here.
   useEffect(() => {
     setPrereqRows(activeTicket.prerequisites || []);
     setPrereqError(null);
-    setPrereqPickId('');
-    setPrereqReason('');
     let cancelled = false;
     api.listPrerequisites(activeTicket.id)
       .then(res => { if (!cancelled) setPrereqRows(res?.prerequisites || []); })
@@ -1200,27 +578,24 @@ export default function TicketPanel({
     return () => { cancelled = true; };
   }, [activeTicket.id, activeTicket.updated_at]);
 
-  // Add a prerequisite from the inline picker. The REST endpoint returns the
-  // full updated ticket (incl. the refreshed `prerequisites` array), so adopt
-  // that directly rather than issuing a follow-up GET. The SSE board_update
-  // (fired by the prerequisite_added activity) keeps pending_on_tickets and
-  // the board card in sync.
-  const handleAddPrerequisite = useCallback(async () => {
-    const pid = prereqPickId.trim();
-    if (!pid) return;
+  // The REST endpoints return the full updated ticket (incl. the refreshed
+  // `prerequisites` array), so adopt that directly rather than issuing a
+  // follow-up GET. The SSE board_update (fired by the prerequisite activity)
+  // keeps pending_on_tickets and the list row in sync.
+  const handleAddPrerequisite = useCallback(async (prerequisiteId: string, reason: string): Promise<boolean> => {
     setPrereqBusy(true);
     setPrereqError(null);
     try {
-      const updated = await api.addPrerequisites(activeTicket.id, [pid], prereqReason.trim() || undefined);
+      const updated = await api.addPrerequisites(activeTicket.id, [prerequisiteId], reason || undefined);
       setPrereqRows(updated?.prerequisites || []);
-      setPrereqPickId('');
-      setPrereqReason('');
+      return true;
     } catch (e: any) {
       setPrereqError(e?.message || 'Failed to add prerequisite');
+      return false;
     } finally {
       setPrereqBusy(false);
     }
-  }, [activeTicket.id, prereqPickId, prereqReason]);
+  }, [activeTicket.id]);
 
   const handleRemovePrerequisite = useCallback(async (prereqId: string) => {
     setPrereqBusy(true);
@@ -1235,71 +610,20 @@ export default function TicketPanel({
     }
   }, [activeTicket.id]);
 
-  // Fetch role assignments for the active ticket. Refetched on
-  // activeTicket.updated_at so writes through onSetRoleAssignment (which
-  // triggers a board refresh and bumps updated_at) converge.
+  // Seed @-mention candidates from the agents prop immediately so the
+  // dropdown works before the workspace mention-candidates call returns.
   useEffect(() => {
+    setMentionCandidates(agents.map(a => ({ type: 'agent' as const, id: a.id, name: formatAgentDisplayName(a) })));
+    if (!wsId) return;
     let cancelled = false;
-    api.listTicketRoleAssignments(activeTicket.id)
-      .then(rows => { if (!cancelled) setRoleAssignments(rows || []); })
-      .catch(() => { if (!cancelled) setRoleAssignments([]); });
-    return () => { cancelled = true; };
-  }, [activeTicket.id, activeTicket.updated_at]);
-
-  // ─── 합의 상태 조회/갱신 (T6) ────────────────────────────
-  // root 티켓만 대상. updated_at 변화(이동/투표가 보드 refresh 로 bump)에 재조회 →
-  // 수렴. 실패/비-root 는 null(패널 숨김).
-  const refreshConsensus = useCallback(async () => {
-    if (activeTicket.depth !== 0) { setConsensus(null); return; }
-    try {
-      const v = await api.getTicketConsensus(activeTicket.id);
-      setConsensus(v);
-    } catch {
-      setConsensus(null);
-    }
-  }, [activeTicket.id, activeTicket.depth]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (activeTicket.depth !== 0) { setConsensus(null); return; }
-    api.getTicketConsensus(activeTicket.id)
-      .then(v => { if (!cancelled) setConsensus(v); })
-      .catch(() => { if (!cancelled) setConsensus(null); });
-    return () => { cancelled = true; };
-  }, [activeTicket.id, activeTicket.updated_at, activeTicket.depth]);
-
-  // 라이브 갱신: consensus_update SSE 는 카운트만 실으므로, 이 티켓 대상 이벤트가
-  // 오면 상세 홀더 상태를 재조회한다.
-  useBoardStreamEvent('consensus_update', (data: any) => {
-    if (data?.ticket_id === activeTicket.id) refreshConsensus();
-  });
-
-  // Seed @-mention candidates from props + ticket role_ids immediately so the
-  // dropdown works before the workspace-user API call returns.
-  useEffect(() => {
-    const agentById = new Map(agents.map(a => [a.id, a]));
-    const roleItems: MentionCandidate[] = [];
-    const pushRole = (key: 'assignee' | 'reporter' | 'reviewer', id: string | undefined) => {
-      if (!id) return;
-      const a = agentById.get(id);
-      roleItems.push({ type: 'role', id: key, name: key, sublabel: a ? formatAgentDisplayName(a) : id });
-    };
-    pushRole('assignee', activeTicket.assignee_id);
-    pushRole('reporter', activeTicket.reporter_id);
-    pushRole('reviewer', activeTicket.reviewer_id);
-    const agentItems: MentionCandidate[] = agents.map(a => ({ type: 'agent', id: a.id, name: formatAgentDisplayName(a) }));
-    setMentionCandidates([...roleItems, ...agentItems]);
-
-    const workspaceId = getActiveWorkspaceId() || '';
-    if (!workspaceId) return;
-    api.getMentionCandidates(workspaceId, activeTicket.id)
+    api.getMentionCandidates(wsId, activeTicket.id)
       .then(data => {
+        if (cancelled) return;
         const next: MentionCandidate[] = [
-          ...data.role_shortcuts.map(r => ({ type: 'role' as const, id: r.key, name: r.key, sublabel: r.label.replace(`${r.key} `, '') })),
           ...data.users.map(u => ({ type: 'user' as const, id: u.id, name: u.name })),
           // Enrich server-returned agent rows with manager_name from the
-          // local agents list (which carries it). Falls back to bare name
-          // when a candidate isn't in the local list yet.
+          // local agents list (which carries it). Falls back to the server
+          // row's own manager_name when a candidate isn't in the local list.
           ...data.agents.map(a => {
             const full = agents.find(x => x.id === a.id);
             return { type: 'agent' as const, id: a.id, name: formatAgentDisplayName(full || a) };
@@ -1314,223 +638,40 @@ export default function TicketPanel({
         }));
       })
       .catch(() => { /* keep fallback */ });
-  }, [activeTicket.id, activeTicket.assignee_id, activeTicket.reporter_id, activeTicket.reviewer_id, agents]);
+    return () => { cancelled = true; };
+  }, [activeTicket.id, agents, wsId]);
 
-  // Order-insensitive equality for channel id arrays — the server stores them
-  // as a list but neither side guarantees a stable order.
-  const channelIdsEqual = (a: string[], b: string[]) => {
-    if (a.length !== b.length) return false;
-    const sa = [...a].sort();
-    const sb = [...b].sort();
-    for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
-    return true;
-  };
-
-  // Order-SENSITIVE equality. on_done_action_ids is a sequence, not a set —
-  // its array order IS the dispatch order — so a pure reorder (same id set,
-  // different positions) must still register as dirty. channelIdsEqual sorts
-  // before comparing and would mask that, leaving the Save button disabled.
-  const idsEqualOrdered = (a: string[], b: string[]) =>
-    a.length === b.length && a.every((v, i) => v === b[i]);
-
-  // Canonical equality for the handoff relay spec (ticket ac21a745). Both sides
-  // normalize to null when there are no hops, then compare hop JSON — so a draft
-  // that only reorders/edits a hop registers dirty, and null↔empty is a no-op.
-  const handoffSpecEqual = (a: HandoffSpec | null, b: HandoffSpec | undefined) => {
-    const norm = (s: HandoffSpec | null | undefined) =>
-      s && (s.hops || []).length > 0 ? JSON.stringify(s.hops) : '';
-    return norm(a) === norm(b);
-  };
-
-  // Ticket-field drafts that differ from the server-side row. Empty when the
-  // form matches the ticket exactly. The Save handler PATCHes whatever lives
-  // in this object in a single round trip, which collapses the previous
-  // per-field activity log entries (and their fanned-out trigger reservations)
-  // into a single ticket_update event.
-  const dirtyTicketFields = useMemo(() => {
-    const out: Record<string, any> = {};
-    if (title !== activeTicket.title) out.title = title;
-    if ((description || '') !== (activeTicket.description || '')) out.description = description;
-    if (priority !== activeTicket.priority) out.priority = priority;
-    if ((effortPreset || '') !== (activeTicket.effort_preset || '')) {
-      // Empty draft → null clears the per-ticket override (server treats
-      // null/'' as "use the board default at dispatch").
-      out.effort_preset = effortPreset || null;
-    }
-    if ((runtimeProfile || '') !== (activeTicket.cli_runtime_profile || '')) {
-      out.cli_runtime_profile = runtimeProfile || null;
-    }
-    if (!channelIdsEqual(selectedChannelIds, activeTicket.channel_ids || [])) {
-      out.channel_ids = selectedChannelIds;
-    }
-    if ((baseRepoId || '') !== (activeTicket.base_repo_resource_id || '')) {
-      out.base_repo_resource_id = baseRepoId || null;
-    }
-    if ((baseBranch || '') !== (activeTicket.base_branch || '')) {
-      out.base_branch = baseBranch || null;
-    }
-    if ((nextTicketId || '') !== (activeTicket.next_ticket_id || '')) {
-      // Empty draft → null clears the link on the server (REST + MCP both
-      // treat null/'' as "clear next_ticket_id"). Non-empty → the picked id.
-      out.next_ticket_id = nextTicketId || null;
-    }
-    if (!idsEqualOrdered(onDoneActionIds, activeTicket.on_done_action_ids || [])) {
-      // Order-SENSITIVE compare: array order is the dispatch order, so a pure
-      // reorder must flag the field dirty. An empty array clears the per-ticket
-      // binding server-side.
-      out.on_done_action_ids = onDoneActionIds;
-    }
-    if (!handoffSpecEqual(handoffSpec, activeTicket.handoff_spec)) {
-      // Object compare via canonical hop JSON. Draft null / empty hops → null,
-      // which the server treats as "clear the handoff relay".
-      out.handoff_spec = handoffSpec && (handoffSpec.hops || []).length > 0 ? handoffSpec : null;
-    }
-    return out;
-  }, [
-    title, description, priority, effortPreset, runtimeProfile, selectedChannelIds, baseRepoId, baseBranch, nextTicketId,
-    onDoneActionIds, handoffSpec,
-    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset, activeTicket.cli_runtime_profile,
-    activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
-    activeTicket.next_ticket_id, activeTicket.on_done_action_ids, activeTicket.handoff_spec,
-  ]);
-
-  // Current holders grouped by role id (multi-holder T6). roleAssignments is one
-  // row per (role, holder), so a role with N holders appears as N rows — group
-  // them into a holder list per role for both the chip picker and the dirty diff.
-  const holdersByRoleId = useMemo(() => {
-    const m = new Map<string, Array<{ type: 'agent' | 'user'; id: string; name: string }>>();
-    for (const r of roleAssignments) {
-      if (!r.holder) continue;
-      const list = m.get(r.role.id) || [];
-      list.push(r.holder);
-      m.set(r.role.id, list);
-    }
-    return m;
-  }, [roleAssignments]);
-
-  // Server-resolved holder display names keyed by holder id. The REST
-  // role-assignments projection resolves ids workspace-independently (and, per
-  // ST-7, with the <Manager>/<Agent> prefix), so this is the fallback when a
-  // holder's agent/user isn't in the workspace-scoped `agents`/`users` lists —
-  // an already-assigned cross-workspace agent then shows its name instead of a
-  // raw id (ticket 0cccf9b5).
-  const resolvedHolderNameById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of roleAssignments) {
-      if (r.holder) m.set(r.holder.id, r.holder.name);
-    }
-    return m;
-  }, [roleAssignments]);
-
-  // Role drafts that genuinely change the holder SET. A draft whose holder set
-  // equals the live set is dropped (no-op — e.g. add then remove the same one,
-  // or reorder). Compared as unordered key sets (holder order isn't meaningful).
-  const dirtyRoleDrafts = useMemo(() => {
-    const out: Record<string, HolderDraft[]> = {};
-    for (const [roleId, draft] of Object.entries(roleDrafts)) {
-      const currentKeys = new Set(
-        (holdersByRoleId.get(roleId) || []).map(h => holderDraftKey(holderToDraft(h))).filter(Boolean),
-      );
-      const draftKeys = new Set(draft.map(holderDraftKey).filter(Boolean));
-      const same = draftKeys.size === currentKeys.size && [...draftKeys].every(k => currentKeys.has(k));
-      if (!same) out[roleId] = draft;
-    }
-    return out;
-  }, [roleDrafts, holdersByRoleId]);
-
-  const isDirty = Object.keys(dirtyTicketFields).length > 0 || Object.keys(dirtyRoleDrafts).length > 0;
+  // Ticket-field drafts that differ from the server-side row, shaped as the
+  // PATCH body. The Save handler sends it in a single round trip (one
+  // ticket_update activity instead of one per field).
+  const dirtyTicketFields = useMemo(() => computeDirtyTicketFields(draft, activeTicket), [draft, activeTicket]);
+  const isDirty = Object.keys(dirtyTicketFields).length > 0;
 
   const handleDiscardDraft = useCallback(() => {
-    setTitle(activeTicket.title);
-    setDescription(activeTicket.description);
-    setPriority(activeTicket.priority);
-    setEffortPreset(activeTicket.effort_preset || '');
-    setRuntimeProfile(activeTicket.cli_runtime_profile || '');
-    setSelectedChannelIds(activeTicket.channel_ids || []);
-    setBaseRepoId(activeTicket.base_repo_resource_id || '');
-    setBaseBranch(activeTicket.base_branch || '');
-    setNextTicketId(activeTicket.next_ticket_id || '');
-    setOnDoneActionIds(activeTicket.on_done_action_ids || []);
-    setHandoffSpec(
-      activeTicket.handoff_spec && (activeTicket.handoff_spec.hops || []).length > 0 ? activeTicket.handoff_spec : null,
-    );
-    setRoleDrafts({});
-  }, [
-    activeTicket.title, activeTicket.description, activeTicket.priority, activeTicket.effort_preset, activeTicket.cli_runtime_profile,
-    activeTicket.channel_ids, activeTicket.base_repo_resource_id, activeTicket.base_branch,
-    activeTicket.next_ticket_id, activeTicket.on_done_action_ids, activeTicket.handoff_spec,
-  ]);
+    setDraft(draftFromTicket(activeTicket));
+  }, [activeTicket]);
 
   const handleSaveDraft = useCallback(async () => {
     if (savingDraft) return;
-    // Snapshot the in-flight commit so drafts the user adds DURING the save
-    // round trip survive — only the keys we actually sent get cleared on
-    // success, leaving newer edits ready for the next Save click.
-    const ticketFieldsToSave = dirtyTicketFields;
-    const roleDraftsToSave = { ...dirtyRoleDrafts };
-    const dirtyRoleIds = Object.keys(roleDraftsToSave);
-    if (Object.keys(ticketFieldsToSave).length === 0 && dirtyRoleIds.length === 0) return;
+    // Snapshot the in-flight commit so edits made DURING the save round trip
+    // survive (settleSavedDraft only drops overrides that were part of it).
+    const fieldsToSave = dirtyTicketFields;
+    const savedDraft = draft;
+    if (Object.keys(fieldsToSave).length === 0) return;
     setSavingDraft(true);
-    // Build the T1 role_assignments[] payload from the dirty holder sets. One
-    // entry per holder (repeated role_slug = multi-holder set); a dirty role
-    // whose set is empty emits a holder-less entry so the server CLEARS the slot.
-    const roleIdToSlug = new Map((workspaceRoles || []).map(r => [r.id, r.slug]));
-    const roleAssignmentsPayload: Array<{ role_slug: string; agent_id?: string; user_id?: string; runtime?: Record<string, any> }> = [];
-    for (const roleId of dirtyRoleIds) {
-      const slug = roleIdToSlug.get(roleId);
-      if (!slug) continue;
-      const holders = roleDraftsToSave[roleId].filter(h => h.agent_id || h.user_id || h.runtime);
-      if (holders.length === 0) {
-        roleAssignmentsPayload.push({ role_slug: slug }); // holder-less → clear
-      } else {
-        for (const h of holders) {
-          if (h.agent_id) roleAssignmentsPayload.push({ role_slug: slug, agent_id: h.agent_id });
-          else if (h.user_id) roleAssignmentsPayload.push({ role_slug: slug, user_id: h.user_id! });
-          // P4c-4: spec-direct holder.
-          else if (h.runtime) roleAssignmentsPayload.push({ role_slug: slug, runtime: h.runtime });
-        }
-      }
-    }
     try {
-      if (onSaveDraft) {
-        await onSaveDraft(activeTicket.id, ticketFieldsToSave, roleAssignmentsPayload);
-      } else {
-        // Legacy fallback (no onSaveDraft embedder): ticket fields via onUpdate,
-        // plus a best-effort SINGLE-holder role write (first holder) through
-        // onSetRoleAssignment. Multi-holder edits require onSaveDraft.
-        const ops: Array<Promise<unknown>> = [];
-        if (Object.keys(ticketFieldsToSave).length > 0) {
-          ops.push(Promise.resolve(onUpdate(activeTicket.id, ticketFieldsToSave)));
-        }
-        if (onSetRoleAssignment) {
-          for (const roleId of dirtyRoleIds) {
-            const raw = roleDraftsToSave[roleId].find(h => h.agent_id || h.user_id || h.runtime) || { agent_id: null, user_id: null };
-            // HolderDraft.runtime 는 null 가능 — 전송 shape 에 맞춰 null 을 제거한다.
-            const first: { agent_id?: string | null; user_id?: string | null; runtime?: Record<string, any> } = {
-              agent_id: raw.agent_id ?? null,
-              user_id: raw.user_id ?? null,
-              ...(raw.runtime ? { runtime: raw.runtime } : {}),
-            };
-            ops.push(Promise.resolve(onSetRoleAssignment(activeTicket.id, roleId, first)));
-          }
-        }
-        await Promise.all(ops);
-      }
-      // Only reached when the save resolved cleanly. A throw skips this block,
-      // so the role drafts the user committed stay buffered, the Save footer
-      // stays visible, and only the upstream error toast fires.
-      setRoleDrafts(prev => {
-        const next = { ...prev };
-        for (const k of dirtyRoleIds) delete next[k];
-        return next;
-      });
+      if (onSaveDraft) await onSaveDraft(activeTicket.id, fieldsToSave);
+      else await Promise.resolve(onUpdate(activeTicket.id, fieldsToSave));
+      // Only reached when the save resolved cleanly. A throw skips this, so
+      // the draft stays buffered and the Save footer stays visible.
+      setDraft(cur => settleSavedDraft(cur, savedDraft));
       showToast('Saved', 'success');
     } catch (e: any) {
       showToast(`Save failed: ${e?.message || 'unknown error'}`, 'error');
     } finally {
       setSavingDraft(false);
     }
-  }, [savingDraft, dirtyTicketFields, dirtyRoleDrafts, activeTicket.id, onSaveDraft, onUpdate, onSetRoleAssignment, showToast, workspaceRoles]);
+  }, [savingDraft, dirtyTicketFields, draft, activeTicket.id, onSaveDraft, onUpdate, showToast]);
 
   // Wrap close so X / Escape prompt before discarding unsaved edits. The
   // post-Delete close path uses raw onClose (the ticket is gone — there's
@@ -1559,26 +700,9 @@ export default function TicketPanel({
     return () => document.removeEventListener('keydown', handler);
   }, [requestClose]);
 
-  // Load the repository resources visible to this ticket at Workspace scope,
-  // then dedupe by id.
-  useEffect(() => {
-    const wsId = workspaceId || getActiveWorkspaceId() || '';
-    if (!wsId) {
-      setRepoOptions([]);
-      return;
-    }
-    let cancelled = false;
-    api.listResources(wsId, 'repository')
-      .then(rows => { if (!cancelled) setRepoOptions(rows || []); })
-      .catch(() => { if (!cancelled) setRepoOptions([]); });
-    return () => { cancelled = true; };
-  }, [workspaceId]);
-
   // Load the Action candidates for the "Run on Done" picker. Reusable Actions
-  // are Workspace-scoped, and method (a) per-ticket dispatch checks workspace
-  // + enabled.
+  // are Workspace-scoped, and per-ticket dispatch checks workspace + enabled.
   useEffect(() => {
-    const wsId = workspaceId || getActiveWorkspaceId() || '';
     if (!wsId) {
       setActionOptions([]);
       return;
@@ -1588,32 +712,7 @@ export default function TicketPanel({
       .then(rows => { if (!cancelled) setActionOptions(rows || []); })
       .catch(() => { if (!cancelled) setActionOptions([]); });
     return () => { cancelled = true; };
-  }, [workspaceId]);
-
-  // Lazy-load branches when the user selects a repo (or the ticket loads with
-  // one already pinned). git ls-remote runs server-side and can take a few
-  // seconds; we surface that with a loading flag rather than blocking the
-  // panel render.
-  useEffect(() => {
-    const wsId = workspaceId || getActiveWorkspaceId() || '';
-    if (!wsId || !baseRepoId) {
-      setBranchOptions([]);
-      setBranchesError(null);
-      return;
-    }
-    let cancelled = false;
-    setBranchesLoading(true);
-    setBranchesError(null);
-    api.listRepoBranches(baseRepoId, wsId)
-      .then(({ branches }) => { if (!cancelled) setBranchOptions(branches || []); })
-      .catch(err => {
-        if (cancelled) return;
-        setBranchOptions([]);
-        setBranchesError(err?.message || 'Failed to list branches');
-      })
-      .finally(() => { if (!cancelled) setBranchesLoading(false); });
-    return () => { cancelled = true; };
-  }, [workspaceId, baseRepoId]);
+  }, [wsId]);
 
   // Remove a staged attachment and revoke its object URL (files only — resource
   // /raw URLs aren't object URLs and don't need revoking).
@@ -1631,7 +730,7 @@ export default function TicketPanel({
     const input = document.createElement('input');
     input.type = 'file';
     // No mimetype restriction — comment attachments go through the Resource
-    // table the same as any other workspace/board asset, so the picker accepts
+    // table the same as any other workspace asset, so the picker accepts
     // PDFs, zips, videos, etc.
     input.multiple = true;
     input.onchange = (e) => {
@@ -1664,7 +763,7 @@ export default function TicketPanel({
     input.click();
   };
 
-  // ─── Reference an existing board/workspace Resource ──────────────
+  // ─── Reference an existing workspace Resource ──────────────
   // The design-recommended path: instead of re-uploading bytes, point the
   // comment at a Resource that already exists. The comment POST then carries
   // only the id (ticket ff3e7337).
@@ -1713,118 +812,6 @@ export default function TicketPanel({
     });
     setResourcePickerOpen(false);
   };
-
-  // ─── Ticket-level attachments ────────────────────────────────
-  const TICKET_ATTACHMENT_MAX = 20;
-  const TICKET_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
-
-  const handleAddTicketAttachments = useCallback(() => {
-    setAttachmentError(null);
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.onchange = async (e) => {
-      const files = (e.target as HTMLInputElement).files;
-      if (!files || files.length === 0) return;
-      const remaining = TICKET_ATTACHMENT_MAX - ticketAttachments.length;
-      if (remaining <= 0) {
-        setAttachmentError(`Maximum ${TICKET_ATTACHMENT_MAX} attachments per ticket`);
-        return;
-      }
-      const payload: { file_name: string; file_mimetype: string; file_data: string }[] = [];
-      const oversized: string[] = [];
-      for (let i = 0; i < files.length && payload.length < remaining; i++) {
-        const file = files[i];
-        if (file.size > TICKET_ATTACHMENT_SIZE_BYTES) {
-          oversized.push(file.name);
-          continue;
-        }
-        const data = await fileToBase64(file);
-        payload.push({
-          file_name: file.name,
-          file_mimetype: file.type || 'application/octet-stream',
-          file_data: data,
-        });
-      }
-      if (payload.length === 0) {
-        if (oversized.length > 0) {
-          setAttachmentError(`Skipped — exceeds 10MB: ${oversized.join(', ')}`);
-        }
-        return;
-      }
-      setAttachmentBusy(true);
-      try {
-        const saved = await api.addTicketAttachments(activeTicket.id, payload);
-        setTicketAttachments(prev => [...saved, ...prev]);
-        if (oversized.length > 0) {
-          setAttachmentError(`Skipped — exceeds 10MB: ${oversized.join(', ')}`);
-        }
-      } catch (err: any) {
-        setAttachmentError(err?.message || 'Upload failed');
-      } finally {
-        setAttachmentBusy(false);
-      }
-    };
-    input.click();
-  }, [activeTicket.id, ticketAttachments.length]);
-
-  const handleDeleteTicketAttachment = useCallback(async (attachmentId: string, fileName: string) => {
-    const ok = await confirm({ title: 'Delete attachment', message: `Delete attachment "${fileName}"?` });
-    if (!ok) return;
-    setAttachmentBusy(true);
-    setAttachmentError(null);
-    const prev = ticketAttachments;
-    setTicketAttachments(prev.filter(a => a.id !== attachmentId));
-    try {
-      await api.deleteTicketAttachment(activeTicket.id, attachmentId);
-    } catch (err: any) {
-      setTicketAttachments(prev);
-      setAttachmentError(err?.message || 'Delete failed');
-    } finally {
-      setAttachmentBusy(false);
-    }
-  }, [activeTicket.id, ticketAttachments, confirm]);
-
-  const handleDownloadTicketAttachment = useCallback(async (attachment: TicketAttachmentMeta) => {
-    setAttachmentError(null);
-    try {
-      const full = await api.getTicketAttachment(activeTicket.id, attachment.id);
-      if (!full?.file_data) {
-        setAttachmentError('Attachment has no data');
-        return;
-      }
-      const link = document.createElement('a');
-      link.href = `data:${full.file_mimetype || 'application/octet-stream'};base64,${full.file_data}`;
-      link.download = full.file_name;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (err: any) {
-      setAttachmentError(err?.message || 'Download failed');
-    }
-  }, [activeTicket.id]);
-
-  const handlePreviewTicketAttachment = useCallback(async (attachment: TicketAttachmentMeta) => {
-    const mt = attachment.file_mimetype || '';
-    const isImage = mt.startsWith('image/');
-    const isVideo = mt.startsWith('video/');
-    if (!isImage && !isVideo) {
-      handleDownloadTicketAttachment(attachment);
-      return;
-    }
-    setAttachmentError(null);
-    try {
-      const full = await api.getTicketAttachment(activeTicket.id, attachment.id);
-      if (full?.file_data) {
-        setImagePreview({
-          src: `data:${full.file_mimetype};base64,${full.file_data}`,
-          mimetype: full.file_mimetype,
-        });
-      }
-    } catch (err: any) {
-      setAttachmentError(err?.message || 'Preview failed');
-    }
-  }, [activeTicket.id, handleDownloadTicketAttachment]);
 
   // ─── Phase 3: typing emit (debounced) ─────────────────────────────────
   // Send is_typing=true on first keystroke; idle for TYPING_IDLE_MS triggers
@@ -2445,11 +1432,21 @@ export default function TicketPanel({
             }}
           >#{activeTicket.id}</span>
           <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5,
             fontSize: '11px', padding: '3px 8px', borderRadius: 4,
             background: tokens.colors.surfaceCard, color: tokens.colors.textMuted,
-          }}>{columnName}</span>
+          }}>
+            <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: '50%', background: ticketStatusColor(activeTicket.status) }} />
+            {ticketStatusLabel(activeTicket.status)}
+          </span>
+          {activeTicket.archived_at && (
+            <span style={{
+              fontSize: '10px', fontWeight: 700, padding: '2px 6px', borderRadius: 4, textTransform: 'uppercase',
+              background: tokens.colors.surfaceSubtle, color: tokens.colors.textMuted,
+            }}>Archived</span>
+          )}
           {/* Tier-1 G stale-question badge in the panel header. Same threshold
-             as the board card so a ticket marked stale on the board stays
+             as the ticket card so a ticket marked stale in the list stays
              marked once you open it — no surprise mismatch. */}
           {(activeTicket.has_stale_open_question ?? hasStaleOpenQuestion(mergedComments)) && (
             <span
@@ -2499,90 +1496,44 @@ export default function TicketPanel({
             오른쪽 프레임 헤더는 점 대신 라벨까지 보여 준다. */}
         <ActivityPill view={ticketActivity(activeTicket)} />
         <div style={{ display: 'flex', gap: 8, position: 'relative' }}>
-          <button
-            onClick={() => setTriggerMenuOpen(v => !v)}
-            title="Manually wake an agent on this ticket (bypasses cooldown)"
-            style={{
-              background: tokens.colors.surfaceCard,
-              color: tokens.colors.accentMid,
-              border: `1px solid ${tokens.colors.border}`,
-              borderRadius: tokens.radii.md,
-              padding: '4px 12px',
-              fontSize: '12px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-            }}
-          >
-            <span>⚡</span>
-            <span>Trigger</span>
-          </button>
-          <TriggerMenu
-            open={triggerMenuOpen}
-            onClose={() => setTriggerMenuOpen(false)}
-            roleTargets={(workspaceRoles || []).slice().sort((a, b) => a.position - b.position).map(r => {
-              const row = roleAssignments.find(x => x.role.id === r.id);
-              const holder = row?.holder || null;
-              // Trigger only fires for agent holders — user holders aren't
-              // wakeable (no agent endpoint to call). Mark hasAgent
-              // accordingly so the menu disables them with the same "unassigned"
-              // visual cue.
-              // ST-7: when the holder is an agent, prefer the display
-              // name from the loaded agents list (which carries
-              // manager_name) over the bare name in the assignment row
-              // payload — keeps managed agents rendered as
-              // <ManagerName>/<AgentName> in the trigger menu too.
-              const fullAgent = holder?.type === 'agent' && holder?.id
-                ? agents.find(a => a.id === holder.id)
-                : null;
-              const holderDisplay = fullAgent
-                ? formatAgentDisplayName(fullAgent)
-                : (holder?.name || (holder ? holder.id : 'unassigned'));
-              return {
-                slug: r.slug,
-                label: r.name,
-                holderName: holderDisplay,
-                hasAgent: holder?.type === 'agent',
-              };
-            })}
-            busy={retriggering}
-            onPick={(slug, label, holderName) => handleRetrigger(slug, label, holderName)}
-          />
-          {/* Move-to-board action — only meaningful for root tickets, since
-             children carry no column_id and inherit the board through their
-             parent. Hidden when no handler is wired (legacy callers). */}
-          {onMoveToBoard && activeTicket.depth === 0 && !activeTicket.parent_id && (
-            <div style={{ position: 'relative' }}>
-              <button
-                onClick={handleOpenMoveBoardMenu}
-                disabled={movingToBoard}
-                title="Move this ticket (and its subtasks) to a different board"
-                style={{
-                  background: tokens.colors.surfaceCard,
-                  color: tokens.colors.textSecondary,
-                  border: `1px solid ${tokens.colors.border}`,
-                  borderRadius: tokens.radii.md,
-                  padding: '4px 12px',
-                  fontSize: '12px',
-                  cursor: movingToBoard ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
-                }}
-              >
-                <span>📋</span>
-                <span>{movingToBoard ? 'Moving…' : 'Move to…'}</span>
-              </button>
-              <MoveToBoardMenu
-                open={moveBoardMenuOpen}
-                onClose={() => setMoveBoardMenuOpen(false)}
-                boards={moveBoardOptions}
-                loading={moveBoardLoading}
-                busy={movingToBoard}
-                onPick={(boardId, columnId) => handleMoveToBoard(boardId, columnId)}
-              />
-            </div>
+          {/* Run — root tickets only; children are a checklist the parent's
+              assignee works through and are never dispatched themselves. */}
+          {isRoot && (
+            <button
+              onClick={handleRun}
+              disabled={running || !activeTicket.assignee}
+              title={activeTicket.assignee
+                ? 'Send this ticket to its assignee now'
+                : '담당자가 없어 실행할 수 없습니다 — Detail 탭에서 담당자를 지정하고 저장하세요'}
+              style={{
+                background: tokens.colors.surfaceCard,
+                color: activeTicket.assignee ? tokens.colors.accentMid : tokens.colors.textMuted,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: tokens.radii.md,
+                padding: '4px 12px',
+                fontSize: '12px',
+                cursor: running || !activeTicket.assignee ? 'not-allowed' : 'pointer',
+                opacity: running || !activeTicket.assignee ? 0.6 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <span>▶</span>
+              <span>{running ? 'Running…' : 'Run'}</span>
+            </button>
+          )}
+          {isRoot && (
+            <button
+              onClick={handleToggleArchive}
+              disabled={archiveBusy}
+              title={activeTicket.archived_at ? 'Restore this ticket to the pool' : 'Archive this ticket (and its subtasks)'}
+              style={{
+                background: tokens.colors.surfaceCard, color: tokens.colors.textSecondary,
+                border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
+                padding: '4px 12px', fontSize: '12px', cursor: archiveBusy ? 'not-allowed' : 'pointer',
+              }}
+            >{activeTicket.archived_at ? 'Unarchive' : 'Archive'}</button>
           )}
           <button onClick={() => { onDelete(activeTicket.id); onClose(); }} style={{
             background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
@@ -2652,861 +1603,150 @@ export default function TicketPanel({
           <>
             {/* Title */}
             <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
+              value={draft.title}
+              onChange={e => setDraftField('title', e.target.value)}
               style={{
                 width: '100%', background: 'transparent', border: 'none', color: tokens.colors.textPrimary,
                 fontSize: '18px', fontWeight: 700, outline: 'none', marginBottom: 14,
               }}
             />
 
-            {/* Meta row */}
+            {/* Status (moves immediately) + Priority (draft) */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+              <div>
+                <label style={labelStyle}>Status{pendingStatus ? ' · moving…' : ''}</label>
+                <select
+                  value={pendingStatus ?? activeTicket.status}
+                  disabled={!!pendingStatus}
+                  onChange={e => handleStatusChange(e.target.value as TicketStatus)}
+                  style={{
+                    background: tokens.colors.surfaceCard,
+                    border: `2px solid ${ticketStatusColor(pendingStatus ?? activeTicket.status)}`,
+                    borderRadius: tokens.radii.md, padding: '5px 8px',
+                    color: ticketStatusColor(pendingStatus ?? activeTicket.status),
+                    fontSize: '12px', fontWeight: 600, width: '100%',
+                    cursor: pendingStatus ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {TICKET_STATUSES.map(s => <option key={s} value={s}>{ticketStatusLabel(s)}</option>)}
+                </select>
+              </div>
               <div>
                 <label style={labelStyle}>Priority</label>
                 <select
-                  value={priority}
-                  onChange={e => setPriority(e.target.value as any)}
+                  value={draft.priority}
+                  onChange={e => setDraftField('priority', e.target.value as TicketDraft['priority'])}
                   style={{
-                    background: tokens.colors.surfaceCard, border: `2px solid ${priorityColors[priority]}`,
+                    background: tokens.colors.surfaceCard, border: `2px solid ${priorityColors[draft.priority]}`,
                     borderRadius: tokens.radii.md, padding: '5px 8px',
-                    color: priorityColors[priority], fontSize: '12px', fontWeight: 600, width: '100%',
+                    color: priorityColors[draft.priority], fontSize: '12px', fontWeight: 600, width: '100%',
                   }}
                 >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="critical">Critical</option>
+                  {TICKET_PRIORITIES.map(p => <option key={p} value={p}>{TICKET_PRIORITY_LABELS[p]}</option>)}
                 </select>
               </div>
+            </div>
 
-              <div>
-                <label style={labelStyle}>Claude backend (run override)</label>
-                <select value={runtimeProfile} onChange={e => setRuntimeProfile(e.target.value)}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `2px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md, padding: '5px 8px',
-                    color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 600, width: '100%',
-                  }}>
-                  <option value="">Inherit Agent / Board / Global default</option>
-                  <option value="none">Anthropic default (explicit)</option>
-                  {runtimeProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-                </select>
-              </div>
-
-              {/* Effort preset — abstract effort option the board resolves
-                  per-CLI at dispatch. '' maps to null = board default. */}
-              <div>
-                <label style={labelStyle}>Effort preset</label>
-                <select
-                  value={effortPreset}
-                  onChange={e => setEffortPreset(e.target.value)}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `2px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md, padding: '5px 8px',
-                    color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 600, width: '100%',
-                  }}
-                >
-                  <option value="">(board default)</option>
-                  {parseEffortPresetList(effortPresets).map(p => (
-                    <option key={p.id} value={p.id}>{p.label || p.id}</option>
-                  ))}
-                </select>
-              </div>
-
-              {(() => {
-                // One cell per workspace role, sorted by position. MULTI-HOLDER
-                // (T6): each role is a chip picker — existing holders render as
-                // removable chips and an "add" dropdown appends more (agents or
-                // users). A single holder looks like one chip (no regression).
-                const sortedRoles = (workspaceRoles || []).slice()
-                  .sort((a, b) => a.position - b.position);
-                if (sortedRoles.length === 0) {
-                  return (
-                    <div style={{ gridColumn: '1 / span 2', fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
-                      No workspace roles yet — configure roles in workspace settings.
-                    </div>
-                  );
-                }
-                // Agent Manager(type='manager')는 역할 담당자가 될 수 없다 (ticket 941c72d3) — 후보에서 숨김.
-                const activeAgents = (agents || []).filter(a => a.is_active && a.type !== 'manager');
-                const activeUsers = users || [];
-                const editable = !!onSetRoleAssignment && !savingDraft;
-                return sortedRoles.map(role => {
-                  // Effective holder set = buffered draft (if any) else the live
-                  // holders. A draft is the role's FULL desired holder set.
-                  const draft = roleDrafts[role.id];
-                  const effective: HolderDraft[] = draft
-                    ? draft
-                    : (holdersByRoleId.get(role.id) || []).map(holderToDraft);
-                  const heldKeys = new Set(effective.map(holderDraftKey).filter(Boolean));
-
-                  const nameOf = (h: HolderDraft): string => {
-                    if (h.agent_id) {
-                      const a = (agents || []).find(x => x.id === h.agent_id);
-                      if (a) return formatAgentDisplayName(a);
-                      // Cross-workspace holder: not in the ws-scoped agents
-                      // list. Fall back to the server-resolved display name
-                      // (workspace-independent) instead of leaking the raw id.
-                      return resolvedHolderNameById.get(h.agent_id) || h.agent_id;
-                    }
-                    if (h.user_id) {
-                      const u = (users || []).find(x => x.id === h.user_id);
-                      if (u) return (u.name || u.email);
-                      return resolvedHolderNameById.get(h.user_id) || h.user_id;
-                    }
-                    // P4c-4: spec-direct holder — 스냅샷 라벨.
-                    if (h.runtime && typeof h.runtime === 'object') {
-                      const label = ((h.runtime as any).label || '').trim();
-                      if (label) return label;
-                      const cli = ((h.runtime as any).cli || '').trim();
-                      if (cli) return cli;
-                    }
-                    return '?';
-                  };
-                  const commit = (next: HolderDraft[]) => setRoleDrafts(prev => ({ ...prev, [role.id]: next }));
-                  const removeHolder = (h: HolderDraft) =>
-                    commit(effective.filter(e => holderDraftKey(e) !== holderDraftKey(h)));
-                  const addFromValue = (raw: string) => {
-                    if (!raw) return;
-                    const h: HolderDraft = raw.startsWith('agent:')
-                      ? { agent_id: raw.slice(6), user_id: null }
-                      : { agent_id: null, user_id: raw.slice(5) };
-                    const key = holderDraftKey(h);
-                    if (!key || heldKeys.has(key)) return;
-                    commit([...effective, h]);
-                  };
-                  const addableAgents = activeAgents.filter(a => !heldKeys.has(`agent:${a.id}`));
-                  const addableUsers = activeUsers.filter(u => !heldKeys.has(`user:${u.id}`));
-
-                  return (
-                    <div key={role.id}>
-                      <label style={labelStyle}>
-                        {role.name}
-                        {effective.length >= 2 && (
-                          <span style={{ marginLeft: 6, fontSize: '10px', color: tokens.colors.accentLight, fontWeight: 700 }}>
-                            ×{effective.length}
-                          </span>
-                        )}
-                      </label>
-                      <div
-                        title={role.description || ''}
-                        style={{
-                          display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center',
-                          background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
-                          borderRadius: tokens.radii.md, padding: '4px 6px', minHeight: 30,
-                        }}
-                      >
-                        {effective.length === 0 && (
-                          <span style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>Unassigned</span>
-                        )}
-                        {effective.map(h => (
-                          <span
-                            key={holderDraftKey(h)}
-                            style={{
-                              display: 'inline-flex', alignItems: 'center', gap: 4,
-                              background: h.agent_id ? `${tokens.colors.accent}20` : `${tokens.colors.info}20`,
-                              color: tokens.colors.textStrong, fontSize: '11px', fontWeight: 600,
-                              borderRadius: tokens.radii.sm, padding: '2px 4px 2px 8px',
-                            }}
-                          >
-                            {nameOf(h)}
-                            {editable && (
-                              <button
-                                type="button"
-                                aria-label={`remove ${nameOf(h)}`}
-                                onClick={() => removeHolder(h)}
-                                style={{
-                                  background: 'transparent', border: 'none', color: tokens.colors.textSecondary,
-                                  cursor: 'pointer', fontSize: '13px', lineHeight: 1, padding: 0,
-                                }}
-                              >×</button>
-                            )}
-                          </span>
-                        ))}
-                        {editable && (addableAgents.length > 0 || addableUsers.length > 0) && (
-                          <select
-                            value=""
-                            onChange={e => { addFromValue(e.target.value); e.currentTarget.value = ''; }}
-                            style={{
-                              background: 'transparent', border: 'none', color: tokens.colors.accentMid,
-                              fontSize: '11px', cursor: 'pointer', outline: 'none',
-                            }}
-                          >
-                            <option value="">+ 추가…</option>
-                            {addableAgents.length > 0 && (
-                              <optgroup label="Agents">
-                                {addableAgents.map(a => (
-                                  <option key={`a-${a.id}`} value={`agent:${a.id}`}>{formatAgentDisplayName(a)}</option>
-                                ))}
-                              </optgroup>
-                            )}
-                            {addableUsers.length > 0 && (
-                              <optgroup label="Users">
-                                {addableUsers.map(u => (
-                                  <option key={`u-${u.id}`} value={`user:${u.id}`}>{u.name || u.email}</option>
-                                ))}
-                              </optgroup>
-                            )}
-                          </select>
-                        )}
-                      </div>
-                    </div>
-                  );
-                });
-              })()}
-              {/* P4c-4: runtime 선언 → 선택한 역할의 draft에 holder 추가. */}
-              <TicketRuntimeSection
-                roles={(workspaceRoles || []).slice().sort((a, b) => a.position - b.position)}
-
-                workspaceId={workspaceId || ''}
-                onAdd={(roleId, draft) => setRoleDrafts(prev => ({ ...prev, [roleId]: [...(prev[roleId] ?? (holdersByRoleId.get(roleId) || []).map(holderToDraft)), draft] }))}
+            {/* Tags (draft) — suggestions come from the loaded workspace pool */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>Tags</label>
+              <TagInput
+                key={`tags-${activeTicket.id}`}
+                value={draftTags}
+                suggestions={tagPool}
+                onChange={next => setDraftField('tags', next)}
               />
             </div>
 
-            {/* 다중담당자·합의 패널 (T6). 이탈(현재) 컬럼 라우팅 홀더가 ≥2 이거나
-                열린 이동 제안이 있을 때만 렌더 — 단일홀더 티켓은 숨겨져 시각 회귀
-                없음. 홀더별 agree/pending/object, 진행바, why-blocked, 이동 제안,
-                (홀더면) 투표, (reporter면) override 를 노출한다. */}
-            {(() => {
-              if (!consensus) return null;
-              const st = consensus.state;
-              const showPanel = consensus.gate.holder_count >= 2 || !!consensus.proposal;
-              if (!showPanel) return null;
-
-              const keyOf = (p: ConsensusParty) => `${p.type}:${p.id}`;
-              const agreedKeys = new Set(st.agreed.map(keyOf));
-              const objectedKeys = new Set(st.objected.map(keyOf));
-              const nameOfParty = (p: ConsensusParty): string => {
-                const k = keyOf(p);
-                if (consensus.names[k]) return consensus.names[k];
-                if (p.type === 'agent') {
-                  const a = (agents || []).find(x => x.id === p.id);
-                  if (a) return formatAgentDisplayName(a);
-                } else {
-                  const u = (users || []).find(x => x.id === p.id);
-                  if (u) return u.name || u.email;
-                }
-                return p.id.slice(0, 8);
-              };
-              const statusOf = (p: ConsensusParty): 'agree' | 'object' | 'pending' =>
-                agreedKeys.has(keyOf(p)) ? 'agree' : objectedKeys.has(keyOf(p)) ? 'object' : 'pending';
-
-              // 현재 유저가 required 홀더인지 / reporter 홀더인지 → vote / override 노출.
-              const myKey = user ? `user:${user.id}` : '';
-              const iAmRequired = !!myKey && st.required.some(p => keyOf(p) === myKey);
-              const reporterRole = (workspaceRoles || []).find(r => r.slug === 'reporter');
-              const reporterHolderKeys = reporterRole
-                ? new Set((holdersByRoleId.get(reporterRole.id) || []).map(h => `${h.type}:${h.id}`))
-                : new Set<string>();
-              const iAmReporter = !!myKey && reporterHolderKeys.has(myKey);
-
-              const proposalId = consensus.proposal?.proposal_id || st.proposalId || null;
-              const requiredCount = st.required.length;
-              const agreedCount = st.agreed.length;
-              const pct = requiredCount > 0 ? Math.round((agreedCount / requiredCount) * 100) : 0;
-              const targetCols = (boardColumns || []).filter(c => c.id !== activeTicket.column_id);
-
-              const statusStyle: Record<string, { bg: string; fg: string; label: string }> = {
-                agree: { bg: `${tokens.colors.success}22`, fg: tokens.colors.successLight, label: '동의' },
-                object: { bg: `${tokens.colors.danger}22`, fg: tokens.colors.dangerLight, label: '이의' },
-                pending: { bg: `${tokens.colors.border}55`, fg: tokens.colors.textMuted, label: '대기' },
-              };
-
-              const doVote = async (status: 'agree' | 'object', override = false) => {
-                if (consensusBusy) return;
-                setConsensusBusy(true);
-                try {
-                  const r = await api.recordTicketConsensusVote(activeTicket.id, {
-                    status, proposal_id: proposalId || undefined, override,
-                  });
-                  await refreshConsensus();
-                  if (r?.moved) showToast(`합의 성립 → '${r.moved.to_column_name || '이동'}' 자동 이동`, 'success');
-                  else showToast(override ? 'Override 적용' : `시그널 기록: ${status}`, 'success');
-                } catch (e: any) {
-                  showToast(`실패: ${e?.message || 'unknown error'}`, 'error');
-                } finally {
-                  setConsensusBusy(false);
-                }
-              };
-              const doPropose = async () => {
-                if (consensusBusy || !proposeTarget) return;
-                setConsensusBusy(true);
-                try {
-                  await api.proposeTicketMove(activeTicket.id, proposeTarget);
-                  setProposeTarget('');
-                  await refreshConsensus();
-                  showToast('이동 제안 등록 — 전 홀더 동의 시 자동 이동', 'success');
-                } catch (e: any) {
-                  showToast(`제안 실패: ${e?.message || 'unknown error'}`, 'error');
-                } finally {
-                  setConsensusBusy(false);
-                }
-              };
-
-              const headerBadge = st.satisfied
-                ? { bg: `${tokens.colors.success}22`, fg: tokens.colors.successLight, label: st.overriddenBy ? '합의(override)' : '합의 성립' }
-                : consensus.gate.blocked
-                  ? { bg: `${tokens.colors.warning}22`, fg: tokens.colors.warningLight, label: '합의 필요' }
-                  : { bg: `${tokens.colors.border}55`, fg: tokens.colors.textSecondary, label: '진행 중' };
-
-              return (
-                <div style={{
-                  border: `1px solid ${tokens.colors.accent}55`, borderRadius: tokens.radii.md,
-                  padding: '10px 12px', marginBottom: 14, background: `${tokens.colors.accent}0d`,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span style={{ fontSize: '12px', fontWeight: 700, color: tokens.colors.textStrong }}>
-                      합의 <span style={{ color: tokens.colors.textMuted, fontWeight: 500 }}>· 다중담당자 {requiredCount}명</span>
-                    </span>
-                    <span style={{
-                      fontSize: '10px', fontWeight: 700, textTransform: 'uppercase',
-                      background: headerBadge.bg, color: headerBadge.fg, padding: '2px 8px', borderRadius: tokens.radii.sm,
-                    }}>{headerBadge.label}</span>
-                  </div>
-
-                  {/* 열린 이동 제안 */}
-                  {consensus.proposal && (
-                    <div style={{ fontSize: '11px', color: tokens.colors.textSecondary, marginBottom: 8 }}>
-                      이동 제안: <strong style={{ color: tokens.colors.accentLight }}>{columnName || '현재'}</strong>
-                      {' → '}
-                      <strong style={{ color: tokens.colors.accentLight }}>{consensus.proposal.target_column_name || '대상'}</strong>
-                      {' '}(by {nameOfParty(consensus.proposal.by)})
-                    </div>
-                  )}
-
-                  {/* 진행바 */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                    <div style={{ flex: 1, height: 6, background: `${tokens.colors.border}66`, borderRadius: tokens.radii.xs, overflow: 'hidden' }}>
-                      <div style={{
-                        width: `${pct}%`, height: '100%',
-                        background: st.satisfied ? tokens.colors.successLight : tokens.colors.accent,
-                        borderRadius: tokens.radii.xs, transition: 'width 0.2s',
-                      }} />
-                    </div>
-                    <span style={{ fontSize: '11px', color: tokens.colors.textSecondary, fontWeight: 600 }}>
-                      동의 {agreedCount}/{requiredCount}
-                    </span>
-                  </div>
-
-                  {/* 홀더별 상태 */}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: consensus.gate.blocked ? 8 : 0 }}>
-                    {st.required.map(p => {
-                      const s = statusOf(p);
-                      const ss = statusStyle[s];
-                      return (
-                        <span key={keyOf(p)} style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 4,
-                          background: ss.bg, color: ss.fg, fontSize: '11px', fontWeight: 600,
-                          borderRadius: tokens.radii.sm, padding: '2px 8px',
-                        }}>
-                          {s === 'agree' ? '✓' : s === 'object' ? '✗' : '⋯'} {nameOfParty(p)}
-                        </span>
-                      );
-                    })}
-                  </div>
-
-                  {/* why-blocked */}
-                  {consensus.gate.blocked && (
-                    <div style={{ fontSize: '11px', color: tokens.colors.warningLight, marginBottom: 8 }}>
-                      이동 차단: {st.pending.length > 0 && `${st.pending.length}명 미투표`}
-                      {st.pending.length > 0 && st.objected.length > 0 && ', '}
-                      {st.objected.length > 0 && `${st.objected.length}명 이의`}
-                      {' — 전원 동의 또는 reporter override 필요.'}
-                    </div>
-                  )}
-
-                  {/* 액션: 이동 제안 (누구나) + 투표(홀더) + override(reporter) */}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 4 }}>
-                    {targetCols.length > 0 && (
-                      <>
-                        <select
-                          value={proposeTarget}
-                          disabled={consensusBusy}
-                          onChange={e => setProposeTarget(e.target.value)}
-                          style={{
-                            background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
-                            borderRadius: tokens.radii.sm, padding: '4px 6px', color: tokens.colors.textStrong, fontSize: '11px',
-                          }}
-                        >
-                          <option value="">{consensus.proposal ? '다른 컬럼으로 제안…' : '이동 대상 컬럼…'}</option>
-                          {targetCols.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                        </select>
-                        <button
-                          type="button"
-                          disabled={consensusBusy || !proposeTarget}
-                          onClick={doPropose}
-                          style={{
-                            background: tokens.colors.accent, color: '#fff', border: 'none',
-                            borderRadius: tokens.radii.sm, padding: '4px 10px', fontSize: '11px', fontWeight: 600,
-                            cursor: consensusBusy || !proposeTarget ? 'not-allowed' : 'pointer', opacity: consensusBusy || !proposeTarget ? 0.6 : 1,
-                          }}
-                        >이동 제안</button>
-                      </>
-                    )}
-                    {iAmRequired && proposalId && (
-                      <>
-                        <button
-                          type="button" disabled={consensusBusy} onClick={() => doVote('agree')}
-                          style={{
-                            background: `${tokens.colors.success}22`, color: tokens.colors.successLight,
-                            border: `1px solid ${tokens.colors.success}55`, borderRadius: tokens.radii.sm,
-                            padding: '4px 10px', fontSize: '11px', fontWeight: 600, cursor: consensusBusy ? 'not-allowed' : 'pointer',
-                          }}
-                        >동의</button>
-                        <button
-                          type="button" disabled={consensusBusy} onClick={() => doVote('object')}
-                          style={{
-                            background: `${tokens.colors.danger}22`, color: tokens.colors.dangerLight,
-                            border: `1px solid ${tokens.colors.danger}55`, borderRadius: tokens.radii.sm,
-                            padding: '4px 10px', fontSize: '11px', fontWeight: 600, cursor: consensusBusy ? 'not-allowed' : 'pointer',
-                          }}
-                        >이의</button>
-                      </>
-                    )}
-                    {iAmReporter && !st.satisfied && (
-                      <button
-                        type="button" disabled={consensusBusy} onClick={() => doVote('agree', true)}
-                        title="reporter 권한으로 합의를 강제 통과시켜 즉시 이동합니다(감사 로그 기록)."
-                        style={{
-                          background: `${tokens.colors.warning}22`, color: tokens.colors.warningLight,
-                          border: `1px solid ${tokens.colors.warning}66`, borderRadius: tokens.radii.sm,
-                          padding: '4px 10px', fontSize: '11px', fontWeight: 700, cursor: consensusBusy ? 'not-allowed' : 'pointer',
-                        }}
-                      >⚡ Override</button>
-                    )}
-                  </div>
+            {/* Project / base branch + assignee — root tickets only. Children
+                have no assignee and are never dispatched: the parent's
+                assignee works through them in the parent's checkout. */}
+            {isRoot ? (
+              <>
+                <ProjectBranchFields
+                  projects={projects}
+                  projectsLoading={projectsLoading}
+                  projectId={draft.projectId}
+                  baseBranch={draft.baseBranch}
+                  savedProject={activeTicket.project}
+                  onProjectChange={id => setDraft(prev => ({ ...prev, projectId: id, baseBranch: '' }))}
+                  onBranchChange={b => setDraftField('baseBranch', b)}
+                  labelStyle={labelStyle}
+                />
+                <AssigneeSection
+                  key={`assignee-${activeTicket.id}`}
+                  assignee={draftAssignee}
+                  unsaved={!!draft.assignee && !runtimeSpecEqual(draft.assignee.value, activeTicket.assignee)}
+                  project={draftProject}
+                  workspaceId={wsId}
+                  disabled={savingDraft}
+                  onChange={(next: RuntimeSpecDraft | null) => setDraftField('assignee', { value: next })}
+                  runNote={runNote}
+                  labelStyle={labelStyle}
+                />
+              </>
+            ) : (
+              <div style={{ marginBottom: 14 }}>
+                <label style={labelStyle}>Assignee</label>
+                <div style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic' }}>
+                  부모 티켓의 담당자가 처리합니다
                 </div>
-              );
-            })()}
-
-            {/* Base repository / branch — 티켓 명시값이 비어 있으면 서버가
-                board/workspace 기본값을 base_repo 스냅샷으로 내려준다. */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <div>
-                <label style={labelStyle}>Base Repository</label>
-                <select
-                  value={baseRepoId}
-                  onChange={e => {
-                    const next = e.target.value;
-                    setBaseRepoId(next);
-                    setBaseBranch('');
-                  }}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%', cursor: 'pointer',
-                  }}
-                >
-                  <option value="">— None —</option>
-                  {repoOptions.map(r => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={labelStyle}>
-                  Base Branch
-                  {baseRepoId && branchesLoading ? ' · loading…' : ''}
-                </label>
-                <select
-                  value={baseBranch}
-                  disabled={!baseRepoId || branchesLoading}
-                  onChange={e => setBaseBranch(e.target.value)}
-                  style={{
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%',
-                    cursor: !baseRepoId || branchesLoading ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  <option value="">{baseRepoId ? '— Use repo default —' : '— Select repo first —'}</option>
-                  {/* Pinned base_branch may not be in the live ls-remote list
-                      (branch deleted upstream, or list still loading). Show
-                      it anyway so the picker reflects the persisted value. */}
-                  {baseBranch && !branchOptions.some(b => b.name === baseBranch) && (
-                    <option value={baseBranch}>{baseBranch}</option>
-                  )}
-                  {branchOptions.map(b => (
-                    <option key={b.name} value={b.name}>{b.name}</option>
-                  ))}
-                </select>
-                {branchesError && (
-                  <div style={{ fontSize: '10px', color: tokens.colors.dangerLight, marginTop: 4 }}>
-                    {branchesError}
-                  </div>
-                )}
-              </div>
-            </div>
-            {!activeTicket.base_repo_resource_id && activeTicket.base_repo && (
-              <div style={{
-                marginTop: -10, marginBottom: 14, padding: '6px 8px',
-                borderRadius: tokens.radii.sm, background: `${tokens.colors.info}14`,
-                color: tokens.colors.textMuted, fontSize: '11px',
-              }}>
-                보드/워크스페이스에서 상속됨: {activeTicket.base_repo.name || activeTicket.base_repo.url}
-                {' · '}{activeTicket.base_branch || activeTicket.base_repo.default_branch || 'origin/HEAD'}
               </div>
             )}
 
-            {/* Next Ticket — when this ticket lands on a terminal column,
-                TriggerLoopService dispatches a `next_ticket` round for the
-                linked ticket's CURRENT column's routing roles. Picker is
-                drawn from boardTickets (excludes self + non-root tickets
-                are already filtered out by Board.tsx). The server-hydrated
-                next_ticket snapshot keeps the option visible even when the
-                linked ticket lives outside the current board view. */}
+            {/* Next Ticket — when this ticket enters `done`, the linked ticket
+                is picked up next. Options come from the loaded workspace pool;
+                the server-hydrated next_ticket snapshot keeps the saved link
+                visible even when it isn't in the loaded list. */}
             <div style={{ marginBottom: 14 }}>
               <label style={labelStyle}>
                 Next Ticket
-                {activeTicket.next_ticket?.column_name
-                  ? ` · currently in ${activeTicket.next_ticket.column_name}`
+                {activeTicket.next_ticket?.status
+                  ? ` · currently ${ticketStatusLabel(activeTicket.next_ticket.status)}`
                   : ''}
               </label>
               <select
-                value={nextTicketId}
-                onChange={e => setNextTicketId(e.target.value)}
+                value={draft.nextTicketId}
+                onChange={e => setDraftField('nextTicketId', e.target.value)}
                 style={{
                   background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
                   padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', width: '100%', cursor: 'pointer',
                 }}
               >
                 <option value="">— None —</option>
-                {/* Persisted link comes first so it always renders, even if
-                    the linked ticket lives on another board (boardTickets
-                    only carries the current board) or the picker hasn't
-                    received boardTickets yet. */}
-                {activeTicket.next_ticket && !(boardTickets || []).some(t => t.id === activeTicket.next_ticket!.id) && (
+                {activeTicket.next_ticket && !(workspaceTickets || []).some(t => t.id === activeTicket.next_ticket!.id) && (
                   <option value={activeTicket.next_ticket.id}>
-                    {activeTicket.next_ticket.title}
-                    {activeTicket.next_ticket.column_name ? ` (${activeTicket.next_ticket.column_name})` : ''}
+                    {activeTicket.next_ticket.title} · {ticketStatusLabel(activeTicket.next_ticket.status)}
                   </option>
                 )}
-                {(boardTickets || [])
+                {(workspaceTickets || [])
                   .filter(t => t.id !== activeTicket.id)
                   .map(t => (
-                    <option key={t.id} value={t.id}>{t.title}</option>
+                    <option key={t.id} value={t.id}>{t.title} · {ticketStatusLabel(t.status)}</option>
                   ))}
               </select>
             </div>
 
-            {/* Cross-board handoff relay (ticket ac21a745). Root tickets only —
-                a follow-up is created on the next functional board when this
-                ticket completes, carrying its deliverable context. Also renders
-                the read-only pipeline rollup for the relay this ticket is in.
-                Reuses the move-to-board picker's lazily-loaded workspace boards. */}
-            {activeTicket.depth === 0 && !activeTicket.parent_id && (
-              <HandoffEditor
-                ticket={activeTicket}
-                boardOptions={moveBoardOptions}
-                boardsLoading={moveBoardLoading}
-                onEnsureBoards={loadMoveBoardOptions}
-                value={handoffSpec}
-                onChange={setHandoffSpec}
-              />
-            )}
+            <OnDoneActionsField
+              value={draft.onDoneActionIds}
+              onChange={update => setDraft(prev => ({ ...prev, onDoneActionIds: update(prev.onDoneActionIds) }))}
+              actions={actionOptions}
+              agents={agents}
+              labelStyle={labelStyle}
+            />
 
-            {/* Run on Done — per-ticket on-done action binding (ticket
-                16a6339c, method "a"; picker reworked in 59afc55a). The bound
-                actions are dispatched exactly ONCE when THIS ticket lands on a
-                terminal column, and only for this ticket — independent of any
-                board/label-scoped policy (method "b"). A bound action fires even
-                if its own `trigger` is blank (manual); clearing the list clears
-                the binding. enabled=false actions are skipped at dispatch, so
-                they're shown disabled.
-
-                Two regions: an ordered "selected" list (the array order is the
-                dispatch order — reorder with ↑/↓) and an "add" candidate list.
-                Candidates are scoped to this workspace. An already-bound id
-                that's no longer available or deleted still shows in
-                the selected list so it can be unbound (criterion d). */}
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ ...labelStyle, marginBottom: 6 }}>
-                Run on Done
-                {onDoneActionIds.length > 0 ? ` · ${onDoneActionIds.length} bound` : ''}
-              </label>
-              <div style={{
-                background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
-                padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5,
-              }}>
-                {(() => {
-                  // All reusable Actions are Workspace-scoped. Keep
-                  // `actionOptions` as the full Workspace fetch so names
-                  // resolve for already-bound ids that were deleted or are
-                  // otherwise unavailable (criterion d).
-                  const actionById = new Map(actionOptions.map(a => [a.id, a]));
-                  const candidates = actionOptions.filter(a => !onDoneActionIds.includes(a.id));
-
-                  // Reorder helper — moves the id at `from` to `to`, clamped.
-                  // The array order IS the dispatch order, saved verbatim via
-                  // update_ticket(on_done_action_ids=[...]) (criterion b/c).
-                  const moveBound = (from: number, to: number) => {
-                    setOnDoneActionIds(prev => {
-                      if (to < 0 || to >= prev.length || from === to) return prev;
-                      const next = [...prev];
-                      const [moved] = next.splice(from, 1);
-                      next.splice(to, 0, moved);
-                      return next;
-                    });
-                  };
-
-                  const iconBtnStyle = (disabled: boolean) => ({
-                    flexShrink: 0,
-                    background: 'transparent', border: 'none',
-                    color: disabled ? tokens.colors.border : tokens.colors.textMuted,
-                    fontSize: '12px', lineHeight: 1, padding: '0 3px',
-                    cursor: disabled ? 'not-allowed' : 'pointer',
-                  });
-
-                  return (
-                    <>
-                      {/* ── Selected actions (ordered, reorderable) ──────────
-                          One row per bound id in dispatch order. Unknown ids
-                          (deleted, or scoped out of the fetch) still render so
-                          they can be unbound (criterion d). */}
-                      {onDoneActionIds.length > 0 && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                          {onDoneActionIds.map((id, idx) => {
-                            const act = actionById.get(id);
-                            const targetAgent = act ? agents.find(a => a.id === act.target_agent_id) : undefined;
-                            return (
-                              <div key={id} style={{
-                                display: 'flex', alignItems: 'center', gap: 6,
-                                padding: '3px 5px', borderRadius: 4,
-                                background: `${tokens.colors.accent}15`,
-                              }}>
-                                <span style={{
-                                  flexShrink: 0, fontSize: '10px', fontWeight: 700,
-                                  color: tokens.colors.textMuted, minWidth: 14, textAlign: 'right',
-                                }}>{idx + 1}.</span>
-                                {act ? (
-                                  <>
-                                    <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>
-                                      {act.name}
-                                    </span>
-                                    {targetAgent && (
-                                      <span style={{ fontSize: '10px', color: tokens.colors.textSecondary }}>
-                                        → {formatAgentDisplayName(targetAgent)}
-                                      </span>
-                                    )}
-                                    <span style={{ fontSize: '10px', color: act.enabled ? tokens.colors.textMuted : tokens.colors.warningLight, marginLeft: 'auto' }}>
-                                      {act.enabled ? (act.board_id ? 'board' : 'workspace') : 'disabled — won’t fire'}
-                                    </span>
-                                  </>
-                                ) : (
-                                  <span style={{ fontSize: '12px', color: tokens.colors.textMuted, fontStyle: 'italic', marginRight: 'auto' }}>
-                                    {id.slice(0, 8)}… (removed action)
-                                  </span>
-                                )}
-                                <button
-                                  type="button"
-                                  title="Move up (earlier in dispatch order)"
-                                  disabled={idx === 0}
-                                  onClick={() => moveBound(idx, idx - 1)}
-                                  style={iconBtnStyle(idx === 0)}
-                                >↑</button>
-                                <button
-                                  type="button"
-                                  title="Move down (later in dispatch order)"
-                                  disabled={idx === onDoneActionIds.length - 1}
-                                  onClick={() => moveBound(idx, idx + 1)}
-                                  style={iconBtnStyle(idx === onDoneActionIds.length - 1)}
-                                >↓</button>
-                                <button
-                                  type="button"
-                                  title="Unbind this action"
-                                  onClick={() => setOnDoneActionIds(prev => prev.filter(x => x !== id))}
-                                  style={{ ...iconBtnStyle(false), fontSize: '14px' }}
-                                >×</button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {/* ── Add candidates ───────────────────────────────────
-                          Scoped to current board + workspace; clicking appends
-                          to the end of the dispatch order. */}
-                      {candidates.length > 0 && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: onDoneActionIds.length > 0 ? 6 : 0 }}>
-                          {onDoneActionIds.length > 0 && (
-                            <div style={{ fontSize: '10px', color: tokens.colors.textMuted, fontWeight: 600, padding: '0 4px' }}>
-                              Add an action
-                            </div>
-                          )}
-                          {candidates.map(act => {
-                            const targetAgent = agents.find(a => a.id === act.target_agent_id);
-                            return (
-                              <button
-                                key={act.id}
-                                type="button"
-                                onClick={() => setOnDoneActionIds(prev => [...prev, act.id])}
-                                style={{
-                                  display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
-                                  padding: '3px 5px', borderRadius: 4, textAlign: 'left',
-                                  background: 'transparent', border: 'none', width: '100%',
-                                }}
-                              >
-                                <span style={{ flexShrink: 0, fontSize: '12px', color: tokens.colors.textMuted, lineHeight: 1 }}>+</span>
-                                <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>
-                                  {act.name}
-                                </span>
-                                {targetAgent && (
-                                  <span style={{ fontSize: '10px', color: tokens.colors.textSecondary }}>
-                                    → {formatAgentDisplayName(targetAgent)}
-                                  </span>
-                                )}
-                                <span style={{ fontSize: '10px', color: act.enabled ? tokens.colors.textMuted : tokens.colors.warningLight, marginLeft: 'auto' }}>
-                                  {act.enabled ? (act.board_id ? 'board' : 'workspace') : 'disabled — won’t fire'}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {onDoneActionIds.length === 0 && candidates.length === 0 && (
-                        <div style={{ fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic', padding: '2px 4px' }}>
-                          No actions on this board or workspace yet — create one from the Actions menu to bind it here.
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-            </div>
-
-            {/* Prerequisites (ticket 48d14fff) — the M:N "blocked-by another
-                ticket" set. Distinct from Next Ticket above (forward 1:1 push):
-                this ticket stays parked (pending_on_tickets) until EVERY prereq
-                here reaches a terminal column, at which point the trigger loop
-                auto-resumes it — no human unpend. Each row shows a status pill
-                (satisfied / blocked / removed) so the user can see at a glance
-                what's still holding the ticket. */}
-            <div style={{ marginBottom: 14 }}>
-              <label style={labelStyle}>
-                Prerequisites
-                {prereqRows.length > 0 && (() => {
-                  const open = prereqRows.filter(r => r.prerequisite && !r.prerequisite.archived_at && !r.prerequisite.is_terminal).length;
-                  return open > 0
-                    ? ` · ${open} blocking, auto-resumes when all done`
-                    : ' · all satisfied';
-                })()}
-              </label>
-
-              {prereqRows.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
-                  {prereqRows.map(row => {
-                    const p = row.prerequisite;
-                    const archived = !!p?.archived_at;
-                    const satisfied = !!p?.is_terminal && !archived;
-                    // Status pill: green=satisfied (terminal), muted=archived
-                    // (link auto-drops), blue=still blocking, red=missing row.
-                    const pill = !p
-                      ? { label: 'MISSING', bg: tokens.colors.warningBg, fg: tokens.colors.warningLight }
-                      : archived
-                        ? { label: 'ARCHIVED', bg: tokens.colors.surface, fg: tokens.colors.textMuted }
-                        : satisfied
-                          ? { label: 'SATISFIED', bg: tokens.colors.successBg, fg: tokens.colors.successLight }
-                          : { label: p.column_name ? p.column_name.toUpperCase() : 'BLOCKING', bg: tokens.colors.surface, fg: tokens.colors.info };
-                    return (
-                      <div
-                        key={row.prerequisite_ticket_id}
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: 8,
-                          background: tokens.colors.surfaceCard,
-                          border: `1px solid ${tokens.colors.border}`,
-                          borderRadius: tokens.radii.md,
-                          padding: '6px 8px',
-                        }}
-                      >
-                        <span style={{
-                          flexShrink: 0,
-                          fontSize: '9px', fontWeight: 800, letterSpacing: '0.4px',
-                          padding: '1px 6px', borderRadius: tokens.radii.sm,
-                          textTransform: 'uppercase',
-                          background: pill.bg, color: pill.fg,
-                        }}>{pill.label}</span>
-                        <button
-                          type="button"
-                          onClick={() => onSelectTicket && p && onSelectTicket(p.id)}
-                          title={p ? 'Open prerequisite ticket' : undefined}
-                          disabled={!p || !onSelectTicket}
-                          style={{
-                            flex: 1, minWidth: 0, textAlign: 'left',
-                            background: 'transparent', border: 'none', padding: 0,
-                            color: tokens.colors.textStrong, fontSize: '12px',
-                            cursor: (p && onSelectTicket) ? 'pointer' : 'default',
-                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                          }}
-                        >{p ? p.title : `(deleted) ${row.prerequisite_ticket_id}`}</button>
-                        <button
-                          type="button"
-                          onClick={() => handleRemovePrerequisite(row.prerequisite_ticket_id)}
-                          disabled={prereqBusy}
-                          title="Remove this prerequisite"
-                          style={{
-                            flexShrink: 0,
-                            background: 'transparent', border: 'none',
-                            color: tokens.colors.textMuted, fontSize: '14px',
-                            cursor: prereqBusy ? 'not-allowed' : 'pointer', lineHeight: 1,
-                            padding: '0 2px',
-                          }}
-                        >×</button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* Add picker — same boardTickets source as Next Ticket, minus
-                  self and tickets already linked as prerequisites. */}
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <select
-                  value={prereqPickId}
-                  onChange={e => setPrereqPickId(e.target.value)}
-                  style={{
-                    flex: 1, minWidth: 0,
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', cursor: 'pointer',
-                  }}
-                >
-                  <option value="">— Add a prerequisite ticket —</option>
-                  {(boardTickets || [])
-                    .filter(t => t.id !== activeTicket.id && !prereqRows.some(r => r.prerequisite_ticket_id === t.id))
-                    .map(t => (
-                      <option key={t.id} value={t.id}>{t.title}</option>
-                    ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={handleAddPrerequisite}
-                  disabled={prereqBusy || !prereqPickId}
-                  style={{
-                    flexShrink: 0,
-                    background: tokens.colors.accent, color: 'white', border: 'none',
-                    borderRadius: tokens.radii.md, padding: '5px 12px', fontSize: '12px', fontWeight: 600,
-                    cursor: (prereqBusy || !prereqPickId) ? 'not-allowed' : 'pointer',
-                    opacity: (prereqBusy || !prereqPickId) ? 0.5 : 1,
-                  }}
-                >Add</button>
-              </div>
-              {prereqPickId && (
-                <input
-                  type="text"
-                  value={prereqReason}
-                  onChange={e => setPrereqReason(e.target.value)}
-                  placeholder="Optional: why is this a prerequisite?"
-                  style={{
-                    width: '100%', marginTop: 6,
-                    background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md,
-                    padding: '5px 8px', color: tokens.colors.textStrong, fontSize: '12px', fontFamily: 'inherit',
-                  }}
-                />
-              )}
-              {prereqError && (
-                <div style={{ marginTop: 6, fontSize: '11px', color: tokens.colors.warningLight }}>{prereqError}</div>
-              )}
-            </div>
-
+            <PrerequisitesField
+              key={`prereq-${activeTicket.id}`}
+              rows={prereqRows}
+              busy={prereqBusy}
+              error={prereqError}
+              candidates={(workspaceTickets || []).filter(t =>
+                t.id !== activeTicket.id && !prereqRows.some(r => r.prerequisite_ticket_id === t.id))}
+              onAdd={handleAddPrerequisite}
+              onRemove={handleRemovePrerequisite}
+              onOpen={onSelectTicket}
+              labelStyle={labelStyle}
+            />
             {/* Created By */}
             {activeTicket.created_by && (
               <div style={{ marginBottom: 14 }}>
@@ -3529,8 +1769,8 @@ export default function TicketPanel({
             <div style={{ marginBottom: 14 }}>
               <label style={{ ...labelStyle, marginBottom: 6 }}>Description</label>
               <textarea
-                value={description}
-                onChange={e => setDescription(e.target.value)}
+                value={draft.description}
+                onChange={e => setDraftField('description', e.target.value)}
                 placeholder="Add description..."
                 rows={descriptionRows}
                 style={{
@@ -3541,115 +1781,12 @@ export default function TicketPanel({
               />
             </div>
 
-            {/* Ticket-level attachments. Distinct from comment attachments —
-               files added here live on the ticket itself and cascade-delete
-               with it; they do NOT pass through the Resource indirection
-               that the comment composer uses. */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <label style={{ ...labelStyle, marginBottom: 0 }}>
-                  Attachments
-                  {ticketAttachments.length > 0 && (
-                    <span style={{ marginLeft: 6, color: tokens.colors.textDisabled, fontWeight: 500 }}>
-                      ({ticketAttachments.length}/{TICKET_ATTACHMENT_MAX})
-                    </span>
-                  )}
-                </label>
-                <button
-                  type="button"
-                  onClick={handleAddTicketAttachments}
-                  disabled={attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX}
-                  style={{
-                    background: 'transparent',
-                    border: `1px solid ${tokens.colors.border}`,
-                    borderRadius: tokens.radii.md,
-                    color: tokens.colors.textStrong,
-                    fontSize: '11px',
-                    padding: '4px 10px',
-                    cursor: (attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX) ? 'not-allowed' : 'pointer',
-                    opacity: (attachmentBusy || ticketAttachments.length >= TICKET_ATTACHMENT_MAX) ? 0.5 : 1,
-                  }}
-                  title="Attach files (10MB each, max 20 per ticket)"
-                >
-                  + Attach files
-                </button>
-              </div>
-              {attachmentError && (
-                <div style={{
-                  fontSize: '11px', color: tokens.colors.dangerLight, padding: '4px 6px',
-                  background: tokens.colors.dangerBg, borderRadius: tokens.radii.sm, marginBottom: 4,
-                }}>
-                  {attachmentError}
-                </div>
-              )}
-              {ticketAttachments.length === 0 ? (
-                <div style={{
-                  fontSize: '11px', color: tokens.colors.textMuted, fontStyle: 'italic',
-                  padding: '6px 10px', background: tokens.colors.surfaceCard,
-                  border: `1px dashed ${tokens.colors.border}`, borderRadius: tokens.radii.lg,
-                }}>
-                  No files attached.
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {ticketAttachments.map(att => {
-                    const mt = att.file_mimetype || '';
-                    const isImage = mt.startsWith('image/');
-                    const isVideo = mt.startsWith('video/');
-                    const sizeKb = att.file_size > 0 ? Math.max(1, Math.round(att.file_size / 1024)) : null;
-                    return (
-                      <div
-                        key={att.id}
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: 8,
-                          padding: '6px 10px',
-                          background: tokens.colors.surfaceCard,
-                          border: `1px solid ${tokens.colors.border}`,
-                          borderRadius: tokens.radii.md,
-                        }}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => handlePreviewTicketAttachment(att)}
-                          style={{
-                            background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
-                            color: tokens.colors.textStrong, fontSize: '12px', fontWeight: 500,
-                            textAlign: 'left', flex: 1, minWidth: 0,
-                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                          }}
-                          title={isImage || isVideo ? 'Click to preview' : 'Click to download'}
-                        >
-                          {isImage ? '🖼️' : isVideo ? '🎬' : '📎'} {att.file_name}
-                        </button>
-                        <span style={{ fontSize: '10px', color: tokens.colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
-                          {sizeKb !== null ? `${sizeKb} KB` : ''}
-                          {att.uploaded_by ? ` · ${att.uploaded_by}` : ''}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleDownloadTicketAttachment(att)}
-                          title="Download"
-                          style={{
-                            background: 'transparent', border: 'none', cursor: 'pointer',
-                            color: tokens.colors.textSecondary, fontSize: '12px', padding: '0 4px',
-                          }}
-                        >⬇</button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteTicketAttachment(att.id, att.file_name)}
-                          disabled={attachmentBusy}
-                          title="Delete"
-                          style={{
-                            background: 'transparent', border: 'none', cursor: attachmentBusy ? 'not-allowed' : 'pointer',
-                            color: tokens.colors.dangerLight, fontSize: '12px', padding: '0 4px',
-                          }}
-                        >✕</button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+            <TicketAttachmentsSection
+              key={`attachments-${activeTicket.id}`}
+              ticket={activeTicket}
+              onPreview={(src, mimetype) => setImagePreview({ src, mimetype })}
+              labelStyle={labelStyle}
+            />
 
             {/* Notification Channels */}
             {channels.length > 0 && (
@@ -3660,7 +1797,7 @@ export default function TicketPanel({
                   padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5,
                 }}>
                   {channels.map(ch => {
-                    const isSelected = selectedChannelIds.includes(ch.id);
+                    const isSelected = draft.channelIds.includes(ch.id);
                     return (
                       <label key={ch.id} style={{
                         display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
@@ -3671,13 +1808,13 @@ export default function TicketPanel({
                           type="checkbox"
                           checked={isSelected}
                           onChange={() => {
-                            if (isSelected && selectedChannelIds.length <= 1) return;
+                            if (isSelected && draft.channelIds.length <= 1) return;
                             const next = isSelected
-                              ? selectedChannelIds.filter(id => id !== ch.id)
-                              : [...selectedChannelIds, ch.id];
-                            setSelectedChannelIds(next);
+                              ? draft.channelIds.filter(id => id !== ch.id)
+                              : [...draft.channelIds, ch.id];
+                            setDraftField('channelIds', next);
                           }}
-                          style={{ accentColor: tokens.colors.accent, cursor: isSelected && selectedChannelIds.length <= 1 ? 'not-allowed' : 'pointer' }}
+                          style={{ accentColor: tokens.colors.accent, cursor: isSelected && draft.channelIds.length <= 1 ? 'not-allowed' : 'pointer' }}
                         />
                         <span style={{ fontSize: '12px', color: tokens.colors.textStrong, fontWeight: 500 }}>{ch.name}</span>
                         <span style={{ fontSize: '10px', color: ch.is_active ? tokens.colors.successLight : tokens.colors.textSecondary, marginLeft: 'auto' }}>
@@ -3686,12 +1823,12 @@ export default function TicketPanel({
                       </label>
                     );
                   })}
-                  {selectedChannelIds.length === 0 && (
+                  {draft.channelIds.length === 0 && (
                     <div style={{ fontSize: '11px', color: tokens.colors.danger, padding: '4px 6px', background: `${tokens.colors.danger}15`, borderRadius: tokens.radii.sm }}>
                       No channel selected — please select at least one channel to receive notifications
                     </div>
                   )}
-                  {selectedChannelIds.length === 1 && (
+                  {draft.channelIds.length === 1 && (
                     <div style={{ fontSize: '11px', color: tokens.colors.warningLight, padding: '2px 6px' }}>
                       Last channel — cannot be removed
                     </div>
@@ -3704,9 +1841,10 @@ export default function TicketPanel({
             <ChildTicketList
               parentTicket={activeTicket}
               maxDepth={2}
-              boardTickets={boardTickets}
+              workspaceTickets={workspaceTickets}
+              tagPool={tagPool}
               onCreateChild={onCreateChild}
-              onUpdateChild={(id, data) => onUpdate(id, data)}
+              onMoveChild={moveTicket}
               onDeleteChild={onDeleteChild}
               onReparentChild={onReparentChild}
               onSelectChild={handleSelectChild}
@@ -3719,21 +1857,6 @@ export default function TicketPanel({
                independent of the filter (chip = list visibility, mute =
                signal suppression like unread dots and typing indicators). */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8, alignItems: 'center', position: 'relative' }}>
-              <button
-                type="button"
-                onClick={handleStartCommentSummary}
-                disabled={summaryStarting || isCommentSummaryInProgress(commentSummary?.status)}
-                title="Replace existing comments with one agent-generated summary"
-                style={{ padding: '2px 8px', borderRadius: tokens.radii.full as any, fontSize: 11, fontWeight: 600, border: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceSubtle, color: tokens.colors.textStrong, cursor: summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 'not-allowed' : 'pointer', opacity: summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 0.6 : 1 }}
-              >
-                {summaryStarting || isCommentSummaryInProgress(commentSummary?.status) ? 'Summarizing…' : 'Summary'}
-              </button>
-              {commentSummary?.status === 'failed' && (
-                <span role="alert" style={{ fontSize: 11, color: tokens.colors.danger }}>
-                  {commentSummary.error_code ? `${commentSummary.error_code}: ` : ''}
-                  {commentSummary.error || 'Summary failed. Originals were preserved; you can retry.'}
-                </span>
-              )}
               {/* Render a chip for every type that has at least one comment.
                  Previously also kept chips for OFF types the user had toggled
                  off, but that branch hid chips for types with count=0 the
@@ -3940,8 +2063,8 @@ export default function TicketPanel({
                   </span>
                 </div>
                 <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, lineHeight: 1.5 }}>
-                  Waiting on {prereqRows.filter(r => r.prerequisite && !r.prerequisite.archived_at && !r.prerequisite.is_terminal).length || prereqRows.length} prerequisite ticket(s).
-                  This resumes <strong>automatically</strong> once every prerequisite reaches a terminal column — no action needed.
+                  Waiting on {openPrerequisiteCount(prereqRows) || prereqRows.length} prerequisite ticket(s).
+                  This resumes <strong>automatically</strong> once every prerequisite is <strong>Done</strong> — no action needed.
                   See the <strong>Prerequisites</strong> section on the Detail tab to view or change them.
                 </div>
               </div>
@@ -4116,7 +2239,7 @@ export default function TicketPanel({
                   <li>Read the reason above and the latest comments to see what's blocked.</li>
                   <li>Type your answer in the response box, then click <strong>Resume</strong> — the text lands as a comment and the assignee picks it up on the next trigger.</li>
                   <li>Already replied in the Comments tab? Just click <strong>Resume</strong> with the box empty.</li>
-                  <li>Need to split the work? Create a follow-up ticket from the board, then Resume.</li>
+                  <li>Need to split the work? Create a follow-up ticket, then Resume.</li>
                 </ul>
               </>
             ) : (
@@ -4133,8 +2256,8 @@ export default function TicketPanel({
                 }}>
                   This ticket is not currently parked for user intervention. Park it
                   here when a human decision is needed and the agent should stop
-                  re-trying. Parked tickets get a high-visibility badge on the
-                  board and drop out of the agent's focus queue until you resume them.
+                  re-trying. Parked tickets get a high-visibility badge in the
+                  ticket list and are not dispatched until you resume them.
                 </div>
 
                 <label style={labelStyle}>Park reason</label>

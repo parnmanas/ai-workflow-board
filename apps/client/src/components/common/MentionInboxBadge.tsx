@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { tokens } from '../../tokens';
 import { useMentions } from '../../hooks/useMentions';
 import { useToast } from '../../contexts/ToastContext';
-import { api, UserMentionItem } from '../../api';
+import { UserMentionItem } from '../../api';
+import { ticketPath } from '../../utils/ticketPath';
 import { renderMentionPreview } from '../../utils/mentionPreview';
 import { NavBadge } from './NavBadge';
 
@@ -75,30 +76,10 @@ export function MentionInboxBadge({ workspaceId }: Props) {
     }
 
     if (item.source_type === 'comment' && item.ticket_id && workspaceId) {
-      const ticketParam = encodeURIComponent(item.ticket_id);
-      const commentParam = encodeURIComponent(item.source_id);
-      // `board_id` is best-effort: rows delivered live over SSE from the MCP
-      // comment paths carry none, and a ticket can be moved to another board
-      // after the mention was stored. Resolve it at click time from the
-      // ticket itself (GET /tickets/:id walks the parent chain server-side)
-      // rather than routing to a board-less URL, which no page consumed —
-      // the click silently did nothing.
-      let boardId = item.board_id;
-      if (!boardId) {
-        try {
-          const ticket: any = await api.getTicket(item.ticket_id);
-          boardId = ticket?.board_id ?? null;
-        } catch {
-          boardId = null;
-        }
-      }
-      if (!boardId) {
-        showToast('이 멘션이 가리키는 티켓을 찾을 수 없습니다 (삭제되었거나 접근 권한이 없습니다)', 'error');
-        return;
-      }
-      navigate(
-        `/ws/${workspaceId}/boards/${encodeURIComponent(boardId)}?ticket=${ticketParam}&comment=${commentParam}`,
-      );
+      // Tickets live in one workspace pool, so the ticket id alone addresses
+      // it — the Tickets page opens `?ticket=` (fetching it by id even when
+      // the current filters hide it) and scrolls to `?comment=`.
+      navigate(ticketPath(workspaceId, item.ticket_id, { commentId: item.source_id }));
       return;
     }
 

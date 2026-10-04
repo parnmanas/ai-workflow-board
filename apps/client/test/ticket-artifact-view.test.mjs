@@ -2,7 +2,7 @@
 //
 // 카드 클릭 → 우측 패널에 주입되는 read-only 상세의 상태별(로딩·오류·로드) 마크업을
 // react-dom/server 로 jsdom 없이 고정한다. 순수 <TicketArtifactView>(state props)라
-// fetch·부수효과 없이 계약을 검증한다. 시스템 코멘트 필터·role 폴백까지 확인.
+// fetch·부수효과 없이 계약을 검증한다. 시스템 코멘트 필터·담당자 표시까지 확인.
 //
 // 실행:  node --import tsx --test apps/client/test/ticket-artifact-view.test.mjs
 import test from 'node:test';
@@ -52,17 +52,15 @@ test('로드 상태 + disconnected: SSE 단절 배너 노출, 연결 시 미노�
   assert.doesNotMatch(on, /실시간 갱신이 일시중단/);
 });
 
-test('로드 상태: 제목·우선순위·라벨·역할·설명·하위작업·코멘트', () => {
+test('로드 상태: 제목·우선순위·상태·태그·프로젝트·담당자·설명·하위작업·코멘트', () => {
   const ticket = {
     title: '로그인 리다이렉트 버그',
     priority: 'high',
     status: 'in_progress',
-    labels: ['bug', 'auth'],
+    tags: ['bug', 'auth'],
+    project: { id: 'p1', name: 'awb-web', repo_url: 'https://x/awb.git', default_branch: 'main' },
     description: '로그인 후 빈 화면으로 리다이렉트됩니다.',
-    role_assignments: [
-      { slug: 'assignee', holder: { type: 'agent', id: 'a1', name: 'Rolf/AWB' } },
-      { slug: 'reviewer', holder: { type: 'agent', id: 'a2', name: 'Rolf/AWB.Reviewer' } },
-    ],
+    assignee: { manager_agent_id: 'h1', cli: 'claude', working_dir: '/w/awb', label: 'AWB' },
     children: [
       { id: 'c1', title: '리다이렉트 원인 조사', status: 'done' },
       { id: 'c2', title: '회귀 테스트 추가', status: 'todo' },
@@ -72,25 +70,40 @@ test('로드 상태: 제목·우선순위·라벨·역할·설명·하위작업�
       { id: 'm1', author_type: 'agent', author: 'Rolf/AWB', content: '원인 파악 완료' },
     ],
   };
-  const html = render({ status: 'loaded', ticket });
+  const html = renderToStaticMarkup(
+    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, hostNames: { h1: 'Rolf' } }),
+  );
   assert.match(html, /로그인 리다이렉트 버그/); // 제목
   assert.match(html, /high/); // 우선순위 배지
-  assert.match(html, /bug/); // 라벨
-  assert.match(html, /auth/);
-  assert.match(html, /Rolf\/AWB/); // 담당자
-  assert.match(html, /Rolf\/AWB\.Reviewer/); // 리뷰어
+  assert.match(html, /In Progress/); // 상태 라벨(상수 경유)
+  assert.match(html, /#bug/); // 태그
+  assert.match(html, /#auth/);
+  assert.match(html, /awb-web/); // 프로젝트
+  assert.match(html, /Rolf\/AWB/); // 담당자 — <Host>/<label>
   assert.match(html, /빈 화면으로 리다이렉트/); // 설명
   assert.match(html, /리다이렉트 원인 조사/); // 하위 작업
   assert.match(html, /회귀 테스트 추가/);
+  assert.match(html, /To Do/); // 하위 작업 상태 라벨
   assert.match(html, /원인 파악 완료/); // 사람/에이전트 코멘트
   assert.doesNotMatch(html, /이동됨/); // 시스템 코멘트는 필터
 });
 
-test('role_assignments 비어도 비정규화 assignee/reporter 로 폴백', () => {
-  const ticket = { title: 'T', assignee: 'LegacyBot', reporter: 'LegacyReporter', role_assignments: [] };
+test('담당자 host 이름을 모르면 raw host id 대신 label 만 그린다', () => {
+  const ticket = { title: 'T', assignee: { manager_agent_id: 'deadbeef-0000', cli: 'codex', working_dir: '/w/api', label: '' } };
   const html = render({ status: 'loaded', ticket });
-  assert.match(html, /LegacyBot/);
-  assert.match(html, /LegacyReporter/);
+  assert.match(html, /api\/codex/);
+  assert.doesNotMatch(html, /deadbeef/);
+});
+
+test('서버가 해석한 assignee_name(<Host>/<label>)을 우선 쓴다', () => {
+  const ticket = { title: 'T', assignee: { manager_agent_id: 'h9', cli: 'codex', working_dir: '/w/api', label: 'api' }, assignee_name: 'ragnar/api' };
+  const html = render({ status: 'loaded', ticket });
+  assert.match(html, /ragnar\/api/);
+});
+
+test('담당자가 없으면 미지정 안내', () => {
+  const html = render({ status: 'loaded', ticket: { title: 'T', assignee: null } });
+  assert.match(html, /미지정/);
 });
 
 test('설명에 티켓 토큰이 있으면 중첩 카드로 렌더', () => {
@@ -100,37 +113,32 @@ test('설명에 티켓 토큰이 있으면 중첩 카드로 렌더', () => {
   assert.match(html, /의존 티켓/);
 });
 
-// ─── "보드에서 열기" 버튼 (티켓 7815a958) ────────────────────────────────────
+// ─── "티켓 열기" 버튼 (티켓 7815a958 → board-less: Tickets 페이지로) ──────────
 
-test('onOpenOnBoard 없으면 보드 열기 버튼 미노출', () => {
-  const ticket = { title: 'T', board_id: 'b1' };
+test('onOpen 없으면 열기 버튼 미노출', () => {
+  const ticket = { id: 't1', title: 'T', workspace_id: 'w1' };
   const html = render({ status: 'loaded', ticket });
-  assert.doesNotMatch(html, /보드에서 열기/);
+  assert.doesNotMatch(html, /티켓 열기/);
 });
 
-test('board_id 있고 아카이브 안 됐으면 활성 버튼', () => {
-  const ticket = { title: 'T', board_id: 'b1' };
-  const html = renderToStaticMarkup(
-    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpenOnBoard: () => {} }),
-  );
-  assert.match(html, /보드에서 열기/);
-  assert.doesNotMatch(html, /disabled=""/);
+test('workspace_id 가 있으면 활성 버튼 (보관된 티켓도 Tickets 페이지가 id 로 연다)', () => {
+  for (const ticket of [
+    { id: 't1', title: 'T', workspace_id: 'w1' },
+    { id: 't1', title: 'T', workspace_id: 'w1', archived_at: '2026-01-01T00:00:00.000Z' },
+  ]) {
+    const html = renderToStaticMarkup(
+      React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpen: () => {} }),
+    );
+    assert.match(html, /티켓 열기/);
+    assert.doesNotMatch(html, /disabled=""/);
+  }
 });
 
-test('board_id 없으면 버튼 비활성 + 안내', () => {
-  const ticket = { title: 'T' };
+test('workspace_id 없으면 버튼 비활성 + 안내', () => {
+  const ticket = { id: 't1', title: 'T' };
   const html = renderToStaticMarkup(
-    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpenOnBoard: () => {} }),
-  );
-  assert.match(html, /disabled=""/);
-  assert.match(html, /보드를 찾을 수 없습니다/);
-});
-
-test('archived_at 있으면 board_id 가 있어도 버튼 비활성 + 안내', () => {
-  const ticket = { title: 'T', board_id: 'b1', archived_at: '2026-01-01T00:00:00.000Z' };
-  const html = renderToStaticMarkup(
-    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpenOnBoard: () => {} }),
+    React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpen: () => {} }),
   );
   assert.match(html, /disabled=""/);
-  assert.match(html, /보관된 티켓은 보드에서 바로 열 수 없습니다/);
+  assert.match(html, /워크스페이스를 찾을 수 없습니다/);
 });
