@@ -1,5 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 import { ApiKey } from '../../entities/ApiKey';
+import { RuntimeHost } from '../../entities/RuntimeHost';
 import { TicketRoleAssignment } from '../../entities/TicketRoleAssignment';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
@@ -30,6 +31,39 @@ export class DropAgentTable1760000000089 implements MigrationInterface {
   name = 'DropAgentTable1760000000089';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // Pre-P0 pairing never stamped host_id. Preserve those manager identities
+    // while their Agent rows and key links still exist; dropping agents first
+    // can SET NULL the only link and permanently strand their credentials.
+    if (await queryRunner.hasTable('agents')) {
+      const managers: Array<{ id: string; name: string; is_active: number; last_seen_at: Date | null }> =
+        await queryRunner.query("SELECT id, name, is_active, last_seen_at FROM agents WHERE type = 'manager'");
+      const hostRepo = queryRunner.manager.getRepository(RuntimeHost);
+      const keys = queryRunner.manager.getRepository(ApiKey);
+      for (const manager of managers) {
+        const managerKeys = await keys.find({ where: { agent_id: manager.id } });
+        const hostIds = [...new Set(managerKeys.map((key) => key.host_id).filter((id): id is string => !!id))];
+        if (hostIds.length > 1) {
+          throw new Error(`Manager ${manager.id} has conflicting Runtime Host bindings; refusing to drop agents`);
+        }
+        const hostId = hostIds[0] || manager.id;
+        if (!(await hostRepo.findOne({ where: { id: hostId } }))) {
+          await hostRepo.save(hostRepo.create({
+            id: hostId,
+            name: manager.name,
+            hostname: '',
+            workspace_id: managerKeys[0]?.workspace_id || null,
+            is_active: manager.is_active,
+            last_seen_at: manager.last_seen_at,
+          }));
+        }
+        for (const key of managerKeys) {
+          if (!key.host_id) {
+            key.host_id = hostId;
+            await keys.save(key);
+          }
+        }
+      }
+    }
     // ── 1. spec re-key ──────────────────────────────────────────────
     const keyRepo = queryRunner.manager.getRepository(ApiKey);
     let links: Array<{ agent_id: string | null; host_id: string | null }> = [];
