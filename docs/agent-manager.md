@@ -736,6 +736,11 @@ can always be edited directly. Selecting a template copies its preferences and
 keeps its name visible as the starting point. Returning to **사용 안 함** preserves
 the current settings, including local edits; templates are managed separately in Hosts.
 
+Hosts separates **Runtime Hosts** (connection, manager/CLI/ACP versions, model
+refresh and logs) from **Agent 템플릿** using tabs. Host details no longer display
+the retired Agent directory/identity roster, Agent lifecycle status or restart-all
+Agent controls. Execution folders and sessions are managed on their work surfaces.
+
 Execution folders belong to the session or inline RuntimeSpec. The old
 `set_working_dir` manager command has been removed from both contracts. CLI
 capabilities govern effort availability; explicit runtime effort reaches both

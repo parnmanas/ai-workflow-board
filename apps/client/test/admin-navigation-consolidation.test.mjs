@@ -45,7 +45,7 @@ test('P4c-4: agents surface is gone — nav has no AI Agents item, route redirec
 });
 
 test('runtime console survives on AgentManagerPage without the agent list', () => {
-  assert.match(agentManagerPageSource, /function AgentStatusSummary/);
-  assert.match(agentManagerPageSource, /title="Without a live runtime"/);
-  assert.match(agentManagerPageSource, /<AgentStatusSummary agent=\{dashboardAgent\} \/>/);
+  assert.match(agentManagerPageSource, /export function InstanceDetail/);
+  assert.match(agentManagerPageSource, /<InstalledCliVersions/);
+  assert.doesNotMatch(agentManagerPageSource, /WorkspaceAgentRows|AgentStatusSummary|Without a live runtime/);
 });

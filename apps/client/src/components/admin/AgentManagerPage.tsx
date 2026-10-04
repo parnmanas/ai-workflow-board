@@ -1,32 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { installedVersionBadge, managerUpdateAction, updateFailureBadge } from './managerUpdateAction';
 import type {
-  RuntimeParticipant,
-  AgentCredentialEntry,
-  AgentCurrentTask,
-  AgentLifecycleState,
-  AgentManagerCommandKind,
   AgentManagerInstance,
   CliInstallEntry,
   PrivilegedCommandRequest,
-  Credential,
-  DashboardAgent,
   PairingTokenMint,
   PairingTokenSafe,
-  SubagentSummary,
-  WorktreeStatusEntry,
   AcpAdapterReport,
 } from '../../types';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useToast } from '../../contexts/ToastContext';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
-import { Button, Input, Modal, Select } from '../common';
-import { formatAgentDisplayName, agentIdentityLabel } from '../../utils/agentName';
-import DirectoryPicker from './DirectoryPicker';
-// ticket 40110b64 — Runtime Hosts 화면과 Agent 다이얼로그가 같은 리프레시 흐름을 쓴다.
+import { Button, Input, Modal } from '../common';
+// Runtime Hosts와 실행 설정은 같은 모델 목록 갱신 경로를 사용한다.
 import { refreshHostModels, summarizeHostModels } from '../../cli/hostModels';
 import { reloadInstance, waitForCommandAck } from './agentManagerModelRefresh';
 import { INSTANCE_OP, finishInstanceOp, pendingAdapterClis, pendingInstallKeys, startInstanceOp, useInstanceOps } from './instanceOps';
@@ -36,8 +25,8 @@ import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersion
  * Runtime Host administration and observability.
  *
  * Layout: master/detail split. Left column lists every heartbeating instance
- * grouped by host; right column shows the selected instance's subagents,
- * recent server-side logs touching that agent, and a restart button that
+ * grouped by host; right column shows connection health, manager/CLI versions,
+ * recent host logs, and a restart button that
  * dispatches `restart_manager` over the agent_manager_command SSE channel
  * (re-execs the Runtime Host in place, no git pull).
  *
@@ -49,98 +38,6 @@ import { cliUpdateState, compareCliVersionStrings } from '../../utils/cliVersion
 
 const REFRESH_FALLBACK_MS = 15_000;
 const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
-
-interface AgentManagerPageProps {
-  workspaceAgents?: DashboardAgent[];
-  agentsLoading?: boolean;
-  agentsError?: string | null;
-  canManageRuntime?: boolean;
-  onRetryAgents?: () => void;
-  onOpenAgent?: (agentId: string) => void;
-  /** 호스트를 고르지 않았을 때 오른쪽에 그릴 것. AI Agents 화면은 여기에 Agent
-   *  그리드를 넣어, 호스트를 안 고른 기본 상태에서도 Agent 가 보이게 한다.
-   *  주지 않으면 예전처럼 "호스트를 고르세요" 안내가 뜬다. */
-  emptyDetail?: React.ReactNode;
-}
-
-const AGENT_LIFECYCLE_META: Record<
-  AgentLifecycleState,
-  { label: string; color: string; background: string }
-> = {
-  online: { label: 'Online', color: tokens.colors.success, background: tokens.colors.successBg },
-  starting: { label: 'Starting', color: tokens.colors.warning, background: tokens.colors.warningBg },
-  never_started: { label: 'Never started', color: tokens.colors.textMuted, background: tokens.colors.surfaceSubtle },
-  offline: { label: 'Offline', color: tokens.colors.textMuted, background: tokens.colors.surfaceSubtle },
-  error: { label: 'Error', color: tokens.colors.danger, background: tokens.colors.dangerBg },
-};
-
-function resolveAgentLifecycle(agent: DashboardAgent): AgentLifecycleState {
-  if (agent.lifecycle_state) return agent.lifecycle_state;
-  if (agent.is_online) return 'online';
-  return agent.last_seen_at || agent.connected_at ? 'offline' : 'never_started';
-}
-
-function activeAgentTasks(agent: DashboardAgent | undefined): AgentCurrentTask[] {
-  if (!agent) return [];
-  if (agent.active_tasks?.length) return agent.active_tasks;
-  return agent.current_task ? [agent.current_task] : [];
-}
-
-function AgentStatusSummary({ agent }: { agent: DashboardAgent | undefined }) {
-  if (!agent) {
-    return <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>Status unavailable</span>;
-  }
-  const state = resolveAgentLifecycle(agent);
-  const meta = AGENT_LIFECYCLE_META[state];
-  const tasks = activeAgentTasks(agent);
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-        <span
-          title={agent.lifecycle_detail || undefined}
-          style={{
-            padding: '2px 7px',
-            borderRadius: 4,
-            fontSize: 10,
-            fontWeight: 700,
-            color: meta.color,
-            background: meta.background,
-            textTransform: 'uppercase',
-          }}
-        >
-          {meta.label}
-        </span>
-        {!agent.is_online && (
-          <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>
-            {agent.last_seen_at ? `Last seen ${formatRelative(agent.last_seen_at)}` : 'Never connected'}
-          </span>
-        )}
-        <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>
-          {tasks.length === 0 ? 'Idle' : `${tasks.length} active task${tasks.length === 1 ? '' : 's'}`}
-        </span>
-      </div>
-      {agent.lifecycle_detail && state === 'error' && (
-        <div style={{ fontSize: 11, color: tokens.colors.dangerLight }}>{agent.lifecycle_detail}</div>
-      )}
-      {tasks.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          {tasks.map((task) => (
-            <div
-              key={`${task.kind || 'ticket'}:${task.ticket_id}:${task.role || ''}`}
-              style={{ fontSize: 11, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              title={task.ticket_title}
-            >
-              {task.kind === 'qa' ? 'QA · ' : ''}
-              {task.ticket_title}
-              {task.role ? ` · ${task.role}` : ''}
-              {task.claimed_at ? ` · ${formatRelative(task.claimed_at)}` : ''}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function degradedReason(inst: AgentManagerInstance): string | null {
   // 아예 실행조차 못 하는 CLI 가 가장 심각한 degraded 상태 — 먼저 노출한다
@@ -194,159 +91,6 @@ function formatDuration(startIso: string): string {
   }
 }
 
-function modeBadgeColor(_mode: 'manager'): string {
-  return tokens.colors.accent;
-}
-
-// ─── Live worktrees (ticket 72fc244f) ──────────────────────────────────────
-
-function worktreeStateMeta(state: 'allocated' | 'idle' | 'orphaned'): {
-  label: string;
-  color: string;
-  bg: string;
-} {
-  // allocated → green (a worker is on it), idle → muted (warm/free), orphaned →
-  // red (active lease with no live owner past the reclaim grace — a visible leak).
-  if (state === 'allocated') {
-    return { label: 'allocated', color: tokens.colors.successLight, bg: tokens.colors.successBg };
-  }
-  if (state === 'orphaned') {
-    return { label: 'orphaned', color: tokens.colors.dangerLight, bg: tokens.colors.dangerBg };
-  }
-  return { label: 'idle', color: tokens.colors.textMuted, bg: tokens.colors.surfaceSubtle };
-}
-
-/** Short ticket ref for the "slot → task" line: "#d68afab5 <title>" (title only
- *  when the server joined one; falls back to the raw slug for idle per_ticket). */
-function worktreeTaskLabel(w: WorktreeStatusEntry): string {
-  if (w.ticket_id) {
-    const short = w.ticket_id.slice(0, 8);
-    return w.ticket_title ? `#${short} ${w.ticket_title}` : `#${short}`;
-  }
-  // per_ticket idle dir: only the 8-char slug is knowable locally.
-  if (w.mode === 'per_ticket') return `#${w.slot}`;
-  return 'idle';
-}
-
-function StatePill({ state }: { state: 'allocated' | 'idle' | 'orphaned' }) {
-  const meta = worktreeStateMeta(state);
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '1px 7px',
-        borderRadius: 4,
-        fontSize: 10,
-        fontWeight: 600,
-        textTransform: 'uppercase',
-        letterSpacing: '0.04em',
-        color: meta.color,
-        background: meta.bg,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {meta.label}
-    </span>
-  );
-}
-
-/**
- * Renders a manager instance's live worktrees, grouped by working_dir then by
- * mode. Shared pool slots come first as an explicit "slot → current task" map
- * (the core ask of ticket 72fc244f: dark shared-N leases are legible at a
- * glance); per_ticket dirs follow. QA/Security run clones (`.awb/qa/`) are a
- * separate workspace and intentionally not listed here.
- */
-function WorktreeStatusList({ entries }: { entries: WorktreeStatusEntry[] }) {
-  // Group by working_dir so a multi-agent manager doesn't blur two repos' pools.
-  const byDir = new Map<string, WorktreeStatusEntry[]>();
-  for (const e of entries) {
-    const key = e.working_dir || '(unknown working_dir)';
-    (byDir.get(key) ?? byDir.set(key, []).get(key)!).push(e);
-  }
-  const rowStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    fontFamily: 'monospace',
-    fontSize: 11,
-    padding: '2px 0',
-  };
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {Array.from(byDir.entries()).map(([dir, rows]) => {
-        const shared = rows.filter((r) => r.mode === 'shared');
-        const perTicket = rows.filter((r) => r.mode === 'per_ticket');
-        return (
-          <div key={dir} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            <div
-              style={{
-                fontFamily: 'monospace',
-                fontSize: 10,
-                color: tokens.colors.textMuted,
-                wordBreak: 'break-all',
-              }}
-            >
-              {dir}
-            </div>
-            {shared.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingLeft: 6 }}>
-                {shared.map((w) => (
-                  <div key={w.path} style={rowStyle}>
-                    <span style={{ color: tokens.colors.accentLight, minWidth: 62 }}>{w.slot}</span>
-                    <span style={{ color: tokens.colors.textMuted }}>→</span>
-                    <span
-                      style={{
-                        color:
-                          w.state === 'idle' ? tokens.colors.textMuted : tokens.colors.textStrong,
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                      title={`${worktreeTaskLabel(w)}${w.branch ? ` @${w.branch}` : ''}`}
-                    >
-                      {worktreeTaskLabel(w)}
-                      {w.branch ? (
-                        <span style={{ color: tokens.colors.textMuted }}> @{w.branch}</span>
-                      ) : null}
-                    </span>
-                    <StatePill state={w.state} />
-                  </div>
-                ))}
-              </div>
-            )}
-            {perTicket.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingLeft: 6 }}>
-                {perTicket.map((w) => (
-                  <div key={w.path} style={rowStyle}>
-                    <span
-                      style={{
-                        color: tokens.colors.textStrong,
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                      title={`${worktreeTaskLabel(w)}${w.branch ? ` @${w.branch}` : ''}`}
-                    >
-                      {worktreeTaskLabel(w)}
-                      {w.branch ? (
-                        <span style={{ color: tokens.colors.textMuted }}> @{w.branch}</span>
-                      ) : null}
-                    </span>
-                    <StatePill state={w.state} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 interface InstanceRowProps {
   inst: AgentManagerInstance;
   selected: boolean;
@@ -381,14 +125,14 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
               fontWeight: 700,
               padding: '2px 6px',
               borderRadius: 4,
-              background: `${modeBadgeColor(inst.mode)}20`,
-              color: modeBadgeColor(inst.mode),
+              background: `${tokens.colors.accent}20`,
+              color: tokens.colors.accent,
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
               flexShrink: 0,
             }}
           >
-            {inst.mode}
+            Runtime Host
           </span>
           <span
             style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -417,7 +161,7 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
         />
       </div>
       <div style={{ marginTop: 4, fontSize: 11, color: tokens.colors.textMuted }}>
-        agent <code>{inst.agent_id.slice(0, 8)}</code> · pid {inst.pid || '—'} · v{inst.plugin_version} · {inst.cli}
+        v{inst.plugin_version} · {inst.cli_adapters.join(', ') || 'CLI 정보 없음'}
       </div>
       <div style={{ marginTop: 2, fontSize: 11, color: tokens.colors.textMuted }}>
         last seen {formatRelative(inst.last_seen_at)} · up {formatDuration(inst.started_at)}
@@ -426,103 +170,19 @@ function InstanceRow({ inst, selected, onSelect }: InstanceRowProps) {
   );
 }
 
-function WorkspaceAgentRows({
-  agents,
-  loading,
-  error,
-  title,
-  emptyMessage,
-  onRetry,
-  onOpenAgent,
-}: {
-  agents: DashboardAgent[];
-  loading?: boolean;
-  error?: string | null;
-  title: string;
-  emptyMessage: string;
-  onRetry?: () => void;
-  onOpenAgent?: (agentId: string) => void;
-}) {
-  return (
-    <section
-      aria-label={title}
-      style={{
-        padding: 12,
-        background: tokens.colors.surfaceCard,
-        border: `1px solid ${tokens.colors.border}`,
-        borderRadius: tokens.radii.md,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-        <h3 style={{ margin: 0, fontSize: 12, color: tokens.colors.textPrimary }}>{title}</h3>
-        <span style={{ fontSize: 10, color: tokens.colors.textMuted }}>{agents.length}</span>
-      </div>
-      {error ? (
-        <div role="alert" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, color: tokens.colors.danger, fontSize: 11 }}>
-          <span>{error}</span>
-          {onRetry && <Button size="sm" variant="ghost" onClick={onRetry}>Retry</Button>}
-        </div>
-      ) : loading ? (
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>Loading agents...</div>
-      ) : agents.length === 0 ? (
-        <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{emptyMessage}</div>
-      ) : (
-        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {agents.map((agent) => (
-            <li
-              key={agent.id}
-              style={{
-                padding: 10,
-                background: tokens.colors.surface,
-                borderRadius: tokens.radii.sm,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 7,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                <span
-                  style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600, color: tokens.colors.textStrong }}
-                  title={formatAgentDisplayName(agent)}
-                >
-                  {formatAgentDisplayName(agent)}
-                </span>
-                {onOpenAgent && (
-                  <Button size="sm" variant="ghost" onClick={() => onOpenAgent(agent.id)}>
-                    Details
-                  </Button>
-                )}
-              </div>
-              <AgentStatusSummary agent={agent} />
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-interface InstanceDetailProps {
-  inst: AgentManagerInstance;
-  workspaceAgents?: DashboardAgent[];
-  onOpenAgent?: (agentId: string) => void;
-}
-
 /** 회귀 테스트가 Details 진입 경로를 실제로 마운트해 검증할 수 있도록 노출한다
  *  (ticket 20fff298). 페이지 전체를 띄우지 않고 이 컴포넌트만 렌더하면 되므로,
  *  버튼 렌더 조건을 소스 정규식이 아니라 실제 DOM 으로 단언할 수 있다. */
-export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: InstanceDetailProps) {
+export function InstanceDetail({ inst }: { inst: AgentManagerInstance }) {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const degraded = degradedReason(inst);
-  const [subagents, setSubagents] = useState<SubagentSummary[] | null>(null);
   const [logs, setLogs] = useState<any[] | null>(null);
   // 진행 중 플래그는 **호스트별 스토어**에서 읽는다(instanceOps.ts). 이 컴포넌트는 선택된
   // 호스트 하나만 그리고 호스트를 바꿔도 재사용되므로, useState 로 두면 A 의 진행 중이 B 화면을
   // 잠갔다 — A 의 CLI 를 올리는 동안 B 의 CLI 를 못 올린 원인이다.
   const activeOps = useInstanceOps(inst.instance_id);
   const restartPending = activeOps.has(INSTANCE_OP.restart);
-  const restartAllPending = activeOps.has(INSTANCE_OP.restartAll);
   const updatePending = activeOps.has(INSTANCE_OP.updateManager);
   const refreshModelsPending = activeOps.has(INSTANCE_OP.refreshModels);
   // 진행 중인 **설치본 키** 집합 — 같은 호스트의 다른 설치본은 동시에 올릴 수 있다. 진짜
@@ -539,24 +199,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   useEffect(() => {
     setSudoPrompt(null);
   }, [inst.instance_id]);
-  // Manager Agent.name + description live in the agents table, separate
-  // from inst.hostname (OS hostname). The header shows hostname; this
-  // load surfaces the Agent.name (used as the children's display prefix)
-  // so the operator can see and edit it. Only loaded for manager-mode
-  // Runtime Host identity is editable independently from its OS hostname.
-  const [managerInfo, setManagerInfo] = useState<{ name: string; description: string } | null>(null);
-  const dashboardAgent = workspaceAgents.find((agent) => agent.id === inst.agent_id);
-
-  const loadSubagents = useCallback(async () => {
-    try {
-      const data = await api.getAgentManagerInstanceSubagents(inst.instance_id);
-      setSubagents(data);
-    } catch (err: any) {
-      showToast(`Failed to load subagents: ${err?.message || err}`, 'error');
-      setSubagents([]);
-    }
-  }, [inst.instance_id, showToast]);
-
   const loadLogs = useCallback(async () => {
     try {
       const data = await api.getAgentManagerInstanceLogs(inst.instance_id, 100);
@@ -567,19 +209,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   }, [inst.instance_id, showToast]);
 
-  // P4c-4: manager identity 는 Host 행 — 헤더는 hostname 으로 둔다.
-  const loadManagerInfo = useCallback(async () => {
-    setManagerInfo(null);
-  }, []);
-
   useEffect(() => {
-    setSubagents(null);
     setLogs(null);
-    setManagerInfo(null);
-    loadSubagents();
     loadLogs();
-    loadManagerInfo();
-  }, [inst.instance_id, loadSubagents, loadLogs, loadManagerInfo]);
+  }, [inst.instance_id, loadLogs]);
 
   // Dispatch restart_manager SSE command via the /restart admin endpoint.
   // Server returns 202 with command_id + a short message; the manager later
@@ -609,43 +242,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
     }
   };
 
-  // Dispatch restart_all_agents SSE command. Unlike restart_manager, the
-  // manager process stays up — it just reaps+respawns each managed agent in
-  // place (fresh credential + immediate in-flight resume per agent). The 202
-  // only carries command_id; the exact restarted count lands in the async ack
-  // (server-logged), so we surface the *target* count from agent_ids instead.
-  const handleRestartAllAgents = async () => {
-    const id = inst.instance_id;
-    if (restartAllPending) return;
-    const targetCount = inst.agent_ids?.length ?? 0;
-    const ok = await confirm({
-      title: 'Restart all agents',
-      message:
-        '이 매니저가 관리하는 모든 agent 를 재시작합니다. 각 agent 의 진행 중 작업은 재시작 후 자동 재개됩니다. (매니저 프로세스는 유지)',
-      confirmLabel: 'Restart all',
-    });
-    if (!ok) return;
-    if (!startInstanceOp(id, INSTANCE_OP.restartAll)) return;
-    try {
-      const resp = await api.restartAllAgents(id);
-      const idTail = resp?.command_id ? ` (id=${resp.command_id.slice(0, 8)})` : '';
-      showToast(
-        `restart_all_agents dispatched${idTail} — ${targetCount} agent(s) will restart, ` +
-          `resuming in-flight work.`,
-        'success',
-      );
-    } catch (err: any) {
-      showToast(`restart_all_agents failed: ${err?.message || err}`, 'error');
-    } finally {
-      finishInstanceOp(id, INSTANCE_OP.restartAll);
-    }
-  };
-
-  // Dispatch update_manager SSE command. In a git checkout the manager runs
-  // git pull + npm ci + build, acks success, then re-execs with --force;
-  // an npm-global install instead reinstalls via `npm i -g` (detached helper)
-  // and relaunches. Either way we see the restart on the client as an
-  // `agent_instance_update` event with the new manager version — no polling.
   const handleUpdate = async () => {
     const id = inst.instance_id;
     if (updatePending) return;
@@ -855,26 +451,26 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               fontWeight: 700,
               padding: '3px 8px',
               borderRadius: 4,
-              background: `${modeBadgeColor(inst.mode)}20`,
-              color: modeBadgeColor(inst.mode),
+              background: `${tokens.colors.accent}20`,
+              color: tokens.colors.accent,
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
             }}
           >
-            {inst.mode}
+            Runtime Host
           </span>
           <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: tokens.colors.textPrimary }}>
-            {managerInfo?.name || inst.hostname}
+            {inst.agent_name || inst.hostname}
           </h2>
-          {managerInfo?.name && managerInfo.name !== inst.hostname && (
+          {inst.agent_name && inst.agent_name !== inst.hostname && (
             <span
               style={{ fontSize: 12, color: tokens.colors.textMuted }}
-              title="OS hostname reported by the manager process — distinct from the editable Agent identity name above."
+              title="매니저가 실행되는 장비의 호스트 이름"
             >
               host: {inst.hostname}
             </span>
           )}
-          <span style={{ fontSize: 12, color: tokens.colors.textMuted, fontFamily: 'monospace' }}>
+          <span style={{ fontSize: 12, color: tokens.colors.textMuted, fontFamily: 'monospace', overflowWrap: 'anywhere' }}>
             {inst.instance_id}
           </span>
           {degraded && (
@@ -886,19 +482,11 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
             </span>
           )}
         </div>
-        {managerInfo?.description && (
-          <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5, color: tokens.colors.textSecondary }}>
-            {managerInfo.description}
-          </div>
-        )}
-        <div style={{ marginTop: 10 }}>
-          <AgentStatusSummary agent={dashboardAgent} />
-        </div>
         <dl
           style={{
             margin: '12px 0 0 0',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 200px), 1fr))',
             gap: '8px 16px',
             fontSize: 12,
             color: tokens.colors.textSecondary,
@@ -906,18 +494,10 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
         >
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Agent
+              Host ID
             </dt>
-            <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace' }}>
-              {inst.agent_id}
-            </dd>
-          </div>
-          <div>
-            <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Workspace
-            </dt>
-            <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace' }}>
-              {inst.workspace_id || '—'}
+            <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', overflowWrap: 'anywhere' }}>
+              {inst.host_id || inst.agent_id}
             </dd>
           </div>
           <div>
@@ -928,19 +508,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               {inst.pid || '—'} / {inst.cli}
             </dd>
           </div>
-          {/* manager 는 아래 "Agent Manager" 섹션이 버전·업데이트를 모두 보여 주므로
-              여기서 또 적지 않는다. subagent 인스턴스에는 그 섹션이 없어 이 줄이
-              유일한 버전 표시다. */}
-          {inst.mode !== 'manager' && (
-            <div>
-              <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Manager
-              </dt>
-              <dd style={{ margin: 0, color: tokens.colors.textStrong }}>
-                v{inst.plugin_version}
-              </dd>
-            </div>
-          )}
           <div>
             <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Started
@@ -967,40 +534,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
           </div>
           {inst.mode === 'manager' && (
             <>
-              <div style={{ gridColumn: '1 / -1' }}>
-                <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Working directories ({inst.working_dirs?.length ?? 0})
-                </dt>
-                <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', fontSize: 11 }}>
-                  {inst.working_dirs && inst.working_dirs.length > 0 ? inst.working_dirs.join('  •  ') : '—'}
-                </dd>
-              </div>
-              <div style={{ gridColumn: '1 / -1' }}>
-                <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Agent identities supervised ({inst.agent_ids?.length ?? 0})
-                </dt>
-                {/* "identities" 라고 써 놓고 잘린 UUID 를 늘어놓고 있었다
-                    (ticket 20fff298) — 8자리 조각은 이름도 아니고 조회에 쓸 수도
-                    없다. 워크스페이스 스냅샷에서 이름을 찾을 수 있으면 표시 계약
-                    (`<Manager>/<Agent>`)대로 쓰고, 못 찾은 것만 "이름 미확인"으로
-                    남기되 전체 id 를 title 에 실어 지원 시 추적할 수 있게 한다. */}
-                <dd style={{ margin: 0, color: tokens.colors.textStrong, fontFamily: 'monospace', fontSize: 11 }}>
-                  {inst.agent_ids && inst.agent_ids.length > 0
-                    ? inst.agent_ids.map((id, i) => {
-                        const label = agentIdentityLabel(
-                          workspaceAgents.find((agent) => agent.id === id),
-                          id,
-                        );
-                        return (
-                          <React.Fragment key={id}>
-                            {i > 0 ? ', ' : ''}
-                            <span title={label.title}>{label.text}</span>
-                          </React.Fragment>
-                        );
-                      })
-                    : '—'}
-                </dd>
-              </div>
               {inst.paired_at && (
                 <div>
                   <dt style={{ color: tokens.colors.textMuted, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
@@ -1162,31 +695,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
             최대 7개까지 늘어나는데, 감싸지 않으면 창이 좁을 때 버튼들이 눌려 라벨이
             잘리고 마지막 것이 컨테이너 밖으로 밀려 나간다. */}
         <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {/* 워크스페이스 스냅샷에 그 agent 행이 있는지로 게이팅하지 않는다
-              (ticket 20fff298). Details 는 `/ws/:wsId/agents/:agentId` 라우트로
-              가고 그 화면이 id 로 단건 조회하므로, 스냅샷 행은 애초에 필요가
-              없었다. 게이팅 때문에 다른 워크스페이스 소속·글로벌·스냅샷이 아직
-              안 온 에이전트에서 버튼이 통째로 사라졌고 — 조회하면 열렸을 상세를
-              "없는 것"처럼 보이게 했다. 조회 실패는 목적지 화면이 사유와 함께
-              표시한다. AgentCard 의 "View details" 도 원래부터 무조건 렌더다. */}
-          {onOpenAgent && (
-            <button
-              onClick={() => onOpenAgent(inst.agent_id)}
-              style={{
-                padding: '6px 14px',
-                fontSize: 12,
-                fontWeight: 600,
-                background: 'transparent',
-                color: tokens.colors.textStrong,
-                border: `1px solid ${tokens.colors.border}`,
-                borderRadius: tokens.radii.md,
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-              }}
-            >
-              Agent details
-            </button>
-          )}
           {inst.mode === 'manager' && (
             <button
               onClick={handleRefreshModels}
@@ -1206,7 +714,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               title={
                 '이 호스트에 설치된 CLI 들의 모델 목록을 다시 열거합니다. ' +
                 '매니저는 재시작되지 않고 실행 중인 세션도 끊기지 않습니다. ' +
-                'CLI 를 업그레이드한 뒤 Agent 생성/편집 화면의 모델 드롭다운을 갱신할 때 쓰세요.'
+                'CLI 를 업그레이드한 뒤 Agent 템플릿과 실행 설정의 모델 목록을 갱신할 때 쓰세요.'
               }
             >
               {refreshModelsPending ? '모델 갱신 중…' : 'Refresh models'}
@@ -1226,32 +734,12 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
               cursor: restartPending ? 'wait' : 'pointer',
               fontFamily: 'inherit',
             }}
-            title="Dispatch restart_manager: manager re-execs in place (no git pull / build). Manager-mode only."
+            title="이 Host의 매니저를 재시작합니다. 실행 중인 세션과 작업이 종료됩니다."
           >
-            Restart instance
+            매니저 재시작
           </button>
-          {inst.mode === 'manager' && (
-            <button
-              onClick={handleRestartAllAgents}
-              disabled={restartAllPending}
-              style={{
-                padding: '6px 14px',
-                fontSize: 12,
-                fontWeight: 600,
-                background: restartAllPending ? tokens.colors.surfaceHover : tokens.colors.warning,
-                color: restartAllPending ? tokens.colors.textMuted : tokens.colors.surface,
-                border: 'none',
-                borderRadius: tokens.radii.md,
-                cursor: restartAllPending ? 'wait' : 'pointer',
-                fontFamily: 'inherit',
-              }}
-              title="Dispatch restart_all_agents: reap+respawn every managed agent in place (fresh credential + immediate in-flight resume per agent). Manager process stays up — no downtime."
-            >
-              {restartAllPending ? 'Restarting agents…' : 'Restart all agents'}
-            </button>
-          )}
           <button
-            onClick={() => { loadSubagents(); loadLogs(); loadManagerInfo(); }}
+            onClick={() => { loadLogs(); }}
             style={{
               padding: '6px 14px',
               fontSize: 12,
@@ -1268,64 +756,6 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
           </button>
         </div>
       </div>
-
-      {/* P4c-4: managed-agent 섹션 제거 (Agent 테이블 없음). 실행 주체는 팀 슬롯/세션에서 본다. */}
-
-      {/* Subagents */}
-      <section
-        style={{
-          padding: 16,
-          background: tokens.colors.surfaceCard,
-          border: `1px solid ${tokens.colors.border}`,
-          borderRadius: tokens.radii.md,
-        }}
-      >
-        <h3 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>
-          Subagents ({subagents?.length ?? 0})
-        </h3>
-        {subagents === null ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>Loading…</div>
-        ) : subagents.length === 0 ? (
-          <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-            No subagents currently tracked for this agent in this workspace.
-          </div>
-        ) : (
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {subagents.map((s) => (
-              <li
-                key={s.subagent_id}
-                style={{
-                  padding: 8,
-                  background: tokens.colors.surface,
-                  borderRadius: tokens.radii.sm,
-                  fontSize: 12,
-                  color: tokens.colors.textStrong,
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div>
-                  <span style={{ fontWeight: 600 }}>{s.label || s.session_key}</span>
-                  <span style={{ marginLeft: 8, fontSize: 10, color: tokens.colors.textMuted, textTransform: 'uppercase' }}>
-                    {s.kind}
-                  </span>
-                  {s.role && (
-                    <span style={{ marginLeft: 6, fontSize: 11, color: tokens.colors.accentLight }}>
-                      · {s.role}
-                    </span>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-                  pid {s.pid} · {s.line_count} lines · started {formatRelative(s.started_at)}
-                  {s.ended_at && <> · ended {formatRelative(s.ended_at)}</>}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
 
       {/* Logs */}
       <section
@@ -1363,7 +793,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
                     fontSize: 11,
                     color: tokens.colors.textStrong,
                     display: 'grid',
-                    gridTemplateColumns: '120px 60px 100px 1fr',
+                    gridTemplateColumns: 'minmax(0, 1fr) auto auto',
                     gap: 8,
                   }}
                 >
@@ -1372,7 +802,7 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
                     {entry.level}
                   </span>
                   <span style={{ color: tokens.colors.accentLight }}>{entry.category}</span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.message}</span>
+                  <span style={{ gridColumn: '1 / -1', overflowWrap: 'anywhere' }}>{entry.message}</span>
                 </li>
               ))}
             </ul>
@@ -1383,28 +813,15 @@ export function InstanceDetail({ inst, workspaceAgents = [], onOpenAgent }: Inst
   );
 }
 
-export default function AgentManagerPage({
-  workspaceAgents = [],
-  agentsLoading = false,
-  agentsError = null,
-  canManageRuntime = true,
-  onRetryAgents,
-  onOpenAgent,
-  emptyDetail,
-}: AgentManagerPageProps) {
+export default function AgentManagerPage() {
   const isMobile = useMediaQuery('(max-width: 767px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(canManageRuntime);
+  const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pairOpen, setPairOpen] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!canManageRuntime) {
-      setInstances([]);
-      setLoading(false);
-      return;
-    }
     try {
       const data = await api.listAgentManagerInstances();
       setInstances(data);
@@ -1414,7 +831,7 @@ export default function AgentManagerPage({
     } finally {
       setLoading(false);
     }
-  }, [canManageRuntime]);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -1442,60 +859,17 @@ export default function AgentManagerPage({
 
   // Auto-select the first instance once data arrives so the right pane has
   // something to render. Drops the selection if the instance disappears.
-  //
-  // `emptyDetail` 이 주어지면 자동 선택하지 않는다 — 그 경우 빈 상태가 "볼 것이 없는
-  // 자리" 가 아니라 **기본 화면**(AI Agents 의 Agent 그리드)이기 때문이다. 자동으로
-  // 호스트를 골라 버리면 Agent 목록을 첫 화면에서 볼 수 없다.
   useEffect(() => {
     if (instances.length === 0) {
       if (selectedId !== null) setSelectedId(null);
       return;
     }
-    if (emptyDetail !== undefined) {
-      // 고른 호스트가 사라졌으면 선택만 푼다(기본 화면으로 돌아간다).
-      if (selectedId && !instances.some((i) => i.instance_id === selectedId)) setSelectedId(null);
-      return;
-    }
     if (!isMobile && (!selectedId || !instances.some((i) => i.instance_id === selectedId))) {
       setSelectedId(instances[0].instance_id);
     }
-  }, [instances, isMobile, selectedId, emptyDetail]);
+  }, [instances, isMobile, selectedId]);
 
   const selected = instances.find((i) => i.instance_id === selectedId) || null;
-  const representedAgentIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const inst of instances) {
-      ids.add(inst.agent_id);
-      for (const agentId of inst.agent_ids ?? []) ids.add(agentId);
-    }
-    for (const agent of workspaceAgents) {
-      if (agent.manager_agent_id && instances.some((inst) => inst.agent_id === agent.manager_agent_id)) {
-        ids.add(agent.id);
-      }
-    }
-    return ids;
-  }, [instances, workspaceAgents]);
-  const agentsWithoutLiveRuntime = useMemo(
-    () => workspaceAgents.filter((agent) => !representedAgentIds.has(agent.id)),
-    [representedAgentIds, workspaceAgents],
-  );
-
-  if (!canManageRuntime) {
-    return (
-      <div style={{ height: '100%', overflow: 'auto' }}>
-        <WorkspaceAgentRows
-          agents={workspaceAgents}
-          loading={agentsLoading}
-          error={agentsError}
-          title="Workspace agents"
-          emptyMessage="No agents in this workspace yet."
-          onRetry={onRetryAgents}
-          onOpenAgent={onOpenAgent}
-        />
-      </div>
-    );
-  }
-
   return (
     <div style={{ display: 'flex', gap: 16, height: '100%', minHeight: 0, overflow: 'hidden' }}>
       {/* Master pane */}
@@ -1518,10 +892,10 @@ export default function AgentManagerPage({
           }}
         >
           <span style={{ fontSize: 11, color: tokens.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            {loading ? 'Loading…' : `${instances.length} instance${instances.length === 1 ? '' : 's'}`}
+            {loading ? 'Loading…' : `연결된 인스턴스 ${instances.length}`}
           </span>
           <Button size="sm" variant="primary" onClick={() => setPairOpen(true)}>
-            Pair manager…
+            Host 연결
           </Button>
         </div>
         {loadError && (
@@ -1531,39 +905,9 @@ export default function AgentManagerPage({
           </div>
         )}
         <div
-          data-testid="mainframe-agents-list"
+          data-testid="runtime-hosts-list"
           style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
         >
-          {/* 기본 화면(Agent 그리드)으로 돌아가는 줄. 호스트를 한 번 고르고 나면
-              돌아갈 길이 없으면 그 화면은 사실상 없는 것이 된다 — 브라우저 뒤로
-              가기는 라우트가 안 바뀌어 소용이 없다. `emptyDetail` 을 준 화면에만
-              나온다(안 준 화면에서는 돌아갈 기본 화면 자체가 없다). */}
-          {emptyDetail !== undefined && (
-            <button
-              type="button"
-              onClick={() => setSelectedId(null)}
-              aria-current={selected ? undefined : 'true'}
-              style={{
-                width: '100%',
-                marginBottom: 12,
-                padding: '10px 12px',
-                textAlign: 'left',
-                fontSize: 12,
-                fontWeight: 600,
-                fontFamily: 'inherit',
-                cursor: 'pointer',
-                color: selected ? tokens.colors.textSecondary : tokens.colors.textStrong,
-                background: selected ? 'transparent' : tokens.colors.surfaceHover,
-                border: `1px solid ${selected ? tokens.colors.border : tokens.colors.accent}`,
-                borderRadius: tokens.radii.md,
-              }}
-            >
-              모든 Agent
-              <div style={{ marginTop: 2, fontSize: 11, fontWeight: 400, color: tokens.colors.textMuted }}>
-                워크스페이스 전체 · 상태/호스트/CLI 로 묶어 보기
-              </div>
-            </button>
-          )}
           {grouped.length === 0 && !loading && !loadError && (
             <div
               style={{
@@ -1576,8 +920,8 @@ export default function AgentManagerPage({
                 textAlign: 'center',
               }}
             >
-              No Runtime Host is currently heartbeating against this server.
-              Pair and start <code>awb-agent-manager</code> on an execution host.
+              현재 연결된 Runtime Host가 없습니다.
+              ‘Host 연결’에서 코드를 발급받아 실행할 장비의 <code>awb-agent-manager</code>와 연결하세요.
             </div>
           )}
           {grouped.map(([host, list]) => (
@@ -1605,19 +949,6 @@ export default function AgentManagerPage({
               ))}
             </div>
           ))}
-          {(agentsWithoutLiveRuntime.length > 0 || instances.length === 0 || agentsLoading || agentsError) && (
-            <div style={{ marginTop: 12 }}>
-              <WorkspaceAgentRows
-                agents={agentsWithoutLiveRuntime}
-                loading={agentsLoading}
-                error={agentsError}
-                title="Without a live runtime"
-                emptyMessage="Every workspace agent is represented by a live runtime."
-                onRetry={onRetryAgents}
-                onOpenAgent={onOpenAgent}
-              />
-            </div>
-          )}
         </div>
       </div>
 
@@ -1634,7 +965,7 @@ export default function AgentManagerPage({
       >
         {isMobile && selected && (
           <Button size="sm" variant="secondary" onClick={() => setSelectedId(null)} style={{ alignSelf: 'flex-start' }}>
-            ← Back to hosts
+            ← Host 목록
           </Button>
         )}
         <div
@@ -1649,11 +980,7 @@ export default function AgentManagerPage({
           {selected ? (
             <InstanceDetail
               inst={selected}
-              workspaceAgents={workspaceAgents}
-              onOpenAgent={onOpenAgent}
             />
-          ) : emptyDetail !== undefined ? (
-            emptyDetail
           ) : (
             <div
               style={{
@@ -1665,7 +992,7 @@ export default function AgentManagerPage({
                 borderRadius: tokens.radii.md,
               }}
             >
-              Select an instance from the list to inspect its subagents and logs.
+              Host를 선택하면 연결 상태, 매니저·CLI 버전과 로그를 확인할 수 있습니다.
             </div>
           )}
         </div>
@@ -1673,291 +1000,6 @@ export default function AgentManagerPage({
 
       <PairingDialog isOpen={pairOpen} onClose={() => setPairOpen(false)} />
     </div>
-  );
-}
-
-// ───────────────────────────── ST-5 ─────────────────────────────
-// Manager-only sections + pairing wizard. Kept in the same file because
-// they read from the same SSE-driven `instances` state and there is only
-// one consumer. If a second page ever needs the pairing wizard, lift it
-// into a shared admin component module.
-
-// ─── Credential expiry badge ──────────────────────────────────────────
-//
-// Surfaces per-agent OAuth token state on each managed-agent row so the
-// operator notices "expires in 12h" before the agent silently starts
-// returning is_error=true on every turn. Heartbeat data comes from
-// inst.agent_credentials (manager → server → here); never the raw token.
-//
-// Severity rules:
-//   1. expired (now ≥ expires_at_ms) → red, regardless of refresh_token
-//   2. <48h to expiry → yellow
-//   3. refresh_token_present === false → yellow (any expiry = silent fail)
-//   4. kind === 'unknown' / 'missing' → yellow / red (no metadata to validate)
-//   5. kind === 'api_key' → no badge (env var has no expiry concept)
-//   6. kind === 'operator_home' → always badge (neutral when healthy or
-//      uninspectable, escalated to expiring/expired/no-refresh when the
-//      operator's introspectable expiry is concerning). Surfacing this
-//      consistently is what keeps codex/antigravity agents from looking
-//      "broken" (red 'missing') next to claude agents on the same
-//      operator-HOME fallback.
-//   7. subscription kind with >48h refresh-token-present → no badge (healthy)
-
-const EXPIRY_WARNING_MS = 48 * 60 * 60 * 1000;
-
-/** Public path inside the AWB repo that documents the re-login runbook.
- *  Linked from the badge hovercard. We intentionally show the path rather
- *  than a hardcoded URL — operators read the docs from their own checkout
- *  on the manager host (where they'll need to re-auth claude anyway). */
-const RELOGIN_DOC_PATH = 'docs/managed-agent-relogin.md';
-
-type CredentialBadgeSeverity = 'expired' | 'expiring' | 'no-refresh' | 'unknown' | 'missing' | 'operator-home';
-
-interface CredentialBadgeData {
-  severity: CredentialBadgeSeverity;
-  label: string;
-  /** One-line summary shown in the hovercard before the runbook link. */
-  detail: string;
-}
-
-/**
- * Decide whether (and how) to badge an agent given its credential entry.
- * Returns null when the agent is healthy on a per-agent credential or
- * the badge would be noise (api_key kind, no entry yet from a pre-feature
- * manager). operator_home always badges — see severity rules above.
- */
-function classifyCredential(entry: AgentCredentialEntry | undefined): CredentialBadgeData | null {
-  if (!entry) return null;                          // pre-feature manager
-  if (entry.kind === 'api_key') return null;        // no expiry concept
-
-  const now = Date.now();
-
-  if (entry.kind === 'missing') {
-    return {
-      severity: 'missing',
-      label: 'no credential',
-      detail: 'No credential file in this agent\'s cli-home — every spawn will hit "not authenticated" until an operator runs the re-login runbook on the manager host.',
-    };
-  }
-
-  if (entry.kind === 'unknown') {
-    return {
-      severity: 'unknown',
-      label: 'credential ?',
-      detail: 'Credential file exists in cli-home but its shape is unrecognized. Check the manager\'s log and re-run the re-login runbook if needed.',
-    };
-  }
-
-  if (entry.kind === 'operator_home') {
-    // No per-agent credential is configured. The manager uses the
-    // operator's HOME credential (claude `.credentials.json`, codex
-    // `auth.json`, etc.) for every spawn. Always show a badge so the
-    // operator sees a consistent state across all CLIs — the previous
-    // behaviour silently hid healthy claude agents (>48h remaining)
-    // while reporting codex/antigravity ones as red 'missing', even though
-    // both were in the exact same fallback state.
-    if (typeof entry.expires_at_ms === 'number') {
-      const remaining = entry.expires_at_ms - now;
-      if (remaining <= 0) {
-        return {
-          severity: 'expired',
-          label: 'op HOME expired',
-          detail: entry.refresh_token_present
-            ? 'Operator HOME OAuth access token has expired but a refresh token is present — the CLI should auto-renew on the next turn. If turns keep failing with is_error=true, re-login on the manager host.'
-            : 'Operator HOME OAuth access token has expired and no refresh token is on disk. The manager cannot auto-renew; an operator must re-login on the manager host.',
-        };
-      }
-      if (!entry.refresh_token_present) {
-        return {
-          severity: 'no-refresh',
-          label: `op HOME · no refresh · ${formatRemaining(remaining)}`,
-          detail: `Operator HOME OAuth credential has no refresh_token, so when the access token expires (${formatRemaining(remaining)}) every turn will silently fail. Re-login on the manager host to capture a credential file with a refresh_token.`,
-        };
-      }
-      if (remaining < EXPIRY_WARNING_MS) {
-        return {
-          severity: 'expiring',
-          label: `op HOME · expires in ${formatRemaining(remaining)}`,
-          detail: `Operator HOME OAuth access token expires in ${formatRemaining(remaining)}. A refresh token is present so the CLI will normally auto-renew silently — but if it fails, every turn returns is_error=true with no signal. Re-login proactively if you'd rather not depend on that path.`,
-        };
-      }
-      // Healthy operator HOME (>48h, refresh present). Still badge so the
-      // operator can tell at a glance "no per-agent credential set up here".
-      return {
-        severity: 'operator-home',
-        label: 'operator HOME',
-        detail: `No per-agent credential is configured for this agent. The manager is using the operator's HOME credential (auto-renewing; ${formatRemaining(remaining)} on current access token). Configure a per-agent credential in this workspace's Credentials tab for isolated auth.`,
-      };
-    }
-    // No expiry metadata. Normal for adapters that don't introspect their
-    // credential file (codex / antigravity / opencode); also covers claude operator-HOME
-    // when the operator hasn't run `claude login` yet — in that case the
-    // CLI will surface its own "not authenticated" error on first spawn,
-    // which is clearer than anything we could synthesize here.
-    return {
-      severity: 'operator-home',
-      label: 'operator HOME',
-      detail: 'No per-agent credential is configured for this agent. The manager is using the operator\'s HOME credential as fallback; the manager cannot introspect this CLI\'s credential file format, so no expiry is shown.',
-    };
-  }
-
-  // subscription kind — per-agent OAuth credential. Carries a real expires_at.
-  if (typeof entry.expires_at_ms === 'number') {
-    const remaining = entry.expires_at_ms - now;
-    if (remaining <= 0) {
-      return {
-        severity: 'expired',
-        label: 'expired',
-        detail: entry.refresh_token_present
-          ? 'OAuth access token has expired but a refresh token is present — claude should auto-renew on the next turn. If turns keep failing with is_error=true, run the re-login runbook.'
-          : 'OAuth access token has expired and no refresh token is on disk. The manager cannot auto-renew; an operator must re-login on the manager host.',
-      };
-    }
-    if (!entry.refresh_token_present) {
-      // No refresh token = any expiry is silent failure waiting to happen.
-      // Always badge regardless of remaining time.
-      return {
-        severity: 'no-refresh',
-        label: `no refresh · ${formatRemaining(remaining)}`,
-        detail: `OAuth credential has no refresh_token, so when the access token expires (${formatRemaining(remaining)}) every turn will silently fail. Re-run the re-login runbook to capture a credential file with a refresh_token.`,
-      };
-    }
-    if (remaining < EXPIRY_WARNING_MS) {
-      return {
-        severity: 'expiring',
-        label: `expires in ${formatRemaining(remaining)}`,
-        detail: `OAuth access token expires in ${formatRemaining(remaining)}. A refresh token is present so claude will normally auto-renew silently — but if it fails, every turn returns is_error=true with no signal. Re-run the runbook proactively if you'd rather not depend on that path.`,
-      };
-    }
-    // healthy — refresh_token present, > 48h remaining
-    return null;
-  }
-
-  // subscription with no expires_at_ms → unrecognized; surface.
-  return {
-    severity: 'unknown',
-    label: 'credential ?',
-    detail: 'Manager could not parse the OAuth file in cli-home. Re-run the re-login runbook if turns are failing.',
-  };
-}
-
-function formatRemaining(ms: number): string {
-  if (ms <= 0) return '0m';
-  const min = Math.floor(ms / 60_000);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const days = Math.floor(hr / 24);
-  return `${days}d`;
-}
-
-function CredentialExpiryBadge({ entry }: { entry: AgentCredentialEntry | undefined }) {
-  const data = classifyCredential(entry);
-  const [hover, setHover] = useState(false);
-  if (!data) return null;
-  const palette: Record<CredentialBadgeSeverity, { bg: string; fg: string; border: string }> = {
-    expired:    { bg: `${tokens.colors.danger}20`,  fg: tokens.colors.danger,  border: tokens.colors.danger },
-    expiring:   { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
-    'no-refresh': { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
-    unknown:    { bg: `${tokens.colors.warning}20`, fg: tokens.colors.warning, border: tokens.colors.warning },
-    missing:    { bg: `${tokens.colors.danger}20`,  fg: tokens.colors.danger,  border: tokens.colors.danger },
-    // Neutral / informational — "no per-agent credential, using operator HOME
-    // fallback". Not a warning state, so use textSecondary instead of the
-    // warning/danger palette to keep the row visually calm.
-    'operator-home': { bg: tokens.colors.surfaceHover, fg: tokens.colors.textSecondary, border: tokens.colors.border },
-  };
-  const c = palette[data.severity];
-  // Drop the warning glyph for the neutral operator-home state so it doesn't
-  // visually compete with real expiry/missing warnings on the same page.
-  const prefix = data.severity === 'operator-home' ? '' : '⚠ ';
-  return (
-    <span
-      style={{ position: 'relative', display: 'inline-flex' }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <span
-        style={{
-          marginLeft: 6,
-          fontSize: 10,
-          fontWeight: 700,
-          padding: '1px 6px',
-          borderRadius: 4,
-          background: c.bg,
-          color: c.fg,
-          border: `1px solid ${c.border}40`,
-          textTransform: 'uppercase',
-          letterSpacing: '0.04em',
-          whiteSpace: 'nowrap',
-          cursor: 'help',
-        }}
-      >
-        {prefix}{data.label}
-      </span>
-      {hover && (
-        <span
-          role="tooltip"
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            zIndex: 10,
-            minWidth: 280,
-            maxWidth: 360,
-            padding: '8px 10px',
-            background: tokens.colors.surfaceCard,
-            color: tokens.colors.textStrong,
-            border: `1px solid ${tokens.colors.border}`,
-            borderRadius: tokens.radii.md,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-            fontSize: 11,
-            lineHeight: 1.5,
-            fontWeight: 400,
-            textTransform: 'none',
-            letterSpacing: 0,
-            whiteSpace: 'normal',
-          }}
-        >
-          {data.detail}
-          <div style={{ marginTop: 6, color: tokens.colors.textMuted }}>
-            See <code style={{ background: tokens.colors.surface, padding: '0 4px', borderRadius: 3 }}>{RELOGIN_DOC_PATH}</code> in the AWB repo for the re-login runbook on the manager host.
-          </div>
-        </span>
-      )}
-    </span>
-  );
-}
-
-// P4c-4: ManagedAgentsSection 제거 (Agent 테이블 없음).
-
-interface SetWorkingDirInlineProps {
-  pending: boolean;
-  onSubmit(dir: string): void;
-}
-
-function SetWorkingDirInline({ pending, onSubmit }: SetWorkingDirInlineProps) {
-  const [value, setValue] = useState('');
-  return (
-    <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-      <Input
-        type="text"
-        placeholder="/path/on/manager/host"
-        value={value}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setValue(e.target.value)}
-        style={{ fontSize: 11, padding: '2px 6px', minWidth: 220 }}
-      />
-      <Button
-        size="sm"
-        variant="secondary"
-        disabled={pending || !value.trim()}
-        onClick={() => {
-          const dir = value.trim();
-          if (dir) onSubmit(dir);
-        }}
-      >
-        Set
-      </Button>
-    </span>
   );
 }
 
@@ -1972,7 +1014,7 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [pairings, setPairings] = useState<PairingTokenSafe[] | null>(null);
-  const [agentName, setAgentName] = useState('');
+  const [hostName, setHostName] = useState('');
   const [minted, setMinted] = useState<PairingTokenMint | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -1996,9 +1038,9 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
     if (busy) return;
     setBusy(true);
     try {
-      const rec = await api.mintAgentManagerPairing({ agent_name: agentName.trim() || undefined });
+      const rec = await api.mintAgentManagerPairing({ agent_name: hostName.trim() || undefined });
       setMinted(rec);
-      setAgentName('');
+      setHostName('');
       refresh();
     } catch (err: any) {
       showToast(`Mint failed: ${err?.message || err}`, 'error');
@@ -2023,7 +1065,7 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Pair an agent-manager" maxWidth={640}>
+    <Modal isOpen={isOpen} onClose={onClose} title="Runtime Host 연결" maxWidth={640}>
       <p style={{ margin: '0 0 12px 0', fontSize: 12, color: tokens.colors.textSecondary }}>
         Mint a one-time token, hand it to <code>awb-agent-manager pair --code &lt;CODE&gt;</code> on the host that
         will run the manager process. Tokens expire in 10 minutes; they cannot be retrieved after the modal closes.
@@ -2035,13 +1077,13 @@ function PairingDialog({ isOpen, onClose }: PairingDialogProps) {
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 16 }}>
           <div style={{ flex: 1 }}>
             <label style={{ display: 'block', fontSize: 11, color: tokens.colors.textMuted, marginBottom: 4 }}>
-              Agent name (optional)
+              Host 이름 (선택 사항)
             </label>
             <Input
               type="text"
-              value={agentName}
+              value={hostName}
               placeholder="e.g. desktop-mac-mini"
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAgentName(e.target.value)}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHostName(e.target.value)}
             />
           </div>
           <Button onClick={handleMint} disabled={busy} variant="primary">

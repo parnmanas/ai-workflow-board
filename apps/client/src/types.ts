@@ -2217,6 +2217,7 @@ export interface CliInstallEntry {
 
 export interface AgentManagerInstance {
   instance_id: string;
+  host_id?: string | null;
   agent_id: string;
   workspace_id: string | null;
   mode: 'manager';
@@ -2228,10 +2229,7 @@ export interface AgentManagerInstance {
   pid: number;
   started_at: string;
   last_seen_at: string;
-  // Agent.name from the agents table — the operator-facing label edited
-  // via "Edit Identity". Server enriches this on the list response so the
-  // admin list can show the configured name instead of the OS hostname.
-  // null when the Agent row is missing or has no name set.
+  // Runtime Host display name; the wire name is retained for manager compatibility.
   agent_name?: string | null;
   // ST-4 manager-mode fields. Daemons/proxies leave these undefined.
   agent_ids?: string[];

@@ -8,14 +8,14 @@ const [agentManagerPageSource] = await Promise.all([
 // P4c-4: AgentsPage 삭제 — 첫 테스트(AI Agents 레이아웃)도 함께 제거.
 
 
-test('desktop Mainframe keeps page and detail overflow outside the Agents list', () => {
+test('desktop Mainframe keeps page and detail overflow outside the Host list', () => {
   assert.match(
     agentManagerPageSource,
     /display:\s*'flex',\s*gap:\s*16,\s*height:\s*'100%',\s*minHeight:\s*0,\s*overflow:\s*'hidden'/,
   );
   assert.match(
     agentManagerPageSource,
-    /data-testid="mainframe-agents-list"[\s\S]*?flex:\s*1,\s*minHeight:\s*0,\s*overflowY:\s*'auto',\s*overflowX:\s*'hidden'/,
+    /data-testid="runtime-hosts-list"[\s\S]*?flex:\s*1,\s*minHeight:\s*0,\s*overflowY:\s*'auto',\s*overflowX:\s*'hidden'/,
   );
 });
 
@@ -25,7 +25,7 @@ test('Mainframe detail pane owns vertical scrolling without trapping the mobile 
     /data-testid="mainframe-detail-scroll"[\s\S]*?flex:\s*1,[\s\S]*?minHeight:\s*0,[\s\S]*?overflowY:\s*'auto',[\s\S]*?overflowX:\s*'hidden'/,
   );
   assert.ok(
-    agentManagerPageSource.indexOf('Back to agents') <
+    agentManagerPageSource.indexOf('Host 목록') <
       agentManagerPageSource.indexOf('data-testid="mainframe-detail-scroll"'),
   );
   assert.match(
@@ -34,14 +34,14 @@ test('Mainframe detail pane owns vertical scrolling without trapping the mobile 
   );
 });
 
-test('small viewport preserves the same independently scrollable Agents list', () => {
+test('small viewport preserves the same independently scrollable Host list', () => {
   assert.match(agentManagerPageSource, /const isMobile = useMediaQuery\('\(max-width: 767px\)'\)/);
   assert.match(
     agentManagerPageSource,
     /width:\s*isMobile \? '100%' : 320[\s\S]*?flexDirection:\s*'column',\s*minHeight:\s*0/,
   );
   assert.equal(
-    (agentManagerPageSource.match(/data-testid="mainframe-agents-list"/g) ?? []).length,
+    (agentManagerPageSource.match(/data-testid="runtime-hosts-list"/g) ?? []).length,
     1,
   );
 });
