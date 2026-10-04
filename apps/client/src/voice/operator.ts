@@ -54,8 +54,9 @@ export function parseAliasInput(value: string): string[] {
  * 음성 인식 오류(비슷한 발음의 호스트 이름)를 되묻는 것, 되돌리기 어려운 일은 복창 확인을 받는 것,
  * 그리고 **대화가 끝나면 잠들기 표시를 붙이는 것**이 핵심이다 — 문맥으로 끝을 알아보는 것은 operator 의 몫이다.
  *
- * 지침을 파일로 남기라고 하되 **없을 때만** 만들게 한다 — operator 세션이 저장소 안에서 돌면 그
- * 저장소의 AGENTS.md 를 덮어쓰면 안 된다.
+ * 지침을 파일로 남기라고 하되 **없거나 예전 operator 지침 파일일 때만** 쓰게 한다 — operator 세션이 저장소
+ * 안에서 돌면 그 저장소의 AGENTS.md 를 덮어쓰면 안 된다. 예전 지침 파일(첫 줄에 "AWB Operator 지침")은 새로 써야
+ * 이름·잠들기 규칙이 따라온다(첫 지침에는 그것이 없었다).
  */
 export function operatorBrief(name: string): string {
   return `[AWB Operator 지침]
@@ -76,5 +77,5 @@ export function operatorBrief(name: string): string {
 - 지우기·머지·배포·재시작·권한이나 키 변경처럼 되돌리기 어려운 일은, 실행 전에 무엇을 할지 한 문장으로 복창하고 "네" 같은 명시적인 확인을 받은 뒤에만 한다.
 - 확인한 사실과 추측을 구분해서 말한다.
 
-이 지침을 잊지 않도록, 지금 작업 폴더에 AGENTS.md 가 **없을 때만** 이 지침으로 새로 만들어 두라(CLAUDE.md 도 없으면 \`@AGENTS.md\` 한 줄로 만든다). 이미 있으면 건드리지 말고 그렇다고만 말하라. 끝나면 준비됐다고 한 문장으로 답하라.`;
+이 지침을 잊지 않도록 지금 작업 폴더의 AGENTS.md 에 남겨 두라: 파일이 **없거나**, 첫 줄에 "AWB Operator 지침" 이 들어 있는(예전에 이 지침으로 만든) 파일이면 이 지침으로 새로 쓴다(CLAUDE.md 도 없으면 \`@AGENTS.md\` 한 줄로 만든다). **다른 내용의 AGENTS.md 는 건드리지 말고** 그렇다고만 말하라. 끝나면 준비됐다고 한 문장으로 답하라.`;
 }

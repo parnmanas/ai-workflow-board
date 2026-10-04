@@ -148,8 +148,9 @@ operator 를 고르는 화면을 따로 만들지 않는다 — **세션을 여�
 지침이 흐려졌으면 등록 대화상자의 "지침 다시 보내기".
 
 첫 프롬프트에만 있는 지침은 컴팩션에 약하므로, 지침은 에이전트에게 작업 폴더의 `AGENTS.md`(+ `@AGENTS.md` 한 줄짜리
-`CLAUDE.md`)로 남기게 한다 — Claude Code·Codex·opencode 가 모두 읽고 컴팩션 뒤에도 다시 읽힌다. 단 **그 파일이 없을 때만**
-만들게 한다: operator 세션이 저장소 안에서 돌면 그 저장소의 AGENTS.md 를 덮어쓰면 안 된다. 그래서 operator 는 전용 폴더
+`CLAUDE.md`)로 남기게 한다 — Claude Code·Codex·opencode 가 모두 읽고 컴팩션 뒤에도 다시 읽힌다. 단 **그 파일이 없거나
+예전 operator 지침 파일(첫 줄에 "AWB Operator 지침")일 때만** 쓰게 한다: operator 세션이 저장소 안에서 돌면 그 저장소의
+AGENTS.md 를 덮어쓰면 안 되고, 예전 지침 파일은 새로 써야 이름·잠들기 규칙이 따라온다. 그래서 operator 는 전용 폴더
 (예: `~/awb-operator/`)에서 여는 것을 권한다.
 
 ### 권한 — 사이트 전체 (P3 구현)
