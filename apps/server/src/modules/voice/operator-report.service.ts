@@ -138,7 +138,9 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
     const [operator] = routeOperators(operators, report.session.manager_id, this.#lastConversation)
       .filter((op) => !report.tried.includes(op.id));
     if (!operator) return false;
-    this.#queues.set(operator.id, mergeReport(this.#queues.get(operator.id) ?? [], report) as QueuedReport[]);
+    // 그 세션의 driver 를 모르면(서버 재시작 뒤 아무도 다시 열지 않았다) operator 를 등록한 사용자에게 간다.
+    const queued: QueuedReport = report.user_id ? report : { ...report, user_id: operator.created_by };
+    this.#queues.set(operator.id, mergeReport(this.#queues.get(operator.id) ?? [], queued) as QueuedReport[]);
     await this.flush(operator.id);
     return true;
   }

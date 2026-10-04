@@ -1442,17 +1442,18 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 예전엔 무조건 busy 로 심어서 설정 변경 system 행 하나에도 "Working" 유령이 남았다.
       state = this.createState(managerId, managerId.slice(0, 8), cli, sessionId, { cwd: '', title: '', status: inferStatusFromBatch(events, patch), driver_user_id: null });
     }
-    if (state.driver_user_id) {
-      for (const event of events) {
-        activityEvents.emit('agent_session_event', {
-          manager_id: managerId,
-          cli,
-          session_id: sessionId,
-          driver_user_id: state.driver_user_id,
-          event,
-          timestamp: event.created_at,
-        });
-      }
+    // driver 가 없어도(서버 재시작 뒤 아무도 그 세션을 다시 열지 않았다) 서버 안에서는 흘려보낸다 — 작업 보고
+    // (voice-announcer)가 듣는다. 사용자 SSE 는 event-registry 가 driver 에게만 보내므로 driver 가 없으면 아무에게도
+    // 가지 않는다. 예전에는 여기서 막혀서, 배포 직후의 세션 소식이 operator 에게 보고되지 않았다(2026-10-04 실측).
+    for (const event of events) {
+      activityEvents.emit('agent_session_event', {
+        manager_id: managerId,
+        cli,
+        session_id: sessionId,
+        driver_user_id: state.driver_user_id,
+        event,
+        timestamp: event.created_at,
+      });
     }
     let live: AgentSessionLiveSnapshot | null = null;
     if (patch && Object.keys(patch).length) {
@@ -1793,14 +1794,13 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   private emitUpdate(state: LiveState, reason: string): AgentSessionLiveSnapshot {
     const snap = this.snapshot(state);
-    if (state.driver_user_id) {
-      activityEvents.emit('agent_session_update', {
-        session: snap,
-        reason,
-        driver_user_id: state.driver_user_id,
-        timestamp: snap.updated_at,
-      });
-    }
+    // driver 가 없어도 서버 안에서는 흘려보낸다(작업 보고) — 사용자 SSE 는 driver 에게만 간다(event-registry).
+    activityEvents.emit('agent_session_update', {
+      session: snap,
+      reason,
+      driver_user_id: state.driver_user_id,
+      timestamp: snap.updated_at,
+    });
     return snap;
   }
 

@@ -364,3 +364,25 @@ test('the screen recognises the same report prefix and sleep marker the server u
   assert.ok(client.includes(`export const OPERATOR_REPORT_PREFIX = '${OPERATOR_REPORT_PREFIX}';`), 'client folds reports by this exact prefix');
   assert.ok(client.includes("export const SLEEP_MARKER = '[[sleep]]';"), 'client and server agree on the sleep marker');
 });
+
+test('after a server restart a session has no driver — its news still reaches the operator, for whoever registered it', async (t) => {
+  const jarvis = operator('jarvis', 'host-rolf', { created_by: 'admin-1' });
+  const { heard, prompts, teardown } = setup([jarvis]);
+  t.after(teardown);
+  const orphan = session('host-rolf', 's-orphan', { driver_user_id: null });
+  const emit = (reason, over = {}) => activityEvents.emit('agent_session_update', {
+    session: { ...orphan, ...over }, reason, driver_user_id: null, timestamp: new Date().toISOString(),
+  });
+  activityEvents.emit('agent_session_event', {
+    manager_id: 'host-rolf', cli: 'codex', session_id: 's-orphan', driver_user_id: null,
+    event: { id: 'q', seq: 0, turn_id: 't1', type: 'elicitation_request', payload: { elicitation_id: 'q1', mode: 'form', message: '어느 쪽?', schema: {} }, created_at: new Date().toISOString() },
+  });
+  emit('elicitation', { status: 'awaiting_input' });
+  await flush();
+  assert.equal(prompts.length, 1, 'reported even though nobody drives that session right now');
+  assert.equal(prompts[0].userId, 'admin-1', 'the operator works for the user who registered it');
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '롤프의 세션이 질문을 기다려요.');
+  await flush();
+  assert.equal(heard.length, 1);
+  assert.equal(heard[0].user_id, 'admin-1');
+});
