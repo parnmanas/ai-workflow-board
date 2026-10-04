@@ -1,3 +1,4 @@
+import type { HostEffortReport } from './hostEfforts';
 // Runtime Host 별 CLI 모델 목록 — 모델이 보이는 모든 화면이 쓰는 하나의 스토어.
 //
 // 원칙: 모델 dropdown 은 **항상 최신이거나, 그 자리에서 새로고침할 수 있다.**
@@ -16,6 +17,7 @@ import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import type { AgentSessionConfigOption } from '../types';
 
 export interface HostModelsView {
+  effort_options?: Record<string, HostEffortReport[]>;
   manager_agent_id: string;
   manager_name: string;
   is_online: boolean;

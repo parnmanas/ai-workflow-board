@@ -43,3 +43,16 @@ test('isHostModelsStale: 시각이 없거나 오래됐으면 stale', () => {
   assert.equal(isHostModelsStale(view(new Date(now - 1000).toISOString()), now), false);
   assert.equal(isHostModelsStale(view(new Date(now - HOST_MODELS_STALE_MS - 1).toISOString()), now), true);
 });
+
+test('effort reports match only the selected CLI/model; missing, empty and CLI default stay distinct', async () => {
+  const { hostEffortReport } = await import('../src/cli/hostEfforts.ts');
+  const reported = { model: 'm1', config_id: 'thinking', options: [{ value: 'high', label: 'High' }] };
+  const absent = { model: 'm2', config_id: null, options: [] };
+  const view = { effort_options: { cli: [reported, absent] } };
+  assert.equal(hostEffortReport(view, 'cli', 'm1'), reported);
+  assert.equal(hostEffortReport(view, 'cli', 'm2'), absent);
+  assert.equal(hostEffortReport(view, 'cli', 'unknown'), null);
+  assert.equal(hostEffortReport(view, 'cli', null), null);
+  assert.equal(hostEffortReport(view, 'different-cli', 'm1'), null);
+  assert.equal(hostEffortReport(null, 'cli', 'm1'), null);
+});

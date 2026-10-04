@@ -747,6 +747,18 @@ capabilities govern effort availability; explicit runtime effort reaches both
 one-shot and persistent launches. Session effort uses the adapter's
 `thought_level` config option.
 
+Effort is always a dropdown. Host model snapshots include `effort_options`,
+collected from ACP `thought_level` options and scoped to Host, CLI and the
+reported current model. Live reports override persisted session configuration;
+other models' choices are never reused. Opening the selector or switching models
+reloads the snapshot; the refresh button also reloads persisted reports. No
+temporary session is started to probe unknown models. Until that model has been
+reported, the dropdown offers the CLI default and marks any saved value as
+unverified. Changing the model clears the previous effort. Session creation uses
+the reported configuration ID, and non-session execution respects the CLI
+catalog's launch-effort capability. Board effort presets remain abstract dropdown
+mappings because they are not tied to a particular Host/model.
+
 Migration `1760000000090` removes the legacy `agents` table (including
 `working_dir`), `api_keys.agent_id`, `workspaces.assistant_agent_id`, and duplicate
 Agent target columns on Actions, QA, Security, Schedules and Features. Target

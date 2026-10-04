@@ -30,7 +30,7 @@ test('a saved template can be loaded and edited without changing the original', 
   const originalList = api.listAgentTemplates;
   const originalModels = api.getHostModels;
   api.listAgentTemplates = async () => [template];
-  api.getHostModels = async () => ({ models: { codex: ['saved-model'] }, labels: {}, refreshed_at: new Date().toISOString() });
+  api.getHostModels = async () => ({ models: { codex: ['saved-model', 'other-model'] }, effort_options: { codex: [{ model: 'saved-model', config_id: 'reasoning', options: [{ value: 'high', label: 'High' }, { value: 'medium', label: 'Medium' }] }, { model: 'other-model', config_id: 'reasoning', options: [{ value: 'low', label: 'Low' }] }] }, labels: {}, refreshed_at: new Date().toISOString() });
   let latest;
   function Form() {
     const [value, setValue] = React.useState({ host_id: '', cli: '', model: null, effort: null, runtime_config: { strategy: 'single', permission_mode: 'approve' } });
@@ -50,9 +50,9 @@ test('a saved template can be loaded and edited without changing the original', 
   assert.equal(latest.model, 'saved-model');
   assert.equal(latest.effort, 'high');
   assert.equal(picker.value, 'saved', 'the starting template stays visible after loading');
-  const effort = [...document.querySelectorAll('input')].find((input) => input.value === 'high');
+  const effort = document.querySelector('select[aria-label="Effort"]');
   assert.ok(effort && !effort.disabled);
-  typeInto(effort, 'medium');
+  act(() => { effort.value = 'medium'; effort.dispatchEvent(new window.Event('change', { bubbles: true })); });
   assert.equal(latest.effort, 'medium');
   assert.equal(template.effort, 'high');
   assert.equal(picker.value, 'saved');
@@ -60,6 +60,11 @@ test('a saved template can be loaded and edited without changing the original', 
   assert.equal(picker.value, '');
   assert.equal(latest.host_id, 'template-host');
   assert.equal(latest.effort, 'medium', 'clearing the template preserves edited execution settings');
+  const model = [...document.querySelectorAll('select')].find((input) => input.value === 'saved-model');
+  act(() => { model.value = 'other-model'; model.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  assert.equal(latest.effort, null, 'switching model clears effort from the previous model');
+  assert.deepEqual([...effort.options].map(o => o.value), ['', 'low']);
+  assert.equal(document.querySelectorAll('input[aria-label="Effort"]').length, 0);
 });
 
 test('Hosts registers a named Agent template and exposes it for editing', async (t) => {
@@ -99,4 +104,15 @@ test('Hosts registers a named Agent template and exposes it for editing', async 
   click(button('편집'));
   assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 편집');
   assert.equal(document.querySelector('input[aria-label="템플릿 이름"]').value, 'Code review');
+});
+
+test('unreported effort stays a dropdown with default and a disabled saved value, never guessed choices', () => {
+  const markup = renderToStaticMarkup(React.createElement(RuntimeSelectionFields, {
+    value: { host_id: 'unknown-host', cli: 'codex', model: 'unknown-model', effort: 'old-effort', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
+    hosts: [{ id: 'unknown-host', name: 'Host', clis: ['codex'] }], onChange() {},
+  }));
+  assert.match(markup, /<select[^>]*aria-label="Effort"/);
+  assert.match(markup, /<option value="old-effort" disabled="" selected="">/);
+  assert.match(markup, /아직 보고되지 않았습니다/);
+  assert.doesNotMatch(markup, /<input[^>]*value="old-effort"/);
 });
