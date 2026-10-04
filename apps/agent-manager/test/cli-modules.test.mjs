@@ -108,7 +108,7 @@ test('effort 슬라이스 선택이 모듈 선언을 따른다 (옛 selectEffort
   assert.equal(selectEffortSlice('claude', null), null);
   assert.deepEqual(effortSliceKeys(), ['claude', 'codex', 'antigravity', 'pi', 'opencode']);
   assert.deepEqual([...effortKeysForSlice('claude')].sort(), ['effort', 'model', 'ultracode']);
-  assert.deepEqual([...effortKeysForSlice('codex')], ['model']);
+  assert.deepEqual([...effortKeysForSlice('codex')], ['model', 'effort']);
 });
 
 test('Agent Session: ACP 명령·감지가 모듈 슬라이스에서 나온다', async () => {
