@@ -14,8 +14,7 @@ import {
   isViewingTarget,
   sessionTargetKey,
   setViewingSession,
-  tryClaim,
-} from '../src/voice/announcements.ts';
+  tryClaim, shouldSpeakAnnouncement } from '../src/voice/announcements.ts';
 
 function memoryStorage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -63,4 +62,10 @@ test('announcement links: missions carry their workspace, sessions use the curre
   assert.equal(announcementPath({ type: 'session', manager_id: 'm1', cli: 'claude', session_id: 's1' }, 'w1'), '/ws/w1/sessions/m1/claude/s1');
   assert.equal(announcementPath({ type: 'session', manager_id: 'm1', cli: 'claude', session_id: 's1' }, null), null);
   assert.equal(announcementPath(null, 'w1'), null);
+});
+
+test('an announcement about the session on screen is not spoken — unless it awaits a decision', () => {
+  assert.equal(shouldSpeakAnnouncement(false, false), true);
+  assert.equal(shouldSpeakAnnouncement(true, false), false, 'the screen already shows it');
+  assert.equal(shouldSpeakAnnouncement(true, true), true, 'choices are read so the user can answer by voice');
 });

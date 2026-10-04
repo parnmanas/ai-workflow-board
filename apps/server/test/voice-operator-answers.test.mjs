@@ -224,6 +224,31 @@ test('a spoken choice reaches the waiting session only from a turn the user star
   assert.ok(['not_user_turn', 'request_gone'].includes(after.error.code), JSON.stringify(after));
   assert.equal(after.error.code, 'not_user_turn', 'the gate closes with the user turn');
 
+  // 8. 서버가 처음 보는 세션(재시작 뒤 매니저가 먼저 중계) — 보고에 id 앞부분이 아니라 Host 이름이 실린다.
+  //    (앞 단계의 보고 턴이 끝나야 다음 보고가 나간다 — 아직 열린 보고 턴을 끝내 둔다.)
+  // 보고 턴을 하나씩 끝내면 줄 선 다음 보고가 나간다 — 원하는 보고가 나올 때까지 계속 끝낸다.
+  const finished = new Set();
+  const drainReports = async (match, label) => {
+    for (let i = 0; i < 20; i++) {
+      const hit = requests.find((r) => r.op === 'prompt' && r.session_id === 'op-1' && match(r));
+      if (hit) return hit;
+      for (const r of requests.filter((x) => x.op === 'prompt' && x.session_id === 'op-1' && (x.text || '').startsWith('[AWB 작업 보고]') && !finished.has(x.turn_id))) {
+        finished.add(r.turn_id);
+        await relay('claude', 'op-1', [{ type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, turn_id: r.turn_id }], { status: 'ready', reason: 'turn_finished' });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    throw new Error(`timeout waiting for ${label}`);
+  };
+  await relay('codex', 'sess-orphan', [
+    { type: 'turn', payload: { phase: 'started' }, turn_id: 'orphan-turn' },
+    { type: 'text', payload: { text: '정리 끝.' }, turn_id: 'orphan-turn' },
+    { type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' }, turn_id: 'orphan-turn' },
+  ], { status: 'ready', reason: 'turn_finished' });
+  const orphanReport = await drainReports((r) => (r.text || '').includes('정리 끝.'), 'report about a session first seen through a relay');
+  assert.ok(orphanReport.text.includes(`완료 — ${host.name} / Codex`), orphanReport.text.slice(0, 400));
+  assert.equal(orphanReport.driver_user_id, admin.id, 'no driver known — the report goes to whoever registered the operator');
+
   // 7. 새로 만든 세션의 연결 — 참조값으로 붙는다.
   const fresh = mcp('pending-7f3a9c2e-0000-4000-8000-000000000001');
   const unknown = await fresh.callTool('list_pending_session_requests', {});

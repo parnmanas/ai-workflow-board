@@ -330,6 +330,8 @@ function normalizeCommands(input: unknown): AgentSessionCommand[] {
 export class AgentSessionsService implements OnModuleDestroy {
   private readonly pending = new Map<string, PendingRpc>();
   private readonly live = new Map<string, LiveState>();
+  /** 매니저 id → Host 이름(읽은 적 있는 것). 매니저가 먼저 말을 거는 동기 경로가 이름을 쓰게. */
+  private readonly hostNames = new Map<string, string>();
   /** 매니저 → (MCP 연결 참조값 → 세션 id). 새로 만든 세션의 MCP 연결은 세션 id 대신 참조값을 보낸다. */
   private readonly mcpRefs = new Map<string, Map<string, string>>();
   /** 세션 → 사용자의 답을 기다리는 요청들(`PendingSessionInteraction`). */
@@ -352,6 +354,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     // registered / updated — 하트비트가 살아 있는 세션 전체 목록을 실어 오면 그것이 진실이다.
     if (Array.isArray(instance.agent_sessions)) this.reconcileWithHeartbeat(instance.agent_id, instance.agent_sessions);
+    // 이 매니저의 Host 이름을 미리 알아 둔다 — 재시작 뒤 세션 이벤트가 먼저 와도 id 앞부분 대신 이름을 쓰게.
+    if (!this.hostNames.has(instance.agent_id)) void this.managerName(instance.agent_id, '').catch(() => undefined);
   };
 
   constructor(
@@ -467,7 +471,24 @@ export class AgentSessionsService implements OnModuleDestroy {
   private async managerName(managerId: string, fallback: string): Promise<string> {
     // P4c-4: Host 이름으로 해소한다 (Agent 테이블 없음).
     const host = await this.hosts.findOne({ where: { id: managerId } });
+    if (host?.name) this.hostNames.set(managerId, host.name);
     return host?.name || fallback;
+  }
+
+  /**
+   * 매니저가 먼저 말을 거는 경로(서버 재시작 뒤의 이벤트 중계·상태 패치)는 동기라 Host 이름을 그 자리에서 못 읽는다.
+   * 알아 둔 이름이 있으면 그것을, 없으면 일단 id 앞부분으로 만들고 이름을 읽어 고친다 — 예전에는 id 앞부분이 그대로
+   * 남아 operator 보고가 "9a5c9625 / Codex" 로 나갔다(2026-10-05 실측).
+   */
+  private createStateFromManager(managerId: string, cli: string, sessionId: string, seed: { cwd: string; title: string; status: string; driver_user_id: string | null }): LiveState {
+    const known = this.hostNames.get(managerId);
+    const state = this.createState(managerId, known ?? managerId.slice(0, 8), cli, sessionId, seed);
+    if (!known) {
+      void this.managerName(managerId, state.manager_name)
+        .then((name) => { state.manager_name = name; })
+        .catch(() => undefined);
+    }
+    return state;
   }
 
   // ─── CLI 설정 (credential 바인딩) ──────────────────────────────────────
@@ -1440,7 +1461,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 매니저가 먼저 말을 거는 경우(서버 재시작 뒤) — driver 없이 상태만 둔다. 상태는 배치에서 읽는다:
       // 패치가 있으면 그것, 턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, 아니면 idle.
       // 예전엔 무조건 busy 로 심어서 설정 변경 system 행 하나에도 "Working" 유령이 남았다.
-      state = this.createState(managerId, managerId.slice(0, 8), cli, sessionId, { cwd: '', title: '', status: inferStatusFromBatch(events, patch), driver_user_id: null });
+      state = this.createStateFromManager(managerId, cli, sessionId, { cwd: '', title: '', status: inferStatusFromBatch(events, patch), driver_user_id: null });
     }
     // driver 가 없어도(서버 재시작 뒤 아무도 그 세션을 다시 열지 않았다) 서버 안에서는 흘려보낸다 — 작업 보고
     // (voice-announcer)가 듣는다. 사용자 SSE 는 event-registry 가 driver 에게만 보내므로 driver 가 없으면 아무에게도
@@ -1541,7 +1562,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.assertSessionId(sessionId);
     const key = liveKey(managerId, cli, sessionId);
     const state = this.live.get(key)
-      ?? this.createState(managerId, managerId.slice(0, 8), cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: null });
+      ?? this.createStateFromManager(managerId, cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: null });
     this.applyPatch(state, patch);
     return this.emitUpdate(state, patch.reason || 'manager_patch');
   }
