@@ -232,7 +232,7 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
     assert.equal(picker.querySelectorAll('input[type="checkbox"]').length, 0, 'Agent 체크박스가 남아 있으면 안 된다');
 
     // runtime 선언 섹션을 열고 Host/CLI/dir 을 채운다.
-    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes('실행 설정 · Agent 템플릿 선택'));
+    const toggle = [...container.querySelectorAll('label')].find((l) => l.textContent.includes('실행 설정'));
     assert.ok(toggle, 'runtime 선언 토글이 없다');
     click(toggle.querySelector('input[type="checkbox"]'));
     await flush();

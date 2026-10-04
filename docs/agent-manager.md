@@ -723,13 +723,18 @@ and audit trail.
 
 ## Agent templates and runtime selections
 
-Hosts → Agents · Templates stores reusable launch preferences: name, Host, CLI,
+Hosts → Agent 템플릿 → 템플릿 등록 stores reusable launch preferences: name, Host, CLI,
 model, effort and execution strategy/permissions. A template has no working
 folder, workspace ownership, lifecycle, API key or dispatch identity. Selecting
 one copies its settings into the current form; edits and deletion never rewrite
 existing executions. Sessions, chat participants, board roles, team slots and
 Action/QA/Security/Schedule editors share `RuntimeSelectionFields`. Model lists
 still come exclusively from `useHostModels`.
+
+The optional **Agent 템플릿** selector starts at **사용 안 함**: execution settings
+can always be edited directly. Selecting a template copies its preferences and
+keeps its name visible as the starting point. Returning to **사용 안 함** preserves
+the current settings, including local edits; templates are managed separately in Hosts.
 
 Execution folders belong to the session or inline RuntimeSpec. The old
 `set_working_dir` manager command has been removed from both contracts. CLI

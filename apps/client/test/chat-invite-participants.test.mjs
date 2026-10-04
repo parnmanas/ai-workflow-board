@@ -282,7 +282,7 @@ test('유저와 에이전트를 함께 골라 제출하면 그대로 서버로 �
 
     // 에이전트는 runtime 선언으로 추가한다 (Agent 목록 표면 없음).
     const toggle = [...picker.container.querySelectorAll('label')]
-      .find((l) => l.textContent.includes('실행 설정 · Agent 템플릿 선택'));
+      .find((l) => l.textContent.includes('실행 설정'));
     assert.ok(toggle, 'runtime 선언 토글이 없다');
     click(toggle.querySelector('input[type="checkbox"]'));
     await flush();

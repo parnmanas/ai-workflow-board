@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, act, typeInto, React } from './helpers/jsdom.mjs';
+import { setupDom, mount, act, click, typeInto, React } from './helpers/jsdom.mjs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import RuntimeSelectionFields, { applyAgentTemplate } from '../src/components/runtime/RuntimeSelectionFields.tsx';
+import AgentTemplatesPanel from '../src/components/runtime/AgentTemplatesPanel.tsx';
 
 test('applying a template copies preferences without cwd or shared nested configuration', () => {
   const template = { id: 't', name: 'Code', host_id: 'h', cli: 'codex', model: 'm', effort: 'high', runtime_config: { strategy: 'single', permission_mode: 'approve', extra: { max_depth: 2 } }, working_dir: '/legacy' };
@@ -18,7 +19,7 @@ test('shared runtime selection renders host, CLI, model, effort and editable tem
     value: { host_id: 'h', cli: 'codex', model: 'saved-model', effort: 'high', runtime_config: { strategy: 'single', permission_mode: 'approve' } },
     hosts: [{ id: 'h', name: 'Host', clis: ['codex'] }], onChange() {},
   }));
-  for (const label of ['Agent template', 'Runtime Host', 'Model', 'Effort', 'saved-model']) assert.ok(markup.includes(label), label);
+  for (const label of ['Agent 템플릿 (선택 사항)', '사용 안 함', 'Runtime Host', 'Model', 'Effort', 'saved-model']) assert.ok(markup.includes(label), label);
   assert.equal(markup.includes('Working dir'), false);
 });
 
@@ -29,7 +30,7 @@ test('a saved template can be loaded and edited without changing the original', 
   const originalList = api.listAgentTemplates;
   const originalModels = api.getHostModels;
   api.listAgentTemplates = async () => [template];
-  api.getHostModels = async () => ({ models: ['saved-model'], labels: {}, available_models_at: new Date().toISOString() });
+  api.getHostModels = async () => ({ models: { codex: ['saved-model'] }, labels: {}, refreshed_at: new Date().toISOString() });
   let latest;
   function Form() {
     const [value, setValue] = React.useState({ host_id: '', cli: '', model: null, effort: null, runtime_config: { strategy: 'single', permission_mode: 'approve' } });
@@ -41,14 +42,61 @@ test('a saved template can be loaded and edited without changing the original', 
   view = mount(React.createElement(Form));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   const picker = document.querySelector('select');
+  assert.equal(picker.value, '');
+  assert.equal(document.querySelector('select[id$="-host"]').disabled, false);
   act(() => { picker.value = 'saved'; picker.dispatchEvent(new window.Event('change', { bubbles: true })); });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   assert.equal(latest.host_id, 'template-host');
   assert.equal(latest.model, 'saved-model');
   assert.equal(latest.effort, 'high');
+  assert.equal(picker.value, 'saved', 'the starting template stays visible after loading');
   const effort = [...document.querySelectorAll('input')].find((input) => input.value === 'high');
   assert.ok(effort && !effort.disabled);
   typeInto(effort, 'medium');
   assert.equal(latest.effort, 'medium');
   assert.equal(template.effort, 'high');
+  assert.equal(picker.value, 'saved');
+  act(() => { picker.value = ''; picker.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  assert.equal(picker.value, '');
+  assert.equal(latest.host_id, 'template-host');
+  assert.equal(latest.effort, 'medium', 'clearing the template preserves edited execution settings');
+});
+
+test('Hosts registers a named Agent template and exposes it for editing', async (t) => {
+  const { api } = await import('../src/api.ts');
+  const dom = setupDom();
+  const rows = [];
+  t.mock.method(api, 'listAgentTemplates', async () => rows);
+  t.mock.method(api, 'listTemplateHosts', async () => [{ id: 'registration-host', name: 'Build host', clis: ['codex'] }]);
+  t.mock.method(api, 'getHostModels', async () => ({ models: { codex: ['review-model'] }, labels: {}, refreshed_at: new Date().toISOString() }));
+  const create = t.mock.method(api, 'createAgentTemplate', async (value) => {
+    const row = { ...value, id: 'registered' };
+    rows.push(row);
+    return row;
+  });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(React.createElement(AgentTemplatesPanel));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const button = (text) => [...document.querySelectorAll('button')].find((node) => node.textContent === text);
+  click(button('템플릿 등록'));
+  assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 등록');
+  assert.equal(button('등록').disabled, true);
+  typeInto(document.querySelector('input[aria-label="템플릿 이름"]'), 'Code review');
+  const host = document.querySelector('select[id$="-host"]');
+  act(() => { host.value = 'registration-host'; host.dispatchEvent(new window.Event('change', { bubbles: true })); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.equal(button('등록').disabled, false);
+  click(button('등록'));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.equal(create.mock.callCount(), 1);
+  assert.deepEqual(create.mock.calls[0].arguments[0], {
+    name: 'Code review', host_id: 'registration-host', cli: 'codex', model: null, effort: null,
+    runtime_config: { strategy: 'single', permission_mode: 'approve' },
+  });
+  assert.equal(document.querySelector('[role="dialog"]') === null, true);
+  assert.equal(document.querySelector('strong').textContent, 'Code review');
+  click(button('편집'));
+  assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 편집');
+  assert.equal(document.querySelector('input[aria-label="템플릿 이름"]').value, 'Code review');
 });

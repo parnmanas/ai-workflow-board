@@ -41,6 +41,8 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   const generatedId = useId();
   const controlId = idPrefix || `runtime-${generatedId}`;
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<AgentTemplate | null>(null);
+  const [templatesLoading, setTemplatesLoading] = useState(showTemplates);
   const [error, setError] = useState('');
   const hostModels = useHostModels(value.host_id || null, value.cli || null);
   const supportsEffort = session ? !!effortOptions?.length : cliEffortKeys(value.cli).includes('effort');
@@ -49,8 +51,11 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   useEffect(() => {
     if (!showTemplates) return;
     let disposed = false;
+    setTemplatesLoading(true);
+    setError('');
     api.listAgentTemplates().then((rows) => { if (!disposed) setTemplates(rows); })
-      .catch((e) => { if (!disposed) setError(e.message || 'Could not load Agent templates'); });
+      .catch((e) => { if (!disposed) setError(e.message || 'Agent 템플릿을 불러오지 못했습니다.'); })
+      .finally(() => { if (!disposed) setTemplatesLoading(false); });
     return () => { disposed = true; };
   }, [showTemplates]);
   const availableTemplates = templates.filter((t) => {
@@ -59,13 +64,29 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   });
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {showTemplates && <Select label="Agent template" value="" disabled={disabled} options={[
-        { value: '', label: '직접 설정 / 템플릿 불러오기…' },
-        ...availableTemplates.map((t) => ({ value: t.id, label: t.name })),
-      ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
-        const template = availableTemplates.find((t) => t.id === e.target.value);
-        if (template) onChange(applyAgentTemplate(template), 'template');
-      }} />}
+      {showTemplates && <div>
+        <Select id={`${controlId}-template`} aria-label="Agent 템플릿 (선택 사항)" label="Agent 템플릿 (선택 사항)"
+          aria-describedby={`${controlId}-template-help`} value={selectedTemplate?.id || ''} disabled={disabled || templatesLoading} options={[
+            { value: '', label: '사용 안 함' },
+            ...(selectedTemplate && !availableTemplates.some((t) => t.id === selectedTemplate.id)
+              ? [{ value: selectedTemplate.id, label: selectedTemplate.name, disabled: true }] : []),
+            ...availableTemplates.map((t) => ({ value: t.id, label: t.name })),
+          ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
+            const template = availableTemplates.find((t) => t.id === e.target.value) || null;
+            setSelectedTemplate(template);
+            // Clearing the starting template must not discard edits to the execution settings.
+            if (template) onChange(applyAgentTemplate(template), 'template');
+          }} />
+        <p id={`${controlId}-template-help`} style={{ fontSize: 12, margin: '6px 0 0' }}>
+          {selectedTemplate
+            ? `‘${selectedTemplate.name}’에서 불러온 설정입니다. 아래 값을 수정해도 저장된 템플릿은 바뀌지 않습니다.`
+            : '아래에서 직접 설정하거나, 템플릿을 선택해 저장된 설정을 불러온 뒤 수정할 수 있습니다.'}
+        </p>
+        {!templatesLoading && !error && !availableTemplates.length && <p style={{ fontSize: 12, margin: '6px 0 0' }}>
+          {templates.length ? '현재 사용할 수 있는 Host·CLI에 맞는 Agent 템플릿이 없습니다.' : '등록된 Agent 템플릿이 없습니다.'}
+          {' '}관리자는 Hosts → Agent 템플릿에서 템플릿을 등록할 수 있습니다.
+        </p>}
+      </div>}
       {error && <div role="alert">{error}</div>}
       <Select id={`${controlId}-host`} label="Runtime Host" value={value.host_id} disabled={disabled} options={[
         { value: '', label: '선택…' },
