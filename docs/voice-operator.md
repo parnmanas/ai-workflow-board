@@ -237,7 +237,7 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 
 ```
 세션 턴 종료 · 오류 · 승인/질문 대기 (agent_session_update/event — 서버가 이미 안다)
-   │  사용자가 그 세션 화면을 보고 있으면 끝 (VoicePresenceService — 화면이 30초마다 알린다)
+   │  사용자가 그 세션 화면을 보고 있어도 보고한다 — "보고 있음" 표시(VoicePresenceService, 화면이 30초마다 알린다)
    ▼
 OperatorReportService: 받을 operator = 같은 호스트(여럿이면 최근 대화) → 없으면 가장 최근에 대화한 operator
    │  바쁘면(사용자와 대화 중) 줄 세웠다가 한가해지면 묶어서 한 번에
@@ -259,6 +259,13 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
   20분 넘게 기다리면 — 아래 템플릿 문장으로 직접 알린다. 등록된 operator 가 없으면 예전처럼 직접 알린다.
 - operator 자신의 턴은 보고하지 않는다. 사용자가 그 operator 화면을 떠나 있을 때 끝난 대화 턴은 operator 의 답 자체를
   들려준다(`operator_reply`). operator 가 사용자의 승인을 기다리면 직접 알린다.
+- **보고 있는 세션도 보고한다**(2026-10-04 사용자 결정) — operator 가 사이트의 흐름을 결과까지 알게. 다만 "보고 있음" 이
+  붙은 보고는 **소리로 전하지 않는다**: 전부 보고 있던 것이면 operator 에게 기록만 하고 한 문장으로 확인하라고 하고 알림을
+  내지 않으며, 섞여 있으면 보고 있던 것은 요약에서 빼라고 한다(화면 이동도 안 본 세션으로). 직접 알림 대체 경로도 보고
+  있던 것은 말하지 않는다.
+- **결과까지** — 끝난 턴의 보고에 그 턴에서 정해진 것(권한 선택 · 질문의 답, 누가 정했는지)을 싣는다("이 턴에서 정해진
+  것: 'Run npm publish' → Allow once (사용자)"). 매니저의 결정 행(`permission_decision` / `elicitation_decision`)을 요청 행과
+  맞춰 글로 만든다.
 - 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림이 읽는다), 깨어 있는 대화를 맡은
   화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
 - operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기").
@@ -312,7 +319,7 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
 
 | 이벤트 | 조건 | 대상 | 예 |
 |---|---|---|---|
-| 세션 턴 종료·오류·승인/질문 대기 | 사용자가 그 세션을 보고 있지 않음 | driver | **operator 의 요약**(위 "작업 보고"). operator 가 없으면: "롤프 클로드 세션 '배포 스크립트' 작업이 끝났어요."(턴 30초 이상) · "… 세션에서 확인이 필요해요." · "… 세션이 오류로 멈췄어요." |
+| 세션 턴 종료·오류·승인/질문 대기 | 언제나 operator 에게 보고. 소리는 사용자가 그 세션을 보고 있지 않을 때만 | driver | **operator 의 요약**(위 "작업 보고"). operator 가 없으면: "롤프 클로드 세션 '배포 스크립트' 작업이 끝났어요."(턴 30초 이상) · "… 세션에서 확인이 필요해요." · "… 세션이 오류로 멈췄어요." |
 | operator 세션 턴 종료 | 그 operator 화면을 보고 있지 않음 | driver | operator 의 답(`operator_reply`) |
 | `orchestration_update` status `completed` / `failed` / `cancelled` | — | 미션 `created_by` | "미션 '…'이 끝났어요. 12개 중 12개 성공." |
 | 미션 사용자 확인 대기 | — | 기존 confirm-notify 수신자 | "미션 '…'에서 확인이 필요해요." |

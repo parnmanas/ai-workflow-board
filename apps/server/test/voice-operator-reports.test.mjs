@@ -7,7 +7,8 @@
 //   2. 보고는 operator 세션에 대신 보낸 프롬프트다 — 장비 · CLI · 제목 · 길이 · 마지막 답(권한 요청이면 무엇을
 //      허락할지와 선택지)을 싣고, 그 턴이 끝나면 operator 의 답이 `operator_report` 알림으로 driver 에게 간다.
 //      화면 이동은 결정이 필요한 세션이 먼저다.
-//   3. 사용자가 그 세션 화면을 보고 있으면 보고하지 않는다.
+//   3. 사용자가 그 세션 화면을 보고 있어도 operator 에게는 보고한다("보고 있음") — 다만 소리로는 전하지 않는다
+//      (operator 는 기록만, 짧게 확인). 끝난 턴의 보고에는 그 턴에서 정해진 것(권한 선택 · 질문의 답)이 실린다.
 //   4. operator 가 바쁘면 줄 세웠다가 한가해질 때 묶어서 한 번에 보낸다.
 //   5. 조용히 버리지 않는다: 닿지 못하면 다음 operator, 아무도 안 되거나 operator 가 답하지 못하면(턴 실패),
 //      결정이 급한데 operator 가 계속 바쁘면 템플릿 문장으로 직접 알린다.
@@ -146,19 +147,71 @@ test('a finished turn is reported to the same-host operator; its summary reaches
   assert.deepEqual(heard[0].target, { type: 'session', manager_id: 'host-rolf', cli: 'codex', session_id: 's1' }, 'tapping it opens the session that finished');
 });
 
-test('nothing is reported while the user is looking at that session', async (t) => {
-  const { heard, prompts, presence, teardown } = setup([operator('jarvis', 'host-rolf')]);
+test('a session the user is looking at is still reported — quietly', async (t) => {
+  const jarvis = operator('jarvis', 'host-rolf');
+  const { heard, prompts, presence, teardown } = setup([jarvis]);
   t.after(teardown);
   const s = session('host-rolf', 's1');
   presence.update('u1', 'tab-1', { manager_id: 'host-rolf', cli: 'codex', session_id: 's1' }, true);
   finishTurn(s, 't1', '끝났어요.');
   await flush();
-  assert.equal(prompts.length, 0);
-  presence.update('u1', 'tab-1', { manager_id: 'host-rolf', cli: 'codex', session_id: 's1' }, false); // 탭이 숨었다
+  assert.equal(prompts.length, 1, 'the operator hears about it even though the user is watching');
+  assert.match(prompts[0].text, /모두 사용자가 그 세션 화면에서 보고 있던 것이라 소리로 전하지 않습니다/);
+  assert.match(prompts[0].text, /1\. 완료 — rolf \/ Codex · '배포 정리'.* · 보고 있음/);
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '확인했어요.');
+  await flush();
+  assert.equal(heard.length, 0, 'nothing is spoken — the user already sees it');
+
+  // 탭이 숨었다 — 보고도 하고 소리로도 전한다.
+  presence.update('u1', 'tab-1', { manager_id: 'host-rolf', cli: 'codex', session_id: 's1' }, false);
   finishTurn(s, 't2', '또 끝났어요.');
   await flush();
-  assert.equal(prompts.length, 1, 'a hidden tab is not looking');
-  assert.equal(heard.length, 0);
+  assert.equal(prompts.length, 2);
+  assert.doesNotMatch(prompts[1].text, /보고 있음/);
+  finishTurn(opSession(jarvis), prompts[1].turn_id, '롤프의 배포 정리 세션이 또 끝났어요.');
+  await flush();
+  assert.equal(heard.length, 1);
+  assert.equal(heard[0].kind, 'operator_report');
+});
+
+test('a mixed batch speaks only about what the user did not see', async (t) => {
+  const jarvis = operator('jarvis', 'host-rolf');
+  let busy = true;
+  const { heard, prompts, presence, teardown } = setup([jarvis], {
+    prompt: async () => { if (busy) throw Object.assign(new Error('busy'), { code: 'session_busy' }); },
+  });
+  t.after(teardown);
+  presence.update('u1', 'tab-1', { manager_id: 'host-rolf', cli: 'codex', session_id: 'seen' }, true);
+  finishTurn(session('host-rolf', 'seen', { title: '보는 중' }), 't1', '하나.');
+  finishTurn(session('host-rolf', 'unseen', { title: '안 보는 중' }), 't2', '둘.');
+  await flush();
+  busy = false;
+  const op = opSession(jarvis);
+  event(op, 'turn', { phase: 'started' }, 'user-turn');
+  finishTurn(op, 'user-turn', '네.');
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0].text, /"보고 있음" 표시가 붙은 건은 사용자가 이미 화면에서 보고 있으니 요약에서 빼세요/);
+  finishTurn(op, prompts[0].turn_id, "롤프의 '안 보는 중' 세션이 끝났어요.");
+  await flush();
+  const reports = heard.filter((h) => h.kind === 'operator_report'); // ("네." 는 operator 자신의 대화 턴 — operator_reply)
+  assert.equal(reports.length, 1);
+  assert.deepEqual(reports[0].target, { type: 'session', manager_id: 'host-rolf', cli: 'codex', session_id: 'unseen' }, 'tapping opens the one the user did not see');
+});
+
+test('a finished turn carries what was decided in it — the operator learns the outcome', async (t) => {
+  const { prompts, teardown } = setup([operator('jarvis', 'host-rolf')]);
+  t.after(teardown);
+  const s = session('host-rolf', 's7', { title: '배포' });
+  event(s, 'permission_request', { request_id: 'r1', title: 'Run npm publish', options: [{ option_id: 'a', name: 'Allow once' }, { option_id: 'r', name: 'Reject' }] }, 't1');
+  event(s, 'permission_decision', { request_id: 'r1', outcome: 'selected', option_id: 'a', decided_by: 'user' }, 't1');
+  event(s, 'elicitation_request', { elicitation_id: 'q1', mode: 'form', message: '어느 방식?', schema: {} }, 't1');
+  event(s, 'elicitation_decision', { elicitation_id: 'q1', action: 'accept', content: { mode: 'rolling' }, decided_by: 'user' }, 't1');
+  finishTurn(s, 't1', '배포를 마쳤어요.');
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0].text, /이 턴에서 정해진 것:\n\s+- 'Run npm publish' → Allow once \(사용자\)\n\s+- '어느 방식\?' → mode=rolling \(사용자\)/);
+  assert.match(prompts[0].text, /배포를 마쳤어요/);
 });
 
 test('a permission request is reported with what to allow; the summary points at that session', async (t) => {
