@@ -646,7 +646,11 @@ function ImageBlock({
   const [url, setUrl] = useState<string>(block.uri || '');
   const [error, setError] = useState<string | null>(null);
 
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
+    setUrl(block.uri || '');
+    setError(null);
     // 어댑터가 URL 로 준 외부 이미지는 그대로 쓴다 — 가져올 바이트가 없다.
     if (block.uri || !block.imageRef || !loadImage) return;
     let revoked = false;
@@ -665,13 +669,16 @@ function ImageBlock({
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [block.uri, block.imageRef, loadImage]);
+  }, [block.uri, block.imageRef, loadImage, attempt]);
 
   const sizeLabel = block.size ? `, ${Math.round(block.size / 1024)}KB` : '';
   if (error) {
     return (
       <div data-block="image" style={{ fontSize: 11.5, color: tokens.colors.warning }}>
         이미지를 가져오지 못했습니다 — {error}
+        {loadImage && block.imageRef && !block.uri && (
+          <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>다시 시도</button>
+        )}
       </div>
     );
   }
@@ -722,6 +729,8 @@ function MarkdownImage({
   const [url, setUrl] = useState<string>(source === 'remote' ? target : '');
   const [error, setError] = useState<string | null>(null);
 
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
     if (source !== 'local' || !loadLocalImage) return;
     let revoked = false;
@@ -742,7 +751,7 @@ function MarkdownImage({
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [source, target, loadLocalImage]);
+  }, [source, target, loadLocalImage, attempt]);
 
   const caption = (
     <span style={{ fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' }} title={target}>
@@ -756,6 +765,9 @@ function MarkdownImage({
     return (
       <div data-block="markdown-image" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
         이미지를 가져오지 못했습니다 — {error}
+        {source === 'local' && loadLocalImage && (
+          <button type="button" onClick={() => setAttempt((value) => value + 1)} style={{ marginLeft: 8 }}>다시 시도</button>
+        )}
         <div>{caption}</div>
       </div>
     );
