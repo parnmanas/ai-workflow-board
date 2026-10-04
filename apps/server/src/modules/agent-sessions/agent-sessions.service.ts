@@ -1586,6 +1586,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     if (patch.config_options !== undefined) {
       state.config_options = normalizeConfigOptions(patch.config_options);
+      this.hostModels.noteObservedConfigOptions(state.manager_id, state.cli, state.config_options);
       // 살아 있는 어댑터가 보고한 모델 목록은 이 화면만의 지식이 아니다 — 모델을
       // 보여주는 모든 화면의 단일 출처로 올려보낸다(티켓: mission/session/chat 의
       // 목록이 서로 달랐다). 하트비트 열거가 실패하는 CLI 에서는 이것이 유일한 출처다.

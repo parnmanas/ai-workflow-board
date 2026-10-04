@@ -281,3 +281,30 @@ test('ragnar: 어댑터 보고가 있으면 새 세션·팀 슬롯·Agent 다이
   assert.deepEqual(newSession.map((o) => o.value), expected, '새 세션 모달 — 덧붙는 하트비트 id 가 없다');
   assert.deepEqual(newSession.map((o) => o.name), ADAPTER.map(([, name]) => name), '이름도 세션 안과 같다');
 });
+
+test('effort enumeration isolates models and CLIs, reads persisted ACP reports and replaces live choices', async () => {
+  const { HostModelsService } = await import('../dist/modules/agent-manager/host-models.service.js');
+  const { effortReportFromConfigOptions } = await import('../dist/modules/agent-manager/host-effort-options.js');
+  const config = (model, levels) => [
+    { category: 'model', type: 'select', current_value: model, options: [{ value: model, name: model }] },
+    { category: 'thought_level', type: 'select', config_id: 'reasoning', options: levels.map(value => ({ value, name: value.toUpperCase() })) },
+  ];
+  const rows = [
+    { manager_id: 'h', cli: 'cli', known_config_options: JSON.stringify(config('m1', ['high', 'medium', 'high'])) },
+    { manager_id: 'h', cli: 'cli', known_config_options: JSON.stringify(config('m1', ['old'])) },
+    { manager_id: 'h', cli: 'cli', known_config_options: JSON.stringify(config('m2', ['low'])) },
+  ];
+  const service = new HostModelsService({ findOne: async () => ({ id: 'h', name: 'Host' }) }, {}, { find: async () => rows }, { list: () => [] }, {}, {});
+  await service.onModuleInit();
+  const reports = (await service.snapshot('h')).effort_options.cli;
+  assert.deepEqual(reports.map(r => [r.model, r.options.map(o => o.value)]), [['m1', ['high', 'medium']], ['m2', ['low']]]);
+  assert.equal(reports[0].options[0].label, 'HIGH');
+  service.noteObservedConfigOptions('h', 'cli', config('m1', ['max']));
+  service.noteObservedConfigOptions('other-host', 'cli', config('m1', ['wrong-host']));
+  service.noteObservedConfigOptions('h', 'other-cli', config('m1', ['different-cli']));
+  assert.deepEqual((await service.snapshot('h')).effort_options.cli[0].options, [{ value: 'max', label: 'MAX' }]);
+  service.noteObservedConfigOptions('h', 'cli', [config('m1', [])[0]]);
+  assert.deepEqual((await service.snapshot('h')).effort_options.cli[0], { model: 'm1', config_id: null, options: [] });
+  for (const bad of ['{', '{}', '[]', null]) assert.equal(effortReportFromConfigOptions(bad), null);
+  assert.deepEqual(effortReportFromConfigOptions(config(null, ['low'])).model, null);
+});

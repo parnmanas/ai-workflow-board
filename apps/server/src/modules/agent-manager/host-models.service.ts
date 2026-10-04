@@ -1,3 +1,4 @@
+import { effortReportFromConfigOptions, type HostEffortReport } from './host-effort-options';
 import { Injectable, type OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -31,6 +32,8 @@ import { InstanceRecord, InstanceRegistryService } from './instance-registry.ser
  * 서버는 CLI 이름을 모른다.
  */
 export interface HostModelsView {
+  /** ACP effort choices, scoped to the model that actually reported them. */
+  effort_options: Record<string, HostEffortReport[]>;
   manager_agent_id: string;
   manager_name: string;
   is_online: boolean;
@@ -156,9 +159,15 @@ export class HostModelsService implements OnModuleInit {
       // 같은 host×cli 행이 워크스페이스마다 있다. **가장 최근에 보고된 행**을 쓴다 — 어댑터를 올린 뒤
       // 연 세션의 목록이 옛 어댑터의 목록을 이겨야 한다(예전엔 "가장 많이 아는 행" 이라 옛 목록이 남을 수 있었다).
       const rows = await this.cliSettings.find({ order: { updated_at: 'DESC' } });
+      const efforts = new Map<string, HostEffortReport>();
       const byKey = new Map<string, string[]>();
       const labelsByKey = new Map<string, Record<string, string>>();
       for (const row of rows) {
+        const report = effortReportFromConfigOptions(row.known_config_options);
+        if (report) {
+          const effortKey = JSON.stringify([row.manager_id, row.cli, report.model]);
+          if (!efforts.has(effortKey)) efforts.set(effortKey, report);
+        }
         const models = modelIdsFromConfigOptions(row.known_config_options);
         if (!models.length) continue;
         const key = `${row.manager_id}::${row.cli}`;
@@ -166,6 +175,7 @@ export class HostModelsService implements OnModuleInit {
         byKey.set(key, models);
         labelsByKey.set(key, modelLabelsFromConfigOptions(row.known_config_options));
       }
+      this.#reportedEfforts = efforts;
       this.#reported = byKey;
       this.#reportedLabels = labelsByKey;
       this.#reportedAt = Date.now();
@@ -178,6 +188,28 @@ export class HostModelsService implements OnModuleInit {
   #reported = new Map<string, string[]>();
   #reportedLabels = new Map<string, Record<string, string>>();
   #reportedAt = 0;
+  #reportedEfforts = new Map<string, HostEffortReport>();
+  #observedEfforts = new Map<string, { report: HostEffortReport; at: number }>();
+
+  noteObservedConfigOptions(hostId: string, cli: string, options: unknown): void {
+    const report = effortReportFromConfigOptions(options);
+    if (!report) return;
+    this.#observedEfforts.set(JSON.stringify([hostId, cli, report.model]), { report, at: Date.now() });
+  }
+
+  private effortsByCli(hostId: string): Record<string, HostEffortReport[]> {
+    const reports = new Map(this.#reportedEfforts);
+    for (const [key, entry] of this.#observedEfforts) {
+      if (Date.now() - entry.at > OBSERVED_MODELS_TTL_MS) this.#observedEfforts.delete(key);
+      else reports.set(key, entry.report);
+    }
+    const out: Record<string, HostEffortReport[]> = Object.create(null);
+    for (const [key, report] of reports) {
+      const [host, cli] = JSON.parse(key);
+      if (host === hostId) (out[cli] ??= []).push(report);
+    }
+    return out;
+  }
 
   /**
    * 라이브 ACP 세션이 보고한 모델 id — host×cli 별 관측. Agent Session 화면이
@@ -326,6 +358,7 @@ export class HostModelsService implements OnModuleInit {
     }
     const { command_id } = await this.commands.issue(inst, 'refresh_available_models', {}, issuedBy);
     await this.awaitAck(command_id);
+    await this.reloadReportedModels();
     return this.viewOf(manager, this.liveRecord(manager.id));
   }
 
@@ -347,6 +380,7 @@ export class HostModelsService implements OnModuleInit {
       if (Object.keys(picked).length) labels[cli] = picked;
     }
     return {
+      effort_options: this.effortsByCli(manager.id),
       manager_agent_id: manager.id,
       manager_name: manager.name,
       is_online: !!rec,

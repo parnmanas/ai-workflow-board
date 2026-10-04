@@ -7,6 +7,7 @@ import { Button, Input, Modal } from '../common';
 import DirectoryPicker from '../admin/DirectoryPicker';
 import { lastCwdStorageKey } from './sessionList.logic';
 import { runtimeLabel } from './sessionTranscript.logic';
+import { hostEffortReport } from '../../cli/hostEfforts';
 import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 
 /**
@@ -181,11 +182,15 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
           .filter(([, value]) => typeof value === 'string' && value),
       );
       const modelOption = withHostModelOption(knownOptions, hostModels.models, hostModels.labels).find((o) => o.category === 'model');
-      const effortOption = knownOptions.find((o) => o.category === 'thought_level');
-      if (selection.effort && !effortOption) throw new Error('이 CLI의 effort 설정을 아직 확인할 수 없습니다. 세션 설정에서 지원 여부를 확인하세요.');
+      const effortOption = hostEffortReport(hostModels.view, cli, selection.model);
+      if (selectionEdited.current && selection.effort && (!effortOption?.config_id || !effortOption.options.some((o) => o.value === selection.effort))) throw new Error('선택한 모델의 Effort 지원 여부를 확인할 수 없습니다. CLI 기본값을 선택하거나 목록을 새로고침하세요.');
       if (selection.model && !modelOption) throw new Error('이 CLI의 model 설정을 아직 확인할 수 없습니다.');
       if (modelOption && (selection.model || selectionEdited.current)) changed[modelOption.config_id] = selection.model;
-      if (effortOption && (selection.effort || selectionEdited.current)) changed[effortOption.config_id] = selection.effort;
+      if (effortOption?.config_id && (selection.effort || selectionEdited.current)) changed[effortOption.config_id] = selection.effort;
+      // Clear remembered effort on model changes even when the new model has no reported selector.
+      if (!selection.effort && selectionEdited.current) {
+        for (const option of knownOptions.filter((o) => o.category === 'thought_level')) changed[option.config_id] = null;
+      }
       if (Object.keys(changed).length) {
         await api.setHostCliSettings(managerId, cli, host?.cli_settings?.[cli]?.id ?? null, changed);
       }
@@ -225,7 +230,6 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
           hosts={hosts.map((h) => ({ id: h.manager_id, name: h.name, clis: h.clis }))}
           disabled={creating}
           modelConfigId={knownOptions.find((o) => o.category === 'model')?.config_id}
-          effortOptions={knownOptions.find((o) => o.category === 'thought_level')?.options?.map((o) => ({ value: o.value, label: o.name }))}
           onChange={(next, source) => {
             selectionEdited.current = source !== 'host' && source !== 'cli';
             setSelection(next);

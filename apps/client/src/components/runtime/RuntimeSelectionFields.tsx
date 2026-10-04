@@ -1,8 +1,9 @@
-import { cliEffortKeys } from '../../cli/catalog';
 import React, { useEffect, useId, useState } from 'react';
 import { api } from '../../api';
 import type { AgentTemplate } from '../../types';
-import { cliModelChoices, useHostModels } from '../../cli/hostModels';
+import { hostEffortReport } from '../../cli/hostEfforts';
+import { cliEffortKeys } from '../../cli/catalog';
+import { cliModelChoices, loadHostModels, useHostModels } from '../../cli/hostModels';
 import { Button, Input, Select } from '../common';
 import RuntimeConfigFields, { buildRuntimeConfig, runtimeSelectionFromAgent } from '../admin/RuntimeConfigFields';
 
@@ -27,7 +28,7 @@ export function applyAgentTemplate(template: AgentTemplate): RuntimeSelectionVal
 }
 
 /** Shared by templates, sessions, board/chat declarations and team slots. */
-export default function RuntimeSelectionFields({ value, onChange, hosts, disabled = false, showTemplates = true, session = false, effortOptions, idPrefix, modelConfigId }: {
+export default function RuntimeSelectionFields({ value, onChange, hosts, disabled = false, showTemplates = true, session = false, idPrefix, modelConfigId }: {
   value: RuntimeSelectionValue;
   onChange(value: RuntimeSelectionValue, source?: 'template' | 'host' | 'cli'): void;
   hosts: RuntimeSelectionHost[];
@@ -36,7 +37,6 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   session?: boolean;
   idPrefix?: string;
   modelConfigId?: string;
-  effortOptions?: Array<{ value: string; label: string }>;
 }) {
   const generatedId = useId();
   const controlId = idPrefix || `runtime-${generatedId}`;
@@ -45,7 +45,13 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   const [templatesLoading, setTemplatesLoading] = useState(showTemplates);
   const [error, setError] = useState('');
   const hostModels = useHostModels(value.host_id || null, value.cli || null);
-  const supportsEffort = session ? !!effortOptions?.length : cliEffortKeys(value.cli).includes('effort');
+  const effortReport = hostEffortReport(hostModels.view, value.cli, value.model);
+  const supportsLaunchEffort = session || cliEffortKeys(value.cli).includes('effort');
+  const effortOptions = supportsLaunchEffort && effortReport?.config_id ? effortReport.options : [];
+  useEffect(() => {
+    // A session may have reported new options since another form cached this Host.
+    if (value.host_id && value.cli) void loadHostModels(value.host_id);
+  }, [value.host_id, value.cli, value.model]);
   const host = hosts.find((h) => h.id === value.host_id);
   const set = (patch: Partial<RuntimeSelectionValue>) => onChange({ ...value, ...patch });
   useEffect(() => {
@@ -111,20 +117,27 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
           {hostModels.models.length ? <Select data-config-id={modelConfigId} label="Model" value={value.model || ''} disabled={disabled || !value.cli} options={[
             { value: '', label: 'Default — CLI' }, ...cliModelChoices(hostModels.models, hostModels.labels, value.model),
             ...(value.model && !hostModels.models.includes(value.model) ? [{ value: value.model, label: `${value.model} (not listed by this host)` }] : []),
-          ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ model: e.target.value || null })} /> :
+          ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ model: e.target.value || null, effort: null })} /> :
             <Input label="Model" value={value.model || ''} disabled={disabled || !value.cli} placeholder="CLI default"
-              onChange={(e) => set({ model: e.target.value || null })} />}
+              onChange={(e) => set({ model: e.target.value || null, effort: null })} />}
         </div>
         <Button variant="ghost" size="sm" disabled={disabled || !value.cli || !value.host_id || hostModels.refreshing} onClick={() => void hostModels.refresh()}>
           {hostModels.refreshing ? '새로고침 중…' : '새로고침'}
         </Button>
       </div>
-      {effortOptions?.length ? <Select label="Effort" value={value.effort || ''} disabled={disabled || !value.cli} options={[
-        { value: '', label: 'CLI default' }, ...effortOptions,
-        ...(value.effort && !effortOptions.some((o) => o.value === value.effort) ? [{ value: value.effort, label: value.effort }] : []),
-      ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ effort: e.target.value || null })} /> :
-        <Input label="Effort" value={value.effort || ''} disabled={disabled || !value.cli || !supportsEffort} placeholder={supportsEffort ? "CLI default (e.g. high)" : "CLI default"}
-          onChange={(e) => set({ effort: e.target.value.trim() || null })} />}
+      <Select id={`${controlId}-effort`} aria-label="Effort" label="Effort" value={value.effort || ''}
+        disabled={disabled || !value.cli || !value.host_id} options={[
+          { value: '', label: 'CLI 기본값' }, ...effortOptions,
+          ...(value.effort && !effortOptions.some((o) => o.value === value.effort)
+            ? [{ value: value.effort, label: `${value.effort} (지원 여부 미확인)`, disabled: true }] : []),
+        ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ effort: e.target.value || null })} />
+      {!effortOptions.length && value.cli && <div role="status" style={{ fontSize: 12 }}>
+        {hostModels.loading ? 'Effort 선택지를 불러오는 중…'
+          : !supportsLaunchEffort ? '이 CLI는 실행 설정의 Effort 지정을 지원하지 않습니다. CLI 기본값을 사용하세요.'
+          : effortReport ? '이 모델의 ACP 보고에 Effort 선택지가 없습니다. CLI 기본값을 사용하세요.'
+          : !value.model ? '모델을 선택하면 해당 모델의 Effort 선택지를 표시합니다.'
+          : '이 Host·CLI·모델의 Effort 선택지가 아직 보고되지 않았습니다. 해당 모델로 세션을 연결한 뒤 새로고침하세요.'}
+      </div>}
       {hostModels.error && <div role="status">{hostModels.error}</div>}
     </div>
   );

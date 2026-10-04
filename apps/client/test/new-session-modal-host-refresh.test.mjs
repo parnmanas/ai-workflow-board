@@ -212,3 +212,53 @@ test('a host with no cached options shows no pickers and creates without touchin
     dom.cleanup();
   }
 });
+
+test('new sessions use model-specific effort dropdowns and persist the ACP config ID', async (t) => {
+  const dom = setupDom();
+  const settings = { ...SETTINGS, default_config: { model: 'gpt-a', reasoning: 'high' }, known_config_options: [
+    ...SETTINGS.known_config_options,
+    { config_id: 'reasoning', category: 'thought_level', type: 'select', current_value: 'high', options: [{ value: 'high', name: 'High' }] },
+  ] };
+  const calls = stubSettingsApi(t, { settings });
+  api.getHostModels = async () => ({ models: { codex: ['gpt-a', 'gpt-b'] }, labels: {}, refreshed_at: new Date().toISOString(), effort_options: {
+    codex: [{ model: 'gpt-a', config_id: 'reasoning', options: [{ value: 'high', label: 'High' }] },
+      { model: 'gpt-b', config_id: 'reasoning', options: [{ value: 'low', label: 'Low' }] }],
+  } });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  change(document.querySelector('select[data-config-id="model"]'), 'gpt-b');
+  await flush();
+  const effort = document.querySelector('select[aria-label="Effort"]');
+  assert.equal(effort.value, '');
+  assert.deepEqual([...effort.options].map(o => o.value), ['', 'low']);
+  change(effort, 'low');
+  typeInto(cwdInput(), '/srv/effort-test');
+  click([...document.querySelectorAll('button')].find(b => b.textContent === 'Start session'));
+  await flush();
+  assert.deepEqual(calls.put[0].defaultConfig, { model: 'gpt-b', reasoning: 'low' });
+  assert.equal(calls.open.length, 1);
+});
+
+test('switching to an unreported model clears remembered effort before starting the session', async (t) => {
+  const dom = setupDom();
+  const settings = { ...SETTINGS, default_config: { model: 'gpt-a', reasoning: 'high' }, known_config_options: [
+    ...SETTINGS.known_config_options,
+    { config_id: 'reasoning', category: 'thought_level', type: 'select', current_value: 'high', options: [{ value: 'high', name: 'High' }] },
+  ] };
+  const calls = stubSettingsApi(t, { settings });
+  let view;
+  t.after(() => { view?.unmount(); dom.cleanup(); });
+  view = mount(render({ hosts: fleet(), initialManagerId: 'm-rolf', initialCli: 'codex' }));
+  await flush();
+  change(document.querySelector('select[data-config-id="model"]'), 'gpt-b');
+  await flush();
+  const effort = document.querySelector('select[aria-label="Effort"]');
+  assert.deepEqual([...effort.options].map(o => o.value), ['']);
+  typeInto(cwdInput(), '/srv/effort-default');
+  click([...document.querySelectorAll('button')].find(b => b.textContent === 'Start session'));
+  await flush();
+  assert.deepEqual(calls.put[0].defaultConfig, { model: 'gpt-b', reasoning: null });
+  assert.equal(calls.open.length, 1);
+});
