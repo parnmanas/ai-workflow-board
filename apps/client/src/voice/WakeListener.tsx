@@ -9,7 +9,7 @@ import { useVoiceOperators } from './operator';
 import { voiceRecordingSupported } from './recorder';
 import { speechPlayer } from './speechPlayer';
 import { useSpeechState, useVoiceConfig } from './useVoice';
-import { matchWake } from './wake.logic';
+import { isFillerUtterance, matchWake } from './wake.logic';
 import { useWakeState, wakeStore } from './wakeState';
 
 /** 한 단말에서 한 탭만 이름을 듣는다 — 탭마다 마이크를 열면 같은 부름에 여러 탭이 깨어난다. */
@@ -78,8 +78,13 @@ export default function WakeListener() {
     const gesture = new AbortController();
     let checking = 0;
 
+    // 말을 시작한 순간 답을 기다리는 창이 열려 있었나 — 말하는 동안·받아 적는 동안 창이 닫혀도 그 말은 답이다.
+    let followUpAtSpeechStart: string | null = null;
+    const onSpeechStart = () => { followUpAtSpeechStart = wakeStore.activeFollowUp(); };
     const onUtterance = (wav: Blob) => {
       if (run.cancelled) return;
+      const followUpOperatorId = followUpAtSpeechStart ?? wakeStore.activeFollowUp();
+      followUpAtSpeechStart = null;
       checking += 1;
       wakeStore.setListener('checking');
       let failure: string | null = null;
@@ -87,15 +92,21 @@ export default function WakeListener() {
         .then((t) => {
           if (run.cancelled || wakeStore.state.mode !== 'sleeping') return;
           const { operators: list, workspaceId, navigate: go } = latest.current;
-          const match = matchWake(t.text || '', list);
-          if (!match) return;
+          const text = (t.text || '').trim();
+          const match = matchWake(text, list);
+          // 이름을 불렀으면 그 operator, 아니면 — 결정을 묻고 답을 기다리던 operator 에게 그 말 그대로.
+          const answering = !match && followUpOperatorId && !isFillerUtterance(text)
+            ? list.find((op) => op.id === followUpOperatorId) ?? null
+            : null;
+          const operator = match?.operator ?? answering;
+          if (!operator) return;
           if (!workspaceId) {
-            failure = `"${match.operator.name}" 을(를) 들었지만 열 워크스페이스가 없습니다 — 워크스페이스를 한 번 연 뒤에 다시 불러 주세요.`;
+            failure = `"${operator.name}" 을(를) 들었지만 열 워크스페이스가 없습니다 — 워크스페이스를 한 번 연 뒤에 다시 불러 주세요.`;
             return;
           }
           playEarcon('wake');
-          wakeStore.wake(match.operator.id, match.rest || null);
-          go(sessionPath(`/ws/${workspaceId}`, match.operator.manager_id, match.operator.cli, match.operator.session_id));
+          wakeStore.wake(operator.id, match ? (match.rest || null) : text);
+          go(sessionPath(`/ws/${workspaceId}`, operator.manager_id, operator.cli, operator.session_id));
         })
         .catch((err: any) => { failure = err?.message || '이름을 확인하지 못했습니다'; })
         .finally(() => {
@@ -118,7 +129,7 @@ export default function WakeListener() {
       }
       wakeStore.setListener('starting');
       try {
-        const session = await startHandsFree({ onUtterance });
+        const session = await startHandsFree({ onSpeechStart, onUtterance });
         if (run.cancelled) {
           void session.destroy();
           return;

@@ -53,6 +53,14 @@ test('the brief tells the operator how to answer AWB work reports — and not to
   assert.match(brief, /보고만 보고 다른 세션에 작업을 시키거나 무엇을 승인하지 않는다/);
 });
 
+test('the brief teaches spoken choices: read them numbered, pass the pick on with the AWB tools', () => {
+  const brief = operatorBrief('자비스');
+  assert.match(brief, /선택지를 번호와 함께 읽어 준다/);
+  assert.match(brief, /answer_session_permission \/ answer_session_question 도구로 그 세션에 전하고/);
+  assert.match(brief, /list_pending_session_requests 로 확인하고/);
+  assert.match(brief, /사용자의 말 없이 전하는 호출은 AWB 도 거절한다/);
+});
+
 test('aliases are typed comma-separated', () => {
   assert.deepEqual(parseAliasInput(' Jarvis, 쟈비스 ,, 자 비스\n'), ['Jarvis', '쟈비스', '자 비스']);
   assert.deepEqual(parseAliasInput(''), []);

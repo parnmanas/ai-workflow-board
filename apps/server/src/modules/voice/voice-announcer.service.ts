@@ -21,6 +21,8 @@ import {
   elicitationDetail,
   isUrgentReport,
   permissionDetail,
+  questionFields,
+  type ReportedRequest,
   type SessionReport,
   type SessionReportKind,
 } from './operator-report';
@@ -72,6 +74,26 @@ const DIRECT_KIND: Record<SessionReportKind, Extract<AnnouncementKind, `session_
   needs_permission: 'session_needs_input',
   needs_input: 'session_needs_input',
 };
+
+/** 매니저가 중계한 요청 행 → 보고에 실을 요청(답을 전하는 데 필요한 id · 선택지 · 칸). */
+function reportedRequest(pending: { type: string; payload: any }): ReportedRequest | undefined {
+  const p = pending.payload || {};
+  if (pending.type === 'permission_request' && typeof p.request_id === 'string') {
+    return {
+      kind: 'permission',
+      id: p.request_id,
+      title: String(p.title || '').trim(),
+      options: Array.isArray(p.options)
+        ? p.options.filter((o: any) => o && typeof o.option_id === 'string').map((o: any) => ({ option_id: o.option_id, name: String(o.name || o.option_id) }))
+        : [],
+      fields: [],
+    };
+  }
+  if (pending.type === 'elicitation_request' && typeof p.elicitation_id === 'string') {
+    return { kind: 'question', id: p.elicitation_id, title: String(p.message || '').trim(), options: [], fields: questionFields(p.schema) };
+  }
+  return undefined;
+}
 
 const findOperator = (operators: readonly OperatorEntry[], s: { manager_id: string; cli: string; session_id: string }) =>
   operators.find((op) => op.manager_id === s.manager_id && op.cli === s.cli && op.session_id === s.session_id) ?? null;
@@ -138,10 +160,15 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     }
     const finished = this.#answers.push(ev);
     if (finished) this.#finishedTurn.set(key, finished);
-    // 사용자가 operator 와 대화를 시작했다(AWB 가 보낸 보고 턴은 대화가 아니다) — "가장 최근에 대화한" 의 근거.
-    if (ev.type === 'turn' && ev.payload?.phase === 'started' && ev.turn_id && !this.reports.isReportTurn(ev.turn_id)) {
+    // operator 세션의 턴 — 지금 무슨 턴인지 기록하고(말로 받은 답을 전하는 도구의 근거), 사용자가 시작한 턴이면
+    // "가장 최근에 대화한" 의 근거로 남긴다(AWB 가 보낸 보고 턴은 대화가 아니다).
+    const phase = ev.type === 'turn' ? ev.payload?.phase : null;
+    if ((phase === 'started' || phase === 'finished') && ev.turn_id) {
       const operator = findOperator(await cachedOperators(this.dataSource), e);
-      if (operator) this.reports.noteConversation(operator.id);
+      if (operator) {
+        this.reports.noteOperatorTurn(operator.id, ev.turn_id, phase);
+        if (phase === 'started' && !this.reports.isReportTurn(ev.turn_id)) this.reports.noteConversation(operator.id);
+      }
     }
   }
 
@@ -163,6 +190,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     let kind: SessionReportKind | null = null;
     let detail = '';
     let durationMs: number | null = null;
+    let request: ReportedRequest | undefined;
     if (reason === 'turn_finished' || reason === 'turn_failed') {
       const startedAt = this.#turnStartedAt.get(key);
       this.#turnStartedAt.delete(key);
@@ -199,6 +227,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       const pending = this.#pendingRequest.get(key);
       detail = !pending ? ''
         : pending.type === 'permission_request' ? permissionDetail(pending.payload, lang) : elicitationDetail(pending.payload, lang);
+      request = pending ? reportedRequest(pending) : undefined;
       if (operator) {
         // operator 자신이 사용자의 승인을 기다린다 — 다른 operator 를 거치지 않고 직접 알린다.
         if (!viewing()) await this.announceReportsDirectly([this.toReport(kind, userId, session, detail, null, now)]);
@@ -218,7 +247,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     if (!kind) return;
     // 사용자가 그 세션 화면을 보고 있다 — 이미 보고 있는 것을 보고하지 않는다.
     if (viewing()) return;
-    const report = this.toReport(kind, userId, session, detail, durationMs, now);
+    const report = { ...this.toReport(kind, userId, session, detail, durationMs, now), ...(request ? { request } : {}) };
     if (await this.reports.submit(report)) return;
     // 등록된 operator 가 없다 — 템플릿 문장으로 직접 알린다(짧은 턴은 화면을 보며 기다린 것으로 본다).
     if (kind === 'finished' && durationMs !== null && durationMs < MIN_ANNOUNCED_TURN_MS) return;
@@ -271,7 +300,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     }
     await this.announceOperator([summary.userId], 'operator_report', summary.operator, summary.answer, {
       type: 'session', manager_id: focus.session.manager_id, cli: focus.session.cli, session_id: focus.session.session_id,
-    });
+    }, summary.reports.some(isUrgentReport));
   }
 
   private async announceOperator(
@@ -280,11 +309,12 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     operator: OperatorEntry,
     answer: string,
     target: VoiceAnnouncementTarget,
+    needsDecision = false,
   ): Promise<void> {
     if (!(await this.ttsReady())) return;
     const text = toSpeakable(answer, OPERATOR_SUMMARY_CHARS);
     if (!text) return;
-    this.announce(userIds, kind, text, target, { id: operator.id, name: operator.name });
+    this.announce(userIds, kind, text, target, { id: operator.id, name: operator.name }, needsDecision);
   }
 
   // ─── 미션 ────────────────────────────────────────────────────────────────
@@ -342,6 +372,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     text: string,
     target: VoiceAnnouncementTarget,
     operator?: { id: string; name: string },
+    needsDecision = false,
   ): void {
     this.prune();
     for (const userId of userIds) {
@@ -352,6 +383,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
         text,
         target,
         ...(operator ? { operator } : {}),
+        ...(needsDecision ? { needs_decision: true } : {}),
         created_at: new Date().toISOString(),
       };
       this.#store.set(payload.id, { ...payload, expiresAt: Date.now() + ANNOUNCEMENT_TTL_MS, audio: null });

@@ -221,3 +221,24 @@ test('the transcript folds AWB work reports, hides the wake note and the sleep m
   assert.equal(blocks.find((b) => b.kind === 'assistant').text, '모두 정상이에요.');
   assert.equal(isOperatorReportPrompt('그냥 질문'), false);
 });
+
+test('after a decision is read out, a short window takes the answer without the name', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  wakeStore.setEnabled(true);
+  wakeStore.sleep();
+  assert.equal(wakeStore.openFollowUp('j', 8_000), true);
+  assert.equal(wakeStore.activeFollowUp(), 'j');
+  t.mock.timers.tick(7_000);
+  assert.equal(wakeStore.activeFollowUp(), 'j');
+  t.mock.timers.tick(1_500);
+  assert.equal(wakeStore.activeFollowUp(), null, 'the window closes by itself');
+  assert.equal(wakeStore.state.followUp, null);
+
+  wakeStore.openFollowUp('j');
+  wakeStore.wake('j', '1번');
+  assert.equal(wakeStore.state.followUp, null, 'answering (waking) closes it');
+  assert.equal(wakeStore.openFollowUp('f'), false, 'not while someone is already awake — they listen anyway');
+  wakeStore.sleep('j');
+  wakeStore.setEnabled(false);
+  assert.equal(wakeStore.openFollowUp('j'), false, 'name calling off: the mic is not ours to open');
+});

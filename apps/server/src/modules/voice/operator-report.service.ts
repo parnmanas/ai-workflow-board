@@ -65,6 +65,8 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
   #flushing = new Set<string>();
   #reportTurns = new Set<string>();
   #lastConversation = new Map<string, number>();
+  /** operator → 지금 돌고 있는 턴. 말로 받은 답을 전하는 도구가 "사용자가 시작한 턴인가" 를 여기서 본다. */
+  #currentTurn = new Map<string, string>();
   #summaryListeners: SummaryListener[] = [];
   #undeliverableListeners: UndeliverableListener[] = [];
   #timer: NodeJS.Timeout | null = null;
@@ -100,6 +102,21 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
   /** 이 턴은 AWB 가 보낸 보고였나(대화가 아니다). */
   isReportTurn(turnId: string): boolean {
     return this.#reportTurns.has(turnId);
+  }
+
+  /** operator 세션의 턴이 시작했다·끝났다(매니저가 중계한 `turn` 행). */
+  noteOperatorTurn(operatorId: string, turnId: string, phase: 'started' | 'finished'): void {
+    if (phase === 'started') this.#currentTurn.set(operatorId, turnId);
+    else if (this.#currentTurn.get(operatorId) === turnId) this.#currentTurn.delete(operatorId);
+  }
+
+  /**
+   * 지금 이 operator 가 **사용자가 시작한 턴**을 돌고 있으면 그 턴 id. AWB 가 보낸 보고 턴이거나, 턴을 모르면
+   * (서버가 턴 도중에 다시 떴다) null — 그때는 사람이 이 턴에서 무엇을 말했는지 AWB 가 알 수 없다.
+   */
+  userTurnInProgress(operatorId: string): string | null {
+    const turnId = this.#currentTurn.get(operatorId);
+    return turnId && !this.#reportTurns.has(turnId) ? turnId : null;
   }
 
   /** 사용자가 이 operator 와 대화했다 — 보고 받을 operator 를 고를 때 "가장 최근" 의 근거. */

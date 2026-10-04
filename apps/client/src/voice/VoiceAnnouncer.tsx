@@ -9,6 +9,8 @@ import type { VoiceAnnouncementEvent } from '../types';
 import { announcementPath, claimAnnouncement, isViewingTarget } from './announcements';
 import { speechPlayer } from './speechPlayer';
 import { useSpeechState, useVoiceConfig } from './useVoice';
+import { playEarcon } from './earcon';
+import { wakeStore } from './wakeState';
 
 const KEY_PREFIX = 'announcement:';
 
@@ -32,6 +34,8 @@ export default function VoiceAnnouncer() {
   const navigate = useNavigate();
   const speech = useSpeechState();
 
+  // 결정이 필요한 operator 보고 — 다 읽고 나면 잠깐 이름 없이 답을 듣는다(이름 부르기가 켜져 있으면).
+  const followUpRef = useRef<{ key: string; operatorId: string } | null>(null);
   const latest = useRef({ ready: false, enabled: true, workspaceId: currentWorkspaceId });
   latest.current = { ready: !!config?.tts.ready, enabled: prefs.voice, workspaceId: currentWorkspaceId };
 
@@ -58,10 +62,23 @@ export default function VoiceAnnouncer() {
       const path = announcementPath(data.target, workspaceId);
       // operator 가 쓴 글이면(작업 보고 요약 · operator 의 답) 누가 말하는지 붙인다.
       const text = data.operator ? `🎙 ${data.operator.name}: ${data.text}` : data.text;
-      showToast(text, 'info', { durationMs: data.operator ? 12000 : 8000, ...(path ? { onClick: () => navigate(path) } : {}) });
-      speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), `${KEY_PREFIX}${data.id}`);
+      showToast(text, 'info', {
+        durationMs: data.needs_decision ? 20000 : data.operator ? 12000 : 8000,
+        ...(path ? { onClick: () => navigate(path) } : {}),
+      });
+      const key = `${KEY_PREFIX}${data.id}`;
+      if (data.needs_decision && data.operator) followUpRef.current = { key, operatorId: data.operator.id };
+      speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), key);
     })();
   }, [navigate, showToast]));
+
+  // 선택지를 다 읽었다 — 신호음과 함께 이름 없이 답을 듣는 창을 연다(사용자는 "1번" 처럼 바로 답한다).
+  useEffect(() => {
+    const pending = followUpRef.current;
+    if (!pending || speech.speaking || speech.key !== pending.key) return;
+    followUpRef.current = null;
+    if (wakeStore.openFollowUp(pending.operatorId)) playEarcon('wake');
+  }, [speech.speaking, speech.key]);
 
   // 알림 소리를 못 냈으면(자동 재생 차단 · 엔진 오류) 한 번 알려 준다 — 조용히 삼키지 않는다.
   const shownErrorRef = useRef<string | null>(null);

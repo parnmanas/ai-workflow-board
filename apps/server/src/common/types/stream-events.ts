@@ -1159,5 +1159,10 @@ export interface VoiceAnnouncementPayload {
   target: VoiceAnnouncementTarget;
   /** operator 가 쓴 글이면(`operator_report` · `operator_reply`) 그 operator. */
   operator?: { id: string; name: string };
+  /**
+   * 사용자의 결정(승인·답)을 기다리는 보고 — 화면은 다 읽은 뒤 잠깐 이름 없이 답을 듣는다(이름 부르기가
+   * 켜져 있으면). docs/voice-operator.md "말로 답하기".
+   */
+  needs_decision?: boolean;
   created_at: string;
 }

@@ -173,7 +173,9 @@ test('a permission request is reported with what to allow; the summary points at
   await flush();
   assert.equal(prompts.length, 1, 'no operator on ragnar — the only one gets it');
   assert.match(prompts[0].text, /1\. 승인 필요 — ragnar \/ Codex · '모델 서버'/);
-  assert.match(prompts[0].text, /Run npm publish\n\s+선택지: Allow once \/ Reject/);
+  assert.match(prompts[0].text, /요청: Run npm publish\n\s+선택지: 1\) Allow once {2}2\) Reject/);
+  assert.match(prompts[0].text, /answer_session_permission\(manager_id="host-ragnar", cli="codex", session_id="s9", request_id="r1", option_id=1\)"a" 2\)"r"\)/);
+  assert.match(prompts[0].text, /이 답에서는 아무것도 승인하거나 답하지 마세요/);
   finishTurn(opSession(jarvis), prompts[0].turn_id, "ragnar의 모델 서버 세션이 npm publish 실행 허락을 기다려요. 세션 화면에서 허용하거나 거부해 주세요.");
   await flush();
   assert.equal(heard.length, 1);

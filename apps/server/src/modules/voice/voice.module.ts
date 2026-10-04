@@ -6,6 +6,7 @@ import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
 import { VoiceController, VoiceLabController, VoiceOperatorsController } from './voice.controller';
 import { VoiceAnnouncerService } from './voice-announcer.service';
 import { OperatorReportService } from './operator-report.service';
+import { OperatorDecisionService } from './operator-decision.service';
 import { VoicePresenceService } from './voice-presence.service';
 import { VoiceService } from './voice.service';
 
@@ -19,7 +20,8 @@ import { VoiceService } from './voice.service';
   // 작업 보고는 operator 세션에 서버가 대신 프롬프트를 보낸다(AgentSessionsService.promptOnBehalf).
   imports: [AgentSessionsModule],
   controllers: [VoiceController, VoiceLabController, VoiceOperatorsController],
-  providers: [VoiceService, VoiceAnnouncerService, OperatorReportService, VoicePresenceService, AuthGuard, AdminGuard, PermissionGuard],
-  exports: [VoiceService, VoiceAnnouncerService],
+  providers: [VoiceService, VoiceAnnouncerService, OperatorReportService, OperatorDecisionService, VoicePresenceService, AuthGuard, AdminGuard, PermissionGuard],
+  // OperatorDecisionService — MCP 의 operator 도구(말로 받은 답을 세션에 전하기)가 쓴다.
+  exports: [VoiceService, VoiceAnnouncerService, OperatorDecisionService],
 })
 export class VoiceModule {}

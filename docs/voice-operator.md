@@ -258,10 +258,46 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
   들려준다(`operator_reply`). operator 가 사용자의 승인을 기다리면 직접 알린다.
 - 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림이 읽는다), 깨어 있는 대화를 맡은
   화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
-- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침) — 사용자가 세션 화면에서 답하거나, 말로
-  지시한다. 말로 승인까지 대신하게 하는 도구는 아직 없다.
+- operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기").
+- **SSE 전달 목록(event-registry)은 필드를 골라 담는다** — `voice_announcement` 에 필드를 더하면 `map()` 에도 더할 것
+  (`operator` 가 빠져 화면에 안 갔던 것을 `event-registry-payload-parity-guard` 가 잡았다).
 - 회귀: `apps/server/test/voice-operator-reports.test.mjs`(라우팅 · 보고 문장 · 요약 전달 · 보고 있음 · 바쁨/묶음 ·
   다음 후보 · 직접 알림으로 되돌리기 · operator 자신의 턴 · 화면과의 계약).
+
+### 말로 답하기 — 승인·선택지를 듣고 말로 고른다 (2026-10-04)
+
+세션이 승인이나 답을 기다리면 operator 가 선택지를 번호와 함께 읽어 주고, 사용자가 말로 고르면 operator 가 그 세션에
+대신 답을 전한다.
+
+```
+세션 승인 대기(permission_request) / 질문(elicitation form)
+   ▼ 작업 보고: 요청 id · 번호 붙은 선택지 · "답 전하기: answer_session_permission(… request_id, option_id=1)"a" 2)"r")"
+operator 보고 턴: "롤프의 Codex 세션이 npm publish 허락을 기다려요. 1번 이번만 허용, 2번 거부 중에 골라 주세요."
+   ▼ 알림(needs_decision) 을 다 읽으면 ↑신호음 — 8초 동안 이름 없이 답을 듣는다(이름 부르기가 켜져 있으면)
+사용자: "1번" (또는 "헤이 자비스, 허용해")  →  operator 화면에서 깨어나고 그 말이 operator 에게 간다
+   ▼ operator 의 턴(사용자가 시작) — MCP answer_session_permission / answer_session_question
+AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'permission' / 'elicitation' → 세션이 이어서 돈다
+```
+
+- MCP 도구(`mcp/tools/operator-tools.ts`, 티어 `full`): `list_pending_session_requests` · `answer_session_permission` ·
+  `answer_session_question`. 미결 요청은 `AgentSessionsService` 가 매니저가 중계한 요청·결정 행으로 메모리에 둔다
+  (`PendingSessionInteraction` — 결정 · 턴 종료 · 프로세스 종료에서 지운다).
+- **사람이 정했다는 근거** — MCP 는 에이전트만 붙는 표면이라 증명을 못 하므로(티켓 `pending_user_action` 해제가
+  MCP 로 막혀 있는 것과 같은 문제), 서버가 확인할 수 있는 사실로만 허락한다(`voice/operator-decision.service.ts`):
+  1. 호출자가 등록된 operator 세션의 연결(매니저가 주입한 연결 · 그 세션 id · 그 Host 의 full 키 — MCP 세션에
+     `agentSessionId` 로 남는다),
+  2. 그 operator 가 **사용자가 시작한 턴**을 돌고 있다 — 로그인한 화면에서 사람이 방금 말을 걸었다. AWB 가 보낸 보고
+     턴, 서버가 모르는 턴(재시작 직후)에서는 `not_user_turn` 으로 거절한다. 보고에는 다른 세션이 쓴 글(믿을 수 없는
+     입력)이 실려 오므로, 그 글만 보고 operator 가 스스로 승인하는 길을 이 조건이 막는다,
+  3. 기다리는 세션의 driver 가 지금 operator 와 대화하는 사람과 같다(`not_this_user`),
+  4. 요청이 아직 미결이고(`request_gone`) 고른 선택지·값이 그 요청의 것이다(`option_unknown` · `choice_unknown` ·
+     `field_missing`) — 자유 형식으로 승인을 만들어 내지 못한다.
+  전할 때마다 operator · 사용자 · operator 턴 · 요청 · 고른 것을 `Voice` 로그에 남긴다.
+- 이름 없이 답하는 창(`wakeStore.openFollowUp`, 8초): 결정이 필요한 `operator_report` 를 다 읽은 직후에만, 이름 부르기가
+  켜져 있고 잠든 동안에만 연다(깨어 있으면 이미 이름 없이 듣는다). 말을 **시작한** 순간 창이 열려 있었으면 그 말은
+  답이다. 군소리는 답이 아니다.
+- 회귀: `apps/server/test/voice-operator-answers.test.mjs`(보고 문장 · 목록 · 보고 턴 거절 · 사용자 턴 전달 · 한 번만 ·
+  비operator · 다른 사용자 · 질문 값 검증 · 턴이 끝나면 다시 막힘 · SSE 필드), `apps/client/test/voice-wake.test.mjs`(답 창).
 
 ### 출처 이벤트 (기본값)
 

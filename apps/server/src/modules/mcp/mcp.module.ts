@@ -21,6 +21,7 @@ import { OutreachModule } from '../outreach/outreach.module';
 import { OrchestrationModule } from '../orchestration/orchestration.module';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { OntologyModule } from '../ontology/ontology.module';
+import { VoiceModule } from '../voice/voice.module';
 
 @Module({
   imports: [
@@ -62,6 +63,9 @@ import { OntologyModule } from '../ontology/ontology.module';
     // Provides OntologyLifecycleService + OntologyQueryService for the
     // ontology-tools MCP tools (ticket d35b7b7d, DESIGN.md 축 6).
     OntologyModule,
+    // Provides OperatorDecisionService for the operator-tools MCP tools — an operator
+    // session passes the user's spoken answer to a waiting permission request/question.
+    VoiceModule,
   ],
   controllers: [McpController],
 })

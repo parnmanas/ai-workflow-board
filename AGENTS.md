@@ -322,6 +322,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - 셀프호스팅 엔진(ragnar: Qwen3-ASR + Qwen3-TTS)은 `services/voice-server/`(npm 워크스페이스 밖, Python)에 있고 AWB 는 `local` 어댑터로 그 게이트웨이만 부른다 — 모델·목소리 교체는 게이트웨이/`voices.json` 쪽 일이지 AWB 코드 변경이 아니다.
 - **Operator 는 이름 붙은 Agent Session 여러 개**(`operator.sessions`, `/api/voice/operators`)이고, "헤이 <이름>" 으로 깨운다. 깨우는 말은 키워드 모델이 아니라 셀프호스팅 STT 로 받아 적은 **글자로** 확인한다(`apps/client/src/voice/wake.logic.ts`, 상시 청취는 `?purpose=wake` 로 `local` 엔진에서만). 잠들기는 화면이 낱말로 추측하지 않고 **operator 가 문맥으로 정해 답 끝에 `[[sleep]]`** 을 붙인다 — 그 표시를 바꾸면 지침(`operatorBrief`) · 화면(`splitSleepMarker`) · 서버 낭독 정리(`SLEEP_MARKER_RE`) 셋을 같이 바꿀 것. 이름만 한 발화로는 깨우지 않는다(엔진이 용어집을 읊는 메아리 때문). 상세: `docs/voice-operator.md` → "이름 부르기 · 잠들기".
 - **세션 소식은 operator 가 전한다**: AWB 를 거친 세션의 턴 종료·오류·승인/질문 대기를 AWB 가 감지해 operator(같은 호스트 → 없으면 가장 최근 대화)에게 보고 프롬프트로 보내고(`OperatorReportService` → `AgentSessionsService.promptOnBehalf`), operator 의 요약이 `voice_announcement`(`operator_report`)로 간다. 보고 있는 세션은 보고하지 않는다(`PUT /api/voice/presence`). 닿지 못한 보고는 직접 알림으로 되돌린다 — 버리지 말 것. 보고 프롬프트 첫머리 `[AWB 작업 보고]` 는 server(`operator-report.ts`)·client(`wake.logic.ts`) 계약이다. 상세: `docs/voice-operator.md` → "작업 보고".
+- **말로 답하기**: operator 는 MCP `answer_session_permission` / `answer_session_question` 으로 사용자가 말로 고른 것을 기다리는 세션에 전한다. MCP 는 "사람이 정했다" 를 증명하지 못하므로 서버가 **operator 연결 · 사용자가 시작한 operator 턴(보고 턴 거절) · 같은 사용자 · 아직 미결인 요청과 그 선택지**만 허락한다(`voice/operator-decision.service.ts`). 이 조건을 느슨하게 하는 변경(예: 보고 턴에서 허용)은 다른 세션이 쓴 글로 승인이 일어나는 길을 연다 — 하지 말 것. 상세: `docs/voice-operator.md` → "말로 답하기".
 
 ## Skills (AWB 기능)
 

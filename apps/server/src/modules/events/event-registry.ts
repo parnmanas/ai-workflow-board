@@ -1531,6 +1531,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         kind: event.kind,
         text: event.text,
         target: event.target,
+        // operator 가 쓴 글(작업 보고 요약 · operator 의 답)이면 그 operator, 결정이 필요한 보고면 그 표시.
+        ...(event.operator ? { operator: event.operator } : {}),
+        ...(event.needs_decision ? { needs_decision: true } : {}),
         created_at: event.created_at,
       };
       return {

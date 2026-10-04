@@ -25,8 +25,19 @@ export interface ReportedSession {
   cwd: string;
 }
 
+/** 승인·질문 보고에 싣는, 답을 전하는 데 필요한 것(요청 id · 선택지 · 칸). */
+export interface ReportedRequest {
+  kind: 'permission' | 'question';
+  id: string;
+  title: string;
+  options: Array<{ option_id: string; name: string }>;
+  fields: QuestionField[];
+}
+
 export interface SessionReport {
   kind: SessionReportKind;
+  /** 승인·질문이면 그 요청 — operator 가 선택지를 읽어 주고, 사용자가 고르면 이것으로 답을 전한다. */
+  request?: ReportedRequest;
   /** 소식을 들을 사람 — 그 세션의 driver. */
   user_id: string;
   session: ReportedSession;
@@ -96,10 +107,13 @@ const DETAIL_LABEL: Record<AnnouncementLanguage, Record<SessionReportKind, strin
  */
 export function composeReportPrompt(reports: readonly SessionReport[], lang: AnnouncementLanguage): string {
   const lines: string[] = [];
+  const decisions = reports.some((r) => r.request);
   if (lang === 'ko') {
-    lines.push(`${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. 사용자에게 소리로 전할 요약을 1~2문장으로 답하세요 — 어느 장비의 어느 세션인지 이름으로 말하고, 입력이나 선택이 필요하면 무엇을 정해야 하는지 분명히. 여러 건이면 묶어서 짧게. 이 보고에는 [[sleep]] 을 붙이지 마세요.`);
+    lines.push(`${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. 사용자에게 소리로 전할 요약을 1~2문장으로 답하세요 — 어느 장비의 어느 세션인지 이름으로 말하고, 여러 건이면 묶어서 짧게. 이 보고에는 [[sleep]] 을 붙이지 마세요.`
+      + (decisions ? ' 승인이나 답이 필요한 건은 무엇을 정해야 하는지와 선택지를 번호와 함께 읽어 주세요. 이 답에서는 아무것도 승인하거나 답하지 마세요 — 사용자가 말로 고르면 그 턴에서 "답 전하기" 의 도구로 전합니다(이 보고 턴에서는 AWB 가 거절합니다).' : ''));
   } else {
-    lines.push(`${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. Reply with a 1–2 sentence summary the user will hear — name the host and session, and if input or a choice is needed say exactly what. Keep several updates together and short. Do not add [[sleep]] to this reply.`);
+    lines.push(`${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. Reply with a 1–2 sentence summary the user will hear — name the host and session, keep several updates together and short. Do not add [[sleep]] to this reply.`
+      + (decisions ? ' For anything that needs approval or an answer, say what has to be decided and read the choices, numbered. Do not approve or answer anything in this reply — when the user picks, pass it on in that turn with the tool under "Answer with" (AWB refuses it in this report turn).' : ''));
   }
   reports.forEach((r, i) => {
     const s = r.session;
@@ -107,6 +121,10 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
     lines.push('');
     lines.push(`${i + 1}. ${KIND_LABEL[lang][r.kind]} — ${s.manager_name} / ${s.cli_label}${title}${r.kind === 'finished' ? minutes(r.duration_ms, lang) : ''}`);
     if (s.cwd) lines.push(`   ${lang === 'ko' ? '작업 폴더' : 'Folder'}: ${s.cwd}`);
+    if (r.request) {
+      lines.push(...requestLines(r, lang));
+      return;
+    }
     const detail = clip(r.detail, REPORT_DETAIL_CHARS, lang);
     if (detail) {
       lines.push(`   ${DETAIL_LABEL[lang][r.kind]}:`);
@@ -116,6 +134,82 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
     }
   });
   return lines.join('\n');
+}
+
+const numbered = (items: string[]) => items.map((item, i) => `${i + 1}) ${item}`).join('  ');
+
+/** 승인·질문 — 무엇을 정해야 하는지, 번호 붙은 선택지, 그리고 답을 전할 도구 호출에 들어갈 값. */
+function requestLines(r: SessionReport, lang: AnnouncementLanguage): string[] {
+  const q = r.request!;
+  const s = r.session;
+  const where = `manager_id="${s.manager_id}", cli="${s.cli}", session_id="${s.session_id}"`;
+  const out: string[] = [];
+  const ko = lang === 'ko';
+  if (q.kind === 'permission') {
+    out.push(`   ${ko ? '요청' : 'Request'}: ${clip(q.title, 300, lang) || (ko ? '(제목 없음)' : '(untitled)')}`);
+    if (q.options.length) out.push(`   ${ko ? '선택지' : 'Choices'}: ${numbered(q.options.map((o) => o.name))}`);
+    out.push(`   ${ko ? '답 전하기' : 'Answer with'}: answer_session_permission(${where}, request_id="${q.id}", option_id=${q.options.map((o, i) => `${i + 1})"${o.option_id}"`).join(' ') || '?'})`);
+    return out;
+  }
+  out.push(`   ${ko ? '질문' : 'Question'}: ${clip(q.title, 600, lang) || (ko ? '(질문 문장 없음)' : '(no text)')}`);
+  for (const f of q.fields) {
+    const choices = f.choices.length
+      ? numbered(f.choices.map((c) => (c.label === c.value ? c.value : `${c.label} ["${c.value}"]`)))
+      : (ko ? '자유 입력' : 'free text');
+    out.push(`   - ${f.title}${f.title === f.name ? '' : ` (${f.name})`}${f.multiple ? (ko ? ' · 여러 개' : ' · several') : ''}${f.required ? '' : (ko ? ' · 선택' : ' · optional')}: ${choices}`);
+  }
+  out.push(`   ${ko ? '답 전하기' : 'Answer with'}: answer_session_question(${where}, elicitation_id="${q.id}", action="accept", content={${q.fields.map((f) => `"${f.name}": …`).join(', ')}})`);
+  return out;
+}
+
+// ─── 질문(elicitation form) 읽기 ─────────────────────────────────────────
+
+export interface QuestionField {
+  name: string;
+  title: string;
+  type: string;
+  required: boolean;
+  /** 여러 개를 고르는 칸(array). */
+  multiple: boolean;
+  /** 고를 수 있는 값 — 없으면 자유 입력. */
+  choices: Array<{ value: string; label: string }>;
+}
+
+const str = (v: unknown) => (v === undefined || v === null ? '' : String(v));
+
+function choicesOf(def: any): Array<{ value: string; label: string }> {
+  if (!def || typeof def !== 'object') return [];
+  const list = Array.isArray(def.oneOf) && def.oneOf.length ? def.oneOf
+    : Array.isArray(def.anyOf) && def.anyOf.length ? def.anyOf : null;
+  if (list) {
+    return list
+      .map((o: any) => ({ value: str(o?.const ?? o?.value ?? o?.enum?.[0]), label: str(o?.title) || str(o?.const ?? o?.value ?? o?.enum?.[0]) }))
+      .filter((o: { value: string }) => o.value);
+  }
+  if (Array.isArray(def.enum)) return def.enum.map((v: unknown) => ({ value: str(v), label: str(v) })).filter((o: { value: string }) => o.value);
+  return [];
+}
+
+/**
+ * 질문의 JSON Schema → 칸 목록(화면 `sessionTranscript.logic.ts` `elicitationFormView` 와 같은 규칙: enum ·
+ * oneOf/anyOf 의 const+title, 배열이면 items 의 선택지). operator 가 선택지를 읽어 주고 고른 값을 그대로 보낸다.
+ */
+export function questionFields(schema: unknown): QuestionField[] {
+  const s: any = schema && typeof schema === 'object' ? schema : {};
+  const props = s.properties && typeof s.properties === 'object' ? s.properties : {};
+  const required = new Set(Array.isArray(s.required) ? s.required.map(String) : []);
+  return Object.entries(props).map(([name, def]: [string, any]) => {
+    const type = typeof def?.type === 'string' ? def.type : 'string';
+    const multiple = type === 'array';
+    return {
+      name,
+      title: str(def?.title) || name,
+      type,
+      required: required.has(name),
+      multiple,
+      choices: multiple ? choicesOf(def?.items) : choicesOf(def),
+    };
+  });
 }
 
 /** 권한 요청 이벤트 → 보고 상세("Run npm publish — 선택지: Allow / Reject"). */
