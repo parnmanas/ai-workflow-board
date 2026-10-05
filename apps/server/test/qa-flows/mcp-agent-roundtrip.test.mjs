@@ -66,7 +66,8 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
   });
   assert.equal(res.status, 201);
   const ticket = await res.json();
-  assert.equal(ticket.status, 'todo', 'REST create defaults to todo');
+  // Dispatch may claim the new todo ticket before the response is serialized.
+  assert.ok(['todo', 'in_progress'].includes(ticket.status), `ticket is queued or already claimed: ${ticket.status}`);
 
   step('Wait for trigger, then verify agent called add_comment + move_ticket via MCP');
   const trigger = await va.waitForTrigger((tr) => tr.ticket_id === ticket.id, 4000);

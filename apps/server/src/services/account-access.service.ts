@@ -92,8 +92,11 @@ export class AccountAccessService {
       }
     }
     const pathId = req.params?.accountId || req.params?.wsId;
-    const hint = pathId || req.body?.account_id || req.query?.account_id || req.headers?.['x-account-id'];
-    req.requestedAccountId = hint || null;
+    const requested = pathId || req.body?.account_id || req.query?.account_id;
+    const hint = requested || req.headers?.['x-account-id'];
+    // Administrative list filters are explicit parameters. The browser's
+    // creation-default header remains an ownership hint, not a list filter.
+    req.requestedAccountId = requested || null;
     const effective = owner || hint || ids[0] || null;
     if (effective && !ids.includes(effective)) throw new ForbiddenException('account_access_denied');
     if (pathId && owner && pathId !== owner) throw new ForbiddenException('account_access_denied');

@@ -606,6 +606,9 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
     const accountRepo = dataSource.getRepository('Account');
+    // Make the automatic default differ deterministically from the manager's
+    // owner; Global administration must still list that manager.
+    const unrelatedDefault = await accountRepo.save(accountRepo.create({ name: 'Unrelated Default Account', created_at: new Date('2000-01-01T00:00:00Z') }));
 
     const admin = await userRepo.save(userRepo.create({
       name: 'Login Admin',
@@ -717,7 +720,7 @@ test('routed: POST /api/credentials/cli-login/start dispatches a real agent_mana
     });
     assert.equal(globalInstancesDenied.status, 403);
     const globalInstancesAllowed = await fetch(`${baseUrl}/cli-login/instances`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
+      headers: { Authorization: `Bearer ${adminToken}`, 'X-Account-Id': unrelatedDefault.id },
     });
     assert.equal(globalInstancesAllowed.status, 200);
     const globalInstancesBody = await globalInstancesAllowed.json();

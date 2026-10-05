@@ -209,9 +209,11 @@ export class CredentialsController {
     @Res() res: Response,
   ) {
     const all = this.instanceRegistry.list().filter((i) => i.mode === 'manager');
+    // The automatic creation default does not scope Global administration.
+    const requested = (req as any).accountAccessBound ? (req as any).requestedAccountId : accountId;
     let visible;
-    if (accountId) {
-      visible = all.filter((i) => i.account_id === accountId || i.account_id === null);
+    if (requested) {
+      visible = all.filter((i) => i.account_id === requested || i.account_id === null);
     } else {
       // 리뷰 지적(round 1)과 같은 클래스의 문제: account_id 없이 부르면
       // "전역" 조회이므로 credential 생성과 동일하게 MANAGE_GLOBAL_CREDENTIALS
