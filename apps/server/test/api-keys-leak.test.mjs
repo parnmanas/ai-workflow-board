@@ -93,8 +93,8 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
     adminToken = authService.createSession(adminUser.id);
 
     // ─── Create two accounts directly ───────────────────────────────────────
-    wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (api-keys)', description: 'Leak test' }));
-    wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (api-keys)', description: 'Leak test' }));
+    wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (api-keys)', description: 'Leak test', created_at: new Date('2001-01-01T00:00:00Z') }));
+    wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (api-keys)', description: 'Leak test', created_at: new Date('2000-01-01T00:00:00Z') }));
 
     // ─── Create user B and assign to workspace B ──────────────────────────────
     const userBRec = await userRepo.save(userRepo.create({
@@ -169,6 +169,7 @@ describe('api-keys-leak: cross-workspace API key isolation', async () => {
   it('admin can retrieve API key A by ID (control)', async () => {
     const res = await apiRequest(BASE_URL, `/keys/${apiKeyA.id}`, {
       token: adminToken,
+      accountId: wsB.id,
     });
     assert.equal(res.status, 200);
     assert.equal(res.data.id, apiKeyA.id);

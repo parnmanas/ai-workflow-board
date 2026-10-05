@@ -30,7 +30,7 @@ export class AccountAccessService {
       accounts: 'Account', tickets: 'Ticket', projects: 'Project', 'chat-rooms': 'ChatRoom',
       actions: 'Action', credentials: 'Credential', resources: 'Resource',
       functions: 'WorkflowFunction', skills: 'Skill',
-      'api-keys': 'ApiKey', channels: 'Channel',
+      keys: 'ApiKey', 'api-keys': 'ApiKey', channels: 'Channel',
       'qa-scenarios': 'QaScenario', 'qa-schedules': 'QaSchedule',
       'security-profiles': 'SecurityProfile', 'security-schedules': 'SecuritySchedule',
       'automation-schedules': 'AutomationSchedule',
