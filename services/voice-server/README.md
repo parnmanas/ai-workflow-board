@@ -30,6 +30,9 @@ memory fractions are deliberately small (ASR 0.08, TTS stages 0.06 + 0.04).
 | `POST /v1/audio/speech` | `{ input, [voice], [language], [response_format: mp3\|wav] }` → audio (MP3 by default) |
 | `GET /v1/audio/voices` | `{ voices: [{ id, name, language, gender }], default }` — from `voices.json` |
 | `GET /health` | `{ ok, stt: { ready }, tts: { ready } }` — open (no key), 503 until both backends answer |
+| `GET /v1/audio/models` | Installed STT model choices and speaker availability; used by Voice lab |
+| `POST /v1/audio/speaker/embedding` | multipart `file` → `{ embedding, model, speech_seconds }`; requires ≥6 seconds of speech; no recording stored |
+| `POST /v1/audio/speaker/filter` | multipart `file`, `profile` (JSON model + reference vectors), `threshold` → matching speech as WAV with `X-Speaker-Accepted: true`, or 204 + `X-Speaker-Ignored`; does not store profiles |
 
 Every route but `/health` needs `Authorization: Bearer $AWB_VOICE_KEY`.
 
@@ -45,6 +48,51 @@ Then in AWB → Admin → Voice: provider **Self-hosted (ragnar)**, server URL
 
 Voices: edit `voices.json` (speaker, language, optional `instructions` style
 prompt for the 1.7B CustomVoice model) and restart the gateway — no AWB change.
+
+## Speaker filtering and alternative STT
+
+```bash
+./install-tools.sh  # isolated ~/.venvs/voice-tools; CPU speaker model + Whisper download
+./install.sh        # copy the gateway + speaker_filter.py and restart only the gateway
+```
+
+The optional systemd drop-in switches the gateway interpreter to `voice-tools`,
+leaving the working vLLM ASR environment and GPU allocation intact. The models
+are `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` (Sherpa ONNX) and
+`large-v3-turbo` (faster-whisper, CPU/int8). The gateway still defaults to Qwen;
+`model=whisper-large-v3-turbo` explicitly selects the comparison engine. An
+unknown model is rejected rather than silently selecting another engine.
+
+The speaker filter runs Silero VAD, compares windows of at most two seconds to
+the user's reference embeddings and discards nonmatching windows before any
+STT request. Profiles live encrypted in AWB, scoped to the authenticated user;
+this gateway retains neither profiles nor recordings. The model fingerprint
+is checked to prevent applying old embeddings to a replacement model. Samples
+with insufficient speech, clipping, or inconsistent speakers are rejected.
+Very short or overlapping speech still needs real-user testing and threshold
+tuning. This is an input filter, not identity authentication.
+
+In AWB → VOICE, enroll 2–3 samples under **My voice**, and compare the same
+Korean/English recording under **Speech-to-text comparison**. Multiple language
+hints (`ko,en`) use automatic detection rather than forcing Korean. The CPU
+Whisper option is intended for accuracy comparison and can be considerably
+slower than Qwen on the GPU; do not switch based on synthetic audio alone.
+
+Validation:
+
+```bash
+~/.venvs/voice-tools/bin/python -m unittest test_voice_server -v
+```
+
+Primary model/API references: [Sherpa speaker identification](https://k2-fsa.github.io/sherpa/onnx/speaker-identification/index.html),
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper),
+[Qwen language forcing](https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/inference/qwen3_asr.py).
+
+To remove the optional interpreter override, remove
+`~/.config/systemd/user/awb-voice-gateway.service.d/tools.conf`, then run
+`systemctl --user daemon-reload` and `systemctl --user restart awb-voice-gateway`.
+Disable enrolled speaker filters in AWB first; enabled filters fail explicitly
+when their engine is unavailable.
 
 ## Gotchas
 - FlashInfer JIT-compiles kernels on first start: the ASR unit puts the venv's

@@ -80,7 +80,7 @@ interface NotificationContextValue {
   /** Sum of the counts that represent "something is waiting for me". */
   totalUnread: number;
   prefs: NotificationPrefs;
-  setPref: (key: keyof NotificationPrefs, value: boolean) => void;
+  setPref: <K extends keyof NotificationPrefs>(key: K, value: NotificationPrefs[K]) => void;
   /** Returned by Notification.permission. 'default' before the user has chosen. */
   notificationPermission: NotificationPermission;
   /** Ask the browser for permission. Safe to call multiple times. */
@@ -639,7 +639,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   }, [totalUnread]);
 
   // ─── Prefs + permission ─────────────────────────────────────────────
-  const setPref = useCallback((key: keyof NotificationPrefs, value: boolean) => {
+  const setPref = useCallback(<K extends keyof NotificationPrefs,>(key: K, value: NotificationPrefs[K]) => {
     setPrefs(setNotificationPref(key, value));
   }, []);
 

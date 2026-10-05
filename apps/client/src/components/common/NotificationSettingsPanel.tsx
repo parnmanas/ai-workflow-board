@@ -3,6 +3,8 @@ import { tokens } from '../../tokens';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { UserChannelsModal } from './UserChannelsModal';
 import { useVoiceConfig } from '../../voice/useVoice';
+import { NOTIFICATION_SOUNDS, type NotificationSound, notificationSoundClip } from '../../voice/notificationSound';
+import { speechPlayer } from '../../voice/speechPlayer';
 
 /**
  * Dropdown panel for browser notification preferences.
@@ -155,8 +157,16 @@ export function NotificationSettingsPanel() {
           <Toggle label="Admin (pending users, agent errors)" checked={prefs.admin} onChange={(v) => setPref('admin', v)} rowStyle={rowStyle} />
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '6px 0' }} />
           <Toggle label="Audio cue" checked={prefs.audio} onChange={(v) => setPref('audio', v)} rowStyle={rowStyle} />
-          {voiceConfig?.tts.ready && (
-            <Toggle label="Speak work updates" checked={prefs.voice} onChange={(v) => setPref('voice', v)} rowStyle={rowStyle} />
+          {voiceConfig && (
+            <>
+              <Toggle label="Work updates (sound, details on request)" checked={prefs.voice} onChange={(v) => setPref('voice', v)} rowStyle={rowStyle} />
+              <label style={rowStyle}>Work update sound
+                <select value={prefs.workSound} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)}>
+                  {NOTIFICATION_SOUNDS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+              </label>
+              <button onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>Preview sound</button>
+            </>
           )}
           <div style={{ borderTop: `1px solid ${tokens.colors.border}`, margin: '8px 0 6px' }} />
           <button

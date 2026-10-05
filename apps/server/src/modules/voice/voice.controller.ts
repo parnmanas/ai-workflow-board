@@ -78,7 +78,35 @@ export class VoiceController {
   @Post('transcribe')
   async transcribe(@Req() req: Request, @Query('purpose') purpose: string, @Res() res: Response) {
     const { audio, mimeType } = audioBody(req);
-    return run(res, () => this.voice.transcribe(audio, mimeType, undefined, purpose === 'wake' ? 'wake' : 'utterance'));
+    return run(res, () => this.voice.transcribe(audio, mimeType, undefined, purpose === 'wake' ? 'wake' : 'utterance', (req as any).currentUser.id));
+  }
+
+  @Get('speaker')
+  async speaker(@Req() req: Request, @Res() res: Response) {
+    res.setHeader('Cache-Control', 'no-store');
+    return run(res, () => this.voice.speakerProfile((req as any).currentUser.id));
+  }
+
+  @Post('speaker/enroll')
+  async enrollSpeaker(@Req() req: Request, @Res() res: Response) {
+    const { audio, mimeType } = audioBody(req);
+    return run(res, () => this.voice.enrollSpeaker((req as any).currentUser.id, audio, mimeType));
+  }
+
+  @Patch('speaker')
+  async updateSpeaker(@Req() req: Request, @Body() body: any, @Res() res: Response) {
+    return run(res, () => this.voice.updateSpeaker((req as any).currentUser.id, body ?? {}));
+  }
+
+  @Delete('speaker')
+  async removeSpeaker(@Req() req: Request, @Res() res: Response) {
+    return run(res, () => this.voice.removeSpeaker((req as any).currentUser.id));
+  }
+
+  @Get('lab/models')
+  @UseGuards(AdminGuard)
+  async sttModels(@Res() res: Response) {
+    return run(res, () => this.voice.localModels());
   }
 
   /** `{ text }`(화면용 답) → `{ chunks }`(읽을 조각). 엔진을 부르지 않는다. */

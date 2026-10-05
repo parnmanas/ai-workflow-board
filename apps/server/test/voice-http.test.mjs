@@ -45,6 +45,15 @@ async function startFakeAudioServer() {
       if (req.url === '/v1/audio/transcriptions') {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ text: ' 롤프 세션 상태 알려줘 ' }));
+      } else if (req.url === '/v1/audio/speaker/embedding') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ model: 'speaker-v1', embedding: Array.from({ length: 192 }, (_, i) => i === 0 ? 1 : 0) }));
+      } else if (req.url === '/v1/audio/speaker/filter') {
+        res.writeHead(204, { 'x-speaker-ignored': 'speaker_mismatch', 'x-speaker-score': '0.1' });
+        res.end();
+      } else if (req.url === '/v1/audio/models') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ models: [{ id: 'qwen3-asr', name: 'Qwen' }, { id: 'whisper-large-v3-turbo', name: 'Whisper' }], speaker: { ready: true } }));
       } else if (req.url === '/v1/audio/speech') {
         res.writeHead(200, { 'content-type': 'audio/mpeg' });
         res.end(Buffer.from('ID3-fake-mp3'));
@@ -250,4 +259,30 @@ test('voice gateway: permissions, settings, transcribe, speakable → speech, an
   );
   const removed = await call(`${operatorsUrl}/${jarvis.body.operator.id}`, { method: 'DELETE', headers: adminAuth });
   assert.deepEqual(removed.body.operators.map((op) => op.name), ['프라이데이']);
+
+  // Profile ownership comes from the authenticated session, never a body/user-id query.
+  const profileUrl = `${base}/api/voice/speaker`;
+  const modelChoices = await call(`${base}/api/voice/lab/models`, { headers: adminAuth });
+  assert.deepEqual(modelChoices.body.models.map((m) => m.id), ['qwen3-asr', 'whisper-large-v3-turbo']);
+  assert.equal((await call(`${base}/api/voice/lab/models`, { headers: plainAuth })).status, 403);
+  assert.equal((await call(profileUrl, { headers: plainAuth })).status, 403);
+  assert.equal((await call(profileUrl, {})).status, 401);
+  const secondAdmin = await createUser(app, getDataSourceToken, { name: 'another-admin', role: 'admin' });
+  const secondAuth = { Authorization: `Bearer ${app.get(AuthService).createSession(secondAdmin.id)}` };
+  const enrolled = await call(`${profileUrl}/enroll`, { method: 'POST', headers: { ...adminAuth, 'Content-Type': 'audio/webm' }, body: Buffer.from('MY-VOICE-RAW') });
+  assert.equal(enrolled.status, 200, enrolled.buf.toString());
+  assert.equal(enrolled.body.enrolled, true);
+  assert.equal(enrolled.body.embeddings, undefined, 'private voice features never leave the server');
+  assert.ok(fake.seen.find((r) => r.url === '/v1/audio/speaker/embedding').body.includes(Buffer.from('MY-VOICE-RAW')), 'raw body parser preserves enrollment bytes');
+  assert.equal((await call(profileUrl, { headers: secondAuth })).body.enrolled, false);
+  assert.equal((await call(`${profileUrl}?user_id=${admin.id}`, { headers: secondAuth })).body.enrolled, false);
+  fake.seen.length = 0;
+  const mismatched = await call(`${base}/api/voice/transcribe?purpose=wake`, wakeClip);
+  assert.equal(mismatched.status, 200);
+  assert.equal(mismatched.body.ignored, 'speaker_mismatch');
+  assert.equal(mismatched.body.text, '');
+  assert.ok(!fake.seen.some((r) => r.url === '/v1/audio/transcriptions'), 'foreign voice is never recognized');
+  assert.equal((await call(profileUrl, { method: 'DELETE', headers: secondAuth })).status, 200);
+  assert.equal((await call(profileUrl, { headers: adminAuth })).body.enrolled, true, 'another user cannot delete this profile');
+  assert.equal((await call(profileUrl, { method: 'DELETE', headers: adminAuth })).body.enrolled, false);
 });

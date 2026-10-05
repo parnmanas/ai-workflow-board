@@ -41,8 +41,8 @@ export const openAiStt: SttProvider = {
       for (const lang of input.languages) form.append('languages[]', lang);
       for (const term of input.terms) form.append('keywords[]', term);
     } else {
-      // 한 언어만 받는 모델: 첫 언어를 주 언어로 둔다. 용어는 prompt 로 실어 철자를 유도한다.
-      if (input.languages.length) form.append('language', input.languages[0]);
+      // Single language is an explicit hint; multiple languages leave code-switching detection to the engine.
+      if (input.languages.length === 1) form.append('language', input.languages[0]);
       if (input.terms.length) form.append('prompt', `${input.terms.join(', ')}.`);
     }
     const res = await ctx.fetch(`${ctx.config.openaiBaseUrl}/audio/transcriptions`, {

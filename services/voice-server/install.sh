@@ -8,7 +8,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/voice-server"
 UNITS="$HOME/.config/systemd/user"
 mkdir -p "$DEST/logs" "$UNITS" "$HOME/.config/awb-voice"
-install -m 644 "$SRC/awb_voice_server.py" "$SRC/voices.json" "$DEST/"
+install -m 644 "$SRC/awb_voice_server.py" "$SRC/speaker_filter.py" "$SRC/voices.json" "$DEST/"
 install -m 755 "$SRC/tts-container.sh" "$DEST/"
 install -m 644 "$SRC/systemd/awb-voice-asr.service" "$SRC/systemd/awb-voice-gateway.service" "$UNITS/"
 if [ ! -f "$HOME/.config/awb-voice/env" ]; then

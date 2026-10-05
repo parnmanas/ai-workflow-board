@@ -1,5 +1,10 @@
 import type { VoiceAnnouncementTarget } from '../types';
 
+/** Only a response to the user's conversation is spoken automatically. */
+export function announcementPlayback(kind: string): 'speech' | 'cue' {
+  return kind === 'operator_reply' ? 'speech' : 'cue';
+}
+
 /**
  * 음성 알림(docs/voice-operator.md "음성 알림")의 화면 쪽 규칙.
  *
@@ -32,8 +37,8 @@ export function isViewingTarget(target: VoiceAnnouncementTarget | null | undefin
 }
 
 /**
- * 이 탭이 알림을 소리로 낼까. 보고 있는 세션에 대한 알림은 말하지 않는다(화면이 이미 보여 준다) — 단 결정을
- * 기다리는 operator 보고(승인·질문)는 보고 있어도 읽는다: 선택지를 듣고 말로 답하는 것이 그 알림의 쓰임새다.
+ * 보고 있는 세션의 일반 소식은 조용히 처리한다. 승인·질문은 보고 있어도 알림음을 낸다.
+ * 선택지 설명과 음성 답변은 사용자가 operator 에게 자세한 내용을 요청한 뒤 시작한다.
  */
 export function shouldSpeakAnnouncement(viewingTarget: boolean, needsDecision: boolean): boolean {
   return !viewingTarget || needsDecision;

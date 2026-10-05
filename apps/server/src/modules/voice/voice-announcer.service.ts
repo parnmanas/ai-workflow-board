@@ -32,11 +32,11 @@ import { toSpeakable } from './speakable';
 import { VoicePresenceService } from './voice-presence.service';
 
 /**
- * 음성 알림(docs/voice-operator.md "음성 알림 · 작업 보고") — 일이 끝나면 AWB 가 먼저 말한다.
+ * 작업 알림(docs/voice-operator.md) — 작업 보고는 알림음, 사용자 대화 답변은 TTS.
  *
  * 세션(AWB 를 거쳐 연결된 Agent Session)의 턴 종료·오류·확인 대기는 **operator 에게 보고**한다
  * (`OperatorReportService`) — 같은 호스트의 operator, 없으면 가장 최근에 대화한 operator. operator 가 쓴
- * 요약이 사용자에게 `voice_announcement`(kind `operator_report`)로 간다. 말하는 것은 operator 하나다.
+ * 요약이 사용자에게 `voice_announcement`(kind `operator_report`)로 간다. 화면은 선택한 알림음만 재생한다.
  * 사용자가 그 세션 화면을 보고 있으면(`VoicePresenceService`) 보고하지 않는다. 등록된 operator 가 없거나
  * 보고가 닿지 못하면 예전처럼 템플릿 문장으로 직접 알린다 — 조용히 버리지 않는다.
  *
@@ -272,7 +272,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     if (!kind) return;
     // 사용자가 그 세션 화면을 보고 있어도 operator 에게는 보고한다 — operator 가 사이트의 흐름(결과·결정까지)을
     // 알게. 보고 있었다는 표시(viewed)가 붙은 보고는 소리로 전하지 않는다(사용자는 이미 보고 있다). 단 승인·질문은
-    // 보고 있어도 소리로 읽고 말로 답을 받는다 — 화면 앞에서도 손 대신 말로 답하는 것이 이 기능의 쓰임새다.
+    // 보고 있어도 알림음을 낸다. 선택지 설명과 음성 답변은 사용자가 자세한 내용을 요청한 뒤 시작한다.
     const decisionAwaited = kind === 'needs_permission' || kind === 'needs_input';
     const report: SessionReport = {
       ...this.toReport(kind, userId, session, detail, durationMs, now),
@@ -326,7 +326,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
   /** 템플릿 문장으로 직접 — operator 가 없거나, 보고가 operator 에게 닿지 못했을 때. */
   private async announceReportsDirectly(all: SessionReport[]): Promise<void> {
     const reports = all.filter((r) => !r.viewed); // 보고 있던 것은 말하지 않는다
-    if (!reports.length || !(await this.ttsReady())) return;
+    if (!reports.length) return;
     const lang = announcementLanguage((await loadVoiceConfig(this.dataSource)).stt.languages);
     for (const report of reports) {
       const kind = DIRECT_KIND[report.kind];
@@ -367,7 +367,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     target: VoiceAnnouncementTarget,
     needsDecision = false,
   ): Promise<void> {
-    if (!(await this.ttsReady())) return;
+    if (kind === 'operator_reply' && !(await this.ttsReady())) return;
     const text = toSpeakable(answer, OPERATOR_SUMMARY_CHARS);
     if (!text) return;
     this.announce(userIds, kind, text, target, { id: operator.id, name: operator.name }, needsDecision);
@@ -379,7 +379,6 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     const eventType = String(e?.last_event?.type || '');
     const kind = MISSION_EVENT_KINDS[eventType];
     if (!kind || !e?.mission_id || e.deleted) return;
-    if (!(await this.ttsReady())) return;
     const mission: any = await this.dataSource.getRepository('OrchestrationMission').findOne({ where: { id: e.mission_id } });
     if (!mission) return;
     const recipients = await this.missionRecipients(mission);
@@ -413,7 +412,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
 
   // ─── 발행 · 소리 ─────────────────────────────────────────────────────────
 
-  /** 소리를 낼 수 없으면 알리지 않는다 — 음성 알림이지 새 텍스트 알림 채널이 아니다. */
+  /** TTS is required only for a conversational reply; work cues are generated in the browser. */
   private async ttsReady(): Promise<boolean> {
     try {
       return (await this.voice.status(false)).tts.ready;

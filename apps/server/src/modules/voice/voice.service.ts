@@ -14,6 +14,9 @@ import {
 import { STT_PROVIDER_IMPLS, TTS_PROVIDER_IMPLS } from './providers';
 import { VoiceProviderError, type ProviderContext, type SttProvider, type TtsProvider, type VoiceOption } from './providers/types';
 import { operatorNameKey, operatorVocabulary } from './operator-config';
+import { audioBlob, audioFileName } from './providers/audio-file';
+import { upstreamFailure } from './providers/types';
+import { readSpeakerProfile, saveSpeakerProfile, deleteSpeakerProfile, speakerProfileView, validSpeakerEmbedding, speakerSimilarity, type SpeakerProfileView } from './speaker-profile';
 
 /** 한 번의 합성 요청에 싣는 글자 상한 — 화면은 220자 조각으로 보낸다. lab 의 긴 문장까지 받는다. */
 export const MAX_SPEECH_TEXT_CHARS = 2000;
@@ -58,7 +61,8 @@ export interface VoiceTranscriptView {
   model: string;
   latency_ms: number;
   /** 엔진의 답을 버렸으면 그 이유 — `vocabulary_echo`(용어집을 읊었을 뿐이다). text 는 ''. */
-  ignored?: 'vocabulary_echo';
+  ignored?: 'vocabulary_echo' | 'speaker_mismatch' | 'no_speech' | 'insufficient_speech';
+  speaker_score?: number;
 }
 
 /**
@@ -205,6 +209,7 @@ export class VoiceService {
     mimeType: string,
     override?: { provider?: string; model?: string },
     purpose: TranscribePurpose = 'utterance',
+    userId?: string,
   ): Promise<VoiceTranscriptView> {
     if (!audio?.length) throw new VoiceError(400, 'voice_audio_empty', 'The request carried no audio.');
     const config = await this.config();
@@ -214,6 +219,32 @@ export class VoiceService {
     const model = override?.model || config.stt.model || provider.defaultModel;
     const terms = [...new Set([...config.stt.terms, ...(await this.operatorTerms())])];
     const startedAt = Date.now();
+    let speakerScore: number | undefined;
+    // All production input paths (wake, hands-free captions, push-to-talk), for any STT provider.
+    // Lab is intentionally raw so engines can be compared on identical audio.
+    if (!override && userId) {
+      const profile = await readSpeakerProfile(this.dataSource, userId);
+      if (profile?.enabled) {
+        const filtered = await this.speakerRequest(config, 'filter', audio, mimeType, {
+          profile: JSON.stringify({ model: profile.model, embeddings: profile.embeddings }),
+          threshold: String(profile.threshold),
+        });
+        const score = filtered.headers.get('x-speaker-score');
+        if (score !== null && Number.isFinite(Number(score))) speakerScore = Number(score);
+        const ignored = filtered.headers.get('x-speaker-ignored');
+        if (ignored) {
+          return { text: '', provider: provider.id, model, latency_ms: Date.now() - startedAt,
+            ignored: ignored === 'no_speech' ? 'no_speech' : ignored === 'insufficient_speech' ? 'insufficient_speech' : 'speaker_mismatch',
+            speaker_score: speakerScore };
+        }
+        if (filtered.headers.get('x-speaker-accepted') !== 'true') {
+          throw new VoiceError(502, 'voice_speaker_invalid', 'The speaker filter did not confirm a matching voice.');
+        }
+        audio = Buffer.from(await filtered.arrayBuffer());
+        mimeType = 'audio/wav';
+        if (!audio.length) throw new VoiceError(502, 'voice_speaker_empty', 'Speaker filter returned no audio.');
+      }
+    }
     const text = await this.callUpstream(provider.id, TRANSCRIBE_TIMEOUT_MS, (signal) => provider.transcribe(
       { audio, mimeType: mimeType || 'application/octet-stream', model, languages: config.stt.languages, terms },
       this.context(config, signal),
@@ -223,7 +254,82 @@ export class VoiceService {
     if (!override && isVocabularyEcho(text, terms)) {
       return { text: '', provider: provider.id, model, latency_ms, ignored: 'vocabulary_echo' };
     }
-    return { text: text.trim(), provider: provider.id, model, latency_ms };
+    return { text: text.trim(), provider: provider.id, model, latency_ms, ...(speakerScore !== undefined ? { speaker_score: speakerScore } : {}) };
+  }
+
+  async speakerProfile(userId: string): Promise<SpeakerProfileView> {
+    return speakerProfileView(await readSpeakerProfile(this.dataSource, userId));
+  }
+
+  async localModels(): Promise<{ models: Array<{ id: string; name: string }>; speaker: { ready: boolean } }> {
+    const config = await this.config();
+    if (!config.localBaseUrl) return { models: [], speaker: { ready: false } };
+    return this.callUpstream('local models', 10_000, async (signal) => {
+      const res = await this.fetchImpl(`${config.localBaseUrl}/audio/models`, {
+        headers: config.keys.local ? { Authorization: `Bearer ${config.keys.local}` } : {}, signal,
+      });
+      if (!res.ok) throw await upstreamFailure('local', res);
+      const body = await res.json();
+      return { models: Array.isArray(body.models) ? body.models.filter((m: any) => typeof m.id === 'string' && typeof m.name === 'string') : [],
+        speaker: { ready: body.speaker?.ready === true } };
+    });
+  }
+
+  async enrollSpeaker(userId: string, audio: Buffer, mimeType: string): Promise<SpeakerProfileView> {
+    if (!audio.length) throw new VoiceError(400, 'voice_audio_empty', 'Record your voice before enrolling.');
+    const res = await this.speakerRequest(await this.config(), 'embedding', audio, mimeType);
+    const body = await res.json();
+    if (!validSpeakerEmbedding(body.embedding) || typeof body.model !== 'string' || !body.model) {
+      throw new VoiceError(502, 'voice_speaker_invalid', 'The voice server returned an invalid speaker embedding.');
+    }
+    const previous = await readSpeakerProfile(this.dataSource, userId);
+    if (previous && previous.model === body.model && Math.max(...previous.embeddings.map((e) => speakerSimilarity(e, body.embedding))) < 0.35) {
+      throw new VoiceError(409, 'voice_speaker_mismatch', 'This sample does not match your registered voice. Record again, or delete your old samples to start over.');
+    }
+    // Model changes invalidate the old vector space; only this explicit enrollment replaces it.
+    const embeddings = previous && previous.model === body.model ? [...previous.embeddings, body.embedding].slice(-5) : [body.embedding];
+    const profile = { enabled: true, threshold: previous?.threshold ?? 0.6, model: body.model, embeddings, updated_at: new Date().toISOString() };
+    await saveSpeakerProfile(this.dataSource, userId, profile);
+    return speakerProfileView(profile);
+  }
+
+  async updateSpeaker(userId: string, input: { enabled?: unknown; threshold?: unknown }): Promise<SpeakerProfileView> {
+    const profile = await readSpeakerProfile(this.dataSource, userId);
+    if (!profile) throw new VoiceError(409, 'voice_speaker_not_enrolled', 'Sample your voice in Voice first.');
+    if (input.enabled !== undefined && typeof input.enabled !== 'boolean') throw new VoiceError(400, 'voice_speaker_invalid', 'enabled must be a boolean.');
+    if (input.threshold !== undefined && (typeof input.threshold !== 'number' || !Number.isFinite(input.threshold) || input.threshold < 0.3 || input.threshold > 0.9)) {
+      throw new VoiceError(400, 'voice_speaker_invalid', 'Sensitivity threshold must be between 0.3 and 0.9.');
+    }
+    if (typeof input.enabled === 'boolean') profile.enabled = input.enabled;
+    if (typeof input.threshold === 'number') profile.threshold = input.threshold;
+    profile.updated_at = new Date().toISOString();
+    await saveSpeakerProfile(this.dataSource, userId, profile);
+    return speakerProfileView(profile);
+  }
+
+  async removeSpeaker(userId: string): Promise<SpeakerProfileView> {
+    await deleteSpeakerProfile(this.dataSource, userId);
+    return speakerProfileView(null);
+  }
+
+  private async speakerRequest(config: VoiceConfig, route: 'embedding' | 'filter', audio: Buffer, mimeType: string, fields: Record<string, string> = {}): Promise<Response> {
+    if (!config.localBaseUrl) throw new VoiceError(409, 'voice_speaker_not_configured', 'Configure the self-hosted voice server in Voice to use speaker filtering.');
+    return this.callUpstream('local speaker', TRANSCRIBE_TIMEOUT_MS, async (signal) => {
+      const form = new FormData();
+      form.append('file', audioBlob(audio, mimeType), audioFileName(mimeType));
+      for (const [key, value] of Object.entries(fields)) form.append(key, value);
+      const res = await this.fetchImpl(`${config.localBaseUrl}/audio/speaker/${route}`, {
+        method: 'POST', headers: config.keys.local ? { Authorization: `Bearer ${config.keys.local}` } : {}, body: form, signal,
+      });
+      if (!res.ok) {
+        if (res.status === 400 || res.status === 409 || res.status === 422) {
+          const body = await res.json().catch(() => ({}));
+          throw new VoiceError(res.status === 422 ? 400 : res.status, 'voice_speaker_invalid', typeof body.detail === 'string' ? body.detail : 'The speaker sample could not be processed.');
+        }
+        throw await upstreamFailure('local speaker', res);
+      }
+      return res;
+    });
   }
 
   /** 화면용 답 → 읽을 조각들. 읽을 것이 없으면 빈 배열(호출자는 말하지 않는다). */

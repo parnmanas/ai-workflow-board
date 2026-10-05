@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { encrypt } from '../dist/services/encryption.service.js';
+import { decrypt } from '../dist/services/encryption.service.js';
 import { invalidateVoiceConfig } from '../dist/modules/voice/voice-config.js';
 import { VoiceError, VoiceService, isVocabularyEcho } from '../dist/modules/voice/voice.service.js';
 import { azureSsml } from '../dist/modules/voice/providers/azure.js';
@@ -25,12 +26,17 @@ function makeService(settings) {
     value: key.endsWith('.api_key') && value ? encrypt(value) : value,
   }));
   // 설정 행은 find 로, operator 목록(operator.sessions)은 findOne 으로 읽는다 — 여기는 operator 가 없다.
-  const dataSource = { getRepository: () => ({ find: async () => rows, findOne: async () => null }) };
+  const stored = new Map();
+  const dataSource = { getRepository: () => ({ find: async () => rows,
+    findOne: async ({ where }) => stored.get(where.key) ?? null,
+    create: (row) => ({ ...row }), save: async (row) => { stored.set(row.key, { ...row }); return row; },
+    delete: async ({ key }) => { stored.delete(key); },
+  }) };
   const logs = [];
   const log = { warn: (...a) => logs.push(['warn', ...a]), error: (...a) => logs.push(['error', ...a]), info() {}, debug() {} };
   invalidateVoiceConfig();
   const service = new VoiceService(dataSource, log);
-  return { service, logs };
+  return { service, logs, stored };
 }
 
 function recordFetch(respond) {
@@ -43,6 +49,100 @@ function recordFetch(respond) {
 }
 
 const audio = Buffer.from('fake-webm-bytes');
+
+const speakerSettings = { 'voice.stt.provider': 'local', 'voice.local.base_url': 'http://speaker/v1', 'voice.local.api_key': 'speaker-key' };
+const speakerVector = Array.from({ length: 192 }, (_, i) => i === 0 ? 1 : 0);
+
+test('voice enrollment is encrypted, private to the authenticated user, bounded and deletable', async () => {
+  const { service, stored } = makeService(speakerSettings);
+  service.fetchImpl = async (_url, init) => {
+    assert.equal(init.headers.Authorization, 'Bearer speaker-key');
+    assert.equal(Buffer.from(await init.body.get('file').arrayBuffer()).toString(), audio.toString());
+    return Response.json({ model: 'speaker-v1', embedding: speakerVector });
+  };
+  const profile = await service.enrollSpeaker('alice', audio, 'audio/webm');
+  assert.deepEqual(profile, { enrolled: true, enabled: true, threshold: 0.6, samples: 1, updated_at: profile.updated_at });
+  assert.equal((await service.speakerProfile('bob')).enrolled, false);
+  const saved = stored.get('voice-speaker-profile.alice');
+  assert.equal(saved.is_secret, 1);
+  assert.ok(!saved.value.includes('embeddings'));
+  assert.deepEqual(JSON.parse(decrypt(saved.value)).embeddings, [speakerVector]);
+  for (let i = 0; i < 6; i++) await service.enrollSpeaker('alice', audio, 'audio/webm');
+  assert.equal((await service.speakerProfile('alice')).samples, 5);
+  const originalFetch = service.fetchImpl;
+  service.fetchImpl = async () => Response.json({ model: 'speaker-v1', embedding: Array.from({ length: 192 }, (_, i) => i === 1 ? 1 : 0) });
+  await assert.rejects(() => service.enrollSpeaker('alice', audio, 'audio/webm'), (e) => e.code === 'voice_speaker_mismatch');
+  assert.equal((await service.speakerProfile('alice')).samples, 5, 'a second speaker cannot contaminate an enrolled voice');
+  service.fetchImpl = originalFetch;
+  await assert.rejects(() => service.updateSpeaker('alice', { threshold: NaN }), (e) => e.status === 400);
+  await assert.rejects(() => service.updateSpeaker('alice', { threshold: 0.99 }), (e) => e.status === 400);
+  await service.updateSpeaker('alice', { enabled: false, threshold: 0.75 });
+  assert.equal((await service.speakerProfile('alice')).enabled, false);
+  assert.equal((await service.speakerProfile('alice')).threshold, 0.75);
+  assert.equal((await service.removeSpeaker('alice')).enrolled, false);
+  assert.equal(stored.size, 0);
+});
+
+test('speaker mismatch and noise never reach STT; matching audio replaces the raw clip even for cloud STT', async () => {
+  const { service, stored } = makeService({ ...speakerSettings, 'voice.stt.provider': 'openai', 'voice.openai.api_key': 'cloud-key' });
+  stored.set('voice-speaker-profile.alice', { value: encrypt(JSON.stringify({ model: 'speaker-v1', enabled: true, threshold: 0.6, embeddings: [speakerVector] })) });
+  let ignored = 'speaker_mismatch';
+  const calls = [];
+  service.fetchImpl = async (url, init) => {
+    calls.push(url);
+    if (url.endsWith('/speaker/filter')) {
+      assert.equal(JSON.parse(init.body.get('profile')).model, 'speaker-v1');
+      assert.equal(init.body.get('threshold'), '0.6');
+      return ignored ? new Response(null, { status: 204, headers: { 'x-speaker-ignored': ignored, 'x-speaker-score': '0.12' } })
+        : new Response('filtered-wav', { headers: { 'x-speaker-score': '0.85', 'x-speaker-accepted': 'true' } });
+    }
+    assert.equal(init.body.get('file').type, 'audio/wav');
+    assert.equal(Buffer.from(await init.body.get('file').arrayBuffer()).toString(), 'filtered-wav');
+    return Response.json({ text: 'agent manager 상태 알려줘' });
+  };
+  for (const reason of ['speaker_mismatch', 'no_speech', 'insufficient_speech']) {
+    ignored = reason; calls.length = 0;
+    const out = await service.transcribe(audio, 'audio/webm', undefined, 'utterance', 'alice');
+    assert.equal(out.text, ''); assert.equal(out.ignored, reason); assert.equal(calls.length, 1);
+  }
+  ignored = ''; calls.length = 0;
+  const accepted = await service.transcribe(audio, 'audio/webm', undefined, 'utterance', 'alice');
+  assert.equal(accepted.text, 'agent manager 상태 알려줘'); assert.equal(accepted.speaker_score, 0.85);
+  assert.equal(calls.length, 2);
+});
+
+test('wake listening is filtered and Voice lab bypasses speaker filtering for fair comparison', async () => {
+  const { service, stored } = makeService(speakerSettings);
+  stored.set('voice-speaker-profile.alice', { value: encrypt(JSON.stringify({ model: 'speaker-v1', enabled: true, threshold: 0.6, embeddings: [speakerVector] })) });
+  const calls = [];
+  service.fetchImpl = async (url) => {
+    calls.push(url);
+    return url.endsWith('/filter') ? new Response(null, { status: 204, headers: { 'x-speaker-ignored': 'speaker_mismatch' } }) : Response.json({ text: '헤이 자비스 상태 알려줘' });
+  };
+  assert.equal((await service.transcribe(audio, 'audio/wav', undefined, 'wake', 'alice')).ignored, 'speaker_mismatch');
+  assert.equal(calls.length, 1);
+  calls.length = 0;
+  assert.equal((await service.transcribe(audio, 'audio/wav', { provider: 'local', model: 'whisper-large-v3-turbo' }, 'utterance', 'alice')).text, '헤이 자비스 상태 알려줘');
+  assert.deepEqual(calls, ['http://speaker/v1/audio/transcriptions']);
+});
+
+test('enabled filtering fails closed when the engine fails or omits verification, never forwards raw audio', async () => {
+  const { service, stored } = makeService(speakerSettings);
+  stored.set('voice-speaker-profile.alice', { value: encrypt(JSON.stringify({ model: 'speaker-v1', enabled: true, threshold: 0.6, embeddings: [speakerVector] })) });
+  let calls = 0;
+  service.fetchImpl = async () => { calls++; return new Response('unavailable', { status: 503 }); };
+  await assert.rejects(() => service.transcribe(audio, 'audio/webm', undefined, 'utterance', 'alice'), (e) => e.status === 502);
+  assert.equal(calls, 1);
+  calls = 0; service.fetchImpl = async () => { calls++; return new Response('unverified'); };
+  await assert.rejects(() => service.transcribe(audio, 'audio/webm', undefined, 'utterance', 'alice'), (e) => e.code === 'voice_speaker_invalid');
+  assert.equal(calls, 1);
+});
+
+test('one explicit language is retained while multilingual local input detects languages automatically', async () => {
+  const { service } = makeService({ ...speakerSettings, 'voice.stt.languages': 'en' });
+  service.fetchImpl = async (_url, init) => { assert.equal(init.body.get('language'), 'en'); return Response.json({ text: 'hello' }); };
+  await service.transcribe(audio, 'audio/wav');
+});
 
 test('disabled, unknown and keyless providers are reported — never silently swapped', async () => {
   let { service } = makeService({});
@@ -168,7 +268,7 @@ test('openai: gpt-transcribe gets languages[]/keywords[]; a self-hosted server g
   form = calls[0].init.body;
   assert.equal(calls[0].url, 'http://192.168.0.6:8100/v1/audio/transcriptions');
   assert.equal(calls[0].init.headers.Authorization, undefined);
-  assert.equal(form.get('language'), 'ko');
+  assert.equal(form.get('language'), null, 'mixed ko,en speech uses automatic detection');
   assert.equal(form.get('prompt'), 'AWB, ragnar.');
   assert.deepEqual(form.getAll('keywords[]'), []);
 });
@@ -204,7 +304,7 @@ test('local (self-hosted awb-voice-server): own URL and key, language + prompt, 
   assert.equal(calls[0].init.headers.Authorization, 'Bearer ragnar-key');
   const form = calls[0].init.body;
   assert.equal(form.get('model'), null, 'blank model = the server default');
-  assert.equal(form.get('language'), 'ko');
+  assert.equal(form.get('language'), null, 'mixed ko,en speech uses automatic detection');
   assert.equal(form.get('prompt'), 'AWB, rolf.');
   assert.equal(form.get('file').name, 'utterance.webm', 'the gateway decodes whatever the browser recorded');
 

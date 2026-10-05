@@ -1,0 +1,10 @@
+# Isolated CPU tools; keep the working vLLM environment untouched.
+faster-whisper==1.2.1
+sherpa-onnx==1.13.8
+av==19.0.1
+fastapi==0.142.2
+uvicorn==0.54.0
+python-multipart==0.0.32
+httpx==0.28.1
+soundfile==0.14.0
+numpy==2.5.3

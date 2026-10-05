@@ -3138,6 +3138,16 @@ export interface VoiceTranscript {
   provider: string;
   model: string;
   latency_ms: number;
+  ignored?: 'vocabulary_echo' | 'speaker_mismatch' | 'no_speech' | 'insufficient_speech';
+  speaker_score?: number;
+}
+
+export interface VoiceSpeakerProfile {
+  enrolled: boolean;
+  enabled: boolean;
+  threshold: number;
+  samples: number;
+  updated_at: string | null;
 }
 
 // ─── Terminal (Runtime Host 셸) ────────────────────────────────────────────

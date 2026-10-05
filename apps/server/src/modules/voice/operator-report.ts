@@ -133,13 +133,13 @@ export function composeReportPrompt(reports: readonly SessionReport[], lang: Ann
       ? `${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. 모두 사용자가 그 세션 화면에서 보고 있던 것이라 소리로 전하지 않습니다 — 기록으로만 알아 두고, 한 문장으로 짧게 확인만 답하세요. 승인이나 답은 사용자가 화면에서 직접 합니다. 이 보고에는 [[sleep]] 을 붙이지 마세요.`
       : `${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. The user was looking at all of them, so nothing is spoken — just take note and acknowledge in one short sentence. The user answers any request on screen. Do not add [[sleep]] to this reply.`);
   } else if (lang === 'ko') {
-    lines.push(`${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. 사용자에게 소리로 전할 요약을 1~2문장으로 답하세요 — 어느 장비의 어느 세션인지 이름으로 말하고, 여러 건이면 묶어서 짧게. 이 보고에는 [[sleep]] 을 붙이지 마세요.`
+    lines.push(`${OPERATOR_REPORT_PREFIX} 다른 세션 소식 ${reports.length}건입니다. AWB가 사용자에게 알림음만 보냅니다. 이 보고는 문맥에 기억하고 화면용 요약을 1~2문장으로 답하세요. 사용자가 "무슨 일이야", "자세히 알려줘"처럼 물으면 그때 어느 장비의 어느 세션이 어떻게 됐는지 설명하세요. 이 보고에는 [[sleep]] 을 붙이지 마세요.`
       + (spoken.length < reports.length ? ' "보고 있음" 표시가 붙은 건은 사용자가 이미 화면에서 보고 있으니 요약에서 빼세요(기록으로만 알아 두면 됩니다).' : '')
-      + (decisions ? ' 승인이나 답이 필요한 건은 무엇을 정해야 하는지와 선택지를 번호와 함께 읽어 주세요. 이 답에서는 아무것도 승인하거나 답하지 마세요 — 사용자가 말로 고르면 그 턴에서 "답 전하기" 의 도구로 전합니다(이 보고 턴에서는 AWB 가 거절합니다).' : ''));
+      + (decisions ? ' 사용자가 상세를 요청하면 무엇을 정해야 하는지와 번호 붙은 선택지를 설명하세요. 이 보고에서는 아무것도 승인하거나 답하지 마세요. 선택지를 아직 설명하지 않았는데 숫자만 들으면 먼저 선택지를 설명하고 확인하세요. 사용자가 명시적으로 고른 뒤 그 사용자 턴에서 "답 전하기" 도구로 전합니다(보고 턴에서는 AWB가 거절합니다).' : ''));
   } else {
-    lines.push(`${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. Reply with a 1–2 sentence summary the user will hear — name the host and session, keep several updates together and short. Do not add [[sleep]] to this reply.`
+    lines.push(`${OPERATOR_REPORT_PREFIX} ${reports.length} update(s) from other sessions. AWB sends only a notification sound. Remember these reports and acknowledge with a short on-screen summary. Explain the host, session and result only when the user asks what happened or requests details. Do not add [[sleep]] to this reply.`
       + (spoken.length < reports.length ? ' Leave out the ones marked "viewed" — the user already sees them on screen (just take note).' : '')
-      + (decisions ? ' For anything that needs approval or an answer, say what has to be decided and read the choices, numbered. Do not approve or answer anything in this reply — when the user picks, pass it on in that turn with the tool under "Answer with" (AWB refuses it in this report turn).' : ''));
+      + (decisions ? ' When asked for details, explain what needs a decision and the numbered choices. Do not approve or answer anything in this report. If the user gives only a number before hearing the choices, explain them and confirm first. Pass an explicit user choice on in that user turn with the tool under "Answer with" (AWB refuses it in this report turn).' : ''));
   }
   reports.forEach((r, i) => {
     const s = r.session;

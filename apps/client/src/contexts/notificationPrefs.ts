@@ -1,3 +1,5 @@
+import { isNotificationSound, type NotificationSound } from '../voice/notificationSound';
+
 /**
  * Notification preferences — single persisted record shared by every
  * notification surface.
@@ -25,10 +27,11 @@ export interface NotificationPrefs {
   /** Audio cue toggle. Mirrors the legacy `chat_notify_muted` key inverted. */
   audio: boolean;
   /**
-   * 음성 알림 — 세션·미션이 끝나면 말로 알린다(docs/voice-operator.md). 서버에 TTS 가 준비돼
-   * 있을 때만 의미가 있고, 이 단말에서 들을지 말지만 여기서 정한다.
+   * Work updates: cue + toast; operator conversation replies still use TTS.
+   * Kept under the existing key so the browser's opt-out survives the change.
    */
   voice: boolean;
+  workSound: NotificationSound;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -38,6 +41,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   admin: true,
   audio: true,
   voice: true,
+  workSound: 'chime',
 };
 
 const PREFS_KEY = 'awb.notifications.prefs';
@@ -50,7 +54,7 @@ function read(): NotificationPrefs {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { ...DEFAULT_NOTIFICATION_PREFS, ...parsed };
+      return { ...DEFAULT_NOTIFICATION_PREFS, ...parsed, workSound: isNotificationSound(parsed.workSound) ? parsed.workSound : 'chime' };
     }
     // First load — migrate the legacy mute so returning users keep their choice.
     const legacyMuted = localStorage.getItem(LEGACY_MUTE_KEY) === 'true';
@@ -67,7 +71,7 @@ export function getNotificationPrefs(): NotificationPrefs {
   return current;
 }
 
-export function setNotificationPref(key: keyof NotificationPrefs, value: boolean): NotificationPrefs {
+export function setNotificationPref<K extends keyof NotificationPrefs>(key: K, value: NotificationPrefs[K]): NotificationPrefs {
   current = { ...current, [key]: value };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(current));

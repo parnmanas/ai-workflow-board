@@ -6,7 +6,7 @@
 //   2. 확인 대기(권한·질문)는 알리되, 같은 세션에서 연달아 오면 한 번만.
 //   3. 미션: 종료 이벤트(mission_completed/failed/cancelled)와 결정 대기(confirm_notified)만 알린다 —
 //      대상은 사람 소유자, 없으면 워크스페이스 owner.
-//   4. TTS 가 준비되지 않았으면 아무것도 보내지 않는다(음성 알림이지 텍스트 알림 채널이 아니다).
+//   4. 작업 알림음은 TTS 가 없어도 보낸다. 대화 답변만 TTS 가 필요하다.
 //   5. 소리는 받는 사람만, 처음 요청될 때 한 번 합성한다.
 //   6. 문장은 받침과 무관하게 맞는 조사만 쓴다(제목 바로 뒤에 이/가를 붙이지 않는다).
 
@@ -155,12 +155,13 @@ test('missions: terminal and decision events only, to the human owner or else th
   assert.equal(heard[1].text, "'야간 점검' 미션에서 결정이 필요해요. 단계: 배포 승인.");
 });
 
-test('nothing is announced when text-to-speech is not ready', async (t) => {
+test('work update cues are announced even when text-to-speech is not ready', async (t) => {
   const { heard, teardown } = setup({ 'voice.tts.provider': 'elevenlabs' }); // 키도 목소리도 없음
   t.after(teardown);
   update('turn_failed', { status: 'error' });
   await flush();
-  assert.equal(heard.length, 0);
+  assert.equal(heard.length, 1);
+  assert.equal(heard[0].kind, 'session_turn_failed');
 });
 
 test('announcement audio: only its recipient, synthesised once', async (t) => {

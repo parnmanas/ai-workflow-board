@@ -23,6 +23,7 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   // 2분이라(webm/opus ≈ 1MB/분) 25MB 면 넉넉하다.
   app.use('/api/voice/transcribe', raw({ type: () => true, limit: '25mb' }));
   app.use('/api/voice/lab/transcribe', raw({ type: () => true, limit: '25mb' }));
+  app.use('/api/voice/speaker/enroll', raw({ type: () => true, limit: '25mb' }));
 
   // Raise the JSON/urlencoded limit from Express's 100KB default to 10MB. Agent
   // plugins ship proxy.log error/event batches (up to 500 entries) that routinely

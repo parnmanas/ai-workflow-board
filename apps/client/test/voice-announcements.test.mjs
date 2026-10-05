@@ -11,10 +11,39 @@ import assert from 'node:assert/strict';
 
 import {
   announcementPath,
+  announcementPlayback,
   isViewingTarget,
   sessionTargetKey,
   setViewingSession,
-  tryClaim, shouldSpeakAnnouncement } from '../src/voice/announcements.ts';
+  shouldSpeakAnnouncement,
+  tryClaim,
+} from '../src/voice/announcements.ts';
+import { NOTIFICATION_SOUNDS, isNotificationSound, notificationSoundClip } from '../src/voice/notificationSound.ts';
+
+test('work reports cue first; only the conversational operator response is spoken', () => {
+  for (const kind of ['operator_report', 'session_turn_finished', 'session_turn_failed', 'session_needs_input', 'mission_completed', 'mission_needs_decision']) {
+    assert.equal(announcementPlayback(kind), 'cue', kind);
+  }
+  assert.equal(announcementPlayback('operator_reply'), 'speech');
+});
+
+test('each selectable cue is a short, audible WAV without an engine', async () => {
+  const clips = [];
+  for (const sound of NOTIFICATION_SOUNDS) {
+    assert.equal(isNotificationSound(sound.value), true);
+    const clip = notificationSoundClip(sound.value);
+    assert.equal(clip.type, 'audio/wav');
+    const bytes = Buffer.from(await clip.arrayBuffer());
+    assert.equal(bytes.toString('ascii', 0, 4), 'RIFF');
+    assert.equal(bytes.readUInt32LE(40), bytes.length - 44);
+    assert.equal(bytes.readUInt16LE(22), 1);
+    assert.ok((bytes.length - 44) / bytes.readUInt32LE(28) < 1, 'less than a second');
+    assert.ok(bytes.subarray(44).some((n) => n !== 0), 'audible samples');
+    clips.push(bytes.toString('base64'));
+  }
+  assert.equal(new Set(clips).size, NOTIFICATION_SOUNDS.length);
+  assert.equal(isNotificationSound('corrupt-setting'), false);
+});
 
 function memoryStorage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -64,8 +93,76 @@ test('announcement links: missions carry their workspace, sessions use the curre
   assert.equal(announcementPath(null, 'w1'), null);
 });
 
-test('an announcement about the session on screen is not spoken — unless it awaits a decision', () => {
+test('a viewed session stays quiet unless it awaits a decision cue', () => {
   assert.equal(shouldSpeakAnnouncement(false, false), true);
   assert.equal(shouldSpeakAnnouncement(true, false), false, 'the screen already shows it');
-  assert.equal(shouldSpeakAnnouncement(true, true), true, 'choices are read so the user can answer by voice');
+  assert.equal(shouldSpeakAnnouncement(true, true), true, 'a cue invites a request for details and choices');
+});
+
+test('receiving a work-report SSE queues the selected cue without requesting announcement TTS', async (t) => {
+  const { setupDom, React, act } = await import('./helpers/jsdom.mjs');
+  const { installFakeEventSource, mountWithBoardStream } = await import('./helpers/boardStream.mjs');
+  const { MemoryRouter } = await import('react-router-dom');
+  const { NotificationProvider } = await import('../src/contexts/NotificationContext.tsx');
+  const { api } = await import('../src/api.ts');
+  const { speechPlayer } = await import('../src/voice/speechPlayer.ts');
+  const { loadVoiceConfig } = await import('../src/voice/useVoice.ts');
+  const { setNotificationPref, getNotificationPrefs } = await import('../src/contexts/notificationPrefs.ts');
+  const { default: VoiceAnnouncer } = await import('../src/voice/VoiceAnnouncer.tsx');
+  const dom = setupDom();
+  const { FakeEventSource, uninstall } = installFakeEventSource();
+  globalThis.localStorage = dom.window.localStorage;
+  localStorage.setItem('auth_token', 'test-token');
+  const previousPrefs = { ...getNotificationPrefs() };
+  setNotificationPref('voice', true); setNotificationPref('audio', true); setNotificationPref('workSound', 'bell');
+  const originals = { getMe: api.getMe, getSetupStatus: api.getSetupStatus, getVoiceConfig: api.getVoiceConfig,
+    getUnreadMentions: api.getUnreadMentions, getChatUnreadCounts: api.getChatUnreadCounts, getTicketUnreadCounts: api.getTicketUnreadCounts,
+    getVoiceAnnouncementAudio: api.getVoiceAnnouncementAudio, enqueueClip: speechPlayer.enqueueClip };
+  let ttsCalls = 0;
+  const queued = [];
+  api.getMe = async () => ({ id: 'u1', name: 'User', role: 'user', status: 'active', permissions: ['voice.use'], workspaces: [{ id: 'w1', name: 'Work', slug: null, relations: [] }] });
+  api.getSetupStatus = async () => ({ needs_setup: false });
+  api.getVoiceConfig = async () => ({ stt: { provider: 'local', ready: true }, tts: { provider: 'none', ready: false }, wake: { ready: true } });
+  api.getUnreadMentions = async () => ({ count: 0, items: [] });
+  api.getChatUnreadCounts = async () => ({ total: 0, perRoom: {} });
+  api.getTicketUnreadCounts = async () => ({ total: 0, perTicket: {} });
+  api.getVoiceAnnouncementAudio = async () => { ttsCalls++; throw new Error('work reports must not call TTS'); };
+  speechPlayer.enqueueClip = (fetchClip, key) => queued.push({ fetchClip, key });
+  await loadVoiceConfig(true);
+  const h = React.createElement;
+  const view = mountWithBoardStream(h(NotificationProvider, null, h(VoiceAnnouncer)), { wrap: (tree) => h(MemoryRouter, null, tree) });
+  t.after(() => {
+    setViewingSession(null);
+    view.unmount(); uninstall(); dom.cleanup();
+    for (const [key, value] of Object.entries(originals)) { if (key === 'enqueueClip') speechPlayer[key] = value; else api[key] = value; }
+    for (const [key, value] of Object.entries(previousPrefs)) setNotificationPref(key, value);
+  });
+  const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
+  await flush();
+  const source = FakeEventSource.instances[0];
+  assert.ok(source, 'an authenticated SSE connection must exist');
+  const event = { id: 'report-new', user_id: 'u1', kind: 'operator_report', text: 'Work finished',
+    operator: { id: 'op', name: 'Jarvis' }, target: { type: 'session', manager_id: 'm1', cli: 'codex', session_id: 's1' }, needs_decision: true };
+  act(() => source.emit('voice_announcement', event));
+  await flush();
+  assert.equal(queued.length, 1, 'work cues also work with TTS off');
+  const actual = Buffer.from(await (await queued[0].fetchClip()).arrayBuffer());
+  const expected = Buffer.from(await notificationSoundClip('bell').arrayBuffer());
+  assert.deepEqual(actual, expected);
+  assert.equal(ttsCalls, 0);
+  act(() => source.emit('voice_announcement', event));
+  await flush();
+  assert.equal(queued.length, 1, 'the same SSE is claimed once');
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  setViewingSession(sessionTargetKey('m1', 'codex', 's1'));
+  act(() => source.emit('voice_announcement', { ...event, id: 'viewed-completion', needs_decision: false }));
+  await flush();
+  assert.equal(queued.length, 1, 'ordinary viewed updates stay quiet');
+  act(() => source.emit('voice_announcement', { ...event, id: 'viewed-question' }));
+  await flush();
+  assert.equal(queued.length, 2, 'viewed decisions still cue without reading choices');
+  assert.equal(ttsCalls, 0);
+  act(() => source.emit('voice_announcement', { ...event, id: 'reply-with-tts-off', kind: 'operator_reply' }));
+  await flush();
+  assert.equal(queued.length, 2, 'conversation replies still require TTS');
 });

@@ -36,8 +36,8 @@ export const localStt: SttProvider = {
     const form = new FormData();
     form.append('file', audioBlob(input.audio, input.mimeType), audioFileName(input.mimeType));
     if (input.model) form.append('model', input.model);
-    // 한 언어만 받는 모델이 많다 — 첫 언어를 주 언어로 둔다(섞어 쓴 영어 용어는 prompt 의 용어집이 돕는다).
-    if (input.languages.length) form.append('language', input.languages[0]);
+    // Qwen/Whisper can detect mixed speech. Forcing Korean also rewrites accented English terms.
+    if (input.languages.length === 1) form.append('language', input.languages[0]);
     if (input.terms.length) form.append('prompt', `${input.terms.join(', ')}.`);
     form.append('response_format', 'json');
     const res = await ctx.fetch(`${ctx.config.localBaseUrl}/audio/transcriptions`, {

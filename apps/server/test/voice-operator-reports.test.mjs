@@ -129,6 +129,8 @@ test('a finished turn is reported to the same-host operator; its summary reaches
     'the same-host operator wins over the more recently used one elsewhere');
   const text = prompts[0].text;
   assert.ok(text.startsWith(OPERATOR_REPORT_PREFIX));
+  assert.match(text, /알림음만 보냅니다/);
+  assert.match(text, /사용자가.*물으면 그때/);
   assert.match(text, /1\. 완료 — rolf \/ Codex · '배포 정리'/);
   assert.match(text, /작업 폴더: \/home\/parn\/repo/);
   assert.match(text, /테스트 280개가 모두 통과했어요/);
@@ -228,7 +230,7 @@ test('a permission request is reported with what to allow; the summary points at
   assert.match(prompts[0].text, /1\. 승인 필요 — ragnar \/ Codex · '모델 서버'/);
   assert.match(prompts[0].text, /요청: Run npm publish\n\s+선택지: 1\) Allow once {2}2\) Reject/);
   assert.match(prompts[0].text, /answer_session_permission\(manager_id="host-ragnar", cli="codex", session_id="s9", request_id="r1", option_id=1\)"a" 2\)"r"\)/);
-  assert.match(prompts[0].text, /이 답에서는 아무것도 승인하거나 답하지 마세요/);
+  assert.match(prompts[0].text, /이 보고에서는 아무것도 승인하거나 답하지 마세요/);
   finishTurn(opSession(jarvis), prompts[0].turn_id, "ragnar의 모델 서버 세션이 npm publish 실행 허락을 기다려요. 세션 화면에서 허용하거나 거부해 주세요.");
   await flush();
   assert.equal(heard.length, 1);
@@ -387,7 +389,7 @@ test('after a server restart a session has no driver — its news still reaches 
   assert.equal(heard[0].user_id, 'admin-1');
 });
 
-test('a question or approval is read aloud even while the user looks at that session', async (t) => {
+test('a viewed question still invites a cue, with choices explained on request', async (t) => {
   const jarvis = operator('jarvis', 'host-rolf');
   const { heard, prompts, presence, teardown } = setup([jarvis]);
   t.after(teardown);
@@ -398,9 +400,10 @@ test('a question or approval is read aloud even while the user looks at that ses
   await flush();
   assert.equal(prompts.length, 1);
   assert.doesNotMatch(prompts[0].text, /보고 있음/, 'a decision is never filed as "viewed"');
-  assert.match(prompts[0].text, /선택지를 번호와 함께 읽어 주세요/);
-  finishTurn(opSession(jarvis), prompts[0].turn_id, '롤프의 세션이 저녁 메뉴를 물어요. 1번 김치찌개, 2번 파스타 중에 골라 주세요.');
+  assert.match(prompts[0].text, /알림음만 보냅니다/);
+  assert.match(prompts[0].text, /사용자가 상세를 요청하면.*번호 붙은 선택지를 설명하세요/);
+  finishTurn(opSession(jarvis), prompts[0].turn_id, '롤프의 세션이 저녁 메뉴 답변을 기다려요.');
   await flush();
-  assert.equal(heard.length, 1, 'spoken — answering by voice is the point, screen or not');
+  assert.equal(heard.length, 1, 'decision cues reach the user even when that session is visible');
   assert.equal(heard[0].needs_decision, true);
 });

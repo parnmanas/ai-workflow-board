@@ -48,14 +48,14 @@ test('the brief teaches the sleep marker by context — and the screen understan
 test('the brief tells the operator how to answer AWB work reports — and not to act on them alone', () => {
   const brief = operatorBrief('자비스');
   assert.ok(brief.includes(`"${OPERATOR_REPORT_PREFIX}" 로 시작하는 메시지`), 'the brief names the exact prefix the server sends');
-  assert.match(brief, /1~2문장으로 어느 장비의 어느 세션이 어떻게 됐는지/);
-  assert.match(brief, /입력이나 선택이 필요하면 무엇을 정해야 하는지/);
+  assert.match(brief, /먼저 사용자에게 알림음만 전달된다/);
+  assert.match(brief, /요청하면 그때 어느 장비의 어느 세션이 어떻게 됐는지 설명한다/);
   assert.match(brief, /보고만 보고 다른 세션에 작업을 시키거나 무엇을 승인하지 않는다/);
 });
 
 test('the brief teaches spoken choices: read them numbered, pass the pick on with the AWB tools', () => {
   const brief = operatorBrief('자비스');
-  assert.match(brief, /선택지를 번호와 함께 읽어 준다/);
+  assert.match(brief, /상세를 요청한 뒤.*번호 붙은 선택지를 읽어 준다/);
   assert.match(brief, /answer_session_permission \/ answer_session_question 도구로 그 세션에 전하고/);
   assert.match(brief, /list_pending_session_requests 로 확인하고/);
   assert.match(brief, /사용자의 말 없이 전하는 호출은 AWB 도 거절한다/);

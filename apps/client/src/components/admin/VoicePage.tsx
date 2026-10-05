@@ -9,6 +9,10 @@ import type { VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript }
 import { loadVoiceConfig } from '../../voice/useVoice';
 import { useVoiceOperators } from '../../voice/operator';
 import OperatorDialog from '../../voice/OperatorDialog';
+import VoiceSpeakerCard from './VoiceSpeakerCard';
+import { useNotifications } from '../../contexts/NotificationContext';
+import { NOTIFICATION_SOUNDS, notificationSoundClip, type NotificationSound } from '../../voice/notificationSound';
+import { speechPlayer } from '../../voice/speechPlayer';
 import { sessionPath } from '../sessions/sessionList.logic';
 import { runtimeLabel } from '../sessions/sessionTranscript.logic';
 import { startVoiceRecording, voiceRecordingSupported, type ActiveRecording } from '../../voice/recorder';
@@ -81,39 +85,55 @@ function EngineBadge({ label, status }: { label: string; status: { provider: str
 // ─── STT 비교 ────────────────────────────────────────────────────────────────
 
 interface SttResult {
+  key: string;
   provider: string;
+  model?: string;
+  label: string;
   transcript: VoiceTranscript | null;
   error: string | null;
 }
 
-function SttLab({ providers }: { providers: string[] }) {
+function SttLab({ providers, onAdopt }: { providers: string[]; onAdopt: (provider: string, model: string) => void }) {
+  const [localModels, setLocalModels] = useState<Array<{ id: string; name: string }>>([]);
   const [reference, setReference] = useState('');
   const [recording, setRecording] = useState<ActiveRecording | null>(null);
+  const recordingRef = useRef<ActiveRecording | null>(null);
   const [audio, setAudio] = useState<{ blob: Blob; url: string } | null>(null);
   const [results, setResults] = useState<SttResult[]>([]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!providers.includes('local')) return;
+    let alive = true;
+    void api.voiceLocalModels().then((out) => { if (alive) setLocalModels(out.models); }).catch((e) => { if (alive) setError(e.message); });
+    return () => { alive = false; };
+  }, [providers]);
+  const candidates = useMemo(() => providers.flatMap((provider) => provider === 'local' && localModels.length
+    ? localModels.map((m) => ({ key: `local:${m.id}`, provider, model: m.id, label: m.name }))
+    : [{ key: provider, provider, model: '', label: provider }]), [providers, localModels]);
+
   useEffect(() => () => { if (audio) URL.revokeObjectURL(audio.url); }, [audio]);
-  useEffect(() => () => recording?.cancel(), [recording]);
+  useEffect(() => () => recordingRef.current?.cancel(), []);
 
   const run = useCallback(async (blob: Blob) => {
     setRunning(true);
-    setResults(providers.map((provider) => ({ provider, transcript: null, error: null })));
-    await Promise.all(providers.map(async (provider) => {
+    setResults(candidates.map((candidate) => ({ ...candidate, transcript: null, error: null })));
+    await Promise.all(candidates.map(async ({ key, provider, model }) => {
       try {
-        const transcript = await api.voiceLabTranscribe(provider, blob);
-        setResults((prev) => prev.map((r) => (r.provider === provider ? { ...r, transcript } : r)));
+        const transcript = await api.voiceLabTranscribe(provider, blob, model || undefined);
+        setResults((prev) => prev.map((r) => (r.key === key ? { ...r, transcript } : r)));
       } catch (err: any) {
-        setResults((prev) => prev.map((r) => (r.provider === provider ? { ...r, error: err?.message || 'failed' } : r)));
+        setResults((prev) => prev.map((r) => (r.key === key ? { ...r, error: err?.message || 'failed' } : r)));
       }
     }));
     setRunning(false);
-  }, [providers]);
+  }, [candidates]);
 
   const toggle = useCallback(async () => {
     setError(null);
     if (recording) {
+      recordingRef.current = null;
       setRecording(null);
       try {
         const out = await recording.stop();
@@ -126,7 +146,9 @@ function SttLab({ providers }: { providers: string[] }) {
       return;
     }
     try {
-      setRecording(await startVoiceRecording());
+      const next = await startVoiceRecording();
+      recordingRef.current = next;
+      setRecording(next);
     } catch (err: any) {
       setError(err?.name === 'NotAllowedError' ? 'Microphone permission denied.' : (err?.message || 'Could not open the microphone'));
     }
@@ -172,9 +194,10 @@ function SttLab({ providers }: { providers: string[] }) {
                 {results.map((r) => {
                   const cer = r.transcript && reference.trim() ? characterErrorRate(reference, r.transcript.text) : null;
                   return (
-                    <tr key={r.provider} style={{ borderTop: `1px solid ${tokens.colors.border}`, verticalAlign: 'top' }}>
+                    <tr key={r.key} style={{ borderTop: `1px solid ${tokens.colors.border}`, verticalAlign: 'top' }}>
                       <td style={{ padding: '6px 8px', whiteSpace: 'nowrap', color: tokens.colors.textPrimary }}>
-                        {r.provider}
+                        {r.label}
+                        {r.transcript && <Button size="sm" variant="ghost" onClick={() => onAdopt(r.provider, r.model || '')}>Use this engine</Button>}
                         {r.transcript?.model && <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{r.transcript.model}</div>}
                       </td>
                       <td style={{ padding: '6px 8px', color: r.error ? tokens.colors.warning : tokens.colors.textPrimary }}>
@@ -468,6 +491,7 @@ function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) 
 
 export default function VoicePage() {
   const { showToast } = useToast();
+  const { prefs, setPref } = useNotifications();
   const [values, setValues] = useState<Record<string, string>>({});
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<VoiceConfigView | null>(null);
@@ -565,7 +589,23 @@ export default function VoicePage() {
 
       <OperatorsCard wake={status?.wake} />
 
-      <SttLab providers={status?.lab?.stt ?? []} />
+      <Card padding="20px">
+        <div style={sectionTitle}>Work update sound</div>
+        <div style={sectionHint}>The operator keeps work reports and plays a short cue. Ask the operator for details when you want to hear them. This choice applies to this browser.</div>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
+          <Select label="Notification sound" value={prefs.workSound} options={NOTIFICATION_SOUNDS.map((s) => ({ value: s.value, label: s.label }))} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)} />
+          <Button size="sm" variant="ghost" onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>Preview</Button>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.voice} onChange={(e) => setPref('voice', e.target.checked)} /> Work updates</label>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.audio} onChange={(e) => setPref('audio', e.target.checked)} /> Audio cues</label>
+        </div>
+      </Card>
+
+      <VoiceSpeakerCard />
+
+      <SttLab providers={status?.lab?.stt ?? []} onAdopt={(provider, model) => {
+        set('voice.stt.provider', provider); set('voice.stt.model', model);
+        showToast('Filled in the speech-to-text settings — Save to apply.', 'info');
+      }} />
 
       <TtsBlindTest
         providers={status?.lab?.tts ?? []}

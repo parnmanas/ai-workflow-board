@@ -23,12 +23,15 @@ about:
 from __future__ import annotations
 
 import hmac
+import asyncio
 import io
 import json
 import os
 import re
 import time
 from typing import Any
+from functools import lru_cache
+import threading
 
 import av
 import httpx
@@ -36,6 +39,7 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+import speaker_filter
 
 ASR_URL = os.environ.get("ASR_URL", "http://127.0.0.1:8411/v1").rstrip("/")
 ASR_MODEL = os.environ.get("ASR_MODEL", "qwen3-asr")
@@ -46,6 +50,10 @@ API_KEY = os.environ.get("AWB_VOICE_KEY", "")
 ASR_SAMPLE_RATE = 16_000
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 TIMEOUT = httpx.Timeout(120.0, connect=5.0)
+WHISPER_MODEL = os.environ.get('WHISPER_MODEL', '')
+WHISPER_ID = 'whisper-large-v3-turbo'
+WHISPER_LOCK = threading.Lock()
+MAX_AUDIO_SECONDS = 120
 
 app = FastAPI(title="AWB voice server")
 client = httpx.AsyncClient(timeout=TIMEOUT)
@@ -83,7 +91,10 @@ def decode_to_mono(data: bytes, sample_rate: int = ASR_SAMPLE_RATE) -> np.ndarra
             chunks.append(out.to_ndarray().reshape(-1))
     if not chunks:
         raise HTTPException(status_code=400, detail="empty audio")
-    return np.concatenate(chunks).astype(np.float32)
+    audio = np.concatenate(chunks).astype(np.float32)
+    if len(audio) > sample_rate * MAX_AUDIO_SECONDS:
+        raise HTTPException(status_code=413, detail='recordings are limited to 120 seconds')
+    return audio
 
 
 def wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
@@ -109,6 +120,61 @@ async def asr_transcribe(audio: np.ndarray, language: str | None, prompt: str | 
     return str(res.json().get("text") or "").strip()
 
 
+@lru_cache(maxsize=1)
+def whisper_engine():
+    from faster_whisper import WhisperModel
+    return WhisperModel(WHISPER_MODEL, device='cpu', compute_type='int8', cpu_threads=4)
+
+
+def whisper_transcribe(audio: np.ndarray, language: str | None, prompt: str | None) -> str:
+    # Isolated CPU/int8 comparison does not claim the existing ASR/TTS GPU memory.
+    with WHISPER_LOCK:
+        segments, _ = whisper_engine().transcribe(audio, language=language or None, initial_prompt=prompt or None,
+            beam_size=5, vad_filter=True, condition_on_previous_text=False)
+        return ' '.join(segment.text.strip() for segment in segments).strip()
+
+
+async def uploaded_audio(file: UploadFile) -> np.ndarray:
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail='audio too large')
+    return await asyncio.to_thread(decode_to_mono, data)
+
+
+@app.get('/v1/audio/models')
+async def audio_models() -> JSONResponse:
+    return JSONResponse({'models': [{'id': ASR_MODEL, 'name': 'Qwen3 ASR'},
+        *([{'id': WHISPER_ID, 'name': 'Whisper large-v3-turbo (CPU comparison)'}] if WHISPER_MODEL else [])],
+        'speaker': {'ready': bool(speaker_filter.MODEL_PATH and os.path.isfile(speaker_filter.MODEL_PATH))}})
+
+
+@app.post('/v1/audio/speaker/embedding')
+async def speaker_embedding(file: UploadFile = File(...)) -> JSONResponse:
+    audio = await uploaded_audio(file)
+    try:
+        return JSONResponse(await asyncio.to_thread(speaker_filter.enroll, audio))
+    except (ValueError, ImportError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post('/v1/audio/speaker/filter')
+async def speaker_audio(file: UploadFile = File(...), profile: str = Form(...), threshold: float = Form(0.6)) -> Response:
+    audio = await uploaded_audio(file)
+    if not 0.3 <= threshold <= 0.9:
+        raise HTTPException(status_code=400, detail='threshold must be between 0.3 and 0.9')
+    try:
+        parsed = json.loads(profile)
+        if not isinstance(parsed, dict):
+            raise ValueError('Invalid speaker profile.')
+        filtered, score, ignored = await asyncio.to_thread(speaker_filter.filter_speaker, audio, parsed, threshold)
+    except (ValueError, ImportError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    headers = {'X-Speaker-Score': str(round(score, 4)), 'Cache-Control': 'no-store'}
+    if ignored:
+        return Response(status_code=204, headers={**headers, 'X-Speaker-Ignored': ignored})
+    return Response(wav_bytes(filtered, ASR_SAMPLE_RATE), media_type='audio/wav', headers={**headers, 'X-Speaker-Accepted': 'true'})
+
+
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(
     request: Request,
@@ -118,14 +184,18 @@ async def transcriptions(
     prompt: str | None = Form(None),
     response_format: str | None = Form(None),
 ) -> JSONResponse:
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="audio too large")
     started = time.monotonic()
-    audio = decode_to_mono(data)
-    text = await asr_transcribe(audio, language, prompt)
+    audio = await uploaded_audio(file)
+    wanted = model or ASR_MODEL
+    if wanted == ASR_MODEL:
+        text = await asr_transcribe(audio, language, prompt)
+    elif wanted == WHISPER_ID and WHISPER_MODEL:
+        text = await asyncio.to_thread(whisper_transcribe, audio, language, prompt)
+    else:
+        raise HTTPException(status_code=400, detail=f'unknown or disabled ASR model: {wanted}')
     return JSONResponse({
         "text": text,
+        "model": wanted,
         "duration": round(len(audio) / ASR_SAMPLE_RATE, 2),
         "latency_ms": int((time.monotonic() - started) * 1000),
     })

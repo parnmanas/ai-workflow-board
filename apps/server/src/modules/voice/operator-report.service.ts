@@ -42,7 +42,7 @@ interface InflightReport {
 export interface OperatorSummary {
   operator: OperatorEntry;
   userId: string;
-  /** operator 가 쓴 답(마크다운 그대로) — 사용자에게 소리로 전해진다. */
+  /** operator 가 쓴 화면용 요약. 내용은 문맥에 남고, 사용자에게는 알림음으로 알린다. */
   answer: string;
   reports: SessionReport[];
 }

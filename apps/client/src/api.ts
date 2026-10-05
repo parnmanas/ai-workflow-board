@@ -1830,6 +1830,13 @@ export const api = {
   // 서버: apps/server/src/modules/voice. 엔진 키는 서버에만 있고, 화면은 녹음한 바이트를 보내
   // 글자를 받고, 글자를 보내 소리를 받는다.
   getVoiceConfig: () => request<VoiceConfigView>('/voice/config'),
+  getVoiceSpeaker: () => request<import('./types').VoiceSpeakerProfile>('/voice/speaker'),
+  enrollVoiceSpeaker: async (audio: Blob): Promise<import('./types').VoiceSpeakerProfile> =>
+    (await fetchOk('/voice/speaker/enroll', { method: 'POST', body: audio, contentType: audio.type || 'application/octet-stream' })).json(),
+  updateVoiceSpeaker: (input: { enabled?: boolean; threshold?: number }) =>
+    request<import('./types').VoiceSpeakerProfile>('/voice/speaker', { method: 'PATCH', body: JSON.stringify(input) }),
+  removeVoiceSpeaker: () => request<import('./types').VoiceSpeakerProfile>('/voice/speaker', { method: 'DELETE' }),
+  voiceLocalModels: () => request<{ models: Array<{ id: string; name: string }>; speaker: { ready: boolean } }>('/voice/lab/models'),
   /**
    * 발화 하나를 글자로. 녹음 형식(webm/mp4/wav)을 그대로 보낸다. `purpose: 'wake'` 는 잠든 operator 를
    * 부르는 말인지 확인하는 상시 청취다 — 서버가 자체 호스팅 엔진일 때만 받는다.

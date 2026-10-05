@@ -1,8 +1,29 @@
 # Voice Operator (음성 대화 · 음성 알림)
 
 AWB 전체를 관리하는 에이전트 하나(**operator**)와 웹·Android 앱에서 **말로 대화**하고, 세션이나
-작업이 끝나면 AWB 가 **먼저 말로 알려 주는** 기능의 설계다. 2026-10-04 의 리서치와 결정에서
+작업이 끝나면 AWB 가 **알림음으로 알려 주고, 사용자가 요청하면 내용을 설명하는** 기능의 설계다. 2026-10-04 의 리서치와 결정에서
 출발한다 — 벤더·모델·가격은 그날 기준이고 빨리 낡으므로, 구현 직전에 다시 확인한다.
+
+## 목소리 등록과 인식 개선 (2026-10-05)
+
+- **Admin → Voice → My voice**: 평소 마이크로 한국어·영어 샘플을 2~3회 녹음한다. 한 샘플에 실제 말소리 6초 이상이
+  필요하고 최대 5개를 유지한다. 등록하면 필터가 바로 켜진다. 켜기/끄기, 민감도 조절, 인식 테스트, 전체 삭제가 같은 카드에 있다.
+- AWB는 로그인 사용자의 화자 특징만 `SystemSetting`의 `voice-speaker-profile.<user id>`에 **암호화**해 저장한다.
+  녹음 파일은 저장하지 않는다. 서버가 인증된 사용자 id로 조회하며 API 응답은 샘플 수·활성 상태·문턱값뿐이다.
+  새 엔티티나 DB별 SQL을 추가하지 않아 SQLite/PostgreSQL 이관 경로도 그대로 쓴다.
+- 발화는 ragnar에서 Silero VAD로 말소리 구간을 찾고, Sherpa ONNX의 3D-Speaker ERes2Net 특징을 등록한 특징과 비교한다.
+  최대 2초 구간별로 검사해 일치하는 구간만 STT로 넘긴다. 이름 호출·대화·실시간 자막·수동 입력, 클라우드 STT에도 같은
+  필터가 적용된다. 필터가 켜진 상태에서 엔진에 문제가 생기면 사유를 표시하고 원본을 보내지 않는다.
+- 매우 짧은 말, 동시에 겹치는 화자, 다른 마이크·큰 잡음은 어려울 수 있다. 본인 목소리가 누락되면 샘플을 추가하거나
+  문턱값을 낮춘다. 화자 필터는 입력 품질을 위한 기능이며 신원 인증을 대체하지 않는다.
+- `ko,en`처럼 여러 언어가 설정되면 Qwen/Whisper에 한국어를 강제하지 않는다. 한 언어만 설정했으면 그 힌트는 유지한다.
+- **STT comparison**은 등록 필터를 거치지 않은 동일 녹음을 공급자·로컬 모델별로 비교한다. ragnar에 설치된 Qwen과
+  `whisper-large-v3-turbo`를 나란히 호출하고, 정답을 적어 CER을 비교한 뒤 **Use this engine → Save**로 적용한다.
+  Whisper는 별도 `voice-tools` 환경의 CPU/int8 비교용으로 설치되며 기존 GPU ASR/TTS와 기본 선택을 바꾸지 않는다.
+- ragnar 실측: SpeechBrain의 공개 테스트 파일에서 등록한 화자의 다른 문장은 통과(유사도 0.676), 다른 화자는 차단(0.049),
+  필터 시간은 50~70ms. 2.87초 영어 문장의 첫 요청은 Qwen 약 0.3초, Whisper 약 13초(모델 로딩 포함), 전사는 동일했다.
+  이 결과는 한국인 영어 발음의 우열을 증명하지 않는다. 실제 선택은 본인 혼합 발화로 비교한다.
+- 설치와 API: [`services/voice-server/README.md`](../services/voice-server/README.md).
 
 ## 결정 (2026-10-04)
 
@@ -233,7 +254,7 @@ MCP 도구 `notify_user(text, priority)` — operator(또는 다른 에이전트
 
 세션마다 따로 말하지 않는다. AWB 를 거쳐 연결된 세션(driver 가 있는 Agent Session)의 턴이 끝나거나(오류 포함)
 사용자의 승인·답을 기다리면, **AWB 가 그것을 알아채 operator 에게 보고**하고, operator 가 쓴 요약이 사용자에게
-소리(+토스트)로 간다. 말하는 것은 operator 하나다.
+선택한 알림음(+토스트)으로 간다. 자세한 설명은 사용자가 operator 에게 요청한 뒤 TTS 로 듣는다.
 
 ```
 세션 턴 종료 · 오류 · 승인/질문 대기 (agent_session_update/event — 서버가 이미 안다)
@@ -244,7 +265,8 @@ OperatorReportService: 받을 operator = 같은 호스트(여럿이면 최근 �
    ▼
 operator 세션에 대신 보낸 프롬프트 "[AWB 작업 보고] … 1. 완료 — rolf / Codex · '배포 정리' · 12분 …"
    ▼  (operator 가 1~2문장 요약)
-voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙 자비스: …" + 낭독, 누르면 그 세션으로
+voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙 자비스: …" + 선택한 알림음, 누르면 그 세션으로
+사용자: "헤이 자비스, 무슨 작업이 끝났어?" → 보고를 기억한 operator가 설명 → 답변만 TTS
 ```
 
 - **감지는 AWB 가 한다(MCP 자가보고가 아니다).** 턴 종료·승인 대기는 AWB 가 이미 정확히 알고, 승인 대기로 멈춘
@@ -260,8 +282,8 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
 - operator 자신의 턴은 보고하지 않는다. 사용자가 그 operator 화면을 떠나 있을 때 끝난 대화 턴은 operator 의 답 자체를
   들려준다(`operator_reply`). operator 가 사용자의 승인을 기다리면 직접 알린다.
 - **보고 있는 세션도 보고한다**(2026-10-04 사용자 결정) — operator 가 사이트의 흐름을 결과까지 알게. **승인·질문은 보고
-  있어도 소리로 읽고 이름 없이 답을 듣는다**(2026-10-05 사용자 결정 — 화면 앞에서도 손 대신 말로 답한다; 화면의 음성 알림도
-  `shouldSpeakAnnouncement` 로 결정 대기 알림만은 보고 있어도 읽는다). 그 밖의 보고에 "보고 있음" 이 붙으면 **소리로 전하지
+  있어도 알림음을 낸다**(`shouldSpeakAnnouncement`). 사용자가 operator 를 불러 자세한 내용을 요청하면 선택지를 설명하고
+  말로 답을 받는다. 알림음만 듣고 번호를 말한 경우에는 어떤 선택인지 먼저 확인한다. 그 밖의 보고에 "보고 있음" 이 붙으면 **소리로 전하지
   않는다**: 전부 보고 있던 것이면 operator 에게 기록만 하고 한 문장으로 확인하라고 하고 알림을
   내지 않으며, 섞여 있으면 보고 있던 것은 요약에서 빼라고 한다(화면 이동도 안 본 세션으로). 직접 알림 대체 경로도 보고
   있던 것은 말하지 않는다.
@@ -273,7 +295,7 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
 - **결과까지** — 끝난 턴의 보고에 그 턴에서 정해진 것(권한 선택 · 질문의 답, 누가 정했는지)을 싣는다("이 턴에서 정해진
   것: 'Run npm publish' → Allow once (사용자)"). 매니저의 결정 행(`permission_decision` / `elicitation_decision`)을 요청 행과
   맞춰 글로 만든다.
-- 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림이 읽는다), 깨어 있는 대화를 맡은
+- 같은 답을 두 번 읽지 않는다: 세션 화면은 **자기가 보낸 턴만** 읽고(보고 턴은 알림음만 낸다), 깨어 있는 대화를 맡은
   화면은 탭이 숨어도 "보고 있음" 으로 알린다(그 답은 화면이 읽는다).
 - operator 는 보고만 보고 다른 세션에 일을 시키거나 승인하지 않는다(지침, 그리고 서버가 막는다 — 아래 "말로 답하기").
 - **SSE 전달 목록(event-registry)은 필드를 골라 담는다** — `voice_announcement` 에 필드를 더하면 `map()` 에도 더할 것
@@ -283,15 +305,15 @@ voice_announcement kind `operator_report`(+ operator 이름) → 토스트 "🎙
 
 ### 말로 답하기 — 승인·선택지를 듣고 말로 고른다 (2026-10-04)
 
-세션이 승인이나 답을 기다리면 operator 가 선택지를 번호와 함께 읽어 주고, 사용자가 말로 고르면 operator 가 그 세션에
+세션이 승인이나 답을 기다리면 먼저 알림음만 낸다. 사용자가 상세를 요청하면 operator 가 선택지를 번호와 함께 읽어 주고, 사용자가 말로 고르면 operator 가 그 세션에
 대신 답을 전한다.
 
 ```
 세션 승인 대기(permission_request) / 질문(elicitation form)
    ▼ 작업 보고: 요청 id · 번호 붙은 선택지 · "답 전하기: answer_session_permission(… request_id, option_id=1)"a" 2)"r")"
-operator 보고 턴: "롤프의 Codex 세션이 npm publish 허락을 기다려요. 1번 이번만 허용, 2번 거부 중에 골라 주세요."
-   ▼ 알림(needs_decision) 을 다 읽으면 ↑신호음 — 8초 동안 이름 없이 답을 듣는다(이름 부르기가 켜져 있으면)
-사용자: "1번" (또는 "헤이 자비스, 허용해")  →  operator 화면에서 깨어나고 그 말이 operator 에게 간다
+operator 보고 턴: 화면용 요약만 작성 → 선택한 알림음
+사용자: "헤이 자비스, 무슨 일이야?" → operator가 상세와 선택지를 설명
+사용자: "이번만 허용해" → operator에게 명시적인 선택 전달
    ▼ operator 의 턴(사용자가 시작) — MCP answer_session_permission / answer_session_question
 AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'permission' / 'elicitation' → 세션이 이어서 돈다
 ```
@@ -313,12 +335,8 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
 - **짧은 숫자는 잘못 들린다** — 실측으로 가짜 마이크의 "1번." 을 ragnar ASR 이 "일반." 으로 적었다("이번만" ↔ "2번만"도
   같은 소리). 그래서 지침이 "답이 숫자 하나뿐이거나 선택지 이름과 정확히 맞지 않으면 전하기 전에 한 번 확인하고 '네' 를
   들은 뒤 전한다" 를 가르친다. 선택지 이름("이번만 허용해")으로 답하면 바로 전한다.
-- 이름 없이 답하는 창(`wakeStore.openFollowUp`, 8초): 결정이 필요한 `operator_report` 를 다 읽은 직후에만, 이름 부르기가
-  켜져 있고 잠든 동안에만 연다(깨어 있으면 이미 이름 없이 듣는다). 말을 **시작한** 순간 창이 열려 있었으면 그 말은
-  답이다. 군소리는 답이 아니다.
-- 검증(브라우저): 헤드리스 Chromium 에 결정 보고 SSE + ragnar TTS 로 만든 알림 소리 + 가짜 마이크("1번.")를 넣고 실제 ragnar
-  ASR 로 — 알림을 다 읽은 순간 답 창이 열리고("answer"), 이름 없이 한 말이 받아 적혀 operator 가 깨어나 그 말이 첫 요청으로
-  갔다(알림 큐 8.0초 → 답 창 16.2초 → 깨어남 22.1초).
+- 알림음 직후에는 이름 없이 숫자 답을 받는 창을 열지 않는다. 먼저 이름을 불러 내용을 요청한다. 이미 깨어 있는 대화는
+  이름 없이 계속 이어진다. 선택지를 설명하기 전에 숫자만 들으면 먼저 선택지를 설명하고 확인한다.
 - 회귀: `apps/server/test/voice-operator-answers.test.mjs`(보고 문장 · 목록 · 보고 턴 거절 · 사용자 턴 전달 · 한 번만 ·
   비operator · 다른 사용자 · 질문 값 검증 · 턴이 끝나면 다시 막힘 · SSE 필드), `apps/client/test/voice-wake.test.mjs`(답 창).
 
@@ -427,9 +445,9 @@ AgentSessionsService.decidePermission / answerElicitation → 매니저 op 'perm
 | 감지 | `VoiceAnnouncerService` 가 activity 이벤트를 듣는다 — `agent_session_update`(turn_finished · turn_failed · 권한/질문 대기), `agent_session_event`(답의 첫머리를 모은다), `orchestration_update` 의 `last_event.type`(mission_completed · mission_failed · mission_cancelled · confirm_notified) | `modules/voice/voice-announcer.service.ts` |
 | 문장 | 템플릿(ko/en — `voice.stt.languages` 첫 언어). 답·요약이 있으면 `toSpeakable` 로 160자까지 덧붙인다. 조사는 고정 명사 뒤에만 단다(제목 받침과 무관하게 맞게) | `modules/voice/announcement-text.ts` |
 | 대상 | 세션 → driver. 미션 → 사람이 만들었으면 그 사람, 에이전트가 만들었으면 워크스페이스 owner(소리는 member 전원까지 넓히지 않는다) | 같은 서비스 |
-| 발행 | SSE `voice_announcement`(user-only, 받는 사용자만 — agent-manager 무관). TTS 가 준비되지 않았으면 보내지 않는다 | `event-registry.ts` |
-| 소리 | `GET /api/voice/announcements/:id/audio` — 받는 사람만, **처음 요청될 때 한 번** 합성(듣는 화면이 없으면 엔진을 부르지 않는다). 메모리에 2시간 | `voice.controller.ts` |
-| 화면 | `VoiceAnnouncer`(AppLayout, 모든 화면): 알림 설정 "Speak work updates"(단말별, 기본 켬)가 켜져 있으면 토스트(누르면 그 화면) + 소리. 탭이 여럿이면 **먼저 집은 한 탭만**(Web Locks + localStorage 표시, 숨은 탭은 700ms 양보). **보고 있는 세션의 알림은 말하지 않는다**(그 화면이 이미 답을 읽는다). 대화 낭독을 끊지 않고 줄을 서고, 말하기 시작하면 줄까지 비운다 | `voice/VoiceAnnouncer.tsx`, `voice/announcements.ts`, `voice/speechPlayer.ts` |
+| 발행 | SSE `voice_announcement`(user-only, 받는 사용자만 — agent-manager 무관). 작업 소식은 TTS 없이도 전달, `operator_reply`만 TTS 필요 | `event-registry.ts` |
+| 소리 | 작업 소식은 브라우저에서 짧은 WAV 알림음 생성. `operator_reply`는 `GET /api/voice/announcements/:id/audio`로 받는 사람만 요청하며 한 번 합성 | `voice/notificationSound.ts`, `voice.controller.ts` |
+| 화면 | `VoiceAnnouncer`(AppLayout): 토스트 + 알림음, 상세를 요청한 operator 답변은 TTS. VOICE 또는 알림 옵션에서 Chime/Bell/Soft 선택·미리듣기(단말별). 한 탭만 재생하고 보고 있는 세션은 억제하며, 대화 낭독과 같은 큐를 사용한다 | `voice/VoiceAnnouncer.tsx`, `voice/announcements.ts`, `voice/speechPlayer.ts` |
 
 - 기준: 턴이 **30초 이상** 걸렸을 때만 알린다(시작을 못 봤으면 긴 것으로 친다). 사용자가 멈춘 턴은 알리지 않고, 오류는 길이와
   무관하게 알린다. 같은 세션의 "확인 필요" 는 1분에 한 번.
