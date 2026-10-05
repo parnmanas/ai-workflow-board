@@ -12,7 +12,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 //   - `WHERE ticket_id = ? ORDER BY created_at DESC`   — focus selector,
 //                                                        stuck detector,
 //                                                        latest-by-ticket
-//   - `WHERE workspace_id = ?`                         — admin activity feed
+//   - `WHERE account_id = ?`                         — admin activity feed
 //   - `WHERE entity_type = ? AND entity_id = ?`        — generic entity audit
 //   - `WHERE actor_id = ? ORDER BY created_at`         — agent action history
 //
@@ -48,7 +48,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
 // rather than just the window, on the SAME 15s-polled endpoint the P1 above
 // already flagged once.
 @Index('idx_activity_logs_ticket_created', ['ticket_id', 'created_at'])
-@Index('idx_activity_logs_workspace_created', ['workspace_id', 'created_at'])
+@Index('idx_activity_logs_workspace_created', ['account_id', 'created_at'])
 @Index('idx_activity_logs_entity', ['entity_type', 'entity_id', 'created_at'])
 @Index('idx_activity_logs_actor_created', ['actor_id', 'created_at'])
 @Index('idx_activity_logs_action_field', ['action', 'field_changed'])
@@ -59,7 +59,7 @@ export class ActivityLog {
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: '' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   entity_type: string;

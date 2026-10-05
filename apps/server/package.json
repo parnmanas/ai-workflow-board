@@ -18,7 +18,7 @@
     "test:mention-audit": "npm run build && node test/run-suite.mjs test/qa-flows/mention-audit-retry.test.mjs",
     "migration:generate": "tsx ../../node_modules/typeorm/cli.js migration:generate -d src/db.ts",
     "migration:create": "tsx ../../node_modules/typeorm/cli.js migration:create",
-    "migration:run": "tsx ../../node_modules/typeorm/cli.js migration:run -d src/db.ts",
+    "migration:run": "tsx src/database/run-migrations.ts",
     "migration:revert": "tsx ../../node_modules/typeorm/cli.js migration:revert -d src/db.ts",
     "test:catalog-scope": "node --test test/agent-manager-instance-supersede.test.mjs test/catalog-scope.test.mjs test/catalog-scope-promotion.test.mjs",
     "test:auto-notice": "node --test test/comment-tools-auto-notice.test.mjs",

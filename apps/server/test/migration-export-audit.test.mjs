@@ -43,7 +43,7 @@ const { buildDataSourceOptions } = await import(modPath('db.js'));
 const { ActivityLog } = await import(modPath('entities', 'ActivityLog.js'));
 /* P4c-4: Agent 엔티티 삭제 — import 제거 (바인딩 미사용). */
 const { ApiKey } = await import(modPath('entities', 'ApiKey.js'));
-const { Workspace } = await import(modPath('entities', 'Workspace.js'));
+const { Account } = await import(modPath('entities', 'Account.js'));
 const { Ticket } = await import(modPath('entities', 'Ticket.js'));
 const { TicketPrerequisite } = await import(modPath('entities', 'TicketPrerequisite.js'));
 const { ActivityService } = await import(modPath('services', 'activity.service.js'));
@@ -151,21 +151,21 @@ test('6. [review round 2 — supersedes the old "first page only" behavior] EVER
   // 7 and 8 below for the two concrete bypasses this enabled. The fix is
   // simply "audit unconditionally"; this test pins the resulting behavior:
   // a resumed page now ALSO writes its own row, not zero.
-  const wsRepo = ds.getRepository(Workspace);
+  const wsRepo = ds.getRepository(Account);
   await wsRepo.save(wsRepo.create({ name: 'audit-test-ws-6' }));
 
   const req = { apiKey: { id: 'key-2', name: 'table-caller' } };
-  const countBefore = await auditCount('Workspace');
+  const countBefore = await auditCount('Account');
 
   let firstPage = null;
-  await controller.table('Workspace', undefined, '500', undefined, req, { json: (b) => { firstPage = b; }, status: () => ({ json: () => {} }) });
-  const countAfterFirst = await auditCount('Workspace');
+  await controller.table('Account', undefined, '500', undefined, req, { json: (b) => { firstPage = b; }, status: () => ({ json: () => {} }) });
+  const countAfterFirst = await auditCount('Account');
   assert.equal(countAfterFirst, countBefore + 1, 'the first (after=null) page of a fresh pull must be audited');
   assert.equal(JSON.stringify(firstPage).includes('audit-test-ws-6'), true, 'sanity: the actual row data is returned to the caller (just not written into the audit trail)');
 
   // Resume with a cursor — same entity, same run — must NOW also add a row.
-  await controller.table('Workspace', 'zzzz-nonexistent-cursor', '500', undefined, req, { json: () => {}, status: () => ({ json: () => {} }) });
-  const countAfterResume = await auditCount('Workspace');
+  await controller.table('Account', 'zzzz-nonexistent-cursor', '500', undefined, req, { json: () => {}, status: () => ({ json: () => {} }) });
+  const countAfterResume = await auditCount('Account');
   assert.equal(countAfterResume, countBefore + 2, 'a resumed (after != null) page of the same entity must ALSO be audited — every call, not just the first');
 
   const auditRow = await latestAuditRow('migration_export_table');
@@ -173,30 +173,30 @@ test('6. [review round 2 — supersedes the old "first page only" behavior] EVER
 });
 
 test('7. [review round 2, blocking] a call using a non-empty client-supplied `after` on its very FIRST-ever request is still audited', async (t) => {
-  await t.test('single-column PK (Workspace) — a synthetic low-sentinel `after` still returns real data, proving the old if(!after) heuristic was a live bypass', async () => {
-    const wsRepo = ds.getRepository(Workspace);
+  await t.test('single-column PK (Account) — a synthetic low-sentinel `after` still returns real data, proving the old if(!after) heuristic was a live bypass', async () => {
+    const wsRepo = ds.getRepository(Account);
     await wsRepo.save(wsRepo.create({ name: 'audit-test-ws-7a' }));
 
     const req = { apiKey: { id: 'key-3', name: 'bypass-attempt-sort-order' } };
-    const countBefore = await auditCount('Workspace');
+    const countBefore = await auditCount('Account');
 
     let page = null;
     // '!' (0x21) sorts before every character that appears in a UUID PK, so
     // `id > '!'` still matches virtually the whole table — a non-empty
     // `after` that is functionally "give me everything" despite never having
     // paged through anything before.
-    await controller.table('Workspace', '!', '500', undefined, req, { json: (b) => { page = b; }, status: () => ({ json: () => {} }) });
+    await controller.table('Account', '!', '500', undefined, req, { json: (b) => { page = b; }, status: () => ({ json: () => {} }) });
     assert.ok(JSON.stringify(page).includes('audit-test-ws-7a'), 'a synthetic non-empty after must still yield real row data — this is what made the old heuristic exploitable');
 
-    const countAfter = await auditCount('Workspace');
+    const countAfter = await auditCount('Account');
     assert.equal(countAfter, countBefore + 1, 'the old `if (!after)` heuristic would have skipped this call entirely; it must now be audited');
   });
 
   await t.test('composite PK (TicketPrerequisite) — a malformed cursor silently skips keyset filtering, returning an unfiltered first page under the guise of a "resume"', async () => {
     const ticketRepo = ds.getRepository(Ticket);
     const prereqRepo = ds.getRepository(TicketPrerequisite);
-    const a = await ticketRepo.save(ticketRepo.create({ title: 'A', workspace_id: 'w1' }));
-    const b = await ticketRepo.save(ticketRepo.create({ title: 'B', workspace_id: 'w1' }));
+    const a = await ticketRepo.save(ticketRepo.create({ title: 'A', account_id: 'w1' }));
+    const b = await ticketRepo.save(ticketRepo.create({ title: 'B', account_id: 'w1' }));
     await prereqRepo.save(prereqRepo.create({ ticket_id: a.id, prerequisite_ticket_id: b.id, created_by: 'test' }));
 
     const req = { apiKey: { id: 'key-4', name: 'bypass-attempt-malformed-cursor' } };
@@ -232,7 +232,7 @@ test('8. [review round 2, blocking] fail-closed — when the audit write itself 
   assert.match(metaRes.body.error, /audit/i);
 
   const tableRes = fakeRes();
-  await brokenController.table('Workspace', undefined, '500', undefined, req, tableRes);
+  await brokenController.table('Account', undefined, '500', undefined, req, tableRes);
   assert.equal(tableRes.statusCode, 503, 'table() must refuse with 503 when it cannot write the access audit');
   assert.ok(!tableRes.body.rows, 'no row data may be returned when the audit write failed');
   assert.match(tableRes.body.error, /audit/i);

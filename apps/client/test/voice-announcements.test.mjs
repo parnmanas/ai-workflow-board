@@ -81,15 +81,15 @@ test('viewing means: this exact session, in a visible tab', () => {
   assert.equal(isViewingTarget(target, true), true);
   assert.equal(isViewingTarget(target, false), false, 'a hidden tab is not looking');
   assert.equal(isViewingTarget({ ...target, session_id: 's2' }, true), false);
-  assert.equal(isViewingTarget({ type: 'mission', workspace_id: 'w', mission_id: 'm' }, true), false);
+  assert.equal(isViewingTarget({ type: 'mission', account_id: 'w', mission_id: 'm' }, true), false);
   setViewingSession(null);
   assert.equal(isViewingTarget(target, true), false);
 });
 
-test('announcement links: missions carry their workspace, sessions use the current one', () => {
-  assert.equal(announcementPath({ type: 'mission', workspace_id: 'w9', mission_id: 'mm' }, 'w1'), '/ws/w9/orchestration/missions/mm');
-  assert.equal(announcementPath({ type: 'session', manager_id: 'm1', cli: 'claude', session_id: 's1' }, 'w1'), '/ws/w1/sessions/m1/claude/s1');
-  assert.equal(announcementPath({ type: 'session', manager_id: 'm1', cli: 'claude', session_id: 's1' }, null), null);
+test('announcement links address work directly without an ownership account', () => {
+  assert.equal(announcementPath({ type: 'mission', account_id: 'w9', mission_id: 'mm' }, 'w1'), '/missions/mm');
+  assert.equal(announcementPath({ type: 'session', manager_id: 'm1', cli: 'claude', session_id: 's1' }, 'w1'), '/sessions/m1/claude/s1');
+  assert.equal(announcementPath({ type: 'session', manager_id: 'm1', cli: 'claude', session_id: 's1' }, null), '/sessions/m1/claude/s1');
   assert.equal(announcementPath(null, 'w1'), null);
 });
 
@@ -145,7 +145,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
     listVoiceOperators: api.listVoiceOperators, transcribeVoice: api.transcribeVoice };
   let ttsCalls = 0;
   const queued = [];
-  api.getMe = async () => ({ id: 'u1', name: 'User', role: 'user', status: 'active', permissions: ['voice.use'], workspaces: [{ id: 'w1', name: 'Work', slug: null, relations: [] }] });
+  api.getMe = async () => ({ id: 'u1', name: 'User', role: 'user', status: 'active', permissions: ['voice.use'], accounts: [{ id: 'w1', name: 'Work', slug: null, relations: [] }] });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.getVoiceConfig = async () => ({ stt: { provider: 'local', ready: true }, tts: { provider: 'none', ready: false }, wake: { ready: true } });
   api.getUnreadMentions = async () => ({ count: 0, items: [] });
@@ -163,7 +163,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   function RouteProbe() {
     currentPath = useLocation().pathname;
     const wake = useWakeState();
-    const here = currentPath === '/ws/w1/sessions/m1/codex/operator-session';
+    const here = currentPath === '/sessions/m1/codex/operator-session';
     React.useEffect(() => here ? wakeStore.attach('op') : undefined, [here]);
     return here ? h(SessionComposer, { disabled: false, busy: false, placeholder: 'Operator prompt',
       onSend: (prompt) => prompts.push(prompt), onCancel: () => {},
@@ -198,7 +198,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   assert.equal(wakeStore.state.enabled, false, 'do not enable persistent name calling');
   assert.equal(wakeStore.state.mode, 'awake');
   assert.equal(wakeStore.state.operatorId, 'op');
-  assert.equal(currentPath, '/ws/w1/sessions/m1/codex/operator-session', 'open the operator, not the source session');
+  assert.equal(currentPath, '/sessions/m1/codex/operator-session', 'open the operator, not the source session');
   assert.equal(microphoneStarts, 1, 'open the actual composer without waiting for cue completion');
   assertFocused(view.container.querySelector('textarea'), 'focus the operator input before speaking');
   assert.deepEqual(prompts, [], 'opening input must not fabricate a user request or answer');
@@ -259,7 +259,7 @@ test('a work/question SSE focuses the operator and starts its composer before an
   act(speech); await flush();
   assert.equal(wakeStore.state.mode, 'awake', 'manually enabling the microphone still accepts 보고해');
   assert.equal(prompts.at(-1).text, '보고해', 'manual name calling still delivers the request once');
-  assert.equal(currentPath, '/ws/w1/sessions/m1/codex/operator-session');
+  assert.equal(currentPath, '/sessions/m1/codex/operator-session');
 });
 
 test('audio completion callbacks run after successful playback, never after interruption or failure', async (t) => {

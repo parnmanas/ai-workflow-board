@@ -80,7 +80,7 @@ export function inferResourceMimetype(fileData: string | null | undefined, fileN
 export function resourceToJson(r: Resource) {
   return {
     id: r.id,
-    workspace_id: r.workspace_id,
+    account_id: r.account_id,
     name: r.name,
     description: r.description,
     type: r.type,

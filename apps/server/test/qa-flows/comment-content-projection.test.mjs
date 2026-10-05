@@ -7,7 +7,7 @@
 // commits established — and which a future projection change could silently
 // re-break — is:
 //
-//   • GET /api/workspaces/:wsId/tickets → card comments are the LIGHT
+//   • GET /api/accounts/:wsId/tickets → card comments are the LIGHT
 //     projection: exactly {id, ticket_id, type, status, created_at}. No
 //     content/author/author_type/parent_id/metadata. (perf must stay: card
 //     payloads never carry bodies.)
@@ -22,7 +22,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createTicket, createUser } from '../helpers/fixtures.mjs';
+import { createAccount, createTicket, createUser } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_COMMENT_PROJECTION_PORT || '0';
 
@@ -40,17 +40,17 @@ test('comment payload contract: card list GET light, ticket GET full thread', as
   const { getDataSourceToken, AuthService } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'comment-projection');
+  const ws = await createAccount(app, getDataSourceToken, 'comment-projection');
   const user = await createUser(app, getDataSourceToken, { name: 'reader' });
   const token = app.get(AuthService).createSession(user.id);
   const authHeaders = {
     Authorization: `Bearer ${token}`,
-    'X-Workspace-Id': ws.id,
+    'X-Account-Id': ws.id,
     Connection: 'close',
   };
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'projection ticket',
   });
 
@@ -58,18 +58,18 @@ test('comment payload contract: card list GET light, ticket GET full thread', as
   // and parent_id all survive the full-thread path.
   const commentRepo = ds.getRepository('Comment');
   const root = await commentRepo.save(commentRepo.create({
-    ticket_id: ticket.id, workspace_id: ws.id, author: 'Alice', author_type: 'user',
+    ticket_id: ticket.id, account_id: ws.id, author: 'Alice', author_type: 'user',
     author_id: 'u-alice', content: 'HELLO_BODY_123', type: 'note', status: null,
     attachment_resource_ids: '[]', metadata: '{}',
   }));
   const reply = await commentRepo.save(commentRepo.create({
-    ticket_id: ticket.id, workspace_id: ws.id, author: 'Bob', author_type: 'user',
+    ticket_id: ticket.id, account_id: ws.id, author: 'Bob', author_type: 'user',
     author_id: 'u-bob', content: 'REPLY_BODY_456', type: 'note', status: null,
     parent_id: root.id, attachment_resource_ids: '[]', metadata: '{}',
   }));
 
-  step('GET /api/workspaces/:wsId/tickets — card comments must be the light projection (no bodies)');
-  const listRes = await fetch(`http://localhost:${port}/api/workspaces/${ws.id}/tickets`, { headers: authHeaders });
+  step('GET /api/accounts/:wsId/tickets — card comments must be the light projection (no bodies)');
+  const listRes = await fetch(`http://localhost:${port}/api/accounts/${ws.id}/tickets`, { headers: authHeaders });
   assert.equal(listRes.status, 200, 'ticket list GET should succeed');
   const listJson = await listRes.json();
   const card = (listJson.tickets || []).find((tk) => tk.id === ticket.id);

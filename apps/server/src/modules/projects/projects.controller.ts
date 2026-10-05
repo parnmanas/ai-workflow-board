@@ -5,7 +5,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Credential } from '../../entities/Credential';
 import { AuthGuard } from '../../common/guards/auth.guard';
-import { WorkspaceGuard } from '../../common/guards/workspace.guard';
+import { AccountGuard } from '../../common/guards/account.guard';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import { listRepoBranches, resolveGitCredential } from '../mcp/shared/git-branches';
 import {
@@ -28,7 +28,7 @@ import { ProjectInputError, ProjectsService } from './projects.service';
 @ApiBearerAuth('user-session')
 @ApiTags('projects')
 @Controller('api')
-@UseGuards(AuthGuard, WorkspaceGuard)
+@UseGuards(AuthGuard, AccountGuard)
 export class ProjectsController {
   constructor(
     private readonly projects: ProjectsService,
@@ -49,19 +49,21 @@ export class ProjectsController {
   }
 
   private workspaceOf(req: Request): string {
-    return String((req as any).currentWorkspaceId || req.headers['x-workspace-id'] || req.query['workspace_id'] || '');
+    return String((req as any).currentAccountId || req.headers['x-account-id'] || req.query['account_id'] || '');
   }
 
-  @Get('workspaces/:wsId/projects')
-  async list(@Param('wsId') wsId: string, @Res() res: Response) {
-    return res.json(await this.projects.list(wsId));
+  @Get(['projects', 'accounts/:wsId/projects'])
+  async list(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
+    const ids: string[] = wsId ? [wsId] : (req as any).accessibleAccountIds || [];
+    const groups = await Promise.all(ids.map(id => this.projects.list(id)));
+    return res.json(groups.flat().sort((a, b) => a.name.localeCompare(b.name)));
   }
 
-  @Post('workspaces/:wsId/projects')
+  @Post(['projects', 'accounts/:wsId/projects'])
   async create(@Param('wsId') wsId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     if (!this.canManage(req)) return res.status(403).json({ error: 'Missing permission: admin.resources' });
     try {
-      return res.status(201).json(await this.projects.create(wsId, body));
+      return res.status(201).json(await this.projects.create(wsId || this.workspaceOf(req), body));
     } catch (err) {
       return this.fail(res, err);
     }
@@ -70,13 +72,13 @@ export class ProjectsController {
   // Literal path above `projects/:id` so `:id` never swallows it.
   @Post('projects/test-connection')
   async testConnection(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = String(body?.workspace_id || this.workspaceOf(req) || '');
+    const accountId = String(body?.account_id || this.workspaceOf(req) || '');
     const url = typeof body?.repo_url === 'string' ? body.repo_url.trim() : '';
     const defaultBranch = typeof body?.default_branch === 'string' ? body.default_branch : '';
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id is required' });
     if (!url) return res.status(400).json({ error: 'repo_url is required' });
     try {
-      const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), body?.credential_id || null, workspaceId);
+      const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), body?.credential_id || null, accountId);
       const branches = await listRepoBranches({ url, credential, defaultBranch });
       return res.json({ ok: true, branches, default_branch: defaultBranch });
     } catch (err: any) {
@@ -135,14 +137,14 @@ export class ProjectsController {
 
   @Get('projects/:id/branches')
   async branches(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = this.workspaceOf(req);
-    const project = await this.projects.getInWorkspace(id, workspaceId);
+    const accountId = this.workspaceOf(req);
+    const project = await this.projects.getInWorkspace(id, accountId);
     if (!project) return res.status(404).json({ error: 'Project not found' });
     if (!project.repo_url) {
       return res.status(400).json({ error: "project has no repository URL — set it before listing branches" });
     }
     try {
-      const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), project.credential_id, workspaceId);
+      const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), project.credential_id, accountId);
       const branches = await listRepoBranches({ url: project.repo_url, credential, defaultBranch: project.default_branch || '' });
       return res.json({ branches, default_branch: project.default_branch || '' });
     } catch (err: any) {
@@ -157,11 +159,11 @@ export class ProjectsController {
   // directories keep being reused). SSH-only URLs degrade with HTTP 422 + code
   // 'ssh_unsupported'.
 
-  private async prepRepo(id: string, workspaceId: string, forceFetch = false): Promise<string> {
-    const project = await this.projects.getInWorkspace(id, workspaceId);
+  private async prepRepo(id: string, accountId: string, forceFetch = false): Promise<string> {
+    const project = await this.projects.getInWorkspace(id, accountId);
     if (!project) throw Object.assign(new Error('Project not found'), { status: 404 });
     if (!project.repo_url) throw new BadRequestException("project has no repository URL — set it before reading git history");
-    const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), project.credential_id, workspaceId);
+    const credential = await resolveGitCredential(this.dataSource.getRepository(Credential), project.credential_id, accountId);
     return ensureRepoCache({ resourceId: id, url: project.repo_url, credential, forceFetch });
   }
 

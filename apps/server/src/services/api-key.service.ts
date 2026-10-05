@@ -33,7 +33,7 @@ export class ApiKeyService {
     host_id?: string | null;
     scope?: string;
     expires_at?: Date | null;
-    workspace_id?: string;
+    account_id?: string;
   }) {
     const rawKey = this.generateApiKey();
     const entity = this.repo.create({
@@ -45,7 +45,7 @@ export class ApiKeyService {
       host_id: params.host_id ?? null,
       scope: params.scope || 'full',
       expires_at: params.expires_at ?? null,
-      workspace_id: params.workspace_id || '',
+      account_id: params.account_id || '',
     });
     const saved = await this.repo.save(entity);
     const { key, ...rest } = saved;
@@ -55,8 +55,8 @@ export class ApiKeyService {
     };
   }
 
-  async listApiKeys(workspaceId?: string) {
-    const where = workspaceId ? { workspace_id: workspaceId } : {};
+  async listApiKeys(accountId?: string) {
+    const where = accountId ? { account_id: accountId } : {};
     // P4c-4: Agent relation 삭제 — join 없음 (표시는 agent_id/host_id 스칼라).
     const keys = await this.repo.find({
       where,
@@ -83,7 +83,7 @@ export class ApiKeyService {
     return true;
   }
 
-  async deleteApiKeysByHostAndNamePrefix(hostId: string, key: string, workspaceId?: string): Promise<number> {
+  async deleteApiKeysByHostAndNamePrefix(hostId: string, key: string, accountId?: string): Promise<number> {
     const query = this.repo
       .createQueryBuilder()
       .delete()
@@ -91,7 +91,7 @@ export class ApiKeyService {
         host_id: hostId,
         suffix: `%:${key}`,
       });
-    if (workspaceId !== undefined) query.andWhere('workspace_id = :workspace_id', { workspace_id: workspaceId });
+    if (accountId !== undefined) query.andWhere('account_id = :account_id', { account_id: accountId });
     const result = await query.execute();
     return result.affected ?? 0;
   }

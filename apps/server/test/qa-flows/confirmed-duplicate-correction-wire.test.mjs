@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createTicket, createWorkspace, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createTicket, createAccount, runtimeHostKeyForAgent } from '../helpers/fixtures.mjs';
 import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -30,12 +30,12 @@ test('MCP duplicate correction re-sends an in_progress ticket exactly once and p
   const gdst = modules.getDataSourceToken;
   const ds = app.get(gdst());
   const ticketRepo = ds.getRepository('Ticket');
-  const ws = await createWorkspace(app, gdst, 'duplicate-correction-wire');
+  const ws = await createAccount(app, gdst, 'duplicate-correction-wire');
   // The wire trigger is delivered to the assignee's Runtime Host stream; the VA
   // connects with that host's key.
   const assignee = await createAgent(app, gdst, ws.id, { name: 'worker', runtime: true });
   const operator = await createAgent(app, gdst, ws.id, { name: 'operator', runtime: true });
-  const operatorKey = await createApiKey(app, gdst, operator.id, { workspaceId: ws.id, label: 'operator' });
+  const operatorKey = await createApiKey(app, gdst, operator.id, { accountId: ws.id, label: 'operator' });
   const va = new VirtualAgent({ name: 'worker', agentId: assignee.id, apiKey: runtimeHostKeyForAgent(assignee.id), port });
   await va.start();
   t.after(async () => va.stop());
@@ -43,10 +43,10 @@ test('MCP duplicate correction re-sends an in_progress ticket exactly once and p
   t.after(async () => mcp.close());
 
   const canonical = await createTicket(app, gdst, {
-    workspaceId: ws.id, status: 'done', title: 'unrelated done ticket',
+    accountId: ws.id, status: 'done', title: 'unrelated done ticket',
   });
   const seedCorrection = async ({ title, status = 'in_progress', assignee: holder = assignee }) => {
-    const ticket = await createTicket(app, gdst, { workspaceId: ws.id, status, title, assignee: holder });
+    const ticket = await createTicket(app, gdst, { accountId: ws.id, status, title, assignee: holder });
     await ticketRepo.update(ticket.id, { canonical_ticket_id: canonical.id });
     return ticket;
   };

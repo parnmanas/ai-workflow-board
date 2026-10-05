@@ -16,7 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
 } from '../helpers/fixtures.mjs';
@@ -27,13 +27,13 @@ process.env.PORT = process.env.QA_CHAT_READ_PORT || '0';
 // Insert a chat room, its participants, and a spaced-out message history
 // directly via repositories — there is no chat fixture helper, and the read
 // tools only need persisted rows (the SSE/send path is covered elsewhere).
-async function seedRoom(ds, { workspaceId, participants, messages }) {
+async function seedRoom(ds, { accountId, participants, messages }) {
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
   const msgRepo = ds.getRepository('ChatRoomMessage');
 
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: workspaceId,
+    account_id: accountId,
     type: participants.length > 2 ? 'group' : 'dm',
     name: 'qa-read-room',
   }));
@@ -56,7 +56,7 @@ async function seedRoom(ds, { workspaceId, participants, messages }) {
     const m = messages[i];
     const row = await msgRepo.save(msgRepo.create({
       room_id: room.id,
-      workspace_id: workspaceId,
+      account_id: accountId,
       sender_type: m.sender_type,
       sender_id: m.sender_id,
       type: m.type || 'message',
@@ -75,16 +75,16 @@ test('MCP get_chat_room_messages + search_chat_messages contract', async (t) => 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-read');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-read');
 
   const member = await createAgent(app, getDataSourceToken, ws.id, { name: 'member', runtime: true });
   const memberKey = await createApiKey(app, getDataSourceToken, member.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'member',
   });
   const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider', runtime: true });
   const outsiderKey = await createApiKey(app, getDataSourceToken, outsider.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'outsider',
   });
 
@@ -96,7 +96,7 @@ test('MCP get_chat_room_messages + search_chat_messages contract', async (t) => 
 
   step('Empty room → count 0, no error');
   const emptyRoom = await seedRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'agent', id: member.id }],
     messages: [],
   });
@@ -107,7 +107,7 @@ test('MCP get_chat_room_messages + search_chat_messages contract', async (t) => 
 
   step('Populated room → chronological full history');
   const { room, saved } = await seedRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'agent', id: member.id }],
     messages: [
       { sender_type: 'agent', sender_id: member.id, content: 'alpha apple' },

@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createAccount } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.PRIVILEGED_CMD_PORT || '0';
 // 매니저 전용 엔드포인트의 신원 확인을 실제로 태우기 위해 dev 모드를 끈다.
@@ -36,13 +36,13 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
   });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'privileged');
+  const workspace = await createAccount(app, getDataSourceToken, 'privileged');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'privileged-manager',
     type: 'manager',
   });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'privileged-manager-key',
   });
   const stranger = await createAgent(app, getDataSourceToken, null, {
@@ -50,7 +50,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
     type: 'manager',
   });
   const strangerKey = await createApiKey(app, getDataSourceToken, stranger.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'privileged-stranger-key',
   });
   const admin = await createUser(app, getDataSourceToken, { name: 'privileged-admin', role: 'admin' });
@@ -85,7 +85,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
   const svc = app.get(PrivilegedCommandService);
   const newRequest = (over = {}) => {
     const created = svc.create({
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       agent_id: 'agent-asking',
       agent_name: 'Runner/Worker',
       instance_id: INSTANCE_ID,
@@ -190,7 +190,7 @@ test('권한 상승은 운영자 승인으로만 실행되고, 매니저는 정�
   newRequest();
   newRequest();
   const overflow = svc.create({
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     agent_id: 'agent-asking',
     agent_name: 'Runner/Worker',
     instance_id: INSTANCE_ID,

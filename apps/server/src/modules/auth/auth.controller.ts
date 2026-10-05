@@ -5,7 +5,7 @@ import { Request, Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { User } from '../../entities/User';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { AuthService } from '../../services/auth.service';
 import { GoogleOAuthService } from '../../services/google-oauth.service';
 import { ReBACService } from '../../services/rebac.service';
@@ -19,14 +19,14 @@ export class AuthController {
     private readonly googleOAuthService: GoogleOAuthService,
     private readonly rebacService: ReBACService,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
+    @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
   ) {}
 
   private async _buildWorkspacesForUser(userId: string) {
-    // Admin gets all workspaces — never blocked by empty ReBACservice relations
+    // Admin gets all accounts — never blocked by empty ReBACservice relations
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (user?.role === 'admin') {
-      const allWorkspaces = await this.workspaceRepo.find();
+      const allWorkspaces = await this.accountRepo.find();
       return allWorkspaces.map(ws => ({
         id: ws.id,
         name: ws.name,
@@ -36,16 +36,16 @@ export class AuthController {
     }
 
     const memberWsIds = await this.rebacService.listObjects(
-      { type: 'user', id: userId }, 'member', 'workspace',
+      { type: 'user', id: userId }, 'member', 'account',
     );
     const ownerWsIds = await this.rebacService.listObjects(
-      { type: 'user', id: userId }, 'owner', 'workspace',
+      { type: 'user', id: userId }, 'owner', 'account',
     );
     const allWsIds = [...new Set([...memberWsIds, ...ownerWsIds])];
     if (allWsIds.length === 0) return [];
 
-    const workspaces = await this.workspaceRepo.find({ where: { id: In(allWsIds) } });
-    return workspaces.map(ws => ({
+    const accounts = await this.accountRepo.find({ where: { id: In(allWsIds) } });
+    return accounts.map(ws => ({
       id: ws.id,
       name: ws.name,
       slug: ws.slug,
@@ -57,7 +57,7 @@ export class AuthController {
   }
 
   @Post('login')
-  @ApiOperation({ summary: 'Log in with email + password. Returns { token, user, workspaces }. Put the token in the "user-session" Authorize slot at the top of this page.' })
+  @ApiOperation({ summary: 'Log in with email + password. Returns { token, user, accounts }. Put the token in the "user-session" Authorize slot at the top of this page.' })
   @ApiBody({ type: LoginDto })
   async login(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const { email, password } = body;
@@ -76,7 +76,7 @@ export class AuthController {
 
     const user = result.user as any;
     const permissions = resolvePermissions(user.role, user.permissions ? JSON.parse(user.permissions || '[]') : []);
-    const workspaces = await this._buildWorkspacesForUser(user.id);
+    const accounts = await this._buildWorkspacesForUser(user.id);
 
     return res.json({
       token: result.token,
@@ -84,7 +84,7 @@ export class AuthController {
         ...result.user,
         resolved_permissions: permissions,
       },
-      workspaces,
+      accounts,
     });
   }
 
@@ -112,12 +112,12 @@ export class AuthController {
     const customPerms = (user as any).permissions ? JSON.parse((user as any).permissions || '[]') : [];
     const permissions = resolvePermissions(user.role, customPerms);
     const { password_hash, ...safeUser } = user as any;
-    const workspaces = await this._buildWorkspacesForUser(user.id);
+    const accounts = await this._buildWorkspacesForUser(user.id);
 
     return res.json({
       ...safeUser,
       resolved_permissions: permissions,
-      workspaces,
+      accounts,
     });
   }
 
@@ -176,7 +176,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Register a new user. First user becomes admin automatically.' })
   @ApiBody({ type: RegisterDto })
   async register(@Body() body: any, @Res() res: Response) {
-    const { name, email, password, requested_workspace_id } = body;
+    const { name, email, password, requested_account_id } = body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'name, email, and password are required' });
     }
@@ -197,17 +197,17 @@ export class AuthController {
       role: 'user',
       status: 'pending',
       password_hash,
-      requested_workspace_id: requested_workspace_id || null,
+      requested_account_id: requested_account_id || null,
     } as any);
     await this.userRepo.save(created as any);
 
     return res.status(201).json({ success: true, message: 'Registration submitted. Please wait for admin approval.' });
   }
 
-  @Get('public-workspaces')
+  @Get('public-accounts')
   async publicWorkspaces(@Res() res: Response) {
-    const workspaces = await this.workspaceRepo.find({ where: { is_public: 1 } as any });
-    return res.json(workspaces.map(ws => ({ id: ws.id, name: ws.name, slug: ws.slug })));
+    const accounts = await this.accountRepo.find({ where: { is_public: 1 } as any });
+    return res.json(accounts.map(ws => ({ id: ws.id, name: ws.name, slug: ws.slug })));
   }
 
   /** Public: exposes whether Google OAuth is enabled + the client_id (never the secret). */

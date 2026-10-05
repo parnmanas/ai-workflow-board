@@ -172,7 +172,7 @@ export class OperatorDecisionService {
       throw new OperatorDecisionError('option_unknown',
         `"${input.option_id}" is not one of this request's options: ${request.options.map((o) => `${o.option_id} (${o.name})`).join(', ') || 'none'}.`);
     }
-    await this.sessions.decidePermission(operator.workspace_id || '', userId, input.manager_id, input.cli, input.session_id, request.id, option.option_id);
+    await this.sessions.decidePermission(operator.account_id || '', userId, input.manager_id, input.cli, input.session_id, request.id, option.option_id);
     this.logService.info('Voice', `operator "${operator.name}" passed on the user's answer to a permission request`, {
       operator_id: operator.id, user_id: userId, operator_turn_id: turnId,
       manager_id: input.manager_id, cli: input.cli, session_id: input.session_id,
@@ -212,7 +212,7 @@ export class OperatorDecisionService {
         }
       }
     }
-    await this.sessions.answerElicitation(operator.workspace_id || '', userId, input.manager_id, input.cli, input.session_id, request.id, input.action, content);
+    await this.sessions.answerElicitation(operator.account_id || '', userId, input.manager_id, input.cli, input.session_id, request.id, input.action, content);
     this.logService.info('Voice', `operator "${operator.name}" passed on the user's answer to a question`, {
       operator_id: operator.id, user_id: userId, operator_turn_id: turnId,
       manager_id: input.manager_id, cli: input.cli, session_id: input.session_id,

@@ -48,18 +48,18 @@ export class AgentSessionsAgentController {
     }
   }
 
-  /** CLI 설정으로 이 매니저에 묶인 credential 의 원문. `?workspace_id=` 필수. 비밀이므로 no-store. */
+  /** CLI 설정으로 이 매니저에 묶인 credential 의 원문. `?account_id=` 필수. 비밀이므로 no-store. */
   @Get('credential/:credentialId')
   async credential(
     @Param('credentialId') credentialId: string,
-    @Query('workspace_id') workspaceId: string | undefined,
+    @Query('account_id') accountId: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     const caller = this.callerId(req);
     if (!caller) return res.status(401).json({ error: 'manager_identity_required' });
     try {
-      const material = await this.sessions.getSessionCredential(caller, credentialId, String(workspaceId || '').trim());
+      const material = await this.sessions.getSessionCredential(caller, credentialId, String(accountId || '').trim());
       res.setHeader('Cache-Control', 'no-store');
       return res.status(200).json(material);
     } catch (err) {

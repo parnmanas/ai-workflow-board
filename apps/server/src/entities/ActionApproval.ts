@@ -31,7 +31,7 @@ export class ActionApproval {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   action_id: string;

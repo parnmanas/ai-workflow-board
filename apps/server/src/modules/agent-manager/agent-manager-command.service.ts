@@ -125,9 +125,9 @@ export class AgentManagerCommandService {
   // P4c-4: Agent 행 없음 — Host/link 해소 후 live 인스턴스 확인. working_dir 은
   // 이 레이어에 없으므로 spawn 실발행은 불가하고 'no_working_dir' 로 분류한다
   // (호출자의 피드백 문구가 정직하게 "시작 불가"를 말한다).
-  async issueSpawnAgent(targetAgentId: string, issuedBy: string, workspaceId?: string): Promise<SpawnAgentResult> {
+  async issueSpawnAgent(targetAgentId: string, issuedBy: string, accountId?: string): Promise<SpawnAgentResult> {
     if (!targetAgentId) return { ok: false, reason: 'agent_not_found' };
-    void workspaceId;
+    void accountId;
     void issuedBy;
     let hostId: string | null = null;
     const direct = await this.hostRepo.findOne({ where: { id: targetAgentId } });

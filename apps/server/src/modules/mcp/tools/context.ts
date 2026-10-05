@@ -29,7 +29,7 @@ import { User } from '../../../entities/User';
 import { Ticket } from '../../../entities/Ticket';
 import { UserMention } from '../../../entities/UserMention';
 import { TicketAttachment } from '../../../entities/TicketAttachment';
-import { Workspace } from '../../../entities/Workspace';
+import { Account } from '../../../entities/Account';
 import { SystemSetting } from '../../../entities/SystemSetting';
 import { ActivityService } from '../../../services/activity.service';
 import { ApiKeyService } from '../../../services/api-key.service';
@@ -53,7 +53,7 @@ import type { QaScheduleService } from '../../qa/qa-schedule.service';
 import type { SecurityProfileService } from '../../security/security-profile.service';
 import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
-import type { WorkspaceScheduleService } from '../../workspace-schedule/workspace-schedule.service';
+import type { WorkspaceScheduleService } from '../../automation-schedule/automation-schedule.service';
 import { TicketPrerequisitesService } from '../../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../../tickets/ci-wait.service';
 import { TicketService } from '../../tickets/ticket.service';
@@ -162,8 +162,8 @@ export interface ToolContext {
   // security-schedule MCP tools (CRUD + run-now). Standalone context omits it;
   // the tools degrade to an explicit error (no background tick in standalone mode).
   securityScheduleService?: SecurityScheduleService;
-  // Workspace scheduler (ticket 769eb260, foundation 8845be79) — general-purpose
-  // agent-task trigger layer. Required by the workspace-schedule MCP tools (CRUD +
+  // Account scheduler (ticket 769eb260, foundation 8845be79) — general-purpose
+  // agent-task trigger layer. Required by the automation-schedule MCP tools (CRUD +
   // run-now). Standalone context omits it; the tools degrade to an explicit error
   // (no background tick in standalone mode).
   workspaceScheduleService?: WorkspaceScheduleService;
@@ -279,7 +279,7 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
     dataSource.getRepository(Ticket),
     dataSource.getRepository(UserMention),
     dataSource.getRepository(TicketAttachment),
-    dataSource.getRepository(Workspace),
+    dataSource.getRepository(Account),
     dataSource,
     logService,
     roomMembershipService,

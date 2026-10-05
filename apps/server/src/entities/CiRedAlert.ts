@@ -32,7 +32,7 @@ export class CiRedAlert {
   project_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // "owner/repo" — parsed from the project's repo_url.
   @Column({ type: 'varchar' })

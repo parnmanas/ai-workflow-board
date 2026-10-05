@@ -18,10 +18,10 @@ const listCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   verticalAlign: 'middle',
 });
 
-export default function ChannelManager({ workspaceId }: { workspaceId?: string } = {}) {
+export default function ChannelManager({ accountId }: { accountId?: string } = {}) {
   const confirm = useConfirm();
   const { items: channels, showForm, setShowForm, editingId, setEditingId, refresh: load } =
-    useCrudList<Channel>(() => api.getChannels(workspaceId), [workspaceId]);
+    useCrudList<Channel>(() => api.getChannels(accountId), [accountId]);
   const [testResult, setTestResult] = useState<Record<string, { success: boolean; error?: string }>>({});
   const [form, setForm] = useState({
     name: '', type: 'discord', bot_token: '', channel_id: '',

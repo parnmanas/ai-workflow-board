@@ -3,7 +3,7 @@
 // 티켓 98d0936e · F2-1 · §회귀 안전망 ②(딥링크).
 //
 // - TicketArtifactController 가 `?ticket=<id>` 를 관찰해 패널을 열고 파라미터를 제거.
-// - App 의 WorkspaceSectionRedirect 가 `/ws/:wsId?ticket=..` → `sessions?ticket=..` 로
+// - App 의 LegacyWorkspaceRedirect 가 `?ticket=..` → `sessions?ticket=..` 로
 //   쿼리를 실어 나른다(수정 전: search 유실로 딥링크가 셸에 도달 못함).
 //   기본 랜딩은 Agent Session 목록(sessions)이다.
 //
@@ -17,7 +17,7 @@ import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx'
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import TicketArtifactController from '../src/components/TicketArtifactController.tsx';
 import ArtifactPanel from '../src/components/ArtifactPanel.tsx';
-import { WorkspaceSectionRedirect } from '../src/App.tsx';
+import { LegacyWorkspaceRedirect } from '../src/App.tsx';
 
 const h = React.createElement;
 
@@ -44,12 +44,12 @@ test('② `?ticket=<id>` 딥링크 → 패널 오픈 + URL 에서 ticket 파라�
     mount(
       h(
         MemoryRouter,
-        { initialEntries: ['/ws/w1/assistant?ticket=T1'] },
+        { initialEntries: ['/assistant?ticket=T1'] },
         h(
           Routes,
           null,
           h(Route, {
-            path: '/ws/:wsId/assistant',
+            path: '/assistant',
             element: h(
               BoardStreamProvider,
               null,
@@ -79,7 +79,7 @@ test('② `?ticket=<id>` 딥링크 → 패널 오픈 + URL 에서 ticket 파라�
   }
 });
 
-test('MINOR-1: /ws/:wsId?ticket= 리다이렉트가 쿼리스트링을 보존한다', () => {
+test('MINOR-1: ?ticket= 리다이렉트가 쿼리스트링을 보존한다', () => {
   const dom = setupDom({ width: 1280 });
   probe.search = null;
   try {
@@ -91,8 +91,8 @@ test('MINOR-1: /ws/:wsId?ticket= 리다이렉트가 쿼리스트링을 보존한
           Routes,
           null,
           // 기본 모드 → sessions 로 리다이렉트하며 search 를 실어 나른다
-          h(Route, { path: '/ws/:wsId', element: h(WorkspaceSectionRedirect) }),
-          h(Route, { path: '/ws/:wsId/sessions', element: h(LocationProbe) }),
+          h(Route, { path: '/ws/:wsId/*', element: h(LegacyWorkspaceRedirect) }),
+          h(Route, { path: '/sessions', element: h(LocationProbe) }),
         ),
       ),
     );

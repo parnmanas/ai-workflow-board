@@ -5,7 +5,7 @@
 // mentioning its own identity would notify itself → agent-manager re-spawns
 // the author's own subagent → recursive loop.
 //
-// Workspace roles and `@[role:…]` fan-out are gone (docs/tickets.md): a
+// Account roles and `@[role:…]` fan-out are gone (docs/tickets.md): a
 // ticket has exactly one agent — its assignee — and only a mention of the
 // assignee identity can wake anything. So the author that can hit the loop
 // is the assignee itself. Two agents drive the REAL MCP add_comment tool,
@@ -26,7 +26,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
   createTicket,
@@ -41,17 +41,17 @@ test('self-mention dropped: the assignee never wakes itself; a peer mention stil
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'mention-self-excl');
+  const ws = await createAccount(app, getDataSourceToken, 'mention-self-excl');
   const agentA = await createAgent(app, getDataSourceToken, ws.id, { name: 'assignee-a', runtime: true });
   const agentB = await createAgent(app, getDataSourceToken, ws.id, { name: 'peer-b', runtime: true });
   // The Host-bound runtime credential (`runtime:<label>:<rt-key>`): MCP calls
   // made with it are authored as the runtime identity key, exactly like a
   // dispatched subagent's.
-  const keyA = await createApiKey(app, getDataSourceToken, agentA.id, { workspaceId: ws.id, label: 'assignee-a' });
-  const keyB = await createApiKey(app, getDataSourceToken, agentB.id, { workspaceId: ws.id, label: 'peer-b' });
+  const keyA = await createApiKey(app, getDataSourceToken, agentA.id, { accountId: ws.id, label: 'assignee-a' });
+  const keyB = await createApiKey(app, getDataSourceToken, agentB.id, { accountId: ws.id, label: 'peer-b' });
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'Discussion self-exclusion',
     status: 'in_progress',
     assignee: agentA,

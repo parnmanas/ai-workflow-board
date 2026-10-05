@@ -38,7 +38,7 @@ import Sidebar from '../src/components/Sidebar.tsx';
 const h = React.createElement;
 
 const WS_ID = 'ws-1';
-const BASE = `/ws/${WS_ID}`;
+const BASE = ``;
 const MANAGER_ID = 'mgr-1';
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -108,10 +108,10 @@ function installFetchStub({ hosts, sessionsByCli, permissions, control = {} }) {
         status: 'active',
         permissions,
         resolved_permissions: permissions,
-        workspaces: [{ id: WS_ID, name: 'Workspace', slug: null, relations: [] }],
+        accounts: [{ id: WS_ID, name: 'Account', slug: null, relations: [] }],
       });
     }
-    if (path.includes('/orchestration/teams') || path.includes('/orchestration/missions')) return json([]);
+    if (path.includes('/teams') || path.includes('/orchestration/missions')) return json([]);
     if (path.includes('/tickets/unread-counts')) {
       return json({ total: 0, perTicket: {} });
     }

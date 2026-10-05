@@ -145,10 +145,10 @@ export interface SpawnOpts {
     /** Ticket ee26302d review round 3 (P1): every real caller (ChatSessionManager
      *  / TicketSessionManager) passes an AgentExecutionContext here, which has
      *  this as a required field — declared optional locally only so a caller
-     *  without workspace scoping isn't forced to supply one. Threaded into the
-     *  profile-specific mcp-config path/write below so workspace A and
-     *  workspace B sharing an agent id don't converge on one unscoped file. */
-    workspace_id?: string;
+     *  without account scoping isn't forced to supply one. Threaded into the
+     *  profile-specific mcp-config path/write below so account A and
+     *  account B sharing an agent id don't converge on one unscoped file. */
+    account_id?: string;
     api_key: string;
     cwd: string;
     mcp_config_path: string;
@@ -172,7 +172,7 @@ export interface SpawnOpts {
    *  that support inline image content blocks (Claude); other adapters
    *  ignore the list (metadata already in the prompt text). */
   firstTurnImages?: TurnImage[];
-  /** Board/workspace harness from the dispatching trigger (e9c7a896).
+  /** Account harness from the dispatching trigger (e9c7a896).
    *  Applied at session CREATION only — CLI flags are fixed at spawn, so
    *  follow-up turns keep the harness the session was born with. */
   harness?: HarnessSpec | null;
@@ -182,7 +182,7 @@ export interface SpawnOpts {
    *  selectEffortSlice; claude maps it to `--effort` + the ultracode keyword
    *  in the first turn. Applied at session CREATION only. */
   effortPreset?: ResolvedEffortPreset | null;
-  /** Non-secret env vars from the workspace environment_config (ticket 354d336b).
+  /** Non-secret env vars from the account environment_config (ticket 354d336b).
    *  Merged into the spawned CLI's environment after process.env but BEFORE
    *  auth / cli-home / credential / harness env so those always win. Applied
    *  at session CREATION only. */
@@ -214,7 +214,7 @@ interface TurnState {
 export interface RunSessionBinding {
   kind: 'qa' | 'security' | 'action';
   run_id: string;
-  workspace_id: string;
+  account_id: string;
 }
 
 export interface SessionRecord {
@@ -668,7 +668,7 @@ export class BaseSessionManager {
     const effectiveApiKey = agentContext?.api_key || this._config.apiKey;
     const effectiveCwd = agentContext?.cwd || undefined;
 
-    // Board/workspace harness (e9c7a896) — same partition/precedence rules
+    // Account harness (e9c7a896) — same partition/precedence rules
     // as SubagentManager.spawn: keep adapter-expressible keys, warn + skip
     // the rest, harness.model beats the per-agent Agent.model default.
     // Session flags are fixed at spawn; follow-up turns can't re-apply.
@@ -887,18 +887,18 @@ export class BaseSessionManager {
           // never share a file to race on (see that function's doc comment
           // for why concurrent spawns of the SAME profile are still safe).
           //
-          // Ticket ee26302d review round 3 (P1): pass agentContext.workspace_id
-          // through here too — omitting it (as round 2 did) collapses workspace
-          // A and workspace B onto the SAME unscoped path whenever they share
-          // an agent id, so whichever workspace spawns first "wins" the file
+          // Ticket ee26302d review round 3 (P1): pass agentContext.account_id
+          // through here too — omitting it (as round 2 did) collapses account
+          // A and account B onto the SAME unscoped path whenever they share
+          // an agent id, so whichever account spawns first "wins" the file
           // and the other silently reuses it (wrong Authorization, or a stale
-          // auth failure) instead of getting its own workspace-scoped config.
+          // auth failure) instead of getting its own account-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
-          const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.workspace_id, profile);
+          const profileConfigPath = mcpConfigPathFor(agentContext.agent_id, agentContext.account_id, profile);
           const sharedConfigPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
-                agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.workspace_id, toolProfileHeader,
+                agentContext.agent_id, this._config.url, effectiveApiKey, agentContext.account_id, toolProfileHeader,
               );
           // 각 persistent 프로세스에 추적 가능한 config/pid sidecar 쌍을
           // 부여한다. 내용은 profile별 불변 config의 복사본이라 TOCTOU 격리는

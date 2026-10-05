@@ -24,7 +24,7 @@ const TABS: Array<{ key: DetailTab; label: string; needsSaved: boolean }> = [
 interface ProjectDetailPanelProps {
   /** null = new project draft. */
   project: Project | null;
-  workspaceId: string;
+  accountId: string;
   credentials: Credential[];
   hosts: Array<{ id: string; name: string }>;
   hostsLoading: boolean;
@@ -38,7 +38,7 @@ interface ProjectDetailPanelProps {
 
 export default function ProjectDetailPanel({
   project,
-  workspaceId,
+  accountId,
   credentials,
   hosts,
   hostsLoading,
@@ -119,7 +119,7 @@ export default function ProjectDetailPanel({
       <div style={{ display: tab === 'settings' ? 'block' : 'none' }}>
         <ProjectForm
           project={project}
-          workspaceId={workspaceId}
+          accountId={accountId}
           credentials={credentials}
           hosts={hosts}
           onSaved={onSaved}
@@ -142,7 +142,7 @@ export default function ProjectDetailPanel({
         />
       )}
       {project && (tab === 'branches' || tab === 'history' || tab === 'files') && (
-        <ProjectRepoTabs project={project} workspaceId={workspaceId} tab={tab} />
+        <ProjectRepoTabs project={project} accountId={accountId} tab={tab} />
       )}
     </div>
   );

@@ -10,7 +10,7 @@ import { QaScenarioModule } from '../qa/qa-scenario.module';
 import { BuildsModule } from '../builds/build-artifact.module';
 import { DeploymentsModule } from '../deployments/deployment.module';
 import { SecurityProfileModule } from '../security/security-profile.module';
-import { WorkspaceScheduleModule } from '../workspace-schedule/workspace-schedule.module';
+import { WorkspaceScheduleModule } from '../automation-schedule/automation-schedule.module';
 import { WorkflowFunctionsModule } from '../workflow-functions/workflow-functions.module';
 import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
 import { OutreachModule } from '../outreach/outreach.module';
@@ -35,7 +35,7 @@ import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
     DeploymentsModule,
     // Provides SecurityProfileService + SecurityRunService for the security-tools MCP tools.
     SecurityProfileModule,
-    // Provides WorkspaceScheduleService for the workspace-schedule MCP tools (ticket 769eb260).
+    // Provides WorkspaceScheduleService for the automation-schedule MCP tools (ticket 769eb260).
     WorkspaceScheduleModule,
     WorkflowFunctionsModule,
     ArtifactRefsModule,

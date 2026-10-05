@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_BATCH_SEQ_PORT || '0';
@@ -29,7 +29,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function scenarioPayload(wsId, agentId, name) {
   return {
-    workspace_id: wsId,
+    account_id: wsId,
     target_runtime: agentId,
     name,
     qa_driver: 'http-api',
@@ -42,9 +42,9 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'qa-batch');
+  const ws = await createAccount(app, getDataSourceToken, 'qa-batch');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-batch-runner' });
-  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
+  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { accountId: ws.id, label: 'qa' });
 
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
@@ -61,14 +61,14 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   const [s0, s1, s2] = scenarios;
 
   const runCount = async (scenarioId) => {
-    const runs = await mcp.callTool('list_qa_runs', { scenario_id: scenarioId, workspace_id: ws.id });
+    const runs = await mcp.callTool('list_qa_runs', { scenario_id: scenarioId, account_id: ws.id });
     return Array.isArray(runs) ? runs : [];
   };
 
   // ── 1. start_qa_batch dispatches ONLY scenario 0 ─────────────────────────────
   step('start_qa_batch — only the first scenario dispatches');
   const batch0 = await mcp.callTool('start_qa_batch', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     scenario_ids: [s0.id, s1.id, s2.id],
   });
   assert.ok(!batch0?.isError && batch0.id, `start_qa_batch failed: ${JSON.stringify(batch0)}`);
@@ -82,16 +82,16 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   assert.equal((await runCount(s1.id)).length, 0, 'scenario 1 NOT dispatched yet');
   assert.equal((await runCount(s2.id)).length, 0, 'scenario 2 NOT dispatched yet');
   const run0 = batch0.run_ids[0];
-  const firstRun = await mcp.callTool('get_qa_run', { run_id: run0, workspace_id: ws.id });
+  const firstRun = await mcp.callTool('get_qa_run', { run_id: run0, account_id: ws.id });
   assert.equal(firstRun.batch_id, batch0.id, 'run 0 is stamped with its batch');
-  assert.equal(firstRun.workspace_id, ws.id, 'batch Workspace is the run\'s execution context');
+  assert.equal(firstRun.account_id, ws.id, 'batch Account is the run\'s execution context');
 
   // ── 2. A failed run still advances to the next scenario ──────────────────────
   step('complete run 0 as FAILED → batch advances to scenario 1 (chain not broken)');
-  const c0 = await mcp.callTool('complete_qa_run', { run_id: run0, workspace_id: ws.id, status: 'failed', summary: 's0 failed' });
+  const c0 = await mcp.callTool('complete_qa_run', { run_id: run0, account_id: ws.id, status: 'failed', summary: 's0 failed' });
   assert.ok(!c0?.isError, `complete run0: ${JSON.stringify(c0)}`);
 
-  let batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  let batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.current_index, 1, 'cursor advanced to 1 despite the failure');
   assert.equal(batch.status, 'running');
   assert.equal(batch.failed, 1, 'failure tallied');
@@ -103,9 +103,9 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
 
   // ── 3. Idempotency — re-finalizing run 0 must not double-dispatch ────────────
   step('re-complete run 0 → no double-dispatch, no double-count (idempotent guard)');
-  const c0again = await mcp.callTool('complete_qa_run', { run_id: run0, workspace_id: ws.id, status: 'failed', summary: 's0 failed again' });
+  const c0again = await mcp.callTool('complete_qa_run', { run_id: run0, account_id: ws.id, status: 'failed', summary: 's0 failed again' });
   assert.ok(!c0again?.isError, `re-complete run0: ${JSON.stringify(c0again)}`);
-  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.current_index, 1, 'cursor unchanged after re-finalize of an already-advanced run');
   assert.equal(batch.failed, 1, 'failure count NOT double-incremented');
   assert.equal(batch.run_ids.length, 2, 'no extra run dispatched');
@@ -114,8 +114,8 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
 
   // ── Advance through the rest ─────────────────────────────────────────────────
   step('complete run 1 as PASSED → scenario 2 dispatches');
-  await mcp.callTool('complete_qa_run', { run_id: run1, workspace_id: ws.id, status: 'passed', summary: 's1 ok' });
-  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  await mcp.callTool('complete_qa_run', { run_id: run1, account_id: ws.id, status: 'passed', summary: 's1 ok' });
+  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.current_index, 2, 'cursor at last index');
   assert.equal(batch.passed, 1);
   assert.equal(batch.run_ids.length, 3, 'scenario 2 dispatched');
@@ -123,8 +123,8 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
   const run2 = batch.run_ids[2];
 
   step('complete run 2 as PASSED → batch is done with the right rollup');
-  await mcp.callTool('complete_qa_run', { run_id: run2, workspace_id: ws.id, status: 'passed', summary: 's2 ok' });
-  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  await mcp.callTool('complete_qa_run', { run_id: run2, account_id: ws.id, status: 'passed', summary: 's2 ok' });
+  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.status, 'done', 'batch terminal after last scenario');
   assert.equal(batch.passed, 2, 'two passed');
   assert.equal(batch.failed, 1, 'one failed');
@@ -133,8 +133,8 @@ test('QA batch: sequential dispatch, failure-continue, idempotent advance', asyn
 
   // Re-finalize after done — must remain a no-op (status guard).
   step('re-complete a run after the batch is done → still done, rollup unchanged');
-  await mcp.callTool('complete_qa_run', { run_id: run2, workspace_id: ws.id, status: 'passed', summary: 's2 again' });
-  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  await mcp.callTool('complete_qa_run', { run_id: run2, account_id: ws.id, status: 'passed', summary: 's2 again' });
+  batch = await mcp.callTool('get_qa_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.status, 'done');
   assert.equal(batch.passed, 2, 'rollup frozen after done');
   assert.equal(batch.run_ids.length, 3, 'no extra dispatch after done');

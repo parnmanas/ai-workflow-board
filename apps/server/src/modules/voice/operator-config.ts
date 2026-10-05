@@ -38,7 +38,7 @@ export interface OperatorEntry {
    * 이 세션을 다루던 워크스페이스 — 서버가 대신 프롬프트를 보낼 때(작업 보고) 그 워크스페이스의 CLI 설정
    * (credential 바인딩·기억된 설정)으로 세션을 연다. 등록 때 화면의 워크스페이스로 정해진다.
    */
-  workspace_id: string;
+  account_id: string;
   /** 사용자가 이 operator 와 마지막으로 대화한 시각 — 보고를 받을 operator 를 고르는 데 쓴다(같은 호스트가 없을 때). */
   last_conversation_at: string;
   created_at: string;
@@ -89,7 +89,7 @@ function sanitizeEntry(raw: any): OperatorEntry | null {
     session_id: str(raw?.session_id, 256),
     cwd: str(raw?.cwd, 1024),
     title: str(raw?.title, 256),
-    workspace_id: str(raw?.workspace_id, 128),
+    account_id: str(raw?.account_id, 128),
     last_conversation_at: str(raw?.last_conversation_at, 64),
     created_at: str(raw?.created_at, 64),
     created_by: str(raw?.created_by, 128),
@@ -143,7 +143,7 @@ export function createOperatorEntry(body: any, createdBy: string, list: Operator
     session_id,
     cwd: str(body?.cwd, 1024),
     title: str(body?.title, 256),
-    workspace_id: str(body?.workspace_id, 128),
+    account_id: str(body?.account_id, 128),
     last_conversation_at: '',
     created_at: at,
     created_by: createdBy,
@@ -297,7 +297,7 @@ export interface OperatorConnectionAuth {
   source: string;
   agentId?: string;
   scope?: string;
-  workspaceId?: string;
+  accountId?: string;
 }
 
 /**

@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
 } from '../helpers/fixtures.mjs';
@@ -38,7 +38,7 @@ const EXPECTED_TOOLS = [
   'get_project',
   'save_project',
   'list_repo_branches',
-  'list_workspaces',
+  'list_accounts',
   // Ticket 48d14fff — prerequisite ("blocked-by ticket") surface.
   'add_ticket_prerequisites',
   'remove_ticket_prerequisite',
@@ -92,12 +92,12 @@ const EXPECTED_TOOLS = [
   'delete_security_schedule',
   'run_security_schedule_now',
   // Ticket 769eb260 — workspace scheduler (general-purpose agent-task trigger).
-  'list_workspace_schedules',
-  'get_workspace_schedule',
-  'create_workspace_schedule',
-  'update_workspace_schedule',
-  'delete_workspace_schedule',
-  'run_workspace_schedule_now',
+  'list_automation_schedules',
+  'get_automation_schedule',
+  'create_automation_schedule',
+  'update_automation_schedule',
+  'delete_automation_schedule',
+  'run_automation_schedule_now',
   // Ticket 80d52250 — Build & Artifact Registry (commit↔산출물 서버 권위 추적).
   'get_latest_artifact',
   'register_build_artifact',
@@ -143,10 +143,10 @@ test('MCP initialize + tools/list returns expected AWB tool surface', async (t) 
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'mcp-surface');
+  const ws = await createAccount(app, getDataSourceToken, 'mcp-surface');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'inspector',
   });
 

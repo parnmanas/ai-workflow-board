@@ -5,7 +5,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 
 interface Props {
-  workspaceId?: string;
+  accountId?: string;
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
@@ -87,10 +87,10 @@ const button = (primary = false): React.CSSProperties => ({
 });
 
 export default function FunctionManager({
-  workspaceId,
+  accountId,
   globalMode = false,
   catalogMode = false,
-  createScope = 'workspace',
+  createScope = 'account',
   allScopes = false,
   canManageGlobal = false,
 }: Props) {
@@ -111,8 +111,8 @@ export default function FunctionManager({
     setLoading(true);
     try {
       const [functions, history] = await Promise.all([
-        api.listFunctions(globalMode ? null : workspaceId, catalogMode),
-        !globalMode && workspaceId ? api.listFunctionRuns(workspaceId, { limit: 30 }) : Promise.resolve([]),
+        api.listFunctions(globalMode ? null : accountId, catalogMode),
+        !globalMode && accountId ? api.listFunctionRuns(accountId, { limit: 30 }) : Promise.resolve([]),
       ]);
       setRows(functions);
       setRuns(history);
@@ -121,7 +121,7 @@ export default function FunctionManager({
     } finally {
       setLoading(false);
     }
-  }, [globalMode, catalogMode, workspaceId, allScopes, showToast]);
+  }, [globalMode, catalogMode, accountId, allScopes, showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -141,7 +141,7 @@ export default function FunctionManager({
     setEditing(null);
     setCreating(true);
     if (source) {
-      setDraft({ ...draftFrom(source), key: source.key, name: `${source.name} (workspace override)` });
+      setDraft({ ...draftFrom(source), key: source.key, name: `${source.name} (account override)` });
     } else {
       setDraft({ ...emptyDraft });
     }
@@ -178,7 +178,7 @@ export default function FunctionManager({
     const effectiveScope = editing?.scope || (globalMode ? 'global' : createScope);
     const payload = {
       scope: effectiveScope,
-      workspace_id: effectiveScope === 'global' ? null : workspaceId,
+      account_id: effectiveScope === 'global' ? null : accountId,
       ...draft,
       input_schema: inputSchema,
       output_schema: outputSchema,
@@ -209,7 +209,7 @@ export default function FunctionManager({
   };
 
   const run = async (row: WorkflowFunction) => {
-    if (!workspaceId) return;
+    if (!accountId) return;
     let inputs: Record<string, any>;
     try {
       inputs = JSON.parse(runInputs || '{}');
@@ -220,7 +220,7 @@ export default function FunctionManager({
     setRunningId(row.id);
     try {
       const result = await api.runFunction(row.id, {
-        workspace_id: workspaceId,
+        account_id: accountId,
         ticket_id: ticketId || undefined,
         inputs,
         idempotency_key: idempotencyKey || undefined,
@@ -240,8 +240,8 @@ export default function FunctionManager({
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
           {globalMode
-            ? 'Global definitions have workspace_id = NULL and are inherited by every workspace.'
-            : 'Workspace definitions override inherited Global Functions when their key is the same.'}
+            ? 'Global definitions are inherited by every account.'
+            : 'Account definitions override inherited Global Functions when their key is the same.'}
         </div>
         <button style={button(true)} onClick={() => startCreate()}>New Function</button>
       </div>
@@ -303,7 +303,7 @@ export default function FunctionManager({
         ) : rows.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted }}>No Functions defined.</div>
         ) : rows.map(row => {
-          const inherited = !globalMode && row.workspace_id === null && !canManageGlobal;
+          const inherited = !globalMode && row.account_id === null && !canManageGlobal;
           return (
             <div key={row.id} style={{ background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`, borderRadius: 8, padding: 14, display: 'grid', gridTemplateColumns: 'minmax(240px, 1fr) auto', gap: 14 }}>
               <div>

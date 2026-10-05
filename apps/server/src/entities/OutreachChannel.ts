@@ -5,7 +5,7 @@ export type OutreachPublishPolicy = 'auto' | 'approval' | 'off';
 export type OutreachDeployPostMode = 'new_post' | 'reply_to_existing' | 'auto' | 'off';
 
 /**
- * OutreachChannel — workspace-scoped registration of an external feedback
+ * OutreachChannel — account-scoped registration of an external feedback
  * channel (a Reddit subreddit list, or a GitHub repo) that OutreachPollingService
  * sweeps periodically. Each due sweep calls OutreachIngestService.pollChannel,
  * which fetches inbound items via an OutreachConnector (ticket 2500fea3) and
@@ -20,20 +20,20 @@ export type OutreachDeployPostMode = 'new_post' | 'reply_to_existing' | 'auto' |
  * `credential_id` is a bare FK-less pointer into the shared Credential table
  * (same pattern as Resource.credential_id) — resolved via outreach-credential.ts's
  * `resolveOutreachCredential`, which mirrors git-branches.ts's `resolveGitCredential`
- * workspace-scope guard (global credential OR same-workspace; a mismatched
+ * account-scope guard (global credential OR same-workspace; a mismatched
  * workspace throws rather than silently resolving to no token).
  *
  * Tickets filed from a channel get `target_tags` (plus the provenance tags the
  * ingest adds) and `target_project_id`; both optional.
  */
 @Entity('outreach_channels')
-@Index(['workspace_id', 'enabled'])
+@Index(['account_id', 'enabled'])
 export class OutreachChannel {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   kind: OutreachChannelKind;

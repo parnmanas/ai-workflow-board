@@ -1,10 +1,10 @@
 // Credentials are the one catalog surface where an existing row's scope is
-// switchable (global ↔ Workspace) instead of 400-ing. The picker only appears
+// switchable (global ↔ Account) instead of 400-ing. The picker only appears
 // on an existing credential — creation scope comes from the page-level
-// "Workspace for new item" select in WorkspaceManagementPage — and it is
+// "Account for new item" select in AccountManagementPage — and it is
 // read-only for anyone without admin.global_credentials.
 //
-// The gate matters twice over: WorkspaceManagementPage used to derive it from
+// The gate matters twice over: AccountManagementPage used to derive it from
 // admin.access, which the server never checks, so the UI and the server
 // disagreed in both directions.
 
@@ -17,17 +17,17 @@ import { api } from '../src/api.ts';
 import CredentialManager from '../src/components/admin/CredentialManager.tsx';
 
 const pageSource = fs.readFileSync(
-  new URL('../src/components/WorkspaceManagementPage.tsx', import.meta.url),
+  new URL('../src/components/AccountManagementPage.tsx', import.meta.url),
   'utf8',
 );
 
 function cred(overrides) {
   return {
     id: 'credential-ws',
-    workspace_id: 'workspace-1',
+    account_id: 'workspace-1',
     board_id: null,
-    scope: 'workspace',
-    name: 'Workspace PAT',
+    scope: 'account',
+    name: 'Account PAT',
     description: '',
     provider: 'github',
     credential_fields: { token: 'ghp••••tail' },
@@ -40,7 +40,7 @@ function cred(overrides) {
 
 const globalCred = cred({
   id: 'credential-global',
-  workspace_id: null,
+  account_id: null,
   scope: 'global',
   name: 'Shared PAT',
 });
@@ -74,13 +74,13 @@ async function mountManager(t, { credentials, ...props }) {
   const originals = { getMe: api.getMe, getSetupStatus: api.getSetupStatus, listCredentials: api.listCredentials, updateCredential: api.updateCredential };
   api.getMe = async () => ({
     id: 'admin-1', name: 'Admin', email: 'admin@example.test', role: 'admin', status: 'active',
-    permissions: [], workspaces: [{ id: 'workspace-1', name: 'Workspace One', slug: null, relations: [] }],
+    permissions: [], accounts: [{ id: 'workspace-1', name: 'Account One', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => credentials;
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { workspaceId: 'workspace-1', workspaceName: 'Workspace One', ...props }),
+    React.createElement(CredentialManager, { accountId: 'workspace-1', accountName: 'Account One', ...props }),
   );
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
@@ -96,18 +96,18 @@ function openEdit(container, rowText) {
   click(edit[0]);
 }
 
-test('an admin can widen a Workspace credential to global from the Edit dialog', async (t) => {
+test('an admin can widen a Account credential to global from the Edit dialog', async (t) => {
   const { container } = await mountManager(t, { credentials: [cred({})], canManageGlobal: true });
   const calls = [];
   api.updateCredential = async (id, body) => { calls.push({ id, body }); return cred({}); };
 
-  openEdit(container, 'Workspace PAT');
+  openEdit(container, 'Account PAT');
   const select = scopeSelect(container);
   assert.ok(select, 'the Edit dialog must expose a scope picker');
   assert.equal(select.disabled, false);
-  assert.equal(select.value, 'workspace');
-  // The destination Workspace is named, not called "Current Workspace".
-  assert.ok([...select.options].some((o) => o.textContent.includes('Workspace One')));
+  assert.equal(select.value, 'account');
+  // The destination Account is named, not called "Current Account".
+  assert.ok([...select.options].some((o) => o.textContent.includes('Account One')));
 
   selectOption(select, 'global');
   await act(async () => { click(buttonsByText(container, 'Save Credential')[0]); });
@@ -115,10 +115,10 @@ test('an admin can widen a Workspace credential to global from the Edit dialog',
   assert.equal(calls.length, 1);
   assert.equal(calls[0].id, 'credential-ws');
   assert.equal(calls[0].body.scope, 'global');
-  assert.equal(calls[0].body.workspace_id, 'workspace-1');
+  assert.equal(calls[0].body.account_id, 'workspace-1');
 });
 
-test('an admin narrowing a global credential sends the viewed Workspace as the destination', async (t) => {
+test('an admin narrowing a global credential sends the viewed Account as the destination', async (t) => {
   const { container } = await mountManager(t, { credentials: [globalCred], canManageGlobal: true });
   const calls = [];
   api.updateCredential = async (id, body) => { calls.push({ id, body }); return globalCred; };
@@ -126,15 +126,15 @@ test('an admin narrowing a global credential sends the viewed Workspace as the d
   openEdit(container, 'Shared PAT');
   const select = scopeSelect(container);
   assert.equal(select.value, 'global');
-  selectOption(select, 'workspace');
+  selectOption(select, 'account');
   await act(async () => { click(buttonsByText(container, 'Save Credential')[0]); });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].body.scope, 'workspace');
+  assert.equal(calls[0].body.scope, 'account');
   assert.equal(
-    calls[0].body.workspace_id,
+    calls[0].body.account_id,
     'workspace-1',
-    'a global credential has no workspace_id of its own — the viewed Workspace is the destination',
+    'a global credential has no account_id of its own — the viewed Account is the destination',
   );
 });
 
@@ -143,10 +143,10 @@ test('a scope-unchanged save keeps sending the credential’s own scope', async 
   const calls = [];
   api.updateCredential = async (id, body) => { calls.push({ id, body }); return cred({}); };
 
-  openEdit(container, 'Workspace PAT');
+  openEdit(container, 'Account PAT');
   await act(async () => { click(buttonsByText(container, 'Save Credential')[0]); });
-  assert.equal(calls[0].body.scope, 'workspace');
-  assert.equal(calls[0].body.workspace_id, 'workspace-1');
+  assert.equal(calls[0].body.scope, 'account');
+  assert.equal(calls[0].body.account_id, 'workspace-1');
 });
 
 test('without global permission the picker is read-only and inherited globals stay uneditable', async (t) => {
@@ -159,9 +159,9 @@ test('without global permission the picker is read-only and inherited globals st
   assert.match(globalRow.textContent, /Inherited \(read-only\)/);
   assert.equal(buttonsByText(globalRow, 'Edit').length, 0);
 
-  openEdit(container, 'Workspace PAT');
+  openEdit(container, 'Account PAT');
   const select = scopeSelect(container);
-  assert.ok(select, 'the row still states which Workspace owns the credential');
+  assert.ok(select, 'the row still states which Account owns the credential');
   assert.equal(select.disabled, true, 'only an admin may move a credential between scopes');
 });
 

@@ -82,12 +82,12 @@ function roomMemberFilter(envelope: StreamEvent<any>, identity: SubscriberIdenti
  * 보다가 읽기·발화 403 을 맞는다.
  *
  * 워크스페이스 대조를 **수신 측**이 하는 이유: 이 스택에서 `users` 는 워크스페이스에
- * 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다 — `requested_workspace_id` 는 가입 시
+ * 소속되지 않고(User 엔티티에 멤버십 컬럼이 없다 — `requested_account_id` 는 가입 시
  * 선택값일 뿐이다), SSE identity 에도 워크스페이스가 없다(events.controller 는 boardId 만
  * 받는다). 그래서 서버 필터가 동기적으로 판정할 근거가 없다. 대신 payload 에
- * `workspace_id` 를 실어 보내고 수신 측이 지금 보고 있는 워크스페이스와 대조한다 —
+ * `account_id` 를 실어 보내고 수신 측이 지금 보고 있는 워크스페이스와 대조한다 —
  * `subagent_registered` / `subagent_log` / `subagent_ended` 가 이미 쓰는 방식과 같다
- * ("Workspace scoping happens at the page (REST) level; SSE filter only checks the
+ * ("Account scoping happens at the page (REST) level; SSE filter only checks the
  * identity kind"). 에이전트에게는 보내지 않는다: 이 옵션은 사람의 방 목록 가시성에만
  * 관계하고, 에이전트의 발신 규약은 이 값과 무관하게 참여자 행을 그대로 요구한다.
  *
@@ -140,17 +140,17 @@ export const EVENT_TYPES: EventDefinition[] = [
         previous_column_name: isStatusMove ? label(activity.old_value || '') : '',
         new_column_name: isStatusMove ? label(activity.new_value || '') : '',
       };
-      return { payload, scope: { workspace_id: snapshot.workspace_id } };
+      return { payload, scope: { account_id: snapshot.account_id } };
     },
-    // Workspace scoping happens at the page (REST) level — the flattened frame
-    // carries workspace_id for the client to compare; every subscriber gets it.
+    // Account scoping happens at the page (REST) level — the flattened frame
+    // carries account_id for the client to compare; every subscriber gets it.
     filter: () => true,
     // Runtime Hosts read ticket_id/action/field_changed/actor_name at the top level.
     flatten: (env) => {
       const p = env.payload as BoardUpdatePayload;
       return {
         board_id: '',
-        workspace_id: env.scope.workspace_id || '',
+        account_id: env.scope.account_id || '',
         event_type: 'board_update',
         ticket_id: p.ticket_id,
         repository_resource_id: p.repository_resource_id || '',
@@ -229,7 +229,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         ticket_prompt: event.ticket_prompt || '',
         trigger_source: event.trigger_source || '',
         status: event.status || undefined,
-        workspace_id: event.workspace_id || undefined,
+        account_id: event.account_id || undefined,
         project: event.project ?? null,
         current_column_id: event.current_column_id || '',
         current_column_name: event.current_column_name || '',
@@ -305,7 +305,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         // Board-less model (docs/tickets.md): the status the column fields
         // below are projected from, the workspace, and the project summary.
         status: p.status || '',
-        workspace_id: p.workspace_id || '',
+        account_id: p.account_id || '',
         project: p.project ?? null,
         current_column_id: p.current_column_id || '',
         current_column_name: p.current_column_name || '',
@@ -522,11 +522,11 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: ChatRoomMessagePayload = {
         room_id: event.room_id,
         // Room membership — not workspace — decides SSE delivery, so a
-        // multi-workspace user sees both workspaces' room traffic on one
+        // multi-workspace user sees both accounts' room traffic on one
         // stream. Carry the workspace so the web UI can scope its per-
         // workspace unread badge. RoomMessagingService already stamps it on
         // every emit; this map() used to drop it on the floor.
-        workspace_id: event.workspace_id || undefined,
+        account_id: event.account_id || undefined,
         message_id: event.message_id,
         sender_type: event.sender_type,
         sender_id: event.sender_id,
@@ -631,7 +631,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         // 같은 이벤트에만 실린다. 이 update type 은 워크스페이스 전체로 나가므로
         // 수신 측이 "지금 보고 있는 워크스페이스의 일인가"를 이 값으로 판정한다
         // (chatRoomUpdateFilter 주석 참조).
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         // B3: read-event reader identity + marker, populated only when present.
         participant_type: event.participant_type,
         last_read_at: event.last_read_at,
@@ -645,7 +645,7 @@ export const EVENT_TYPES: EventDefinition[] = [
           room_id: event.room_id,
           member_ids: event.member_ids,
           agent_member_ids: event.agent_member_ids,
-          workspace_id: event.workspace_id,
+          account_id: event.account_id,
         },
       };
     },
@@ -726,7 +726,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: CommentMentionPayload = {
         ticket_id: event.ticket_id,
         comment_id: event.comment_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         agent_id: event.agent_id,
         // P4c-4: spec-direct 멘션 스냅샷 (없으면 생략).
         runtime: event.runtime ?? undefined,
@@ -757,7 +757,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { agent_id: event.agent_id, workspace_id: event.workspace_id },
+        scope: { agent_id: event.agent_id, account_id: event.account_id },
         timestamp: event.timestamp,
       };
     },
@@ -823,7 +823,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: UserMentionPayload = {
         mention_id: event.mention_id,
         user_id: event.user_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         source_type: event.source_type,
         source_id: event.source_id,
         ticket_id: event.ticket_id ?? null,
@@ -836,7 +836,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { user_id: event.user_id, workspace_id: event.workspace_id },
+        scope: { user_id: event.user_id, account_id: event.account_id },
         timestamp: event.created_at,
       };
     },
@@ -875,13 +875,13 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: TicketReadsClearedPayload = {
         user_id: event.user_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         updated: event.updated,
         read_at: event.read_at,
       };
       return {
         payload,
-        scope: { user_id: event.user_id, workspace_id: event.workspace_id },
+        scope: { user_id: event.user_id, account_id: event.account_id },
         timestamp: event.read_at,
       };
     },
@@ -890,7 +890,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       return env.scope.user_id === identity.userId;
     },
     // user_mention과 동일하게 flat 유지 — NotificationContext가 payload
-    // 필드(user_id/workspace_id/…)를 최상위에서 그대로 읽는다.
+    // 필드(user_id/account_id/…)를 최상위에서 그대로 읽는다.
     flatten: (env) => ({
       event_type: 'ticket_reads_cleared',
       ...(env.payload as object),
@@ -908,12 +908,12 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: TicketPresencePayload = {
         ticket_id: event.ticket_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         viewers: Array.isArray(event.viewers) ? event.viewers : [],
       };
       return {
         payload,
-        scope: { ticket_id: event.ticket_id, workspace_id: event.workspace_id },
+        scope: { ticket_id: event.ticket_id, account_id: event.account_id },
         timestamp: event.timestamp,
       };
     },
@@ -934,7 +934,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: CommentTypingPayload = {
         ticket_id: event.ticket_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         actor_type: event.actor_type === 'agent' ? 'agent' : 'user',
         actor_id: event.actor_id,
         actor_name: event.actor_name || '',
@@ -943,7 +943,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { ticket_id: event.ticket_id, workspace_id: event.workspace_id },
+        scope: { ticket_id: event.ticket_id, account_id: event.account_id },
         timestamp: event.timestamp,
       };
     },
@@ -1013,7 +1013,7 @@ export const EVENT_TYPES: EventDefinition[] = [
   },
 
   // ───────── subagent_registered / subagent_log / subagent_ended ─────────
-  // Workspace-scoped fan-out: every user with an SSE stream subscribed to the
+  // Account-scoped fan-out: every user with an SSE stream subscribed to the
   // workspace sees every subagent on every agent machine in that workspace.
   // No agent-side filter — the events are observability traffic the agents
   // don't need to consume themselves. UI does the rendering.
@@ -1024,7 +1024,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: SubagentRegisteredPayload = {
         subagent_id: event.subagent_id,
         agent_id: event.agent_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         kind: event.kind,
         session_key: event.session_key || '',
         pid: event.pid || 0,
@@ -1034,9 +1034,9 @@ export const EVENT_TYPES: EventDefinition[] = [
         ticket_title: event.ticket_title || undefined,
         role: event.role || undefined,
       };
-      return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.started_at };
+      return { payload, scope: { account_id: event.account_id }, timestamp: payload.started_at };
     },
-    // Workspace scoping happens at the page (REST) level; SSE filter only
+    // Account scoping happens at the page (REST) level; SSE filter only
     // restricts to user subscribers (agents don't need this traffic).
     filter: (env, identity) => identity.type === 'user',
     flatten: (env) => ({ event_type: 'subagent_registered', ...(env.payload as object), timestamp: env.timestamp }),
@@ -1048,14 +1048,14 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: SubagentLogPayload = {
         subagent_id: event.subagent_id,
         agent_id: event.agent_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         direction: event.direction,
         line: event.line,
         ts: event.ts || new Date().toISOString(),
       };
-      return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.ts };
+      return { payload, scope: { account_id: event.account_id }, timestamp: payload.ts };
     },
-    // Workspace scoping happens at the page (REST) level; SSE filter only
+    // Account scoping happens at the page (REST) level; SSE filter only
     // restricts to user subscribers (agents don't need this traffic).
     filter: (env, identity) => identity.type === 'user',
     flatten: (env) => ({ event_type: 'subagent_log', ...(env.payload as object), timestamp: env.timestamp }),
@@ -1067,23 +1067,23 @@ export const EVENT_TYPES: EventDefinition[] = [
       const payload: SubagentEndedPayload = {
         subagent_id: event.subagent_id,
         agent_id: event.agent_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         exit_code: event.exit_code ?? null,
         signal: event.signal ?? null,
         duration_ms: event.duration_ms || 0,
         ended_at: event.ended_at || new Date().toISOString(),
         expires_at: event.expires_at,
       };
-      return { payload, scope: { workspace_id: event.workspace_id }, timestamp: payload.ended_at };
+      return { payload, scope: { account_id: event.account_id }, timestamp: payload.ended_at };
     },
-    // Workspace scoping happens at the page (REST) level; SSE filter only
+    // Account scoping happens at the page (REST) level; SSE filter only
     // restricts to user subscribers (agents don't need this traffic).
     filter: (env, identity) => identity.type === 'user',
     flatten: (env) => ({ event_type: 'subagent_ended', ...(env.payload as object), timestamp: env.timestamp }),
   },
 
   // ───────── agent_instance_update ─────────
-  // Runtime Host presence registry change. Workspace-
+  // Runtime Host presence registry change. Account-
   // scoped so the admin UI for one workspace doesn't see every other tenant's
   // instance traffic; agent subscribers don't need this (it's pure UI fuel for
   // the human-side dashboard).
@@ -1097,7 +1097,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         instance: {
           instance_id: String(inst.instance_id || ''),
           agent_id: String(inst.agent_id || ''),
-          workspace_id: typeof inst.workspace_id === 'string' ? inst.workspace_id : null,
+          account_id: typeof inst.account_id === 'string' ? inst.account_id : null,
           mode: 'manager',
           hostname: String(inst.hostname || 'unknown'),
           plugin_version: String(inst.plugin_version || 'unknown'),
@@ -1147,7 +1147,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { workspace_id: payload.instance.workspace_id || undefined },
+        scope: { account_id: payload.instance.account_id || undefined },
         timestamp: event?.timestamp || payload.instance.last_seen_at,
       };
     },
@@ -1209,7 +1209,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: ConsensusUpdatePayload = {
         ticket_id: event.ticket_id,
-        workspace_id: event.workspace_id || '',
+        account_id: event.account_id || '',
         proposal_id: event.proposal_id ?? null,
         satisfied: !!event.satisfied,
         required: Number.isFinite(event.required) ? Number(event.required) : 0,
@@ -1223,7 +1223,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { workspace_id: event.workspace_id || undefined, ticket_id: event.ticket_id },
+        scope: { account_id: event.account_id || undefined, ticket_id: event.ticket_id },
         timestamp: event.timestamp,
       };
     },
@@ -1245,7 +1245,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: OrchestrationUpdatePayload = {
         mission_id: event.mission_id,
-        workspace_id: event.workspace_id || '',
+        account_id: event.account_id || '',
         team_id: event.team_id || '',
         title: event.title || '',
         status: event.status || '',
@@ -1268,7 +1268,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { workspace_id: event.workspace_id || undefined },
+        scope: { account_id: event.account_id || undefined },
         timestamp: event.timestamp,
       };
     },
@@ -1292,7 +1292,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: CliLoginProgressPayload = {
         session_id: event.session_id || '',
-        workspace_id: event.workspace_id || '',
+        account_id: event.account_id || '',
         status: event.status,
         verification_url: event.verification_url ?? null,
         user_code: event.user_code ?? null,
@@ -1302,7 +1302,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { workspace_id: event.workspace_id || undefined, user_id: event.triggered_by_id || undefined },
+        scope: { account_id: event.account_id || undefined, user_id: event.triggered_by_id || undefined },
         timestamp: event.timestamp,
       };
     },
@@ -1326,7 +1326,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     emitterEvent: 'ontology_graph_progress',
     map(event: any) {
       const payload: OntologyGraphProgressPayload = {
-        workspace_id: event.workspace_id || '',
+        account_id: event.account_id || '',
         graph_id: event.graph_id || '',
         resource_id: event.resource_id || '',
         job_id: event.job_id || '',
@@ -1341,7 +1341,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { workspace_id: event.workspace_id || undefined },
+        scope: { account_id: event.account_id || undefined },
         timestamp: event.timestamp,
       };
     },
@@ -1362,7 +1362,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: AgentSessionRequestPayload = {
         manager_id: event.manager_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         cli: event.cli,
         op: event.op,
         request_id: event.request_id,
@@ -1455,7 +1455,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: TerminalRequestPayload = {
         manager_id: event.manager_id,
-        workspace_id: event.workspace_id,
+        account_id: event.account_id,
         op: event.op,
         request_id: event.request_id,
         terminal_id: event.terminal_id ?? null,

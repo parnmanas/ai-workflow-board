@@ -9,7 +9,7 @@ import ResolvedArtifactRef from '../src/components/chat/ResolvedArtifactRef.tsx'
 const id = '44444444-4444-4444-8444-444444444444';
 
 async function renderWith(result) {
-  const dom = new JSDOM('<div id="root"></div>', { url: 'https://awb.test/ws/workspace-1/chat' });
+  const dom = new JSDOM('<div id="root"></div>', { url: 'https://awb.test/chat' });
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
   api.resolveArtifactRefs = async () => [result];
@@ -26,18 +26,18 @@ async function renderWith(result) {
 test('uses canonical resolver label and exact deep link, not the claimed label', async () => {
   const { dom, root } = await renderWith({
     type: 'action', id, available: true, label: 'Canonical action',
-    deepLink: `/ws/workspace-1/actions?artifact=${id}`,
-    workspaceName: 'Platform',
+    deepLink: `/actions?artifact=${id}`,
+    accountName: 'Platform',
   });
   const anchor = dom.window.document.querySelector('a');
   assert.ok(anchor);
   assert.equal(anchor.textContent.trim(), '▶️ Canonical action · Platform');
-  assert.equal(anchor.getAttribute('href'), `/ws/workspace-1/actions?artifact=${id}`);
+  assert.equal(anchor.getAttribute('href'), `/actions?artifact=${id}`);
   assert.doesNotMatch(anchor.textContent, /Forged/);
   root.unmount();
 });
 
-for (const reason of ['not_found', 'workspace_access_denied']) {
+for (const reason of ['not_found', 'account_access_denied']) {
   test(`${reason} renders a disabled full-id fallback`, async () => {
     const { dom, root } = await renderWith({
       type: 'action', id, available: false, label: 'action', deepLink: null, reason,
@@ -57,7 +57,7 @@ for (const reason of ['not_found', 'workspace_access_denied']) {
 test('no_detail_surface renders type, canonical name, context, and unavailable state', async () => {
   const { dom, root } = await renderWith({
     type: 'action', id, available: false, label: 'Canonical action', deepLink: null,
-    workspaceName: 'Platform', reason: 'no_detail_surface',
+    accountName: 'Platform', reason: 'no_detail_surface',
   });
   assert.equal(
       Boolean(dom.window.document.querySelector('a')),

@@ -1,3 +1,4 @@
+import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../api';
@@ -37,7 +38,9 @@ import { missionStyle, progressPercent } from './status';
  * the mission is non-terminal, to cover a dropped SSE frame.
  */
 export default function MissionDetailPage() {
-  const { wsId = '', missionId = '' } = useParams<{ wsId: string; missionId: string }>();
+  const { missionId = '' } = useParams<{ missionId: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const navigate = useNavigate();
   const { showToast } = useToast();
 
@@ -130,8 +133,8 @@ export default function MissionDetailPage() {
       <div style={{ padding: 24 }}>
         <EmptyState
           title="Mission not found"
-          description="It may have been deleted, or it belongs to another workspace."
-          action={<Button variant="secondary" onClick={() => navigate(`/ws/${wsId}/orchestration`)}>Back to missions</Button>}
+          description="It may have been deleted, or you may no longer have access."
+          action={<Button variant="secondary" onClick={() => navigate('/missions')}>Back to missions</Button>}
         />
       </div>
     );
@@ -155,7 +158,7 @@ export default function MissionDetailPage() {
         description={`${mission.team_name}${mission.orchestrator_name ? ` · orchestrated by ${mission.orchestrator_name}` : ''}`}
         actions={
           <>
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/ws/${wsId}/orchestration`)}>
+            <Button variant="ghost" size="sm" onClick={() => navigate('/missions')}>
               All missions
             </Button>
             {mission.status === 'draft' && (
@@ -290,7 +293,7 @@ export default function MissionDetailPage() {
                     act(
                       () =>
                         api.updateOrchestrationMission(mission.id, {
-                          workspace_id: wsId,
+                          account_id: wsId,
                           // 이 필드 하나만 보낸다 — 브리핑 필드를 함께 실으면 running
                           // 미션에서 서버의 draft 잠금이 409 를 낸다.
                           user_chat_mode: e.target.value as OrchestrationUserChatMode,
@@ -334,7 +337,7 @@ export default function MissionDetailPage() {
                 <MissionConversationPanel
                   key={mission.id}
                   missionId={mission.id}
-                  workspaceId={wsId}
+                  accountId={wsId}
                   roomId={mission.room_id}
                   events={mission.events}
                   live={isLive}
@@ -696,7 +699,7 @@ function BriefPane({ mission }: { mission: OrchestrationMissionDetail }) {
             <Prose text={mission.acceptance_criteria} muted />
           </>
         )}
-        <SubHeading>Step workspace</SubHeading>
+        <SubHeading>Step working folder</SubHeading>
         <div style={{ fontSize: 12, color: tokens.colors.textSecondary, fontFamily: 'monospace' }}>
           {mission.resolved_workspace_folder}
         </div>

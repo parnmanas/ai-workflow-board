@@ -62,7 +62,7 @@ function makeFakeGithubService() {
 function makeResourceRow(over = {}) {
   return {
     id: 'res-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     board_id: null,
     credential_id: 'cred-valid',
     name: 'AWB',
@@ -87,7 +87,7 @@ function makeFakeDataSource(resourceRow) {
       if (
         resourceRow &&
         where.id === resourceRow.id &&
-        where.workspace_id === resourceRow.workspace_id
+        where.account_id === resourceRow.account_id
       ) {
         return resourceRow;
       }
@@ -134,7 +134,7 @@ test('sync uses the resource\'s stored credential when none is passed (the fix)'
   const handler = getSyncHandler(ctx);
 
   const res = await handler({
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     url: 'https://github.com/parnmanas/ai-workflow-board',
     resource_id: 'res-1',
     // credential_id intentionally omitted — the resource carries 'cred-valid'.
@@ -154,7 +154,7 @@ test('an explicit credential_id still wins over the resource\'s stored one', asy
   const handler = getSyncHandler(ctx);
 
   const res = await handler({
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     url: 'https://github.com/parnmanas/ai-workflow-board',
     resource_id: 'res-1',
     credential_id: 'cred-valid',
@@ -172,7 +172,7 @@ test('no resource credential + no global token still errors (fallback unchanged)
   const handler = getSyncHandler(ctx);
 
   const res = await handler({
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     url: 'https://github.com/parnmanas/ai-workflow-board',
     resource_id: 'res-1',
   });
@@ -188,7 +188,7 @@ test('create path (no resource_id) threads the explicit credential', async () =>
   const handler = getSyncHandler(ctx);
 
   const res = await handler({
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     url: 'https://github.com/parnmanas/ai-workflow-board',
     credential_id: 'cred-valid',
   });

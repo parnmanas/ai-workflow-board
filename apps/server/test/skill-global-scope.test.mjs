@@ -1,11 +1,11 @@
 import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 // Global skill scope + the built-in pack / tap registry that feeds it.
 //
-// Before this work `Skill.workspace_id` was NOT NULL and every query was a
+// Before this work `Skill.account_id` was NOT NULL and every query was a
 // plain equality, so a global skill was not merely missing — it was
 // unrepresentable. These tests lock the contract that replaced it:
 //
-//   1. Global (workspace_id NULL) + Workspace scope, per docs/catalog-scopes.md.
+//   1. Global (account_id NULL) + Account scope, per docs/catalog-scopes.md.
 //   2. A workspace skill SHADOWS a global one with the same slug (the
 //      precedence WorkflowFunction uses for its key), and forking is how a
 //      workspace diverges from a built-in.
@@ -25,7 +25,7 @@ import path from 'node:path';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createAccount } from './helpers/fixtures.mjs';
 
 const BASE_PORT = parseInt(process.env.QA_SKILL_GLOBAL_PORT || '0', 10);
 
@@ -49,8 +49,8 @@ const snapshots = app.get(RunSkillSnapshotService);
 const builtin = app.get(BuiltinSkillPackService);
 const taps = app.get(SkillTapService);
 
-const ws = await createWorkspace(app, getDataSourceToken, 'skill-scope');
-const other = await createWorkspace(app, getDataSourceToken, 'skill-scope-other');
+const ws = await createAccount(app, getDataSourceToken, 'skill-scope');
+const other = await createAccount(app, getDataSourceToken, 'skill-scope-other');
 // P4c-4: hosted (Host 행 + api_keys 링크) — 그래야 assign 의 정체성 해소가 된다.
 const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'skilled', type: 'hermes' });
 
@@ -61,8 +61,8 @@ test('the in-repo built-in pack is seeded into the global scope at boot', async 
   const globals = await skills.listGlobal();
   assert.ok(globals.length > 0, 'boot must seed at least one global skill from skills/');
   assert.ok(
-    globals.every((s) => s.workspace_id === null),
-    'every row from listGlobal must carry workspace_id NULL',
+    globals.every((s) => s.account_id === null),
+    'every row from listGlobal must carry account_id NULL',
   );
   const pack = globals.filter((s) => s.source_kind === 'builtin');
   assert.ok(pack.length > 0, 'seeded rows must be marked source_kind=builtin so a re-seed recognises them');
@@ -85,11 +85,11 @@ test('re-seeding is idempotent — identical content publishes no new version', 
 // ─── 2. Scope, visibility, shadowing ─────────────────────────────────────────
 test('a workspace sees global + its own skills, and never another workspace\'s', async () => {
   const mine = await skills.create(ws.id, {
-    slug: `ws-only-${stamp}`, name: 'Workspace only', body: '# ws only\n',
-  }, 'tester', 'workspace');
+    slug: `ws-only-${stamp}`, name: 'Account only', body: '# ws only\n',
+  }, 'tester', 'account');
   await skills.create(other.id, {
     slug: `other-only-${stamp}`, name: 'Other only', body: '# other only\n',
-  }, 'tester', 'workspace');
+  }, 'tester', 'account');
 
   const visible = await skills.list(ws.id);
   const slugs = new Set(visible.map((s) => s.slug));
@@ -97,7 +97,7 @@ test('a workspace sees global + its own skills, and never another workspace\'s',
   assert.ok(slugs.has('systematic-debugging'), 'global built-in must be visible from a workspace');
   assert.ok(!slugs.has(`other-only-${stamp}`), "another workspace's skill must NOT leak in");
 
-  assert.equal(mine.scope, 'workspace');
+  assert.equal(mine.scope, 'account');
   assert.equal(visible.find((s) => s.slug === 'systematic-debugging').scope, 'global');
 });
 
@@ -107,24 +107,24 @@ test('a workspace skill shadows a global one with the same slug; include_shadowe
 
   const fork = await skills.fork(ws.id, globalSkill.id, 'tester');
   assert.equal(fork.slug, globalSkill.slug, 'a fork keeps the slug — that is what makes it shadow');
-  assert.equal(fork.workspace_id, ws.id);
+  assert.equal(fork.account_id, ws.id);
 
   const shadowed = await skills.list(ws.id);
   const matches = shadowed.filter((s) => s.slug === 'systematic-debugging');
   assert.equal(matches.length, 1, 'default listing must return ONE row per slug');
-  assert.equal(matches[0].workspace_id, ws.id, 'the workspace fork must win over the global');
+  assert.equal(matches[0].account_id, ws.id, 'the workspace fork must win over the global');
 
   const all = await skills.list(ws.id, { includeShadowed: true });
   const both = all.filter((s) => s.slug === 'systematic-debugging');
   assert.equal(both.length, 2, 'include_shadowed must surface the overridden global too');
-  const globalRow = both.find((s) => !s.workspace_id);
+  const globalRow = both.find((s) => !s.account_id);
   assert.equal(globalRow.shadowed, true, 'the overridden global must be flagged shadowed');
 
   // The other workspace has no fork, so it still resolves to the global.
   const elsewhere = await skills.list(other.id);
   const theirs = elsewhere.filter((s) => s.slug === 'systematic-debugging');
   assert.equal(theirs.length, 1);
-  assert.equal(theirs[0].workspace_id, null, 'a fork in one workspace must not affect another');
+  assert.equal(theirs[0].account_id, null, 'a fork in one workspace must not affect another');
 });
 
 // ─── 3. Write authorization ──────────────────────────────────────────────────
@@ -144,14 +144,14 @@ test('a workspace caller cannot publish into or quarantine a global skill', asyn
 
   // The admin path (empty workspace id) is allowed.
   const published = await skills.publish('', globalSkill.id, { body: '# admin edit\n' }, 'admin');
-  assert.equal(published.workspace_id, null, "a global skill's versions must stay global");
+  assert.equal(published.account_id, null, "a global skill's versions must stay global");
   assert.equal(published.version, 2, 'version numbering must continue across the global skill');
 });
 
 test('a workspace caller cannot publish into another workspace\'s skill', async () => {
   const theirs = await skills.create(other.id, {
     slug: `theirs-${stamp}`, name: 'Theirs', body: '# theirs\n',
-  }, 'tester', 'workspace');
+  }, 'tester', 'account');
   await assert.rejects(
     () => skills.publish(ws.id, theirs.id, { body: '# nope\n' }, 'tester'),
     (err) => err.status === 403,
@@ -171,7 +171,7 @@ test('a run snapshot includes an assigned GLOBAL skill', async () => {
   }, 'tester');
 
   const snapshot = await snapshots.resolve({
-    workspaceId: ws.id,
+    accountId: ws.id,
     runId: `run-global-${stamp}`,
     agentId: runtimeIdentityKey(runtime),
   });

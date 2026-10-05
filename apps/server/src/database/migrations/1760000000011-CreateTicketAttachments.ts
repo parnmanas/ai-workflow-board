@@ -19,7 +19,7 @@ export class CreateTicketAttachments1760000000011 implements MigrationInterface 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS ticket_attachments (
         id UUID PRIMARY KEY,
-        workspace_id VARCHAR DEFAULT '',
+        account_id VARCHAR DEFAULT '',
         ticket_id VARCHAR NOT NULL,
         file_name VARCHAR NOT NULL,
         file_mimetype VARCHAR DEFAULT '',

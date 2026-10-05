@@ -11,7 +11,7 @@ import { activityEvents } from '../../services/activity.service';
 import { RoomMembershipService } from './room-membership.service';
 import { resolveAgentDisplayNamesByIds } from '../../utils/agent-name';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 
 const PARTICIPANT_CAP = 50;
@@ -73,7 +73,7 @@ export class RoomCrudService {
    * Returns rooms sorted by last_message_at DESC (COALESCE for SQLite safety).
    * Includes unread_count (datetime comparison, not UUID) and dm_partner_name for DMs.
    */
-  async listRooms(workspaceId: string, userId: string): Promise<any[]> {
+  async listRooms(accountId: string, userId: string): Promise<any[]> {
     const t = (col: string) => this.membership.toText(col);
     // Join on active participant row for calling user.
     //
@@ -90,7 +90,7 @@ export class RoomCrudService {
         `${t('p.room_id')} = ${t('r.id')} AND p.participant_id = :userId AND p.participant_type = 'user' AND p.left_at IS NULL`,
         { userId },
       )
-      .where('r.workspace_id = :wsId', { wsId: workspaceId })
+      .where('r.account_id = :wsId', { wsId: accountId })
       // 자유 참여 방은 참여자가 아니어도 목록에 실린다. 이 조건이 없으면 위 LEFT JOIN
       // 은 워크스페이스의 **모든** 방을 흘려보낸다 — 완화 대상은 open_join 방 하나뿐이다.
       .andWhere('(p.id IS NOT NULL OR r.open_join = :openJoin)', { openJoin: true })
@@ -284,7 +284,7 @@ export class RoomCrudService {
 
       return {
         id: room.id,
-        workspace_id: room.workspace_id,
+        account_id: room.account_id,
         type: room.type,
         // Raw room.name (possibly empty for un-renamed DMs). Client picks
         // displayName via `name || dm_partner_name || 'Direct Message'`.
@@ -311,7 +311,7 @@ export class RoomCrudService {
    * can keep multiple topic-separated threads with the same person.
    */
   async createRoom(
-    workspaceId: string,
+    accountId: string,
     creator: { type: 'user' | 'agent'; id: string },
     participantIds: { participant_type: string; participant_id: string; runtime?: unknown }[],
     name?: string,
@@ -378,7 +378,7 @@ export class RoomCrudService {
       for (const id of requestedAgentIds) {
         const holder = await resolveCallerIdentityRow(this.dataSource, id);
         if (!holder) throw makeError(400, `Agent ${id} does not belong to this workspace`);
-        if (!agentIsVisibleInWorkspace(holder.workspace_id, workspaceId)) {
+        if (!agentIsVisibleInWorkspace(holder.account_id, accountId)) {
           throw makeError(400, `Agent ${id} does not belong to this workspace`);
         }
       }
@@ -410,7 +410,7 @@ export class RoomCrudService {
     // Save room
     const room = await this.roomRepo.save(
       this.roomRepo.create({
-        workspace_id: workspaceId,
+        account_id: accountId,
         type: roomType,
         name: roomName,
         last_message_at: null,
@@ -437,7 +437,7 @@ export class RoomCrudService {
     });
     await this.participantRepo.save(participantRows);
 
-    this.logService.info('ChatRooms', `Created ${roomType} room ${room.id} in workspace ${workspaceId}`);
+    this.logService.info('ChatRooms', `Created ${roomType} room ${room.id} in workspace ${accountId}`);
 
     const viewerUserId = creator.type === 'user' ? creator.id : '';
     const detail = await this.getRoomDetail(room.id, viewerUserId);
@@ -487,7 +487,7 @@ export class RoomCrudService {
 
     return {
       id: room.id,
-      workspace_id: room.workspace_id,
+      account_id: room.account_id,
       type: room.type,
       name: room.name || '',
       dm_partner_name: dmPartnerName,
@@ -519,14 +519,14 @@ export class RoomCrudService {
    */
   async renameRoom(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     actorId: string,
     newName: string,
     actorType: string = 'user',
   ): Promise<void> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     // 워크스페이스가 다르면 존재 자체를 알려주지 않는다 — `setOpenJoin` / `requireRoomAccess` 와 같은 규칙.
-    if (!room || room.workspace_id !== workspaceId) {
+    if (!room || room.account_id !== accountId) {
       throw makeError(404, 'Room not found');
     }
 
@@ -580,14 +580,14 @@ export class RoomCrudService {
    */
   async setOpenJoin(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     actorId: string,
     openJoin: boolean,
     actorType: string = 'user',
   ): Promise<{ room_id: string; open_join: boolean }> {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     // 워크스페이스가 다르면 존재 자체를 알려주지 않는다 — `requireRoomAccess` 와 같은 규칙.
-    if (!room || room.workspace_id !== workspaceId) {
+    if (!room || room.account_id !== accountId) {
       throw makeError(404, 'Room not found');
     }
     if (room.type === 'dm') {
@@ -610,7 +610,7 @@ export class RoomCrudService {
       // 이 이벤트만 방 구성원이 아니라 **워크스페이스의 모든 사용자**에게 나간다
       // (티켓 995a9519 리뷰 라운드1 P1-2, `chatRoomUpdateFilter` 참조). 변경의 실제
       // 영향 대상이 비참여자이기 때문이다 — ON 이면 방이 새로 보여야 하고 OFF 면
-      // 사이드바에서 사라져야 한다. `workspace_id` 는 수신 측이 "지금 보고 있는
+      // 사이드바에서 사라져야 한다. `account_id` 는 수신 측이 "지금 보고 있는
       // 워크스페이스의 일인가"를 판정하는 근거이므로 반드시 함께 싣는다.
       // member_ids / agent_member_ids 는 다른 update_type 과 봉투 모양을 맞추기 위해
       // 그대로 둔다(이 타입에서는 필터가 쓰지 않는다).
@@ -618,7 +618,7 @@ export class RoomCrudService {
         room_id: roomId,
         update_type: 'open_join_changed',
         open_join: next,
-        workspace_id: room.workspace_id,
+        account_id: room.account_id,
         member_ids: memberIds,
         agent_member_ids: agentMemberIds,
       });
@@ -629,17 +629,17 @@ export class RoomCrudService {
   }
 
   /**
-   * Workspace-wide observer view: every active room regardless of caller's
+   * Account-wide observer view: every active room regardless of caller's
    * membership. Used by the chat page's "All workspace rooms" toggle so a
    * human can monitor agent-to-agent conversations they aren't a participant
    * in. Does not compute per-user unread counts (caller may not be a member).
    */
-  async listAllWorkspaceRooms(workspaceId: string): Promise<any[]> {
+  async listAllWorkspaceRooms(accountId: string): Promise<any[]> {
     // Same action_id IS NULL filter as listRooms — observer view also wants to
     // skip Action-Run rooms because they belong to the Actions surface, and
     // orchestration rooms because they belong to the Mission detail view.
     const rooms = await this.roomRepo.createQueryBuilder('r')
-      .where('r.workspace_id = :wsId', { wsId: workspaceId })
+      .where('r.account_id = :wsId', { wsId: accountId })
       .andWhere('r.action_id IS NULL')
       .andWhere('r.orchestration_mission_id IS NULL')
       .orderBy('r.last_message_at', 'DESC')

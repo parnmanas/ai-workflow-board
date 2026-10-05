@@ -38,7 +38,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     role: 'admin',
     status: 'active',
     permissions: [],
-    workspaces: [{ id: 'workspace-1', name: 'Workspace', slug: null, relations: [] }],
+    accounts: [{ id: 'workspace-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
   api.listCredentials = async () => [];
@@ -46,7 +46,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     {
       instance_id: 'inst-1',
       hostname: 'host-1',
-      workspace_id: 'workspace-1',
+      account_id: 'workspace-1',
       codex_installed: true,
       codex_healthy: true,
       claude_installed: true,
@@ -59,7 +59,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
     if (startCliLoginImpl) return startCliLoginImpl(data);
     return {
       id: 'session-1',
-      workspace_id: data.workspace_id || '',
+      account_id: data.account_id || '',
       is_global: data.scope === 'global',
       cli: data.cli,
       credential_name: data.credential_name,
@@ -75,7 +75,7 @@ async function mountCredentialManagerForAutoLogin(t, { startCliLoginImpl } = {})
   };
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
+    React.createElement(CredentialManager, { accountId: 'workspace-1' }),
   );
   await flush();
 
@@ -139,7 +139,7 @@ test("'Try Again' after a failed claude attempt resets to a clean claude form, n
   const { container } = await mountCredentialManagerForAutoLogin(t, {
     startCliLoginImpl: async (data) => ({
       id: 'session-2',
-      workspace_id: data.workspace_id || '',
+      account_id: data.account_id || '',
       is_global: false,
       cli: data.cli,
       credential_name: data.credential_name,

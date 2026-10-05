@@ -8,10 +8,10 @@
 //       워크스페이스에 바인딩되지 않은 full-scope 키를 발급하거나 다른
 //       워크스페이스의 키를 열람/삭제할 수 있었다.
 //   Medium) workflow-function-tools.ts의 scopeAllowed()가
-//       `!caller?.workspaceId || ...` 형태의 fail-open이라 워크스페이스가
+//       `!caller?.accountId || ...` 형태의 fail-open이라 워크스페이스가
 //       없는(바인딩되지 않은) 호출자를 무조건 통과시켰다.
 //   후속) agent-tools.ts의 쓰기 툴들(삭제됨 — P4c-3b)과
-//       workspace-tools.ts(update/delete_workspace)도 동일한 패턴(호출자 검증
+//       account-tools.ts(update/delete_account)도 동일한 패턴(호출자 검증
 //       없음, 또는 문서만 "Admin-gated"라고 주장할 뿐 실제 게이트가 없음).
 //
 // 이 파일은 apps/server/test/hermes-collaboration.test.mjs의 패턴을 그대로
@@ -34,7 +34,7 @@ import { ApiKey } from '../dist/entities/ApiKey.js';
 import { registerUserTools } from '../dist/modules/mcp/tools/user-tools.js';
 import { registerApiKeyTools } from '../dist/modules/mcp/tools/api-key-tools.js';
 import { registerWorkflowFunctionTools } from '../dist/modules/mcp/tools/workflow-function-tools.js';
-import { registerWorkspaceTools } from '../dist/modules/mcp/tools/workspace-tools.js';
+import { registerWorkspaceTools } from '../dist/modules/mcp/tools/account-tools.js';
 
 import { ApiKeyService } from '../dist/services/api-key.service.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
@@ -106,15 +106,15 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  // ─── Test fixtures: two workspace-scoped agents + one full-scope agent ───
+  // ─── Test fixtures: two account-scoped agents + one full-scope agent ───
 
   // P4c-4: 정체성은 RuntimeHost 행이다 (Agent 테이블 없음).
-  async function makeAgent(workspaceId) {
+  async function makeAgent(accountId) {
     const repo = dataSource.getRepository(RuntimeHost);
     return repo.save(repo.create({
       name: `host-${randomUUID().slice(0, 8)}`,
       hostname: 'authz-test',
-      workspace_id: workspaceId ?? '',
+      account_id: accountId ?? '',
     }));
   }
 
@@ -124,9 +124,9 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     return () => sessionStore.remove(sessionId);
   }
 
-  // ─── DoD (a): workspace-scoped key cannot change another user's role ───
+  // ─── DoD (a): account-scoped key cannot change another user's role ───
 
-  it('rejects update_user role change from a workspace-scoped caller (and from any caller)', async () => {
+  it('rejects update_user role change from a account-scoped caller (and from any caller)', async () => {
     const agent = await makeAgent('workspace-a');
     const userRepo = dataSource.getRepository(User);
     const target = await userRepo.save(userRepo.create({ name: 'Target User', role: 'user' }));
@@ -134,7 +134,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
@@ -158,7 +158,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, true);
   });
 
-  it('rejects delete_user from a workspace-scoped (non-full-scope) caller', async () => {
+  it('rejects delete_user from a account-scoped (non-full-scope) caller', async () => {
     const agent = await makeAgent('workspace-a');
     const userRepo = dataSource.getRepository(User);
     const target = await userRepo.save(userRepo.create({ name: 'Doomed User', role: 'user' }));
@@ -166,7 +166,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'full', // even full scope must still be DB-backed + agent-bound; read/write also rejected below
       source: 'db',
     });
@@ -189,7 +189,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
@@ -202,14 +202,14 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.ok(reloaded);
   });
 
-  // ─── DoD (b): workspace-scoped key cannot mint a full-scope key ───
+  // ─── DoD (b): account-scoped key cannot mint a full-scope key ───
 
   it('rejects create_api_key minting a broader scope than the caller', async () => {
     const agent = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
@@ -228,7 +228,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'write',
       source: 'db',
     });
@@ -241,13 +241,13 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
 
     assert.equal(result.isError, undefined);
     const body = JSON.parse(result.content[0].text);
-    assert.equal(body.workspace_id, 'workspace-a');
+    assert.equal(body.account_id, 'workspace-a');
     assert.ok(body.raw_key);
   });
 
   it('rejects create_api_key from a caller with no resolvable workspace (unbound)', async () => {
     const sessionId = `session-${randomUUID()}`;
-    // No agentId, no workspaceId — e.g. an env-configured master key.
+    // No agentId, no accountId — e.g. an env-configured master key.
     const cleanup = registerSession(sessionId, { scope: 'full', source: 'env' });
 
     const result = await tools.create_api_key.handler({ name: 'orphan-key' }, { sessionId });
@@ -256,19 +256,19 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, true);
   });
 
-  // ─── DoD (c): workspace-scoped key cannot list/view/delete another workspace's keys ───
+  // ─── DoD (c): account-scoped key cannot list/view/delete another workspace's keys ───
 
-  it('scopes list_api_keys to the caller workspace and excludes other workspaces', async () => {
+  it('scopes list_api_keys to the caller workspace and excludes other accounts', async () => {
     const agentA = await makeAgent('workspace-a');
     const agentB = await makeAgent('workspace-b');
 
-    const created = await apiKeyService.createApiKey({ name: 'ws-a-key', workspace_id: 'workspace-a' });
-    await apiKeyService.createApiKey({ name: 'ws-b-key', workspace_id: 'workspace-b' });
+    const created = await apiKeyService.createApiKey({ name: 'ws-a-key', account_id: 'workspace-a' });
+    await apiKeyService.createApiKey({ name: 'ws-b-key', account_id: 'workspace-b' });
 
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agentA.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
@@ -279,18 +279,18 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, undefined);
     const body = JSON.parse(result.content[0].text);
     assert.ok(body.some(k => k.id === created.apiKey.id));
-    assert.ok(body.every(k => k.workspace_id === 'workspace-a'));
+    assert.ok(body.every(k => k.account_id === 'workspace-a'));
     void agentB;
   });
 
   it('rejects get_api_key / delete_api_key for a key belonging to another workspace', async () => {
     const agentA = await makeAgent('workspace-a');
-    const foreignKey = await apiKeyService.createApiKey({ name: 'ws-b-key', workspace_id: 'workspace-b' });
+    const foreignKey = await apiKeyService.createApiKey({ name: 'ws-b-key', account_id: 'workspace-b' });
 
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agentA.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'full',
       source: 'db',
     });
@@ -319,7 +319,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     // workspace from — the old code let this straight through.
     const cleanup = registerSession(sessionId, { scope: 'full', source: 'env' });
 
-    const result = await tools.list_functions.handler({ workspace_id: 'workspace-a' }, { sessionId });
+    const result = await tools.list_functions.handler({ account_id: 'workspace-a' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, true);
@@ -331,12 +331,12 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
 
-    const result = await tools.list_functions.handler({ workspace_id: 'workspace-a' }, { sessionId });
+    const result = await tools.list_functions.handler({ account_id: 'workspace-a' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, undefined);
@@ -347,21 +347,21 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
 
-    const result = await tools.list_functions.handler({ workspace_id: 'workspace-b' }, { sessionId });
+    const result = await tools.list_functions.handler({ account_id: 'workspace-b' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, true);
   });
 
-  it('allows a genuinely global (workspace_id-less) full-scope Agent through the escape hatch', async () => {
+  it('allows a genuinely global (account_id-less) full-scope Agent through the escape hatch', async () => {
     const globalAgent = await makeAgent(''); // '' normalizes to null (global)
     const sessionId = `session-${randomUUID()}`;
-    // No caller.workspaceId on the session — must fall through to the DB
+    // No caller.accountId on the session — must fall through to the DB
     // lookup, which proves this agent really is global.
     const cleanup = registerSession(sessionId, {
       agentId: globalAgent.id,
@@ -369,7 +369,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
       source: 'db',
     });
 
-    const result = await tools.list_functions.handler({ workspace_id: 'workspace-any' }, { sessionId });
+    const result = await tools.list_functions.handler({ account_id: 'workspace-any' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, undefined);
@@ -395,20 +395,20 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   });
 
 
-  // ─── workspace-tools.ts: update/delete_workspace ───
+  // ─── account-tools.ts: update/delete_account ───
 
-  it('rejects update_workspace when the caller does not belong to the target workspace', async () => {
+  it('rejects update_account when the caller does not belong to the target workspace', async () => {
     const caller = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: caller.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'full',
       source: 'db',
     });
 
-    const result = await tools.update_workspace.handler(
-      { workspace_id: 'workspace-b', name: 'Renamed by outsider' },
+    const result = await tools.update_account.handler(
+      { account_id: 'workspace-b', name: 'Renamed by outsider' },
       { sessionId },
     );
     cleanup();
@@ -416,17 +416,17 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     assert.equal(result.isError, true);
   });
 
-  it('rejects delete_workspace from a non-full-scope caller', async () => {
+  it('rejects delete_account from a non-full-scope caller', async () => {
     const caller = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: caller.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'write',
       source: 'db',
     });
 
-    const result = await tools.delete_workspace.handler({ workspace_id: 'workspace-a' }, { sessionId });
+    const result = await tools.delete_account.handler({ account_id: 'workspace-a' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, true);
@@ -440,17 +440,17 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
   // the sessionless user-tools gate and foreign agent_id linking. ───
 
 
-  it('rejects delete_workspace of workspace B from a workspace-A full-scope caller', async () => {
+  it('rejects delete_account of workspace B from a workspace-A full-scope caller', async () => {
     const caller = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: caller.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'full',
       source: 'db',
     });
 
-    const result = await tools.delete_workspace.handler({ workspace_id: 'workspace-b' }, { sessionId });
+    const result = await tools.delete_account.handler({ account_id: 'workspace-b' }, { sessionId });
     cleanup();
 
     assert.equal(result.isError, true);
@@ -495,7 +495,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
       agentId: agent.id,
-      workspaceId: 'workspace-a',
+      accountId: 'workspace-a',
       scope: 'read',
       source: 'db',
     });
@@ -509,7 +509,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
     const host = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
-      agentId: host.id, workspaceId: 'workspace-a', scope: 'full', source: 'db',
+      agentId: host.id, accountId: 'workspace-a', scope: 'full', source: 'db',
     });
     try {
       const result = await tools.create_api_key.handler({ name: 'workspace-key' }, { sessionId });
@@ -517,7 +517,7 @@ describe('MCP tool authorization (ticket d6b56237)', () => {
       const body = JSON.parse(result.content[0].text);
       assert.equal('agent_id' in body, false);
       const persisted = await apiKeyService.getApiKey(body.id);
-      assert.equal(persisted.workspace_id, 'workspace-a');
+      assert.equal(persisted.account_id, 'workspace-a');
       assert.equal(persisted.host_id, null);
       assert.equal('agent_id' in persisted, false);
     } finally { cleanup(); }
@@ -553,12 +553,12 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
   });
 
   // P4c-4: 정체성은 RuntimeHost 행이다 (Agent 테이블 없음).
-  async function makeAgent(workspaceId) {
+  async function makeAgent(accountId) {
     const repo = dataSource.getRepository(RuntimeHost);
     return repo.save(repo.create({
       name: `host-${randomUUID().slice(0, 8)}`,
       hostname: 'authz-test',
-      workspace_id: workspaceId ?? '',
+      account_id: accountId ?? '',
     }));
   }
 
@@ -583,7 +583,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
 
   it('maps the d6b56237 role/credential/cascade tools to their verified tier', () => {
     assert.equal(resolveAuthzTier('delete_user'), 'full');
-    assert.equal(resolveAuthzTier('delete_workspace'), 'full');
+    assert.equal(resolveAuthzTier('delete_account'), 'full');
     assert.equal(resolveAuthzTier('create_user'), 'caller');
     assert.equal(resolveAuthzTier('update_user'), 'caller');
     assert.equal(resolveAuthzTier('create_api_key'), 'caller');
@@ -599,7 +599,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const uncoveredDeleteTools = [
       'delete_action', 'delete_ticket', 'delete_qa_scenario',
       'delete_security_profile', 'delete_child_ticket', 'delete_qa_schedule',
-      'delete_workspace_schedule', 'delete_security_schedule', 'delete_ticket_attachment',
+      'delete_automation_schedule', 'delete_security_schedule', 'delete_ticket_attachment',
       'delete_function', 'delete_channel', 'delete_resource',
       'delete_chat_message_attachment',
     ];
@@ -645,13 +645,13 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     assert.ok(KNOWN_EXISTING_TOOLS.has('create_ticket'));
   });
 
-  it('leaves update_workspace to its own nuanced per-file logic', () => {
-    // update_workspace intentionally allows a workspace-bound NON-full-scope
+  it('leaves update_account to its own nuanced per-file logic', () => {
+    // update_account intentionally allows a workspace-bound NON-full-scope
     // caller. A static per-name tier would misgate it, so it is not in the
     // table — and it matches neither the delete_* / revoke_* fallback pattern
     // nor the unknown-name deny, so the fallback leaves it alone either.
     // (move_agent_to_workspace no longer exists — see the removal test above.)
-    assert.equal(resolveAuthzTier('update_workspace'), null);
+    assert.equal(resolveAuthzTier('update_account'), null);
   });
 
   // ─── installToolAuthzGate: end-to-end wrapping behavior ───
@@ -680,7 +680,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const agent = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
-      agentId: agent.id, workspaceId: 'workspace-a', scope: 'full', source: 'db',
+      agentId: agent.id, accountId: 'workspace-a', scope: 'full', source: 'db',
     });
     const result = await tools.delete_user.handler({ user_id: 'x' }, { sessionId });
     cleanup();
@@ -701,7 +701,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const agent = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
-      agentId: agent.id, workspaceId: 'workspace-a', scope: 'write', source: 'db',
+      agentId: agent.id, accountId: 'workspace-a', scope: 'write', source: 'db',
     });
     const result = await tools.delete_user.handler({ user_id: 'x' }, { sessionId });
     cleanup();
@@ -733,7 +733,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     const agent = await makeAgent('workspace-a');
     const sessionId = `session-${randomUUID()}`;
     const cleanup = registerSession(sessionId, {
-      agentId: agent.id, workspaceId: 'workspace-a', scope: 'read', source: 'db',
+      agentId: agent.id, accountId: 'workspace-a', scope: 'read', source: 'db',
     });
     const result = await tools.delete_something_nobody_has_written_yet.handler({}, { sessionId });
     cleanup();
@@ -784,7 +784,7 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
       let extra = {};
       let cleanup = () => {};
       if (auth) {
-        const agent = auth.workspaceId !== undefined ? await makeAgent(auth.workspaceId) : null;
+        const agent = auth.accountId !== undefined ? await makeAgent(auth.accountId) : null;
         const sessionId = `session-${randomUUID()}`;
         cleanup = registerSession(sessionId, { ...auth, agentId: agent?.id });
         extra = { sessionId };
@@ -802,15 +802,15 @@ describe('MCP tool authorization — central gate (ticket 838f43c4)', () => {
     });
 
     it('(2) read-scoped caller', async () => {
-      await assertDenied({ workspaceId: 'workspace-a', scope: 'read', source: 'db' });
+      await assertDenied({ accountId: 'workspace-a', scope: 'read', source: 'db' });
     });
 
     it('(3) write-scoped caller', async () => {
-      await assertDenied({ workspaceId: 'workspace-a', scope: 'write', source: 'db' });
+      await assertDenied({ accountId: 'workspace-a', scope: 'write', source: 'db' });
     });
 
     it('(4) full-scope, DB-backed, agent-bound caller — the strongest caller this gate ever accepts for a tabled tool', async () => {
-      await assertDenied({ workspaceId: 'workspace-a', scope: 'full', source: 'db' });
+      await assertDenied({ accountId: 'workspace-a', scope: 'full', source: 'db' });
     });
   });
 

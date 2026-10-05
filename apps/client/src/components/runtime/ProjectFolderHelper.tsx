@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { getActiveWorkspaceId } from '../../api';
+import { getActiveAccountId } from '../../api';
 import type { Project } from '../../types';
 import { tokens } from '../../tokens';
 import { Select } from '../common';
@@ -7,8 +7,8 @@ import { useProjects } from '../../projects/useProjects';
 import { projectFolderHelperView } from '../../projects/projectFolderHelper.logic';
 
 interface ProjectFolderHelperProps {
-  /** Workspace whose projects are offered. Falls back to the active workspace. */
-  workspaceId?: string;
+  /** Account whose projects are offered. Falls back to the active workspace. */
+  accountId?: string;
   /**
    * The currently selected Runtime Host — one id, or the ids that name the same
    * host (Host id + legacy manager Agent uuid). Empty → the control is disabled.
@@ -29,13 +29,13 @@ interface ProjectFolderHelperProps {
  * rule lives once. Renders nothing while the workspace has no projects.
  */
 export default function ProjectFolderHelper({
-  workspaceId,
+  accountId,
   hostIds,
   currentDir = '',
   onPick,
   disabled = false,
 }: ProjectFolderHelperProps) {
-  const wsId = workspaceId || getActiveWorkspaceId() || '';
+  const wsId = accountId || getActiveAccountId() || '';
   const { projects } = useProjects(wsId);
   const view = useMemo(
     () => projectFolderHelperView(projects, hostIds, currentDir),

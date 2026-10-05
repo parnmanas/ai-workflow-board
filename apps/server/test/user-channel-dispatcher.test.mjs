@@ -15,7 +15,7 @@
 // Also covers `_handleActivity` (ticket f57dcfbc): it used to build a
 // workspace-less `/?ticket=<id>` notification link — the same legacy
 // pattern removed from the client's admin fallbacks — instead of the
-// workspace-scoped shape `_buildDeepLink` already uses for mentions. Since
+// account-scoped shape `_buildDeepLink` already uses for mentions. Since
 // boards were removed that shape is the Tickets page
 // (`/ws/<wsId>/tickets?ticket=<id>`, common/artifact-ref.ts ticketPath), and
 // the recipients are the ticket's human participants (creator, commenters,
@@ -90,7 +90,7 @@ test('_handleChat tolerates Set<string> member_ids and dispatches per non-sender
   const memberIds = new Set(['u-sender', 'u-alice', 'u-bob']);
   const ev = {
     room_id: 'room-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     message_id: 'msg-1',
     sender_type: 'user',
     sender_id: 'u-sender',
@@ -119,7 +119,7 @@ test('_handleChat accepts string[] member_ids (legacy interface shape)', async (
 
   await svc._handleChat({
     room_id: 'room-2',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     message_id: 'msg-2',
     sender_type: 'user',
     sender_id: 'u-sender',
@@ -147,7 +147,7 @@ test('_handleChat 은 orchestration / Action Run 방(is_action_room)에는 팬�
 
   const ev = {
     room_id: 'room-mission-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     message_id: 'msg-brief-1',
     sender_type: 'user',
     // 엔진의 브리핑은 의사 user 'system' 이 쓴다 — 사람 참여자는 전부 수신 대상이 된다.
@@ -175,7 +175,7 @@ test('_handleChat 은 일반 방에서는 그대로 팬아웃한다 (위 제외�
 
   await svc._handleChat({
     room_id: 'room-plain-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     message_id: 'msg-2',
     sender_type: 'user',
     sender_id: 'u-sender',
@@ -196,7 +196,7 @@ test('_handleChat skips when content is only @-mentions (delegated to mention di
 
   await svc._handleChat({
     room_id: 'room-3',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     message_id: 'msg-3',
     sender_type: 'user',
     sender_id: 'u-sender',
@@ -247,7 +247,7 @@ test("_handleActivity links to the ticket on its workspace's Tickets page — no
     const svc = makeActivityService(UserChannelDispatcherService, {
       tickets: {
         'tk-1': {
-          id: 'tk-1', workspace_id: 'ws-1', status: 'in_progress', parent_id: null, title: 'Fix the thing',
+          id: 'tk-1', account_id: 'ws-1', status: 'in_progress', parent_id: null, title: 'Fix the thing',
           created_by_type: 'user', created_by_id: 'u-alice',
         },
       },
@@ -269,7 +269,7 @@ test("_handleActivity links to the ticket on its workspace's Tickets page — no
 
     assert.equal(sentPayloads.length, 1, 'only the creator is notified — the actor is excluded');
     assert.equal(sentPayloads[0].target, 'u-alice');
-    assert.equal(sentPayloads[0].payload.url, 'https://awb.example.com/ws/ws-1/tickets?ticket=tk-1');
+    assert.equal(sentPayloads[0].payload.url, 'https://awb.example.com/tickets?ticket=tk-1');
     assert.equal(sentPayloads[0].payload.body, 'status: todo → in_progress');
   } finally {
     if (prevUrl === undefined) delete process.env.AWB_PUBLIC_URL;
@@ -286,7 +286,7 @@ test("_handleActivity omits the url when the ticket's workspace can't be resolve
     const svc = makeActivityService(UserChannelDispatcherService, {
       tickets: {
         'tk-2': {
-          id: 'tk-2', workspace_id: '', status: 'todo', parent_id: null, title: 'Workspace-less ticket',
+          id: 'tk-2', account_id: '', status: 'todo', parent_id: null, title: 'Account-less ticket',
           created_by_type: 'agent', created_by_id: 'rt-0123456789abcdef',
         },
       },

@@ -31,7 +31,7 @@ function instanceRow({ availableModels }) {
   return {
     instance_id: INSTANCE_ID,
     agent_id: MANAGER_AGENT_ID,
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     mode: 'manager',
     hostname: 'refresh-host',
     plugin_version: '1.0.0',

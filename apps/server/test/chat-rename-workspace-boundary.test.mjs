@@ -8,13 +8,13 @@
 //
 // 실제 sql.js DataSource 위에서 진짜 쿼리를 돌린다(chat-open-join.test.mjs 와 같은
 // 방식). 스텁으로는 아무것도 검증되지 않는다 — 워크스페이스 조건을 통째로 빼도
-// 스텁 기반 테스트는 그대로 통과한다. 확인 대상이 "방 행의 workspace_id 와 호출자의
+// 스텁 기반 테스트는 그대로 통과한다. 확인 대상이 "방 행의 account_id 와 호출자의
 // workspace 가 실제로 대조되는가" 그 자체이기 때문이다.
 //
 // 두 공개 경로를 **각자의 진입점에서** 돈다 — 서비스 시그니처만 고치고 호출부가
 // 워크스페이스를 안 넘기면 경계는 여전히 뚫려 있으므로, 서비스 직접 호출로는 그 결함이
 // 잡히지 않는다.
-//   - REST: 진짜 `ChatRoomsController` 를 만들어 `X-Workspace-Id` 헤더가 실린 fake req/res 로 호출
+//   - REST: 진짜 `ChatRoomsController` 를 만들어 `X-Account-Id` 헤더가 실린 fake req/res 로 호출
 //   - MCP : 진짜 `registerChatTools` 가 등록한 `set_chat_room_name` 핸들러를 sessionStore 에
 //           등록된 실제 caller 세션으로 호출
 //
@@ -46,7 +46,7 @@ const ALICE = '33333333-3333-4333-8333-333333333333';
 /** 같은 워크스페이스의 비참여자 — 경계를 고쳐도 참여자 게이트가 그대로인지 본다. */
 const OUTSIDER = '44444444-4444-4444-8444-444444444444';
 const BOT = '55555555-5555-4555-8555-555555555555';
-/** workspace_id 가 없는(global) 에이전트 — 워크스페이스 해석 실패 경로용. */
+/** account_id 가 없는(global) 에이전트 — 워크스페이스 해석 실패 경로용. */
 const GLOBAL_BOT = '66666666-6666-4666-8666-666666666666';
 /** 존재하지 않는 방 id — 타 워크스페이스 응답과 글자 단위로 대조할 기준값. */
 const MISSING_ROOM = '77777777-7777-4777-8777-777777777777';
@@ -67,7 +67,7 @@ async function seedRoom(overrides = {}, participants = []) {
   const roomRepo = dataSource.getRepository(ChatRoom);
   const partRepo = dataSource.getRepository(ChatRoomParticipant);
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     type: 'group',
     name: '원래 이름',
     last_message_at: null,
@@ -100,10 +100,10 @@ function fakeRes() {
   };
 }
 
-/** `X-Workspace-Id` 헤더는 Express 가 소문자로 정규화해서 넘긴다. */
+/** `X-Account-Id` 헤더는 Express 가 소문자로 정규화해서 넘긴다. */
 function fakeReq(userId, wsId) {
   const headers = {};
-  if (wsId !== undefined) headers['x-workspace-id'] = wsId;
+  if (wsId !== undefined) headers['x-account-id'] = wsId;
   return { currentUser: { id: userId }, headers, query: {} };
 }
 
@@ -114,12 +114,12 @@ async function restRename(roomId, userId, wsId, name = '바뀐 이름') {
   return res;
 }
 
-/** MCP `set_chat_room_name` 한 번. agentWorkspaceId 는 caller 세션이 들고 있는 값. */
-async function mcpRename(roomId, agentId, sessionWorkspaceId, name = '바뀐 이름') {
+/** MCP `set_chat_room_name` 한 번. agentAccountId 는 caller 세션이 들고 있는 값. */
+async function mcpRename(roomId, agentId, sessionAccountId, name = '바뀐 이름') {
   const sessionId = `session-${randomUUID()}`;
   sessionStore.register(sessionId, { close: async () => {} }, {}, {
     agentId,
-    workspaceId: sessionWorkspaceId,
+    accountId: sessionAccountId,
     scope: 'full',
     source: 'db',
   });
@@ -181,8 +181,8 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
       userRepo.create({ id: OUTSIDER, name: 'Outsider', email: 'out@example.com' }),
     ]);
     await hostRepo.save([
-      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', workspace_id: WS }),
-      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', workspace_id: null }),
+      hostRepo.create({ id: BOT, name: 'Bot', type: 'claude', account_id: WS }),
+      hostRepo.create({ id: GLOBAL_BOT, name: 'Global bot', type: 'claude', account_id: null }),
     ]);
 
     roomUpdates = [];
@@ -206,7 +206,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
 
   it('REST: 타 워크스페이스 방은 active 참여자여도 404 이고 이름이 바뀌지 않는다', async () => {
     // 이 티켓의 핵심 — 참여자 행을 들고 있어도 지금 바인딩된 워크스페이스가 아니면 거부다.
-    const room = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'user', id: ALICE }]);
+    const room = await seedRoom({ account_id: OTHER_WS }, [{ type: 'user', id: ALICE }]);
 
     const res = await restRename(room.id, ALICE, WS);
 
@@ -217,7 +217,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
 
   it('REST: 없는 방과 타 워크스페이스 방의 응답이 status·body 모두 같다', async () => {
     // 다르면 남의 워크스페이스 room_id 를 넣어보는 것만으로 방의 존재를 확인할 수 있다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'user', id: ALICE }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'user', id: ALICE }]);
 
     const foreignRes = await restRename(foreign.id, ALICE, WS);
     const missingRes = await restRename(MISSING_ROOM, ALICE, WS);
@@ -228,14 +228,14 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
     assert.deepEqual(foreignRes.body, { error: 'Room not found' });
   });
 
-  it('REST: X-Workspace-Id 가 없으면 400 이고 이름이 바뀌지 않는다', async () => {
+  it('REST: X-Account-Id 가 없으면 400 이고 이름이 바뀌지 않는다', async () => {
     // setOpenJoin 엔드포인트와 같은 규약 — 헤더가 없으면 판정할 근거가 없으므로 거부한다.
     const room = await seedRoom({}, [{ type: 'user', id: ALICE }]);
 
     const res = await restRename(room.id, ALICE, undefined);
 
     assert.equal(res.statusCode, 400);
-    assert.deepEqual(res.body, { error: 'Workspace ID required' });
+    assert.deepEqual(res.body, { error: 'Account ID required' });
     assert.equal(await nameOf(room.id), '원래 이름');
     assert.equal(roomUpdates.length, 0);
   });
@@ -275,7 +275,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
   // ── MCP 경로 ──────────────────────────────────────────────────────────────
 
   it('MCP: 타 워크스페이스 방은 active 참여자여도 거부되고 이름이 바뀌지 않는다', async () => {
-    const room = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const room = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
 
     const res = await mcpRename(room.id, BOT, WS);
 
@@ -286,7 +286,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
   });
 
   it('MCP: 없는 방과 타 워크스페이스 방의 응답이 완전히 같다', async () => {
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
 
     const foreignRes = await mcpRename(foreign.id, BOT, WS);
     const missingRes = await mcpRename(MISSING_ROOM, BOT, WS);
@@ -296,10 +296,10 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
     assert.equal(foreignRes.payload.error, 'Room not found');
   });
 
-  it('MCP: 세션에 workspace 가 없어도 에이전트 자신의 workspace_id 로 판정한다', async () => {
-    // caller.workspaceId 가 비면 normalizeAgentWorkspaceId(agent.workspace_id) 로 떨어진다.
+  it('MCP: 세션에 workspace 가 없어도 에이전트 자신의 account_id 로 판정한다', async () => {
+    // caller.accountId 가 비면 normalizeAgentAccountId(agent.account_id) 로 떨어진다.
     // BOT 은 WS 소속이므로 OTHER_WS 방은 여전히 거부돼야 한다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'agent', id: BOT }]);
     const own = await seedRoom({}, [{ type: 'agent', id: BOT }]);
 
     const foreignRes = await mcpRename(foreign.id, BOT, undefined);
@@ -312,7 +312,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
   });
 
   it('MCP: 워크스페이스를 해석할 수 없으면 거부하고 이름을 건드리지 않는다', async () => {
-    // global agent(workspace_id null) + 키에도 workspace 가 없으면 판정 근거가 없다.
+    // global agent(account_id null) + 키에도 workspace 가 없으면 판정 근거가 없다.
     // 같은 조건에서 send_chat_room_message 도 이미 거부하므로 rename 만 열어둘 이유가 없다.
     const room = await seedRoom({}, [{ type: 'agent', id: GLOBAL_BOT }]);
 
@@ -351,7 +351,7 @@ describe('renameRoom 워크스페이스 경계 (티켓 de4d27e9)', () => {
   it('타 워크스페이스 방은 참여자가 아닐 때도 403 이 아니라 404 로 수렴한다', async () => {
     // 워크스페이스 검사가 참여자 검사보다 **뒤**에 있으면, 참여자 행 유무가 404/403 으로
     // 갈려 남의 워크스페이스 방의 참여자 구성이 드러난다. 두 경우 모두 404 여야 한다.
-    const foreign = await seedRoom({ workspace_id: OTHER_WS }, [{ type: 'user', id: ALICE }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS }, [{ type: 'user', id: ALICE }]);
 
     const asMember = await restRename(foreign.id, ALICE, WS);
     const asStranger = await restRename(foreign.id, OUTSIDER, WS);

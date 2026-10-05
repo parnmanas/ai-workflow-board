@@ -126,7 +126,7 @@ function ConfirmCard({
     setSubmitting(verdict);
     try {
       const result = await api.submitOrchestrationStepConfirm(step.id, {
-        workspace_id: wsId,
+        account_id: wsId,
         verdict,
         visit: step.visit,
         feedback: feedback.trim() || undefined,

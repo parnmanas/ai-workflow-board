@@ -18,7 +18,7 @@ const apiKeyCellStyle = (align: 'left' | 'right'): React.CSSProperties => ({
   verticalAlign: 'middle',
 });
 
-export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } = {}) {
+export default function ApiKeyManager({ accountId }: { accountId?: string } = {}) {
   const confirm = useConfirm();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -28,9 +28,9 @@ export default function ApiKeyManager({ workspaceId }: { workspaceId?: string } 
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
-    const keysData = await api.getApiKeys(workspaceId);
+    const keysData = await api.getApiKeys(accountId);
     setKeys(keysData);
-  }, [workspaceId]);
+  }, [accountId]);
 
   useEffect(() => { load(); }, [load]);
 

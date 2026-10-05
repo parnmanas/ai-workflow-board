@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SECURITY_FAIL_PORT || '0';
@@ -26,7 +26,7 @@ const SHA_HEAD = 'c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1';
 
 async function countTicketsForProfile(ds, wsId, profileId) {
   const rows = await ds.getRepository('Ticket').createQueryBuilder('t')
-    .where('t.workspace_id = :ws', { ws: wsId })
+    .where('t.account_id = :ws', { ws: wsId })
     .andWhere('t.tags LIKE :marker', { marker: `%security-profile:${profileId}%` })
     .getMany();
   return rows;
@@ -38,16 +38,16 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'sec-fail');
+  const ws = await createAccount(app, getDataSourceToken, 'sec-fail');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'inspector' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'inspector' });
 
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 
   step('create_security_profile WITH on_failure_ticket (enabled, min_severity=high, per_open_ticket)');
   const profile = await mcp.callTool('create_security_profile', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'self code-review',
     target_runtime: agent.runtime_spec,
     scan_driver: 'code-review',
@@ -71,11 +71,11 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   step('run A — failed with only a MEDIUM finding → below gate → NO ticket');
   const startA = await mcp.callTool('start_security_run', { profile_id: profile.id });
   await mcp.callTool('record_security_finding', {
-    run_id: startA.run_id, workspace_id: ws.id,
+    run_id: startA.run_id, account_id: ws.id,
     finding: { id: 'm1', severity: 'medium', title: 'minor input issue', category: 'input-validation' },
   });
   const doneA = await mcp.callTool('complete_security_run', {
-    run_id: startA.run_id, workspace_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'full',
+    run_id: startA.run_id, account_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'full',
     summary: '1 medium',
   });
   assert.equal(doneA.status, 'failed');
@@ -86,7 +86,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   step('run B — passed → NO ticket');
   const startB = await mcp.callTool('start_security_run', { profile_id: profile.id });
   const doneB = await mcp.callTool('complete_security_run', {
-    run_id: startB.run_id, workspace_id: ws.id, status: 'passed', scanned_commit: SHA_BASE, scope_used: 'full',
+    run_id: startB.run_id, account_id: ws.id, status: 'passed', scanned_commit: SHA_BASE, scope_used: 'full',
     summary: '0 critical/high',
   });
   assert.equal(doneB.status, 'passed');
@@ -99,21 +99,21 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   // baseline advanced by run B's PASS → run C is incremental from SHA_BASE.
   assert.equal(startC && !startC.isError, true);
   await mcp.callTool('attach_security_artifact', {
-    run_id: startC.run_id, workspace_id: ws.id, resource_ids: ['res-evidence-1'],
+    run_id: startC.run_id, account_id: ws.id, resource_ids: ['res-evidence-1'],
   });
   await mcp.callTool('record_security_finding', {
-    run_id: startC.run_id, workspace_id: ws.id,
+    run_id: startC.run_id, account_id: ws.id,
     finding: { id: 'h1', severity: 'high', title: 'Missing workspace scope check', category: 'authz',
       file: 'apps/server/src/modules/foo/foo.controller.ts', line: 42,
-      evidence: 'findOne({ where: { id } }) with no workspace_id', remediation: 'add workspace_id to the where clause',
+      evidence: 'findOne({ where: { id } }) with no account_id', remediation: 'add account_id to the where clause',
       checklist_item_id: 'authz' },
   });
   await mcp.callTool('record_security_finding', {
-    run_id: startC.run_id, workspace_id: ws.id,
+    run_id: startC.run_id, account_id: ws.id,
     finding: { id: 'lo1', severity: 'low', title: 'verbose log', category: 'data-exposure' },
   });
   const doneC = await mcp.callTool('complete_security_run', {
-    run_id: startC.run_id, workspace_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'incremental',
+    run_id: startC.run_id, account_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'incremental',
     summary: '1 high, 1 low',
   });
   assert.equal(doneC.status, 'failed');
@@ -140,7 +140,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   const body = ticket.description || '';
   assert.match(body, /Missing workspace scope check/, 'body lists the high finding');
   assert.match(body, /foo\.controller\.ts:42/, 'body has file:line');
-  assert.match(body, /add workspace_id to the where clause/, 'body has remediation');
+  assert.match(body, /add account_id to the where clause/, 'body has remediation');
   assert.match(body, new RegExp(SHA_HEAD), 'body has the scanned commit');
   assert.match(body, new RegExp(SHA_BASE), 'body has the baseline commit (incremental scope)');
   assert.match(body, /res-evidence-1/, 'body links the run artifact');
@@ -152,7 +152,7 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   // ── IDEMPOTENCY: re-finalize the SAME run → no second ticket ────────────────
   step('re-finalize run C → idempotent (no duplicate)');
   const reDoneC = await mcp.callTool('complete_security_run', {
-    run_id: startC.run_id, workspace_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'incremental',
+    run_id: startC.run_id, account_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'incremental',
     summary: 're-finalize',
   });
   assert.equal(reDoneC.auto_ticket_id, ticket.id, 're-finalize returns the same ticket id');
@@ -162,11 +162,11 @@ test('security on-failure auto-ticket: severity gate + evidence + idempotency + 
   step('run D — new failing run, high finding → per_open_ticket recurrence comment (no new ticket)');
   const startD = await mcp.callTool('start_security_run', { profile_id: profile.id });
   await mcp.callTool('record_security_finding', {
-    run_id: startD.run_id, workspace_id: ws.id,
+    run_id: startD.run_id, account_id: ws.id,
     finding: { id: 'h2', severity: 'critical', title: 'SQL injection in filter', category: 'injection' },
   });
   const doneD = await mcp.callTool('complete_security_run', {
-    run_id: startD.run_id, workspace_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'incremental',
+    run_id: startD.run_id, account_id: ws.id, status: 'failed', scanned_commit: SHA_HEAD, scope_used: 'incremental',
     summary: '1 critical',
   });
   assert.equal(doneD.auto_ticket_id, ticket.id, 'recurrence reuses the existing open ticket');

@@ -21,7 +21,7 @@ import { OutreachOutboundPost } from '../../entities/OutreachOutboundPost';
 function channelToJson(c: OutreachChannel) {
   return {
     id: c.id,
-    workspace_id: c.workspace_id,
+    account_id: c.account_id,
     kind: c.kind,
     name: c.name,
     targets: Array.isArray(c.targets) ? c.targets : [],
@@ -54,7 +54,7 @@ function channelToJson(c: OutreachChannel) {
 function outboundToJson(p: OutreachOutboundPost) {
   return {
     id: p.id,
-    workspace_id: p.workspace_id,
+    account_id: p.account_id,
     channel_id: p.channel_id,
     kind: p.kind,
     status: p.status,
@@ -101,9 +101,9 @@ export class OutreachController {
   ) {}
 
   @Get()
-  async list(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async list(@Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      const rows = await this.channelService.list(workspaceId);
+      const rows = await this.channelService.list(accountId);
       return res.json(rows.map(channelToJson));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list outreach channels' });
@@ -111,9 +111,9 @@ export class OutreachController {
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async get(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(channelToJson(await this.channelService.get(id, workspaceId)));
+      return res.json(channelToJson(await this.channelService.get(id, accountId)));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'Outreach channel not found' });
     }
@@ -122,9 +122,9 @@ export class OutreachController {
   // Channel status — last/next poll timestamps + a per-status count rollup,
   // the "상태 확인" half of the ticket's minimal REST scope.
   @Get(':id/status')
-  async status(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async status(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.channelService.status(id, workspaceId));
+      return res.json(await this.channelService.status(id, accountId));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'Outreach channel not found' });
     }
@@ -134,7 +134,7 @@ export class OutreachController {
   async create(@Body() body: any, @Res() res: Response) {
     try {
       const row = await this.channelService.create({
-        workspaceId: body?.workspace_id,
+        accountId: body?.account_id,
         kind: body?.kind,
         name: body?.name,
         targets: body?.targets,
@@ -167,7 +167,7 @@ export class OutreachController {
       // an OMITTED key must mean "leave alone", not "clear it". The service
       // distinguishes `undefined` (untouched) from an explicit `null`/''`
       // (clear) via `patch.field !== undefined`.
-      const row = await this.channelService.update(id, body?.workspace_id, {
+      const row = await this.channelService.update(id, body?.account_id, {
         kind: body?.kind,
         name: body?.name,
         targets: body?.targets,
@@ -194,9 +194,9 @@ export class OutreachController {
   }
 
   @Delete(':id')
-  async remove(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async remove(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.channelService.remove(id, workspaceId);
+      await this.channelService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete outreach channel' });
@@ -212,12 +212,12 @@ export class OutreachController {
   @Get(':id/outbound')
   async listOutbound(
     @Param('id') channelId: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('status') status: string | undefined,
     @Res() res: Response,
   ) {
     try {
-      const rows = await this.publisherService.listOutbound(channelId, workspaceId, status);
+      const rows = await this.publisherService.listOutbound(channelId, accountId, status);
       return res.json(rows.map(outboundToJson));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list outbound posts' });
@@ -232,11 +232,11 @@ export class OutreachController {
     @Res() res: Response,
   ) {
     try {
-      const workspaceId = body?.workspace_id;
+      const accountId = body?.account_id;
       // channelId is verified atomically inside approve() itself (together
-      // with postId/workspaceId, before any connector call) — see that
+      // with postId/accountId, before any connector call) — see that
       // method's docstring. No post-hoc check needed here.
-      const post = await this.publisherService.approve(postId, channelId, workspaceId, body?.body);
+      const post = await this.publisherService.approve(postId, channelId, accountId, body?.body);
       return res.json(outboundToJson(post));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to approve outbound post' });
@@ -251,8 +251,8 @@ export class OutreachController {
     @Res() res: Response,
   ) {
     try {
-      const workspaceId = body?.workspace_id;
-      const post = await this.publisherService.reject(postId, channelId, workspaceId);
+      const accountId = body?.account_id;
+      const post = await this.publisherService.reject(postId, channelId, accountId);
       return res.json(outboundToJson(post));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to reject outbound post' });

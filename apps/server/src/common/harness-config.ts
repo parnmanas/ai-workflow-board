@@ -5,7 +5,7 @@ import { z } from 'zod';
  *
  * A harness describes how a subagent CLI should be launched for tickets on a
  * board: extra system prompt, tool allow/deny lists, model and permission
- * mode. Stored as a JSON text column on both Workspace (`harness_config` =
+ * mode. Stored as a JSON text column on both Account (`harness_config` =
  * workspace-wide default) and Board (`harness_config` = per-board override),
  * mirroring the `Board.routing_config` / `Board.column_prompts` convention.
  *

@@ -108,7 +108,7 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
 
   // ── 대조군: 실제 agent 는 real Postgres 에서도 정규 표시로 해석된다 ──────
   const host = await agentRepo.save(agentRepo.create({
-    name: 'Rolf', workspace_id: 'ws-actor-sentinel',
+    name: 'Rolf', account_id: 'ws-actor-sentinel',
   }));
   assert.equal(
     await resolveAgentDisplayName(ds, host.id), 'Rolf',
@@ -120,7 +120,7 @@ test('sentinel actor id 는 real Postgres 의 agents.id(uuid) 조회에 닿지 �
   assert.ok(def, 'EVENT_TYPES 에 board_update 정의가 있어야 한다');
   const ctx = {
     resolveTicketSnapshot: async () => ({
-      root_id: '44444444-4444-4444-8444-444444444444', workspace_id: 'ws-actor-sentinel', status: 'done', project_id: '',
+      root_id: '44444444-4444-4444-8444-444444444444', account_id: 'ws-actor-sentinel', status: 'done', project_id: '',
     }),
     resolveActorDisplayName: (actorId) => resolveAgentDisplayName(ds, actorId),
   };

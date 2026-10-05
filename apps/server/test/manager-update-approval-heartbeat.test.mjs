@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 import { ActivityLog } from '../dist/entities/ActivityLog.js';
 
@@ -22,13 +22,13 @@ async function setup(t, port, label) {
   const { app, port: boundPort, modules } = await bootApp({ port });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, label);
+  const workspace = await createAccount(app, getDataSourceToken, label);
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: `${label}-host`,
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label,
   });
   const dataSource = app.get(getDataSourceToken());
@@ -42,7 +42,7 @@ async function heartbeat(port, key, manager, workspace, body) {
     body: JSON.stringify({
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       mode: 'manager',
       hostname: 'approval-test-host',
       plugin_version: '1.6.94',

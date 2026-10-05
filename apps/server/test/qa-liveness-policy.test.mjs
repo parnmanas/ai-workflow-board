@@ -222,44 +222,44 @@ function makeHeartbeatService(run) {
 
 test('recordHeartbeat advances the deadline only on a STRICT token increase', async () => {
   const run = {
-    id: 'r1', workspace_id: 'w1', status: 'running',
+    id: 'r1', account_id: 'w1', status: 'running',
     liveness_token: null, liveness_token_at: null,
   };
   const svc = makeHeartbeatService(run);
 
-  await svc.recordHeartbeat({ runId: 'r1', workspaceId: 'w1', progressToken: 10 });
+  await svc.recordHeartbeat({ runId: 'r1', accountId: 'w1', progressToken: 10 });
   assert.equal(run.liveness_token, 10, 'first token recorded');
   const t1 = run.liveness_token_at;
   assert.ok(t1 instanceof Date, 'liveness_token_at stamped on first heartbeat');
 
   // (c) Same token again — must NOT advance the deadline clock.
-  await svc.recordHeartbeat({ runId: 'r1', workspaceId: 'w1', progressToken: 10 });
+  await svc.recordHeartbeat({ runId: 'r1', accountId: 'w1', progressToken: 10 });
   assert.equal(run.liveness_token, 10, 'token unchanged');
   assert.strictEqual(run.liveness_token_at, t1, 'repeated token does NOT bump liveness_token_at (false-immortal guard)');
 
   // Lower token (out-of-order / replay) — also no advance, keep the high-water mark.
-  await svc.recordHeartbeat({ runId: 'r1', workspaceId: 'w1', progressToken: 7 });
+  await svc.recordHeartbeat({ runId: 'r1', accountId: 'w1', progressToken: 7 });
   assert.equal(run.liveness_token, 10, 'high-water mark preserved against a lower token');
   assert.strictEqual(run.liveness_token_at, t1, 'lower token does NOT bump the deadline');
 
   // Strict increase — advances both.
-  await svc.recordHeartbeat({ runId: 'r1', workspaceId: 'w1', progressToken: 11 });
+  await svc.recordHeartbeat({ runId: 'r1', accountId: 'w1', progressToken: 11 });
   assert.equal(run.liveness_token, 11, 'strict increase updates token');
   assert.notStrictEqual(run.liveness_token_at, t1, 'strict increase resets the deadline');
 });
 
 test('recordHeartbeat rejects a terminal run and a non-finite token', async () => {
-  const terminal = { id: 'r2', workspace_id: 'w1', status: 'passed', liveness_token: null, liveness_token_at: null };
+  const terminal = { id: 'r2', account_id: 'w1', status: 'passed', liveness_token: null, liveness_token_at: null };
   const svcT = makeHeartbeatService(terminal);
   await assert.rejects(
-    () => svcT.recordHeartbeat({ runId: 'r2', workspaceId: 'w1', progressToken: 5 }),
+    () => svcT.recordHeartbeat({ runId: 'r2', accountId: 'w1', progressToken: 5 }),
     /already 'passed'/, 'heartbeats refused once the run is terminal',
   );
 
-  const live = { id: 'r3', workspace_id: 'w1', status: 'running', liveness_token: null, liveness_token_at: null };
+  const live = { id: 'r3', account_id: 'w1', status: 'running', liveness_token: null, liveness_token_at: null };
   const svcN = makeHeartbeatService(live);
   await assert.rejects(
-    () => svcN.recordHeartbeat({ runId: 'r3', workspaceId: 'w1', progressToken: Number.NaN }),
+    () => svcN.recordHeartbeat({ runId: 'r3', accountId: 'w1', progressToken: Number.NaN }),
     /finite number/, 'NaN token rejected',
   );
 });

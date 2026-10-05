@@ -3,7 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Not } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Ticket } from '../../entities/Ticket';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { Comment } from '../../entities/Comment';
 import { User } from '../../entities/User';
 import { isUuidShapedId } from '../../utils/agent-name';
@@ -121,7 +121,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   // ── public API ────────────────────────────────────────────────────────
 
   /** Start queued `todo` tickets that have capacity. Scoped when filters are given. */
-  startQueued(filter: { workspaceId?: string; assigneeKey?: string } = {}): Promise<number> {
+  startQueued(filter: { accountId?: string; assigneeKey?: string } = {}): Promise<number> {
     const run = this.pumpChain.then(() => this.pump(filter));
     this.pumpChain = run.catch(() => undefined);
     return run;
@@ -171,7 +171,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       entity_type: 'ticket',
       entity_id: args.ticketId,
       ticket_id: args.ticketId,
-      workspace_id: ticket.workspace_id || '',
+      account_id: ticket.account_id || '',
       action: `dispatch_ack_${args.outcome}`,
       field_changed: args.triggerId || '',
       new_value: (args.reason || '').slice(0, 500),
@@ -194,9 +194,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   private async onActivity(activity: ActivityLog): Promise<void> {
     // Resuming a paused workspace (or raising its per-agent cap) can start
     // queued tickets right away instead of waiting for the sweep.
-    if (activity?.entity_type === 'workspace' && activity.action === 'config_changed'
+    if (activity?.entity_type === 'account' && activity.action === 'config_changed'
       && ['dispatch_paused_at', 'max_concurrent_tickets_per_agent'].includes(activity.field_changed || '')) {
-      await this.startQueued({ workspaceId: String(activity.entity_id) });
+      await this.startQueued({ accountId: String(activity.entity_id) });
       return;
     }
     if (!activity?.ticket_id) return;
@@ -207,7 +207,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (activity.entity_type !== 'ticket') return;
     const ticket = await this.dataSource.getRepository(Ticket).findOne({ where: { id: activity.ticket_id } });
     if (!ticket) {
-      if (activity.action === 'deleted') await this.startQueued({ workspaceId: activity.workspace_id || undefined });
+      if (activity.action === 'deleted') await this.startQueued({ accountId: activity.account_id || undefined });
       return;
     }
     if (ticket.parent_id) return; // children are a checklist, never dispatched
@@ -222,7 +222,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     // inferring them from activity rows too would wake the agent twice.
     if (activity.action === 'moved' && ticket.status === 'done') await this.onDone(ticket);
     // Any ticket change can open or fill a slot — re-pump the workspace.
-    await this.startQueued({ workspaceId: ticket.workspace_id || undefined });
+    await this.startQueued({ accountId: ticket.account_id || undefined });
   }
 
   private async onComment(commentId: string, ticketId: string): Promise<void> {
@@ -254,11 +254,11 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (ticket.next_ticket_id) {
       const repo = this.dataSource.getRepository(Ticket);
       const next = await repo.findOne({ where: { id: ticket.next_ticket_id } });
-      if (next && next.workspace_id === ticket.workspace_id && next.status === 'backlog' && !next.archived_at) {
+      if (next && next.account_id === ticket.account_id && next.status === 'backlog' && !next.archived_at) {
         const res = await repo.update({ id: next.id, status: 'backlog' }, { status: 'todo' });
         if (res.affected) {
           await this.activityService.logActivity({
-            entity_type: 'ticket', entity_id: next.id, ticket_id: next.id, workspace_id: next.workspace_id,
+            entity_type: 'ticket', entity_id: next.id, ticket_id: next.id, account_id: next.account_id,
             action: 'moved', field_changed: 'status', old_value: 'backlog', new_value: 'todo',
             actor_name: 'AWB', trigger_source: 'next_ticket',
           });
@@ -290,7 +290,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       if (!claimed.affected) continue;
       const decisions = this.dataSource.getRepository(TicketDuplicateDecision);
       await decisions.save(decisions.create({
-        workspace_id: duplicate.workspace_id,
+        account_id: duplicate.account_id,
         report_ticket_id: duplicate.id,
         candidate_ticket_id: canonical.id,
         outcome: 'resolved_from_canonical',
@@ -300,7 +300,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
         actor_name: 'Canonical resolution',
       }));
       await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: duplicate.id, ticket_id: duplicate.id, workspace_id: duplicate.workspace_id,
+        entity_type: 'ticket', entity_id: duplicate.id, ticket_id: duplicate.id, account_id: duplicate.account_id,
         action: 'moved', field_changed: 'resolved_from_canonical', old_value: prev, new_value: 'done',
         actor_id: 'system', actor_name: 'Canonical resolution',
       });
@@ -309,7 +309,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
 
   // ── queue ─────────────────────────────────────────────────────────────
 
-  private async pump(filter: { workspaceId?: string; assigneeKey?: string }): Promise<number> {
+  private async pump(filter: { accountId?: string; assigneeKey?: string }): Promise<number> {
     if (await this.instanceQuiesce.isQuiesced()) return 0;
     const repo = this.dataSource.getRepository(Ticket);
     const where: any = {
@@ -317,7 +317,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
       assignee_key: filter.assigneeKey ? filter.assigneeKey : Not(''),
     };
-    if (filter.workspaceId) where.workspace_id = filter.workspaceId;
+    if (filter.accountId) where.account_id = filter.accountId;
     const queued = await repo.find({ where, take: 500 });
     if (queued.length === 0) return 0;
     queued.sort((a, b) =>
@@ -325,11 +325,11 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       || a.position - b.position
       || new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
-    const workspaces = await this.workspacesById([...new Set(queued.map((t) => t.workspace_id).filter(Boolean))]);
+    const accounts = await this.accountsById([...new Set(queued.map((t) => t.account_id).filter(Boolean))]);
     const running = await this.runningCounts([...new Set(queued.map((t) => t.assignee_key))]);
     let started = 0;
     for (const ticket of queued) {
-      const ws = workspaces.get(ticket.workspace_id);
+      const ws = accounts.get(ticket.account_id);
       if (!ws || ws.dispatch_paused_at) continue;
       const cap = Math.max(1, ws.max_concurrent_tickets_per_agent || 1);
       const inFlight = running.get(ticket.assignee_key) ?? 0;
@@ -346,7 +346,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       running.set(ticket.assignee_key, inFlight + 1);
       ticket.status = 'in_progress';
       await this.activityService.logActivity({
-        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
         action: 'moved', field_changed: 'status', old_value: 'todo', new_value: 'in_progress',
         actor_name: 'AWB', trigger_source: 'start',
       });
@@ -356,7 +356,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     return started;
   }
 
-  /** Non-pending, non-archived in_progress tickets per assignee identity (all workspaces). */
+  /** Non-pending, non-archived in_progress tickets per assignee identity (all accounts). */
   private async runningCounts(keys: string[]): Promise<Map<string, number>> {
     const out = new Map<string, number>();
     if (keys.length === 0) return out;
@@ -371,9 +371,9 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     return out;
   }
 
-  private async workspacesById(ids: string[]): Promise<Map<string, Workspace>> {
+  private async accountsById(ids: string[]): Promise<Map<string, Account>> {
     if (ids.length === 0) return new Map();
-    const rows = await this.dataSource.getRepository(Workspace).find({ where: { id: In(ids) } });
+    const rows = await this.dataSource.getRepository(Account).find({ where: { id: In(ids) } });
     return new Map(rows.map((w) => [w.id, w]));
   }
 
@@ -382,7 +382,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (isTicketPending(ticket)) return 'pending';
     if (ticket.archived_at) return 'archived';
     if (ticket.canonical_ticket_id) return 'duplicate';
-    const ws = await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } });
+    const ws = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
     if (ws?.dispatch_paused_at) return 'workspace_paused';
     const spec = parseRuntimeSpec(ticket.assignee);
     if (!spec) return 'unassigned';
@@ -403,7 +403,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (ticket.status !== 'in_progress' && ticket.status !== 'todo') return { dispatched: false, reason: `status_${ticket.status}` };
     const spec = parseRuntimeSpec(ticket.assignee);
     if (!spec) return { dispatched: false, reason: 'unassigned' };
-    const ws = await this.dataSource.getRepository(Workspace).findOne({ where: { id: ticket.workspace_id } });
+    const ws = await this.dataSource.getRepository(Account).findOne({ where: { id: ticket.account_id } });
     if (!ws) return { dispatched: false, reason: 'workspace_missing' };
     if (ws.dispatch_paused_at) return { dispatched: false, reason: 'workspace_paused' };
     if (await this.instanceQuiesce.isQuiesced()) return { dispatched: false, reason: 'instance_quiesced' };
@@ -418,7 +418,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     } catch (err: any) {
       this.logService.error('Dispatch', 'trigger build failed; not emitted', { err: String(err?.message || err), ticket_id: ticket.id });
       await this.dataSource.getRepository(ActivityLog).save({
-        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id || '',
+        entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id || '',
         action: 'dispatch_failed', field_changed: source, new_value: String(err?.message || err).slice(0, 500),
         role: 'assignee', actor_name: 'AWB', trigger_source: source,
       });
@@ -427,7 +427,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
 
     // Correlation row first, then the emit: a fast ack must find it.
     await this.dataSource.getRepository(ActivityLog).save({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id || '',
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id || '',
       action: 'trigger_emitted', field_changed: payload.trigger_id, new_value: payload.agent_id,
       role: 'assignee', actor_name: 'AWB', trigger_source: source,
     });
@@ -442,13 +442,13 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
   private async buildPayload(
     ticket: Ticket,
     spec: RuntimeSpec,
-    ws: Workspace,
+    ws: Account,
     source: DispatchSource,
     forceRespawn: boolean,
   ): Promise<AgentTriggerPayload & Record<string, unknown>> {
     const agentId = runtimeIdentityKey(spec);
     const status = (ticket.status === 'todo' ? 'in_progress' : ticket.status) as TicketStatus;
-    const project = ticket.project_id ? await this.projects.getInWorkspace(ticket.project_id, ticket.workspace_id) : null;
+    const project = ticket.project_id ? await this.projects.getInWorkspace(ticket.project_id, ticket.account_id) : null;
     const mainCloneDir = project ? await this.projects.hostFolder(project.id, spec.manager_agent_id) : null;
     const baseBranch = ticket.base_branch || '';
 
@@ -487,7 +487,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
 
     // Skill selection is part of the execution contract — fail closed.
     const snapshot = await this.runSkillSnapshots.resolve({
-      workspaceId: ticket.workspace_id,
+      accountId: ticket.account_id,
       runId: `ticket:${ticket.id}:assignee`,
       agentId,
     });
@@ -497,7 +497,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       ticket_id: ticket.id,
       agent_id: agentId,
       runtime: spec,
-      workspace_id: ticket.workspace_id,
+      account_id: ticket.account_id,
       role: 'assignee',
       role_prompt: spec.role_prompt || '',
       ticket_prompt: ticket.prompt_text || '',
@@ -536,7 +536,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
     if (Date.now() - last < OFFLINE_NOTICE_COOLDOWN_MS) return;
     this.offlineNoticeAt.set(ticket.id, Date.now());
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
       action: 'dispatch_deferred', field_changed: 'host_offline',
       new_value: `Runtime Host ${spec.manager_agent_id} is offline — the ticket waits until it reconnects.`,
       actor_name: 'AWB',
@@ -574,10 +574,10 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       take: 500,
     });
     if (working.length === 0) return;
-    const workspaces = await this.workspacesById([...new Set(working.map((t) => t.workspace_id).filter(Boolean))]);
+    const accounts = await this.accountsById([...new Set(working.map((t) => t.account_id).filter(Boolean))]);
     const latestComment = await this.latestCommentAt(working.map((t) => t.id));
     for (const ticket of working) {
-      const ws = workspaces.get(ticket.workspace_id);
+      const ws = accounts.get(ticket.account_id);
       if (!ws || ws.dispatch_paused_at) continue;
 
       const nack = this.nackRetryAt.get(ticket.id);
@@ -636,7 +636,7 @@ export class TicketDispatchService implements OnModuleInit, OnModuleDestroy {
       supervisor_redispatches: 0,
     });
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      entity_type: 'ticket', entity_id: ticket.id, ticket_id: ticket.id, account_id: ticket.account_id,
       action: 'updated', field_changed: 'pending_user_action', old_value: 'false', new_value: 'true',
       actor_name: 'AWB', trigger_source: 'supervisor',
     });

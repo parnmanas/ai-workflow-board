@@ -34,7 +34,7 @@ import { QaScheduleService } from '../qa/qa-schedule.service';
 import { SecurityProfileService } from '../security/security-profile.service';
 import { SecurityRunService } from '../security/security-run.service';
 import { SecurityScheduleService } from '../security/security-schedule.service';
-import { WorkspaceScheduleService } from '../workspace-schedule/workspace-schedule.service';
+import { WorkspaceScheduleService } from '../automation-schedule/automation-schedule.service';
 import { TicketPrerequisitesService } from '../tickets/ticket-prerequisites.service';
 import { CiWaitService } from '../tickets/ci-wait.service';
 import { TicketService } from '../tickets/ticket.service';
@@ -306,20 +306,20 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
 
       // Operator(고정된 Agent Session)의 연결은 워크스페이스에 묶지 않는다 — 사이트 전체를 관리한다.
       // 조건·신뢰 경계는 voice/operator-config.ts `isOperatorConnection`.
-      if (mcpAuthInfo.workspaceId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers,
+      if (mcpAuthInfo.accountId && await isOperatorConnection(this.dataSource, mcpAuthInfo, req.headers,
         (managerId, ref) => this.agentSessionsService.resolveMcpSessionRef(managerId, ref))) {
         if (req.method === 'POST' && req.body?.method === 'initialize') {
           this._logService.info('MCP', 'operator session connected with site-wide scope', {
             host_id: mcpAuthInfo.agentId,
             session_id: String(req.headers['x-awb-session-id'] || ''),
-            pairing_workspace_id: mcpAuthInfo.workspaceId,
+            pairing_account_id: mcpAuthInfo.accountId,
           });
         }
-        mcpAuthInfo.workspaceId = undefined;
+        mcpAuthInfo.accountId = undefined;
       }
 
-      // Inject workspace_id from API key into request context for downstream use
-      (req as any).currentWorkspaceId = mcpAuthInfo.workspaceId ?? null;
+      // Inject account_id from API key into request context for downstream use
+      (req as any).currentAccountId = mcpAuthInfo.accountId ?? null;
 
       // schemaVersion:2 validation for general MCP clients. Runtime children
       // receive a Host-authenticated, run-scoped MCP configuration and bypass
@@ -391,8 +391,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         // 워크스페이스 범위는 요청마다 다시 판정한 값을 따른다 — 이미 열린 MCP 세션을 operator 로
         // 지정하거나 해제해도 다음 요청부터 맞는 범위로 돈다(같은 키의 연결일 때만).
         if (session.auth && session.auth.source === 'db' && session.auth.agentId === mcpAuthInfo.agentId
-          && session.auth.workspaceId !== mcpAuthInfo.workspaceId) {
-          session.auth.workspaceId = mcpAuthInfo.workspaceId;
+          && session.auth.accountId !== mcpAuthInfo.accountId) {
+          session.auth.accountId = mcpAuthInfo.accountId;
         }
         const sessionToolProfile: ToolProfile = session.auth?.toolProfile === 'compact' ? 'compact' : 'full';
 
@@ -483,7 +483,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
             sessionStore.register(id, transport, mcpServer, {
               agentId: mcpAuthInfo.agentId,
               agentName: mcpAuthInfo.agentName,
-              workspaceId: mcpAuthInfo.workspaceId,
+              accountId: mcpAuthInfo.accountId,
               scope: mcpAuthInfo.scope,
               source: mcpAuthInfo.source,
               runtimeKey: mcpAuthInfo.runtimeKey,

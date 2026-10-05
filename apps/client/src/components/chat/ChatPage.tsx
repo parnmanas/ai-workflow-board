@@ -88,7 +88,9 @@ function ProtocolUpgradeBanner() {
 }
 
 export default function ChatPage() {
-  const { wsId, roomId: routeRoomId } = useParams<{ wsId: string; roomId?: string }>();
+  const { roomId: routeRoomId } = useParams<{ roomId?: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const navigate = useNavigate();
   const { user } = useAuth();
   // Announcements (toast / sound / OS notification) belong to
@@ -174,28 +176,11 @@ export default function ChatPage() {
     [],
   );
 
-  // Workspace-wide observer toggle (v0.32+) — when on, the room list
-  // includes every active room in the workspace, including agent-to-agent
-  // DMs the current user isn't a participant in. Off by default; persisted
-  // to localStorage so the choice survives reloads.
-  const [showAllRooms] = useState<boolean>(() => {
-    try { return localStorage.getItem('chat:showAllRooms') === 'true'; } catch { return false; }
-  });
+  // The work surface lists the signed-in user's rooms across accessible accounts.
+  const showAllRooms = false;
 
-  // Workspace 전환 시 이전 workspace 의 활성 방을 들고 있지 않도록 초기화한다.
-  // activeRoomId 가 null 이 되면 아래 "Load messages on room change" effect 가
-  // messages/roomParticipants/isObserver 도 함께 정리한다 (티켓 28258c75).
   useEffect(() => {
-    setActiveRoomId(null);
-  }, [wsId]);
-
-  // Load rooms on mount + when scope toggles + when workspace changes.
-  // Pass wsId explicitly (instead of relying on the ambient X-Workspace-Id
-  // header) — this effect fires the instant the URL's wsId changes, which can
-  // beat the sibling AppLayout effect that syncs the ambient header to the new
-  // workspace, so relying on it here could re-fetch under the old workspace.
-  useEffect(() => {
-    api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId)
+    api.listChatRooms(showAllRooms ? 'account' : undefined, wsId)
       .then((list) => {
         setRooms(list);
       })
@@ -206,7 +191,7 @@ export default function ChatPage() {
         // on the thrown error. The user-facing message is intentionally left
         // generic (we don't leak backend detail into the UI).
         console.error(
-          `[chat] listChatRooms failed (scope=${showAllRooms ? 'workspace' : 'mine'}, status=${err?.status ?? '?'}, code=${err?.code ?? ''})`,
+          `[chat] listChatRooms failed (scope=${showAllRooms ? 'account' : 'mine'}, status=${err?.status ?? '?'}, code=${err?.code ?? ''})`,
           err,
         );
       });
@@ -218,7 +203,7 @@ export default function ChatPage() {
   // while ChatPage is mounted.
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('chat-rooms-changed', {
-      detail: { workspaceId: wsId, rooms },
+      detail: { accountId: wsId, rooms },
     }));
   }, [rooms, wsId]);
 
@@ -232,12 +217,12 @@ export default function ChatPage() {
     const messageParam = searchParams.get('message');
     if (newChatParam === '1' && wsId) {
       setShowNewChat(true);
-      navigate(`/ws/${wsId}/chat`, { replace: true });
+      navigate(`/chat`, { replace: true });
       return;
     }
     if (roomParam && wsId) {
       const messageQuery = messageParam ? `?message=${encodeURIComponent(messageParam)}` : '';
-      navigate(`/ws/${wsId}/chat/${roomParam}${messageQuery}`, { replace: true });
+      navigate(`/chat/${roomParam}${messageQuery}`, { replace: true });
       return;
     }
     const targetRoomId = routeRoomId || null;
@@ -544,13 +529,9 @@ export default function ChatPage() {
       {
         currentUserId: user?.id,
         getActiveRoomId: () => activeRoomIdRef.current,
-        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId),
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, wsId),
         setRooms,
         refreshActiveRoomParticipants,
-        // open_join_changed 는 워크스페이스 전체로 나가므로 스코프 대조가 필요하다
-        // (ticket 995a9519). ambient getActiveWorkspaceId() 대신 URL 의 wsId 를 쓰는
-        // 이유는 아래 방 목록 조회와 같다 — 탭마다 다른 워크스페이스를 볼 수 있다.
-        getCurrentWorkspaceId: () => wsId ?? null,
       },
       data,
     );
@@ -558,7 +539,7 @@ export default function ChatPage() {
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
-    if (wsId) navigate(`/ws/${wsId}/chat/${roomId}`);
+    if (wsId) navigate(`/chat/${roomId}`);
   }
 
   // Older-message loader: fetches a page of history strictly older than
@@ -635,7 +616,7 @@ export default function ChatPage() {
     if (activeRoomId === roomId) {
       setActiveRoomId(null);
       setMessages([]);
-      if (wsId) navigate(`/ws/${wsId}/chat`);
+      if (wsId) navigate(`/chat`);
     }
   }
 
@@ -674,7 +655,7 @@ export default function ChatPage() {
     // 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 — SSE 경로와 동일 반응.
     reflectParticipantChange(
       {
-        listChatRooms: () => api.listChatRooms(showAllRooms ? 'workspace' : undefined, wsId),
+        listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, wsId),
         setRooms,
         getActiveRoomId: () => activeRoomIdRef.current,
         refreshActiveRoomParticipants,
@@ -721,19 +702,14 @@ export default function ChatPage() {
     [rooms, activeRoomId],
   );
 
-  // URL 의 wsId 를 직접 쓴다(ambient getActiveWorkspaceId() 대신) — workspace 전환
-  // 직후의 첫 렌더에서는 AppLayout 의 setActiveWorkspaceId() 이펙트가 아직 커밋 전이라
-  // ambient 값이 이전 workspace 를 가리켜, 이 값에 의존하는 agent dashboard(활성
-  // task 배지)와 RoomListPanel 의 채팅 검색(searchChatMessages)이 구 workspace
-  // 기준으로 동작하는 race 가 있었다 (티켓 28258c75).
-  const workspaceId = wsId || '';
+  const accountId = wsId || '';
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!accountId) return;
     let cancelled = false;
     // P4c-4: Agent 대시보드 제거 — 빈 목록 (DM 상대 task unknown).
     setDashboardAgents([]);
     return () => { cancelled = true; };
-  }, [workspaceId]);
+  }, [accountId]);
 
   useBoardStreamEvent('agent_status', useCallback((event: any) => {
     const payload = event?.payload ?? event;

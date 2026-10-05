@@ -12,7 +12,7 @@ function makeError(status: number, message: string): Error & { status: number } 
 }
 
 export interface RegisterBuildArtifactInput {
-  workspaceId: string;
+  accountId: string;
   repo: BuildRepoRef;
   target: string;
   commitSha: string;
@@ -27,7 +27,7 @@ export interface RegisterBuildArtifactInput {
 }
 
 export interface ReportBuildFailureInput {
-  workspaceId: string;
+  accountId: string;
   repo: BuildRepoRef;
   target: string;
   commitSha?: string;
@@ -38,7 +38,7 @@ export interface ReportBuildFailureInput {
 }
 
 export interface GetLatestArtifactInput {
-  workspaceId: string;
+  accountId: string;
   repo: BuildRepoRef;
   target: string;
   /** When set, freshness is decided against this exact commit. */
@@ -93,8 +93,8 @@ export class BuildArtifactService {
    * row rather than piling duplicates.
    */
   async register(input: RegisterBuildArtifactInput): Promise<BuildArtifact> {
-    const workspaceId = (input.workspaceId || '').trim();
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+    const accountId = (input.accountId || '').trim();
+    if (!accountId) throw makeError(400, 'account_id is required');
     const target = (input.target || '').trim();
     if (!target) throw makeError(400, 'target is required');
     const commitSha = (input.commitSha || '').trim();
@@ -104,7 +104,7 @@ export class BuildArtifactService {
     const status: BuildArtifactStatus = input.status ?? 'ok';
     const host = (input.host || '').trim();
 
-    const row = await this.upsert(workspaceId, repoKey, target, commitSha, host, {
+    const row = await this.upsert(accountId, repoKey, target, commitSha, host, {
       repo_resource_id: buildRepoProjectId(input.repo),
       repo_url: (input.repo.url || '').trim(),
       status,
@@ -132,8 +132,8 @@ export class BuildArtifactService {
    * and reusable by security / dev builds.
    */
   async reportFailure(input: ReportBuildFailureInput): Promise<BuildArtifact> {
-    const workspaceId = (input.workspaceId || '').trim();
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+    const accountId = (input.accountId || '').trim();
+    if (!accountId) throw makeError(400, 'account_id is required');
     const target = (input.target || '').trim();
     if (!target) throw makeError(400, 'target is required');
     const logSummary = (input.logSummary || '').trim();
@@ -144,7 +144,7 @@ export class BuildArtifactService {
     const commitSha = (input.commitSha || '').trim();
     const host = (input.host || '').trim();
 
-    const row = await this.upsert(workspaceId, repoKey, target, commitSha, host, {
+    const row = await this.upsert(accountId, repoKey, target, commitSha, host, {
       repo_resource_id: buildRepoProjectId(input.repo),
       repo_url: (input.repo.url || '').trim(),
       status: 'failed',
@@ -169,15 +169,15 @@ export class BuildArtifactService {
    * fallback.
    */
   async getLatest(input: GetLatestArtifactInput): Promise<GetLatestArtifactResult> {
-    const workspaceId = (input.workspaceId || '').trim();
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+    const accountId = (input.accountId || '').trim();
+    if (!accountId) throw makeError(400, 'account_id is required');
     const target = (input.target || '').trim();
     if (!target) throw makeError(400, 'target is required');
     const repoKey = this.resolveKey(input.repo);
     const host = (input.host || '').trim();
 
     const base: Record<string, any> = {
-      workspace_id: workspaceId,
+      account_id: accountId,
       repo_key: repoKey,
       target,
       status: 'ok',
@@ -199,7 +199,7 @@ export class BuildArtifactService {
 
   /** Find the existing row for the identity tuple and patch it, else insert. */
   private async upsert(
-    workspaceId: string,
+    accountId: string,
     repoKey: string,
     target: string,
     commitSha: string,
@@ -207,7 +207,7 @@ export class BuildArtifactService {
     patch: Partial<BuildArtifact>,
   ): Promise<BuildArtifact> {
     const existing = await this.repo.findOne({
-      where: { workspace_id: workspaceId, repo_key: repoKey, target, commit_sha: commitSha, host },
+      where: { account_id: accountId, repo_key: repoKey, target, commit_sha: commitSha, host },
     });
     if (existing) {
       Object.assign(existing, patch);
@@ -215,7 +215,7 @@ export class BuildArtifactService {
     }
     return this.repo.save(
       this.repo.create({
-        workspace_id: workspaceId,
+        account_id: accountId,
         repo_key: repoKey,
         target,
         commit_sha: commitSha,

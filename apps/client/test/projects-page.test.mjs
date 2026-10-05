@@ -15,14 +15,15 @@ import assert from 'node:assert/strict';
 // 죽는다(helpers/jsdom.mjs 상단 주석).
 import { setupDom, mount, click, typeInto, React, act } from './helpers/jsdom.mjs';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import { api } from '../src/api.ts';
+import { api, getActiveAccountId } from '../src/api.ts';
+import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import ProjectsPage from '../src/components/projects/ProjectsPage.tsx';
 
 const flush = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
 function project(overrides = {}) {
   return {
-    id: 'p-1', workspace_id: 'WS', name: 'AWB', description: '', repo_url: 'https://github.com/o/awb.git',
+    id: 'p-1', account_id: 'WS', name: 'AWB', description: '', repo_url: 'https://github.com/o/awb.git',
     default_branch: 'main', credential_id: null, clone_policy: null, use_pr: false, instructions: '',
     default_assignee: null, host_folders: [], created_at: '2026-10-01T00:00:00.000Z', updated_at: '2026-10-01T00:00:00.000Z',
     ...overrides,
@@ -46,10 +47,12 @@ function fieldByLabel(container, labelText, tag = 'input') {
 async function renderPage(t, { wsId, projects, stubs = {} }) {
   const dom = setupDom();
   globalThis.localStorage = dom.window.localStorage;
+  localStorage.setItem('auth_token', 'test-token');
   const calls = [];
   let rows = projects;
   const originals = {};
   const all = {
+    getMe: async () => ({ id: 'u1', name: 'Tester', status: 'active', accounts: [{ id: wsId, name: 'Owner', slug: null, relations: ['owner'] }] }),
     listProjects: async () => rows,
     listCredentials: async () => [],
     listTemplateHosts: async () => [{ id: 'host-rolf', name: 'rolf' }],
@@ -60,9 +63,9 @@ async function renderPage(t, { wsId, projects, stubs = {} }) {
     api[key] = async (...args) => { calls.push([key, ...args]); return fn(...args); };
   }
   const view = mount(
-    React.createElement(MemoryRouter, { initialEntries: [`/ws/${wsId}/projects`] },
+    React.createElement(MemoryRouter, { initialEntries: [`/projects`] },
       React.createElement(Routes, null,
-        React.createElement(Route, { path: '/ws/:wsId/projects', element: React.createElement(ProjectsPage) }))),
+        React.createElement(Route, { path: '/projects', element: React.createElement(AuthProvider, null, React.createElement(ProjectsPage)) }))),
   );
   await flush();
   await flush();
@@ -91,7 +94,7 @@ test('새 프로젝트 — 연결 테스트가 기본 브랜치를 채우고, �
   await flush();
 
   const testCall = calls.find((c) => c[0] === 'testProjectConnection');
-  assert.deepEqual(testCall[1], { repo_url: 'https://github.com/o/game.git', credential_id: null, workspace_id: 'ws-create' });
+  assert.deepEqual(testCall[1], { repo_url: 'https://github.com/o/game.git', credential_id: null, account_id: 'ws-create' });
   assert.match(container.querySelector('[data-testid="project-test-success"]').textContent, /브랜치 2개/);
   assert.equal(container.querySelector('input[aria-label="기본 브랜치"]').value, 'develop', '비어 있던 기본 브랜치를 원격 기본으로 채운다');
 
@@ -189,4 +192,27 @@ test('삭제 — 409 project_in_use 면 참조 수를 보여주고 "강제 삭�
   click([...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === '강제 삭제'));
   await flush();
   assert.deepEqual(deletes, [['p-1', undefined], ['p-1', { force: true }]]);
+});
+
+
+test('opening another account project uses its credentials without changing the creation default', async (t) => {
+  const p = project({ account_id: 'organization' });
+  const { container, calls } = await renderPage(t, {
+    wsId: 'personal', projects: [p],
+    stubs: {
+      getMe: async () => ({ id: 'u1', name: 'Tester', status: 'active', accounts: [
+        { id: 'personal', name: 'Personal', slug: null, relations: ['owner'] },
+        { id: 'organization', name: 'Organization', slug: null, relations: ['member'] },
+      ] }),
+      testProjectConnection: async () => ({ ok: true, branches: [], default_branch: 'main' }),
+    },
+  });
+  assert.equal(getActiveAccountId(), 'personal');
+  click(container.querySelector('[data-testid="project-row-p-1"]'));
+  await flush();
+  assert.equal(calls.filter((call) => call[0] === 'listCredentials').at(-1)[1], 'organization');
+  click(buttonByText(container, '연결 테스트'));
+  await flush();
+  assert.equal(calls.find((call) => call[0] === 'testProjectConnection')[1].account_id, 'organization');
+  assert.equal(getActiveAccountId(), 'personal');
 });

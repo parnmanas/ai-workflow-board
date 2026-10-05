@@ -9,7 +9,7 @@
  * 기본적으로 FK 자체를 강제하지 않고, Postgres도 나머지엔 제약이 없다).
  *
  * 실제 FK 7개 (P4c-4: ApiKey.agent_id → Agent 실FK가 Agent 테이블과 함께,
- * 보드 제거: Board.workspace_id · BoardColumn.board_id · Ticket.column_id 가
+ * 보드 제거: Board.account_id · BoardColumn.board_id · Ticket.column_id 가
  * 보드 테이블과 함께 제거됨. Project / ProjectHostFolder 는 평문 varchar 참조뿐):
  *   (ApiKey.agent_id 는 평문 varchar audit 컬럼으로 남고, host_id 가 유일한 바인딩이다)
  *   ChatRoomParticipant.room_id → ChatRoom
@@ -78,12 +78,12 @@ export const SELF_FK_BACKFILL: Record<string, string> = {
 // 부모 → 자식 순서. 위 7개 실FK만 정확히 지키면 되고, 나머지는 참고용 배치.
 export const MIGRATION_ENTITY_ORDER: string[] = [
   // 독립 루트
-  'Workspace', 'User', 'SystemSetting', 'ClaudeBackendProfile', 'SkillTap', 'Skill',
+  'Account', 'User', 'SystemSetting', 'ClaudeBackendProfile', 'SkillTap', 'Skill',
   'Channel', 'Credential', 'WorkflowFunction', 'Resource',
-  // (연성) Workspace·Credential 의존. 옛 저장소 Resource 와 같은 id 로 이관된 행.
+  // (연성) Account·Credential 의존. 옛 저장소 Resource 와 같은 id 로 이관된 행.
   'Project',
 
-  // Workspace/Credential에 의존
+  // Account/Credential에 의존
   // P4c-4: Agent 테이블 삭제 — 해당 항목 제거. ApiKey.agent_id 실FK도 함께 제거됨.
   // (주의: 이 배열 본문 안의 주석에 따옴표로 감싼 엔티티명을 쓰지 말 것 —
   // completeness 테스트가 본문의 모든 따옴표 문자열을 등록명으로 파싱한다.)
@@ -94,16 +94,17 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'ApiKey',
   'AgentErrorLog', 'AgentUsageDailyRollup',
 
-  // Workspace 하위 설정
+  // Account 하위 설정
   'UserChannel', 'Deployment',
   'OrchestrationTeam', 'Action', 'QaScenario', 'SecurityProfile', 'OutreachChannel',
   'CliLoginSession',
   // Agent Session(CLI 직접 세션)의 Runtime Host × CLI 설정. 세션 내용은 장비의
   // CLI 홈이 원본이라 저장하지 않지만 이 바인딩은 설정이라 이관 대상이다.
-  // @ManyToOne/@JoinColumn 이 없어(workspace_id/manager_id/cli/credential_id 전부
+  // @ManyToOne/@JoinColumn 이 없어(account_id/manager_id/cli/credential_id 전부
   // 평문 varchar) 실FK 가 없으므로 위 11개 제약과 무관하다 — (연성) 의존하는
-  // Workspace·RuntimeHost·Credential 이 모두 앞에 있으니 여기 둔다.
+  // Account·RuntimeHost·Credential 이 모두 앞에 있으니 여기 둔다.
   'AgentSessionCliSetting',
+  'AgentSessionExecution',
   'ResourceEmbedding', // (연성) Resource 의존, 위에서 이미 삽입됨
 
   // Skill 체인 / 배치-런
@@ -113,7 +114,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   // ChatRoom 계열
   'ChatRoom',
   'ChatRoomParticipant', // FK: ChatRoom
-  'WorkspaceSchedule',
+  'AutomationSchedule',
   'OrchestrationTeamMember', 'OrchestrationMission', 'OrchestrationStep', 'OrchestrationEvent',
 
   // Ticket 및 그 자식들

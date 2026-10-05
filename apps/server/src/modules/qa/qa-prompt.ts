@@ -58,7 +58,7 @@ export function renderQaRunPrompt(scenario: QaScenario, runId: string): string {
     // both blocks address the current directory (RUN_WORKSPACE_PROMPT_PATH).
     // build_target falls back to qa_driver when unset (keeps the share key stable).
     renderBuildRegistryBlock({
-      workspace_id: scenario.workspace_id,
+      account_id: scenario.account_id,
       run_id: runId,
       kind: 'qa',
       repo_ref: scenario.repo_ref,

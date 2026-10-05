@@ -198,7 +198,7 @@ test('⑧ 미션 대화를 열면 맨 위가 아니라 최신 메시지에서 �
     listOrchestrationMissionEvents: api.listOrchestrationMissionEvents,
   };
   const ROOM = 'room-mission-scroll';
-  api.getMe = async () => ({ id: 'u1', name: 'Operator', email: 'o@x', role: 'admin', status: 'active', permissions: [], resolved_permissions: [], workspaces: [] });
+  api.getMe = async () => ({ id: 'u1', name: 'Operator', email: 'o@x', role: 'admin', status: 'active', permissions: [], resolved_permissions: [], accounts: [] });
   api.getChatRoomMessages = async () =>
     Array.from({ length: 30 }, (_, i) => ({
       id: `m${i + 1}`,
@@ -222,7 +222,7 @@ test('⑧ 미션 대화를 열면 맨 위가 아니라 최신 메시지에서 �
   });
 
   const view = mountWithBoardStream(
-    h(MissionConversationPanel, { missionId: 'mission-1', workspaceId: 'ws-1', roomId: ROOM, live: true, events: [] }),
+    h(MissionConversationPanel, { missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [] }),
     { withAuth: true },
   );
   await settle();

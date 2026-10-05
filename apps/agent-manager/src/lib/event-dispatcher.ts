@@ -1,3 +1,4 @@
+import { normalizeAccountEnvelope } from './account-scope.js';
 // Routes parsed SSE events (trigger / chat_request / chat_room_message /
 // board_update / comment_mention / fs_request) to the appropriate session or
 // subagent manager. Extracted from EventStream so the SSE pipe can stay a thin
@@ -100,9 +101,9 @@ export async function ordinaryWorkCandidatesForChat(
 
 /**
  * Defensive parse of the `harness_config` field on a flattened agent_trigger
- * event (ticket e9c7a896). The server ships the resolved workspace (older
+ * event (ticket e9c7a896). The server ships the resolved account (older
  * servers: board ⊕ workspace) harness as a JSON object (or omits it — older
- * servers / unconfigured workspaces). Accepts an object or a JSON string, keeps only the known keys
+ * servers / unconfigured accounts). Accepts an object or a JSON string, keeps only the known keys
  * with the right runtime types, and degrades to null on anything else —
  * a malformed harness must never block the dispatch it rides on.
  */
@@ -432,7 +433,7 @@ export function parseEffortPreset(raw: unknown): ResolvedEffortPreset | null {
  * Defensive parse of the `environment_config` field on a flattened agent_trigger
  * event (ticket 354d336b). The server ships the resolved environment setup —
  * repositories with concrete urls, env_vars, setup_commands — as a JSON object
- * (or omits it for older servers / unconfigured workspaces). Accepts an object or a
+ * (or omits it for older servers / unconfigured accounts). Accepts an object or a
  * JSON string, keeps only the known keys with the right runtime types, and
  * degrades to null on anything else — a malformed environment_config must never
  * block the dispatch it rides on (mirror parseHarnessConfig). A repository
@@ -643,7 +644,7 @@ const TERMINAL_CLEANUP_DONE_LIMIT = 512;
 // behavior so single-agent setups keep working unchanged.
 export interface AgentExecutionContext {
   agent_id: string;
-  workspace_id: string;
+  account_id: string;
   api_key: string;
   cwd: string;
   /** Pre-written `claude --mcp-config` file. Manager writes once per agent. */
@@ -690,7 +691,7 @@ export interface SubagentSpawnArgs {
   chatRequestId?: string;
   ticketId: string;
   agentId: string;
-  /** Workspace role slug the spawn is acting as. When set together with
+  /** Account role slug the spawn is acting as. When set together with
    *  ticketId, SubagentManager pins it onto the per-spawn mcp-config via
    *  X-AWB-Subagent-Role / X-AWB-Subagent-Ticket-Id headers so server-side
    *  resolveAuthorRole attributes the comment to the single triggered role
@@ -715,7 +716,7 @@ export interface SubagentSpawnArgs {
   isActionRoom?: boolean;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
-  /** Resolved workspace harness from the trigger event (e9c7a896; older
+  /** Resolved account harness from the trigger event (e9c7a896; older
    *  servers: board ⊕ workspace). Null/absent → spawn exactly as before. */
   harness?: HarnessSpec | null;
   runtimeProfile?: RuntimeProfileSpec | null;
@@ -726,7 +727,7 @@ export interface SubagentSpawnArgs {
   effortPreset?: ResolvedEffortPreset | null;
   /** Per-spawn lifetime override for unusually long initialization work. */
   ttlMinutes?: number;
-  /** Non-secret env vars from the workspace environment_config (ticket 354d336b),
+  /** Non-secret env vars from the account environment_config (ticket 354d336b),
    *  injected into the spawned CLI's environment. Applied on every spawn (not
    *  persisted on disk like the cloned repos). Absent → none. */
   envVars?: Record<string, string>;
@@ -821,7 +822,7 @@ export interface ChatDispatchArgs {
    *  reply is attributed to the right agent and lands in the room they're
    *  a member of. Undefined when the manager itself is the participant. */
   agentContext?: AgentExecutionContext;
-  /** ticket 7d8ea7c9: resolved agent > workspace Claude backend profile for
+  /** ticket 7d8ea7c9: resolved agent > account Claude backend profile for
    *  this chat turn — the chat-path twin of TicketTriggerArgs.runtimeProfile.
    *  Undefined/null when the responder isn't a Claude agent or no profile
    *  resolves; BaseSessionManager then spawns exactly as before (Anthropic
@@ -877,13 +878,13 @@ export interface TicketTriggerArgs {
   triggerSource?: string;
   /** ST-6: per-event managed-agent runtime context. Optional. */
   agentContext?: AgentExecutionContext;
-  /** Per-workspace cap (older servers: per-board) for distinct active tickets per agent. Server's
+  /** Per-account cap (older servers: per-board) for distinct active tickets per agent. Server's
    *  TriggerLoopService already enforces this; the manager keeps a
    *  defensive drop in case two triggers raced past the server gate
    *  before the first set_current_task arrived. Defaults to 1 when the
    *  server didn't include it (older server). */
   maxConcurrentTicketsPerAgent?: number;
-  /** Resolved workspace harness from the trigger event (e9c7a896; older
+  /** Resolved account harness from the trigger event (e9c7a896; older
    *  servers: board ⊕ workspace). Applied at SESSION CREATION only — a live session's CLI flags are
    *  fixed at spawn; follow-up turns into an existing pid keep the
    *  harness the session was born with. Null/absent → spawn as before. */
@@ -893,7 +894,7 @@ export interface TicketTriggerArgs {
    *  applied at SESSION CREATION only — a live session's `--effort` flag is
    *  fixed at spawn. Null/absent → no effort override. */
   effortPreset?: ResolvedEffortPreset | null;
-  /** Non-secret env vars from the workspace environment_config (ticket 354d336b),
+  /** Non-secret env vars from the account environment_config (ticket 354d336b),
    *  injected into the spawned CLI's environment at SESSION CREATION. A live
    *  session keeps the env it was born with. Absent → none. */
   envVars?: Record<string, string>;
@@ -1872,7 +1873,7 @@ export class EventDispatcher {
     if (!ctx.api_key || !ctx.working_dir || !ctx.mcp_config_path) return undefined;
     return {
       agent_id: ctx.agent_id,
-      workspace_id: ctx.workspace_id,
+      account_id: ctx.account_id,
       api_key: ctx.api_key,
       cwd: ctx.working_dir,
       mcp_config_path: ctx.mcp_config_path,
@@ -1898,14 +1899,14 @@ export class EventDispatcher {
    */
   async #resolveRuntimeContext(
     spec: TriggerRuntimeSpec | null,
-    workspaceId: string | undefined | null,
+    accountId: string | undefined | null,
   ): Promise<AgentExecutionContext | undefined> {
     if (!spec || !this.#managedAgentContexts) return undefined;
     const entry = findRuntimeContextEntry(this.#managedAgentContexts.list(), spec);
     if (entry) {
       const ctx: AgentExecutionContext = {
         agent_id: entry.agent_id,
-        workspace_id: entry.workspace_id,
+        account_id: entry.account_id,
         api_key: entry.api_key,
         cwd: entry.working_dir,
         mcp_config_path: entry.mcp_config_path,
@@ -1918,14 +1919,14 @@ export class EventDispatcher {
         runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? entry.runtime_config ?? null,
       };
       if (!ctx.api_key || !ctx.cwd || !ctx.mcp_config_path) return undefined;
-      return this.#scopeAgentContext(ctx, workspaceId);
+      return this.#scopeAgentContext(ctx, accountId);
     }
     // P4c-2a: tuple miss → self-heal by provisioning a runtime identity instead
     // of reporting a miss. No Agent row needed: the key + cli-home are keyed by
     // the stable runtimeIdentityKey, the server binds the key to this host
     // (host_id from our own pairing-time key), and MCP attribution degrades to
     // the `runtime:<key>` synthetic identity (P4c-4 reworks display).
-    return this.#provisionRuntimeContext(spec, workspaceId);
+    return this.#provisionRuntimeContext(spec, accountId);
   }
 
   /**
@@ -1940,7 +1941,7 @@ export class EventDispatcher {
    */
   async #provisionRuntimeContext(
     spec: TriggerRuntimeSpec,
-    workspaceId: string | undefined | null,
+    accountId: string | undefined | null,
   ): Promise<AgentExecutionContext | undefined> {
     const dir = (spec.working_dir || '').trim();
     const cli = (spec.cli || '').trim().toLowerCase();
@@ -1949,9 +1950,9 @@ export class EventDispatcher {
       log(`Runtime provision refused: need absolute working_dir + cli (dir='${dir.slice(0, 80)}' cli='${cli}')`);
       return undefined;
     }
-    const scope = String(workspaceId || '').trim();
+    const scope = String(accountId || '').trim();
     if (!scope) {
-      log('Runtime provision refused: no workspace scope for key issuance');
+      log('Runtime provision refused: no account scope for key issuance');
       return undefined;
     }
     const key = runtimeIdentityKey(spec);
@@ -1971,7 +1972,7 @@ export class EventDispatcher {
       );
       return {
         agent_id: key,
-        workspace_id: scope,
+        account_id: scope,
         api_key: apiKey,
         cwd: dir,
         mcp_config_path: mcpConfigPath,
@@ -1991,23 +1992,23 @@ export class EventDispatcher {
 
   async #scopeAgentContext(
     context: AgentExecutionContext | undefined,
-    workspaceId: string | undefined | null,
+    accountId: string | undefined | null,
   ): Promise<AgentExecutionContext | undefined> {
-    const scope = String(workspaceId || '').trim();
-    if (!context || !scope || context.workspace_id === scope) return context;
+    const scope = String(accountId || '').trim();
+    if (!context || !scope || context.account_id === scope) return context;
     let apiKey = await readApiKey(context.agent_id, scope);
     if (!apiKey) {
       const issued = await provisionManagedAgentApiKey(this.#config, context.agent_id, scope);
-      if (!issued?.raw_key) throw new Error(`Could not provision workspace-scoped key for ${scope}`);
+      if (!issued?.raw_key) throw new Error(`Could not provision account-scoped key for ${scope}`);
       apiKey = issued.raw_key;
       await writeApiKey(context.agent_id, apiKey, scope);
     }
-    // Ticket ee26302d: cross-workspace re-scoping — no resolved profile in
+    // Ticket ee26302d: cross-account re-scoping — no resolved profile in
     // scope here either (same gap as agent-manager-commands.ts's spawn_agent
     // / #refreshMcpConfig), always writes 'full'. Corrected by the next
     // actual spawn through base-session-manager.ts / subagent-manager.ts.
     const mcpConfigPath = await writeMcpConfig(context.agent_id, this.#config.url, apiKey, scope);
-    return { ...context, workspace_id: scope, api_key: apiKey, mcp_config_path: mcpConfigPath };
+    return { ...context, account_id: scope, api_key: apiKey, mcp_config_path: mcpConfigPath };
   }
 
   async #dispatchHermes(args: {
@@ -2477,7 +2478,7 @@ export class EventDispatcher {
     if (!this.#agentSessionRunner) return;
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse agent_session_request: ${err?.message ?? err}`);
       return;
@@ -2498,7 +2499,7 @@ export class EventDispatcher {
     if (!this.#terminalRunner) return;
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse terminal_request: ${err?.message ?? err}`);
       return;
@@ -2513,7 +2514,7 @@ export class EventDispatcher {
   async handleFsRequest(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse fs_request: ${err?.message ?? err}`);
       return;
@@ -2652,7 +2653,7 @@ export class EventDispatcher {
   async #replayColumnWorkflowTrigger(raw: string, ticketId: string, role: string): Promise<void> {
     let parsed: any;
     try {
-      parsed = JSON.parse(raw);
+      parsed = normalizeAccountEnvelope(JSON.parse(raw));
     } catch {
       return;
     }
@@ -2725,7 +2726,7 @@ export class EventDispatcher {
   ): Promise<void> {
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse trigger: ${err?.message ?? err}`);
       return;
@@ -2752,7 +2753,7 @@ export class EventDispatcher {
     // P4c-1: runtime 스냅샷 튜플 매칭 우선 — 일치하면 spec이 이긴다.
     // 없으면 위 agent_id 경로 그대로 (동작 불변).
     if (triggerRuntime) {
-      const rtCtx = await this.#resolveRuntimeContext(triggerRuntime, ev.workspace_id);
+      const rtCtx = await this.#resolveRuntimeContext(triggerRuntime, ev.account_id);
       if (rtCtx) {
         if (!agentContext || rtCtx.agent_id !== agentContext.agent_id) {
           log(
@@ -2763,7 +2764,7 @@ export class EventDispatcher {
         agentContext = rtCtx;
       }
     }
-    agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
+    agentContext = await this.#scopeAgentContext(agentContext, ev.account_id);
     const envConfig = parseEnvironmentConfig(ev.environment_config);
     if (
       selfAgentId &&
@@ -3132,7 +3133,7 @@ export class EventDispatcher {
       selectedRepo || ev.base_repo || ev.repository_context_required === true || envConfig?.repositories.length,
     );
     const repoCredentialStatus = selectedRepo?.resourceId && agentContext?.agent_id
-      ? await fetchRepositoryCredentialStatus(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.workspace_id)
+      ? await fetchRepositoryCredentialStatus(this.#config, selectedRepo.resourceId, agentContext.agent_id, ev.account_id)
       : { credential: null, failure: selectedRepo ? 'credential_lookup_not_applicable' : null };
     const repoCredential = repoCredentialStatus.credential;
     const worktreeMode = parseWorktreeMode(ev.worktree_mode);
@@ -3301,14 +3302,14 @@ export class EventDispatcher {
       return;
     }
 
-    // Workspace harness (older servers: board ⊕ workspace) resolved server-side
+    // Account harness (older servers: board ⊕ workspace) resolved server-side
     // and flattened onto the event (e9c7a896). Parsed here (ahead of its original single use-site
     // below) so the ticket 48aeab6e CLI-readiness gate immediately below can
     // also read harness.permission_mode.
     const harness = parseHarnessConfig(ev.harness_config);
 
     // ticket 5851e435: 이 디스패치의 effective permission policy. Agent trust
-    // (`runtime_config.permission_mode`)가 workspace harness
+    // (`runtime_config.permission_mode`)가 account harness
     // `permission_mode` 를 이긴다. spawn 사이트(SubagentManager /
     // BaseSessionManager)는 같은 함수로 같은 값을 다시 계산하므로, 게이트 ·
     // 컨텍스트 계약 · 실제 argv 가 한 규칙을 공유한다.
@@ -4105,7 +4106,7 @@ export class EventDispatcher {
   async handleChatRequest(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse chat_request: ${err?.message ?? err}`);
       return;
@@ -4126,7 +4127,7 @@ export class EventDispatcher {
     let agentContext = this.#resolveAgentContext(payload.agent_id || '');
     // P4c-1: trigger 경로와 동일 — runtime 스냅샷 튜플 매칭 우선.
     if (chatRuntime) {
-      const rtCtx = await this.#resolveRuntimeContext(chatRuntime, payload.workspace_id);
+      const rtCtx = await this.#resolveRuntimeContext(chatRuntime, payload.account_id);
       if (rtCtx) {
         if (!agentContext || rtCtx.agent_id !== agentContext.agent_id) {
           log(
@@ -4137,7 +4138,7 @@ export class EventDispatcher {
         agentContext = rtCtx;
       }
     }
-    agentContext = await this.#scopeAgentContext(agentContext, payload.workspace_id);
+    agentContext = await this.#scopeAgentContext(agentContext, payload.account_id);
 
     // ticket c0c0b1e4 (리뷰 지적 #1): a registered-but-not-bootstrapped miss must
     // be reported HERE, before any fallback dispatch is attempted — the hermes /
@@ -4156,7 +4157,7 @@ export class EventDispatcher {
     const delegationEnabled = delegation.enabled !== false;
     const persistentChat = delegation.persistentChatSessions !== false;
 
-    // ticket 7d8ea7c9: RoomMessagingService resolves agent > workspace Claude
+    // ticket 7d8ea7c9: RoomMessagingService resolves agent > account Claude
     // backend profile server-side (mirrors trigger-loop.service.ts's ticket
     // resolution) and stamps it on chat_request. chat_request is
     // envelope-native (see comment above), so this reads payload.* — NOT the
@@ -4179,7 +4180,7 @@ export class EventDispatcher {
     // DM / @-멘션 쪽 짝. `chat_request`는 (chat_room_message와 달리) DM이나 명시적
     // @-멘션의 정식(canonical) 디스패치 경로다 — manager 에이전트 자신의 운영 채팅이
     // 바로 이 경우이므로, chat_room_message가 처리하는 그룹룸 턴만으로는 부족하고
-    // 이 경로도 자체적인 cwd 고정이 필요하다. `run_provision`은 대상 workspace가
+    // 이 경로도 자체적인 cwd 고정이 필요하다. `run_provision`은 대상 account가
     // chat_workspace_folder_enabled를 켰을 때만 존재하며(서버 측 게이트), 채팅용
     // RunProvision은 항상 repo:null을 갖는다(ChatRoom에는 repo_ref 옵션이 없다) —
     // 그래서 여기서의 프로비저닝은 저비용 best-effort mkdir 수준으로 낮춰 처리한다.
@@ -4188,7 +4189,7 @@ export class EventDispatcher {
     // working_dir 루트에서 답하는 것보다 더 나쁜 결과다).
     let runContext = agentContext;
     // runContext.cwd와는 별도로 추적한다: composeChatPrompt에 폴더 경계 블록의
-    // 트리거로 전달되는데, opt-in하지 않은 workspace라면 반드시 ''(블록 없음,
+    // 트리거로 전달되는데, opt-in하지 않은 account라면 반드시 ''(블록 없음,
     // {{AWB_WORK_FOLDER}} 치환도 없음)을 유지해야 하기 때문이다 — 위에서
     // 프로비저닝이 실패한 뒤에는 runContext.cwd만 봐서는 "프로비저닝됨"과
     // "그냥 에이전트의 통상적인 working_dir 루트"를 구분할 수 없다.
@@ -4370,7 +4371,7 @@ export class EventDispatcher {
   async handleCommentMention(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse comment_mention: ${err?.message ?? err}`);
       return;
@@ -4416,7 +4417,7 @@ export class EventDispatcher {
     if (!agentContext) {
       const mentionRuntime = parseTriggerRuntime((ev as any).runtime);
       if (mentionRuntime) {
-        const rtCtx = await this.#resolveRuntimeContext(mentionRuntime, ev.workspace_id);
+        const rtCtx = await this.#resolveRuntimeContext(mentionRuntime, ev.account_id);
         if (rtCtx) {
           log(
             `Comment mention context from runtime snapshot: ticket=${String(ticketId).slice(0, 8)} ` +
@@ -4426,7 +4427,7 @@ export class EventDispatcher {
         }
       }
     }
-    agentContext = await this.#scopeAgentContext(agentContext, ev.workspace_id);
+    agentContext = await this.#scopeAgentContext(agentContext, ev.account_id);
 
     // ticket c0c0b1e4 (handleChatRequest 리뷰 지적 #1과 동일 구조): fallback
     // 시도(hermes/ticketSessionManager/subagentManager) 전에 여기서 먼저
@@ -4511,7 +4512,7 @@ export class EventDispatcher {
           leaseId: String(ev.worktree_lease_id || `cwd:${agentContext.cwd}`),
           // 리뷰 지적(71532b4f): 컬럼 트리거 Hermes 분기와 동일하게 harness의
           // system_prompt_append를 합성 — 이전에는 rolePrompt만 실려 board/
-          // workspace harness_config가 Hermes comment_mention에서만 무시됐다.
+          // account harness_config가 Hermes comment_mention에서만 무시됐다.
           systemContext: [rolePrompt, harness?.system_prompt_append || ''].filter(Boolean).join('\n\n'),
           task: taskText,
         });
@@ -4848,7 +4849,7 @@ export class EventDispatcher {
 
   handleBoardUpdate(raw: string): void {
     try {
-      const ev = JSON.parse(raw);
+      const ev = normalizeAccountEnvelope(JSON.parse(raw));
       // entity_type: 'ticket' | 'comment' | 'child_ticket' etc.
       // action: 'created' | 'updated' | 'moved' | 'deleted' | 'status_changed'
 
@@ -4972,7 +4973,7 @@ export class EventDispatcher {
   async handleChatRoomMessage(raw: string): Promise<void> {
     let ev: any;
     try {
-      ev = JSON.parse(raw);
+      ev = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`Failed to parse chat_room_message: ${err?.message ?? err}`);
       return;
@@ -5033,7 +5034,7 @@ export class EventDispatcher {
           if (senderAgentId && id === senderAgentId) continue;
           const spec = parseTriggerRuntime((rtSpecs as Record<string, unknown>)[id]);
           if (!spec) continue;
-          const rtCtx = await this.#resolveRuntimeContext(spec, p.workspace_id);
+          const rtCtx = await this.#resolveRuntimeContext(spec, p.account_id);
           if (rtCtx) {
             log(
               `Chat room member from runtime snapshot: room=${String(p.room_id || '').slice(0, 8)} ` +
@@ -5045,7 +5046,7 @@ export class EventDispatcher {
         }
       }
     }
-    agentContext = await this.#scopeAgentContext(agentContext, p.workspace_id);
+    agentContext = await this.#scopeAgentContext(agentContext, p.account_id);
 
     // Two early-exit cases for agent-sent messages — both still record into
     // the chat ring so future dispatches see complete history:
@@ -5217,7 +5218,7 @@ export class EventDispatcher {
         // 공통 kind→tool 계약을 그대로 타고 간다(chat-session-manager.ts /
         // subagent-manager.ts의 orphan-sweep에서도 동일하게 사용). ticket
         // 2dc3c62f: 'orchestration'도 여기서 제외한다 — report_orchestration_step
-        // 은 run_id/workspace_id가 아니라 step_id로 완료 처리하는 다른 모양의
+        // 은 run_id/account_id가 아니라 step_id로 완료 처리하는 다른 모양의
         // 계약이라 resolveRunCompletionRoute에 억지로 맞추지 않는다; 대신 미션의
         // 기존 step_timeout_minutes reaper가 응답 없는 step을 회수한다
         // (run-provisioner.ts의 RunProvisionKind 문서 참고).
@@ -5225,7 +5226,7 @@ export class EventDispatcher {
           const route = resolveRunCompletionRoute(runProvision.kind);
           await fireAndForgetTool(this.#config, route.completeTool, {
             run_id: runProvision.run_id,
-            workspace_id: runProvision.workspace_id,
+            account_id: runProvision.account_id,
             status: route.failureStatus,
             summary: `작업폴더 프로비저닝 실패: ${result.error || 'unknown error'}`,
           });
@@ -5283,7 +5284,7 @@ export class EventDispatcher {
     // 프로비저닝 실패(FAILURE)라면 위에서 이미 "런 작업폴더 프로비저닝 실패" abort
     // 경로로 return했으므로, 여기까지 도달했는데 runProvision이 truthy라는 것은
     // 항상 바로 위 줄의 cwd 고정이 성공했다는 뜻이다 — runContext.cwd를 그대로
-    // 읽어도 안전하다. runProvision이 null/부재(opt-in하지 않은 workspace의
+    // 읽어도 안전하다. runProvision이 null/부재(opt-in하지 않은 account의
     // 일반 채팅 턴)라면 이 값은 ''로 유지된다.
     const provisionedWorkFolder = runProvision ? (runContext?.cwd || '') : '';
 
@@ -5423,14 +5424,14 @@ export class EventDispatcher {
           // 작업까지 걷어가 버린다.
           // ticket 2dc3c62f: kind:'orchestration' 도 제외 — RunSessionBinding.kind
           // 타입 자체가 'qa'|'security'|'action'만 받고(base-session-manager.ts),
-          // report_orchestration_step은 step_id 기반이라 이 run_id/workspace_id
+          // report_orchestration_step은 step_id 기반이라 이 run_id/account_id
           // 바인딩 계약과 모양이 다르다(run-provisioner.ts의 RunProvisionKind
           // 문서 참고).
           run: runProvision && runProvision.kind !== 'chat' && runProvision.kind !== 'orchestration'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,
-                workspace_id: runProvision.workspace_id,
+                account_id: runProvision.account_id,
               }
             : undefined,
           // ticket e9d0e8bc: release the run lock when this session's process
@@ -5534,14 +5535,14 @@ export class EventDispatcher {
           // 가드 참고(RunSessionBinding에는 'chat' 멤버가 없다).
           // ticket 2dc3c62f: kind:'orchestration' 도 제외 — RunSessionBinding.kind
           // 타입 자체가 'qa'|'security'|'action'만 받고(base-session-manager.ts),
-          // report_orchestration_step은 step_id 기반이라 이 run_id/workspace_id
+          // report_orchestration_step은 step_id 기반이라 이 run_id/account_id
           // 바인딩 계약과 모양이 다르다(run-provisioner.ts의 RunProvisionKind
           // 문서 참고).
           run: runProvision && runProvision.kind !== 'chat' && runProvision.kind !== 'orchestration'
             ? {
                 kind: runProvision.kind,
                 run_id: runProvision.run_id,
-                workspace_id: runProvision.workspace_id,
+                account_id: runProvision.account_id,
               }
             : undefined,
         });

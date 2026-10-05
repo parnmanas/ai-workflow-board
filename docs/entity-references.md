@@ -20,17 +20,19 @@ An `agent` reference resolves through the Runtime Host identity (there is no
 Agent table and no agent detail page), so it always renders as a named,
 unlinked reference with the `no_detail_surface` reason.
 
-The server resolves every reference by exact ID in the active workspace,
+The server resolves every reference by exact ID and authorizes its actual owner,
 replaces an untrusted token label with the canonical entity name, and returns
-the canonical deep link (tickets open `/ws/:wsId/tickets?ticket=<id>`; Actions,
-Functions and Schedules open their workspace page). The client renders the
-entity kind, canonical name, and workspace context. Context makes same-named
+the canonical deep link (tickets open `/tickets?ticket=<id>`; Actions,
+Functions and Schedules open `/actions?artifact=<id>`, `/functions?artifact=<id>`,
+and `/schedules?artifact=<id>`). A request does not need an ambient account.
+The client renders the entity kind, canonical name, and account context. Context makes same-named
 entities distinguishable; the full ID remains available in the tooltip.
 
-If the ID is malformed, missing, outside the active workspace, inaccessible, or
+If the ID is malformed, missing, inaccessible, or
 has no detail surface, AWB does not create a link. It renders the entity kind,
-full display name when known, full stable ID, available workspace context, and
+full display name when authorized, full stable ID, available account context, and
 an explicit `연결 불가` reason.
+An inaccessible reference never reveals its stored name or owner context.
 
 MCP entity-returning tools include a copy-ready `_ref` alongside raw IDs.
 Prompts require agents to use `_ref` in chat, ticket comments, and Run output.

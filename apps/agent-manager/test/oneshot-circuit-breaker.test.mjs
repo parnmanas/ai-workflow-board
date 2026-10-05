@@ -1032,7 +1032,7 @@ test('shutdown 회귀 (ticket 8436f96f, 6abe2b79): stop() 이 SIGTERM 전에 지
       }),
       // ticket 6abe2b79: 죽은 oneshot Action run 의 모습 — exit 시점 backstop
       // 이 종료 처리해야 하는 서버 쪽 run 에 바인딩돼 있다.
-      run: { run_id: 'oneshot-shutdown-run', workspace_id: 'ws-1', kind: 'action' },
+      run: { run_id: 'oneshot-shutdown-run', account_id: 'ws-1', kind: 'action' },
     });
 
     const stopping = mgr.stop('manager_shutdown');
@@ -1119,7 +1119,7 @@ test('SIGKILL 강제 경로 회귀 (ticket 6abe2b79 리뷰 반영): grace 만료
         process_handle: child,
         commentSent: false,
       }),
-      run: { run_id: 'oneshot-sigkill-run', workspace_id: 'ws-1', kind: 'action' },
+      run: { run_id: 'oneshot-sigkill-run', account_id: 'ws-1', kind: 'action' },
     });
 
     const stopping = mgr.stop('manager_shutdown');
@@ -1193,7 +1193,7 @@ test('SIGKILL 이후 close 가 끝내 오지 않는 극단 케이스 (ticket 6ab
         process_handle: child,
         commentSent: false,
       }),
-      run: { run_id: 'oneshot-wedged-run', workspace_id: 'ws-1', kind: 'security' },
+      run: { run_id: 'oneshot-wedged-run', account_id: 'ws-1', kind: 'security' },
     });
 
     const stopping = mgr.stop('manager_shutdown');
@@ -1293,7 +1293,7 @@ test('settle timeout fallback 과 뒤늦은 close 의 interleaving (ticket 6abe2
         process_handle: child,
         commentSent: false,
       }),
-      run: { run_id: 'oneshot-race-run', workspace_id: 'ws-1', kind: 'action' },
+      run: { run_id: 'oneshot-race-run', account_id: 'ws-1', kind: 'action' },
     });
 
     const stopping = mgr.stop('manager_shutdown');
@@ -1416,7 +1416,7 @@ test('역방향 interleaving (ticket 6abe2b79 리뷰 라운드4): exit 핸들러
         process_handle: child,
         commentSent: false,
       }),
-      run: { run_id: 'oneshot-reverse-race-run', workspace_id: 'ws-1', kind: 'action' },
+      run: { run_id: 'oneshot-reverse-race-run', account_id: 'ws-1', kind: 'action' },
     });
 
     const stopping = mgr.stop('manager_shutdown');

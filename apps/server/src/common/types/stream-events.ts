@@ -58,7 +58,7 @@ export interface StreamEventScope {
   board_id?: string;
   agent_id?: string;
   user_id?: string;
-  workspace_id?: string;    // v0.32: workspace-scoped events (subagent monitor)
+  account_id?: string;    // v0.32: account-scoped events (subagent monitor)
   ticket_id?: string; // Phase 2 D-26 — chat thread scoping (global vs ticket-scoped)
   room_id?: string;         // Phase 7: chat room targeting
   member_ids?: Set<string>; // Phase 7: pre-resolved participant user IDs for sync filter
@@ -123,7 +123,7 @@ export interface AgentTriggerPayload {
   trigger_source: string;
   /** Ticket status at dispatch (in_progress for every start / re-send). */
   status?: TicketStatus;
-  workspace_id?: string;
+  account_id?: string;
   /** Project summary when the ticket is about a repository. */
   project?: { id: string; name: string; repo_url: string; default_branch: string } | null;
   // Legacy column projection of `status` (statusColumnProjection) — managers
@@ -153,7 +153,7 @@ export interface AgentTriggerPayload {
   // ticket before handling the trigger. Set when a wedged session has failed
   // to advance my_last_update_at after the initial supervisor re-push.
   force_respawn?: boolean;
-  // Workspace cap on distinct active tickets per agent. TicketDispatchService
+  // Account cap on distinct active tickets per agent. TicketDispatchService
   // is the primary enforcer; forwarded so the manager can keep a defensive
   // drop. Defaults to 1 in the manager when absent.
   max_concurrent_tickets_per_agent?: number;
@@ -173,7 +173,7 @@ export interface AgentTriggerPayload {
       support_files: Array<{ path: string; content: string }>;
     }>;
   } | null;
-  // Workspace harness config (ticket e9c7a896) plus the workspace language
+  // Account harness config (ticket e9c7a896) plus the workspace language
   // instruction. agent-manager maps the
   // keys onto subagent CLI flags at spawn time (--append-system-prompt /
   // --allowedTools / --disallowedTools / --model / --permission-mode).
@@ -187,7 +187,7 @@ export interface AgentTriggerPayload {
   // Always null since board removal — effort rides
   // `runtime.runtime_config.extra.effort`. Kept on the wire for old managers.
   effort_preset?: Record<string, unknown> | null;
-  // Workspace environment setup (ticket 354d336b) — env vars / setup only;
+  // Account environment setup (ticket 354d336b) — env vars / setup only;
   // repositories come from the ticket's project (base_repo). Null = none.
   environment_config?: ResolvedEnvironmentConfig | null;
   // Always 'per_ticket' since board removal; kept for old managers.
@@ -395,12 +395,12 @@ export interface ChatRoomMessageMetadata {
 // Phase 7 — room-based chat
 export interface ChatRoomMessagePayload {
   room_id: string;
-  // Workspace the room belongs to. SSE delivery is scoped by room membership,
-  // NOT by workspace — a user who belongs to two workspaces receives room
+  // Account the room belongs to. SSE delivery is scoped by room membership,
+  // NOT by workspace — a user who belongs to two accounts receives room
   // events from both on the same stream. The web UI's unread badge is
   // per-workspace, so without this field it counted foreign-workspace
   // messages into the workspace currently on screen.
-  workspace_id?: string;
+  account_id?: string;
   message_id: string;
   sender_type: 'user' | 'agent' | 'system';
   sender_id: string;
@@ -494,7 +494,7 @@ export interface ChatRoomUpdatePayload {
   open_join?: boolean;
   // 위 브로드캐스트의 스코프 판정 근거. 수신 측이 지금 보고 있는 워크스페이스와
   // 대조해 남의 워크스페이스 이벤트를 버린다. `open_join_changed` 에만 채워진다.
-  workspace_id?: string;
+  account_id?: string;
 
   // B3 fix: `read` events carry the reader's identity + the new marker so that
   // other tabs / devices of the same user can sync their local unread_count
@@ -541,7 +541,7 @@ export interface ChatRoomSessionStatusPayload {
 export interface CommentMentionPayload {
   ticket_id: string;
   comment_id: string;
-  workspace_id: string;
+  account_id: string;
   agent_id: string;
   actor_id: string;
   actor_type: 'user' | 'agent';
@@ -588,7 +588,7 @@ export interface CommentMentionPayload {
 // typing echoed back.
 export interface CommentTypingPayload {
   ticket_id: string;
-  workspace_id: string;
+  account_id: string;
   actor_type: 'user' | 'agent';
   actor_id: string;
   actor_name: string;
@@ -602,11 +602,11 @@ export interface CommentTypingPayload {
 // ticket changes (someone opened the panel / their heartbeat expired / they
 // left explicitly). Steady-state heartbeats DON'T fire this event; only
 // transitions do, so traffic is bounded by the join/leave rate not the ping
-// rate. Workspace-scoped so the client can ignore presence for tickets they
+// rate. Account-scoped so the client can ignore presence for tickets they
 // can't see.
 export interface TicketPresencePayload {
   ticket_id: string;
-  workspace_id?: string;
+  account_id?: string;
   viewers: Array<{ type: 'user' | 'agent'; id: string; name: string }>;
 }
 
@@ -615,7 +615,7 @@ export interface TicketPresencePayload {
 export interface UserMentionPayload {
   mention_id: string;           // UserMention.id
   user_id: string;              // mentioned user
-  workspace_id: string;
+  account_id: string;
   source_type: 'comment' | 'chat_message';
   source_id: string;
   // Comment mentions deep-link to /ws/<wsId>/tickets?ticket=<id>&comment=<id>;
@@ -634,7 +634,7 @@ export interface UserMentionPayload {
 // 닿지 않는 다른 기기의 사이드바/티켓 뱃지도 재조회 없이 즉시 수렴시킨다.
 export interface TicketReadsClearedPayload {
   user_id: string;           // 처리를 실행한 사용자
-  workspace_id: string;
+  account_id: string;
   updated: number;           // TicketReadState 로 upsert 된 티켓 수
   read_at: string;           // ISO-8601
 }
@@ -662,7 +662,7 @@ export interface FsRequestPayload {
 export interface SubagentRegisteredPayload {
   subagent_id: string;        // manager-generated uuid; identifies one transcript
   agent_id: string;           // parent registered agent
-  workspace_id: string;
+  account_id: string;
   kind: 'chat' | 'ticket' | 'oneshot';
   session_key: string;        // 'ticket:<id>:<role>' | 'room:<id>' | 'oneshot:<trigger_id>'
   pid: number;
@@ -681,7 +681,7 @@ export interface SubagentRegisteredPayload {
 export interface SubagentLogPayload {
   subagent_id: string;
   agent_id: string;
-  workspace_id: string;
+  account_id: string;
   // direction is from the subagent's POV: 'in' = parent → subagent stdin
   // (i.e. our composed turn prompts), 'out' = subagent stdout (the model's
   // responses, tool_use frames, thinking blocks, etc.).
@@ -694,7 +694,7 @@ export interface SubagentLogPayload {
 export interface SubagentEndedPayload {
   subagent_id: string;
   agent_id: string;
-  workspace_id: string;
+  account_id: string;
   exit_code: number | null;
   signal: string | null;
   duration_ms: number;
@@ -714,7 +714,7 @@ export interface AgentInstanceUpdatePayload {
   instance: {
     instance_id: string;
     agent_id: string;
-    workspace_id: string | null;
+    account_id: string | null;
     mode: 'manager';
     hostname: string;
     plugin_version: string;
@@ -857,7 +857,7 @@ export interface AgentManagerCommandPayload {
  */
 export interface ConsensusUpdatePayload {
   ticket_id: string;
-  workspace_id: string;
+  account_id: string;
   proposal_id: string | null; // 판정이 고정된 이동 제안(앵커). null = 제안 무관.
   satisfied: boolean;         // 지금 합의 성립 여부.
   required: number;           // 필수 홀더 수.
@@ -887,7 +887,7 @@ export interface ConsensusUpdatePayload {
  */
 export interface OrchestrationUpdatePayload {
   mission_id: string;
-  workspace_id: string;
+  account_id: string;
   team_id: string;
   title: string;
   status: string;
@@ -914,7 +914,7 @@ export interface OrchestrationUpdatePayload {
  */
 export interface CliLoginProgressPayload {
   session_id: string;
-  workspace_id: string;
+  account_id: string;
   status: 'starting' | 'awaiting_user' | 'completing' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
   verification_url: string | null;
   user_code: string | null;
@@ -938,7 +938,7 @@ export interface CliLoginProgressPayload {
  * 패턴과 동일하게, 클라이언트가 progress 숫자를 그대로 누적/치환한다.
  */
 export interface OntologyGraphProgressPayload {
-  workspace_id: string;
+  account_id: string;
   graph_id: string;
   resource_id: string;
   /** 이 진행 프레임을 낸 job(디바운스 단일 파일 갱신, 또는 git-diff 스코프
@@ -970,7 +970,7 @@ export interface OntologyGraphProgressPayload {
 export interface AgentSessionRequestPayload {
   manager_id: string;
   /** 요청을 낸 워크스페이스 — credential 조회 스코프. */
-  workspace_id: string;
+  account_id: string;
   cli: string;
   // 유니온을 여기 다시 적지 않는다 — `AGENT_SESSION_REQUEST_OPS`(agent-sessions.ts)가
   // 단일 원천이다. 예전에는 같은 목록이 두 벌이라, 상수에 op 를 추가해도 이 타입이
@@ -1088,7 +1088,7 @@ export interface AgentSessionEventPayload {
 /** 서버 → agent-manager. scope.agent_id 는 매니저 identity 라 그 매니저 SSE 연결에만 간다. */
 export interface TerminalRequestPayload {
   manager_id: string;
-  workspace_id?: string;
+  account_id?: string;
   /** common/types/terminals.ts 의 `TERMINAL_REQUEST_OPS`. */
   op: string;
   /** list / open / attach 는 RPC — 매니저가 `POST /api/agent/terminals/rpc/:id` 로 답한다. */
@@ -1127,7 +1127,7 @@ export interface TerminalOutputPayload {
 /** 알림이 가리키는 곳 — 화면이 경로를 만들고, 보고 있는 세션이면 알림을 걸러 낸다. */
 export type VoiceAnnouncementTarget =
   | { type: 'session'; manager_id: string; cli: string; session_id: string }
-  | { type: 'mission'; workspace_id: string; mission_id: string };
+  | { type: 'mission'; account_id: string; mission_id: string };
 
 /**
  * UI 전용(받는 사용자만). 소리는 싣지 않는다 — 화면이 `GET /api/voice/announcements/:id/audio` 로

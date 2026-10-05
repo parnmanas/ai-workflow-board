@@ -74,18 +74,20 @@ export class OrchestrationController {
   // ── Teams ─────────────────────────────────────────────────────────────────
 
   @Get('teams')
-  async listTeams(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async listTeams(@Query('account_id') accountId: string, @Req() req: Request, @Res() res: Response) {
     try {
-      return res.json(await this.teams.listTeams(workspaceId));
+      const ids: string[] = (req as any).accessibleAccountIds || [accountId];
+      const teams = (await Promise.all(ids.map(id => this.teams.listTeams(id)))).flat();
+      return res.json([...new Map(teams.map(team => [team.id, team])).values()]);
     } catch (e: any) {
       return fail(res, e, 'Failed to list teams');
     }
   }
 
   @Get('teams/:id')
-  async getTeam(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getTeam(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.teams.getTeam(id, workspaceId));
+      return res.json(await this.teams.getTeam(id, accountId));
     } catch (e: any) {
       return fail(res, e, 'Team not found');
     }
@@ -105,16 +107,16 @@ export class OrchestrationController {
   @Patch('teams/:id')
   async updateTeam(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      return res.json(await this.teams.updateTeam(id, body?.workspace_id, body));
+      return res.json(await this.teams.updateTeam(id, body?.account_id, body));
     } catch (e: any) {
       return fail(res, e, 'Failed to update team');
     }
   }
 
   @Delete('teams/:id')
-  async deleteTeam(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async deleteTeam(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.teams.deleteTeam(id, workspaceId);
+      await this.teams.deleteTeam(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return fail(res, e, 'Failed to delete team');
@@ -124,7 +126,7 @@ export class OrchestrationController {
   @Post('teams/:id/members')
   async addMember(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      return res.status(201).json(await this.teams.addMember(id, body?.workspace_id, body));
+      return res.status(201).json(await this.teams.addMember(id, body?.account_id, body));
     } catch (e: any) {
       return fail(res, e, 'Failed to add member');
     }
@@ -138,7 +140,7 @@ export class OrchestrationController {
     @Res() res: Response,
   ) {
     try {
-      return res.json(await this.teams.updateMember(id, body?.workspace_id, memberId, body));
+      return res.json(await this.teams.updateMember(id, body?.account_id, memberId, body));
     } catch (e: any) {
       return fail(res, e, 'Failed to update member');
     }
@@ -148,11 +150,11 @@ export class OrchestrationController {
   async removeMember(
     @Param('id') id: string,
     @Param('memberId') memberId: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
   ) {
     try {
-      return res.json(await this.teams.removeMember(id, workspaceId, memberId));
+      return res.json(await this.teams.removeMember(id, accountId, memberId));
     } catch (e: any) {
       return fail(res, e, 'Failed to remove member');
     }
@@ -165,15 +167,15 @@ export class OrchestrationController {
    * Replaces the old `assignable-agents` picker feed. Nothing narrows by
    * workspace the way that endpoint did (`global_only`): a Runtime Host is a
    * machine, not a workspace member — the same one legitimately runs slots for
-   * several workspaces, and the identity the slot gets is stamped with the
+   * several accounts, and the identity the slot gets is stamped with the
    * TEAM's scope by the provisioner rather than inherited from a pre-existing
    * agent. So the workspace-vs-global roster split has nothing left to gate
    * here, and hiding a host would only make a team un-editable.
    */
   @Get('runtime-hosts')
-  async runtimeHosts(@Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async runtimeHosts(@Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.teams.listRuntimeHosts(workspaceId));
+      return res.json(await this.teams.listRuntimeHosts(accountId));
     } catch (e: any) {
       return fail(res, e, 'Failed to list Runtime Hosts');
     }
@@ -196,7 +198,7 @@ export class OrchestrationController {
     @Res() res: Response,
   ) {
     try {
-      const host = await this.teams.refreshRuntimeHostModels(managerAgentId, body?.workspace_id);
+      const host = await this.teams.refreshRuntimeHostModels(managerAgentId, body?.account_id);
       if (!host) return res.status(404).json({ error: 'Runtime Host not found' });
       return res.json(host);
     } catch (e: any) {
@@ -208,15 +210,16 @@ export class OrchestrationController {
 
   @Get('missions')
   async listMissions(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('team_id') teamId: string,
     @Query('status') status: string,
     @Query('limit') limit: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     try {
       return res.json(
-        await this.missions.listMissions(workspaceId, {
+        await this.missions.listMissions((req as any).accessibleAccountIds || [accountId], {
           teamId: teamId || undefined,
           status: status || undefined,
           limit: limit ? Number(limit) : undefined,
@@ -228,9 +231,9 @@ export class OrchestrationController {
   }
 
   @Get('missions/:id')
-  async getMission(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getMission(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.missions.getMissionDetail(id, workspaceId));
+      return res.json(await this.missions.getMissionDetail(id, accountId));
     } catch (e: any) {
       return fail(res, e, 'Mission not found');
     }
@@ -248,7 +251,7 @@ export class OrchestrationController {
   @Get('missions/:id/events')
   async listMissionEvents(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string,
     @Query('before_at') beforeAt: string,
     @Query('before_seq') beforeSeq: string,
@@ -257,7 +260,7 @@ export class OrchestrationController {
   ) {
     try {
       return res.json(
-        await this.missions.listMissionEvents(id, workspaceId, {
+        await this.missions.listMissionEvents(id, accountId, {
           limit: limit ? parseInt(limit, 10) : undefined,
           before_at: beforeAt || undefined,
           before_seq: beforeSeq ? parseInt(beforeSeq, 10) : undefined,
@@ -283,15 +286,15 @@ export class OrchestrationController {
       // and a start that fails can be reported together.
       if (body?.start) {
         try {
-          await this.runner.startMission(mission.id, mission.workspace_id, actorOf(req));
+          await this.runner.startMission(mission.id, mission.account_id, actorOf(req));
         } catch (e: any) {
           return res.status(201).json({
-            ...(await this.missions.getMissionDetail(mission.id, mission.workspace_id)),
+            ...(await this.missions.getMissionDetail(mission.id, mission.account_id)),
             start_error: e?.message || 'failed to start mission',
           });
         }
       }
-      return res.status(201).json(await this.missions.getMissionDetail(mission.id, mission.workspace_id));
+      return res.status(201).json(await this.missions.getMissionDetail(mission.id, mission.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to create mission');
     }
@@ -300,17 +303,17 @@ export class OrchestrationController {
   @Patch('missions/:id')
   async updateMission(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      await this.missions.updateMission(id, body?.workspace_id, body);
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.missions.updateMission(id, body?.account_id, body);
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to update mission');
     }
   }
 
   @Delete('missions/:id')
-  async deleteMission(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async deleteMission(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.missions.deleteMission(id, workspaceId);
+      await this.missions.deleteMission(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return fail(res, e, 'Failed to delete mission');
@@ -320,8 +323,8 @@ export class OrchestrationController {
   @Post('missions/:id/start')
   async startMission(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      await this.runner.startMission(id, body?.workspace_id, actorOf(req));
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.runner.startMission(id, body?.account_id, actorOf(req));
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to start mission');
     }
@@ -330,8 +333,8 @@ export class OrchestrationController {
   @Post('missions/:id/pause')
   async pauseMission(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      await this.runner.pauseMission(id, body?.workspace_id, actorOf(req));
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.runner.pauseMission(id, body?.account_id, actorOf(req));
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to pause mission');
     }
@@ -340,8 +343,8 @@ export class OrchestrationController {
   @Post('missions/:id/resume')
   async resumeMission(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      await this.runner.resumeMission(id, body?.workspace_id, actorOf(req));
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.runner.resumeMission(id, body?.account_id, actorOf(req));
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to resume mission');
     }
@@ -350,8 +353,8 @@ export class OrchestrationController {
   @Post('missions/:id/cancel')
   async cancelMission(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      await this.runner.cancelMission(id, body?.workspace_id, actorOf(req), body?.reason || '');
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.runner.cancelMission(id, body?.account_id, actorOf(req), body?.reason || '');
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to cancel mission');
     }
@@ -361,8 +364,8 @@ export class OrchestrationController {
   @Post('missions/:id/nudge')
   async nudgeMission(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      await this.runner.nudgeOrchestrator(id, body?.workspace_id, actorOf(req), body?.note || '');
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.runner.nudgeOrchestrator(id, body?.account_id, actorOf(req), body?.note || '');
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to nudge orchestrator');
     }
@@ -390,7 +393,7 @@ export class OrchestrationController {
     @Res() res: Response,
   ) {
     try {
-      return res.json(await this.runner.joinMissionConversation(id, body?.workspace_id, actorOf(req)));
+      return res.json(await this.runner.joinMissionConversation(id, body?.account_id, actorOf(req)));
     } catch (e: any) {
       return fail(res, e, 'Failed to join the mission conversation');
     }
@@ -433,8 +436,8 @@ export class OrchestrationController {
     @Res() res: Response,
   ) {
     try {
-      await this.runner.reopenMission(id, body?.workspace_id, actorOf(req), { reason: body?.reason });
-      return res.json(await this.missions.getMissionDetail(id, body?.workspace_id));
+      await this.runner.reopenMission(id, body?.account_id, actorOf(req), { reason: body?.reason });
+      return res.json(await this.missions.getMissionDetail(id, body?.account_id));
     } catch (e: any) {
       return fail(res, e, 'Failed to reopen the mission');
     }
@@ -443,7 +446,7 @@ export class OrchestrationController {
   @Get('steps/:stepId/session')
   async getStepSession(
     @Param('stepId') stepId: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string,
     @Query('before_id') beforeId: string,
     @Res() res: Response,
@@ -451,7 +454,7 @@ export class OrchestrationController {
     try {
       const parsed = parseInt(limit, 10);
       return res.json(
-        await this.missions.getStepSession(stepId, workspaceId, {
+        await this.missions.getStepSession(stepId, accountId, {
           limit: Number.isFinite(parsed) ? parsed : undefined,
           beforeId: beforeId || undefined,
         }),
@@ -469,11 +472,11 @@ export class OrchestrationController {
   async getStepAttachment(
     @Param('stepId') stepId: string,
     @Param('attachmentId') attachmentId: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
   ) {
     try {
-      return res.json(await this.missions.getStepAttachment(stepId, workspaceId, attachmentId));
+      return res.json(await this.missions.getStepAttachment(stepId, accountId, attachmentId));
     } catch (e: any) {
       return fail(res, e, 'Attachment not found');
     }
@@ -483,14 +486,14 @@ export class OrchestrationController {
   @Get('missions/:id/evidence')
   async listMissionEvidence(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string,
     @Res() res: Response,
   ) {
     try {
       const parsed = parseInt(limit, 10);
       return res.json(
-        await this.missions.listMissionEvidence(id, workspaceId, Number.isFinite(parsed) ? parsed : undefined),
+        await this.missions.listMissionEvidence(id, accountId, Number.isFinite(parsed) ? parsed : undefined),
       );
     } catch (e: any) {
       return fail(res, e, 'Failed to read the mission evidence');
@@ -505,7 +508,7 @@ export class OrchestrationController {
     @Res() res: Response,
   ) {
     try {
-      const result = await this.runner.submitConfirmDecision(stepId, body?.workspace_id, actorOf(req), {
+      const result = await this.runner.submitConfirmDecision(stepId, body?.account_id, actorOf(req), {
         verdict: body?.verdict,
         feedback: body?.feedback,
         visit: body?.visit,

@@ -185,7 +185,7 @@ export class ActionRunReaperService implements OnModuleInit, OnModuleDestroy {
         if (ageMs < this.ttlMs) continue;
         const ageMin = Math.round(ageMs / 60_000);
         try {
-          const result = await this.actionsService.completeRun(run.id, run.workspace_id, {
+          const result = await this.actionsService.completeRun(run.id, run.account_id, {
             status: 'failed',
             summary:
               `[auto-reaped by ActionRunReaperService] no result was reported within ` +

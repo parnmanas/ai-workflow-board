@@ -1,4 +1,5 @@
 import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
+import { preSyncAccountOwnership } from './database/pre-sync-account-ownership';
 import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
 /**
  * Database compatibility module
@@ -608,6 +609,7 @@ export async function flushOntologySqljs(dataSource: DataSource, force = false):
 export async function initOntologyDb(): Promise<void> {
   if (!AppOntologyDataSource) return;
   if (!AppOntologyDataSource.isInitialized) {
+    await preSyncAccountOwnership(AppOntologyDataSource.options);
     await AppOntologyDataSource.initialize();
   }
 }
@@ -817,9 +819,12 @@ export async function initDb() {
   // 일으킬 수 있어 아래 initOntologyDb() → AppOntologyDataSource.initialize()
   // 이전에 동일 가드를 돌린다(ticket b646ed54).
   await ensureOntologySqljsDbHealthy();
+  await preSyncAccountOwnership(buildDataSourceOptions());
   await preSyncAgentCleanup(buildDataSourceOptions());
   await preSyncBoardRemoval(buildDataSourceOptions());
   await AppDataSource.initialize();
+  const applied = await AppDataSource.runMigrations({ transaction: 'each' });
+  if (applied.length) console.log(`[DB] Applied ${applied.length} migration(s): ${applied.map(m => m.name).join(', ')}`);
   // Ticket 6ca4894a — Postgres/MySQL에서는 no-op(그쪽은 AppOntologyDataSource가 null).
   await initOntologyDb();
   const dbType = process.env.DB_TYPE || 'sqlite';

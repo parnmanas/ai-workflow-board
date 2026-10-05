@@ -6,7 +6,7 @@ import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
 import { findOrFail } from '../../common/find-or-fail';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import {
@@ -101,7 +101,7 @@ export interface SecurityProfileListItem extends Omit<SecurityProfile, 'refreshR
 }
 
 export interface CreateProfileInput {
-  workspace_id: string;
+  account_id: string;
   name: string;
   description?: string;
   checklist?: any;
@@ -142,10 +142,10 @@ export class SecurityProfileService {
     private readonly runService: SecurityRunService,
   ) {}
 
-  async list(workspaceId: string): Promise<SecurityProfileListItem[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+  async list(accountId: string): Promise<SecurityProfileListItem[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.profileRepo.createQueryBuilder('p')
-      .where('p.workspace_id = :ws', { ws: workspaceId });
+      .where('p.account_id = :ws', { ws: accountId });
     const profiles = await qb.orderBy('p.name', 'ASC').getMany();
     return this._attachLastRun(profiles);
   }
@@ -200,7 +200,7 @@ export class SecurityProfileService {
    * 스냅샷, 아니면 레거시 행 경로.
    */
   private async resolveTarget(
-    workspaceId: string,
+    accountId: string,
     targetAgentId: string | undefined,
     targetRuntime: unknown,
   ): Promise<{ target_agent_id: string; target_runtime: Record<string, any> | null }> {
@@ -222,12 +222,12 @@ export class SecurityProfileService {
   }
 
   async create(input: CreateProfileInput): Promise<SecurityProfile> {
-    if (!input.workspace_id) throw makeError(400, 'workspace_id is required');
+    if (!input.account_id) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
-    const target = await this.resolveTarget(input.workspace_id, input.target_agent_id, input.target_runtime);
+    const target = await this.resolveTarget(input.account_id, input.target_agent_id, input.target_runtime);
 
     const created = this.profileRepo.create({
-      workspace_id: input.workspace_id,
+      account_id: input.account_id,
       name: input.name.trim(),
       description: input.description ?? '',
       checklist: normalizeChecklist(input.checklist),
@@ -254,9 +254,9 @@ export class SecurityProfileService {
     return this.profileRepo.save(created);
   }
 
-  async update(id: string, workspaceId: string, patch: Partial<CreateProfileInput> & { last_passed_commit?: string | null }): Promise<SecurityProfile> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const existing = await findOrFail(this.profileRepo, { where: { id, workspace_id: workspaceId } }, 'security profile not found in workspace');
+  async update(id: string, accountId: string, patch: Partial<CreateProfileInput> & { last_passed_commit?: string | null }): Promise<SecurityProfile> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    const existing = await findOrFail(this.profileRepo, { where: { id, account_id: accountId } }, 'security profile not found in workspace');
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -266,7 +266,7 @@ export class SecurityProfileService {
     if (patch.checklist !== undefined) existing.checklist = normalizeChecklist(patch.checklist);
     if (patch.target_agent_id !== undefined || (patch as any).target_runtime !== undefined) {
       const target = await this.resolveTarget(
-        workspaceId,
+        accountId,
         patch.target_agent_id !== undefined ? patch.target_agent_id : existing.target_agent_id,
         (patch as any).target_runtime,
       );
@@ -296,13 +296,13 @@ export class SecurityProfileService {
     return this.profileRepo.save(existing);
   }
 
-  async remove(id: string, workspaceId: string): Promise<void> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    const existing = await this.profileRepo.findOne({ where: { id, workspace_id: workspaceId } });
+  async remove(id: string, accountId: string): Promise<void> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    const existing = await this.profileRepo.findOne({ where: { id, account_id: accountId } });
     if (!existing) throw makeError(404, 'security profile not found in workspace');
     // Cascade: tear down every run + the room each run created so the chat list
     // doesn't end up with orphan rooms pointing at a deleted profile.
     await this.runService.deleteRunsForProfile(id);
-    await this.profileRepo.delete({ id, workspace_id: workspaceId });
+    await this.profileRepo.delete({ id, account_id: accountId });
   }
 }

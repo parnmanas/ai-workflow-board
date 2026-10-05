@@ -132,12 +132,12 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async _onDeploymentReported(signal: DeploymentReportedSignal): Promise<void> {
-    // Fail-closed on a GLOBAL deployment (workspace_id=null): fanning it out
-    // to every workspace's Reddit channels would post on behalf of workspaces
+    // Fail-closed on a GLOBAL deployment (account_id=null): fanning it out
+    // to every workspace's Reddit channels would post on behalf of accounts
     // that never asked for it. A future global-broadcast feature would be an
     // explicit opt-in, not this default (lesson e45829b8).
-    if (!signal.workspace_id) {
-      this.logService.info('Outreach', 'deploy publish skipped — global (workspace_id=null) deployment, fail-closed', {
+    if (!signal.account_id) {
+      this.logService.info('Outreach', 'deploy publish skipped — global (account_id=null) deployment, fail-closed', {
         environment: signal.environment,
       });
       return;
@@ -147,7 +147,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
     if (!environment || !deployedCommitSha) return;
 
     const channels = await this.channelRepo.find({
-      where: { workspace_id: signal.workspace_id, enabled: true, kind: 'reddit' },
+      where: { account_id: signal.account_id, enabled: true, kind: 'reddit' },
     });
     const eligible = channels.filter((c) => c.deploy_post_mode !== 'off' && c.publish_policy !== ('off' as any));
 
@@ -174,7 +174,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const doneTickets = await this._collectDoneTickets(channel.workspace_id, latestPublished?.published_at ?? null);
+    const doneTickets = await this._collectDoneTickets(channel.account_id, latestPublished?.published_at ?? null);
     const summary = await this.summarizer.summarize({
       environment,
       deployedCommitSha,
@@ -185,7 +185,7 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
     let claimed: OutreachOutboundPost;
     try {
       claimed = await this.postRepo.save(this.postRepo.create({
-        workspace_id: channel.workspace_id,
+        account_id: channel.account_id,
         channel_id: channel.id,
         dedupe_key: dedupeKey,
         kind: 'deploy',
@@ -239,16 +239,16 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
    * best-effort background sweep).
    *
    * `channelId` (the URL path segment) is verified HERE, in the very first
-   * lookup, together with `postId`/`workspaceId` — review fix: the previous
+   * lookup, together with `postId`/`accountId` — review fix: the previous
    * version ran the whole approval (including the external publish call)
    * before checking `post.channel_id === channelId` in the controller, so a
-   * caller who knew a valid postId/workspaceId but supplied the WRONG
+   * caller who knew a valid postId/accountId but supplied the WRONG
    * channelId in the URL still triggered the public post; only the response
    * came back 404. Folding the channel_id into this SELECT means a mismatch
    * finds no row at all — 404 with zero connector calls, zero mutation.
    */
-  async approve(postId: string, channelId: string, workspaceId: string, bodyOverride?: string): Promise<OutreachOutboundPost> {
-    const existing = await this.postRepo.findOne({ where: { id: postId, channel_id: channelId, workspace_id: workspaceId } });
+  async approve(postId: string, channelId: string, accountId: string, bodyOverride?: string): Promise<OutreachOutboundPost> {
+    const existing = await this.postRepo.findOne({ where: { id: postId, channel_id: channelId, account_id: accountId } });
     if (!existing) throw makeError(404, 'outbound post not found');
 
     if (typeof bodyOverride === 'string' && bodyOverride.trim()) {
@@ -278,12 +278,12 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
 
   /** Reject a draft — terminal, never calls the connector. Same single-winner
    *  conditional UPDATE shape as approve() (draft→rejected only), and the
-   *  same channelId+workspaceId+postId atomic ownership check up front
+   *  same channelId+accountId+postId atomic ownership check up front
    *  (reject has no external call to protect, but a wrong-channel caller
    *  should still get a clean 404, not silently terminate another channel's
    *  draft). */
-  async reject(postId: string, channelId: string, workspaceId: string): Promise<OutreachOutboundPost> {
-    const existing = await this.postRepo.findOne({ where: { id: postId, channel_id: channelId, workspace_id: workspaceId } });
+  async reject(postId: string, channelId: string, accountId: string): Promise<OutreachOutboundPost> {
+    const existing = await this.postRepo.findOne({ where: { id: postId, channel_id: channelId, account_id: accountId } });
     if (!existing) throw makeError(404, 'outbound post not found');
 
     const result = await this.postRepo
@@ -302,8 +302,8 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
 
   /** List a channel's outbound ledger rows, optionally filtered by status —
    *  the "승인 대기 큐 조회" REST surface (`?status=draft`). */
-  async listOutbound(channelId: string, workspaceId: string, status?: string): Promise<OutreachOutboundPost[]> {
-    const channel = await this.channelRepo.findOne({ where: { id: channelId, workspace_id: workspaceId } });
+  async listOutbound(channelId: string, accountId: string, status?: string): Promise<OutreachOutboundPost[]> {
+    const channel = await this.channelRepo.findOne({ where: { id: channelId, account_id: accountId } });
     if (!channel) throw makeError(404, 'outreach channel not found');
     const where: Record<string, string> = { channel_id: channelId };
     if (status) where.status = status;
@@ -382,11 +382,11 @@ export class OutreachPublisherService implements OnModuleInit, OnModuleDestroy {
 
   /** Tickets that entered `done` strictly after `since` (null =
    *  no prior publish on record → no changelog, not "everything ever"). */
-  private async _collectDoneTickets(workspaceId: string, since: Date | null): Promise<ReleaseDoneTicket[]> {
+  private async _collectDoneTickets(accountId: string, since: Date | null): Promise<ReleaseDoneTicket[]> {
     if (!since) return [];
     const ticketRepo = this.dataSource.getRepository(Ticket);
     const rows = await ticketRepo.find({
-      where: { workspace_id: workspaceId, terminal_entered_at: MoreThan(since) },
+      where: { account_id: accountId, terminal_entered_at: MoreThan(since) },
       order: { terminal_entered_at: 'ASC' },
       take: MAX_DONE_TICKETS,
     });

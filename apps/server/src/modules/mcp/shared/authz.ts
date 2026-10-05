@@ -7,14 +7,14 @@
  * fail-closed place to (a) require a DB-backed, full-scope caller bound to
  * a live Agent row (mirrors `requireAgentRegistryAccess` in
  * claude-backend-profile-tools.ts), and (b) resolve the caller's REAL
- * workspace (never trust a caller-supplied workspace_id) the same way
- * chat-tools.ts already does at its `callerWorkspaceId` call sites.
+ * workspace (never trust a caller-supplied account_id) the same way
+ * chat-tools.ts already does at its `callerAccountId` call sites.
  */
 
 import { Like, type DataSource, type EntityManager } from 'typeorm';
 import { isRuntimeIdentityKey } from '../../../common/runtime-spec';
 import { RuntimeHost } from '../../../entities/RuntimeHost';
-import { normalizeAgentWorkspaceId } from '../../../common/agent-workspace-scope';
+import { normalizeAgentAccountId } from '../../../common/agent-account-scope';
 import { ApiKey } from '../../../entities/ApiKey';
 import type { McpAgentContext } from './session-auth';
 
@@ -49,51 +49,51 @@ export async function requireFullScopeCaller(
 /**
  * Resolves the caller's REAL workspace: the workspace bound to the API key
  * session itself, falling back to the workspace on the caller's own Agent
- * row. Never trusts a request-supplied workspace_id parameter — that is
+ * row. Never trusts a request-supplied account_id parameter — that is
  * exactly the fail-open bug this helper replaces (previously
- * `!caller?.workspaceId || caller.workspaceId === workspaceId`, which
- * trusted an unbound caller's claimed workspace_id unconditionally).
+ * `!caller?.accountId || caller.accountId === accountId`, which
+ * trusted an unbound caller's claimed account_id unconditionally).
  *
  * Returns null when no workspace can be resolved (unbound caller with no
  * Agent row) — callers must treat null as "deny", not "allow everything".
  */
-export async function resolveCallerWorkspaceId(
+export async function resolveCallerAccountId(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
 ): Promise<string | null> {
   if (!caller) return null;
-  if (caller.workspaceId) return normalizeAgentWorkspaceId(caller.workspaceId);
+  if (caller.accountId) return normalizeAgentAccountId(caller.accountId);
   if (!caller.agentId) return null;
   // P4c-4: Host/링크 해소 (Agent 테이블 없음).
   const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
-  return row ? normalizeAgentWorkspaceId(row.workspace_id) : null;
+  return row ? normalizeAgentAccountId(row.account_id) : null;
 }
 
 /**
- * True when the caller may act within `targetWorkspaceId`. A caller with an
- * explicitly bound workspace (session workspaceId, or its own Agent row's
- * workspace_id) must match exactly — this is the fail-closed replacement for
- * the old `!caller?.workspaceId || caller.workspaceId === workspaceId`
- * pattern, which trusted an unbound caller's claimed workspace_id
+ * True when the caller may act within `targetAccountId`. A caller with an
+ * explicitly bound workspace (session accountId, or its own Agent row's
+ * account_id) must match exactly — this is the fail-closed replacement for
+ * the old `!caller?.accountId || caller.accountId === accountId`
+ * pattern, which trusted an unbound caller's claimed account_id
  * unconditionally.
  *
  * The one deliberate escape hatch preserved from that prior behavior: a
- * genuinely GLOBAL full-scope Agent (DB row with workspace_id NULL/'') may
+ * genuinely GLOBAL full-scope Agent (DB row with account_id NULL/'') may
  * still reach every workspace, but only after a DB lookup proves the agent
- * really is global — never merely because the caller omitted workspaceId.
+ * really is global — never merely because the caller omitted accountId.
  * Every other unresolved case (no caller, no agentId, unknown agent) denies.
  *
- * A null `targetWorkspaceId` (a genuinely global resource) is checked via
- * that same DB lookup FIRST, before ever consulting `caller.workspaceId` —
+ * A null `targetAccountId` (a genuinely global resource) is checked via
+ * that same DB lookup FIRST, before ever consulting `caller.accountId` —
  * a workspace-bound ApiKey can never legitimately equal a null target by
  * definition, so short-circuiting on it there would reject every caller,
  * including a genuinely global Agent whose ApiKey row still carries a
- * non-null workspace_id from issuance context (ticket 9b7a5bb7).
+ * non-null account_id from issuance context (ticket 9b7a5bb7).
  */
 export async function callerCanAccessWorkspace(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
-  targetWorkspaceId: string | null,
+  targetAccountId: string | null,
 ): Promise<boolean> {
   if (!caller) return false;
   // P4c-4: Host/링크 해소 (Agent 테이블 없음). Host 는 장비 단위라
@@ -104,16 +104,16 @@ export async function callerCanAccessWorkspace(
     const row = await resolveCallerIdentityRow(dataSource, caller.agentId);
     if (!row) return undefined;
     if (row.kind === 'host') return null;
-    return normalizeAgentWorkspaceId(row.workspace_id);
+    return normalizeAgentAccountId(row.account_id);
   };
-  if (targetWorkspaceId === null) {
+  if (targetAccountId === null) {
     if (!caller.agentId) return false;
     const ws = await callerRowWorkspace();
     if (ws === undefined) return false;
     return ws === null && caller.scope === 'full';
   }
-  if (caller.workspaceId) {
-    return normalizeAgentWorkspaceId(caller.workspaceId) === targetWorkspaceId;
+  if (caller.accountId) {
+    return normalizeAgentAccountId(caller.accountId) === targetAccountId;
   }
   if (!caller.agentId) return false;
   const ws = await callerRowWorkspace();
@@ -121,7 +121,7 @@ export async function callerCanAccessWorkspace(
   if (ws === null) {
     return caller.scope === 'full';
   }
-  return ws === targetWorkspaceId;
+  return ws === targetAccountId;
 }
 
 /**
@@ -132,7 +132,7 @@ export async function callerCanAccessWorkspace(
 export async function resolveCallerIdentityRow(
   dataSource: DataSource | EntityManager,
   agentId: string | undefined,
-): Promise<{ kind: 'host' | 'runtime'; id: string; name: string; workspace_id: string | null } | null> {
+): Promise<{ kind: 'host' | 'runtime'; id: string; name: string; account_id: string | null } | null> {
   if (!agentId) return null;
   // Runtime credentials already carry the execution key in their provisioned
   // name. Resolve that key without querying a UUID Host column or an Agent row.
@@ -141,13 +141,13 @@ export async function resolveCallerIdentityRow(
     for (const key of keys) {
       if (!key.host_id || !key.is_active) continue;
       const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: key.host_id } });
-      if (host) return { kind: 'runtime', id: agentId, name: key.name.slice('runtime:'.length, -(agentId.length + 1)), workspace_id: key.workspace_id || null };
+      if (host) return { kind: 'runtime', id: agentId, name: key.name.slice('runtime:'.length, -(agentId.length + 1)), account_id: key.account_id || null };
     }
     return null;
   }
   const host = await dataSource.getRepository(RuntimeHost).findOne({ where: { id: agentId } });
   if (host) {
-    return { kind: 'host', id: host.id, name: host.name, workspace_id: host.workspace_id ?? null };
+    return { kind: 'host', id: host.id, name: host.name, account_id: host.account_id ?? null };
   }
 
   return null;
@@ -163,17 +163,17 @@ export const WORKSPACE_SCOPE_GATE_ERROR =
  * called this," never that the caller belongs to the workspace it's about
  * to mutate — so a full-scope key bound to workspace A could update/delete
  * an Agent in workspace B, or cascade-delete workspace B itself).
- * `targetWorkspaceId` is the resource's OWN workspace (null for a genuinely
+ * `targetAccountId` is the resource's OWN workspace (null for a genuinely
  * global resource) — never a caller-supplied parameter parroted back.
  * Returns an error string when either gate fails, or null when both pass.
  */
 export async function requireWorkspaceScopedFullAccess(
   dataSource: DataSource,
   caller: McpAgentContext | undefined,
-  targetWorkspaceId: string | null,
+  targetAccountId: string | null,
 ): Promise<string | null> {
   const gateError = await requireFullScopeCaller(dataSource, caller);
   if (gateError) return gateError;
-  const allowed = await callerCanAccessWorkspace(dataSource, caller, targetWorkspaceId);
+  const allowed = await callerCanAccessWorkspace(dataSource, caller, targetAccountId);
   return allowed ? null : WORKSPACE_SCOPE_GATE_ERROR;
 }

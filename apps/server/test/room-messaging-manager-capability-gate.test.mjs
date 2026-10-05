@@ -142,7 +142,7 @@ const NEW_MANAGER_INSTANCE = { plugin_version: '1.6.94', manager_capabilities: [
 
 function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE] }) {
   const dataSource = makeDataSource(profiles);
-  const dmRoom = { id: 'room-1', type: 'dm', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, workspace_id: 'ws-1' };
+  const dmRoom = { id: 'room-1', type: 'dm', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, account_id: 'ws-1' };
   const roomRepo = {
     async findOne() { return dmRoom; },
     async update() {},
@@ -162,7 +162,7 @@ function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE]
       };
     },
   };
-  const workspaceRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return workspace; } };
   const messageRepo = {
     // sendMessage()'s own transactional insert path.
     createQueryBuilder: makeQueryBuilder,
@@ -199,7 +199,7 @@ function makeSvc({ agent, workspace, instanceRegistry, profiles = [VLLM_PROFILE]
   const connectivity = { isReachable: () => true };
   return new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, {}, {}, {},
-    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
     instanceRegistry,
   );
 }
@@ -339,7 +339,7 @@ function makeGroupSvc({ agents, workspace, instanceRegistry, profiles = [VLLM_PR
   // 직후 바로 리턴하게만 해두면 충분하다(room-messaging-chat-runtime-profile
   // 테스트의 동일 stub과 같은 이유).
   const participantRepo = { async findOne() { return { id: 'participant-1' }; } };
-  const workspaceRepo = { async findOne() { return workspace; } };
+  const accountRepo = { async findOne() { return workspace; } };
   const messageRepo = {
     createQueryBuilder: () => ({ ...makeQueryBuilder(), async getOne() { return null; } }),
     manager: {
@@ -378,7 +378,7 @@ function makeGroupSvc({ agents, workspace, instanceRegistry, profiles = [VLLM_PR
   const connectivity = { isReachable: () => true };
   return new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, {}, {}, {},
-    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
     instanceRegistry,
   );
 }

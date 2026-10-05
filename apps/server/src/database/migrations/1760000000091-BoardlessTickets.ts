@@ -32,7 +32,7 @@ export class BoardlessTickets1760000000091 implements MigrationInterface {
     const columns = await has('columns') ? await runner.query('SELECT * FROM columns') : [];
     const boardById = new Map<string, any>(boards.map((b: any) => [String(b.id), b]));
     const columnById = new Map<string, any>(columns.map((c: any) => [String(c.id), c]));
-    const firstWorkspace = (await runner.query('SELECT id FROM workspaces ORDER BY created_at ASC'))[0]?.id ?? null;
+    const firstWorkspace = (await runner.query('SELECT id FROM accounts ORDER BY created_at ASC'))[0]?.id ?? null;
 
     // ── projects ────────────────────────────────────────────────────────
     const projectIds = new Set<string>(
@@ -41,12 +41,12 @@ export class BoardlessTickets1760000000091 implements MigrationInterface {
     if (await has('board_removal_repo_snapshot')) {
       for (const repo of await runner.query('SELECT * FROM board_removal_repo_snapshot')) {
         const id = String(repo.id);
-        const workspaceId = repo.workspace_id || firstWorkspace;
-        if (!workspaceId || projectIds.has(id)) continue;
+        const accountId = repo.account_id || firstWorkspace;
+        if (!accountId || projectIds.has(id)) continue;
         await bindParams(runner,
-          'INSERT INTO projects (id, workspace_id, name, description, repo_url, default_branch, credential_id, clone_policy, use_pr, instructions) ' +
+          'INSERT INTO projects (id, account_id, name, description, repo_url, default_branch, credential_id, clone_policy, use_pr, instructions) ' +
           'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [id, workspaceId, repo.name || 'Repository', repo.description || '', repo.url || '', repo.default_branch || '',
+          [id, accountId, repo.name || 'Repository', repo.description || '', repo.url || '', repo.default_branch || '',
             repo.credential_id || null, repo.clone_policy || null, false, '']);
         projectIds.add(id);
       }
@@ -110,18 +110,18 @@ export class BoardlessTickets1760000000091 implements MigrationInterface {
     // ── workspace settings that lived on boards ─────────────────────────
     const byWorkspace = new Map<string, any[]>();
     for (const board of boards) {
-      if (!board.workspace_id || board.archived_at) continue;
-      const list = byWorkspace.get(String(board.workspace_id)) || [];
+      if (!board.account_id || board.archived_at) continue;
+      const list = byWorkspace.get(String(board.account_id)) || [];
       list.push(board);
-      byWorkspace.set(String(board.workspace_id), list);
+      byWorkspace.set(String(board.account_id), list);
     }
-    for (const [workspaceId, list] of byWorkspace) {
+    for (const [accountId, list] of byWorkspace) {
       const language = mostCommon(list.map((b) => b.language).filter((v) => v && String(v).trim()));
       const archiveDays = mostCommon(list.map((b) => b.auto_archive_days).filter((v) => v !== null && v !== undefined));
       const cap = Math.max(1, ...list.map((b) => Number(b.max_concurrent_tickets_per_agent) || 1));
       await bindParams(runner,
-        'UPDATE workspaces SET language = COALESCE(language, ?), auto_archive_days = COALESCE(auto_archive_days, ?), max_concurrent_tickets_per_agent = ? WHERE CAST(id AS VARCHAR) = ?',
-        [language ?? null, archiveDays ?? null, cap, workspaceId]);
+        'UPDATE accounts SET language = COALESCE(language, ?), auto_archive_days = COALESCE(auto_archive_days, ?), max_concurrent_tickets_per_agent = ? WHERE CAST(id AS VARCHAR) = ?',
+        [language ?? null, archiveDays ?? null, cap, accountId]);
     }
 
     // ── repo_ref / on_failure_ticket / outreach rewrites ────────────────

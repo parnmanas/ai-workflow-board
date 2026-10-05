@@ -26,7 +26,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.DEPLOYMENT_GATE_PORT || '0';
@@ -84,9 +84,9 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   const ds = app.get(getDataSourceToken());
   const activityService = app.get(modules.ActivityService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'deploy-gate');
+  const ws = await createAccount(app, getDataSourceToken, 'deploy-gate');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-runner' });
-  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
+  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { accountId: ws.id, label: 'qa' });
 
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
@@ -97,11 +97,11 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
     const runs = await runsForScenario(ds, scenarioId);
     const latest = runs[runs.length - 1];
     await mcp.callTool('record_qa_step', {
-      run_id: latest.id, workspace_id: ws.id, idx: 0,
+      run_id: latest.id, account_id: ws.id, idx: 0,
       status: status === 'passed' ? 'passed' : 'failed', log: `step 0 ${status}`,
     });
     const done = await mcp.callTool('complete_qa_run', {
-      run_id: latest.id, workspace_id: ws.id, status, summary: `run ${status}`,
+      run_id: latest.id, account_id: ws.id, status, summary: `run ${status}`,
     });
     assert.ok(!done?.isError, `complete_qa_run: ${JSON.stringify(done)}`);
     return done;
@@ -110,7 +110,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   // ── Setup: an env-bound scenario with the deployment gate ON, NO time delay ──
   step('Create scenario: deployment_gate ON, target_environment=gate-env, rerun_delay_seconds=0');
   const sc = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Gated QA', target_runtime: qaAgent.runtime_spec,
+    account_id: ws.id, name: 'Gated QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps, target_environment: 'gate-env',
     on_failure_ticket: {
       enabled: true, dedupe: 'per_open_ticket',
@@ -138,7 +138,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   // ── CASE 2: a deployment that does NOT include the fix → still deferred ───────
   step('CASE 2: report a deploy WITHOUT the fix commit → rerun still deferred');
   const dep2 = await mcp.callTool('report_deployment', {
-    workspace_id: ws.id, environment: 'gate-env',
+    account_id: ws.id, environment: 'gate-env',
     deployed_commit_sha: UNRELATED_HEAD, ancestor_shas: [], source: 'webhook',
   });
   assert.ok(!dep2?.isError, `report_deployment: ${JSON.stringify(dep2)}`);
@@ -148,7 +148,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   // ── CASE 3: the deployment that INCLUDES the fix → rerun FIRES immediately ────
   step('CASE 3: report a deploy whose ancestry INCLUDES the fix → rerun fires now');
   const dep3 = await mcp.callTool('report_deployment', {
-    workspace_id: ws.id, environment: 'gate-env',
+    account_id: ws.id, environment: 'gate-env',
     deployed_commit_sha: DEPLOY_HEAD, ancestor_shas: [FIX_SHA, UNRELATED_HEAD], source: 'webhook',
   });
   assert.ok(!dep3?.isError, `report_deployment: ${JSON.stringify(dep3)}`);
@@ -164,7 +164,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   // ── CASE 4: freshness fallback — no fix-commit tag, deploy-ordering un-gates ───
   step('CASE 4: freshness fallback — no fix-commit tag; a deploy at/after Done un-gates');
   const scF = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Freshness QA', target_runtime: qaAgent.runtime_spec,
+    account_id: ws.id, name: 'Freshness QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps, target_environment: 'fresh-env',
     on_failure_ticket: {
       enabled: true, dedupe: 'per_open_ticket',
@@ -181,7 +181,7 @@ test('deployment gate: rerun waits for the deploy that includes the fix, then fi
   assert.equal((await runsForScenario(ds, scF.id)).length, 1, 'freshness gate holds before any deploy');
 
   const depF = await mcp.callTool('report_deployment', {
-    workspace_id: ws.id, environment: 'fresh-env',
+    account_id: ws.id, environment: 'fresh-env',
     deployed_commit_sha: DEPLOY_HEAD, source: 'webhook',
     deployed_at: new Date(Date.now() + 2000).toISOString(),
   });

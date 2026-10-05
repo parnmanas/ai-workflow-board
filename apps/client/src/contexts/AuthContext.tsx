@@ -1,9 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { api, setActiveWorkspaceId, bootstrapActiveWorkspaceId } from '../api';
+import { api, setActiveAccountId, bootstrapActiveAccountId } from '../api';
 import { User } from '../types';
 import { loadCliCatalog } from '../cli/catalog';
 
-interface WorkspaceEntry {
+interface AccountEntry {
   id: string;
   name: string;
   slug: string | null;
@@ -17,8 +17,8 @@ interface AuthState {
   isLoading: boolean;
   needsSetup: boolean;
   serverUnavailable: boolean;
-  currentWorkspaceId: string | null;
-  availableWorkspaces: WorkspaceEntry[];
+  currentAccountId: string | null;
+  availableAccounts: AccountEntry[];
   userStatus: 'active' | 'pending' | 'rejected' | null;
 }
 
@@ -28,7 +28,7 @@ interface AuthContextValue extends AuthState {
   setup: (name: string, email: string, password: string) => Promise<void>;
   hasPermission: (perm: string) => boolean;
   refreshUser: () => Promise<void>;
-  setCurrentWorkspace: (wsId: string) => void;
+  setCurrentAccount: (wsId: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -39,38 +39,22 @@ export function useAuth(): AuthContextValue {
   return ctx;
 }
 
-function resolveWorkspaceState(workspaces: WorkspaceEntry[], userStatus: string): {
-  currentWorkspaceId: string | null;
-  availableWorkspaces: WorkspaceEntry[];
+export function resolveAccountState(accounts: AccountEntry[], userStatus: string): {
+  currentAccountId: string | null;
+  availableAccounts: AccountEntry[];
   isAuthenticated: boolean;
 } {
-  if (userStatus !== 'active') {
-    return { currentWorkspaceId: null, availableWorkspaces: [], isAuthenticated: false };
+  if (userStatus !== 'active' || accounts.length === 0) {
+    setActiveAccountId(null);
+    return { currentAccountId: null, availableAccounts: accounts, isAuthenticated: false };
   }
 
-  if (workspaces.length === 0) {
-    // Active user but no workspace assigned yet — awaiting assignment
-    return { currentWorkspaceId: null, availableWorkspaces: [], isAuthenticated: false };
-  }
-
-  if (workspaces.length === 1) {
-    // Auto-select single workspace
-    const wsId = workspaces[0].id;
-    localStorage.setItem('currentWorkspaceId', wsId);
-    return { currentWorkspaceId: wsId, availableWorkspaces: workspaces, isAuthenticated: true };
-  }
-
-  // Multiple workspaces — show picker
-  // Restore previously selected workspace if still in the list. Prefer this
-  // tab's own URL/sessionStorage over the cross-tab localStorage default —
-  // otherwise a legacy route redirect (e.g. `/`) resolves to whatever
-  // workspace another tab last touched (ticket dc5c0813).
-  const saved = bootstrapActiveWorkspaceId();
-  if (saved && workspaces.some(ws => ws.id === saved)) {
-    return { currentWorkspaceId: saved, availableWorkspaces: workspaces, isAuthenticated: true };
-  }
-
-  return { currentWorkspaceId: null, availableWorkspaces: workspaces, isAuthenticated: false };
+  // Ownership defaults never interrupt sign-in with a work-container picker.
+  const saved = bootstrapActiveAccountId();
+  const accountId = accounts.find((account) => account.id === saved)?.id || accounts[0].id;
+  try { localStorage.setItem('currentAccountId', accountId); } catch {}
+  setActiveAccountId(accountId);
+  return { currentAccountId: accountId, availableAccounts: accounts, isAuthenticated: true };
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -81,8 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isLoading: true,
     needsSetup: false,
     serverUnavailable: false,
-    currentWorkspaceId: localStorage.getItem('currentWorkspaceId'),
-    availableWorkspaces: [],
+    currentAccountId: localStorage.getItem('currentAccountId'),
+    availableAccounts: [],
     userStatus: null,
   });
 
@@ -104,8 +88,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const result = await api.getMe();
       const userStatus = (result.status || 'active') as 'active' | 'pending' | 'rejected';
-      const workspaces: WorkspaceEntry[] = result.workspaces || [];
-      const wsState = resolveWorkspaceState(workspaces, userStatus);
+      const accounts: AccountEntry[] = result.accounts || [];
+      const wsState = resolveAccountState(accounts, userStatus);
 
       setState({
         user: result,
@@ -114,8 +98,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isLoading: false,
         needsSetup: false,
         serverUnavailable: false,
-        currentWorkspaceId: wsState.currentWorkspaceId,
-        availableWorkspaces: wsState.availableWorkspaces,
+        currentAccountId: wsState.currentAccountId,
+        availableAccounts: wsState.availableAccounts,
         userStatus,
       });
     } catch {
@@ -125,12 +109,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const { needs_setup } = await api.getSetupStatus();
         setState({
           user: null, token: null, isAuthenticated: false, isLoading: false,
-          needsSetup: needs_setup, serverUnavailable: false, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+          needsSetup: needs_setup, serverUnavailable: false, currentAccountId: null, availableAccounts: [], userStatus: null,
         });
       } catch {
         setState({
           user: null, token: null, isAuthenticated: false, isLoading: false,
-          needsSetup: false, serverUnavailable: true, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+          needsSetup: false, serverUnavailable: true, currentAccountId: null, availableAccounts: [], userStatus: null,
         });
       }
     }
@@ -142,13 +126,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const handler = () => {
       localStorage.removeItem('auth_token');
-      localStorage.removeItem('currentWorkspaceId');
-      setActiveWorkspaceId(null);
+      localStorage.removeItem('currentAccountId');
+      setActiveAccountId(null);
       setState(prev => {
         if (!prev.isAuthenticated && !prev.user) return prev; // Already logged out
         return {
           ...prev, isAuthenticated: false, user: null, token: null,
-          currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+          currentAccountId: null, availableAccounts: [], userStatus: null,
         };
       });
     };
@@ -183,8 +167,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('auth_token', result.token);
 
     const userStatus = (result.user?.status || 'active') as 'active' | 'pending' | 'rejected';
-    const workspaces: WorkspaceEntry[] = result.workspaces || [];
-    const wsState = resolveWorkspaceState(workspaces, userStatus);
+    const accounts: AccountEntry[] = result.accounts || [];
+    const wsState = resolveAccountState(accounts, userStatus);
 
     setState({
       user: result.user,
@@ -193,8 +177,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isLoading: false,
       needsSetup: false,
       serverUnavailable: false,
-      currentWorkspaceId: wsState.currentWorkspaceId,
-      availableWorkspaces: wsState.availableWorkspaces,
+      currentAccountId: wsState.currentAccountId,
+      availableAccounts: wsState.availableAccounts,
       userStatus,
     });
   };
@@ -202,34 +186,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = async () => {
     try { await api.logout(); } catch { /* ignore */ }
     localStorage.removeItem('auth_token');
-    localStorage.removeItem('currentWorkspaceId');
-    setActiveWorkspaceId(null);
+    localStorage.removeItem('currentAccountId');
+    setActiveAccountId(null);
     setState({
       user: null, token: null, isAuthenticated: false, isLoading: false, needsSetup: false,
-      serverUnavailable: false, currentWorkspaceId: null, availableWorkspaces: [], userStatus: null,
+      serverUnavailable: false, currentAccountId: null, availableAccounts: [], userStatus: null,
     });
   };
 
   const setup = async (name: string, email: string, password: string) => {
     const result = await api.setup({ name, email, password });
     localStorage.setItem('auth_token', result.token);
+    const profile = await api.getMe();
+    const ownership = resolveAccountState(profile.accounts || [], 'active');
     setState({
-      user: result.user,
+      user: profile,
       token: result.token,
-      isAuthenticated: true,
+      isAuthenticated: ownership.isAuthenticated,
       isLoading: false,
       needsSetup: false,
       serverUnavailable: false,
-      currentWorkspaceId: null,
-      availableWorkspaces: [],
+      currentAccountId: ownership.currentAccountId,
+      availableAccounts: ownership.availableAccounts,
       userStatus: 'active',
     });
   };
 
-  const setCurrentWorkspace = (wsId: string) => {
-    localStorage.setItem('currentWorkspaceId', wsId);
-    setActiveWorkspaceId(wsId);
-    setState(s => ({ ...s, currentWorkspaceId: wsId, isAuthenticated: true }));
+  const setCurrentAccount = (wsId: string) => {
+    localStorage.setItem('currentAccountId', wsId);
+    setActiveAccountId(wsId);
+    setState(s => ({ ...s, currentAccountId: wsId, isAuthenticated: true }));
   };
 
   const hasPermission = (perm: string): boolean => {
@@ -241,12 +227,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshUser = async () => {
     try {
       const user = await api.getMe();
-      setState(s => ({ ...s, user }));
+      const ownership = resolveAccountState(user.accounts || [], user.status || 'active');
+      setState(s => ({ ...s, user, ...ownership }));
     } catch { /* ignore */ }
   };
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, setup, hasPermission, refreshUser, setCurrentWorkspace }}>
+    <AuthContext.Provider value={{ ...state, login, logout, setup, hasPermission, refreshUser, setCurrentAccount }}>
       {children}
     </AuthContext.Provider>
   );

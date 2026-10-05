@@ -39,7 +39,7 @@
  * Sweep default is shorter than the sibling TTL reapers (5m vs the 15-30m
  * QA/Action run reapers use): those wait out a fixed TTL before killing
  * something, but this reaper is racing the run-budget window's own clear
- * (default 1h, Workspace.hard_budget_config) to retry a cheap, side-effect-
+ * (default 1h, Account.hard_budget_config) to retry a cheap, side-effect-
  * free dispatch — a shorter cadence recovers sooner at negligible cost when
  * nothing is actually wedged.
  *

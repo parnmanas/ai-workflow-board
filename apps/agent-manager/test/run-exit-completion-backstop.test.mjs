@@ -101,14 +101,14 @@ function makeChatSession(pid, overrides = {}) {
 test('ChatSessionManager._onChildExit: 한 번도 응답 못 한 run-bound 세션 → run을 failed/error로 종료 처리', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(40001, {
-    _run: { run_id: 'run-hang-1', workspace_id: 'ws-1', kind: 'action' },
+    _run: { run_id: 'run-hang-1', account_id: 'ws-1', kind: 'action' },
   });
   await mgr._onChildExit(sess, null, 'SIGTERM'); // idle-timer/health-watchdog에 의해 kill됨, result 라인은 한 번도 없었음
 
   const call = mcpToolCalls.find((c) => c.name === 'complete_action_run');
   assert.ok(call, 'complete_action_run이 호출돼야 한다 — run을 영원히 running으로 남겨둘 수 없다');
   assert.equal(call.args.run_id, 'run-hang-1');
-  assert.equal(call.args.workspace_id, 'ws-1');
+  assert.equal(call.args.account_id, 'ws-1');
   assert.equal(call.args.status, 'failed', "resolveRunCompletionRoute 기준 action의 failureStatus는 'failed'다");
   assert.ok(call.args.summary && call.args.summary.length > 0, 'summary에 실패 사유가 담겨 있어야 한다');
 });
@@ -116,7 +116,7 @@ test('ChatSessionManager._onChildExit: 한 번도 응답 못 한 run-bound 세�
 test('ChatSessionManager._onChildExit: qa 종류 run은 complete_qa_run으로 라우팅되고 status=error', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(40002, {
-    _run: { run_id: 'run-hang-2', workspace_id: 'ws-1', kind: 'qa' },
+    _run: { run_id: 'run-hang-2', account_id: 'ws-1', kind: 'qa' },
   });
   await mgr._onChildExit(sess, 0, null);
 
@@ -139,7 +139,7 @@ test('ChatSessionManager._onChildExit: 보통 세션(_run 없음)은 어떤 run-
 test("ChatSessionManager._onChildExit: CLI의 untrusted-workspace 경고를 실패 summary로 승격한다", async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(40004, {
-    _run: { run_id: 'run-untrusted', workspace_id: 'ws-1', kind: 'action' },
+    _run: { run_id: 'run-untrusted', account_id: 'ws-1', kind: 'action' },
   });
   // _collectOutputTail은 베이스 클래스의 pid별 출력 링(`_outputRings`, 실제
   // 운영에서는 stdio-capture 배선이 채운다)을 읽는다 — 그 필드를 클래스
@@ -161,7 +161,7 @@ test("ChatSessionManager._onChildExit: CLI의 untrusted-workspace 경고를 실�
 test('ChatSessionManager._onChildExit: 흔한 hang(tail에 trust 경고 없음)은 일반 summary를 받는다', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(40005, {
-    _run: { run_id: 'run-generic-hang', workspace_id: 'ws-1', kind: 'action' },
+    _run: { run_id: 'run-generic-hang', account_id: 'ws-1', kind: 'action' },
   });
   mgr._outputRings.set(sess.pid, ['assistant: still working...']);
   await mgr._onChildExit(sess, null, 'SIGTERM');
@@ -185,7 +185,7 @@ test('ChatSessionManager._onChildExit: 흔한 hang(tail에 trust 경고 없음)�
 test('ChatSessionManager._onChildExit: stopReason이 있으면 추측 문구 대신 정확한 사유를 기록한다', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(40006, {
-    _run: { run_id: 'run-self-update', workspace_id: 'ws-1', kind: 'action' },
+    _run: { run_id: 'run-self-update', account_id: 'ws-1', kind: 'action' },
     stopReason: 'self_update_restart',
   });
   await mgr._onChildExit(sess, null, 'SIGTERM');
@@ -202,7 +202,7 @@ test('ChatSessionManager._onChildExit: stopReason이 있으면 추측 문구 대
 test('ChatSessionManager.stop: 살아있는 run-bound 세션에 reason을 태그해 SIGTERM 이전에 남긴다', async () => {
   const mgr = new ChatSessionManager(makeConfig());
   const sess = makeChatSession(50001, {
-    _run: { run_id: 'run-shutdown-tag', workspace_id: 'ws-1', kind: 'action' },
+    _run: { run_id: 'run-shutdown-tag', account_id: 'ws-1', kind: 'action' },
   });
   mgr._sessions.set(sess.sessionKey, sess);
   await mgr.stop('self_update_restart');
@@ -230,7 +230,7 @@ test('ChatSessionManager._ensureCapacity: maxConcurrent 도달 시 LRU 세션에
     delegation: { enabled: true, maxConcurrent: 1, ttlMinutes: 15, idleMinutes: 999, maxTurnsPerSession: 999 },
   });
   const older = makeChatSession(50003, {
-    _run: { run_id: 'run-evicted', workspace_id: 'ws-1', kind: 'action' },
+    _run: { run_id: 'run-evicted', account_id: 'ws-1', kind: 'action' },
     lastTouchedAt: Date.now() - 100_000,
   });
   const newer = makeChatSession(50004, { lastTouchedAt: Date.now() });
@@ -275,7 +275,7 @@ function makeOneshotRunRecord(overrides = {}) {
 test('SubagentManager._runExitCompletionBackstop: 결과 없이 끝난 run-bound record → failed로 종료 처리', async () => {
   const mgr = new SubagentManager(makeConfig());
   const record = makeOneshotRunRecord({
-    run: { run_id: 'oneshot-hang-1', workspace_id: 'ws-1', kind: 'action' },
+    run: { run_id: 'oneshot-hang-1', account_id: 'ws-1', kind: 'action' },
     tailLines: ['assistant: checking repo state', '→ tool(Bash)'],
   });
   await mgr._runExitCompletionBackstop(record, null);
@@ -300,7 +300,7 @@ test('SubagentManager._runExitCompletionBackstop: run 바인딩이 없으면 아
 test('SubagentManager._runExitCompletionBackstop: tail 속 untrusted-workspace 경고를 감지해 summary에 명시한다', async () => {
   const mgr = new SubagentManager(makeConfig());
   const record = makeOneshotRunRecord({
-    run: { run_id: 'oneshot-untrusted', workspace_id: 'ws-1', kind: 'action' },
+    run: { run_id: 'oneshot-untrusted', account_id: 'ws-1', kind: 'action' },
     tailLines: [
       'Ignoring 22 permissions.allow entries from .claude/settings.json: this workspace has',
       'not been trusted. Run Claude Code interactively here once and accept the trust dialog.',
@@ -320,7 +320,7 @@ test('SubagentManager._runExitCompletionBackstop: tail 속 untrusted-workspace �
 test('SubagentManager._runExitCompletionBackstop: 흔한 hang(tail에 trust 경고 없음)은 일반 summary를 받는다', async () => {
   const mgr = new SubagentManager(makeConfig());
   const record = makeOneshotRunRecord({
-    run: { run_id: 'oneshot-generic-hang', workspace_id: 'ws-1', kind: 'security' },
+    run: { run_id: 'oneshot-generic-hang', account_id: 'ws-1', kind: 'security' },
     tailLines: ['assistant: working on it...'],
   });
   await mgr._runExitCompletionBackstop(record, null);

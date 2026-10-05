@@ -92,23 +92,23 @@ export function deploymentIncludesCommit(dep: DeploymentCommitInfo | null | unde
 
 /**
  * The current live deployment for `environment` as seen by a given workspace.
- * A workspace-scoped row shadows a global (null-workspace) one, but we simply
- * pick the freshest by deployed_at across {workspace-scoped, global} — a global
+ * A account-scoped row shadows a global (null-workspace) one, but we simply
+ * pick the freshest by deployed_at across {account-scoped, global} — a global
  * self-report that is newer than a stale workspace override should still win
- * (the environment genuinely moved forward). `workspaceId` null → global only.
+ * (the environment genuinely moved forward). `accountId` null → global only.
  */
 export async function findLatestDeployment(
   repo: Repository<Deployment>,
-  workspaceId: string | null | undefined,
+  accountId: string | null | undefined,
   environment: string,
 ): Promise<Deployment | null> {
   const env = (environment || '').trim();
   if (!env) return null;
   const qb = repo.createQueryBuilder('d').where('d.environment = :env', { env });
-  if (workspaceId) {
-    qb.andWhere('(d.workspace_id = :ws OR d.workspace_id IS NULL)', { ws: workspaceId });
+  if (accountId) {
+    qb.andWhere('(d.account_id = :ws OR d.account_id IS NULL)', { ws: accountId });
   } else {
-    qb.andWhere('d.workspace_id IS NULL');
+    qb.andWhere('d.account_id IS NULL');
   }
   qb.orderBy('d.deployed_at', 'DESC').addOrderBy('d.created_at', 'DESC');
   return qb.getOne();

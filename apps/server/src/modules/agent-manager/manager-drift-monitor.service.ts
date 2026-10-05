@@ -495,7 +495,7 @@ export class ManagerDriftMonitorService implements OnModuleInit, OnModuleDestroy
       const repo = this.dataSource.getRepository(ActivityLog);
       void repo.save(
         repo.create({
-          // Managers are workspace-less; leave workspace_id at its '' default.
+          // Managers are workspace-less; leave account_id at its '' default.
           entity_type: 'agent_manager',
           entity_id: input.agentId,
           action: input.action,

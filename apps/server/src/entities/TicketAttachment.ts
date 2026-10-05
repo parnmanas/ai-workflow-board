@@ -15,7 +15,7 @@ export class TicketAttachment {
   id: string;
 
   @Column({ type: 'varchar', nullable: true, default: '' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar', default: 'ticket' })
   owner_type: string;

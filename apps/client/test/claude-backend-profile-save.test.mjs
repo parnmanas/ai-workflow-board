@@ -5,8 +5,8 @@ import { api } from '../src/api.ts';
 import ClaudeBackendProfilesManager from '../src/components/admin/ClaudeBackendProfilesManager.tsx';
 
 const credentials = [
-  { id: 'credential-a', workspace_id: 'workspace-1', scope: 'workspace', name: '운영 Claude', provider: 'claude_oauth_token' },
-  { id: 'credential-b', workspace_id: 'workspace-1', scope: 'workspace', name: '개발 API', provider: 'anthropic' },
+  { id: 'credential-a', account_id: 'workspace-1', scope: 'account', name: '운영 Claude', provider: 'claude_oauth_token' },
+  { id: 'credential-b', account_id: 'workspace-1', scope: 'account', name: '개발 API', provider: 'anthropic' },
 ];
 const existingProfile = {
   id: 'profile-1', name: '기존 프로필', kind: 'claude-backend', protocol: 'anthropic-compatible',
@@ -48,7 +48,7 @@ async function renderManager(t, { profiles = [], listCredentials = async () => c
   api.listCredentials = listCredentials;
   api.createClaudeBackendProfile = async () => {};
   api.updateClaudeBackendProfile = async () => {};
-  const view = mount(React.createElement(ClaudeBackendProfilesManager, { workspaceId: 'workspace-1' }));
+  const view = mount(React.createElement(ClaudeBackendProfilesManager, { accountId: 'workspace-1' }));
   await flush();
   t.after(() => {
     view.unmount();
@@ -268,7 +268,7 @@ test('공통 프로필 컨트롤과 자동 래핑 레이아웃을 사용하고 �
 
 test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범위를 보여준다', async (t) => {
   const { container } = await renderManager(t, { profiles: [existingProfile] });
-  const impact = { global_default: false, workspaces: ['w1'], agents: [], runs: [{ id: 'r1' }] };
+  const impact = { global_default: false, accounts: ['w1'], agents: [], runs: [{ id: 'r1' }] };
   const deleted = [];
   let confirmCalls = 0;
   const originalConfirm = window.confirm;
@@ -290,7 +290,7 @@ test('삭제는 window.confirm 이 아니라 공통 ConfirmDialog 로 영향 범
   assert.equal(confirmCalls, 0, 'window.confirm 을 호출하면 안 됩니다.');
   // 다이얼로그 본문에 프로필 이름과 참조 요약이 함께 있어야 한다.
   assert.match(document.body.textContent, /프로필을 삭제할까요\?/);
-  assert.match(document.body.textContent, /워크스페이스 1개/);
+  assert.match(document.body.textContent, /계정 1개/);
   assert.match(document.body.textContent, /티켓 재정의 1건/);
   // 보드는 사라졌다 — 참조 요약이 보드 수를 세면 안 된다.
   assert.doesNotMatch(document.body.textContent, /보드 \d+개/);
@@ -336,7 +336,7 @@ test('Adapter 설정은 공통 Textarea 로 렌더되어 가로 리사이즈를 
 
 // ── 사라진 워크스페이스 스코프 문구 재등장 방지 (리뷰 지적 P1, 티켓 e616dbfc) ──
 // 배정/상속 계층을 코드에서 지워도 사용자에게 보이는 설명이 남으면 화면이 거짓말을
-// 한다. 실제로 탭 설명은 "current Workspace assignment", 보드 셀렉트는 "Inherit
+// 한다. 실제로 탭 설명은 "current Account assignment", 보드 셀렉트는 "Inherit
 // workspace" 로 남아 있었다. 렌더 트리 전체를 세우는 대신 소스 문자열을 직접
 // 단언한다 — 목적이 "이 문구가 다시 들어오지 않는 것" 자체이기 때문이다.
 test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화면에 남아 있지 않다', async () => {
@@ -346,9 +346,9 @@ test('워크스페이스 배정/상속을 약속하는 문구가 프로필 화�
   const here = dirname(fileURLToPath(import.meta.url));
   const read = (rel) => readFile(join(here, '..', 'src', 'components', rel), 'utf8');
 
-  const managementPage = await read('WorkspaceManagementPage.tsx');
+  const managementPage = await read('AccountManagementPage.tsx');
   assert.equal(
-    managementPage.includes('current Workspace assignment'), false,
+    managementPage.includes('current Account assignment'), false,
     'Claude Backend Profiles 탭 설명이 사라진 워크스페이스 배정을 계속 약속하면 안 됩니다.',
   );
   assert.match(managementPage, /Profiles are global/, '전역 단일 스코프임을 설명해야 합니다.');

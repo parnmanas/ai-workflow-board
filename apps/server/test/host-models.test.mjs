@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createAccount } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.HOST_MODELS_PORT || '0';
 
@@ -22,9 +22,9 @@ test('host models: read from heartbeat, refresh waits for the command ack, auth 
   const base = `http://127.0.0.1:${port}`;
   const { AuthService, getDataSourceToken, activityEvents } = modules;
 
-  const workspace = await createWorkspace(app, getDataSourceToken, 'host-models');
+  const workspace = await createAccount(app, getDataSourceToken, 'host-models');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'ralf', type: 'manager' });
-  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: workspace.id, label: 'ralf-key' });
+  const managerKey = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'ralf-key' });
   const viewer = await createUser(app, getDataSourceToken, { name: 'viewer', role: 'user' });
   const token = app.get(AuthService).createSession(viewer.id);
   const userHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };

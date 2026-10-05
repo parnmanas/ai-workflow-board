@@ -32,7 +32,7 @@ test('parses all five entity artifact types but SSR never creates an unverified 
     assert.match(html, new RegExp(`data-entity-ref="${type}:${ids[type]}"`));
   }
   assert.doesNotMatch(html, /<a /);
-  assert.match(html, /workspace context 없음/);
+  assert.match(html, /확인 중/);
 });
 
 test('short ids remain plain text instead of becoming fake links', () => {

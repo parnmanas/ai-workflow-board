@@ -112,7 +112,7 @@ test('백필은 같은 밀리초 안에서도 마이크로초 순서대로 write
 
   const missionRepo = ds.getRepository(entities.OrchestrationMission);
   const mission = await missionRepo.save(missionRepo.create({
-    workspace_id: WS, team_id: 'team-1', title: 'µs backfill fixture',
+    account_id: WS, team_id: 'team-1', title: 'µs backfill fixture',
     objective: 'backfill fixture', status: 'running',
     created_by_type: 'user', created_by: '33333333-3333-4333-8333-333333333333',
   }));
@@ -126,7 +126,7 @@ test('백필은 같은 밀리초 안에서도 마이크로초 순서대로 write
     // 레거시 상태 재현: `write_seq` 는 컬럼 도입 이전 행처럼 전부 0 이다.
     await ds.query(
       `INSERT INTO "${SCHEMA}".orchestration_events
-         (id, mission_id, workspace_id, step_id, type, actor_type, actor_id, actor_name, message, data, created_at, write_seq)
+         (id, mission_id, account_id, step_id, type, actor_type, actor_id, actor_name, message, data, created_at, write_seq)
        VALUES ($1, $2, $3, NULL, 'note', 'system', '', '', $4, NULL, $5::timestamp, 0)`,
       [idsByTime[i], mission.id, WS, `evt-${i}`, timesAsc[i]],
     );

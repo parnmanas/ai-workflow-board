@@ -22,10 +22,10 @@ function agentFixture(kind) {
 }
 
 async function stubApi(page, kind) {
-  await page.addInitScript(({ workspaceId }) => {
+  await page.addInitScript(({ accountId }) => {
     localStorage.setItem('auth_token', 'e2e-token');
-    localStorage.setItem('currentWorkspaceId', workspaceId);
-  }, { workspaceId: workspace.id });
+    localStorage.setItem('currentAccountId', accountId);
+  }, { accountId: workspace.id });
 
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url());
@@ -39,9 +39,9 @@ async function stubApi(page, kind) {
         role: 'member',
         status: 'active',
         permissions: [],
-        workspaces: [workspace],
+        accounts: [workspace],
       };
-    } else if (path === '/workspaces') {
+    } else if (path === '/accounts') {
       body = [workspace];
     } else if (path === `/agents/agent-${kind}`) {
       body = agentFixture(kind);
@@ -62,7 +62,7 @@ async function stubApi(page, kind) {
 
 async function openFixture(page, kind) {
   await stubApi(page, kind);
-  await page.goto(`/ws/${workspace.id}/agents/agent-${kind}`);
+  await page.goto(`/agents/agent-${kind}`);
   await expect(page.getByRole('region', { name: `${kind} content agent` })).toBeVisible();
 }
 

@@ -253,7 +253,7 @@ export interface RunRepoSpec {
  *     ticket 9fd27487은 대화형 세션이 원치 않는 clone을 강제로 겪지 않도록
  *     채팅방에는 의도적으로 repo_ref 노브를 주지 않았다.
  *   - `checkout_mode` drives reuse (fetch+ff-pull / clone) vs fresh (wipe + clone).
- *   - `run_id` / `workspace_id` let the manager finalize the run as `error` if
+ *   - `run_id` / `account_id` let the manager finalize the run as `error` if
  *     프로비저닝이 실패하는 경우다(the "dispatch 중단 + 코멘트" 경로).
  *     `kind:'chat'`에는 애초에 종료 처리할 run이 없다 — agent-manager는
  *     채팅용 RunProvision을 one-shot run으로 취급해서는 안 된다(event-dispatcher의
@@ -265,7 +265,7 @@ export interface RunRepoSpec {
 export interface RunProvision {
   kind: RunWorkspaceKind;
   run_id: string;
-  workspace_id: string;
+  account_id: string;
   workspace_folder: string;
   checkout_mode: CheckoutMode;
   repo: RunRepoSpec | null;

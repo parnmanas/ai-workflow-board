@@ -422,7 +422,7 @@ export interface ResolveCwdArgs {
     url: string;
     branch?: string;
     credential?: { username?: string; token: string } | null;
-    /** 서버가 Repo Resource ⊕ Workspace 기본값으로 해석해 agent_trigger 에 실어보낸
+    /** 서버가 Repo Resource ⊕ Account 기본값으로 해석해 agent_trigger 에 실어보낸
      *  clone 정책(ticket bddb63ee). 없으면 repo-credential 의 시스템 기본값
      *  (60분 wall-clock / idle 비활성 / 전체 clone)이 적용된다. */
     clonePolicy?: CloneWirePolicy | null;

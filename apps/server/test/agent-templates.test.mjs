@@ -26,7 +26,7 @@ test('Agent templates CRUD persists preferences and rejects Agent ownership/fold
     const input = { name: 'Code', host_id: host.id, cli: 'codex', model: 'test-model', effort: 'high', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
     const saved = await controller.create(input);
     assert.equal(saved.model, 'test-model'); assert.equal(saved.effort, 'high');
-    for (const field of ['working_dir', 'agent_id', 'workspace_id', 'role_prompt']) {
+    for (const field of ['working_dir', 'agent_id', 'account_id', 'role_prompt']) {
       await assert.rejects(controller.create({ ...input, [field]: '/tmp/repo' }), /Only name/);
       await assert.rejects(controller.update(saved.id, { [field]: '/tmp/repo' }), /Only name/);
     }
@@ -47,16 +47,16 @@ test('cleanup preserves host keys and inline execution specs, drops legacy owner
   const db = await database();
   try {
     const qr = db.createQueryRunner();
-    await qr.query('CREATE TABLE agents (id varchar PRIMARY KEY, name varchar, type varchar, workspace_id varchar, working_dir varchar)');
+    await qr.query('CREATE TABLE agents (id varchar PRIMARY KEY, name varchar, type varchar, account_id varchar, working_dir varchar)');
     await qr.query("INSERT INTO agents VALUES ('manager-old', 'Host', 'manager', NULL, '/obsolete')");
-    await qr.query('CREATE TABLE workspaces (id varchar PRIMARY KEY, assistant_agent_id varchar, name varchar)');
-    await qr.query("INSERT INTO workspaces VALUES ('ws', 'manager-old', 'preserved')");
+    await qr.query('CREATE TABLE accounts (id varchar PRIMARY KEY, assistant_agent_id varchar, name varchar)');
+    await qr.query("INSERT INTO accounts VALUES ('ws', 'manager-old', 'preserved')");
     await qr.addColumn('api_keys', new TableColumn({ name: 'agent_id', type: 'varchar', isNullable: true }));
     await qr.query("INSERT INTO api_keys (id, name, key, agent_id) VALUES ('key', 'pair', 'hashed-secret', 'manager-old')");
     await qr.query('CREATE TABLE chat_room_participants (id varchar PRIMARY KEY, runtime_spec text)');
     const spec = { manager_agent_id: 'manager-old', cli: 'codex', working_dir: '/execution', model: 'm' };
     await qr.query('INSERT INTO chat_room_participants VALUES (?, ?)', ['p', JSON.stringify(spec)]);
-    await qr.query('CREATE TABLE agent_skill_assignments (id varchar, workspace_id varchar, agent_id varchar, skill_id varchar, skill_version_id varchar, board_id varchar, role_slug varchar, assigned_by varchar, created_at datetime)');
+    await qr.query('CREATE TABLE agent_skill_assignments (id varchar, account_id varchar, agent_id varchar, skill_id varchar, skill_version_id varchar, board_id varchar, role_slug varchar, assigned_by varchar, created_at datetime)');
     await qr.query("INSERT INTO agent_skill_assignments VALUES ('keep', 'ws', 'rt-0123456789abcdef', 'skill', 'v', '', '', 'u', CURRENT_TIMESTAMP), ('drop', 'ws', 'old-agent', 'skill', 'v', '', '', 'u', CURRENT_TIMESTAMP)");
     await qr.query('CREATE TABLE outreach_channels (id varchar PRIMARY KEY, classifier_agent_id varchar)');
     const migration = new AgentTemplates1760000000090();
@@ -67,9 +67,9 @@ test('cleanup preserves host keys and inline execution specs, drops legacy owner
     assert.equal(await qr.hasColumn('outreach_channels', 'classifier_agent_id'), false);
     assert.equal(await qr.hasColumn('outreach_channels', 'classifier_runtime'), true);
     assert.equal(await qr.hasColumn('api_keys', 'agent_id'), false);
-    assert.equal(await qr.hasColumn('workspaces', 'assistant_agent_id'), false);
+    assert.equal(await qr.hasColumn('accounts', 'assistant_agent_id'), false);
     assert.equal((await qr.query('SELECT host_id FROM api_keys'))[0].host_id, 'manager-old');
-    assert.equal((await qr.query('SELECT name FROM workspaces'))[0].name, 'preserved');
+    assert.equal((await qr.query('SELECT name FROM accounts'))[0].name, 'preserved');
     assert.deepEqual(JSON.parse((await qr.query('SELECT runtime_spec FROM chat_room_participants'))[0].runtime_spec), spec);
     assert.equal(await qr.hasColumn('agent_templates', 'working_dir'), false);
   } finally { await db.destroy(); }
@@ -81,7 +81,7 @@ test('action target keys are derived from runtime specs and have no legacy DB co
   try {
     const spec = { manager_agent_id: 'h', cli: 'codex', working_dir: '/repo', folder_scope: 'shared', model: null, credential_id: null, cli_runtime_profile: null, label: '', role_prompt: '', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
     const actions = db.getRepository(Action);
-    const row = await actions.save(actions.create({ workspace_id: 'w', name: 'Run', target_runtimes: [spec], target_agent_id: 'obsolete-agent' }));
+    const row = await actions.save(actions.create({ account_id: 'w', name: 'Run', target_runtimes: [spec], target_agent_id: 'obsolete-agent' }));
     const loaded = await actions.findOneByOrFail({ id: row.id });
     assert.equal(loaded.target_agent_id, runtimeIdentityKey(spec));
     assert.deepEqual(JSON.parse(loaded.target_agent_ids), [runtimeIdentityKey(spec)]);
@@ -123,8 +123,8 @@ test('runtime identity resolves only from an active Host-bound execution credent
     const host = await db.getRepository(RuntimeHost).save({ name: 'machine' });
     const runtimeKey = 'rt-0123456789abcdef';
     const keys = db.getRepository(ApiKey);
-    const key = await keys.save({ name: `runtime:Coder:${runtimeKey}`, key: 'hash', host_id: host.id, workspace_id: 'workspace-a' });
-    assert.deepEqual(await resolveCallerIdentityRow(db, runtimeKey), { kind: 'runtime', id: runtimeKey, name: 'Coder', workspace_id: 'workspace-a' });
+    const key = await keys.save({ name: `runtime:Coder:${runtimeKey}`, key: 'hash', host_id: host.id, account_id: 'workspace-a' });
+    assert.deepEqual(await resolveCallerIdentityRow(db, runtimeKey), { kind: 'runtime', id: runtimeKey, name: 'Coder', account_id: 'workspace-a' });
     const caller = { agentId: runtimeKey, source: 'db', scope: 'full' };
     assert.equal(await callerCanAccessWorkspace(db, caller, 'workspace-a'), true);
     assert.equal(await callerCanAccessWorkspace(db, caller, 'workspace-b'), false);

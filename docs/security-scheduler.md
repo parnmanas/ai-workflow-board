@@ -129,18 +129,22 @@ tick 은 `SecurityRunReaperService`/`QaScheduleService` 패턴 그대로:
 
 ## REST / MCP
 
+사용자 Profile/Schedule 목록은 접근 가능한 Account를 합친다. 새 스케줄은
+`account_id`의 계정에 귀속되며 상세·수정·실행 권한과 credential·정책·예산은 실제
+소유 계정으로 검사한다. 구 `workspace_id`는 입력 호환 alias다.
+
 ```
 # 수동 전체 점검 (batch)
-POST   /api/security/batches                  { workspace_id, profile_ids?[], all?, stop_on_fail? }
-GET    /api/security/batches/:id?workspace_id=..
+POST   /api/security/batches                  { account_id, profile_ids?[], all?, stop_on_fail? }
+GET    /api/security/batches/:id?account_id=..
 
 # 스케줄
-GET    /api/security/schedules?workspace_id=..
-GET    /api/security/schedules/:id?workspace_id=..
-POST   /api/security/schedules                { workspace_id, name, kind?, scope, profile_ids?, cron|interval_ms, .. }
-PATCH  /api/security/schedules/:id            { workspace_id, ..부분 갱신(kind 포함).. }
-DELETE /api/security/schedules/:id?workspace_id=..
-POST   /api/security/schedules/:id/run-now    { workspace_id }   # enabled 무시, next_run_at 안 건드림
+GET    /api/security/schedules                 # 접근 가능한 계정 합산
+GET    /api/security/schedules/:id              # 실제 owner 권한
+POST   /api/security/schedules                { account_id, name, kind?, scope, profile_ids?, cron|interval_ms, .. }
+PATCH  /api/security/schedules/:id            { account_id, ..부분 갱신(kind 포함).. }
+DELETE /api/security/schedules/:id?account_id=..
+POST   /api/security/schedules/:id/run-now    { account_id }   # enabled 무시, next_run_at 안 건드림
                                               # 응답은 kind 로 분기: scan→{kind:'scan', batch, refreshes:null},
                                               #                      checklist_refresh→{kind:'checklist_refresh', batch:null, refreshes:[{profile_id,room_id}]}
 POST   /api/security/schedules/tick           # 운영 lever / 결정적 테스트 — sweep 1회 즉시

@@ -130,10 +130,10 @@ export default function TeamSlotRuntimeFields({
   credentials,
   backendProfiles,
   neighbours = [],
-  workspaceId,
+  accountId,
   disabled = false,
 }: {
-  workspaceId: string;
+  accountId: string;
   value: SlotDraft;
   onChange(next: SlotDraft): void;
   hosts: OrchestrationRuntimeHost[];
@@ -271,7 +271,7 @@ export default function TeamSlotRuntimeFields({
           THEIR machine instead of guessing the path. Host id + legacy alias are
           both matched, like `host` above. */}
       <ProjectFolderHelper
-        workspaceId={workspaceId}
+        accountId={accountId}
         hostIds={[value.manager_agent_id, host?.manager_agent_id, host?.legacy_agent_id]}
         currentDir={value.working_dir}
         disabled={disabled}

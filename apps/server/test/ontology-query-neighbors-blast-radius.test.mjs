@@ -42,7 +42,7 @@ let nodeRepo, edgeRepo;
 function node(id, overrides = {}) {
   return {
     id,
-    workspace_id: WORKSPACE_ID,
+    account_id: WORKSPACE_ID,
     graph_id: GRAPH_ID,
     symbol_id: `sym:${id}`,
     type: 'Callable',
@@ -57,7 +57,7 @@ function node(id, overrides = {}) {
 function edge(id, srcId, dstId, overrides = {}) {
   return {
     id,
-    workspace_id: WORKSPACE_ID,
+    account_id: WORKSPACE_ID,
     graph_id: GRAPH_ID,
     src_id: srcId,
     dst_id: dstId,

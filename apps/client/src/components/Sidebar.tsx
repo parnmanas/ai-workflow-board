@@ -142,7 +142,7 @@ export default function Sidebar({
     }
   };
 
-  const workspaceBase = wsId ? `/ws/${wsId}` : '';
+  const basePath = '';
   const canAdmin = hasPermission('admin.access');
   // Agent Session(CLI 직접 세션) — Chat 위에 오는 주 작업 표면. 행은 (Runtime Host × CLI)
   // 이고 세션 자체는 그 장비에 있다. 권한이 없는 사용자에겐 섹션을 그리지 않는다.
@@ -154,20 +154,18 @@ export default function Sidebar({
   const wake = useWakeState();
   const { hosts: sessionHosts, loading: sessionHostsLoading } = useAgentSessionsNav(canUseSessions && wsId ? wsId : null);
 
-  // 워크스페이스를 바꾸면 펼침 상태를 초기 5개로 되돌린다. 30초 폴링이나
-  // chat-rooms-changed 이벤트로 rooms 배열만 갱신될 때는 wsId 가 그대로이므로
-  // 이 로컬 state 가 리셋되지 않고 유지된다.
+  // 다른 사용자로 로그인할 때만 목록과 세션 캐시를 초기화한다.
   React.useEffect(() => {
     setVisibleRoomCount(SIDEBAR_ROOMS_BASE_COUNT);
     setVisibleGroupCounts({});
-    // 워크스페이스 전환 시 세션 캐시만 초기화 (폴드 상태는 localStorage 유지)
+    // 폴드 상태는 localStorage에 유지한다.
     loadAttemptedRef.current.clear();
     pendingHostReloadRef.current.clear();
     lastGoodByCliRef.current = {};
     for (const retry of Object.values(retryRef.current)) if (retry.timer !== null) window.clearTimeout(retry.timer);
     retryRef.current = {};
     setHostSessions({});
-  }, [wsId]);
+  }, [user?.id]);
 
   const isPathActive = (path: string): boolean =>
     location.pathname === path || location.pathname.startsWith(`${path}/`);
@@ -178,7 +176,7 @@ export default function Sidebar({
     if (overlay) onClose();
   };
 
-  const workspaceSections: Array<{ title: string; items: NavItem[] }> = [
+  const featureSections: Array<{ title: string; items: NavItem[] }> = [
     {
       // Tickets(워크스페이스 전체 티켓 풀)는 맨 위 평평한 행으로, Teams /
       // Orchestrations 는 목록을 서브메뉴로 펴는 계층형 그룹이라 평평한 items 가
@@ -192,7 +190,7 @@ export default function Sidebar({
         ...(canUseTerminals
           ? [{
             key: 'terminals',
-            path: `${workspaceBase}/terminals`,
+            path: `${basePath}/terminals`,
             label: 'Terminals',
             icon: 'T',
           }]
@@ -202,20 +200,20 @@ export default function Sidebar({
     {
       title: 'Automation',
       items: [
-        { key: 'functions', path: `${workspaceBase}/functions`, label: 'Functions', icon: 'F' },
-        { key: 'actions', path: `${workspaceBase}/actions`, label: 'Actions', icon: 'A' },
-        { key: 'schedules', path: `${workspaceBase}/schedules`, label: 'Schedules', icon: 'S' },
+        { key: 'functions', path: `${basePath}/functions`, label: 'Functions', icon: 'F' },
+        { key: 'actions', path: `${basePath}/actions`, label: 'Actions', icon: 'A' },
+        { key: 'schedules', path: `${basePath}/schedules`, label: 'Schedules', icon: 'S' },
       ],
     },
     {
       title: 'Knowledge',
       items: [
         // 저장소(repository) — 티켓/미션/QA 가 가리키는 프로젝트와 Host 별 메인 클론 폴더.
-        { key: 'projects', path: `${workspaceBase}/projects`, label: 'Projects', icon: 'P' },
-        { key: 'resources', path: `${workspaceBase}/resources`, label: 'Resources', icon: 'R' },
+        { key: 'projects', path: `${basePath}/projects`, label: 'Projects', icon: 'P' },
+        { key: 'resources', path: `${basePath}/resources`, label: 'Resources', icon: 'R' },
         {
           key: 'ontology-graph',
-          path: `${workspaceBase}/ontology-graph`,
+          path: `${basePath}/ontology-graph`,
           label: 'Ontology Graph',
           icon: 'G',
         },
@@ -224,8 +222,8 @@ export default function Sidebar({
     {
       title: 'Quality',
       items: [
-        { key: 'qa', path: `${workspaceBase}/qa`, label: 'QA', icon: 'Q' },
-        { key: 'security', path: `${workspaceBase}/security`, label: 'Security', icon: 'S' },
+        { key: 'qa', path: `${basePath}/qa`, label: 'QA', icon: 'Q' },
+        { key: 'security', path: `${basePath}/security`, label: 'Security', icon: 'S' },
       ],
     },
     {
@@ -233,21 +231,21 @@ export default function Sidebar({
       items: [
         {
           key: 'settings-overview',
-          path: `${workspaceBase}/settings`,
+          path: `${basePath}/settings`,
           label: 'Settings Overview',
           icon: 'S',
           exact: true,
         },
         ...(canAdmin
-          ? [{ key: 'workspace-settings', path: `${workspaceBase}/settings/workspace`, label: 'Workspace', icon: 'W' }]
+          ? [{ key: 'ownership-settings', path: `${basePath}/settings/ownership`, label: 'Ownership', icon: 'O' }]
           : []),
-        { key: 'members', path: `${workspaceBase}/settings/members`, label: 'Members', icon: 'M' },
-        { key: 'credentials', path: `${workspaceBase}/settings/credentials`, label: 'Credentials', icon: 'C' },
-        { key: 'channels', path: `${workspaceBase}/settings/channels`, label: 'Channels', icon: 'N' },
-        { key: 'api-keys', path: `${workspaceBase}/settings/api-keys`, label: 'API Keys', icon: 'K' },
+        { key: 'members', path: `${basePath}/settings/members`, label: 'Members', icon: 'M' },
+        { key: 'credentials', path: `${basePath}/settings/credentials`, label: 'Credentials', icon: 'C' },
+        { key: 'channels', path: `${basePath}/settings/channels`, label: 'Channels', icon: 'N' },
+        { key: 'api-keys', path: `${basePath}/settings/api-keys`, label: 'API Keys', icon: 'K' },
         {
           key: 'claude-profiles',
-          path: `${workspaceBase}/settings/claude-profiles`,
+          path: `${basePath}/settings/claude-profiles`,
           label: 'Claude Profiles',
           icon: 'C',
         },
@@ -571,12 +569,12 @@ export default function Sidebar({
   // WORK — 맨 위 Tickets 한 줄(워크스페이스 전체 미읽음 배지), 그다음 Teams /
   // Orchestrations 를 그 순서대로 각자의 목록을 서브메뉴로 펴서 보여준다(티켓 03ca8b5b).
   const ticketsNav = buildTicketsNavItem({
-    workspaceBase,
+    basePath,
     pathname: location.pathname,
     ticketUnreadTotal: counts.tickets.total,
   });
   const workGroups = buildWorkNavGroups({
-    workspaceBase,
+    basePath,
     pathname: location.pathname,
     selectedTeamId: searchParams.get('team'),
     teams,
@@ -727,7 +725,7 @@ export default function Sidebar({
   // 왼쪽 프레임의 채팅 행이 "지금 이 방에서 에이전트가 일하고 있다"를 말한다.
   const roomActivity = useRoomActivity();
 
-  const activeRoomId = rooms.find((room) => location.pathname === `${workspaceBase}/chat/${room.id}`)?.id ?? null;
+  const activeRoomId = rooms.find((room) => location.pathname === `${basePath}/chat/${room.id}`)?.id ?? null;
   const { displayRooms, hiddenRooms } = paginateSidebarRooms(rooms, visibleRoomCount, activeRoomId);
   // One source of truth once the counts have loaded. Taking the max of the
   // two sources meant a room read on another tab (which clears perRoom via
@@ -779,7 +777,7 @@ export default function Sidebar({
       >
         <button
           type="button"
-          onClick={() => handleNavClick(workspaceBase ? `${workspaceBase}/assistant` : '')}
+          onClick={() => handleNavClick('/sessions')}
           aria-label="AWB home"
           style={{
             width: 34,
@@ -799,7 +797,7 @@ export default function Sidebar({
           <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
           <div style={{ marginTop: 1, fontSize: 10, color: tokens.colors.textMuted }}>AI Workflow Board</div>
         </div>
-        <MentionInboxBadge workspaceId={wsId} />
+        <MentionInboxBadge accountId={wsId} />
         <NotificationSettingsPanel />
       </div>
 
@@ -852,7 +850,7 @@ export default function Sidebar({
                     const awake = awakeOperator?.id === op.id;
                     return renderNavItem({
                       key: `operator-${op.id}`,
-                      path: sessionPath(`/ws/${wsId}`, op.manager_id, op.cli, op.session_id),
+                      path: sessionPath(``, op.manager_id, op.cli, op.session_id),
                       label: op.name,
                       icon: (op.name.trim()[0] || 'O').toUpperCase(),
                       title: `${op.name} — ${op.title || runtimeLabel(op.cli)}${awake ? ' (깨어 있음)' : ''}`,
@@ -866,7 +864,7 @@ export default function Sidebar({
         })()}
         {canAdmin && renderNavItem({
           key: 'hosts',
-          path: `${workspaceBase}/hosts`,
+          path: `${basePath}/hosts`,
           label: 'HOSTS',
           icon: 'H',
         })}
@@ -889,7 +887,7 @@ export default function Sidebar({
                 type="button"
                 aria-label="New session"
                 title="New session"
-                onClick={() => handleNavClick(`${workspaceBase}/sessions?new=1`)}
+                onClick={() => handleNavClick(`${basePath}/sessions?new=1`)}
                 style={{ width: 24, height: 24, border: 'none', borderRadius: 6, background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 17, lineHeight: 1 }}
               >
                 +
@@ -907,7 +905,7 @@ export default function Sidebar({
                   sessionHosts.map((host) => {
                     const hostExpanded = !collapsedHosts.has(host.manager_id);
                     const hostData = hostSessions[host.manager_id];
-                    const hostBasePath = `${workspaceBase}/sessions/${host.manager_id}`;
+                    const hostBasePath = `${basePath}/sessions/${host.manager_id}`;
                     const hostActive = isPathActive(hostBasePath);
                     return (
                       <React.Fragment key={host.manager_id}>
@@ -958,7 +956,7 @@ export default function Sidebar({
                                 const cwdKey = `${host.manager_id}:${group.cwd}`;
                                 const cwdExpanded = !collapsedHostCwds.has(cwdKey);
                                 const hasActive = group.sessions.some(
-                                  (s) => location.pathname === sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id),
+                                  (s) => location.pathname === sessionPath(``, host.manager_id, s.cli, s.session_id),
                                 );
                                 return (
                                   <React.Fragment key={cwdKey}>
@@ -991,7 +989,7 @@ export default function Sidebar({
                                       return (
                                         <>
                                           {displayed.map((s) => {
-                                            const sPath = sessionPath(`/ws/${wsId ?? ''}`, host.manager_id, s.cli, s.session_id);
+                                            const sPath = sessionPath(``, host.manager_id, s.cli, s.session_id);
                                             const sActive = location.pathname === sPath;
                                             // 세션 목록·세션 헤더와 **같은** 어휘. 예전엔 여기에만
                                             // 따로 색 표가 있어 같은 'busy' 세션이 사이드바에선
@@ -1104,7 +1102,7 @@ export default function Sidebar({
               type="button"
               aria-label="New chat"
               title="New chat"
-              onClick={() => handleNavClick(`${workspaceBase}/chat?new=1`)}
+              onClick={() => handleNavClick(`${basePath}/chat?new=1`)}
               style={{
                 width: 24,
                 height: 24,
@@ -1123,7 +1121,7 @@ export default function Sidebar({
 
           {!chatsCollapsed && renderNavItem({
             key: 'all-chats',
-            path: `${workspaceBase}/chat`,
+            path: `${basePath}/chat`,
             label: 'All chats',
             icon: 'C',
             badge: counts.chat.total,
@@ -1148,7 +1146,7 @@ export default function Sidebar({
               </div>
             ) : (
               displayRooms.map((room) => {
-                const roomPath = `${workspaceBase}/chat/${room.id}`;
+                const roomPath = `${basePath}/chat/${room.id}`;
                 const active = location.pathname === roomPath;
                 const unread = unreadFor(room);
                 return (
@@ -1233,7 +1231,7 @@ export default function Sidebar({
         <div style={{ height: 1, margin: '6px 12px 0', background: tokens.colors.border }} />
 
         <div style={{ paddingBottom: 8 }}>
-          {workspaceSections.map((section) => {
+          {featureSections.map((section) => {
             const sKey = section.title.toLowerCase();
             const isCollapsed = sectionCollapsed[sKey] ?? false;
             return (
@@ -1257,7 +1255,7 @@ export default function Sidebar({
                           type="button"
                           onClick={handleMarkAllTicketsRead}
                           disabled={markingAllTicketsRead}
-                          title={`워크스페이스 전체 읽지 않은 티켓 코멘트 ${counts.tickets.total}건을 모두 읽음으로 표시`}
+                          title={`읽지 않은 티켓 코멘트 ${counts.tickets.total}건을 모두 읽음으로 표시`}
                           style={{
                             border: 'none', background: 'transparent', color: tokens.colors.accent,
                             fontSize: 10, fontWeight: 700, textTransform: 'none', letterSpacing: 'normal',
@@ -1272,7 +1270,7 @@ export default function Sidebar({
                   )}
                 </div>
 
-                {!isCollapsed && section.title === 'Work' && workspaceBase && renderNavItem(ticketsNav)}
+                {!isCollapsed && section.title === 'Work' && renderNavItem(ticketsNav)}
                 {!isCollapsed && section.title === 'Work' && workGroups.map(renderWorkGroup)}
                 {!isCollapsed && section.items.map((item) => renderNavItem(item))}
               </section>

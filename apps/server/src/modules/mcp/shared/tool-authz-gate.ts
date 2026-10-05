@@ -79,8 +79,8 @@
  *                is never consulted. See the branch discussion above.
  *
  * Deliberately NOT tiered here (left to their existing per-file logic):
- * update_workspace (a workspace-bound non-full-scope caller is intentionally
- * allowed — see workspace-tools.ts's callerCanAccessWorkspace usage).
+ * update_account (a workspace-bound non-full-scope caller is intentionally
+ * allowed — see account-tools.ts's callerCanAccessWorkspace usage).
  * (P4c-3b: move_agent_to_workspace no longer exists, so its carve-out is gone.)
  */
 
@@ -106,7 +106,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // behavior.
   delete_user: 'full',
   // P4c-3b: create_agent / update_agent / delete_agent no longer exist.
-  delete_workspace: 'full',
+  delete_account: 'full',
 
   // Same file family, but their own logic deliberately allows a
   // non-full-scope caller through (e.g. a 'write'-scoped key minting a
@@ -199,7 +199,7 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // KNOWN_EXISTING_TOOLS. 'caller' mirrors what every handler already
   // enforces on its own — resolveGraph()/resolveOrProvision() in
   // ontology-tools.ts / ontology-lifecycle.service.ts scope every graph to
-  // its (workspace_id, resource_id, folder_path) or a graph_id already
+  // its (account_id, resource_id, folder_path) or a graph_id already
   // bound to that workspace; a graph_id from another workspace resolves to
   // `not_found` rather than leaking existence. All six are read-only
   // (graph_status's only mutation is auto-provisioning/kicking off its own
@@ -274,28 +274,28 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'complete_action_run', 'complete_qa_run', 'complete_security_run',
   'correct_confirmed_ticket_duplicate', 'create_api_key', 'create_channel', 'create_chat_room',
   'create_child_ticket', 'create_qa_scenario', 'create_qa_schedule', 'create_security_profile',
-  'create_security_schedule', 'create_ticket', 'create_user', 'create_workspace',
-  'create_workspace_schedule', 'decide_ticket_duplicate', 'delete_action', 'delete_api_key',
+  'create_security_schedule', 'create_ticket', 'create_user', 'create_account',
+  'create_automation_schedule', 'decide_ticket_duplicate', 'delete_action', 'delete_api_key',
   'delete_channel', 'delete_chat_message_attachment', 'delete_child_ticket', 'delete_function',
   'delete_qa_scenario', 'delete_qa_schedule', 'delete_resource', 'delete_security_profile',
   'delete_security_schedule', 'delete_ticket', 'delete_ticket_attachment', 'delete_user',
-  'delete_workspace', 'delete_workspace_schedule', 'embed_resources', 'execute_function',
+  'delete_account', 'delete_automation_schedule', 'embed_resources', 'execute_function',
   'fetch_github_info', 'get_action', 'get_api_key', 'get_chat_room_messages', 'get_function',
   'get_latest_artifact', 'get_my_tickets', 'get_qa_batch', 'get_qa_run', 'get_qa_scenario',
   'get_qa_schedule', 'get_recent_activity', 'get_resource', 'get_security_batch',
   'get_security_profile', 'get_security_run', 'get_security_schedule', 'get_ticket',
-  'get_ticket_activity', 'get_ticket_attachment', 'get_user', 'get_workspace',
-  'get_workspace_schedule', 'list_action_runs', 'list_actions', 'list_api_keys',
+  'get_ticket_activity', 'get_ticket_attachment', 'get_user', 'get_account',
+  'get_automation_schedule', 'list_action_runs', 'list_actions', 'list_api_keys',
   'list_archived_tickets', 'list_channels', 'list_chat_rooms', 'list_claude_backend_profiles',
   'list_function_runs', 'list_functions', 'list_qa_runs', 'list_qa_scenarios', 'list_qa_schedules',
   'list_repo_branches', 'list_resources', 'list_security_profiles', 'list_security_runs',
   'list_security_schedules', 'list_ticket_attachments', 'list_ticket_prerequisites', 'list_users',
-  'list_workspaces', 'list_workspace_schedules', 'move_ticket', 'pend_ticket',
+  'list_accounts', 'list_automation_schedules', 'move_ticket', 'pend_ticket',
   'propose_skill_change', 'qa_run_heartbeat', 'record_decision', 'record_outreach_classification',
   'record_qa_step', 'record_security_finding', 'refresh_security_checklist',
   'register_build_artifact', 'release_ticket', 'remove_ticket_prerequisite',
   'report_build_failure', 'report_deployment', 'request_ticket_unpend_approval', 'revoke_api_key',
-  'run_action', 'run_qa_schedule_now', 'run_security_schedule_now', 'run_workspace_schedule_now',
+  'run_action', 'run_qa_schedule_now', 'run_security_schedule_now', 'run_automation_schedule_now',
   'save_action', 'save_function', 'save_resource', 'search_actions', 'search_chat_messages',
   'search_github', 'search_resources', 'send_chat_room_message', 'set_chat_room_name',
   'set_current_task', 'set_qa_phase', 'set_typing', 'start_qa_batch', 'start_qa_run',
@@ -303,7 +303,7 @@ export const KNOWN_EXISTING_TOOLS: ReadonlySet<string> = new Set([
   'unarchive_ticket', 'unpend_ticket', 'update_api_key', 'update_channel', 'update_child_ticket',
   'update_claude_backend_profile', 'update_qa_scenario', 'update_qa_schedule',
   'update_security_profile', 'update_security_schedule', 'update_ticket', 'update_user',
-  'update_workspace', 'update_workspace_schedule', 'upsert_claude_backend_profile', 'whoami',
+  'update_account', 'update_automation_schedule', 'upsert_claude_backend_profile', 'whoami',
   // Orchestration mode (팀 기반 자율 업무 오케스트레이션). These are listed here
   // rather than in TOOL_AUTHZ_TABLE because none of them is gated on API-key
   // scope: every mutating one checks the CALLING AGENT against the mission's

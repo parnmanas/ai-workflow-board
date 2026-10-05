@@ -25,14 +25,14 @@ export class ResourcesController {
 
   private async assertCredentialScope(
     credentialId: string | null | undefined,
-    workspaceId: string | null,
+    accountId: string | null,
   ): Promise<void> {
     if (!credentialId) return;
     const credential = await this.credentialRepo.findOne({ where: { id: credentialId } });
     if (!credential) throw Object.assign(new Error('credential not found'), { status: 400 });
     const available =
-      credential.workspace_id === null
-      || (workspaceId !== null && credential.workspace_id === workspaceId);
+      credential.account_id === null
+      || (accountId !== null && credential.account_id === accountId);
     if (!available) {
       throw Object.assign(new Error('credential is not available in the Resource scope'), { status: 400 });
     }
@@ -51,18 +51,18 @@ export class ResourcesController {
 
   @Get()
   async list(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('type') type: string | undefined,
     @Query('sort_by') sortBy: string | undefined,
     @Query('sort_order') sortOrder: string | undefined,
     @Query('include_all_scopes') includeAllScopes: string | undefined,
     @Res() res: Response,
   ) {
-    if (!workspaceId) {
-      return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!accountId) {
+      return res.status(400).json({ error: 'account_id query parameter is required' });
     }
     const qb = this.resourceRepo.createQueryBuilder('r')
-      .where('(r.workspace_id IS NULL OR r.workspace_id = :ws)', { ws: workspaceId });
+      .where('(r.account_id IS NULL OR r.account_id = :ws)', { ws: accountId });
     if (type) {
       qb.andWhere('r.type = :t', { t: type });
     }
@@ -100,12 +100,12 @@ export class ResourcesController {
   @Get(':id')
   async get(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
     const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
-    if (!canUseCatalogItem(resource, workspaceId)) {
+    if (!canUseCatalogItem(resource, accountId)) {
       return res.status(404).json({ error: 'Resource not found in scope' });
     }
     const parsed = {
@@ -119,23 +119,23 @@ export class ResourcesController {
   @Post()
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     const {
-      workspace_id, credential_id = null, name, description = '', type = 'link',
+      account_id, credential_id = null, name, description = '', type = 'link',
       url = '', content = '', file_data = '', file_name = '', file_mimetype = '',
       tags = [],
     } = body;
     if (type === 'repository') return res.status(400).json({ error: REPOSITORY_RESOURCE_REJECTION });
     let catalogScope;
     try {
-      catalogScope = normalizeCatalogScope({ scope: body.scope, workspace_id });
+      catalogScope = normalizeCatalogScope({ scope: body.scope, account_id });
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid scope' });
     }
-    if (catalogScope.workspace_id === null && (req as any).currentUser?.role !== 'admin') {
+    if (catalogScope.account_id === null && (req as any).currentUser?.role !== 'admin') {
       return res.status(403).json({ error: 'Only admins can create Global Resources' });
     }
     if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
     try {
-      await this.assertCredentialScope(credential_id, catalogScope.workspace_id);
+      await this.assertCredentialScope(credential_id, catalogScope.account_id);
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
     }
@@ -168,14 +168,14 @@ export class ResourcesController {
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
-    if (resource.workspace_id === null && (req as any).currentUser?.role !== 'admin') {
+    if (resource.account_id === null && (req as any).currentUser?.role !== 'admin') {
       return res.status(403).json({ error: 'Only admins can update Global Resources' });
     }
-    if (resource.workspace_id !== null && body.workspace_id !== resource.workspace_id) {
+    if (resource.account_id !== null && body.account_id !== resource.account_id) {
       return res.status(404).json({ error: 'Resource not found in workspace' });
     }
     if (
-      (body.workspace_id !== undefined && (body.workspace_id || null) !== resource.workspace_id)
+      (body.account_id !== undefined && (body.account_id || null) !== resource.account_id)
       || (body.scope !== undefined && body.scope !== catalogScopeOf(resource))
     ) {
       return res.status(400).json({ error: 'Resource scope cannot be changed; create a new scoped Resource instead' });
@@ -198,7 +198,7 @@ export class ResourcesController {
     }
     if (body.credential_id !== undefined) resource.credential_id = body.credential_id || null;
     try {
-      await this.assertCredentialScope(resource.credential_id, resource.workspace_id);
+      await this.assertCredentialScope(resource.credential_id, resource.account_id);
     } catch (error: any) {
       return res.status(error?.status || 400).json({ error: error?.message || 'Invalid credential scope' });
     }
@@ -215,16 +215,16 @@ export class ResourcesController {
   @Delete(':id')
   async remove(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     const resource = await findOrFail(this.resourceRepo, { where: { id } }, 'Resource not found');
-    if (resource.workspace_id === null) {
+    if (resource.account_id === null) {
       if ((req as any).currentUser?.role !== 'admin') {
         return res.status(403).json({ error: 'Only admins can delete Global Resources' });
       }
-    } else if (!workspaceId || resource.workspace_id !== workspaceId) {
+    } else if (!accountId || resource.account_id !== accountId) {
       return res.status(404).json({ error: 'Resource not found in workspace' });
     }
     await this.resourceRepo.delete({ id });

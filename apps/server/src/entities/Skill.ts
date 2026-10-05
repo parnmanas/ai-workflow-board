@@ -5,15 +5,15 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  *
  * Scope follows the catalog model documented in `docs/catalog-scopes.md`:
  *
- *   | Scope     | workspace_id | Resolution priority |
+ *   | Scope     | account_id | Resolution priority |
  *   | Global    | NULL         | 1 (fallback)        |
- *   | Workspace | workspace id | 2 (shadows global)  |
+ *   | Account | workspace id | 2 (shadows global)  |
  *
- * A Workspace skill SHADOWS a Global skill carrying the same `slug`, exactly
+ * A Account skill SHADOWS a Global skill carrying the same `slug`, exactly
  * like WorkflowFunction resolves by key. That is what lets a workspace fork a
  * built-in skill without the operator having to delete the global one.
  *
- * NOTE on uniqueness: a plain `(workspace_id, slug)` unique index does NOT
+ * NOTE on uniqueness: a plain `(account_id, slug)` unique index does NOT
  * constrain global rows — two NULLs are never equal (Postgres and SQLite alike),
  * so it would accept ten global skills with the same slug. Uniqueness is the
  * two PARTIAL indexes below, the same split workflow_functions uses. They live
@@ -26,13 +26,13 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  * literal `board_id: null` (see skill-scope.ts).
  */
 @Entity('skills')
-@Index('uq_skills_global_slug', ['slug'], { unique: true, where: 'workspace_id IS NULL' })
-@Index('uq_skills_workspace_slug', ['workspace_id', 'slug'], { unique: true, where: 'workspace_id IS NOT NULL' })
+@Index('uq_skills_global_slug', ['slug'], { unique: true, where: 'account_id IS NULL' })
+@Index('uq_skills_workspace_slug', ['account_id', 'slug'], { unique: true, where: 'account_id IS NOT NULL' })
 export class Skill {
   @PrimaryGeneratedColumn('uuid') id: string;
 
   /** NULL = global (available to every workspace). */
-  @Column({ type: 'varchar', nullable: true, default: null }) workspace_id: string | null;
+  @Column({ type: 'varchar', nullable: true, default: null }) account_id: string | null;
 
   @Column({ type: 'varchar' }) slug: string;
   @Column({ type: 'varchar' }) name: string;

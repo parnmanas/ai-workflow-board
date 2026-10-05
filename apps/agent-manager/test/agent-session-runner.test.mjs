@@ -427,7 +427,7 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
 
 test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKEN, operator key stripped, projects linked back', async (t) => {
   const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
-  await h.runner.handle({ ...request('open', { request_id: 'rpc-cred', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1' }) });
+  await h.runner.handle({ ...request('open', { request_id: 'rpc-cred', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-1' }) });
   const opened = h.server.rpc('rpc-cred');
   assert.equal(opened.ok, true, JSON.stringify(opened));
   assert.deepEqual(h.fetches, [{ id: 'cred-1', ws: 'ws-1' }]);
@@ -449,7 +449,7 @@ test('credential (claude_oauth_token): session cli-home + CLAUDE_CODE_OAUTH_TOKE
 
 test('credential (claude_subscription): .credentials.json lands in the session home only; operator home untouched', async (t) => {
   const h = await credentialHarness(t, 'claude_subscription', { credentials_json: '{"claudeAiOauth":{"accessToken":"x"}}' });
-  await h.runner.handle(request('open', { request_id: 'rpc-sub', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-2' }));
+  await h.runner.handle(request('open', { request_id: 'rpc-sub', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-2' }));
   assert.equal(h.server.rpc('rpc-sub').ok, true, JSON.stringify(h.server.rpc('rpc-sub')));
   const home = join(h.sessionHomesDir, 'claude', 'cred-2');
   assert.equal(await readFile(join(home, '.credentials.json'), 'utf8'), '{"claudeAiOauth":{"accessToken":"x"}}');
@@ -461,7 +461,7 @@ test('credential (claude_subscription): .credentials.json lands in the session h
 
 test('credential (codex_subscription): auth.json in the session home with sessions linked back', async (t) => {
   const h = await credentialHarness(t, 'codex_subscription', { auth_json: '{"tokens":{"access_token":"a"}}', config_toml: '' }, 'codex');
-  await h.runner.handle({ ...request('open', { request_id: 'rpc-codex', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-3' }), cli: 'codex' });
+  await h.runner.handle({ ...request('open', { request_id: 'rpc-codex', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-3' }), cli: 'codex' });
   const opened = h.server.rpc('rpc-codex');
   assert.equal(opened.ok, true, JSON.stringify(opened));
   const home = join(h.sessionHomesDir, 'codex', 'cred-3');
@@ -474,23 +474,23 @@ test('credential (codex_subscription): auth.json in the session home with sessio
 
 test('credential errors: provider mismatch, unsupported cli, and missing material fail the open RPC without spawning', async (t) => {
   const mismatch = await credentialHarness(t, 'codex_api_key', { api_key: 'k' });
-  await mismatch.runner.handle(request('open', { request_id: 'rpc-mismatch', session_id: null, cwd: mismatch.cwd, workspace_id: 'ws-1', credential_id: 'cred-x' }));
+  await mismatch.runner.handle(request('open', { request_id: 'rpc-mismatch', session_id: null, cwd: mismatch.cwd, account_id: 'ws-1', credential_id: 'cred-x' }));
   assert.equal(mismatch.server.rpc('rpc-mismatch').ok, false);
   assert.equal(mismatch.server.rpc('rpc-mismatch').code, 'credential_provider_mismatch');
   assert.equal(mismatch.runner._snapshot().length, 0);
 
   const hermes = await credentialHarness(t, 'claude_api_key', { api_key: 'k' });
-  await hermes.runner.handle({ ...request('open', { request_id: 'rpc-hermes', session_id: null, cwd: hermes.cwd, workspace_id: 'ws-1', credential_id: 'cred-h' }), cli: 'hermes' });
+  await hermes.runner.handle({ ...request('open', { request_id: 'rpc-hermes', session_id: null, cwd: hermes.cwd, account_id: 'ws-1', credential_id: 'cred-h' }), cli: 'hermes' });
   assert.equal(hermes.server.rpc('rpc-hermes').code, 'credential_unsupported');
 
   const missing = await credentialHarness(t, null, {});
-  await missing.runner.handle(request('open', { request_id: 'rpc-missing-cred', session_id: null, cwd: missing.cwd, workspace_id: 'ws-1', credential_id: 'cred-gone' }));
+  await missing.runner.handle(request('open', { request_id: 'rpc-missing-cred', session_id: null, cwd: missing.cwd, account_id: 'ws-1', credential_id: 'cred-gone' }));
   assert.equal(missing.server.rpc('rpc-missing-cred').code, 'credential_unavailable');
 });
 
 test('no credential bound → operator login: env untouched, no session home created', async (t) => {
   const h = await credentialHarness(t, 'claude_api_key', { api_key: 'unused' });
-  await h.runner.handle(request('open', { request_id: 'rpc-plain', session_id: null, cwd: h.cwd, workspace_id: 'ws-1' }));
+  await h.runner.handle(request('open', { request_id: 'rpc-plain', session_id: null, cwd: h.cwd, account_id: 'ws-1' }));
   assert.equal(h.server.rpc('rpc-plain').ok, true);
   assert.deepEqual(h.fetches, [], 'credential is never fetched without a binding');
   const cap = await h.capture();
@@ -501,7 +501,7 @@ test('no credential bound → operator login: env untouched, no session home cre
 
 test('binding a credential after the session is live reopens the process with the credential on the next prompt', async (t) => {
   const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-late' });
-  await h.runner.handle(request('open', { request_id: 'rpc-first', session_id: null, cwd: h.cwd, workspace_id: 'ws-1' }));
+  await h.runner.handle(request('open', { request_id: 'rpc-first', session_id: null, cwd: h.cwd, account_id: 'ws-1' }));
   const first = h.server.rpc('rpc-first');
   assert.equal(first.ok, true);
   const sid = first.result.session_id;
@@ -509,7 +509,7 @@ test('binding a credential after the session is live reopens the process with th
   const pidBefore = h.runner._snapshot()[0]?.pid;
 
   // the operator binds a credential in CLI settings, then prompts again
-  const turn = h.runner.handle(request('prompt', { session_id: sid, turn_id: 't-late', text: 'hi', workspace_id: 'ws-1', credential_id: 'cred-late' }));
+  const turn = h.runner.handle(request('prompt', { session_id: sid, turn_id: 't-late', text: 'hi', account_id: 'ws-1', credential_id: 'cred-late' }));
   await waitFor(() => h.server.events(sid).some((e) => e.type === 'permission_request'), 'permission after reopen');
   const permission = h.server.events(sid).find((e) => e.type === 'permission_request');
   await h.runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
@@ -522,12 +522,12 @@ test('binding a credential after the session is live reopens the process with th
 
 test('credential whitespace is repaired before use (a token pasted with a line wrap still works) and incomplete credentials are refused', async (t) => {
   const wrapped = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-first-half\n second-half' });
-  await wrapped.runner.handle(request('open', { request_id: 'rpc-wrap', session_id: null, cwd: wrapped.cwd, workspace_id: 'ws-1', credential_id: 'cred-wrap' }));
+  await wrapped.runner.handle(request('open', { request_id: 'rpc-wrap', session_id: null, cwd: wrapped.cwd, account_id: 'ws-1', credential_id: 'cred-wrap' }));
   assert.equal(wrapped.server.rpc('rpc-wrap').ok, true, JSON.stringify(wrapped.server.rpc('rpc-wrap')));
   assert.equal((await wrapped.capture()).CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-first-halfsecond-half', 'interior whitespace stripped');
 
   const empty = await credentialHarness(t, 'claude_oauth_token', { oauth_token: '   ' });
-  await empty.runner.handle(request('open', { request_id: 'rpc-empty', session_id: null, cwd: empty.cwd, workspace_id: 'ws-1', credential_id: 'cred-empty' }));
+  await empty.runner.handle(request('open', { request_id: 'rpc-empty', session_id: null, cwd: empty.cwd, account_id: 'ws-1', credential_id: 'cred-empty' }));
   assert.equal(empty.server.rpc('rpc-empty').ok, false);
   assert.equal(empty.server.rpc('rpc-empty').code, 'credential_incomplete');
   assert.equal(empty.runner._snapshot().length, 0);
@@ -878,7 +878,7 @@ test('a session opened with a workspace credential reports source=credential', a
   const { cwd, server, runner } = await harness(t, {
     credentialFetcher: async () => ({ credential_id: 'cred-auth', provider: 'claude_oauth_token', fields: { oauth_token: 'sk-ant-oat-xxxxxxxxxxxx' } }),
   });
-  await runner.handle(request('open', { request_id: 'rpc-open-cred-auth', session_id: null, cwd, credential_id: 'cred-auth', workspace_id: 'ws-1' }));
+  await runner.handle(request('open', { request_id: 'rpc-open-cred-auth', session_id: null, cwd, credential_id: 'cred-auth', account_id: 'ws-1' }));
   const sid = server.rpc('rpc-open-cred-auth').result.session_id;
   await waitFor(() => server.states(sid).some((s) => s.auth), 'auth patch');
   assert.equal(server.states(sid).filter((s) => s.auth).at(-1).auth.source, 'credential');
@@ -895,7 +895,7 @@ test('a broken session-store link is detected and rebuilt, and a real directory 
   // credentialHarness 는 세션 전용 cli-home 을 tmp 로 격리해 준다(기존 credential 테스트와 같은 배선).
   const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
   const { cwd, server, runner, root } = h;
-  const open = (requestId) => runner.handle(request('open', { request_id: requestId, session_id: null, cwd, credential_id: 'cred-1', workspace_id: 'ws-1' }));
+  const open = (requestId) => runner.handle(request('open', { request_id: requestId, session_id: null, cwd, credential_id: 'cred-1', account_id: 'ws-1' }));
   const linkPath = join(h.sessionHomesDir, 'claude', 'cred-1', 'projects');
   const operatorStore = join(root, 'claude', 'projects');
 
@@ -945,7 +945,7 @@ test('a Claude backend profile points the session at its endpoint and model', as
     context_window: 200000,
   };
   await h.runner.handle(request('open', {
-    request_id: 'rpc-backend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1',
+    request_id: 'rpc-backend', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-1',
     runtime_profile: profile,
   }));
   const opened = h.server.rpc('rpc-backend');
@@ -960,14 +960,14 @@ test('a Claude backend profile points the session at its endpoint and model', as
 
 test('no backend profile leaves the endpoint alone, and a broken one fails the open with a named reason', async (t) => {
   const h = await credentialHarness(t, 'claude_oauth_token', { oauth_token: 'sk-ant-oat-test' });
-  await h.runner.handle(request('open', { request_id: 'rpc-nobackend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1' }));
+  await h.runner.handle(request('open', { request_id: 'rpc-nobackend', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-1' }));
   assert.equal(h.server.rpc('rpc-nobackend').ok, true);
   const cap = await h.capture();
   assert.equal(cap.ANTHROPIC_BASE_URL, null, 'without a profile the CLI keeps its default endpoint');
   await h.runner.handle(request('close', { session_id: h.server.rpc('rpc-nobackend').result.session_id }));
 
   await h.runner.handle(request('open', {
-    request_id: 'rpc-badbackend', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-1',
+    request_id: 'rpc-badbackend', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-1',
     runtime_profile: { id: 'broken', kind: 'claude-backend', protocol: 'anthropic-compatible', base_url: '', model: '' },
   }));
   const bad = h.server.rpc('rpc-badbackend');
@@ -1002,7 +1002,7 @@ test('credential (opencode_api_key): the nested session-store link is created wi
   h.holdsRoot(runner);
   t.after(() => rm(captureFile, { force: true }));
 
-  await runner.handle(request('open', { request_id: 'rpc-oc-cred', session_id: null, cwd: h.cwd, workspace_id: 'ws-1', credential_id: 'cred-oc', cli: 'opencode' }));
+  await runner.handle(request('open', { request_id: 'rpc-oc-cred', session_id: null, cwd: h.cwd, account_id: 'ws-1', credential_id: 'cred-oc', cli: 'opencode' }));
   const opened = h.server.rpc('rpc-oc-cred');
   assert.equal(opened.ok, true, JSON.stringify(opened));
 

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
-import { createAgent, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.AGENT_SESSION_OPEN_FAILURE_PORT || '0';
@@ -46,10 +46,10 @@ test('open 이 실패하면 그 사유가 세션 상태에 남고 driver 에게 
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'open-failure');
+  const ws = await createAccount(app, getDataSourceToken, 'open-failure');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
   const token = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'codex' });
   const managerId = agent.manager_agent_id;
@@ -131,10 +131,10 @@ test('세션 id 없이 새로 여는 경우는 붙일 곳이 없으므로 상태
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'open-failure-new');
+  const ws = await createAccount(app, getDataSourceToken, 'open-failure-new');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner2', role: 'admin' });
   const token = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder2', type: 'codex' });
   const managerId = agent.manager_agent_id;
@@ -188,10 +188,10 @@ test('force 는 요청한 때만 매니저에게 실린다 — 자동 연결이 
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'open-force');
+  const ws = await createAccount(app, getDataSourceToken, 'open-force');
   const owner = await createUser(app, getDataSourceToken, { name: 'owner3', role: 'admin' });
   const token = app.get(AuthService).createSession(owner.id);
-  const headers = { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id, 'Content-Type': 'application/json' };
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
 
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder3', type: 'codex' });
   const managerId = agent.manager_agent_id;

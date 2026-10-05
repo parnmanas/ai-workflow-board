@@ -87,7 +87,7 @@ test('CiHealthMonitorService source defines the sweep loop, env config, and thre
   // ticket 3886473a — incident 키는 workspace 스코프여야 한다. project id 가 들어가면
   // 같은 저장소를 감시하는 프로젝트 수만큼 실행 티켓이 열리고 같은 수정이 여러 번 dispatch 된다.
   assert.match(code, /export\s+function\s+ciIncidentDedupeKey\s*\(/, 'incident 키를 만드는 단일 원천 함수가 있어야 한다');
-  assert.match(code, /ciIncidentDedupeKey\(\s*project\.workspace_id/, '티켓 키는 project id 가 아니라 workspace id 로 만들어야 한다');
+  assert.match(code, /ciIncidentDedupeKey\(\s*project\.account_id/, '티켓 키는 project id 가 아니라 workspace id 로 만들어야 한다');
   assert.doesNotMatch(code, /`ci_red:\$\{project\.id\}/, 'project id 를 incident 키에 다시 넣으면 안 된다 (ticket 3886473a 회귀)');
   // 티켓 생성은 TicketService 를 거쳐야 한다 — 손으로 쓴 행은 position / activity /
   // dispatch 부수효과를 건너뛰어 project default_assignee 에게 큐잉되지 않는다.

@@ -56,7 +56,7 @@ after(async () => {
 function minimalNodeRow({ id, type, path: p, content_hash, pagerank }) {
   return {
     id,
-    workspace_id: WORKSPACE_ID,
+    account_id: WORKSPACE_ID,
     graph_id: GRAPH_ID,
     symbol_id: `${type.toLowerCase()}:${p ?? id}`,
     type,
@@ -86,7 +86,7 @@ describe('Phase C — evidence_ref content_hash 불일치를 stale로 뒤집고 
     await edgeRepo.insert([
       {
         id: SEMANTIC_EDGE_ID,
-        workspace_id: WORKSPACE_ID,
+        account_id: WORKSPACE_ID,
         graph_id: GRAPH_ID,
         src_id: SUMMARY_NODE_ID,
         dst_id: FILE_ID,
@@ -101,7 +101,7 @@ describe('Phase C — evidence_ref content_hash 불일치를 stale로 뒤집고 
         // evidence_ref가 비어 있는 semantic 엣지 — 판단 근거가 없으니
         // 절대 stale로 뒤집으면 안 된다(false positive보다 무판정이 안전).
         id: NO_EVIDENCE_EDGE_ID,
-        workspace_id: WORKSPACE_ID,
+        account_id: WORKSPACE_ID,
         graph_id: GRAPH_ID,
         src_id: SUMMARY_NODE_ID,
         dst_id: FILE_ID,
@@ -205,7 +205,7 @@ describe('리뷰 지적(차단2) — Phase C의 allPaths/srcIds 청크 조회가
     const dstFileId = randomUUID();
     const dstRow = {
       id: dstFileId,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: 'file:chunk-shared.ts',
       type: 'File',
@@ -221,7 +221,7 @@ describe('리뷰 지적(차단2) — Phase C의 allPaths/srcIds 청크 조회가
     const srcIds = Array.from({ length: N }, () => randomUUID());
     const srcRows = srcIds.map((id, i) => ({
       id,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: `concept:${i}`,
       type: 'Concept',
@@ -242,7 +242,7 @@ describe('리뷰 지적(차단2) — Phase C의 allPaths/srcIds 청크 조회가
     // 500개 경계 너머까지 실제로 돌게 만든다.
     const edgeRows = srcIds.map((srcId, i) => ({
       id: randomUUID(),
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       src_id: srcId,
       dst_id: dstFileId,
@@ -285,7 +285,7 @@ describe('리뷰 지적(차단2, 잔존) — Phase C의 candidate 스캔 자체�
     const dstFileId = randomUUID();
     const dstRow = {
       id: dstFileId,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: 'file:keyset-shared.ts',
       type: 'File',
@@ -300,7 +300,7 @@ describe('리뷰 지적(차단2, 잔존) — Phase C의 candidate 스캔 자체�
     const srcIds = Array.from({ length: N }, () => randomUUID());
     const srcRows = srcIds.map((id, i) => ({
       id,
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       symbol_id: `keyset-concept:${i}`,
       type: 'Concept',
@@ -316,7 +316,7 @@ describe('리뷰 지적(차단2, 잔존) — Phase C의 candidate 스캔 자체�
 
     const edgeRows = srcIds.map((srcId, i) => ({
       id: randomUUID(),
-      workspace_id: WORKSPACE_ID,
+      account_id: WORKSPACE_ID,
       graph_id: GRAPH_ID,
       src_id: srcId,
       dst_id: dstFileId,

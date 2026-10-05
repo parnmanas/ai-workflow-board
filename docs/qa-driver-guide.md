@@ -131,7 +131,7 @@ shells out to `ffmpeg` (or `$QA_FFMPEG`). It maps onto the contract as:
 Two gotchas this helper encodes, learned from running it end-to-end (ticket 91cee9f7):
 
 - **Navigate inside the SPA, not by full page load.** AWB uses BrowserRouter (history mode).
-  A direct `Page.navigate` to a deep route (`/ws/:ws/qa`) can hit the server
+  A direct `Page.navigate` to a deep route (`/qa`) can hit the server
   before the SPA fallback and return a JSON 404 — depending on the static-serving setup
   (observed under Express 5). Load `/` once (authenticated), then drive route changes with
   `history.pushState(...); dispatchEvent(new PopStateEvent('popstate'))` so React Router swaps
@@ -151,8 +151,11 @@ node apps/server/scripts/qa-visual-capture.mjs \
   --out /tmp/qa-shots --record-video --ffmpeg /path/to/ffmpeg
 ```
 
-It captures login, Tickets (`/ws/:ws/tickets`), the ticket detail
-(`?ticket=<id>`), chat, QA, Projects, Resources and workspace settings.
+It captures login, Tickets, the ticket detail (`?ticket=<id>`), chat, QA,
+Projects, Resources and ownership settings. This reference helper retains
+`--workspace`, `currentWorkspaceId`, and `/ws/:ws/...` for compatibility;
+the current UI redirects its legacy routes to canonical work routes such as
+`/tickets`, `/qa`, and `/projects`. Those work pages have no owner switch.
 
 ---
 

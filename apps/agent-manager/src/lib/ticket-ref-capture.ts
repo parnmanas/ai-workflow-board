@@ -323,7 +323,7 @@ export function chunkTicketRefs(refs: TicketRef[], size: number): TicketRef[][] 
  *                 ticket_action card (TicketUnpendActionCard) — folding it into ticket_refs
  *                 too would double the signal, not close a gap.
  *   agent-state — set/clear_current_task: the focus seat, not a ticket-row mutation.
- *   non-ticket  — project / workspace / channel / resource / qa / security / action /
+ *   non-ticket  — project / account / channel / resource / qa / security / action /
  *                 function / user / api-key / chat / claude-backend-profile / outreach /
  *                 ontology: not a ticket-row mutation.
  *                 (build / deploy 결과물성 tool 은 F2-4 ⓒ 로 ARTIFACT_ACTION_TOOLS 로
@@ -344,8 +344,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_qa_schedule: 'read', get_recent_activity: 'read', get_resource: 'read',
   get_security_batch: 'read', get_security_profile: 'read', get_security_run: 'read',
   get_security_schedule: 'read', get_ticket: 'read', get_ticket_activity: 'read',
-  get_ticket_attachment: 'read', get_user: 'read', get_workspace: 'read',
-  get_workspace_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
+  get_ticket_attachment: 'read', get_user: 'read', get_account: 'read',
+  get_automation_schedule: 'read', list_action_runs: 'read', list_actions: 'read',
   list_api_keys: 'read', list_archived_tickets: 'read',
   list_channels: 'read',
   list_chat_rooms: 'read', list_claude_backend_profiles: 'read',
@@ -354,10 +354,10 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   list_qa_runs: 'read', list_qa_scenarios: 'read', list_qa_schedules: 'read',
   list_repo_branches: 'read', list_resources: 'read', list_security_profiles: 'read',
   list_security_runs: 'read', list_security_schedules: 'read', list_ticket_attachments: 'read',
-  list_ticket_prerequisites: 'read', list_users: 'read', list_workspace_schedules: 'read',
-  list_workspaces: 'read', search_actions: 'read', search_chat_messages: 'read',
+  list_ticket_prerequisites: 'read', list_users: 'read', list_automation_schedules: 'read',
+  list_accounts: 'read', search_actions: 'read', search_chat_messages: 'read',
   search_github: 'read', search_resources: 'read', subscribe_events: 'read', whoami: 'read',
-  // board-less (docs/tickets.md) — the workspace ticket pool listing, same posture as
+  // board-less (docs/tickets.md) — the account ticket pool listing, same posture as
   // get_my_tickets / list_archived_tickets: a read whose `{ tickets: [...] }` result
   // feeds the title cache (harvestTicketTitles) so later title-less cards stay labelled.
   list_tickets: 'read',
@@ -419,15 +419,15 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   create_channel: 'non-ticket', create_chat_room: 'non-ticket',
   create_qa_scenario: 'non-ticket', create_qa_schedule: 'non-ticket',
   create_security_profile: 'non-ticket', create_security_schedule: 'non-ticket',
-  create_user: 'non-ticket', create_workspace: 'non-ticket',
-  create_workspace_schedule: 'non-ticket', delete_action: 'non-ticket',
+  create_user: 'non-ticket', create_account: 'non-ticket',
+  create_automation_schedule: 'non-ticket', delete_action: 'non-ticket',
   delete_api_key: 'non-ticket',
   delete_channel: 'non-ticket', delete_chat_message_attachment: 'non-ticket',
   delete_function: 'non-ticket',
   delete_qa_scenario: 'non-ticket', delete_qa_schedule: 'non-ticket',
   delete_resource: 'non-ticket', delete_security_profile: 'non-ticket',
   delete_security_schedule: 'non-ticket', delete_user: 'non-ticket',
-  delete_workspace: 'non-ticket', delete_workspace_schedule: 'non-ticket',
+  delete_account: 'non-ticket', delete_automation_schedule: 'non-ticket',
   embed_resources: 'non-ticket', execute_function: 'non-ticket',
   // ticket d35b7b7d (Ontology Graph 6/7) — same posture as embed_resources
   // above: can write (auto-provision an OntologyGraph row + kick off a
@@ -439,7 +439,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   record_qa_step: 'non-ticket',
   record_security_finding: 'non-ticket', refresh_security_checklist: 'non-ticket',
   revoke_api_key: 'non-ticket', run_action: 'non-ticket', run_qa_schedule_now: 'non-ticket',
-  run_security_schedule_now: 'non-ticket', run_workspace_schedule_now: 'non-ticket',
+  run_security_schedule_now: 'non-ticket', run_automation_schedule_now: 'non-ticket',
   save_action: 'non-ticket', save_function: 'non-ticket',
   save_project: 'non-ticket', save_resource: 'non-ticket',
   keep_chat_session_alive: 'non-ticket',
@@ -457,8 +457,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   update_channel: 'non-ticket',
   update_qa_scenario: 'non-ticket', update_qa_schedule: 'non-ticket',
   update_security_profile: 'non-ticket', update_security_schedule: 'non-ticket',
-  update_user: 'non-ticket', update_workspace: 'non-ticket',
-  update_workspace_schedule: 'non-ticket', upsert_claude_backend_profile: 'non-ticket',
+  update_user: 'non-ticket', update_account: 'non-ticket',
+  update_automation_schedule: 'non-ticket', upsert_claude_backend_profile: 'non-ticket',
 };
 
 /** The full set of bare tool names this module classifies (emit ∪ artifact ∪ exclude).

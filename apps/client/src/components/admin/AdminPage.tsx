@@ -40,10 +40,8 @@ function AdminRoute({ page, children }: { page: string; children: React.ReactNod
   );
 }
 
-function WorkspaceRouteRedirect({ path }: { path: string }) {
-  const { currentWorkspaceId } = useAuth();
-  if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/${path}`} replace />;
+function WorkRouteRedirect({ path }: { path: string }) {
+  return <Navigate to={`/${path}`} replace />;
 }
 
 export default function AdminPage() {
@@ -53,16 +51,16 @@ export default function AdminPage() {
       <Route path="users" element={<AdminRoute page="users"><UserManager /></AdminRoute>} />
       <Route path="logs" element={<AdminRoute page="logs"><LogViewer /></AdminRoute>} />
       <Route path="agent-logs" element={<AdminRoute page="agent-logs"><AgentLogViewer /></AdminRoute>} />
-      <Route path="agent-manager" element={<WorkspaceRouteRedirect path="hosts" />} />
+      <Route path="agent-manager" element={<WorkRouteRedirect path="hosts" />} />
       <Route path="skills" element={<AdminRoute page="skills"><SkillsPage /></AdminRoute>} />
       <Route path="skill-registry" element={<AdminRoute page="skill-registry"><SkillRegistryPage /></AdminRoute>} />
       <Route path="workflow-health" element={<AdminRoute page="workflow-health"><WorkflowHealthDashboard /></AdminRoute>} />
-      <Route path="global-credentials" element={<WorkspaceRouteRedirect path="settings/credentials" />} />
-      <Route path="claude-backend-profiles" element={<WorkspaceRouteRedirect path="settings/claude-profiles" />} />
+      <Route path="global-credentials" element={<WorkRouteRedirect path="settings/credentials" />} />
+      <Route path="claude-backend-profiles" element={<WorkRouteRedirect path="settings/claude-profiles" />} />
       <Route path="settings" element={<AdminRoute page="settings"><SettingsManager /></AdminRoute>} />
       <Route path="voice" element={<AdminRoute page="voice"><VoicePage /></AdminRoute>} />
       <Route path="migration" element={<AdminRoute page="migration"><MigrationManager /></AdminRoute>} />
-      <Route path="functions" element={<WorkspaceRouteRedirect path="functions" />} />
+      <Route path="functions" element={<WorkRouteRedirect path="functions" />} />
       <Route path="*" element={<Navigate to="/admin/users" replace />} />
     </Routes>
   );

@@ -34,7 +34,7 @@ function makeScenario() {
   return {
     id: 'scn-shared',
     name: 'shared scenario',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     board_id: null,
     target_agent_id: 'agent-1',
     enabled: true,
@@ -57,7 +57,7 @@ function makeScenario() {
 const dataSource = {
   getRepository: (entity) => {
     if (entity?.name === 'RuntimeHost') {
-      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', workspace_id: 'ws-1' }; }, async find() { return []; } };
+      return { async findOne() { return { id: 'agent-1', name: 'QA-Agent', account_id: 'ws-1' }; }, async find() { return []; } };
     }
     return { findOne: async () => { throw new Error('no repo'); } };
   },
@@ -119,7 +119,7 @@ function makeSvc({ batch, onSend }) {
 function makeBatch(over = {}) {
   return {
     id: 'batch-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     board_id: null,
     scenario_ids: ['s0', 's1'],
     run_ids: ['run-0'],

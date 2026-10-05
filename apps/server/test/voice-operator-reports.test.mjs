@@ -33,7 +33,7 @@ process.env.ENCRYPTION_KEY ??= 'voice-operator-reports-test-key';
 
 const operator = (id, managerId, over = {}) => ({
   id, name: id, aliases: [], manager_id: managerId, cli: 'claude', session_id: `op-${id}`, cwd: '/home/parn/awb-operator', title: '',
-  workspace_id: 'ws-1', last_conversation_at: '', created_at: '', created_by: 'u1', updated_at: '', ...over,
+  account_id: 'ws-1', last_conversation_at: '', created_at: '', created_by: 'u1', updated_at: '', ...over,
 });
 
 function setup(operators, { prompt } = {}) {
@@ -62,10 +62,10 @@ function setup(operators, { prompt } = {}) {
   const prompts = [];
   let turn = 0;
   const prompter = {
-    promptOnBehalf: async (workspaceId, userId, managerId, cli, sessionId, text) => {
+    promptOnBehalf: async (accountId, userId, managerId, cli, sessionId, text) => {
       if (prompt) await prompt({ managerId, sessionId });
       const turn_id = `report-turn-${++turn}`;
-      prompts.push({ workspaceId, userId, managerId, cli, sessionId, text, turn_id });
+      prompts.push({ accountId, userId, managerId, cli, sessionId, text, turn_id });
       return { turn_id, live: {} };
     },
   };
@@ -142,7 +142,7 @@ test('a finished turn is reported to the same-host operator; its summary reaches
   finishTurn(s, 't1', '배포가 끝났고 테스트 280개가 모두 통과했어요.');
   await flush();
   assert.equal(prompts.length, 1);
-  assert.deepEqual([prompts[0].managerId, prompts[0].sessionId, prompts[0].userId, prompts[0].workspaceId], ['host-rolf', 'op-jarvis', 'u1', 'ws-1'],
+  assert.deepEqual([prompts[0].managerId, prompts[0].sessionId, prompts[0].userId, prompts[0].accountId], ['host-rolf', 'op-jarvis', 'u1', 'ws-1'],
     'the same-host operator wins over the more recently used one elsewhere');
   const text = prompts[0].text;
   assert.ok(text.startsWith(OPERATOR_REPORT_PREFIX));

@@ -139,7 +139,7 @@ start/finish records contain bounded, sanitized telemetry for the AWB UI.
 AWB, not Hermes, is the skill authority:
 
 1. An administrator publishes an immutable SkillVersion.
-2. An exact version is assigned to a runtime identity within a workspace
+2. An exact version is assigned to a runtime identity within an account
    (`RuntimeSkillAssignment.runtime_key` = `runtimeIdentityKey(spec)`).
 3. Dispatch creates a deterministic RunSkillSnapshot.
 4. The snapshot locks after dispatch acknowledgement.
@@ -159,7 +159,7 @@ Use AWB as the primary UI:
   team slot) and their runtime policy (the RuntimeSpec);
 - **Skills**: versions, assignments, quarantine, and proposals;
 - **ChildRuns**: bounded Hermes collaboration history
-  (`GET /api/workspaces/:workspaceId/runs/:runId/children`; no dedicated screen).
+  (`GET /api/accounts/:accountId/runs/:runId/children`; no dedicated screen).
 
 Hermes Dashboard, WebUI, or OpenAI-compatible frontends can help runtime
 diagnosis and experimentation, but should not become a second control plane.

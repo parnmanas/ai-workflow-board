@@ -19,7 +19,7 @@ const [sidebarSource, appSource, apiSource, typesSource, pageSource, canvasSourc
 
 test('사이드바 Knowledge 섹션에 Ontology Graph 항목이 Resources/Prompt Templates와 같은 그룹으로 있다', () => {
   assert.match(sidebarSource, /title: 'Knowledge'[\s\S]*?key: 'ontology-graph'[\s\S]*?\],\s*\},/);
-  assert.match(sidebarSource, /path: `\$\{workspaceBase\}\/ontology-graph`/);
+  assert.match(sidebarSource, /path: `\$\{basePath\}\/ontology-graph`/);
 });
 
 test('ready/stale 그래프는 전용 snapshot API로 조회해 Sigma/Graphology 캔버스에 마운트한다', () => {
@@ -58,7 +58,7 @@ test('App.tsx가 OntologyGraphPage를 지연 로드하고 ws/:wsId 하위에 라
   assert.match(appSource, /<Route path="ontology-graph" element={<OntologyGraphPage \/>} \/>/);
   // WorkspaceManagementPage의 kind 스위치(CRUD-list 패턴)로 억지로 끼워넣지
   // 않았는지 — 자기 라우트 element가 WorkspaceManagementPage가 아니어야 한다.
-  assert.doesNotMatch(appSource, /path="ontology-graph" element={<WorkspaceManagementPage/);
+  assert.doesNotMatch(appSource, /path="ontology-graph" element={<AccountManagementPage/);
 });
 
 test('api.ts가 그래프 상태 조회 + 재방문 로깅 + refresh 커맨드 엔드포인트를 노출한다', () => {

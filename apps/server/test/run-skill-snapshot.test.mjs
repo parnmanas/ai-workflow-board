@@ -11,7 +11,7 @@ function snapshotRepository() {
     rows,
     async findOne({ where }) {
       return rows.find((row) =>
-        row.workspace_id === where.workspace_id && row.run_id === where.run_id,
+        row.account_id === where.account_id && row.run_id === where.run_id,
       ) || null;
     },
     create(value) {
@@ -24,7 +24,7 @@ function snapshotRepository() {
     async update(where, patch) {
       for (const row of rows) {
         if (
-          row.workspace_id === where.workspace_id
+          row.account_id === where.account_id
           && row.run_id === where.run_id
           && row.status === where.status
         ) {
@@ -81,7 +81,7 @@ test('run skill snapshot is deterministic, scoped and immutable after first reso
   );
 
   const first = await service.resolve({
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     runId: 'ticket:t-1:reviewer',
     agentId: 'agent-1',
     boardId: 'board-1',
@@ -102,7 +102,7 @@ test('run skill snapshot is deterministic, scoped and immutable after first reso
     support_files: [],
   });
   const second = await service.resolve({
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     runId: 'ticket:t-1:reviewer',
     agentId: 'agent-1',
     boardId: 'board-1',

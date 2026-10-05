@@ -669,7 +669,7 @@ export class ChatSessionManager
           `종료를 유발한 매니저 측 동작이 관측되지 않았습니다.`;
       await fireAndForgetTool(this._config, route.completeTool, {
         run_id: run.run_id,
-        workspace_id: run.workspace_id,
+        account_id: run.account_id,
         status: route.failureStatus,
         summary,
       });
@@ -818,7 +818,7 @@ export class ChatSessionManager
       try {
         const resp = await callMcpTool(this._config, route.getTool, {
           run_id: run.run_id,
-          workspace_id: run.workspace_id,
+          account_id: run.account_id,
         });
         const rec = unwrapToolResult(resp);
         if (rec && typeof rec.status === 'string') status = rec.status;
@@ -855,7 +855,7 @@ export class ChatSessionManager
       `reaped pids: ${pidList}. ${detail}`;
     await fireAndForgetTool(this._config, route.completeTool, {
       run_id: run.run_id,
-      workspace_id: run.workspace_id,
+      account_id: run.account_id,
       status: route.failureStatus,
       summary,
     });

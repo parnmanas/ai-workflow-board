@@ -115,7 +115,7 @@ function waitForExit(manager, tag, timeoutMs = 15_000) {
 function makeAgentContext(cwd, permissionMode, runtimeConfig) {
   return {
     agent_id: 'agent-perm',
-    workspace_id: 'ws-perm',
+    account_id: 'ws-perm',
     api_key: 'agent-key',
     cwd,
     mcp_config_path: '',

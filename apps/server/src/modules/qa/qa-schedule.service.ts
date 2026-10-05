@@ -28,7 +28,7 @@ function clampEnv(name: string, def: number, min: number, max: number): number {
 }
 
 export interface CreateScheduleInput {
-  workspaceId: string;
+  accountId: string;
   name: string;
   scope?: QaScheduleScope;
   scenarioIds?: string[] | null;
@@ -40,7 +40,7 @@ export interface CreateScheduleInput {
   createdBy?: string;
 }
 
-export type UpdateScheduleInput = Partial<Omit<CreateScheduleInput, 'workspaceId' | 'createdBy'>>;
+export type UpdateScheduleInput = Partial<Omit<CreateScheduleInput, 'accountId' | 'createdBy'>>;
 
 /**
  * QaScheduleService — automatic trigger layer over the sequential QA batch
@@ -116,20 +116,20 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
-  async list(workspaceId: string): Promise<QaSchedule[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
+  async list(accountId: string): Promise<QaSchedule[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
     const qb = this.scheduleRepo.createQueryBuilder('s')
-      .where('s.workspace_id = :ws', { ws: workspaceId });
+      .where('s.account_id = :ws', { ws: accountId });
     return qb.orderBy('s.created_at', 'DESC').getMany();
   }
 
-  async get(id: string, workspaceId: string): Promise<QaSchedule> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.scheduleRepo, { where: { id, workspace_id: workspaceId } }, 'QA schedule not found in workspace');
+  async get(id: string, accountId: string): Promise<QaSchedule> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.scheduleRepo, { where: { id, account_id: accountId } }, 'QA schedule not found in workspace');
   }
 
   async create(input: CreateScheduleInput): Promise<QaSchedule> {
-    if (!input.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!input.accountId) throw makeError(400, 'account_id is required');
     if (!input.name || !input.name.trim()) throw makeError(400, 'name is required');
 
     const scope: QaScheduleScope = input.scope === 'selected' ? 'selected' : 'all';
@@ -138,7 +138,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     const enabled = input.enabled !== false;
 
     const draft = this.scheduleRepo.create({
-      workspace_id: input.workspaceId,
+      account_id: input.accountId,
       name: input.name.trim(),
       scope,
       scenario_ids: scenarioIds,
@@ -156,8 +156,8 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     return this.scheduleRepo.save(draft);
   }
 
-  async update(id: string, workspaceId: string, patch: UpdateScheduleInput): Promise<QaSchedule> {
-    const schedule = await this.get(id, workspaceId);
+  async update(id: string, accountId: string, patch: UpdateScheduleInput): Promise<QaSchedule> {
+    const schedule = await this.get(id, accountId);
 
     if (patch.name !== undefined) {
       if (!patch.name || !patch.name.trim()) throw makeError(400, 'name cannot be empty');
@@ -193,8 +193,8 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     return this.scheduleRepo.save(schedule);
   }
 
-  async remove(id: string, workspaceId: string): Promise<void> {
-    const schedule = await this.get(id, workspaceId);
+  async remove(id: string, accountId: string): Promise<void> {
+    const schedule = await this.get(id, accountId);
     await this.scheduleRepo.delete({ id: schedule.id });
   }
 
@@ -206,8 +206,8 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
    * last_run_at / last_batch_id, but does NOT touch next_run_at — a manual run
    * must not disturb the automatic cadence.
    */
-  async runNow(id: string, workspaceId: string, triggeredById: string): Promise<{ schedule: QaSchedule; batch: QaRunBatch }> {
-    const schedule = await this.get(id, workspaceId);
+  async runNow(id: string, accountId: string, triggeredById: string): Promise<{ schedule: QaSchedule; batch: QaRunBatch }> {
+    const schedule = await this.get(id, accountId);
     const batch = await this._dispatchBatch(schedule, triggeredById);
     schedule.last_run_at = new Date();
     schedule.last_batch_id = batch.id;
@@ -332,7 +332,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
       const ids = Array.isArray(schedule.scenario_ids) ? schedule.scenario_ids : [];
       if (ids.length === 0) throw makeError(400, 'selected schedule has no scenario_ids');
       return this.qaRunService.startBatch({
-        workspaceId: schedule.workspace_id,
+        accountId: schedule.account_id,
         scenarioIds: ids,
         stopOnFail: schedule.stop_on_fail,
         triggeredByType: 'system',
@@ -342,7 +342,7 @@ export class QaScheduleService implements OnModuleInit, OnModuleDestroy {
     // scope='all' → resolve every enabled scenario in the workspace AT DISPATCH
     // TIME (no id snapshot), so scenario add/remove is reflected automatically.
     return this.qaRunService.startBatch({
-      workspaceId: schedule.workspace_id,
+      accountId: schedule.account_id,
       all: true,
       stopOnFail: schedule.stop_on_fail,
       triggeredByType: 'system',

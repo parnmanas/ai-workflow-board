@@ -218,10 +218,10 @@ export class VoiceOperatorsController {
   async create(@Body() body: any, @Req() req: Request, @Res() res: Response) {
     if (this.denied(req, res)) return;
     // 화면의 워크스페이스를 같이 남긴다 — 서버가 대신 보고를 보낼 때 이 워크스페이스의 CLI 설정으로 연다.
-    const header = req.headers['x-workspace-id'];
-    const workspaceId = String(Array.isArray(header) ? header[0] : header ?? '');
+    const header = req.headers['x-account-id'];
+    const accountId = String(Array.isArray(header) ? header[0] : header ?? '');
     return this.write(res, () => updateOperators(this.dataSource, (list) => {
-      const operator = createOperatorEntry({ ...body, workspace_id: workspaceId }, (req as any).currentUser.id, list);
+      const operator = createOperatorEntry({ ...body, account_id: accountId }, (req as any).currentUser.id, list);
       return { next: [...list, operator], result: { operator } };
     }));
   }

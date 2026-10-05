@@ -31,7 +31,7 @@ import { GraphSpec } from '../modules/orchestration/orchestration-graph';
  * team mid-mission never re-points a live mission at a different agent.
  */
 @Entity('orchestration_missions')
-@Index('idx_orch_missions_workspace', ['workspace_id'])
+@Index('idx_orch_missions_workspace', ['account_id'])
 @Index('idx_orch_missions_team', ['team_id'])
 @Index('idx_orch_missions_status', ['status'])
 @Index('idx_orch_missions_post_actions_pending', ['post_actions_pending'])
@@ -40,7 +40,7 @@ export class OrchestrationMission {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   team_id: string;

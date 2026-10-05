@@ -22,11 +22,13 @@ export class ActionsController {
 
   @Get()
   async list(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const rows = await this.actionsService.list(workspaceId);
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
+    const ids: string[] = (req as any)?.accessibleAccountIds || [accountId];
+    const rows = (await Promise.all(ids.map(id => this.actionsService.list(id)))).flat();
     // target_agent_ids 는 DB 에 JSON 문자열로 저장되므로 엔티티를 그대로
     // 내보내면 클라이언트가 배열 대신 문자열을 받는다 (티켓 fc3906c5).
     return res.json(rows.map(actionToWireJson));
@@ -55,7 +57,7 @@ export class ActionsController {
   @Patch(':id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      const row = await this.actionsService.update(id, body?.workspace_id, body);
+      const row = await this.actionsService.update(id, body?.account_id, body);
       return res.json(actionToWireJson(row));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update action' });
@@ -65,11 +67,11 @@ export class ActionsController {
   @Delete(':id')
   async remove(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
   ) {
     try {
-      await this.actionsService.remove(id, workspaceId);
+      await this.actionsService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete action' });
@@ -121,7 +123,7 @@ export class ActionsController {
       if (!user?.id) return res.status(401).json({ error: 'Authentication required' });
       const grant = await this.actionsService.createApproval({
         actionId: id,
-        workspaceId: body?.workspace_id,
+        accountId: body?.account_id,
         sourceTicketId: body?.source_ticket_id,
         approverUserId: user.id,
         approverName: user.name,
@@ -137,13 +139,13 @@ export class ActionsController {
   @Get(':id/approvals')
   async listApprovals(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
   ) {
     try {
       const n = limit ? parseInt(limit, 10) : 20;
-      const rows = await this.actionsService.listApprovals(id, workspaceId, Number.isFinite(n) ? n : 20);
+      const rows = await this.actionsService.listApprovals(id, accountId, Number.isFinite(n) ? n : 20);
       return res.json(rows);
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list approvals' });
@@ -153,13 +155,13 @@ export class ActionsController {
   @Get(':id/runs')
   async listRuns(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
   ) {
     try {
       const n = limit ? parseInt(limit, 10) : 20;
-      const runs = await this.actionsService.listRuns(id, workspaceId, Number.isFinite(n) ? n : 20);
+      const runs = await this.actionsService.listRuns(id, accountId, Number.isFinite(n) ? n : 20);
       return res.json(runs);
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list runs' });
@@ -169,11 +171,11 @@ export class ActionsController {
   @Get('runs/:runId')
   async getRun(
     @Param('runId') runId: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
   ) {
     try {
-      const run = await this.actionsService.getRun(runId, workspaceId);
+      const run = await this.actionsService.getRun(runId, accountId);
       return res.json(run);
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'Run not found' });

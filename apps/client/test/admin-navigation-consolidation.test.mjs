@@ -18,7 +18,7 @@ test('ADMIN navigation omits standalone QA, Column Policies, and Agent Manager i
 test('legacy Agent Manager URL redirects into workspace HOSTS management', () => {
   assert.match(
     adminPageSource,
-    /path="agent-manager"[\s\S]*WorkspaceRouteRedirect path="hosts"/,
+    /path="agent-manager"[\s\S]*WorkRouteRedirect path="hosts"/,
   );
   assert.doesNotMatch(adminPageSource, /path="qa"/);
   assert.doesNotMatch(adminPageSource, /path="column-policies"/);
@@ -27,7 +27,7 @@ test('legacy Agent Manager URL redirects into workspace HOSTS management', () =>
 test('HOSTS is reachable above Sessions and uses the guarded runtime management page', async () => {
   const hostsPage = await readFile(new URL('../src/components/HostsPage.tsx', import.meta.url), 'utf8');
   const nav = sidebarSource.slice(sidebarSource.indexOf('aria-label="Primary navigation"'));
-  assert.match(nav, /canAdmin && renderNavItem\(\{[\s\S]*?path: `\$\{workspaceBase\}\/hosts`,[\s\S]*?label: 'HOSTS'/);
+  assert.match(nav, /canAdmin && renderNavItem\(\{[\s\S]*?path: `\$\{basePath\}\/hosts`,[\s\S]*?label: 'HOSTS'/);
   assert.ok(nav.indexOf("label: 'HOSTS'") < nav.indexOf('sidebar-sessions-heading'));
   assert.match(appSource, /path="hosts" element=\{<HostsPage \/>\}/);
   assert.match(hostsPage, /hasPermission\('admin.access'\)/);
@@ -40,7 +40,7 @@ test('P4c-4: agents surface is gone — nav has no AI Agents item, route redirec
   assert.doesNotMatch(sidebarSource, /label:\s*'AI Agents'/);
   assert.match(
     appSource,
-    /path="agents" element=\{<WorkspacedRedirect to="sessions" \/>\}/,
+    /path="agents\/\*" element=\{<GlobalRedirect to="sessions" \/>\}/,
   );
 });
 

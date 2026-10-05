@@ -84,7 +84,7 @@ test('instance heartbeat publishes the cached runtime capability report', async 
     },
   };
   const heartbeat = new InstanceHeartbeat(
-    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' },
     'manager-1',
     {
       mode: 'manager',
@@ -173,7 +173,7 @@ test('instance heartbeat carries available_models_at from its provider so client
   t.after(() => { globalThis.fetch = originalFetch; });
 
   const heartbeat = new InstanceHeartbeat(
-    { url: 'http://awb.invalid', apiKey: 'secret', workspace_id: 'ws-1' },
+    { url: 'http://awb.invalid', apiKey: 'secret', account_id: 'ws-1' },
     'manager-1',
     {
       mode: 'manager',

@@ -13,13 +13,13 @@ export class AgentLogsUploadController {
 
   @Post()
   async upload(@Body() body: any, @Res() res: Response) {
-    const { agent_id, workspace_id, plugin_version, entries } = body || {};
+    const { agent_id, account_id, plugin_version, entries } = body || {};
     if (!agent_id || !Array.isArray(entries)) {
       return res.status(400).json({ error: 'agent_id + entries required' });
     }
     try {
       const result = await this.service.ingestEntries(
-        agent_id, workspace_id ?? null, plugin_version ?? null, entries,
+        agent_id, account_id ?? null, plugin_version ?? null, entries,
       );
       return res.json(result);
     } catch (err: any) {

@@ -27,7 +27,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey, createUser, createTicket } from './helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey, createUser, createTicket } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
@@ -38,11 +38,11 @@ process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 // Seed a DM room with the given participants directly via repositories — there
 // is no chat-room fixture helper and the round-trip only needs the persisted
 // room + participant rows (mirrors seedRoom in qa-flows/chat-message-read).
-async function seedDmRoom(ds, { workspaceId, participants }) {
+async function seedDmRoom(ds, { accountId, participants }) {
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: workspaceId,
+    account_id: accountId,
     type: 'dm',
     name: '',
   }));
@@ -66,19 +66,19 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-roundtrip');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-roundtrip');
 
   const user = await createUser(app, getDataSourceToken, { name: 'human' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder', runtime: true });
   const responderKey = await createApiKey(app, getDataSourceToken, responder.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'responder',
   });
 
   // DM room with the user and the agent as the two participants.
   const room = await seedDmRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [
       { type: 'user', id: user.id },
       { type: 'agent', id: responder.id, runtime: responder.runtime_spec },
@@ -124,7 +124,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${userToken}`,
-      'X-Workspace-Id': ws.id,
+      'X-Account-Id': ws.id,
     },
     body: JSON.stringify({ content: userText }),
   });
@@ -191,7 +191,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
 
   const outsider = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider', runtime: true });
   const outsiderKey = await createApiKey(app, getDataSourceToken, outsider.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'outsider',
   });
   const outsiderMcp = new McpClient({ baseUrl: base, apiKey: outsiderKey.raw_key });
@@ -203,9 +203,9 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   });
   assert.ok(outsiderApproval.isError, 'an agent that is not a room participant cannot post an approval card');
 
-  const otherWs = await createWorkspace(app, getDataSourceToken, 'chat-roundtrip-other');
+  const otherWs = await createAccount(app, getDataSourceToken, 'chat-roundtrip-other');
   const crossWorkspaceTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: otherWs.id,
+    accountId: otherWs.id,
     title: 'other workspace pending',
   });
   await ds.getRepository('Ticket').update(crossWorkspaceTicket.id, { pending_user_action: true });
@@ -213,14 +213,14 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     room_id: room.id,
     ticket_id: crossWorkspaceTicket.id,
   });
-  assert.ok(crossWorkspaceApproval.isError, 'ticket and room from different workspaces are rejected');
+  assert.ok(crossWorkspaceApproval.isError, 'ticket and room from different accounts are rejected');
 
   const agentPatch = await fetch(`${base}/api/tickets/${createdTicket.id}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${responderKey.raw_key}`,
-      'X-Workspace-Id': ws.id,
+      'X-Account-Id': ws.id,
     },
     body: JSON.stringify({ pending_user_action: false }),
   });
@@ -243,7 +243,7 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${userToken}`,
-      'X-Workspace-Id': ws.id,
+      'X-Account-Id': ws.id,
     },
     body: JSON.stringify({ pending_user_action: false }),
   });

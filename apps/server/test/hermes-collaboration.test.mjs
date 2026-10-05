@@ -12,14 +12,14 @@ function childRepository() {
     rows,
     async findOne({ where }) {
       return rows.find((row) =>
-        row.workspace_id === where.workspace_id
+        row.account_id === where.account_id
         && row.parent_run_id === where.parent_run_id
         && row.runtime_child_id === where.runtime_child_id,
       ) || null;
     },
     async find({ where }) {
       return rows.filter((row) =>
-        row.workspace_id === where.workspace_id
+        row.account_id === where.account_id
         && row.parent_run_id === where.parent_run_id,
       );
     },
@@ -37,7 +37,7 @@ test('ChildRuns remain bounded, attributed, sanitized and idempotent under the p
   const repo = childRepository();
   const service = new ChildRunService(repo);
   const first = await service.start({
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     parentRunId: 'ticket:t-1:reviewer',
     parentAgentId: 'agent-1',
     childId: 'hermes-child-1',
@@ -51,7 +51,7 @@ test('ChildRuns remain bounded, attributed, sanitized and idempotent under the p
     },
   });
   const duplicate = await service.start({
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     parentRunId: 'ticket:t-1:reviewer',
     parentAgentId: 'agent-1',
     childId: 'hermes-child-1',
@@ -64,7 +64,7 @@ test('ChildRuns remain bounded, attributed, sanitized and idempotent under the p
   assert.equal(Object.hasOwn(first.runtime_metadata, 'ignored'), false);
 
   const finished = await service.finish({
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     parentRunId: 'ticket:t-1:reviewer',
     childId: 'hermes-child-1',
     status: 'completed',
@@ -92,21 +92,21 @@ test('runtime MCP exposes proposal-only skill learning with server-bound attribu
       // 링크 해소는 연결된 Host 행까지 확인한다 (authz.resolveCallerIdentityRow).
       async findOne({ where } = {}) {
         if (where?.id && where.id !== 'host-1') return null;
-        return { id: 'host-1', name: 'host', workspace_id: 'ws-1' };
+        return { id: 'host-1', name: 'host', account_id: 'ws-1' };
       },
     },
     ApiKey: {
       async findOne() {
-        return { agent_id: childUuid, host_id: 'host-1', workspace_id: 'ws-1' };
+        return { agent_id: childUuid, host_id: 'host-1', account_id: 'ws-1' };
       },
       // resolveCallerIdentityRow 는 host 바인딩 우선 조회(find)다.
       async find() {
-        return [{ agent_id: childUuid, host_id: 'host-1', workspace_id: 'ws-1' }];
+        return [{ agent_id: childUuid, host_id: 'host-1', account_id: 'ws-1' }];
       },
     },
     Skill: {
       async findOne() {
-        return { id: 'skill-1', workspace_id: 'ws-1' };
+        return { id: 'skill-1', account_id: 'ws-1' };
       },
     },
     SkillProposal: {

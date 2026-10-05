@@ -5,7 +5,7 @@ import type { OrchestrationMissionStatus, OrchestrationUpdateEvent } from '../ty
 import { MISSIONS_CHANGED_EVENT, TEAMS_CHANGED_EVENT } from '../components/workNavigation';
 
 /**
- * 사이드바 WORK 섹션이 서브메뉴로 펼치는 Teams/Orchestrations 목록 (티켓 03ca8b5b).
+ * 사이드바 WORK 섹션이 서브메뉴로 펼치는 Teams/Missions 목록 (티켓 03ca8b5b).
  *
  * Boards 는 이미 AppLayout 이 받아 Sidebar 에 prop 으로 넘겨주지만, 이 두 목록은
  * SSE(`orchestration_update`)로 갱신돼야 해서 여기서 직접 가져온다 — AppLayout 은
@@ -24,6 +24,7 @@ export interface WorkNavTeam {
 export interface WorkNavMission {
   id: string;
   title: string;
+  account_id?: string;
   /**
    * 사이드바 행의 진행 점(ActivityDot)이 읽는 값. 목록을 부를 때 받고, 이후
    * `orchestration_update` 프레임이 제자리에서 갱신한다 — 돌고 있는 미션이 왼쪽
@@ -50,14 +51,13 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
   const [teamsLoading, setTeamsLoading] = useState(false);
   const [missionsLoading, setMissionsLoading] = useState(false);
 
-  // 워크스페이스를 빠르게 전환하면 이전 워크스페이스의 응답이 늦게 도착해 새
-  // 워크스페이스의 목록을 덮어쓸 수 있다 — 요청 세대를 세어 마지막 것만 반영한다.
+  // 요청 세대를 세어 늦게 도착한 이전 응답이 최신 목록을 덮어쓰지 않게 한다.
   const generationRef = useRef(0);
 
-  const fetchTeams = useCallback(async (workspaceId: string, generation: number) => {
+  const fetchTeams = useCallback(async (accountId: string, generation: number) => {
     setTeamsLoading(true);
     try {
-      const list = await api.listOrchestrationTeams(workspaceId);
+      const list = await api.listOrchestrationTeams(accountId);
       if (generationRef.current !== generation) return;
       setTeams(list.map((team) => ({ id: team.id, name: team.name })));
     } catch {
@@ -68,12 +68,12 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
     }
   }, []);
 
-  const fetchMissions = useCallback(async (workspaceId: string, generation: number) => {
+  const fetchMissions = useCallback(async (accountId: string, generation: number) => {
     setMissionsLoading(true);
     try {
-      const list = await api.listOrchestrationMissions(workspaceId, { limit: WORK_NAV_MISSION_LIMIT });
+      const list = await api.listOrchestrationMissions(accountId, { limit: WORK_NAV_MISSION_LIMIT });
       if (generationRef.current !== generation) return;
-      setMissions(list.map((mission) => ({ id: mission.id, title: mission.title, status: mission.status })));
+      setMissions(list.map((mission) => ({ id: mission.id, title: mission.title, status: mission.status, account_id: mission.account_id })));
     } catch {
       if (generationRef.current !== generation) return;
       setMissions([]);
@@ -113,7 +113,9 @@ export function useWorkNavLists(wsId: string | null): WorkNavLists {
   // 오므로 이미 아는 미션은 제자리에서 이름만 고치고(바쁜 미션이 step 전이마다
   // 프레임을 쏘는데 그때마다 목록을 다시 받으면 낭비), 모르는 미션일 때만 재조회한다.
   useBoardStreamEvent('orchestration_update', (data: OrchestrationUpdateEvent) => {
-    if (!wsId || !data || data.workspace_id !== wsId) return;
+    if (!wsId || !data) return;
+    const known = missionsRef.current.find((mission) => mission.id === data.mission_id);
+    if (known?.account_id && data.account_id && known.account_id !== data.account_id) return;
     // 삭제된 미션은 즉시 빼야 한다 — 남겨두면 없는 상세 화면으로 보내는 유령
     // 항목이 된다. 삭제는 REST 로만 일어나므로 이 프레임이 유일한 신호다.
     if (data.deleted) {

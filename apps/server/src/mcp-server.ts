@@ -29,6 +29,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { initDb, AppDataSource, startSqljsAutoFlush, AppOntologyDataSource, startOntologySqljsAutoFlush } from './db';
 import { preSyncPostgres } from './database/pre-sync-postgres';
+import { preSyncAccountOwnership } from './database/pre-sync-account-ownership';
+import { buildDataSourceOptions, ensureSqljsDbHealthy, ensureOntologySqljsDbHealthy } from './db';
 import { createStandaloneContext, type ToolContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
@@ -154,7 +156,7 @@ async function startHttp() {
             sessionStore.register(id, transport, mcpServer, {
               agentId: mcpAuthInfo.agentId,
               agentName: mcpAuthInfo.agentName,
-              workspaceId: mcpAuthInfo.workspaceId,
+              accountId: mcpAuthInfo.accountId,
               scope: mcpAuthInfo.scope,
               source: mcpAuthInfo.source,
               runtimeKey: mcpAuthInfo.runtimeKey,
@@ -223,7 +225,10 @@ async function startHttp() {
 // ─── Main ───────────────────────────────────────────────────
 
 async function main() {
+  await ensureSqljsDbHealthy();
+  await ensureOntologySqljsDbHealthy();
   // See pre-sync-postgres.ts — must run before TypeORM initializes.
+  await preSyncAccountOwnership(buildDataSourceOptions());
   await preSyncPostgres();
   await initDb();
 

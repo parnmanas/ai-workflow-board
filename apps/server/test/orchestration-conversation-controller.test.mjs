@@ -71,8 +71,8 @@ test('참여 라우트가 POST missions/:id/join-conversation 으로 등록돼 �
 test('참여 대상은 body 가 아니라 세션 사용자다', async () => {
   const calls = [];
   const controller = controllerWith({
-    async joinMissionConversation(missionId, workspaceId, actor) {
-      calls.push({ missionId, workspaceId, actor });
+    async joinMissionConversation(missionId, accountId, actor) {
+      calls.push({ missionId, accountId, actor });
       return { room_id: 'room-1', joined: true };
     },
   });
@@ -82,14 +82,14 @@ test('참여 대상은 body 가 아니라 세션 사용자다', async () => {
     'mission-7',
     // body 에 남의 신원을 섞어 보낸다 — 컨트롤러가 이걸 집으면 임의의 사용자를 남의
     // 미션 방에 밀어 넣을 수 있게 된다.
-    { workspace_id: 'ws-1', user_id: 'someone-else', actor: { id: 'someone-else' } },
+    { account_id: 'ws-1', user_id: 'someone-else', actor: { id: 'someone-else' } },
     fakeReq({ id: 'user-9', name: 'Operator' }),
     res,
   );
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].missionId, 'mission-7');
-  assert.equal(calls[0].workspaceId, 'ws-1');
+  assert.equal(calls[0].accountId, 'ws-1');
   assert.deepEqual(
     calls[0].actor,
     { type: 'user', id: 'user-9', name: 'Operator' },
@@ -105,7 +105,7 @@ test('이미 참여 중이면 joined:false 가 그대로 전달된다', async ()
     },
   });
   const res = fakeRes();
-  await controller.joinMissionConversation('m1', { workspace_id: 'ws-1' }, fakeReq({ id: 'u1' }), res);
+  await controller.joinMissionConversation('m1', { account_id: 'ws-1' }, fakeReq({ id: 'u1' }), res);
   assert.deepEqual(
     res.out.body,
     { room_id: 'room-1', joined: false },
@@ -123,7 +123,7 @@ test('서비스가 낸 status 가 그대로 전달된다', async () => {
   });
 
   const res = fakeRes();
-  await controller.joinMissionConversation('m1', { workspace_id: 'ws-1' }, fakeReq({ id: 'u1' }), res);
+  await controller.joinMissionConversation('m1', { account_id: 'ws-1' }, fakeReq({ id: 'u1' }), res);
   assert.equal(res.out.statusCode, 409, '아직 시작 안 된 미션을 400 으로 뭉개면 원인을 알 수 없다');
   assert.match(res.out.body.error, /has not been started/);
 });

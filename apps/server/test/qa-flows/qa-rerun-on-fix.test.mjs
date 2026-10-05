@@ -23,7 +23,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_RERUN_ON_FIX_PORT || '0';
@@ -65,9 +65,9 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   const ds = app.get(getDataSourceToken());
   const activityService = app.get(modules.ActivityService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'qa-rerun');
+  const ws = await createAccount(app, getDataSourceToken, 'qa-rerun');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-runner' });
-  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
+  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { accountId: ws.id, label: 'qa' });
 
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
@@ -80,11 +80,11 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
     const runs = await runsForScenario(ds, scenarioId);
     const latest = runs[runs.length - 1];
     await mcp.callTool('record_qa_step', {
-      run_id: latest.id, workspace_id: ws.id, idx: 0,
+      run_id: latest.id, account_id: ws.id, idx: 0,
       status: status === 'passed' ? 'passed' : 'failed', log: `step 0 ${status}`,
     });
     const done = await mcp.callTool('complete_qa_run', {
-      run_id: latest.id, workspace_id: ws.id, status, summary: `run ${status}`,
+      run_id: latest.id, account_id: ws.id, status, summary: `run ${status}`,
     });
     assert.ok(!done?.isError, `complete_qa_run: ${JSON.stringify(done)}`);
     return done;
@@ -97,7 +97,7 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   // ── Setup: a scenario opted into the closed loop, max 2 reruns ───────────────
   step('Create scenario with rerun_on_fix, max_rerun_attempts=2');
   const sc = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'Closed loop QA', target_runtime: qaAgent.runtime_spec,
+    account_id: ws.id, name: 'Closed loop QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
       enabled: true, dedupe: 'per_open_ticket',
@@ -169,7 +169,7 @@ test('QA rerun-on-fix: Done → rerun, generation chain, max-attempts halt, idem
   // ── CASE 5: negative — rerun_on_fix OFF never reruns on Done ─────────────────
   step('CASE 5: a scenario with rerun_on_fix OFF does not rerun on Done');
   const scOff = await mcp.callTool('create_qa_scenario', {
-    workspace_id: ws.id, name: 'No-rerun QA', target_runtime: qaAgent.runtime_spec,
+    account_id: ws.id, name: 'No-rerun QA', target_runtime: qaAgent.runtime_spec,
     qa_driver: 'browser', steps,
     on_failure_ticket: {
       enabled: true, dedupe: 'per_run', rerun_on_fix: false,

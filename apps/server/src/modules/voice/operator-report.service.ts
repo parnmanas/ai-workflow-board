@@ -261,11 +261,11 @@ export class OperatorReportService implements OnModuleInit, OnModuleDestroy {
 
   /** 서버가 대신 프롬프트를 보낼 워크스페이스 — 그 워크스페이스의 CLI 설정(credential)으로 세션이 열린다. */
   private async workspaceFor(operator: OperatorEntry): Promise<string> {
-    if (operator.workspace_id) return operator.workspace_id;
+    if (operator.account_id) return operator.account_id;
     // 워크스페이스를 남기기 전에 등록된 operator — 그 호스트×CLI 의 설정을 마지막으로 고친 워크스페이스.
     const row: any = await this.dataSource.getRepository('AgentSessionCliSetting')
       .findOne({ where: { manager_id: operator.manager_id, cli: operator.cli }, order: { updated_at: 'DESC' } })
       .catch(() => null);
-    return row?.workspace_id ?? '';
+    return row?.account_id ?? '';
   }
 }

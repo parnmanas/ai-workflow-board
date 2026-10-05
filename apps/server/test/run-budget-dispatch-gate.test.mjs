@@ -136,7 +136,7 @@ test('each chokepoint passes its own kind: "qa" / "action" / "orchestration"', (
 // the guard) — pin that call shape.
 test('actions.service.ts completeRun\'s bounded retry re-dispatches via this.dispatch(...) — inherits the run-budget guard automatically', () => {
   const src = code('modules/actions/actions.service.ts');
-  const match = src.match(/async completeRun\(runId: string, workspaceId: string, args: CompleteRunArgs\): Promise<CompleteRunResult> \{[\s\S]*?\r?\n  \}\r?\n/);
+  const match = src.match(/async completeRun\(runId: string, accountId: string, args: CompleteRunArgs\): Promise<CompleteRunResult> \{[\s\S]*?\r?\n  \}\r?\n/);
   assert.ok(match, 'could not isolate the completeRun method body');
   assert.match(match[0], /await this\.dispatch\(\{/, 'the bounded retry must call this.dispatch(...) so it inherits the run-budget guard');
 });

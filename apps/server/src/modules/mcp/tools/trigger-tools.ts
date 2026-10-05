@@ -22,13 +22,13 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
     'subscribe_events',
     'Subscribe to ticket events. Returns recent events since the given cursor (ISO timestamp or event ID). Events include ticket creation, updates, moves, comments, and agent assignments. Poll periodically to receive updates.',
     {
-      workspace_id: z.string().optional().describe('Filter events by workspace (omit for all)'),
+      account_id: z.string().optional().describe('Filter events by workspace (omit for all)'),
       tags: z.array(z.string()).optional().describe('Only events of tickets carrying every one of these tags'),
       since: z.string().optional().describe('ISO timestamp or activity log ID cursor — returns events after this point. Omit for last 10 minutes.'),
       limit: z.number().optional().default(50).describe('Max events to return'),
       assigned_to_me: z.boolean().optional().default(false).describe('Only return events for tickets assigned to the authenticated agent'),
     },
-    async ({ workspace_id, tags, since, limit, assigned_to_me }, extra: { sessionId?: string }) => {
+    async ({ account_id, tags, since, limit, assigned_to_me }, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       const repo = dataSource.getRepository(ActivityLog);
 
@@ -53,9 +53,9 @@ export function registerTriggerTools(server: McpServer, ctx: ToolContext): void 
 
       let events = await query.getMany();
 
-      if (workspace_id || (tags && tags.length)) {
+      if (account_id || (tags && tags.length)) {
         const qb = dataSource.getRepository(Ticket).createQueryBuilder('t').select(['t.id', 't.parent_id', 't.tags']);
-        if (workspace_id) qb.where('t.workspace_id = :ws', { ws: workspace_id });
+        if (account_id) qb.where('t.account_id = :ws', { ws: account_id });
         const rows = await qb.getMany();
         const wanted = (tags || []).map((t) => t.toLowerCase());
         const rootOk = new Set(rows

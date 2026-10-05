@@ -18,7 +18,7 @@ export class UserMention {
   user_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // Where the mention lives
   @Column({ type: 'varchar' })

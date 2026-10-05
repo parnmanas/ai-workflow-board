@@ -114,6 +114,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface CliFlags {
   config?: string;
+  account?: string;
   workspace?: string;
   runtimeProfile?: string;
   dryRun: boolean;
@@ -139,6 +140,7 @@ function parseFlags(argv: string[]): CliFlags {
       args: argv,
       options: {
         config: { type: 'string', short: 'c' },
+        account: { type: 'string' },
         workspace: { type: 'string', short: 'w' },
         'runtime-profile': { type: 'string' },
         'dry-run': { type: 'boolean' },
@@ -157,6 +159,7 @@ function parseFlags(argv: string[]): CliFlags {
 
   return {
     config: values.config as string | undefined,
+    account: values.account as string | undefined,
     workspace: values.workspace as string | undefined,
     runtimeProfile: values['runtime-profile'] as string | undefined,
     dryRun: Boolean(values['dry-run']),
@@ -180,7 +183,8 @@ Usage:
 
 Options:
   -c, --config <path>     Path to config.json (default: ${CONFIG_PATH})
-  -w, --workspace <id>    Override workspace_id from config
+      --account <id>      Override account_id from config
+  -w, --workspace <id>    Deprecated alias for --account
       --runtime-profile <path|none>
                             Use a JSON profile for this manager run, without DB changes
   -f, --force             Take over the lockfile from a stale or running owner
@@ -190,7 +194,7 @@ Options:
 
 Setup options (\`awb-agent-manager setup ...\`):
       --url <url>            AWB server base URL (skip prompt)
-      --token <token>        Pairing token from AWB Workspace → AI Agents
+      --token <token>        Pairing token from AWB Hosts
       --instance-id <id>     Stable id reported on heartbeats (default <hostname>-<rand>)
       --non-interactive      Fail fast on missing fields instead of prompting
       --force                Overwrite an existing config.json
@@ -403,7 +407,7 @@ async function main(): Promise<void> {
         `      awb-agent-manager setup\n\n` +
         `  Or non-interactively (CI / Ansible):\n\n` +
         `      awb-agent-manager setup --url <awb-url> --token <pairing-token>\n\n` +
-        `  The token comes from AWB Workspace → AI Agents → Agent Manager Runtime → "Pair manager…".\n`,
+        `  The token comes from AWB Hosts → "Pair manager…".\n`,
     );
     if (flags.dryRun) {
       log('--dry-run: exiting after config load (config=missing)');
@@ -413,16 +417,16 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (flags.workspace) {
-    config.workspace_id = flags.workspace;
-  }
+  if (flags.workspace) log('--workspace is deprecated; use --account instead.');
+  const accountOverride = flags.account ?? flags.workspace;
+  if (accountOverride) config.account_id = accountOverride;
 
   process.stdout.write(`  config:      ${configPath}\n`);
   process.stdout.write(`  url:         ${config.url}\n`);
-  process.stdout.write(`  workspace:   ${config.workspace_id ?? '(none)'}\n`);
+  process.stdout.write(`  account:     ${config.account_id ?? '(none)'}\n`);
   // ST-7 cli refactor: the manager no longer pins to a single CLI. Each
   // managed agent picks its own (claude/codex/antigravity), set per-row in
-  // AWB Workspace → AI Agents → New Managed Agent. Legacy `cli` field on
+  // an AWB runtime specification. Legacy `cli` field on
   // config.json is now ignored at runtime.
 
   if (flags.dryRun) {
@@ -1218,7 +1222,7 @@ async function runRuntime(
     let skipped = 0;
     for (const id of dirs) {
       const cfg = await readManagedAgentConfig(id);
-      const apiKey = await readApiKeyForRehydrate(id, cfg?.workspace_id);
+      const apiKey = await readApiKeyForRehydrate(id, cfg?.account_id);
       if (!cfg || !apiKey || !cfg.working_dir) {
         skipped++;
         continue;
@@ -1282,11 +1286,11 @@ async function runRuntime(
             : 'subscription';
       managedAgentContexts.upsert({
         agent_id: id,
-        workspace_id: cfg.workspace_id || '',
+        account_id: cfg.account_id || '',
         name: cfg.name,
         cli: cfg.cli,
         working_dir: cfg.working_dir,
-        mcp_config_path: mcpConfigPathFor(id, cfg.workspace_id),
+        mcp_config_path: mcpConfigPathFor(id, cfg.account_id),
         api_key: apiKey,
         subagent_log_path: subagentLogPathFor(id),
         cli_home_dir: cliHomeDirFor(id),

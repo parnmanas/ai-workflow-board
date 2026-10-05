@@ -450,8 +450,8 @@ function TtsBlindTest({ providers, configured, onAdopt }: {
  */
 function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) {
   const operators = useVoiceOperators(true);
-  const { currentWorkspaceId } = useAuth();
-  const { hosts } = useAgentSessionsNav(currentWorkspaceId ?? null);
+  const { currentAccountId } = useAuth();
+  const { hosts } = useAgentSessionsNav(currentAccountId ?? null);
   const navigate = useNavigate();
   const [editing, setEditing] = useState<VoiceOperator | null>(null);
   const hostName = (id: string) => hosts.find((h) => h.manager_id === id)?.name || id.slice(0, 8);
@@ -476,8 +476,8 @@ function OperatorsCard({ wake }: { wake: VoiceConfigView['wake'] | undefined }) 
                   {op.aliases.length ? `also: ${op.aliases.join(', ')} · ` : ''}{hostName(op.manager_id)} · {runtimeLabel(op.cli)}{op.title ? ` · ${op.title}` : ''}
                 </div>
               </div>
-              {currentWorkspaceId && (
-                <Button variant="ghost" size="sm" onClick={() => navigate(sessionPath(`/ws/${currentWorkspaceId}`, op.manager_id, op.cli, op.session_id))}>Open</Button>
+              {currentAccountId && (
+                <Button variant="ghost" size="sm" onClick={() => navigate(sessionPath(``, op.manager_id, op.cli, op.session_id))}>Open</Button>
               )}
               <Button variant="secondary" size="sm" onClick={() => setEditing(op)}>Edit</Button>
             </div>

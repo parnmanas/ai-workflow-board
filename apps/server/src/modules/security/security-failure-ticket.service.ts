@@ -94,15 +94,15 @@ export class SecurityFailureTicketService {
     }
 
     try {
-      const workspaceId = run.workspace_id || profile.workspace_id;
-      if (!workspaceId) {
+      const accountId = run.account_id || profile.account_id;
+      if (!accountId) {
         this.logService.warn('Security', `on_failure_ticket enabled for profile ${profile.id} but run ${run.id} has no workspace — skipping`);
         return null;
       }
 
       // per_open_ticket: reuse an existing open ticket if present.
       if ((cfg.dedupe || 'per_run') === 'per_open_ticket') {
-        const existing = await this._findOpenFailureTicket(profile, workspaceId);
+        const existing = await this._findOpenFailureTicket(profile, accountId);
         if (existing) {
           await this._appendRecurrenceComment(existing, run, profile, qualifying, minSeverity);
           await this._stampRunTicket(run.id, existing.id);
@@ -111,7 +111,7 @@ export class SecurityFailureTicketService {
         }
       }
 
-      const ticketId = await this._createTicket(run, profile, cfg, workspaceId, qualifying, minSeverity);
+      const ticketId = await this._createTicket(run, profile, cfg, accountId, qualifying, minSeverity);
       await this._stampRunTicket(run.id, ticketId);
       this.logService.info('Security', `on_failure_ticket: filed ticket ${ticketId} for failed run ${run.id} (profile ${profile.id}, ${qualifying.length} finding(s) >= ${minSeverity})`);
       return ticketId;
@@ -137,12 +137,12 @@ export class SecurityFailureTicketService {
       .sort((a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0));
   }
 
-  private async _findOpenFailureTicket(profile: SecurityProfile, workspaceId: string): Promise<Ticket | null> {
+  private async _findOpenFailureTicket(profile: SecurityProfile, accountId: string): Promise<Ticket | null> {
     const marker = `${PROFILE_TAG_PREFIX}${profile.id}`;
     // Match the JSON-string tag list (`tags` is a JSON string column). LIKE
     // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
     return this.dataSource.getRepository(Ticket).createQueryBuilder('t')
-      .where('t.workspace_id = :ws', { ws: workspaceId })
+      .where('t.account_id = :ws', { ws: accountId })
       .andWhere('t.depth = 0')
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.status <> :done', { done: DONE_STATUS })
@@ -155,23 +155,23 @@ export class SecurityFailureTicketService {
     run: SecurityRun,
     profile: SecurityProfile,
     cfg: SecurityOnFailureTicketConfig,
-    workspaceId: string,
+    accountId: string,
     qualifying: SecurityFinding[],
     minSeverity: SecuritySeverity,
   ): Promise<string> {
     // A project id that no longer resolves in this workspace must not swallow
     // the finding report — file it without a project and say so in the log.
     let projectId: string | null = (cfg.project_id || '').trim() || null;
-    if (projectId && !(await this.projects.getInWorkspace(projectId, workspaceId))) {
-      this.logService.warn('Security', `on_failure_ticket: project ${projectId} not found in workspace ${workspaceId} (profile ${profile.id}) — filing without a project`);
+    if (projectId && !(await this.projects.getInWorkspace(projectId, accountId))) {
+      this.logService.warn('Security', `on_failure_ticket: project ${projectId} not found in workspace ${accountId} (profile ${profile.id}) — filing without a project`);
       projectId = null;
     }
     // assignee_runtime → profile target_runtime → (omitted) project default_assignee.
     const assignee = parseRuntimeSpec(cfg.assignee_runtime) || parseRuntimeSpec(profile.target_runtime);
 
-    const { ticket } = await this.ticketService.create(workspaceId, {
+    const { ticket } = await this.ticketService.create(accountId, {
       title: this._buildTitle(cfg, profile, qualifying),
-      description: await this._buildBody(run, profile, workspaceId, qualifying, minSeverity),
+      description: await this._buildBody(run, profile, accountId, qualifying, minSeverity),
       priority: cfg.priority || DEFAULT_PRIORITY,
       status: cfg.status === 'backlog' ? 'backlog' : 'todo',
       tags: this._buildTags(cfg, profile.id),
@@ -265,11 +265,11 @@ export class SecurityFailureTicketService {
   private async _buildBody(
     run: SecurityRun,
     profile: SecurityProfile,
-    workspaceId: string,
+    accountId: string,
     qualifying: SecurityFinding[],
     minSeverity: SecuritySeverity,
   ): Promise<string> {
-    const securityDetailLink = `/ws/${workspaceId}/security`;
+    const securityDetailLink = `/security`;
 
     const allFindings = Array.isArray(run.findings) ? run.findings : [];
     const belowGate = allFindings.filter((f) => !qualifying.includes(f));

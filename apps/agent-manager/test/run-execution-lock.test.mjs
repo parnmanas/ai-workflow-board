@@ -112,7 +112,7 @@ test('FolderMutex: release is idempotent and frees the key for a later acquire',
 const RUN = (folder, over = {}) => ({
   kind: 'qa',
   run_id: 'run-1234',
-  workspace_id: 'ws-1',
+  account_id: 'ws-1',
   workspace_folder: folder,
   checkout_mode: 'reuse',
   repo: null,
@@ -239,7 +239,7 @@ test('_sweepTurnEndOrphans: clean turn (folder idle) releases the run lock EARLY
   const mgr = new SweepTestManager(makeConfig(), true); // pid treated as alive
   let released = 0;
   const sess = makeChatSession(DEAD_SENTINEL_PID, {
-    _run: { run_id: 'runclean1', workspace_id: 'ws-1', kind: 'qa' },
+    _run: { run_id: 'runclean1', account_id: 'ws-1', kind: 'qa' },
     releaseRunLock: () => released++,
   });
   await mgr._sweepTurnEndOrphans(sess);
@@ -254,7 +254,7 @@ test('_sweepTurnEndOrphans: does NOT release when the child is already gone (bac
   const mgr = new SweepTestManager(makeConfig(), false); // pid already dead
   let released = 0;
   const sess = makeChatSession(DEAD_SENTINEL_PID, {
-    _run: { run_id: 'rundead01', workspace_id: 'ws-1', kind: 'qa' },
+    _run: { run_id: 'rundead01', account_id: 'ws-1', kind: 'qa' },
     releaseRunLock: () => released++,
   });
   await mgr._sweepTurnEndOrphans(sess);

@@ -93,8 +93,8 @@ export class QaFailureTicketService {
     if (run.auto_ticket_id) return run.auto_ticket_id;
 
     try {
-      const workspaceId = run.workspace_id || scenario.workspace_id;
-      if (!workspaceId) {
+      const accountId = run.account_id || scenario.account_id;
+      if (!accountId) {
         this.logService.warn('QA', `on_failure_ticket enabled for scenario ${scenario.id} but run ${run.id} has no workspace — skipping`);
         return null;
       }
@@ -105,7 +105,7 @@ export class QaFailureTicketService {
       // one-ticket-per-run. run.auto_ticket_id above still no-ops a re-finalize of
       // the SAME run in both modes.
       if ((cfg.dedupe || 'per_open_ticket') === 'per_open_ticket') {
-        const existing = await this._findOpenFailureTicket(scenario, workspaceId);
+        const existing = await this._findOpenFailureTicket(scenario, accountId);
         if (existing) {
           await this._appendRecurrenceComment(existing, run, scenario);
           await this._stampRunTicket(run.id, existing.id);
@@ -114,7 +114,7 @@ export class QaFailureTicketService {
         }
       }
 
-      const ticketId = await this._createTicket(run, scenario, cfg, workspaceId);
+      const ticketId = await this._createTicket(run, scenario, cfg, accountId);
       await this._stampRunTicket(run.id, ticketId);
       this.logService.info('QA', `on_failure_ticket: filed ticket ${ticketId} for failed run ${run.id} (scenario ${scenario.id})`);
       return ticketId;
@@ -155,9 +155,9 @@ export class QaFailureTicketService {
     if (!cfg?.enabled) return [];
 
     try {
-      const workspaceId = run.workspace_id || scenario.workspace_id;
-      if (!workspaceId) return [];
-      const open = await this._findOpenAutoFailureTickets(scenario, workspaceId);
+      const accountId = run.account_id || scenario.account_id;
+      if (!accountId) return [];
+      const open = await this._findOpenAutoFailureTickets(scenario, accountId);
       if (open.length === 0) return [];
 
       const closedIds: string[] = [];
@@ -189,12 +189,12 @@ export class QaFailureTicketService {
   // ── Internals ──────────────────────────────────────────────────────────────
 
   /** Root, non-archived, not-done tickets carrying the scenario marker tag, by creation time. */
-  private async _openScenarioTickets(scenario: QaScenario, workspaceId: string, order: 'ASC' | 'DESC'): Promise<Ticket[]> {
+  private async _openScenarioTickets(scenario: QaScenario, accountId: string, order: 'ASC' | 'DESC'): Promise<Ticket[]> {
     const marker = `${SCENARIO_TAG_PREFIX}${scenario.id}`;
     // Match the JSON-string tag list (`tags` is a JSON string column). LIKE
     // works identically on SQLite(dev) and Postgres(prod) — no JSON operators.
     return this.dataSource.getRepository(Ticket).createQueryBuilder('t')
-      .where('t.workspace_id = :ws', { ws: workspaceId })
+      .where('t.account_id = :ws', { ws: accountId })
       .andWhere('t.depth = 0')
       .andWhere('t.archived_at IS NULL')
       .andWhere('t.status <> :done', { done: DONE_STATUS })
@@ -203,8 +203,8 @@ export class QaFailureTicketService {
       .getMany();
   }
 
-  private async _findOpenFailureTicket(scenario: QaScenario, workspaceId: string): Promise<Ticket | null> {
-    const rows = await this._openScenarioTickets(scenario, workspaceId, 'DESC');
+  private async _findOpenFailureTicket(scenario: QaScenario, accountId: string): Promise<Ticket | null> {
+    const rows = await this._openScenarioTickets(scenario, accountId, 'DESC');
     return rows[0] ?? null;
   }
 
@@ -214,8 +214,8 @@ export class QaFailureTicketService {
    * only genuine QA-filed fix tickets are eligible for auto-close — a human
    * ticket that merely carries `qa-scenario:<id>` is skipped.
    */
-  private async _findOpenAutoFailureTickets(scenario: QaScenario, workspaceId: string): Promise<Ticket[]> {
-    const rows = await this._openScenarioTickets(scenario, workspaceId, 'ASC');
+  private async _findOpenAutoFailureTickets(scenario: QaScenario, accountId: string): Promise<Ticket[]> {
+    const rows = await this._openScenarioTickets(scenario, accountId, 'ASC');
     return rows.filter((t) => {
       const tags = parseTags(t.tags);
       return AUTO_TICKET_MARKER_TAGS.every((tag) => tags.includes(tag));
@@ -263,21 +263,21 @@ export class QaFailureTicketService {
     run: QaRun,
     scenario: QaScenario,
     cfg: QaOnFailureTicketConfig,
-    workspaceId: string,
+    accountId: string,
   ): Promise<string> {
     // A project id that no longer resolves in this workspace must not swallow
     // the failure report — file it without a project and say so in the log.
     let projectId: string | null = (cfg.project_id || '').trim() || null;
-    if (projectId && !(await this.projects.getInWorkspace(projectId, workspaceId))) {
-      this.logService.warn('QA', `on_failure_ticket: project ${projectId} not found in workspace ${workspaceId} (scenario ${scenario.id}) — filing without a project`);
+    if (projectId && !(await this.projects.getInWorkspace(projectId, accountId))) {
+      this.logService.warn('QA', `on_failure_ticket: project ${projectId} not found in workspace ${accountId} (scenario ${scenario.id}) — filing without a project`);
       projectId = null;
     }
     // assignee_runtime → scenario target_runtime → (omitted) project default_assignee.
     const assignee = parseRuntimeSpec(cfg.assignee_runtime) || parseRuntimeSpec(scenario.target_runtime);
 
-    const { ticket } = await this.ticketService.create(workspaceId, {
+    const { ticket } = await this.ticketService.create(accountId, {
       title: this._buildTitle(cfg, scenario),
-      description: await this._buildBody(run, scenario, workspaceId),
+      description: await this._buildBody(run, scenario, accountId),
       priority: cfg.priority || DEFAULT_PRIORITY,
       status: cfg.status === 'backlog' ? 'backlog' : 'todo',
       tags: this._buildTags(cfg, scenario.id, run.rerun_generation),
@@ -357,8 +357,8 @@ export class QaFailureTicketService {
     });
   }
 
-  private async _buildBody(run: QaRun, scenario: QaScenario, workspaceId: string): Promise<string> {
-    const qaDetailLink = `/ws/${workspaceId}/qa`;
+  private async _buildBody(run: QaRun, scenario: QaScenario, accountId: string): Promise<string> {
+    const qaDetailLink = `/qa`;
 
     // Pair each failed step result with its scenario step definition so the
     // body shows the action/expect a debugger needs (step_results store only

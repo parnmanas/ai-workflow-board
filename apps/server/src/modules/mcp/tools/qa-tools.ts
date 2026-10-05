@@ -45,7 +45,7 @@ import type { ToolContext } from './context';
 function scenarioToJson(s: QaScenario) {
   return {
     id: s.id,
-    workspace_id: s.workspace_id,
+    account_id: s.account_id,
     name: s.name,
     description: s.description,
     steps: s.steps ?? [],
@@ -82,7 +82,7 @@ function runToJson(r: QaRun) {
   return {
     id: r.id,
     scenario_id: r.scenario_id,
-    workspace_id: r.workspace_id,
+    account_id: r.account_id,
     status: r.status,
     room_id: r.room_id,
     step_results: r.step_results ?? [],
@@ -121,7 +121,7 @@ function batchToJson(b: QaRunBatch) {
   const ids = b.scenario_ids ?? [];
   return {
     id: b.id,
-    workspace_id: b.workspace_id,
+    account_id: b.account_id,
     scenario_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -176,12 +176,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'list_qa_scenarios',
     'List reusable QA scenarios in a workspace.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ workspace_id }) => {
+    async ({ account_id }) => {
       const repo = dataSource.getRepository(QaScenario);
       const qb = repo.createQueryBuilder('s')
-        .where('s.workspace_id = :ws', { ws: workspace_id });
+        .where('s.account_id = :ws', { ws: account_id });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return ok(rows.map(scenarioToJson));
     },
@@ -206,7 +206,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     '(e.g. "browser", "game-client", "http-api"); `qa_driver_config` holds driver settings ' +
     '(start URL, window title, base endpoint…). See docs/qa-driver-guide.md.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       name: z.string().describe('Scenario name (required)'),
       description: z.string().optional(),
       steps: z.array(stepSchema).optional().describe('Ordered step definitions'),
@@ -239,7 +239,7 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       const caller = getCallerAgent(extra);
       try {
         const row = await qaService.create({
-          workspace_id: args.workspace_id,
+          account_id: args.account_id,
           name: args.name,
           description: args.description,
           steps: args.steps,
@@ -270,10 +270,10 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'update_qa_scenario',
-    'Update a QA scenario. Only the provided fields change. `workspace_id` is required for scope safety.',
+    'Update a QA scenario. Only the provided fields change. `account_id` is required for scope safety.',
     {
       scenario_id: z.string().describe('QaScenario ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       name: z.string().optional(),
       description: z.string().optional(),
       steps: z.array(stepSchema).optional(),
@@ -296,10 +296,10 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
       qa_phases: QaPhasesSchema.nullable().optional()
         .describe('QA multi-phase model (see create_qa_scenario). Pass null to clear (legacy single-running).'),
     },
-    async ({ scenario_id, workspace_id, liveness_policy, qa_phases, ...patch }) => {
+    async ({ scenario_id, account_id, liveness_policy, qa_phases, ...patch }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
       try {
-        const row = await qaService.update(scenario_id, workspace_id, {
+        const row = await qaService.update(scenario_id, account_id, {
           ...(patch as any),
           // Serialize only when the key was provided; undefined leaves it untouched.
           ...(liveness_policy === undefined ? {} : { liveness_policy: serializeLivenessPolicy(liveness_policy) }),
@@ -317,12 +317,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'Delete a QA scenario and cascade-delete all its runs (and the chat room each run created).',
     {
       scenario_id: z.string().describe('QaScenario ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ scenario_id, workspace_id }) => {
+    async ({ scenario_id, account_id }) => {
       if (!qaService) return err('QA service unavailable in this MCP context');
       try {
-        await qaService.remove(scenario_id, workspace_id);
+        await qaService.remove(scenario_id, account_id);
         return ok({ success: true, id: scenario_id });
       } catch (e: any) {
         return err(e?.message || 'Failed to delete QA scenario');
@@ -366,18 +366,18 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'Re-recording the same idx overwrites that step.',
     {
       run_id: z.string().describe('QaRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       idx: z.number().describe('Step index this result is for'),
       status: z.enum(['pending', 'passed', 'failed', 'skipped']).describe('Step outcome'),
       log: z.string().optional().describe('Short evidence note for this step'),
       artifact_resource_ids: z.array(z.string()).optional().describe('Resource ids of screenshots/videos/dumps for this step'),
     },
-    async ({ run_id, workspace_id, idx, status, log, artifact_resource_ids }) => {
+    async ({ run_id, account_id, idx, status, log, artifact_resource_ids }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
         const row = await qaRunService.recordStep({
           runId: run_id,
-          workspaceId: workspace_id,
+          accountId: account_id,
           idx,
           status,
           log,
@@ -401,16 +401,16 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'choice; AWB only enforces that it advances in time. Rejected once the run is terminal.',
     {
       run_id: z.string().describe('QaRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       progress_token: z.number().describe('Monotonic progress token. STRICTLY increase to reset the liveness deadline; a same/lower value is a no-progress heartbeat that does not.'),
       note: z.string().optional().describe('Optional human-readable note (what advanced, e.g. "artifact_count 141→152")'),
     },
-    async ({ run_id, workspace_id, progress_token, note }) => {
+    async ({ run_id, account_id, progress_token, note }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
         const row = await qaRunService.recordHeartbeat({
           runId: run_id,
-          workspaceId: workspace_id,
+          accountId: account_id,
           progressToken: progress_token,
           note,
         });
@@ -432,13 +432,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'run is terminal.',
     {
       run_id: z.string().describe('QaRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       phase: z.string().describe('Phase id to enter (e.g. "import", "build", "run"). Should match an id in the resolved qa_phases for its timeout to apply.'),
     },
-    async ({ run_id, workspace_id, phase }) => {
+    async ({ run_id, account_id, phase }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const row = await qaRunService.setPhase(run_id, workspace_id, phase);
+        const row = await qaRunService.setPhase(run_id, account_id, phase);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to set QA phase');
@@ -452,13 +452,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     '(not tied to a specific step). Use record_qa_step for per-step evidence.',
     {
       run_id: z.string().describe('QaRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       resource_ids: z.array(z.string()).describe('Resource ids to attach'),
     },
-    async ({ run_id, workspace_id, resource_ids }) => {
+    async ({ run_id, account_id, resource_ids }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const row = await qaRunService.attachArtifact(run_id, workspace_id, resource_ids);
+        const row = await qaRunService.attachArtifact(run_id, account_id, resource_ids);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to attach QA artifact');
@@ -475,15 +475,15 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'A self-reported pass that fails the step/evidence gates is downgraded and will NOT advance the warm commit.',
     {
       run_id: z.string().describe('QaRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       status: z.enum(['passed', 'failed', 'error']).describe('Final run status'),
       summary: z.string().optional().describe('Human-readable run summary'),
       built_commit: z.string().optional().describe('Repo HEAD SHA built/tested. On a PASS it becomes the scenario last_built_commit → the next run is warm (cold_then_warm). Omit and the next run stays cold.'),
     },
-    async ({ run_id, workspace_id, status, summary, built_commit }) => {
+    async ({ run_id, account_id, status, summary, built_commit }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const row = await qaRunService.completeRun(run_id, workspace_id, status, summary, built_commit);
+        const row = await qaRunService.completeRun(run_id, account_id, status, summary, built_commit);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'Failed to complete QA run');
@@ -497,13 +497,13 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'and artifact_resource_ids for comparison across re-runs.',
     {
       scenario_id: z.string().describe('QaScenario ID'),
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       limit: z.number().optional().describe('Max rows (default 20, cap 100)'),
     },
-    async ({ scenario_id, workspace_id, limit }) => {
+    async ({ scenario_id, account_id, limit }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const rows = await qaRunService.listRuns(scenario_id, workspace_id, limit ?? 20);
+        const rows = await qaRunService.listRuns(scenario_id, account_id, limit ?? 20);
         return ok(rows.map(runToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list QA runs');
@@ -516,12 +516,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'Get a single QA run with its step_results and accumulated artifact_resource_ids.',
     {
       run_id: z.string().describe('QaRun ID'),
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ run_id, workspace_id }) => {
+    async ({ run_id, account_id }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const row = await qaRunService.getRun(run_id, workspace_id);
+        const row = await qaRunService.getRun(run_id, account_id);
         return ok(runToJson(row));
       } catch (e: any) {
         return err(e?.message || 'QA run not found');
@@ -535,22 +535,22 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     'start_qa_batch',
     'Start a SEQUENTIAL batch run of several QA scenarios — scenario N+1 only dispatches after ' +
     'scenario N reaches a terminal status (passed/failed/error), never all at once. Pass an ordered ' +
-    '`scenario_ids` list, OR `all: true` to expand to every enabled scenario in the Workspace. ' +
+    '`scenario_ids` list, OR `all: true` to expand to every enabled scenario in the Account. ' +
     '`stop_on_fail` (default false) halts the batch ' +
     'on the first non-passed run. Returns the batch with current_index/total + pass/fail rollup; poll ' +
     'get_qa_batch for progress.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       scenario_ids: z.array(z.string()).optional().describe('Ordered scenario ids to run (takes precedence over `all`)'),
       all: z.boolean().optional().describe('Run every enabled scenario in scope, in name order'),
       stop_on_fail: z.boolean().optional().describe('Halt on first non-passed run (default false → continue)'),
     },
-    async ({ workspace_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
+    async ({ account_id, scenario_ids, all, stop_on_fail }, extra: { sessionId?: string }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const batch = await qaRunService.startBatch({
-          workspaceId: workspace_id,
+          accountId: account_id,
           scenarioIds: scenario_ids,
           all: !!all,
           stopOnFail: !!stop_on_fail,
@@ -570,12 +570,12 @@ export function registerQaTools(server: McpServer, ctx: ToolContext): void {
     '(running/done/aborted), and the passed/failed/errored rollup.',
     {
       batch_id: z.string().describe('QaRunBatch ID'),
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ batch_id, workspace_id }) => {
+    async ({ batch_id, account_id }) => {
       if (!qaRunService) return err('QA run service unavailable in this MCP context');
       try {
-        const batch = await qaRunService.getBatch(batch_id, workspace_id);
+        const batch = await qaRunService.getBatch(batch_id, account_id);
         return ok(batchToJson(batch));
       } catch (e: any) {
         return err(e?.message || 'QA batch not found');

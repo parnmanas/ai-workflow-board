@@ -4,7 +4,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Adds the four composite indices that `activity_logs` was missing since
  * day one. The table is unbounded (every column move / claim / release /
  * comment / trigger_emitted / backlog_promotion_* writes a row), and the
- * service code grew read patterns that filter by ticket_id, workspace_id,
+ * service code grew read patterns that filter by ticket_id, account_id,
  * (entity_type, entity_id), and actor_id — none of which were indexed.
  * Every such query degraded to a sequential scan, which on a NAS host
  * with a spinning disk pinned disk I/O at 100% utilisation once the table
@@ -53,7 +53,7 @@ export class AddActivityLogIndices1760000000027 implements MigrationInterface {
     );
     await queryRunner.query(
       'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_activity_logs_workspace_created ' +
-      'ON activity_logs (workspace_id, created_at)'
+      'ON activity_logs (account_id, created_at)'
     );
     await queryRunner.query(
       'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_activity_logs_entity ' +

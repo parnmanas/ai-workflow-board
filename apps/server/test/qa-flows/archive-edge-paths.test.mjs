@@ -3,7 +3,7 @@
 // Scenarios the reviewer flagged as missing behavioural coverage
 // (the existing archive-exclusion-guard.test.mjs is static-grep only):
 //
-//   1. REST GET /api/workspaces/:id, the ticket list and MCP get_workspace
+//   1. REST GET /api/accounts/:id, the ticket list and MCP get_account
 //      must exclude archived tickets by default (and from the per-status
 //      ticket_counts).
 //   2. Creating a ticket directly in `done` must stamp terminal_entered_at, so
@@ -31,7 +31,7 @@ process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), __testDbName);
 
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
   createTicket,
@@ -44,10 +44,10 @@ const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
 
 process.env.PORT = process.env.QA_ARCHIVE_EDGE_PORT || '0';
 
-async function seedAgentComment(commentRepo, ticketId, workspaceId, author, content, createdAt) {
+async function seedAgentComment(commentRepo, ticketId, accountId, author, content, createdAt) {
   const saved = await commentRepo.save(commentRepo.create({
     ticket_id: ticketId,
-    workspace_id: workspaceId,
+    account_id: accountId,
     author_type: 'agent',
     author_id: 'agent-fixture',
     author,
@@ -71,10 +71,10 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   const archiver = app.get(archiverModule.TicketArchiverService);
 
   step('Seed workspace + driver agent + user session');
-  const ws = await createWorkspace(app, getDataSourceToken, 'archive-edges');
+  const ws = await createAccount(app, getDataSourceToken, 'archive-edges');
   const driverAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'driver', runtime: true });
   const driverKey = await createApiKey(app, getDataSourceToken, driverAgent.id, {
-    workspaceId: ws.id, label: 'driver',
+    accountId: ws.id, label: 'driver',
   });
 
   const user = await createUser(app, getDataSourceToken, { name: 'archive-user' });
@@ -83,7 +83,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
 
   const ticketRepo = ds.getRepository('Ticket');
   const commentRepo = ds.getRepository('Comment');
-  const wsRepo = ds.getRepository('Workspace');
+  const wsRepo = ds.getRepository('Account');
   const HOUR = 3_600_000;
 
   const rest = (method, urlPath, body) => fetch(`http://localhost:${port}/api${urlPath}`, {
@@ -91,7 +91,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${userToken}`,
-      'X-Workspace-Id': ws.id,
+      'X-Account-Id': ws.id,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -108,39 +108,39 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   // not dispatch.
 
   // ─── Subtest 1 — workspace REST + ticket list + MCP default exclusion ───
-  await t.test('REST /api/workspaces/:id, the ticket list and MCP get_workspace exclude archived tickets', async () => {
+  await t.test('REST /api/accounts/:id, the ticket list and MCP get_account exclude archived tickets', async () => {
     step('Seed two tickets in the same status: one active, one archived');
     const activeRow = await createTicket(app, getDataSourceToken, {
-      workspaceId: ws.id, status: 'backlog', title: 'active row', assignee: driverAgent,
+      accountId: ws.id, status: 'backlog', title: 'active row', assignee: driverAgent,
     });
     const archivedRow = await createTicket(app, getDataSourceToken, {
-      workspaceId: ws.id, status: 'backlog', title: 'archived row', assignee: driverAgent,
+      accountId: ws.id, status: 'backlog', title: 'archived row', assignee: driverAgent,
     });
     await ticketRepo.update(archivedRow.id, { archived_at: new Date() });
 
-    step('REST GET /api/workspaces/:id');
-    const restRes = await rest('GET', `/workspaces/${ws.id}`);
+    step('REST GET /api/accounts/:id');
+    const restRes = await rest('GET', `/accounts/${ws.id}`);
     assert.equal(restRes.status, 200, `REST workspace fetch must return 200, got ${restRes.status}`);
     const restBody = await restRes.json();
     assert.equal(restBody.ticket_counts.backlog, 1,
       `REST workspace ticket_counts must reflect only the active ticket (got ${JSON.stringify(restBody.ticket_counts)})`);
 
-    step('REST GET /api/workspaces/:wsId/tickets');
-    const listRes = await rest('GET', `/workspaces/${ws.id}/tickets?status=backlog`);
+    step('REST GET /api/accounts/:wsId/tickets');
+    const listRes = await rest('GET', `/accounts/${ws.id}/tickets?status=backlog`);
     assert.equal(listRes.status, 200);
     const listTitles = (await listRes.json()).tickets.map((row) => row.title);
     assert.ok(listTitles.includes('active row'), 'active ticket must appear in the ticket list');
     assert.ok(!listTitles.includes('archived row'),
       'archived ticket must NOT appear in the ticket list by default');
-    const archivedOnly = await (await rest('GET', `/workspaces/${ws.id}/tickets?archived_only=1`)).json();
+    const archivedOnly = await (await rest('GET', `/accounts/${ws.id}/tickets?archived_only=1`)).json();
     assert.deepEqual(archivedOnly.tickets.map((row) => row.id), [archivedRow.id],
       'archived_only=1 is the opt-in archive view');
 
-    step('MCP get_workspace');
-    const mcpRes = await mcp.callTool('get_workspace', { workspace_id: ws.id });
-    assert.ok(mcpRes && !mcpRes.isError, `get_workspace failed: ${JSON.stringify(mcpRes)}`);
+    step('MCP get_account');
+    const mcpRes = await mcp.callTool('get_account', { account_id: ws.id });
+    assert.ok(mcpRes && !mcpRes.isError, `get_account failed: ${JSON.stringify(mcpRes)}`);
     assert.equal(mcpRes.ticket_counts.backlog, 1,
-      `MCP get_workspace ticket_counts must reflect only the active ticket (got ${JSON.stringify(mcpRes.ticket_counts)})`);
+      `MCP get_account ticket_counts must reflect only the active ticket (got ${JSON.stringify(mcpRes.ticket_counts)})`);
 
     // Sanity: cleanup so the later subtests don't see these tickets.
     await ticketRepo.delete({ id: activeRow.id });
@@ -151,7 +151,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   await t.test('Creating a ticket directly in done stamps terminal_entered_at and is archivable', async () => {
     step('MCP create_ticket straight into done');
     const created = await mcp.callTool('create_ticket', {
-      workspace_id: ws.id,
+      account_id: ws.id,
       title: 'born-in-done',
       status: 'done',
       assignee: driverAgent.runtime_spec,
@@ -163,7 +163,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
       'terminal_entered_at must be stamped when a ticket is created directly in done');
 
     step('REST create directly into done also stamps terminal_entered_at');
-    const restRes = await rest('POST', `/workspaces/${ws.id}/tickets`, {
+    const restRes = await rest('POST', `/accounts/${ws.id}/tickets`, {
       title: 'born-in-done-rest', status: 'done', assignee: driverAgent.runtime_spec,
     });
     assert.equal(restRes.status, 201, `REST create must return 201, got ${restRes.status}`);
@@ -194,7 +194,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   await t.test('A comment newer than the cutoff keeps a done ticket out of the archiver', async () => {
     step('Create a done ticket whose entry + edit are old but carries a recent comment');
     const tkt = await createTicket(app, getDataSourceToken, {
-      workspaceId: ws.id, status: 'done', title: 'idle-but-commented', assignee: driverAgent,
+      accountId: ws.id, status: 'done', title: 'idle-but-commented', assignee: driverAgent,
     });
     await wsRepo.update({ id: ws.id }, { auto_archive_days: 1 });
     const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000);
@@ -223,7 +223,7 @@ test('Archive edge-path regressions (ticket 9b44526b)', async (t) => {
   await t.test('MCP archive_ticket clears operational_dedupe_key when archiving an open ticket', async () => {
     step('Create an open ticket carrying an outreach-style dedupe key');
     const outreachLike = await createTicket(app, getDataSourceToken, {
-      workspaceId: ws.id, status: 'backlog',
+      accountId: ws.id, status: 'backlog',
       title: 'outreach-created ticket', assignee: driverAgent,
     });
     await ticketRepo.update(outreachLike.id, {

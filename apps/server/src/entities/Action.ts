@@ -8,7 +8,7 @@ import { CheckoutMode, WorkspaceFolderRepoRef } from '../common/workspace-folder
 // the room via the existing chat_room_message SSE flow — no new event type is
 // needed because Run-as-chat-room reuses the room infrastructure verbatim.
 //
-// workspace_id is required.
+// account_id is required.
 @Entity('actions')
 export class Action {
   @AfterLoad()
@@ -24,7 +24,7 @@ export class Action {
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   @Column({ type: 'varchar' })
   name: string;
@@ -45,9 +45,9 @@ export class Action {
   target_runtimes: Array<Record<string, any>> | null;
 
   /**
-   * @deprecated 크론은 Workspace Schedule 로 옮겼다 — `workspace_schedules.action_id`
+   * @deprecated 크론은 Account Schedule 로 옮겼다 — `automation_schedules.action_id`
    * 가 이 Action 을 가리키고 "언제" 는 그쪽이 정한다. 이유는
-   * `entities/WorkspaceSchedule.ts` 헤더 참조(구현이 두 벌이었고 이쪽은 로컬시간
+   * `entities/AutomationSchedule.ts` 헤더 참조(구현이 두 벌이었고 이쪽은 로컬시간
    * tick-match 라 서버가 그 1분에 죽어 있으면 실행이 조용히 사라졌다).
    *
    * 컬럼은 **이번 릴리스에서 아직 지우지 않는다.** `synchronize: true` 가 마이그레이션

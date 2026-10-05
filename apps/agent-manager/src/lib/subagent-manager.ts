@@ -324,7 +324,7 @@ interface SubagentRecord {
   chat_request_id: string | null;
   ticket_id: string | null;
   agent_id: string | null;
-  /** Workspace role slug the spawn acted as (assignee / reviewer / …). Mirrors
+  /** Account role slug the spawn acted as (assignee / reviewer / …). Mirrors
    *  the role pinned onto the per-spawn mcp-config. Captured so stopForAgent
    *  can report the in-flight (ticket, role) pair a killed zombie was holding,
    *  which restart_agent re-pushes for immediate resume. Empty for chat /
@@ -680,9 +680,9 @@ export class SubagentManager implements SubagentManagerContract {
     const adapter = this.#adapterFor(ctx?.cli);
     const effectiveApiKey = ctx?.api_key || this.#config.apiKey;
     const effectiveCwd = ctx?.cwd || undefined;
-    // Board/workspace harness (e9c7a896): keep the keys this adapter can
+    // Account harness (e9c7a896): keep the keys this adapter can
     // express, warn + skip the rest — a key the CLI can't map is a graceful
-    // skip, never a refusal to spawn. harness.model (workspace-level intent)
+    // skip, never a refusal to spawn. harness.model (account-level intent)
     // beats the per-agent Agent.model default.
     const { applied: harness, skipped: harnessSkipped } = partitionHarness(adapter, spec.harness);
     if (harnessSkipped.length > 0) {
@@ -696,7 +696,7 @@ export class SubagentManager implements SubagentManagerContract {
       );
     }
     // ticket 5851e435: 실행 권한의 단일 기준. Agent trust
-    // (`runtime_config.permission_mode`)가 workspace harness
+    // (`runtime_config.permission_mode`)가 account harness
     // `permission_mode` 를 이긴다 — 그래서 trusted 에이전트는 보드가 어떤
     // harness 값을 걸어도 최고 권한 플래그를 잃지 않는다. 정책은 partition
     // **이전**의 raw harness 로 계산한다: 어댑터가 permission_mode 를
@@ -885,18 +885,18 @@ export class SubagentManager implements SubagentManagerContract {
           // mcpConfigPathFor(..., profile), so concurrent spawns of
           // DIFFERENT profiles for the same agent can never race on one file.
           //
-          // Ticket ee26302d review round 3 (P1): pass ctx.workspace_id through
-          // here too — omitting it (as round 2 did) collapses workspace A and
-          // workspace B onto the SAME unscoped path whenever they share an
-          // agent id, so whichever workspace spawns first "wins" the file and
+          // Ticket ee26302d review round 3 (P1): pass ctx.account_id through
+          // here too — omitting it (as round 2 did) collapses account A and
+          // account B onto the SAME unscoped path whenever they share an
+          // agent id, so whichever account spawns first "wins" the file and
           // the other silently reuses it (wrong Authorization, or a stale
-          // auth failure) instead of getting its own workspace-scoped config.
+          // auth failure) instead of getting its own account-scoped config.
           const profile = toolProfileHeader['X-AWB-Tool-Profile'] === 'compact' ? 'compact' : 'full';
-          const profileConfigPath = mcpConfigPathFor(ctx.agent_id, ctx.workspace_id, profile);
+          const profileConfigPath = mcpConfigPathFor(ctx.agent_id, ctx.account_id, profile);
           configPath = existsSync(profileConfigPath)
             ? profileConfigPath
             : await writeMcpConfig(
-                ctx.agent_id, this.#config.url, effectiveApiKey, ctx.workspace_id, toolProfileHeader,
+                ctx.agent_id, this.#config.url, effectiveApiKey, ctx.account_id, toolProfileHeader,
               );
           configPathIsTemp = false;
         } else {
@@ -1717,7 +1717,7 @@ export class SubagentManager implements SubagentManagerContract {
       try {
         const resp = await callMcpTool(this.#config, route.getTool, {
           run_id: run.run_id,
-          workspace_id: run.workspace_id,
+          account_id: run.account_id,
         });
         const rec = unwrapToolResult(resp);
         if (rec && typeof rec.status === 'string') status = rec.status;
@@ -1754,7 +1754,7 @@ export class SubagentManager implements SubagentManagerContract {
       `reaped pids: ${pidList}. ${detail}`;
     await fireAndForgetTool(this.#config, route.completeTool, {
       run_id: run.run_id,
-      workspace_id: run.workspace_id,
+      account_id: run.account_id,
       status: route.failureStatus,
       summary,
     });
@@ -1819,7 +1819,7 @@ export class SubagentManager implements SubagentManagerContract {
           `종료를 유발한 매니저 측 동작이 관측되지 않았습니다.`;
     await fireAndForgetTool(this.#config, route.completeTool, {
       run_id: run.run_id,
-      workspace_id: run.workspace_id,
+      account_id: run.account_id,
       status: route.failureStatus,
       summary,
     });

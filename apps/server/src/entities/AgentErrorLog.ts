@@ -11,7 +11,7 @@ export class AgentErrorLog {
   agent_id: string;
 
   @Column({ type: 'varchar', nullable: true, default: null })
-  workspace_id: string | null;
+  account_id: string | null;
 
   @Column({ type: Date })
   occurred_at: Date;

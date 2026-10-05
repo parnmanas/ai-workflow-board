@@ -76,7 +76,7 @@ export function registerTicketAttachmentTools(server: McpServer, ctx: ToolContex
         owner_type: 'ticket',
         owner_id: ticket_id,
         ticket_id,
-        workspace_id: ticket.workspace_id || '',
+        account_id: ticket.account_id || '',
         file_name,
         file_mimetype: mimetype,
         file_data,

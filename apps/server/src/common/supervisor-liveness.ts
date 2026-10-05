@@ -25,14 +25,14 @@
 // from it, and make an over-large value observable.
 
 /**
- * Entity / migration default for Workspace.supervisor_stale_ms (30 min).
+ * Entity / migration default for Account.supervisor_stale_ms (30 min).
  * Single source of truth — imported by TicketSupervisorService as its in-code
  * fallback and used here to derive the "surprisingly large" threshold.
  */
 export const DEFAULT_SUPERVISOR_STALE_MS = 30 * 60_000; // 30 min
 
 /**
- * Entity / migration default for Workspace.supervisor_resend_ms (5 min) — the
+ * Entity / migration default for Account.supervisor_resend_ms (5 min) — the
  * cooldown between supervisor re-pushes. Centralized here alongside the stale
  * default so the supervisor tick and the cadence diagnostic share ONE value.
  */

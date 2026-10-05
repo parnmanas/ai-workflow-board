@@ -96,7 +96,7 @@ const noQuiesce = { isQuiesced: async () => false };
 function makeMission(id, overrides = {}) {
   return {
     id,
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     team_id: 'team-1',
     title: `Mission ${id}`,
     status: 'running',
@@ -160,7 +160,7 @@ function makeHarness({ missions = [], steps = [], events = [], nudgeOrchestrator
   const runnerStub = {
     nudgeOrchestrator:
       nudgeOrchestrator ??
-      (async (missionId, _workspaceId, _actor, note, reasonTag) => {
+      (async (missionId, _accountId, _actor, note, reasonTag) => {
         nudges.push({ missionId, note, reasonTag });
         events.push(makeEvent(`ev-nudge-${++seq}`, missionId, 'orchestrator_woken', { reason: reasonTag }, clock.now));
       }),

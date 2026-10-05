@@ -3,7 +3,7 @@ import { ServeStaticModule } from '@nestjs/serve-static';
 import { join, sep } from 'path';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
-import { WorkspacesModule } from './modules/workspaces/workspaces.module';
+import { AccountsModule } from './modules/accounts/accounts.module';
 import { TicketsModule } from './modules/tickets/tickets.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { UsersModule } from './modules/users/users.module';
@@ -28,7 +28,7 @@ import { AgentLogsModule } from './modules/agent-logs/agent-logs.module';
 import { MentionsModule } from './modules/mentions/mentions.module';
 import { AgentManagerModule } from './modules/agent-manager/agent-manager.module';
 import { UserChannelsModule } from './modules/user-channels/user-channels.module';
-import { WorkspaceScheduleModule } from './modules/workspace-schedule/workspace-schedule.module';
+import { WorkspaceScheduleModule } from './modules/automation-schedule/automation-schedule.module';
 import { WorkflowFunctionsModule } from './modules/workflow-functions/workflow-functions.module';
 import { SkillsModule } from './modules/skills/skills.module';
 import { ArtifactRefsModule } from './modules/artifact-refs/artifact-refs.module';
@@ -76,7 +76,7 @@ import { VoiceModule } from './modules/voice/voice.module';
       },
     }),
     AuthModule,
-    WorkspacesModule,
+    AccountsModule,
     ProjectsModule,
     TicketsModule,
     UsersModule,

@@ -33,7 +33,7 @@ import { resolveCallerIdentityRow } from '../../mcp/shared/authz';
 import { ChatRoom } from '../../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../../entities/ChatRoomParticipant';
 import { LogService } from '../../../services/log.service';
-import { agentIsVisibleInWorkspace } from '../../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../../common/agent-account-scope';
 import { RoomMessagingService } from '../../chat-rooms/room-messaging.service';
 import { clampEnv } from '../outreach-polling.service';
 import { InboundItem } from '../connectors/types';
@@ -94,7 +94,7 @@ export class AgentDispatchClassifier implements OutreachClassifier {
 
   private async _dispatch(context: ClassificationContext, agent: { id: string }, item: InboundItem, runId: string): Promise<void> {
     const room = await this.roomRepo.save(this.roomRepo.create({
-      workspace_id: context.workspaceId,
+      account_id: context.accountId,
       type: 'group',
       name: `Outreach classification: ${(item.title || item.external_item_id || '').slice(0, 150)}`,
       last_message_at: null,
@@ -111,6 +111,6 @@ export class AgentDispatchClassifier implements OutreachClassifier {
     ]);
 
     const prompt = renderOutreachClassificationPrompt(context, item, runId);
-    await this.messaging.sendMessage(room.id, context.workspaceId, 'user', 'system', 'Outreach', prompt);
+    await this.messaging.sendMessage(room.id, context.accountId, 'user', 'system', 'Outreach', prompt);
   }
 }

@@ -271,7 +271,7 @@ export class OutreachIngestService {
     }
 
     const { category, confidence } = await this.classifier.classify(item, {
-      workspaceId: channel.workspace_id,
+      accountId: channel.account_id,
       channelId: channel.id,
       channelKind: channel.kind,
       classifierRuntime: channel.classifier_runtime,
@@ -315,7 +315,7 @@ export class OutreachIngestService {
     let claimed: OutreachInboundItem;
     try {
       claimed = await this.itemRepo.save(this.itemRepo.create({
-        workspace_id: channel.workspace_id,
+        account_id: channel.account_id,
         channel_id: channel.id,
         external_item_id: item.external_item_id,
         classification: category,
@@ -415,7 +415,7 @@ export class OutreachIngestService {
 
     try {
       await this.itemRepo.save(this.itemRepo.create({
-        workspace_id: channel.workspace_id,
+        account_id: channel.account_id,
         channel_id: channel.id,
         external_item_id: item.external_item_id,
         classification: '',
@@ -584,7 +584,7 @@ export class OutreachIngestService {
     // that the next poll re-links through the same key, minus those rows.
     // Assignee: omitted on purpose so the target project's default_assignee
     // (if any) picks the ticket up; no project → unassigned, never dispatched.
-    const { ticket } = await this.tickets.create(channel.workspace_id, {
+    const { ticket } = await this.tickets.create(channel.account_id, {
       title: this._buildTitle(channel, item),
       description: this._buildDescription(channel, item),
       priority: category === 'bug' ? 'high' : 'medium',
@@ -605,7 +605,7 @@ export class OutreachIngestService {
   private async _resolveProjectId(channel: OutreachChannel): Promise<string | null> {
     if (!channel.target_project_id) return null;
     const project = await this.dataSource.getRepository(Project).findOne({
-      where: { id: channel.target_project_id, workspace_id: channel.workspace_id },
+      where: { id: channel.target_project_id, account_id: channel.account_id },
     });
     if (project) return project.id;
     this.logService.warn('Outreach', `channel ${channel.id} targets missing project ${channel.target_project_id}; filing without a project`, {

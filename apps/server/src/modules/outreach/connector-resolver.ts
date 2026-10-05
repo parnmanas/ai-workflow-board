@@ -31,7 +31,7 @@ export async function resolveChannelConnector(
   channel: OutreachChannel,
   credentialRepo: Repository<Credential>,
 ): Promise<OutreachConnector> {
-  const credential = await resolveOutreachCredential(credentialRepo, channel.credential_id, channel.workspace_id);
+  const credential = await resolveOutreachCredential(credentialRepo, channel.credential_id, channel.account_id);
   if (channel.kind === 'reddit') {
     if (!credential) throw new Error(`outreach channel ${channel.id} (reddit) has no credential configured`);
     // Fail-closed (ticket risk item: whitelist-only, never auto-expand) —

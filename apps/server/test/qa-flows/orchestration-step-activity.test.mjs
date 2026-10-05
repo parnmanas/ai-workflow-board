@@ -23,7 +23,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
-import { createUser, createWorkspace, createApiKey } from '../helpers/fixtures.mjs';
+import { createUser, createAccount, createApiKey } from '../helpers/fixtures.mjs';
+import { ReBACService } from '../../dist/services/rebac.service.js';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -62,12 +63,12 @@ async function loadServices() {
  * `created_at` 은 @CreateDateColumn 이라 insert 시점 값이 들어가므로, 순서를 확정하려면
  * 저장 후 명시적으로 덮어쓴다(@UpdateDateColumn 과 달리 update 가 이 값을 건드리지 않는다).
  */
-async function putHeartbeat(ds, { roomId, workspaceId, senderId, content, at }) {
+async function putHeartbeat(ds, { roomId, accountId, senderId, content, at }) {
   const repo = ds.getRepository('ChatRoomMessage');
   const row = await repo.save(
     repo.create({
       room_id: roomId,
-      workspace_id: workspaceId,
+      account_id: accountId,
       sender_type: 'agent',
       sender_id: senderId,
       content,
@@ -99,13 +100,18 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
   const runner = app.get(services.OrchestrationRunnerService);
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'step-activity');
-  const other = await createWorkspace(app, getDataSourceToken, 'step-activity-other');
+  const ws = await createAccount(app, getDataSourceToken, 'step-activity');
+  const other = await createAccount(app, getDataSourceToken, 'step-activity-other');
   const operator = await createUser(app, getDataSourceToken, { name: 'activity-operator' });
   const token = app.get(AuthService).createSession(operator.id);
+  const deniedUser = await createUser(app, getDataSourceToken, { name: 'other-account-only', role: 'user' });
+  await ds.getRepository('User').update(deniedUser.id, { permissions: JSON.stringify(['admin.actions']) });
+  await app.get(ReBACService).grant({ type: 'user', id: deniedUser.id }, 'member', { type: 'account', id: other.id });
+  const deniedAuthorization = `Bearer ${app.get(AuthService).createSession(deniedUser.id)}`;
+
 
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Activity squad',
     team: { max_parallel_steps: 3, created_by: HUMAN.id },
     members: [{ role_label: 'builder' }],
@@ -114,7 +120,7 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
   const worker = squad.member('builder');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Activity mission',
     objective: 'ship it',
@@ -123,8 +129,8 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
   });
   await runner.startMission(mission.id, ws.id, HUMAN);
 
-  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label: 'lead' });
-  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { workspaceId: ws.id, label: 'worker' });
+  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label: 'lead' });
+  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { accountId: ws.id, label: 'worker' });
   const leadMcp = new McpClient({ baseUrl: base, apiKey: leadKey.raw_key });
   const workerMcp = new McpClient({ baseUrl: base, apiKey: workerKey.raw_key });
   t.after(() => {
@@ -165,14 +171,14 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
   const now = Date.now();
   await putHeartbeat(ds, {
     roomId: buildRoom.id,
-    workspaceId: ws.id,
+    accountId: ws.id,
     senderId: worker.id,
     content: '_💻 명령 · 첫 번째 명령_',
     at: new Date(now - 120_000),
   });
   await putHeartbeat(ds, {
     roomId: buildRoom.id,
-    workspaceId: ws.id,
+    accountId: ws.id,
     senderId: worker.id,
     // 매니저가 실제로 쓰는 이스케이프를 포함한다: `\_` 두 개와 백틱.
     content: '_✅ 명령 완료 · $env:GIT\\_TERMINAL\\_PROMPT=0; git status \\`short\\`_',
@@ -234,8 +240,8 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
 
   logStep('REST 세션 기록은 끝난 step 에 대해서도 읽힌다 (무엇을 하다 멈췄나)');
   const res = await fetch(
-    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}&limit=50`,
-    { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id } },
+    `${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${ws.id}&limit=50`,
+    { headers: { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id } },
   );
   assert.equal(res.status, 200);
   const log = await res.json();
@@ -260,15 +266,15 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
 
   logStep('커서로 과거를 이어 붙일 수 있다');
   const firstPage = await fetch(
-    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}&limit=2`,
-    { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id } },
+    `${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${ws.id}&limit=2`,
+    { headers: { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id } },
   ).then((r) => r.json());
   assert.equal(firstPage.items.length, 2);
   assert.equal(firstPage.has_more, true, '더 있으면 그렇다고 말한다');
   assert.ok(firstPage.next_before_id, '다음 페이지 커서를 준다');
   const secondPage = await fetch(
-    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}&limit=2&before_id=${firstPage.next_before_id}`,
-    { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id } },
+    `${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${ws.id}&limit=2&before_id=${firstPage.next_before_id}`,
+    { headers: { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id } },
   ).then((r) => r.json());
   assert.ok(secondPage.items.length > 0, '커서 뒤로 이어진다');
   const firstIds = new Set(firstPage.items.map((i) => i.id));
@@ -279,12 +285,12 @@ test('진행 중 step 의 활동 신호가 미션 페이로드에 실리고, 세
 
   logStep('워크스페이스 경계를 지킨다');
   const wrong = await fetch(
-    `${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${other.id}`,
-    { headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': other.id } },
+    `${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${other.id}`,
+    { headers: { Authorization: deniedAuthorization, 'X-Account-Id': other.id } },
   );
-  assert.equal(wrong.status, 404, '다른 워크스페이스에서는 step 자체가 보이지 않는다');
+  assert.equal(wrong.status, 403, '실제 소유 계정에 접근할 수 없는 사용자는 step 전사를 읽을 수 없다');
 
-  const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/session?workspace_id=${ws.id}`);
+  const anon = await fetch(`${base}/api/orchestration/steps/${steps.build.id}/session?account_id=${ws.id}`);
   assert.ok(anon.status === 401 || anon.status === 403, `인증 없이는 읽을 수 없다 (got ${anon.status})`);
 });
 

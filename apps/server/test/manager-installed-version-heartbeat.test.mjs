@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
 process.env.PORT = process.env.MANAGER_INSTALLED_VERSION_PORT || '0';
@@ -19,7 +19,7 @@ async function heartbeat(port, key, manager, workspace, body) {
     body: JSON.stringify({
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       mode: 'manager',
       hostname: 'installed-version-host',
       plugin_version: '1.6.246',
@@ -37,9 +37,9 @@ test('heartbeat installed_version/restart_required round-trip; absence stays und
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'installed-version');
+  const workspace = await createAccount(app, getDataSourceToken, 'installed-version');
   const manager = await createAgent(app, getDataSourceToken, null, { name: 'installed-version-host', type: 'manager' });
-  const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: workspace.id, label: 'installed-version' });
+  const key = await createApiKey(app, getDataSourceToken, manager.id, { accountId: workspace.id, label: 'installed-version' });
   const registry = app.get(InstanceRegistryService);
 
   // 구버전 매니저: 필드 자체가 없다

@@ -12,7 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
   createUser,
@@ -27,16 +27,16 @@ test('chat_room_message is delivered only to the room participants', async (t) =
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-room');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-room');
 
   const agentInRoom = await createAgent(app, getDataSourceToken, ws.id, { name: 'insider' });
   const keyIn = await createApiKey(app, getDataSourceToken, agentInRoom.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'insider',
   });
   const agentOutOfRoom = await createAgent(app, getDataSourceToken, ws.id, { name: 'outsider' });
   const keyOut = await createApiKey(app, getDataSourceToken, agentOutOfRoom.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'outsider',
   });
   const userInRoom = await createUser(app, getDataSourceToken, { name: 'room-user' });
@@ -72,7 +72,7 @@ test('chat_room_message is delivered only to the room participants', async (t) =
   // member_ids + agent_member_ids are the scope hints the SSE filter uses.
   activityEvents.emit('chat_room_message', {
     room_id: roomId,
-    workspace_id: ws.id,
+    account_id: ws.id,
     message_id: 'msg-1',
     sender_type: 'user',
     sender_id: userInRoom.id,

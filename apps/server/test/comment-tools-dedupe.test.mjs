@@ -75,7 +75,7 @@ function registerTools(ctxOverrides = {}) {
 
 async function makeTicket(overrides = {}) {
   return ticketRepo.save(ticketRepo.create({
-    title: 'T', workspace_id: 'w1', pending_user_action: false, ...overrides,
+    title: 'T', account_id: 'w1', pending_user_action: false, ...overrides,
   }));
 }
 function parse(res) {
@@ -384,7 +384,7 @@ test('a dedupe_key note carrying an attachment is never merged — the attachmen
   const addComment = handlers.get('add_comment');
   const t = await makeTicket();
   const resource = await resourceRepo.save(resourceRepo.create({
-    workspace_id: t.workspace_id, type: 'comment_attachment', name: 'log.txt',
+    account_id: t.account_id, type: 'comment_attachment', name: 'log.txt',
   }));
 
   const a = parse(await addComment({

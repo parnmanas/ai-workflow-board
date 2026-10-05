@@ -34,7 +34,7 @@ const modPath = (...p) => 'file://' + path.join(DIST, ...p);
 const { TicketDispatchService } = await import(modPath('modules', 'agents', 'ticket-dispatch.service.js'));
 const { QaScheduleService } = await import(modPath('modules', 'qa', 'qa-schedule.service.js'));
 const { SecurityScheduleService } = await import(modPath('modules', 'security', 'security-schedule.service.js'));
-const { WorkspaceScheduleService } = await import(modPath('modules', 'workspace-schedule', 'workspace-schedule.service.js'));
+const { WorkspaceScheduleService } = await import(modPath('modules', 'automation-schedule', 'automation-schedule.service.js'));
 const { AgentAutostartService } = await import(modPath('modules', 'agents', 'agent-autostart.service.js'));
 // Review round 1 P2 (blocking) — the paths the reviewer named as bypassing
 // quiesce entirely: ActionScheduler, OutreachPolling, OrchestrationReaper,
@@ -42,7 +42,7 @@ const { AgentAutostartService } = await import(modPath('modules', 'agents', 'age
 // to share the same class of gap. (FeaturesService was the other one; the
 // feature-chain feature was removed with boards, so its gate went with it.)
 //
-// ActionSchedulerService 는 삭제됐다 — Action 의 cron 이 Workspace Schedule 로
+// ActionSchedulerService 는 삭제됐다 — Action 의 cron 이 Account Schedule 로
 // 옮겨 갔기 때문이다. 그 게이트는 사라진 게 아니라 **WorkspaceScheduleService.runOnce
 // 로 합쳐졌고**, 그쪽 케이스는 이 파일 위에 이미 있다. 예약 실행 경로가 quiesce 를
 // 우회하지 않는다는 이 파일의 계약은 그대로 지켜진다.
@@ -70,7 +70,7 @@ function makeTicketDispatch({ dataSource = {}, instanceQuiesce = quiescedTrue } 
 test('TicketDispatchService.startQueued (todo queue pump) short-circuits while quiesced, before reading any ticket', async () => {
   // dataSource has no getRepository at all — the pump must return before it.
   const svc = makeTicketDispatch();
-  assert.equal(await svc.startQueued({ workspaceId: 'w1' }), 0, 'a quiesced instance must never start a queued ticket');
+  assert.equal(await svc.startQueued({ accountId: 'w1' }), 0, 'a quiesced instance must never start a queued ticket');
 });
 
 test('TicketDispatchService.dispatch refuses while quiesced, before the host reachability check or any agent_trigger', async () => {
@@ -80,7 +80,7 @@ test('TicketDispatchService.dispatch refuses while quiesced, before the host rea
   const dataSource = { getRepository: () => ({ findOne: async () => ({ id: 'w1', dispatch_paused_at: null }) }) };
   const svc = makeTicketDispatch({ dataSource });
   const ticket = {
-    id: 'tk-1', workspace_id: 'w1', status: 'in_progress', archived_at: null,
+    id: 'tk-1', account_id: 'w1', status: 'in_progress', archived_at: null,
     pending_user_action: false, pending_on_tickets: false, pending_ci_wait: false,
     assignee: {
       manager_agent_id: 'host-1', cli: 'claude', model: null, working_dir: '/work/quiesce',
@@ -133,7 +133,7 @@ test('AgentAutostartService chat-path autostart (_handleChatRequest) short-circu
   // Valid-looking event so the FIRST guard (`!evt?.agent_id || !evt.room_id`)
   // is passed and the quiesce check is what actually gates this call — a
   // malformed event returning early would be a false positive for this test.
-  await assert.doesNotReject(() => svc._handleChatRequest({ agent_id: 'a1', room_id: 'r1', workspace_id: 'w1' }));
+  await assert.doesNotReject(() => svc._handleChatRequest({ agent_id: 'a1', room_id: 'r1', account_id: 'w1' }));
 });
 
 test('[review round 1 P2] OnTicketDoneActionService activity handler short-circuits while quiesced, before even reading the ticket', async () => {
@@ -197,6 +197,6 @@ test('every scheduler + the ticket dispatcher runs its normal path when NOT quie
     dataSource: { getRepository: () => ({ find: async () => { ticketFindCalled = true; return []; } }) },
     instanceQuiesce: quiescedFalse,
   });
-  assert.equal(await dispatcher.startQueued({ workspaceId: 'w1' }), 0);
+  assert.equal(await dispatcher.startQueued({ accountId: 'w1' }), 0);
   assert.equal(ticketFindCalled, true, 'when not quiesced, the dispatcher must proceed past the gate and read the todo queue');
 });

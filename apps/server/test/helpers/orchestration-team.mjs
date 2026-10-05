@@ -22,10 +22,10 @@ export const TEST_WORKING_DIR = '/srv/awb-test/workspace';
  * A Runtime Host (manager identity) a slot can be placed on, plus its api key.
  * Tests that only need "somewhere to run" can let `buildTeam` make one.
  */
-export async function createRuntimeHost(app, getDataSourceToken, workspaceId, { name = 'host' } = {}) {
-  const host = await createAgent(app, getDataSourceToken, workspaceId, { name, type: 'manager' });
+export async function createRuntimeHost(app, getDataSourceToken, accountId, { name = 'host' } = {}) {
+  const host = await createAgent(app, getDataSourceToken, accountId, { name, type: 'manager' });
   const key = await createApiKey(app, getDataSourceToken, host.id, {
-    workspaceId,
+    accountId,
     label: `runtime-host-${name}`,
   });
   return { ...host, api_key: key.raw_key };
@@ -54,7 +54,7 @@ export function slotSpec(managerAgentId, overrides = {}) {
  * Create a team and its roster from slot specs.
  *
  * @param {object} opts
- * @param {string} opts.workspaceId
+ * @param {string} opts.accountId
  * @param {string} opts.name
  * @param {object} [opts.host]          Runtime Host to place every slot on; one is created if absent.
  * @param {object} [opts.orchestrator]  `{ spec?, ...teamFields }` — `spec` overrides merge into slotSpec.
@@ -69,8 +69,8 @@ export function slotSpec(managerAgentId, overrides = {}) {
  * }>}
  */
 export async function buildTeam(app, getDataSourceToken, teams, opts) {
-  const { workspaceId, name, members = [], team: teamFields = {} } = opts;
-  const host = opts.host ?? (await createRuntimeHost(app, getDataSourceToken, workspaceId, { name: `host-${name}` }));
+  const { accountId, name, members = [], team: teamFields = {} } = opts;
+  const host = opts.host ?? (await createRuntimeHost(app, getDataSourceToken, accountId, { name: `host-${name}` }));
   // P4c-4: identity 는 spec 내용 주소다 — 기본 dir 을 팀·슬롯마다 다르게 둬야
   // 서로 다른 팀/슬롯이 같은 worker 로 합쳐지지 않는다 (in-flight 가드·cap 공유).
   // 명시 spec(m.spec / opts.orchestrator.spec)은 그대로 우선한다.
@@ -79,14 +79,14 @@ export async function buildTeam(app, getDataSourceToken, teams, opts) {
     `/srv/awb-test/${slug}-${String(slot).replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 40)}`;
 
   let view = await teams.createTeam({
-    workspace_id: workspaceId,
+    account_id: accountId,
     name,
     ...teamFields,
     orchestrator: slotSpec(host.id, { working_dir: dirFor('orch'), ...opts.orchestrator?.spec }),
   });
 
   for (const [i, m] of members.entries()) {
-    view = await teams.addMember(view.id, workspaceId, {
+    view = await teams.addMember(view.id, accountId, {
       runtime: slotSpec(m.host?.id ?? host.id, {
         working_dir: dirFor(`m${i}-${m.role_label || 'slot'}`),
         ...m.spec,
@@ -99,9 +99,9 @@ export async function buildTeam(app, getDataSourceToken, teams, opts) {
 
   // Every provisioned identity needs a Runtime Host key registered before a
   // VirtualAgent can subscribe as it.
-  await registerRuntimeHostKeyFor(app, getDataSourceToken, view.orchestrator_agent_id, { workspaceId, hostId: host.id, runtime: view.orchestrator_runtime });
+  await registerRuntimeHostKeyFor(app, getDataSourceToken, view.orchestrator_agent_id, { accountId, hostId: host.id, runtime: view.orchestrator_runtime });
   for (const m of view.members) {
-    await registerRuntimeHostKeyFor(app, getDataSourceToken, m.agent_id, { workspaceId, hostId: m.runtime.manager_agent_id, runtime: m.runtime });
+    await registerRuntimeHostKeyFor(app, getDataSourceToken, m.agent_id, { accountId, hostId: m.runtime.manager_agent_id, runtime: m.runtime });
   }
 
   // P4c-4: 이름은 팀 투영이 합성한 agent_name/orchestrator_name 이다 (Agent 행 없음).
@@ -122,7 +122,7 @@ export async function buildTeam(app, getDataSourceToken, teams, opts) {
       return found;
     },
     async refresh() {
-      return teams.getTeam(view.id, workspaceId);
+      return teams.getTeam(view.id, accountId);
     },
   };
 }

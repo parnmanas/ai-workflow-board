@@ -1,4 +1,4 @@
-// 크론은 Action 이 아니라 Workspace Schedule 이 갖는다.
+// 크론은 Action 이 아니라 Account Schedule 이 갖는다.
 //
 // 고치는 증상: 크론 구현이 두 벌이었다. Action 쪽(`modules/actions/cron.ts`)은
 // **로컬시간** tick-match 라 그 1분에 서버가 죽어 있으면 그날 실행이 조용히
@@ -14,7 +14,7 @@
 //   3. 이관 시 벽시계 시각이 보존된다(로컬 → UTC 변환).
 //
 // 발화가 실제로 Action 파이프라인을 타는지는
-// `test/workspace-schedule-action-dispatch.test.mjs` 가 본다.
+// `test/automation-schedule-action-dispatch.test.mjs` 가 본다.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -87,7 +87,7 @@ test('Action 저장 경로가 schedule_cron 을 거부하고 갈 곳을 알려 �
   assert.match(src, /SCHEDULE_CRON_MOVED/);
   assert.match(src, /schedule_cron has moved off Action/);
   // 어디로 가야 하는지까지 말한다. 슬러그만 던지면 사용자는 다음 행동을 모른다.
-  assert.match(src, /workspace-schedules/);
+  assert.match(src, /automation-schedules/);
   assert.match(src, /action_id/);
   // 옛 파서를 다시 끌어오지 않았다.
   assert.doesNotMatch(src, /from '\.\/cron'/);

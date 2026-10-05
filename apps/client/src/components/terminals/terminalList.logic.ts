@@ -45,7 +45,7 @@ export function upsertTerminal(list: TerminalSummary[], next: TerminalSummary): 
 }
 
 export function terminalPath(wsId: string, managerId: string, terminalId: string): string {
-  return `/ws/${wsId}/terminals/${managerId}/${terminalId}`;
+  return `/terminals/${managerId}/${terminalId}`;
 }
 
 /** base64 → 원문 바이트. xterm 은 Uint8Array 를 그대로 받아 UTF-8 경계를 스스로 맞춘다. */

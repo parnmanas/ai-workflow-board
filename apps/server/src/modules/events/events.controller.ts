@@ -1,8 +1,9 @@
 import { ApiTags } from '@nestjs/swagger';
+import { withLegacyOwnershipFields } from '../../common/ownership-contract';
 import { Controller, Sse, Req, Header, UnauthorizedException, OnModuleDestroy, Get, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { Request } from 'express';
-import { Observable, Subject, filter, map, finalize, of, merge, interval, takeUntil } from 'rxjs';
+import { Observable, Subject, ReplaySubject, filter, map, finalize, of, merge, interval, takeUntil } from 'rxjs';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Repository, In } from 'typeorm';
@@ -21,6 +22,7 @@ import { StreamEvent } from '../../common/types/stream-events';
 import { EVENT_TYPES } from './event-registry';
 import { EventDefinition, EventMapContext, SubscriberIdentity } from './types';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { AccountAccessService } from '../../services/account-access.service';
 
 interface RegisteredListener {
   def: EventDefinition;
@@ -104,6 +106,32 @@ export class EventsController implements OnModuleDestroy {
    * 2026-09-16 — the full 90s default, then `status=9/KILL`).
    */
   private readonly shutdown$ = new Subject<void>();
+  // Reconnect browsers with fresh membership after administration changes.
+  // Replay closes the auth-read/observable-subscribe race as well.
+  private readonly ownershipChanges$ = new ReplaySubject<number>(1);
+  private ownershipRevision = 0;
+  private readonly nativeOwners = new Map<string, Promise<string | null>>();
+  private readonly onOwnershipChange = () => {
+    this.nativeOwners.clear();
+    this.ownershipChanges$.next(++this.ownershipRevision);
+  };
+
+  private nativeOwner(session: { manager_id: string; cli: string; session_id: string }): Promise<string | null> {
+    const key = JSON.stringify([session.manager_id, session.cli, session.session_id]);
+    const cached = this.nativeOwners.get(key);
+    if (cached) return cached;
+    const pending = this.dataSource.getRepository('AgentSessionExecution').findOne({
+      where: { manager_id: session.manager_id, cli: session.cli, session_id: session.session_id }, select: ['account_id'],
+    }).then(binding => binding?.account_id || null);
+    if (this.nativeOwners.size >= 2048) this.nativeOwners.delete(this.nativeOwners.keys().next().value!);
+    this.nativeOwners.set(key, pending);
+    // Unbound sessions may be pinned later. Sharing the lookup also preserves
+    // chunk order without a database round trip for every text delta.
+    void pending.then(owner => {
+      if (!owner && this.nativeOwners.get(key) === pending) this.nativeOwners.delete(key);
+    }, () => { if (this.nativeOwners.get(key) === pending) this.nativeOwners.delete(key); });
+    return pending;
+  }
   private clientCount = 0;
   // Runtime Host API-key SSE connections keyed by the Host Agent identity.
   // Executable Agent identities are never added to this map.
@@ -124,12 +152,14 @@ export class EventsController implements OnModuleDestroy {
     // from one that's connected-but-not-pinging.
     private readonly connectivity: AgentConnectivityRegistry,
     metrics: MemoryMetricsRegistry,
+    private readonly accountAccess: AccountAccessService,
   ) {
     // Memory observability gauges for the SSE maps. `sse.connections` is the
     // raw live-stream count; `sse.runtimeHosts` is distinct Runtime Host
     // identities holding at least one stream.
     metrics.register('sse.connections', () => this.clientCount);
     metrics.register('sse.runtimeHosts', () => this.runtimeHostSseSessions.size);
+    activityEvents.on('account_membership_changed', this.onOwnershipChange);
 
     // Table-driven listener registration: EVENT_TYPES drives everything.
     // One loop replaces the 9 hand-written listener blocks that previously lived here.
@@ -164,6 +194,14 @@ export class EventsController implements OnModuleDestroy {
         try {
           const mapped = await def.map(rawEvent, mapCtx);
           if (!mapped) return;
+          if (def.eventType === 'agent_session_update' || def.eventType === 'agent_session_event') {
+            const payload = mapped.payload as any;
+            const session = payload.session || payload;
+            if (session.manager_id && session.cli && session.session_id) {
+              const owner = await this.nativeOwner(session);
+              if (owner) mapped.scope.account_id = owner;
+            }
+          }
           const envelope: StreamEvent = {
             event_type: def.eventType,
             scope: mapped.scope,
@@ -215,6 +253,9 @@ export class EventsController implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    activityEvents.removeListener('account_membership_changed', this.onOwnershipChange);
+    this.ownershipChanges$.complete();
+    this.nativeOwners.clear();
     for (const { def, handler } of this.listeners) {
       activityEvents.removeListener(def.emitterEvent, handler);
     }
@@ -231,7 +272,7 @@ export class EventsController implements OnModuleDestroy {
   /** The root ticket behind an activity — subtasks walk up (max depth 2). */
   private async resolveTicketSnapshot(ticketId: string, entityId: string): Promise<{
     root_id: string;
-    workspace_id: string;
+    account_id: string;
     status: string;
     project_id: string;
   } | null> {
@@ -244,7 +285,7 @@ export class EventsController implements OnModuleDestroy {
     if (!ticket) return null;
     return {
       root_id: ticket.id,
-      workspace_id: ticket.workspace_id || '',
+      account_id: ticket.account_id || '',
       status: ticket.status,
       project_id: ticket.project_id || '',
     };
@@ -253,6 +294,7 @@ export class EventsController implements OnModuleDestroy {
   @Sse('stream')
   @Header('X-Accel-Buffering', 'no')
   async stream(@Req() req: Request): Promise<Observable<MessageEvent>> {
+    const ownershipRevision = this.ownershipRevision;
     // Manual auth check since SSE uses query param for token
     const token =
       (req.query.token as string) ||
@@ -270,6 +312,7 @@ export class EventsController implements OnModuleDestroy {
         type: 'user',
         name: user.name || user.email || 'user',
         userId: user.id,
+        accountIds: new Set(await this.accountAccess.accessibleIds(user)),
       };
     } else {
       // Try API key (for AI agents)
@@ -421,6 +464,7 @@ export class EventsController implements OnModuleDestroy {
         filter((event: StreamEvent) => {
           const def = registry.get(event.event_type);
           if (!def) return false;
+          if (identity.type === 'user' && event.scope.account_id && !identity.accountIds?.has(event.scope.account_id)) return false;
 
           // ST-6: managed-agent fan-out. If this is a manager identity and
           // the event is targeted at one of its managed agents, run the
@@ -520,7 +564,7 @@ export class EventsController implements OnModuleDestroy {
           // recipient's clone only. See redactRunProvisionCredential (module scope).
           const dataObj = redactRunProvisionCredential(rawDataObj, event.event_type, identity.type);
           return {
-            data: JSON.stringify(dataObj),
+            data: JSON.stringify(identity.type === 'agent' ? withLegacyOwnershipFields(dataObj) : dataObj),
             type: event.event_type,
           } as MessageEvent;
         }),
@@ -529,7 +573,9 @@ export class EventsController implements OnModuleDestroy {
       // Applied to the merged stream rather than to `keepalive` alone, so any
       // source added here later is covered by the same shutdown guarantee.
       // Completing this way still runs the `finalize` cleanup above.
-    ).pipe(takeUntil(this.shutdown$));
+    ).pipe(takeUntil(identity.type === 'user'
+      ? merge(this.shutdown$, this.ownershipChanges$.pipe(filter(revision => revision > ownershipRevision)))
+      : this.shutdown$));
   }
 
   /** Runtime Host sessions synthesized per supervised executable Agent. */

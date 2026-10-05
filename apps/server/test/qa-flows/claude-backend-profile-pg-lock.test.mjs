@@ -101,15 +101,15 @@ test('Postgres row lock serializes update and assign across independent connecti
   assert.equal((await ds1.query('SELECT current_schema() AS schema'))[0].schema, SCHEMA);
   assert.equal((await ds2.query('SELECT current_schema() AS schema'))[0].schema, SCHEMA);
 
-  const workspaceRepo = ds1.getRepository('Workspace');
-  const owner = await workspaceRepo.save(workspaceRepo.create({ name: 'PG credential owner' }));
+  const accountRepo = ds1.getRepository('Account');
+  const owner = await accountRepo.save(accountRepo.create({ name: 'PG credential owner' }));
   const created = await tools1.upsertClaudeBackendProfile(ds1, {
     name: 'Postgres contended profile', base_url: 'http://pg-contended.invalid',
     model: 'pg-contended-model', protocol: 'anthropic-compatible',
   });
   const credentialRepo = ds1.getRepository('Credential');
   const credential = await credentialRepo.save(credentialRepo.create({
-    workspace_id: owner.id, name: 'PG owner credential', provider: 'anthropic', encrypted_data: 'test-only',
+    account_id: owner.id, name: 'PG owner credential', provider: 'anthropic', encrypted_data: 'test-only',
   }));
 
   // 티켓 e616dbfc — 경합 상대가 assign 에서 두 번째 update 로 바뀌었다. 검증

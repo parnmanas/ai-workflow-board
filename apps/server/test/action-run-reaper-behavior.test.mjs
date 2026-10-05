@@ -100,8 +100,8 @@ function makeActionsService(rows) {
   const calls = [];
   return {
     calls,
-    async completeRun(runId, workspaceId, args) {
-      calls.push({ runId, workspaceId, args });
+    async completeRun(runId, accountId, args) {
+      calls.push({ runId, accountId, args });
       const row = rows.find((r) => r.id === runId);
       if (!row) throw new Error(`no such run ${runId}`);
       if (row.status !== 'running') {
@@ -141,13 +141,13 @@ const noopLog = { info() {}, warn() {}, error() {} };
 // post-b273d603 standalone dispatch를 나타내려면 픽스처가 명시적으로
 // opt-in해야 한다.
 function makeRun(id, {
-  ageMs, status = 'running', sourceTicketId = '', shouldResume = false, workspaceId = 'ws1',
+  ageMs, status = 'running', sourceTicketId = '', shouldResume = false, accountId = 'ws1',
   completionContractInjected = false,
 } = {}) {
   return {
     id,
     status,
-    workspace_id: workspaceId,
+    account_id: accountId,
     source_ticket_id: sourceTicketId,
     completion_contract_injected: completionContractInjected,
     created_at: new Date(NOW.getTime() - ageMs),

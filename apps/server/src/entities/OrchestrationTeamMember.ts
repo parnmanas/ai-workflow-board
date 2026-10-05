@@ -27,14 +27,14 @@ export class OrchestrationTeamMember {
   team_id: string;
 
   /**
-   * 가입 시점 팀 자신의 workspace_id 스냅샷 — 정보용일 뿐, 이 모듈의 어떤 쿼리도 이
+   * 가입 시점 팀 자신의 account_id 스냅샷 — 정보용일 뿐, 이 모듈의 어떤 쿼리도 이
    * 값으로 member를 필터링하지 않는다(실제 스코핑은 전부 team_id/agent_id/id가 담당).
    * OrchestrationTeam.workspace_id와 동일하게 nullable(티켓 1b62b437) — 글로벌 팀의
    * member는 null이며, 글로벌 팀은 구조상 글로벌(workspace 비종속) 에이전트만 member로
    * 가진다.
    */
   @Column({ type: 'varchar', nullable: true, default: null })
-  workspace_id: string | null;
+  account_id: string | null;
 
   /**
    * The backing Agent identity this slot dispatches to. Since the roster became

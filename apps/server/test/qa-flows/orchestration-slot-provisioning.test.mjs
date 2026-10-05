@@ -28,7 +28,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam, createRuntimeHost, slotSpec } from '../helpers/orchestration-team.mjs';
 
 process.env.PORT = process.env.ORCHESTRATION_SLOT_PORT || '0';
@@ -115,7 +115,7 @@ test('Slot spec → provisioned identity: the roster mints its own agents with t
   // P4c-4: identity 는 member 행 + spec 스냅샷이다 (Agent 행 없음).
   const memberRepo = ds.getRepository('OrchestrationTeamMember');
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-provision');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-provision');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'slot-host' });
 
   step('Creating a team provisions an orchestrator identity from the spec alone — no agent existed beforehand');
@@ -123,7 +123,7 @@ test('Slot spec → provisioned identity: the roster mints its own agents with t
   // 같은 identity 를 공유해 updateMember 가드(409)에 걸린다). 폴더는 같아
   // folder mate 로는 남는다 (shared 판정은 host+dir 기준).
   const team = await teams.createTeam({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Provisioning squad',
     created_by: HUMAN.id,
     orchestrator: slotSpec(host.id, { cli: 'codex', model: 'opus', working_dir: SHARED_DIR, folder_scope: 'shared' }),
@@ -205,10 +205,10 @@ test('A slot edit never touches sibling slots — each member row keeps its own 
   const ds = app.get(getDataSourceToken());
   const teams = app.get(services.OrchestrationTeamService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-sibling');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-sibling');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'sibling-host' });
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Sibling squad',
     host,
     team: { created_by: HUMAN.id },
@@ -245,9 +245,9 @@ test('Releasing an identity that already ran retires it instead of deleting it, 
   const missions = app.get(services.OrchestrationMissionService);
   const runner = app.get(services.OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-retire');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-retire');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Retire squad',
     team: { created_by: HUMAN.id },
     members: [{ role_label: 'builder' }],
@@ -255,7 +255,7 @@ test('Releasing an identity that already ran retires it instead of deleting it, 
   const builder = squad.member('builder');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Retire mission',
     objective: 'Give the member some history.',
@@ -295,12 +295,12 @@ test('folder_scope: shared dispatches into the working folder with NO provisioni
   const runner = app.get(services.OrchestrationRunnerService);
   const provisions = captureProvisions(t, app.get(services.RoomMessagingService));
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-folder-scope');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-folder-scope');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'scope-host' });
 
   step('Two members share one folder; a third is isolated under its own');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Scope squad',
     host,
     team: { max_parallel_steps: 4, created_by: HUMAN.id },
@@ -315,7 +315,7 @@ test('folder_scope: shared dispatches into the working folder with NO provisioni
   const loner = squad.member('loner');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Scope mission',
     objective: 'Prove each slot runs where its scope says.',
@@ -379,10 +379,10 @@ test('The planning brief tells the orchestrator who shares a folder, so it can s
   const missions = app.get(services.OrchestrationMissionService);
   const runner = app.get(services.OrchestrationRunnerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-brief');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-brief');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'brief-host' });
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Brief squad',
     host,
     team: { created_by: HUMAN.id },
@@ -393,7 +393,7 @@ test('The planning brief tells the orchestrator who shares a folder, so it can s
   });
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: squad.team.id,
     title: 'Brief mission',
     objective: 'Read the roster.',
@@ -421,12 +421,12 @@ test('Runtime Host catalogue: offers every paired host, its installed CLIs, and 
   const { getDataSourceToken } = modules;
   const teams = app.get(services.OrchestrationTeamService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-hosts');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-hosts');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'catalogue-host' });
 
   step('A folder is offered once a slot names it, even before any agent has spawned in it');
   await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Catalogue squad',
     host,
     team: { created_by: HUMAN.id },
@@ -461,10 +461,10 @@ test('Editing a slot in place tells the Runtime Host to restart the agent — ot
   const registry = app.get(services.InstanceRegistryService);
   const commands = app.get(services.AgentManagerCommandService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-propagate');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-propagate');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'propagate-host' });
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Propagate squad',
     host,
     team: { created_by: HUMAN.id },
@@ -477,7 +477,7 @@ test('Editing a slot in place tells the Runtime Host to restart the agent — ot
   registry.upsert({
     instance_id: 'slot-propagate-instance',
     agent_id: host.id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     mode: 'manager',
     hostname: 'propagate-host',
     plugin_version: 'test',
@@ -549,14 +549,14 @@ test('Runtime Host model lists can be re-enumerated on demand — a cold CLI mus
   const commands = app.get(services.AgentManagerCommandService);
   const ledger = app.get(services.CommandLedgerService);
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'slot-models');
+  const ws = await createAccount(app, getDataSourceToken, 'slot-models');
   const host = await createRuntimeHost(app, getDataSourceToken, ws.id, { name: 'models-host' });
 
   step('A host that never reported a model list for a CLI exposes no options for it');
   registry.upsert({
     instance_id: 'slot-models-instance',
     agent_id: host.id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     mode: 'manager',
     hostname: 'models-host',
     plugin_version: 'test',
@@ -585,7 +585,7 @@ test('Runtime Host model lists can be re-enumerated on demand — a cold CLI mus
       registry.upsert({
         instance_id: 'slot-models-instance',
         agent_id: host.id,
-        workspace_id: ws.id,
+        account_id: ws.id,
         mode: 'manager',
         hostname: 'models-host',
         plugin_version: 'test',
@@ -621,7 +621,7 @@ test('Runtime Host model lists can be re-enumerated on demand — a cold CLI mus
 
   step('A model the host does not list still round-trips — editing a slot must never drop it');
   const team = await teams.createTeam({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Model squad',
     created_by: HUMAN.id,
     orchestrator: slotSpec(host.id, { cli: 'opencode', model: 'opencode/retired-model' }),

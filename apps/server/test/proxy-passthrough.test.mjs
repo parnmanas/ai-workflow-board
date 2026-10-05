@@ -18,7 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey } from './helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
@@ -74,14 +74,14 @@ test('SSE stream delivers role_prompt and ticket_prompt at top level for agent_t
   // P4c-4: single-recipient 이벤트는 scope.agent_id === 연결 identity 에게만
   // 배달된다 (managed fan-out 집합 제거). 트리거는 Host identity 로 주소가
   // 지정된 형태가 유일한 배달 가능 형태다.
-  const ws = await createWorkspace(app, getDataSourceToken, 'runtime-host-passthrough');
+  const ws = await createAccount(app, getDataSourceToken, 'runtime-host-passthrough');
   const runtimeHost = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host',
     type: 'manager',
   });
   const agent = runtimeHost;
   const apiKey = await createApiKey(app, getDataSourceToken, runtimeHost.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'runtime-host',
   });
 

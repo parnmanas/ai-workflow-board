@@ -18,14 +18,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.SECURITY_BATCH_SEQ_PORT || '0';
 
 function profilePayload(wsId, agentId, name) {
   return {
-    workspace_id: wsId,
+    account_id: wsId,
     target_runtime: agentId,
     name,
     scan_driver: 'code-review',
@@ -39,9 +39,9 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'security-batch');
+  const ws = await createAccount(app, getDataSourceToken, 'security-batch');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'security-batch-runner' });
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'sec' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'sec' });
 
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
@@ -58,14 +58,14 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   const [p0, p1, p2] = profiles;
 
   const runCount = async (profileId) => {
-    const runs = await mcp.callTool('list_security_runs', { profile_id: profileId, workspace_id: ws.id });
+    const runs = await mcp.callTool('list_security_runs', { profile_id: profileId, account_id: ws.id });
     return Array.isArray(runs) ? runs : [];
   };
 
   // ── 1. start_security_batch dispatches ONLY profile 0 ────────────────────────
   step('start_security_batch — only the first profile dispatches');
   const batch0 = await mcp.callTool('start_security_batch', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     profile_ids: [p0.id, p1.id, p2.id],
   });
   assert.ok(!batch0?.isError && batch0.id, `start_security_batch failed: ${JSON.stringify(batch0)}`);
@@ -79,16 +79,16 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   assert.equal((await runCount(p1.id)).length, 0, 'profile 1 NOT dispatched yet');
   assert.equal((await runCount(p2.id)).length, 0, 'profile 2 NOT dispatched yet');
   const run0 = batch0.run_ids[0];
-  const firstRun = await mcp.callTool('get_security_run', { run_id: run0, workspace_id: ws.id });
+  const firstRun = await mcp.callTool('get_security_run', { run_id: run0, account_id: ws.id });
   assert.equal(firstRun.profile_id, p0.id, 'the dispatched run belongs to profile 0');
-  assert.equal(firstRun.workspace_id, ws.id, 'the run is scoped to the batch Workspace');
+  assert.equal(firstRun.account_id, ws.id, 'the run is scoped to the batch Account');
 
   // ── 2. A failed run still advances to the next profile ───────────────────────
   step('complete run 0 as FAILED → batch advances to profile 1 (chain not broken)');
-  const c0 = await mcp.callTool('complete_security_run', { run_id: run0, workspace_id: ws.id, status: 'failed', summary: 'p0 failed' });
+  const c0 = await mcp.callTool('complete_security_run', { run_id: run0, account_id: ws.id, status: 'failed', summary: 'p0 failed' });
   assert.ok(!c0?.isError, `complete run0: ${JSON.stringify(c0)}`);
 
-  let batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  let batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.current_index, 1, 'cursor advanced to 1 despite the failure');
   assert.equal(batch.status, 'running');
   assert.equal(batch.failed, 1, 'failure tallied');
@@ -100,9 +100,9 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
 
   // ── 3. Idempotency — re-finalizing run 0 must not double-dispatch ────────────
   step('re-complete run 0 → no double-dispatch, no double-count (idempotent guard)');
-  const c0again = await mcp.callTool('complete_security_run', { run_id: run0, workspace_id: ws.id, status: 'failed', summary: 'p0 failed again' });
+  const c0again = await mcp.callTool('complete_security_run', { run_id: run0, account_id: ws.id, status: 'failed', summary: 'p0 failed again' });
   assert.ok(!c0again?.isError, `re-complete run0: ${JSON.stringify(c0again)}`);
-  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.current_index, 1, 'cursor unchanged after re-finalize of an already-advanced run');
   assert.equal(batch.failed, 1, 'failure count NOT double-incremented');
   assert.equal(batch.run_ids.length, 2, 'no extra run dispatched');
@@ -111,8 +111,8 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
 
   // ── Advance through the rest ─────────────────────────────────────────────────
   step('complete run 1 as PASSED → profile 2 dispatches');
-  await mcp.callTool('complete_security_run', { run_id: run1, workspace_id: ws.id, status: 'passed', scanned_commit: 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2', summary: 'p1 ok' });
-  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  await mcp.callTool('complete_security_run', { run_id: run1, account_id: ws.id, status: 'passed', scanned_commit: 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2', summary: 'p1 ok' });
+  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.current_index, 2, 'cursor at last index');
   assert.equal(batch.passed, 1);
   assert.equal(batch.run_ids.length, 3, 'profile 2 dispatched');
@@ -120,8 +120,8 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
   const run2 = batch.run_ids[2];
 
   step('complete run 2 as PASSED → batch is done with the right rollup');
-  await mcp.callTool('complete_security_run', { run_id: run2, workspace_id: ws.id, status: 'passed', scanned_commit: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3', summary: 'p2 ok' });
-  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  await mcp.callTool('complete_security_run', { run_id: run2, account_id: ws.id, status: 'passed', scanned_commit: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3', summary: 'p2 ok' });
+  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.status, 'done', 'batch terminal after last profile');
   assert.equal(batch.passed, 2, 'two passed');
   assert.equal(batch.failed, 1, 'one failed');
@@ -130,8 +130,8 @@ test('security batch: sequential dispatch, failure-continue, idempotent advance'
 
   // Re-finalize after done — must remain a no-op (status guard).
   step('re-complete a run after the batch is done → still done, rollup unchanged');
-  await mcp.callTool('complete_security_run', { run_id: run2, workspace_id: ws.id, status: 'passed', summary: 'p2 again' });
-  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, workspace_id: ws.id });
+  await mcp.callTool('complete_security_run', { run_id: run2, account_id: ws.id, status: 'passed', summary: 'p2 again' });
+  batch = await mcp.callTool('get_security_batch', { batch_id: batch0.id, account_id: ws.id });
   assert.equal(batch.status, 'done');
   assert.equal(batch.passed, 2, 'rollup frozen after done');
   assert.equal(batch.run_ids.length, 3, 'no extra dispatch after done');

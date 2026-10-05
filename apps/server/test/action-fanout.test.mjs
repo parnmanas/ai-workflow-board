@@ -29,12 +29,13 @@ import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { RuntimeHost } from '../dist/entities/RuntimeHost.js';
 import { ApiKey } from '../dist/entities/ApiKey.js';
 import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
-import { Workspace } from '../dist/entities/Workspace.js';
+import { Account } from '../dist/entities/Account.js';
 // 엔티티 전체를 등록한다. 엔티티 간 역참조 관계가 줄줄이 이어져 부분
 // 집합으로는 metadata 빌드가 통과하지 않고,
-// run-budget 가드가 Workspace 행을 진짜로 읽어야 해서 스텁으로 대체할 수도 없다.
+// run-budget 가드가 Account 행을 진짜로 읽어야 해서 스텁으로 대체할 수도 없다.
 import * as ALL_ENTITIES from '../dist/entities/index.js';
 import { ActionsService } from '../dist/modules/actions/actions.service.js';
+import { ActionsController } from '../dist/modules/actions/actions.controller.js';
 import {
   actionTargetAgentIds,
   actionToWireJson,
@@ -114,7 +115,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     for (const table of [
       // P4c-4: agents 테이블 없음. api_keys 는 링크 시드 때문에 매번 비운다.
       'chat_room_participants', 'chat_room_messages', 'action_runs',
-      'chat_rooms', 'actions', 'api_keys', 'workspaces',
+      'chat_rooms', 'actions', 'api_keys', 'accounts',
     ]) {
       await dataSource.query(`DELETE FROM "${table}"`);
     }
@@ -123,13 +124,13 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     // AGENT_C 의 링크는 ws-other 소속이라 cross-workspace 거부 계약을 탄다.
     const hostRepo = dataSource.getRepository(RuntimeHost);
     await hostRepo.save([
-      hostRepo.create({ id: MGR_1, name: 'rolf', hostname: 'rolf', workspace_id: WS }),
-      hostRepo.create({ id: MGR_2, name: 'ragnar', hostname: 'ragnar', workspace_id: WS }),
+      hostRepo.create({ id: MGR_1, name: 'rolf', hostname: 'rolf', account_id: WS }),
+      hostRepo.create({ id: MGR_2, name: 'ragnar', hostname: 'ragnar', account_id: WS }),
     ]);
     const keyRepo = dataSource.getRepository(ApiKey);
     // key/key_prefix 는 NOT NULL 이라 더미 해시를 넣는다 (해석은 agent_id/host_id 만 본다).
-    const link = (name, agent_id, host_id, workspace_id) =>
-      keyRepo.create({ name, key: `hash-${name}`, key_prefix: 'test***', agent_id, host_id, scope: 'full', workspace_id });
+    const link = (name, agent_id, host_id, account_id) =>
+      keyRepo.create({ name, key: `hash-${name}`, key_prefix: 'test***', agent_id, host_id, scope: 'full', account_id });
     await keyRepo.save([
       link('link-a', AGENT_A, MGR_1, WS),
       link('link-b', AGENT_B, MGR_2, WS),
@@ -165,7 +166,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       save: async (v) => { comments.push(v); return v; },
     };
     const messaging = {
-      sendMessage: async (roomId, workspaceId, senderType, senderId, senderName, content, _a, _b, _t, extra) => {
+      sendMessage: async (roomId, accountId, senderType, senderId, senderName, content, _a, _b, _t, extra) => {
         sent.push({ roomId, content, runProvision: extra?.runProvision ?? null });
       },
       sendSystemMessage: async () => {},
@@ -181,7 +182,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
       inertRepo(),                             // messageRepo
       inertRepo(),                             // attachmentRepo
       dataSource.getRepository(RuntimeHost),   // hostRepo (P4c-4: agentRepo 삭제)
-      dataSource.getRepository(Workspace),     // workspaceRepo
+      dataSource.getRepository(Account),     // accountRepo
       inertRepo(),                             // userRepo
       commentRepo,                             // commentRepo
       inertRepo(),                             // activityRepo
@@ -200,7 +201,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('2개 이상의 대상 에이전트를 저장하고, 레거시 단일 컬럼은 첫 원소를 미러링한다', async () => {
     const created = await service.create({
-      workspace_id: WS,
+      account_id: WS,
       name: 'CLI 최신화',
       target_runtimes: [SPECA, SPECB],
     });
@@ -212,34 +213,34 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('단일 Runtime 설정도 생성되고 배열 표현으로 수렴한다', async () => {
-    const created = await service.create({ workspace_id: WS, name: '단일', target_runtimes: [SPECA] });
+    const created = await service.create({ account_id: WS, name: '단일', target_runtimes: [SPECA] });
     assert.deepEqual(actionTargetAgentIds(created), [KEYA]);
     assert.equal(created.target_agent_id, KEYA);
   });
 
   it('대상 중 하나라도 Host가 없으면 저장 전체를 거부한다', async () => {
     await assert.rejects(
-      service.create({ workspace_id: WS, name: 'bad', target_runtimes: [SPECA, { ...SPECB, manager_agent_id: 'missing-host' }] }),
+      service.create({ account_id: WS, name: 'bad', target_runtimes: [SPECA, { ...SPECB, manager_agent_id: 'missing-host' }] }),
       /unknown Runtime Host/,
     );
     assert.equal(await dataSource.getRepository(Action).count(), 0, '부분 저장이 남으면 안 된다');
   });
 
   it('update 로 대상을 늘리면 두 컬럼이 함께 갱신된다', async () => {
-    const created = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECB] });
+    const created = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECB] });
     const updated = await service.update(created.id, WS, { target_runtimes: [SPECA, SPECB] });
     assert.deepEqual(actionTargetAgentIds(updated), [KEYA, KEYB]);
     assert.equal(updated.target_agent_id, KEYA, '대표 대상 미러가 stale 하면 레거시 독자가 지워진 대상을 본다');
   });
 
   it('대상을 0개로 만드는 update 는 거부된다', async () => {
-    const created = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
+    const created = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA] });
     await assert.rejects(service.update(created.id, WS, { target_runtimes: [] }), /at least one target/);
   });
 
   it('REST 로 내보내는 형태는 JSON 문자열이 아니라 진짜 배열이다', async () => {
     const created = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     // 엔티티 자체는 JSON 문자열을 들고 있다 (SQLite/Postgres 패리티 관례).
     assert.equal(typeof created.target_agent_ids, 'string');
@@ -256,26 +257,19 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     assert.deepEqual(wire.target_agent_ids, [AGENT_B]);
   });
 
-  it('actions.controller 의 모든 Action 읽기 경로가 정규화를 통과한다', () => {
-    // awb-field-wiring 이 경고하는 "한 셀만 빠뜨림" 회귀 가드 — 새 읽기 경로를
-    // 추가하면서 정규화를 빼먹으면 여기서 걸린다.
-    const src = readFileSync(
-      new URL('../src/modules/actions/actions.controller.ts', import.meta.url),
-      'utf8',
-    );
-    const actionReads = [
-      'const rows = await this.actionsService.list(workspaceId);',
-      'const row = await this.actionsService.get(id);',
-      'const row = await this.actionsService.create(body);',
-      'const row = await this.actionsService.update(id, body?.workspace_id, body);',
-    ];
-    for (const read of actionReads) {
-      const idx = src.indexOf(read);
-      assert.ok(idx > -1, `읽기 경로가 사라졌다(테스트를 갱신할 것): ${read}`);
-      // 그 직후 응답 구문이 actionToWireJson 을 거쳐야 한다.
-      const after = src.slice(idx, idx + 400);
-      assert.match(after, /actionToWireJson/, `정규화를 거치지 않는 읽기 경로: ${read}`);
-    }
+  it('actions.controller 의 모든 Action 읽기 경로가 정규화를 통과한다', async () => {
+    const controller = new ActionsController(service, {});
+    const responses = [];
+    const res = { status() { return this; }, json(body) { responses.push(body); return this; } };
+    await controller.create({ account_id: WS, name: 'wire', target_runtimes: [SPECA, SPECB] }, res);
+    const created = responses.pop();
+    assert.deepEqual(created.target_agent_ids, [KEYA, KEYB]);
+    await controller.get(created.id, res);
+    assert.deepEqual(responses.pop().target_agent_ids, [KEYA, KEYB]);
+    await controller.list(WS, res, { accessibleAccountIds: [WS] });
+    assert.deepEqual(responses.pop().map(row => row.target_agent_ids), [[KEYA, KEYB]]);
+    await controller.update(created.id, { account_id: WS, target_runtimes: [SPECB] }, res);
+    assert.deepEqual(responses.pop().target_agent_ids, [KEYB]);
   });
 
   it('예약 실행과 on_ticket_done 훅이 같은 dispatch() 를 거쳐 fan-out 을 상속한다', () => {
@@ -284,11 +278,11 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     // 조용히 단일 대상으로 되돌아가므로 호출 형태를 고정한다.
     //
     // 예약 경로는 ActionSchedulerService 가 아니라 WorkspaceScheduleService 다 —
-    // Action 의 cron 이 Workspace Schedule 로 옮겨 갔다(docs/workspace-schedules.md).
+    // Action 의 cron 이 Account Schedule 로 옮겨 갔다(docs/automation-schedules.md).
     // 그 파일은 인라인 프롬프트 형태 때문에 방을 만드는 코드도 함께 갖고 있으므로,
     // Action 발화 함수(`#dispatchAction`) 안만 떼어 본다.
     const scheduleSrc = readFileSync(
-      new URL('../src/modules/workspace-schedule/workspace-schedule.service.ts', import.meta.url),
+      new URL('../src/modules/automation-schedule/automation-schedule.service.ts', import.meta.url),
       'utf8',
     );
     const start = scheduleSrc.indexOf('private async _dispatchAction(');
@@ -361,7 +355,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('실행 1회가 대상 수만큼 run 을 만들고 각 run 이 자기 방을 쓴다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'CLI 최신화', prompt: 'upgrade', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'CLI 최신화', prompt: 'upgrade', target_runtimes: [SPECA, SPECB],
     });
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
@@ -383,7 +377,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('하위 호환: 반환값의 run/room_id/prompt 는 첫 run 을 가리킨다', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(result.run.id, result.runs[0].run.id);
     assert.equal(result.room_id, result.runs[0].room_id);
@@ -391,7 +385,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('회귀: 단일 대상 Action 은 예전과 같이 run 1건 + 방 1개만 만든다', async () => {
-    const action = await service.create({ workspace_id: WS, name: '단일', target_runtimes: [SPECA] });
+    const action = await service.create({ account_id: WS, name: '단일', target_runtimes: [SPECA] });
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
     assert.equal(result.runs.length, 1);
@@ -406,7 +400,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     // 스냅샷에서 해소하므로 스냅샷도 함께 둔다.
     const repo = dataSource.getRepository(Action);
     const legacy = await repo.save(repo.create({
-      workspace_id: WS, name: 'legacy', prompt: 'p',
+      account_id: WS, name: 'legacy', prompt: 'p',
       target_agent_id: KEYB, target_agent_ids: '[]', target_runtimes: [SPECB],
     }));
     assert.deepEqual(actionTargetAgentIds(legacy), [KEYB], '읽기 경로가 레거시 컬럼으로 폴백해야 한다');
@@ -420,7 +414,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('한 대상이 실패해도 나머지 대상의 run 은 정상 생성된다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다 // 첫 대상이 죽어도 뒤가 이어져야 한다
 
@@ -436,7 +430,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('전원 실패면 던진다 — 호출부의 "디스패치 실패는 throw" 계약을 유지한다', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA] });
     failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다
     await assert.rejects(
       service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' }),
@@ -448,7 +442,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('같은 매니저 아래 2개 에이전트로 fan-out 해도 작업폴더가 겹치지 않는다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
 
@@ -460,21 +454,21 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('회귀: 단일 대상 Action 의 작업폴더는 글자 하나 바뀌지 않는다 (warm checkout 보존)', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA] });
     await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(sent[0].runProvision.workspace_folder, `.awb/act/${action.id.slice(0, 8)}`);
   });
 
   it('명시적 workspace_folder 도 fan-out 시에만 에이전트별로 갈라진다', async () => {
     const single = await service.create({
-      workspace_id: WS, name: 's', target_runtimes: [SPECA], workspace_folder: 'ops/cli',
+      account_id: WS, name: 's', target_runtimes: [SPECA], workspace_folder: 'ops/cli',
     });
     await service.dispatch({ actionId: single.id, triggeredByType: 'system', triggeredById: '' });
     assert.equal(sent[0].runProvision.workspace_folder, '.awb/act/ops/cli', '단일 대상은 그대로');
 
     sent = [];
     const multi = await service.create({
-      workspace_id: WS, name: 'm', target_runtimes: [SPECA, SPECB], workspace_folder: 'ops/cli',
+      account_id: WS, name: 'm', target_runtimes: [SPECA, SPECB], workspace_folder: 'ops/cli',
     });
     await service.dispatch({ actionId: multi.id, triggeredByType: 'system', triggeredById: '' });
     const folders = sent.map((s) => s.runProvision.workspace_folder);
@@ -486,13 +480,13 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   // ── 5. 배치 재개 게이트 ─────────────────────────────────────────────────
 
   function seedTicket(id) {
-    tickets.set(id, { id, workspace_id: WS, title: 't' });
+    tickets.set(id, { id, account_id: WS, title: 't' });
     return id;
   }
 
   it('source_ticket_id 가 있으면 전원 종료 뒤 한 번만 재개한다', async () => {
     const ticketId = seedTicket('44444444-4444-4444-8444-444444444444');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
@@ -513,7 +507,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
     const ticketId = seedTicket('55555555-5555-4555-8555-555555555555');
     // high_impact 면 실패해도 자동 재시도하지 않으므로 배치가 곧장 확정된다.
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
+      account_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
     });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
@@ -536,7 +530,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('배치 재개는 1회성이다 — 이미 클레임된 배치는 다시 재개하지 않는다', async () => {
     const ticketId = seedTicket('66666666-6666-4666-8666-666666666666');
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
+      account_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
     });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
@@ -555,7 +549,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('회귀: 단일 대상 run 은 배치 로직을 타지 않고 즉시 재개한다', async () => {
     const ticketId = seedTicket('77777777-7777-4777-8777-777777777777');
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA], high_impact: true,
+      account_id: WS, name: 'deploy', target_runtimes: [SPECA], high_impact: true,
     });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'user', triggeredById: 'u1', sourceTicketId: ticketId,
@@ -567,10 +561,10 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('batch_id 가 없는 레거시 run 도 즉시 재개한다', async () => {
     const ticketId = seedTicket('88888888-8888-4888-8888-888888888888');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA] });
     const runRepo = dataSource.getRepository(ActionRun);
     const legacyRun = await runRepo.save(runRepo.create({
-      action_id: action.id, workspace_id: WS, room_id: 'room-legacy',
+      action_id: action.id, account_id: WS, room_id: 'room-legacy',
       source_ticket_id: ticketId, status: 'running', attempt: 1,
       agent_id: '', batch_id: '',
     }));
@@ -582,7 +576,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('실패한 대상만 재시도되고 원래 배치를 승계한다', async () => {
     const ticketId = seedTicket('99999999-9999-4999-8999-999999999999');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
@@ -605,7 +599,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('재시도가 떠 있는 동안 배치는 미완으로 취급된다', async () => {
     const ticketId = seedTicket('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
@@ -631,7 +625,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('P1-1: 재시도 행이 삽입되기 전에 형제가 끝나도 배치가 조기 재개되지 않는다', async () => {
     const ticketId = seedTicket('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
@@ -668,7 +662,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('P1-1: 재시도가 아예 못 뜨면 예약이 풀려 배치가 종료된다', async () => {
     const ticketId = seedTicket('cccccccc-cccc-4ccc-8ccc-cccccccccccc');
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     const result = await service.dispatch({
       actionId: action.id, triggeredByType: 'agent', triggeredById: AGENT_A, sourceTicketId: ticketId,
     });
@@ -697,7 +691,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('P1-2: 디스패치에 실패한 대상도 terminal ActionRun 으로 남는다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다
 
@@ -725,7 +719,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('대상 설정 하나를 제거하면 남은 Runtime만 실행한다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
     // KEYA 의 스냅샷이 사라진 상황을 만든다.
     await stripSpecs(action.id, [SPECB]);
@@ -741,7 +735,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('P1-2: 대상이 모두 사라졌으면 던진다 (승인 grant 를 태우기 전 fail-fast)', async () => {
-    const action = await service.create({ workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
+    const action = await service.create({ account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB] });
     await stripSpecs(action.id, []);
 
     await assert.rejects(
@@ -754,7 +748,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   it('P1-2: 실패 대상이 배치 재개의 x/N 분모에 포함된다', async () => {
     const ticketId = seedTicket('dddddddd-dddd-4ddd-8ddd-dddddddddddd');
     const action = await service.create({
-      workspace_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
+      account_id: WS, name: 'deploy', target_runtimes: [SPECA, SPECB], high_impact: true,
     });
     failRunSaveFor = KEYA; // P4c-4: run 의 agent_id 는 rt 키다
     const result = await service.dispatch({
@@ -771,14 +765,14 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   // ── 7. 예산 ─────────────────────────────────────────────────────────────
 
   it('예산은 run 단위로 소모된다 — fan-out 이 상한을 넘어서 계속 만들지 않는다', async () => {
-    const wsRepo = dataSource.getRepository(Workspace);
+    const wsRepo = dataSource.getRepository(Account);
     await wsRepo.save(wsRepo.create({
       id: WS, name: 'ws',
       // text 컬럼이라 JSON 문자열로 넣는다 (common/hard-budget-config.ts 가 파싱).
       hard_budget_config: JSON.stringify({ enabled: true, max_runs_per_window: 2, notify: false }),
     }));
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
 
     // 첫 트리거로 run 2건 — 여기서 상한(2)에 도달한다.
@@ -794,13 +788,13 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
   });
 
   it('배치 도중 상한에 걸리면 그 대상만 실패하고 이미 만든 run 은 남는다', async () => {
-    const wsRepo = dataSource.getRepository(Workspace);
+    const wsRepo = dataSource.getRepository(Account);
     await wsRepo.save(wsRepo.create({
       id: WS, name: 'ws',
       hard_budget_config: JSON.stringify({ enabled: true, max_runs_per_window: 1, notify: false }),
     }));
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB],
     });
 
     const result = await service.dispatch({ actionId: action.id, triggeredByType: 'system', triggeredById: '' });
@@ -814,7 +808,7 @@ describe('Action fan-out (다중 에이전트 대상)', () => {
 
   it('max_runs 프루닝은 에이전트별로 적용된다', async () => {
     const action = await service.create({
-      workspace_id: WS, name: 'x', target_runtimes: [SPECA, SPECB], max_runs: 2,
+      account_id: WS, name: 'x', target_runtimes: [SPECA, SPECB], max_runs: 2,
     });
     // 3회 트리거 → 에이전트당 3건. 상한 2 이므로 에이전트별로 1건씩 잘린다.
     for (let i = 0; i < 3; i++) {

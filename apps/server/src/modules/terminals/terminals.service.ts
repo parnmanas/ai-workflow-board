@@ -188,7 +188,7 @@ export class TerminalsService implements OnModuleDestroy {
     return out;
   }
 
-  async listHosts(_workspaceId: string): Promise<TerminalHost[]> {
+  async listHosts(_accountId: string): Promise<TerminalHost[]> {
     const records = this.managerRecords();
     const ids = Array.from(new Set(records.map((r) => r.agent_id)));
     const names = new Map<string, string>();
@@ -264,7 +264,7 @@ export class TerminalsService implements OnModuleDestroy {
       timer.unref?.();
       this.pending.set(requestId, { manager_id: managerId, op, created_at: Date.now(), resolve, timer });
     });
-    this.emitRequest({ manager_id: managerId, workspace_id: '', op, request_id: requestId, driver_user_id: driverUserId, ...args });
+    this.emitRequest({ manager_id: managerId, account_id: '', op, request_id: requestId, driver_user_id: driverUserId, ...args });
     return promise.then((body) => {
       if (!body.ok) {
         const status = body.code === 'timeout' ? 504 : body.code === 'not_found' ? 404 : 502;
@@ -296,9 +296,9 @@ export class TerminalsService implements OnModuleDestroy {
    * 메모리 행은 (starting 유예를 빼고) 그 자리에서 정리한다 — 터미널은 기록이 없어서
    * "예전에 있었던 것" 을 보여줄 이유가 전혀 없다.
    */
-  async listTerminals(workspaceId: string, userId: string, managerId: string): Promise<TerminalSummary[]> {
+  async listTerminals(accountId: string, userId: string, managerId: string): Promise<TerminalSummary[]> {
     const rec = this.requireHost(managerId);
-    const result = await this.rpc<{ terminals?: unknown }>(managerId, 'list', { workspace_id: workspaceId }, userId);
+    const result = await this.rpc<{ terminals?: unknown }>(managerId, 'list', { account_id: accountId }, userId);
     const raw = Array.isArray(result?.terminals) ? result.terminals.slice(0, TERMINAL_LIST_LIMIT) : [];
     const managerName = await this.managerName(managerId, rec.hostname);
     const seen = new Set<string>();
@@ -319,13 +319,13 @@ export class TerminalsService implements OnModuleDestroy {
    * 터미널에 붙는다 — 매니저가 들고 있던 스크롤백을 한 번 받아 화면을 다시 그리고,
    * 그 순간부터 이 사용자가 driver 가 된다(출력 SSE 를 받는 사람).
    */
-  async attach(workspaceId: string, userId: string, managerId: string, terminalId: string, size?: { cols?: unknown; rows?: unknown }): Promise<TerminalSnapshot> {
+  async attach(accountId: string, userId: string, managerId: string, terminalId: string, size?: { cols?: unknown; rows?: unknown }): Promise<TerminalSnapshot> {
     const rec = this.requireHost(managerId);
     this.assertTerminalId(terminalId);
     const cols = size?.cols === undefined ? undefined : clampCols(size.cols);
     const rows = size?.rows === undefined ? undefined : clampRows(size.rows);
     const result = await this.rpc<Record<string, any>>(managerId, 'attach', {
-      workspace_id: workspaceId,
+      account_id: accountId,
       terminal_id: terminalId,
       ...(cols !== undefined ? { cols } : {}),
       ...(rows !== undefined ? { rows } : {}),
@@ -347,7 +347,7 @@ export class TerminalsService implements OnModuleDestroy {
   // ─── 사용자 쓰기 ────────────────────────────────────────────────────────
 
   async openTerminal(
-    workspaceId: string,
+    accountId: string,
     userId: string,
     managerId: string,
     input: { shell?: string | null; cwd?: string; title?: string; cols?: unknown; rows?: unknown },
@@ -367,7 +367,7 @@ export class TerminalsService implements OnModuleDestroy {
       throw new TerminalError(429, 'too_many_terminals', `This Runtime Host already has ${TERMINAL_PER_HOST_MAX} live terminals. Close one first.`);
     }
     const result = await this.rpc<Record<string, any>>(managerId, 'open', {
-      workspace_id: workspaceId,
+      account_id: accountId,
       terminal_id: null,
       shell: shell || null,
       cwd,
@@ -385,7 +385,7 @@ export class TerminalsService implements OnModuleDestroy {
   }
 
   /** 키 입력. PTY 는 조용히 받으므로 fire-and-forget 이다 — 답은 출력 스트림으로 온다. */
-  write(workspaceId: string, userId: string, managerId: string, terminalId: string, dataInput: unknown): { ok: true } {
+  write(accountId: string, userId: string, managerId: string, terminalId: string, dataInput: unknown): { ok: true } {
     this.requireHost(managerId);
     this.assertTerminalId(terminalId);
     const data = typeof dataInput === 'string' ? dataInput : '';
@@ -395,11 +395,11 @@ export class TerminalsService implements OnModuleDestroy {
     // 입력한 사람이 곧 driver 다 — 그래야 그 답(에코·출력)이 자기 화면으로 온다.
     state.driver_user_id = userId;
     state.updated_at = Date.now();
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, op: 'input', terminal_id: terminalId, data, driver_user_id: userId });
+    this.emitRequest({ manager_id: managerId, account_id: accountId, op: 'input', terminal_id: terminalId, data, driver_user_id: userId });
     return { ok: true };
   }
 
-  resize(workspaceId: string, userId: string, managerId: string, terminalId: string, colsInput: unknown, rowsInput: unknown): TerminalSummary {
+  resize(accountId: string, userId: string, managerId: string, terminalId: string, colsInput: unknown, rowsInput: unknown): TerminalSummary {
     this.requireHost(managerId);
     this.assertTerminalId(terminalId);
     const state = this.requireLive(managerId, terminalId);
@@ -409,7 +409,7 @@ export class TerminalsService implements OnModuleDestroy {
     state.cols = cols;
     state.rows = rows;
     state.updated_at = Date.now();
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, op: 'resize', terminal_id: terminalId, cols, rows, driver_user_id: userId });
+    this.emitRequest({ manager_id: managerId, account_id: accountId, op: 'resize', terminal_id: terminalId, cols, rows, driver_user_id: userId });
     return this.emitUpdate(state, 'resized');
   }
 
@@ -417,10 +417,10 @@ export class TerminalsService implements OnModuleDestroy {
    * 터미널을 닫는다. 이미 끝난 터미널에도 409 를 내지 않는다 — 사용자가 누르는 이유는
    * "이 행을 치워라" 이고, 매니저가 이미 치웠다면 그 요청은 그냥 만족된 것이다.
    */
-  close(workspaceId: string, userId: string, managerId: string, terminalId: string): TerminalSummary | { ok: true } {
+  close(accountId: string, userId: string, managerId: string, terminalId: string): TerminalSummary | { ok: true } {
     this.requireHost(managerId);
     this.assertTerminalId(terminalId);
-    this.emitRequest({ manager_id: managerId, workspace_id: workspaceId, op: 'close', terminal_id: terminalId, driver_user_id: userId });
+    this.emitRequest({ manager_id: managerId, account_id: accountId, op: 'close', terminal_id: terminalId, driver_user_id: userId });
     const state = this.live.get(liveKey(managerId, terminalId));
     if (!state) return { ok: true };
     state.driver_user_id = userId;

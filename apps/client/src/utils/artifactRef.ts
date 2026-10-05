@@ -32,7 +32,3 @@ export function parseArtifactRefs(text: string): ParsedArtifactRef[] {
   }
   return refs;
 }
-
-export function workspaceIdFromPath(pathname: string): string {
-  return pathname.match(/\/ws\/([^/]+)/)?.[1] || '';
-}

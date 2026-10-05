@@ -55,10 +55,10 @@ process.env.SQLJS_DB_PATH = DB_FILE;
 process.env.NODE_ENV = 'test';
 
 const dbUrl = 'file://' + path.join(DIST_ROOT, 'db.js');
-const wsUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'Workspace.js');
+const wsUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'Account.js');
 
 const { buildDataSourceOptions, serializeSqljsTransactions } = await import(dbUrl);
-const { Workspace } = await import(wsUrl);
+const { Account } = await import(wsUrl);
 const { DataSource } = await import('typeorm');
 
 async function openDataSource() {
@@ -74,7 +74,7 @@ const KNOWN_RACE_ERRORS =
 // — ticket 02c85264의 원래 재현 스크립트와 같은 형태.
 function makeOverlappingWrite(tag) {
   return async (manager) => {
-    const repo = manager.getRepository(Workspace);
+    const repo = manager.getRepository(Account);
     await repo.save(repo.create({ name: `${tag}-a`, description: 'overlap' }));
     await new Promise((r) => setTimeout(r, 15));
     await repo.save(repo.create({ name: `${tag}-b`, description: 'overlap' }));
@@ -121,7 +121,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
     // 공유 커넥션을 ROLLBACK시켜 이긴 쪽까지 조용히 날려버릴 수 있다는 것이다.
     // 4개 행(raw-a-a, raw-a-b, raw-b-a, raw-b-b)을 쓰려 했으니, 미적용
     // 커넥션은 4개를 온전히 다 갖고 있어서는 안 된다.
-    const rawCount = await raw.getRepository(Workspace).count();
+    const rawCount = await raw.getRepository(Account).count();
     assert.ok(
       rawCount < 4,
       `expected the unpatched race to lose at least one write (silent cross-transaction ` +
@@ -136,7 +136,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
     ]);
     assert.deepEqual([a, b], ['fix-a', 'fix-b'], 'both overlapping calls must resolve, not reject');
 
-    const names = (await patched.getRepository(Workspace).find()).map((w) => w.name).sort();
+    const names = (await patched.getRepository(Account).find()).map((w) => w.name).sort();
     for (const n of ['fix-a-a', 'fix-a-b', 'fix-b-a', 'fix-b-b']) {
       assert.ok(names.includes(n), `expected ${n} to survive — no write should be lost once serialized`);
     }
@@ -147,7 +147,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
     // 위임일 뿐이다(typeorm/data-source/DataSource.js). 이 코드베이스의 여러
     // 호출부는 repo.manager.transaction()을 직접 부른다 — 두 형태를 한
     // overlap에 섞어본다.
-    const repo = patched.getRepository(Workspace);
+    const repo = patched.getRepository(Account);
     let active = 0;
     let maxActive = 0;
     const tracked = (tag) => async (manager) => {
@@ -175,7 +175,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
   it('fix: a transaction() call nested on the SAME chain does not deadlock behind its own outer call', async () => {
     const outcome = await Promise.race([
       patched.transaction(async (outerManager) => {
-        const outerRepo = outerManager.getRepository(Workspace);
+        const outerRepo = outerManager.getRepository(Account);
         await outerRepo.save(outerRepo.create({ name: 'nested-outer', description: 'nested' }));
         // 이미 큐를 통과해 실행 중인 트랜잭션 "안에서" 루트 dataSource에 거는
         // 재진입 호출 — sqlite의 "nested" transactionSupport가 같은 shared
@@ -183,7 +183,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
         // 중첩된 바로 그 호출 뒤에 큐잉되면(=바깥은 안쪽이 끝나야 끝나는데
         // 안쪽은 바깥 차례를 기다림) 데드락이 난다.
         await patched.transaction(async (innerManager) => {
-          const innerRepo = innerManager.getRepository(Workspace);
+          const innerRepo = innerManager.getRepository(Account);
           await innerRepo.save(innerRepo.create({ name: 'nested-inner', description: 'nested' }));
         });
         return 'completed';
@@ -192,7 +192,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
     ]);
     assert.equal(outcome, 'completed', 'a same-chain nested transaction() call must resolve, not deadlock');
 
-    const names = (await patched.getRepository(Workspace).find()).map((w) => w.name);
+    const names = (await patched.getRepository(Account).find()).map((w) => w.name);
     assert.ok(names.includes('nested-outer'), 'outer nested write must be committed');
     assert.ok(names.includes('nested-inner'), 'inner nested write must be committed');
   });
@@ -211,7 +211,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
       active += 1;
       maxActive = Math.max(maxActive, active);
       try {
-        const repo = manager.getRepository(Workspace);
+        const repo = manager.getRepository(Account);
         await repo.save(repo.create({ name: `${tag}-a`, description: 'stale-reentry' }));
         await new Promise((r) => setTimeout(r, delayMs));
         await repo.save(repo.create({ name: `${tag}-b`, description: 'stale-reentry' }));
@@ -230,7 +230,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
     // 지연 자손은 그보다 한참 뒤, 아래 "다른 큐 작업"이 여전히 활성인 동안
     // fire된다.
     await patched.transaction(async (outerManager) => {
-      const outerRepo = outerManager.getRepository(Workspace);
+      const outerRepo = outerManager.getRepository(Account);
       await outerRepo.save(outerRepo.create({ name: 'stale-outer', description: 'stale-reentry' }));
       setTimeout(() => {
         descendantPromise = patched.transaction(trackedWithDelay('stale-descendant', 5));
@@ -256,7 +256,7 @@ describe('sql.js transaction serialization queue (ticket 762fbe05)', () => {
       'a stale-reentry descendant must queue behind the transaction that is currently active, not run alongside it',
     );
 
-    const names = (await patched.getRepository(Workspace).find()).map((w) => w.name);
+    const names = (await patched.getRepository(Account).find()).map((w) => w.name);
     for (const n of ['stale-outer', 'other-queued-a', 'other-queued-b', 'stale-descendant-a', 'stale-descendant-b']) {
       assert.ok(names.includes(n), `expected ${n} to survive — no write should be lost`);
     }

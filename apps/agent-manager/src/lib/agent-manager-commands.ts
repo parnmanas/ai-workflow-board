@@ -1,3 +1,4 @@
+import { normalizeAccountEnvelope } from './account-scope.js';
 // ST-5b — handle agent_manager_command SSE events.
 //
 // Event shape (from server, see common/types/stream-events on AWB):
@@ -326,7 +327,7 @@ export class AgentManagerCommandHandler {
   async handle(raw: string): Promise<void> {
     let payload: AgentManagerCommandPayload;
     try {
-      payload = JSON.parse(raw);
+      payload = normalizeAccountEnvelope(JSON.parse(raw));
     } catch (err: any) {
       log(`agent_manager_command: parse failed: ${err?.message ?? err}`);
       return;
@@ -465,7 +466,7 @@ export class AgentManagerCommandHandler {
    */
   async #updateManager(): Promise<string> {
     // ticket 9408b308: 이 명령을 낼 수 있는 주체가 곧 정책 D 가 말하는 승인
-    // 주체(workspace admin)다 — 새 권한 축을 만들지 않고 이 명령 자체를 승인으로
+    // 주체(account admin)다 — 새 권한 축을 만들지 않고 이 명령 자체를 승인으로
     // 기록한다. `scheduled` 호스트에서 이 설치가 지금 끝나지 못하더라도 다음 창의
     // tick 이 같은 버전을 다시 묻지 않고 이어서 개시한다.
     const result = await runSelfUpdate({
@@ -545,7 +546,7 @@ export class AgentManagerCommandHandler {
       (typeof payload.args?.model === 'string' && payload.args.model.trim()) ||
       '';
     const runtimeConfig = remote?.runtime_config ?? payload.args?.runtime_config ?? null;
-    const workspaceId = String(payload.args?.workspace_id || (remote as any)?.workspace_id || this.#config.workspace_id || '').trim();
+    const accountId = String(payload.args?.account_id || (remote as any)?.account_id || this.#config.account_id || '').trim();
 
     if (!workingDir) {
       throw new Error('spawn_agent: working_dir is empty — set it before spawning');
@@ -561,7 +562,7 @@ export class AgentManagerCommandHandler {
       name,
       cli,
       working_dir: workingDir,
-      workspace_id: workspaceId,
+      account_id: accountId,
       model: model || null,
       runtime_config: runtimeConfig,
       last_spawn_at: new Date().toISOString(),
@@ -572,21 +573,21 @@ export class AgentManagerCommandHandler {
     // endpoint is idempotent in the "rotate any prior provisioned" sense,
     // so a fresh provision here is also safe — we just don't gratuitously
     // rotate every spawn_agent (e.g. on a manager restart).
-    let rawApiKey = await readApiKey(agentId, workspaceId);
+    let rawApiKey = await readApiKey(agentId, accountId);
     let provisioned = false;
     if (!rawApiKey) {
-      const issued = await provisionManagedAgentApiKey(this.#config, agentId, workspaceId);
+      const issued = await provisionManagedAgentApiKey(this.#config, agentId, accountId);
       if (!issued?.raw_key) {
         throw new Error('spawn_agent: apiKey provisioning failed (server returned no key)');
       }
       rawApiKey = issued.raw_key;
-      await writeApiKey(agentId, rawApiKey, workspaceId);
+      await writeApiKey(agentId, rawApiKey, accountId);
       provisioned = true;
     }
     // Ticket ee26302d: same gap as #refreshMcpConfig below — no resolved
     // profile at spawn_agent time, so this static file always starts
     // 'full'; a subsequent ticket/chat spawn corrects it if needed.
-    const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey, workspaceId);
+    const mcpConfigPath = await writeMcpConfig(agentId, this.#config.url, rawApiKey, accountId);
 
     // ST-7 follow-up: per-agent CLI home dir. Created lazily here so the
     // CLI (claude/codex/antigravity) writes its sessions / plugins / settings
@@ -607,7 +608,7 @@ export class AgentManagerCommandHandler {
     // claude agent); a mismatch is logged and ignored so a typo on the
     // AWB side doesn't silently start sending OpenAI keys to claude.
     const credentialIdHint = typeof payload.args?.credential_id === 'string' ? payload.args.credential_id : '';
-    const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint, workspaceId);
+    const credential = await this.#resolveAgentCredential(agentId, cli, credentialIdHint, accountId);
     if (credential) {
       await writeAgentCredential(agentId, credential);
     } else {
@@ -654,7 +655,7 @@ export class AgentManagerCommandHandler {
     if (this.#deps.contextRegistry) {
       this.#deps.contextRegistry.upsert({
         agent_id: agentId,
-        workspace_id: workspaceId,
+        account_id: accountId,
         name,
         cli,
         working_dir: workingDir,
@@ -723,9 +724,9 @@ export class AgentManagerCommandHandler {
     agentId: string,
     cli: string,
     credentialIdHint: string,
-    workspaceId?: string,
+    accountId?: string,
   ): Promise<ManagedAgentCredential | null> {
-    const fetched = await fetchAgentCredential(this.#config, agentId, workspaceId);
+    const fetched = await fetchAgentCredential(this.#config, agentId, accountId);
     if (!fetched) {
       if (credentialIdHint) {
         log(
@@ -1073,8 +1074,8 @@ export class AgentManagerCommandHandler {
     const agentId = this.#targetAgentId(payload, 'refresh_mcp_config');
     const ctx = this.#deps.contextRegistry?.get(agentId);
     const diskConfig = ctx ? null : await readManagedAgentConfig(agentId);
-    const workspaceId = String(payload.args?.workspace_id || ctx?.workspace_id || diskConfig?.workspace_id || '').trim();
-    const rawApiKey = await readApiKey(agentId, workspaceId || undefined);
+    const accountId = String(payload.args?.account_id || ctx?.account_id || diskConfig?.account_id || '').trim();
+    const rawApiKey = await readApiKey(agentId, accountId || undefined);
     if (!rawApiKey) {
       throw new Error(
         `refresh_mcp_config: no apiKey on disk for agent=${agentId.slice(0, 8)} ` +
@@ -1088,7 +1089,7 @@ export class AgentManagerCommandHandler {
     // if that session's resolved profile calls for it (see those files'
     // "reuse-if-exists fast path" branches), so this is a transient gap,
     // not a permanent one.
-    const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey, workspaceId || undefined);
+    const path = await writeMcpConfig(agentId, this.#config.url, rawApiKey, accountId || undefined);
     const cli = ctx?.cli ?? diskConfig?.cli;
     if (cli) {
       await ensureCliHomeDir(agentId);

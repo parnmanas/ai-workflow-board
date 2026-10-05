@@ -28,7 +28,7 @@ import { api } from '../src/api.ts';
 function baseMission(overrides) {
   return {
     id: 'mission-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     team_id: 'team-1',
     team_name: 'Platform squad',
     title: 'Ship the billing export',
@@ -74,10 +74,10 @@ function baseMission(overrides) {
 const TEAMS = [
   {
     id: 'team-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     is_global: false,
-    owner_workspace_id: 'ws-1',
-    allowed_workspace_ids: [],
+    owner_account_id: 'ws-1',
+    allowed_account_ids: [],
     name: 'Platform squad',
     description: '',
     orchestrator_agent_id: 'agent-1',

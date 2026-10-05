@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import type { CatalogScope, Credential } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
@@ -108,19 +108,19 @@ function cliProviderFieldDefs(provider: FlattenedCredentialProvider): Record<str
 }
 
 export default function CredentialManager({
-  workspaceId,
-  workspaceName,
+  accountId,
+  accountName,
   globalMode = false,
   catalogMode = false,
-  createScope = 'workspace',
+  createScope = 'account',
   allScopes = false,
   canManageGlobal = false,
 }: {
-  workspaceId?: string;
+  accountId?: string;
   /** Names the destination in the Edit dialog's scope picker — moving a global
-   *  credential down lands it in the Workspace currently being viewed, and
-   *  "Current Workspace" is not a good enough label for that. */
-  workspaceName?: string;
+   *  credential down lands it in the Account currently being viewed, and
+   *  "Current Account" is not a good enough label for that. */
+  accountName?: string;
   globalMode?: boolean;
   catalogMode?: boolean;
   createScope?: CatalogScope;
@@ -155,11 +155,11 @@ export default function CredentialManager({
   const [formDescription, setFormDescription] = useState('');
   const [formProvider, setFormProvider] = useState('github');
   const [formFields, setFormFields] = useState<Record<string, string>>({});
-  const [formScope, setFormScope] = useState<CatalogScope>('workspace');
+  const [formScope, setFormScope] = useState<CatalogScope>('account');
   const [storedFieldPreviews, setStoredFieldPreviews] = useState<Record<string, string>>({});
   const [formErrors, setFormErrors] = useState<{ name?: string }>({});
 
-  const effectiveWsId = globalMode ? '' : (workspaceId || (getActiveWorkspaceId() || ''));
+  const effectiveWsId = globalMode ? '' : (accountId || (getActiveAccountId() || ''));
   const effectiveCreateScope: CatalogScope = globalMode ? 'global' : createScope;
 
   const loadCredentials = useCallback(async () => {
@@ -274,7 +274,7 @@ export default function CredentialManager({
     // the purpose of showing an identifying prefix/suffix.
     setStoredFieldPreviews({ ...cred.credential_fields });
     setFormFields({});
-    setFormScope(cred.scope ?? (cred.workspace_id ? 'workspace' : 'global'));
+    setFormScope(cred.scope ?? (cred.account_id ? 'account' : 'global'));
     setFormErrors({});
     setEditCred(cred);
     setShowForm(true);
@@ -286,7 +286,7 @@ export default function CredentialManager({
     const errors: { name?: string } = {};
     if (!formName.trim()) errors.name = 'Name is required.';
     if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
-    if (!globalMode && !effectiveWsId) { showToast('Select a workspace first.', 'error'); return; }
+    if (!globalMode && !effectiveWsId) { showToast('Ownership defaults are unavailable.', 'error'); return; }
 
     setSaving(true);
     try {
@@ -296,7 +296,7 @@ export default function CredentialManager({
           // Doubles as the ownership proof for a workspace credential and the
           // destination when a global one is narrowed — see the server's
           // update() doc comment.
-          workspace_id: editCred.workspace_id ?? effectiveWsId,
+          account_id: editCred.account_id ?? effectiveWsId,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -306,7 +306,7 @@ export default function CredentialManager({
       } else {
         await api.createCredential({
           scope: effectiveCreateScope,
-          workspace_id: effectiveCreateScope === 'global' ? undefined : effectiveWsId,
+          account_id: effectiveCreateScope === 'global' ? undefined : effectiveWsId,
           name: formName.trim(),
           description: formDescription,
           provider: formProvider,
@@ -327,7 +327,7 @@ export default function CredentialManager({
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await api.deleteCredential(deleteTarget.id, deleteTarget.workspace_id === null ? undefined : effectiveWsId);
+      await api.deleteCredential(deleteTarget.id, deleteTarget.account_id === null ? undefined : effectiveWsId);
       showToast('Credential deleted.', 'success');
       setDeleteTarget(null);
       await loadCredentials();
@@ -337,7 +337,7 @@ export default function CredentialManager({
   };
 
   if (!globalMode && !effectiveWsId) {
-    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Select a workspace first.</div>;
+    return <div style={{ fontSize: '13px', color: tokens.colors.textSecondary }}>Ownership defaults are unavailable.</div>;
   }
 
   return (
@@ -346,12 +346,12 @@ export default function CredentialManager({
         <span style={{ fontSize: 13, color: tokens.colors.textMuted }}>{credentials.length} credentials</span>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <CliAutoLogin
-            workspaceId={effectiveWsId}
+            accountId={effectiveWsId}
             createScope={effectiveCreateScope}
             onCreated={loadCredentials}
           />
           <CliCredentialImport
-            workspaceId={effectiveWsId}
+            accountId={effectiveWsId}
             createScope={effectiveCreateScope}
             onCreated={loadCredentials}
           />
@@ -539,12 +539,12 @@ export default function CredentialManager({
           </div>
           <Input label="Description" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Optional note" />
 
-          {/* Scope is fixed at create time by the page-level "Workspace for new
+          {/* Scope is fixed at create time by the page-level "Account for new
               item" picker; on an existing credential it is switchable, because
               the alternative is re-pasting a secret and re-pointing every
               binding by hand. Non-admins get the control read-only: the Actions
               column already hides Edit for inherited globals, so for them this
-              row only ever states which Workspace owns the row. */}
+              row only ever states which Account owns the row. */}
           {editCred && !globalMode && (
             <div>
               <label style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: tokens.typography.fontWeightSemibold, color: tokens.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: tokens.spacing.xs }}>Scope</label>
@@ -554,15 +554,15 @@ export default function CredentialManager({
                 onChange={(e) => setFormScope(e.target.value as CatalogScope)}
                 style={{ width: '100%', background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md, padding: '8px 10px', color: canManageGlobal ? tokens.colors.textStrong : tokens.colors.textMuted, fontSize: '12px', fontFamily: 'inherit', boxSizing: 'border-box' }}
               >
-                <option value="global">Not set (Global — every Workspace)</option>
-                <option value="workspace">{workspaceName || 'Current Workspace'}</option>
+                <option value="global">Not set (Global — every Account)</option>
+                <option value="account">{accountName || 'Current Account'}</option>
               </select>
               <div style={{ fontSize: '11px', color: tokens.colors.textMuted, marginTop: 4 }}>
                 {!canManageGlobal
-                  ? 'Only an administrator can share a credential across Workspaces.'
+                  ? 'Only an administrator can share a credential across Accounts.'
                   : formScope === 'global'
-                  ? 'Readable from every Workspace on this instance.'
-                  : `Readable only from ${workspaceName || 'this Workspace'}. Agents, resources, CLI session settings and outreach channels elsewhere that use it must be re-pointed first.`}
+                  ? 'Readable from every Account on this instance.'
+                  : `Readable only from ${accountName || 'this Account'}. Agents, resources, CLI session settings and outreach channels elsewhere that use it must be re-pointed first.`}
               </div>
             </div>
           )}

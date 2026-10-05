@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
 } from '../helpers/fixtures.mjs';
@@ -21,10 +21,10 @@ test('MCP initialize without experimental.awb/schemaVersion is rejected with cod
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'schema');
+  const ws = await createAccount(app, getDataSourceToken, 'schema');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'schema-tester' });
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'schema-tester',
   });
 

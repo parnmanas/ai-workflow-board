@@ -28,7 +28,7 @@ import type { WebStandardStreamableHTTPServerTransport } from '@modelcontextprot
 export interface McpAgentContext {
   agentId?: string;
   agentName?: string;
-  workspaceId?: string;
+  accountId?: string;
   scope?: string;
   source: 'db' | 'env' | 'dev-mode';
   // P4c-2b: runtime-tuple identity (`rt-<hex16>`) for host-bound keys that

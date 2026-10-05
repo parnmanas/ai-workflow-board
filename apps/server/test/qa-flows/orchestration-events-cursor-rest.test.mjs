@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 
 process.env.PORT = process.env.ORCHESTRATION_EVENTS_CURSOR_PORT || '0';
@@ -58,19 +58,19 @@ test('타임라인 커서의 마지막 키가 REST 경로로 전달되어 seq �
   const missions = app.get(services.OrchestrationMissionService);
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'events-cursor-rest');
+  const ws = await createAccount(app, getDataSourceToken, 'events-cursor-rest');
 
   // MANAGE_ACTIONS 가 필요하다 — 이 컨트롤러 전체가 그 권한 뒤에 있다.
   const operator = await createUser(app, getDataSourceToken, { name: 'events-cursor-operator' });
   const token = app.get(AuthService).createSession(operator.id);
 
   const { team } = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Cursor squad',
     team: { max_parallel_steps: 2, created_by: operator.id },
   });
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Cursor fixture',
     objective: 'fail-open 이 두 번 난 타임라인',
@@ -140,14 +140,14 @@ test('타임라인 커서의 마지막 키가 REST 경로로 전달되어 seq �
     let cursor = null;
     let sawCursorId = false;
     for (let page = 0; page < 30; page += 1) {
-      const qs = [`workspace_id=${encodeURIComponent(ws.id)}`, `limit=${limit}`];
+      const qs = [`account_id=${encodeURIComponent(ws.id)}`, `limit=${limit}`];
       if (cursor) {
         qs.push(`before_at=${encodeURIComponent(cursor.at)}`);
         qs.push(`before_seq=${cursor.seq}`);
         if (withId) qs.push(`before_id=${encodeURIComponent(cursor.id)}`);
       }
       const res = await fetch(`${base}/api/orchestration/missions/${mission.id}/events?${qs.join('&')}`, {
-        headers: { Authorization: `Bearer ${token}`, 'X-Workspace-Id': ws.id },
+        headers: { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id },
       });
       // 본문은 **한 번만** 읽는다 — assert 메시지 자리에서 `await res.text()` 를 부르면
       // 템플릿 리터럴이 즉시 평가되어 성공 경로에서도 body 가 소모되고, 뒤의 json() 이

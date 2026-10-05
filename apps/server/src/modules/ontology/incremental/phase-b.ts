@@ -11,7 +11,7 @@ import type { PhaseAResult } from './phase-a';
 
 export interface PhaseBInput {
   graphId: string;
-  workspaceId: string;
+  accountId: string;
   commit: string;
   extractionRunId: string;
   /** Phase A가 방금 처리한 파일의 현재(새) 경로. */
@@ -47,7 +47,7 @@ export async function runPhaseB(dataSource: DataSource, input: PhaseBInput): Pro
 
   const summary = await resolveCrossFileEdges(dataSource, {
     graphId: input.graphId,
-    workspaceId: input.workspaceId,
+    accountId: input.accountId,
     commit: input.commit,
     extractionRunId: input.extractionRunId,
     scopeFilePaths: scope,

@@ -3,7 +3,7 @@ import { TypeOrmModule, InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions, serializeSqljsTransactions } from '../db';
 import * as entitiesBarrel from '../entities';
-import { Workspace } from '../entities/Workspace';
+import { Account } from '../entities/Account';
 import { LogService } from '../services/log.service';
 
 const entityList = Object.values(entitiesBarrel);
@@ -57,15 +57,15 @@ export class DatabaseModule implements OnModuleInit {
       throw e;
     }
 
-    const wsRepo = this.dataSource.getRepository(Workspace);
+    const wsRepo = this.dataSource.getRepository(Account);
     // Seed default workspace if empty (seeding, NOT migration — stays here).
     // A workspace is just a ticket pool now (docs/tickets.md) — nothing else
     // to seed.
     const wsCount = await wsRepo.count();
     if (wsCount === 0) {
       await wsRepo.save(wsRepo.create({
-        name: 'Default Workspace',
-        description: 'Main workspace for AI agent collaboration',
+        name: 'Personal',
+        description: 'Default ownership account',
       }));
       this.dbLog('Seeded default workspace');
     }

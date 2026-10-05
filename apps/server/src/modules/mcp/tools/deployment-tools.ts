@@ -25,7 +25,7 @@ function deploymentToJson(d: Deployment | null) {
   if (!d) return null;
   return {
     id: d.id,
-    workspace_id: d.workspace_id,
+    account_id: d.account_id,
     environment: d.environment,
     base_url: d.base_url,
     repo_resource_id: d.repo_resource_id,
@@ -50,24 +50,24 @@ export function registerDeploymentTools(server: McpServer, ctx: ToolContext) {
     'for this environment to deploy the fix: the rerun fires the moment `deployed_commit_sha` (or one ' +
     'of `ancestor_shas`) includes the fix commit — no time guessing. Pass `ancestor_shas` (e.g. ' +
     '`git rev-list --max-count=200 HEAD`) so the "does this deploy include the fix" ancestor check ' +
-    'works without AWB holding a clone. Omit `workspace_id` for a GLOBAL/shared environment (e.g. the ' +
+    'works without AWB holding a clone. Omit `account_id` for a GLOBAL/shared environment (e.g. the ' +
     'AWB server itself); set it to scope the environment to one workspace.',
     {
       environment: z.string().describe('Environment name, e.g. "production", "staging", "awb-server". This is what a QA scenario points at via target_environment.'),
       deployed_commit_sha: z.string().describe('The commit SHA now LIVE in this environment (git rev-parse HEAD of what was deployed).'),
-      workspace_id: z.string().optional().describe('Scope to one workspace. Omit for a GLOBAL environment shared across workspaces.'),
+      account_id: z.string().optional().describe('Scope to one workspace. Omit for a GLOBAL environment shared across accounts.'),
       base_url: z.string().optional().describe('Public base URL of the environment (for the UI badge link / poller).'),
       repo_resource_id: z.string().optional().describe('Optional Resource id of the repo this environment deploys (provenance).'),
       ancestor_shas: z.array(z.string()).optional().describe('Recent commit ancestry of deployed_commit_sha (newest→oldest, e.g. `git rev-list --max-count=200 HEAD`). Enables the "deploy includes the fix commit" ancestor gate without a server-side clone.'),
       source: z.enum(DEPLOYMENT_SOURCES as [string, ...string[]]).optional().describe('How this was collected. Default "mcp".'),
       deployed_at: z.string().optional().describe('ISO timestamp the environment went live on this commit. Defaults to now.'),
     },
-    async ({ environment, deployed_commit_sha, workspace_id, base_url, repo_resource_id, ancestor_shas, source, deployed_at }, extra: { sessionId?: string }) => {
+    async ({ environment, deployed_commit_sha, account_id, base_url, repo_resource_id, ancestor_shas, source, deployed_at }, extra: { sessionId?: string }) => {
       if (!deploymentService) return err('Deployment service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
         const row = await deploymentService.report({
-          workspaceId: workspace_id ?? null,
+          accountId: account_id ?? null,
           environment,
           deployedCommitSha: deployed_commit_sha,
           baseUrl: base_url,

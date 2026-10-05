@@ -1,6 +1,6 @@
 // Run-creation-rate guard — runtime tests (ticket a51ec6d9), against a REAL
 // sql.js DataSource driven through the app's own buildDataSourceOptions()
-// (so `synchronize` actually creates Workspace.hard_budget_config + the
+// (so `synchronize` actually creates Account.hard_budget_config + the
 // qa_runs/action_runs/orchestration_missions tables the guard queries — the
 // dual-DB migration-free config-column convention; see hard-budget-guard.test.mjs
 // for the same pattern applied to the per-ticket ceilings this module's
@@ -43,7 +43,7 @@ process.env.NODE_ENV = 'test';
 
 const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.js'));
 const { DataSource } = await import('typeorm');
-const { Workspace } = await import('file://' + path.join(DIST, 'entities', 'Workspace.js'));
+const { Account } = await import('file://' + path.join(DIST, 'entities', 'Account.js'));
 const { ChatRoom } = await import('file://' + path.join(DIST, 'entities', 'ChatRoom.js'));
 const { QaRun } = await import('file://' + path.join(DIST, 'entities', 'QaRun.js'));
 const { ActionRun } = await import('file://' + path.join(DIST, 'entities', 'ActionRun.js'));
@@ -62,7 +62,7 @@ await ds.initialize();
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const deps = { dataSource: ds, logger: logStub };
 
-const wsRepo = ds.getRepository(Workspace);
+const wsRepo = ds.getRepository(Account);
 const qaRunRepo = ds.getRepository(QaRun);
 const actionRunRepo = ds.getRepository(ActionRun);
 const missionRepo = ds.getRepository(OrchestrationMission);
@@ -70,14 +70,14 @@ const missionRepo = ds.getRepository(OrchestrationMission);
 async function makeWorkspace(hardBudgetConfig) {
   return wsRepo.save(wsRepo.create({ name: 'W', hard_budget_config: hardBudgetConfig ?? null }));
 }
-async function makeQaRun(workspaceId, overrides = {}) {
-  return qaRunRepo.save(qaRunRepo.create({ scenario_id: 's1', workspace_id: workspaceId, ...overrides }));
+async function makeQaRun(accountId, overrides = {}) {
+  return qaRunRepo.save(qaRunRepo.create({ scenario_id: 's1', account_id: accountId, ...overrides }));
 }
-async function makeActionRun(workspaceId, overrides = {}) {
-  return actionRunRepo.save(actionRunRepo.create({ action_id: 'a1', workspace_id: workspaceId, room_id: 'r1', ...overrides }));
+async function makeActionRun(accountId, overrides = {}) {
+  return actionRunRepo.save(actionRunRepo.create({ action_id: 'a1', account_id: accountId, room_id: 'r1', ...overrides }));
 }
-async function makeMission(workspaceId, overrides = {}) {
-  return missionRepo.save(missionRepo.create({ workspace_id: workspaceId, team_id: 't1', title: 'M', ...overrides }));
+async function makeMission(accountId, overrides = {}) {
+  return missionRepo.save(missionRepo.create({ account_id: accountId, team_id: 't1', title: 'M', ...overrides }));
 }
 
 after(async () => {
@@ -144,7 +144,7 @@ test('enforceRunBudget: at the cap throws RunBudgetExceededError carrying kind/w
       assert.ok(err instanceof RunBudgetExceededError);
       assert.equal(err.status, 429);
       assert.equal(err.kind, 'qa');
-      assert.equal(err.workspaceId, ws.id);
+      assert.equal(err.accountId, ws.id);
       assert.equal(err.count, 2);
       assert.equal(err.limit, 2);
       assert.equal(err.windowMinutes, 30);
@@ -206,8 +206,8 @@ test('enforceRunBudget: an unconfigured workspace (no row) fails open against th
 // itself must stay unconditional; only the chat send should be damped to one
 // per breach episode.
 const roomRepo = ds.getRepository(ChatRoom);
-async function makeAlertsRoom(workspaceId) {
-  return roomRepo.save(roomRepo.create({ workspace_id: workspaceId, type: 'group', name: 'alerts' }));
+async function makeAlertsRoom(accountId) {
+  return roomRepo.save(roomRepo.create({ account_id: accountId, type: 'group', name: 'alerts' }));
 }
 
 test('enforceRunBudget: repeated breaches in the same episode send only ONE chat alert', async () => {
@@ -217,8 +217,8 @@ test('enforceRunBudget: repeated breaches in the same episode send only ONE chat
 
   const sent = [];
   const roomMessagingService = {
-    async sendSystemMessage(roomId, workspaceId, content) {
-      sent.push({ roomId, workspaceId, content });
+    async sendSystemMessage(roomId, accountId, content) {
+      sent.push({ roomId, accountId, content });
     },
   };
   const notifyDeps = { dataSource: ds, roomMessagingService, logger: logStub };
@@ -230,7 +230,7 @@ test('enforceRunBudget: repeated breaches in the same episode send only ONE chat
   assert.equal(sent.length, 1, 'only the first breach in the episode posted a chat alert');
 });
 
-test('enforceRunBudget: breaches in DIFFERENT workspaces (or kinds) each get their own alert', async () => {
+test('enforceRunBudget: breaches in DIFFERENT accounts (or kinds) each get their own alert', async () => {
   const wsA = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: true }));
   const wsB = await makeWorkspace(JSON.stringify({ max_runs_per_window: 1, notify: true }));
   await makeAlertsRoom(wsA.id);
@@ -241,8 +241,8 @@ test('enforceRunBudget: breaches in DIFFERENT workspaces (or kinds) each get the
 
   const sent = [];
   const roomMessagingService = {
-    async sendSystemMessage(roomId, workspaceId, content) {
-      sent.push({ roomId, workspaceId, content });
+    async sendSystemMessage(roomId, accountId, content) {
+      sent.push({ roomId, accountId, content });
     },
   };
   const notifyDeps = { dataSource: ds, roomMessagingService, logger: logStub };

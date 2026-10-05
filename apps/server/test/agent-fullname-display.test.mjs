@@ -30,7 +30,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createUser,
   createApiKey,
@@ -50,7 +50,7 @@ const ds = app.get(getDataSourceToken());
 // ── Shared scene: one workspace, a managed agent (has a manager → prefixed
 //    display), its Runtime Host identity (bare display), a human user, and
 //    a ticket to hang activity / pending state on. ────────────────────────────
-const ws = await createWorkspace(app, getDataSourceToken, 'fullname');
+const ws = await createAccount(app, getDataSourceToken, 'fullname');
 
 const manager = await createAgent(app, getDataSourceToken, ws.id, { name: 'Mgr', type: 'manager' });
 const managed = await createAgent(app, getDataSourceToken, ws.id, {
@@ -60,7 +60,7 @@ const managed = await createAgent(app, getDataSourceToken, ws.id, {
 });
 // P4c-4: managed→manager 연결은 api_keys 페어링 링크다 (Agent 행 없음).
 await createApiKey(app, getDataSourceToken, managed.id, {
-  workspaceId: ws.id, hostId: manager.id, label: 'managed-link',
+  accountId: ws.id, hostId: manager.id, label: 'managed-link',
 });
 const user = await createUser(app, getDataSourceToken, { name: 'Human' });
 
@@ -68,7 +68,7 @@ const user = await createUser(app, getDataSourceToken, { name: 'Human' });
 const MANAGED_DISPLAY = manager.name;
 
 const ticket = await createTicket(app, getDataSourceToken, {
-  workspaceId: ws.id,
+  accountId: ws.id,
   title: 'fullname display',
 });
 
@@ -139,12 +139,12 @@ test('Activity tab: actor_name re-resolves to the Host bare name from actor_id',
 // ─── User (pending) tab (WRITE-side stamp), end-to-end via /mcp ──────────────
 test('User tab: pend_ticket stamps pending_set_by as the Host bare name', async () => {
   // P4c-4: 호출자 키 자체가 host 바인딩이다 (단일 행 — 해소가 결정적이다).
-  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, hostId: manager.id, label: 'pend' });
+  const key = await createApiKey(app, getDataSourceToken, managed.id, { accountId: ws.id, hostId: manager.id, label: 'pend' });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
   const pendTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'pend me',
   });
 
@@ -167,12 +167,12 @@ test('User tab: pend_ticket stamps pending_set_by as the Host bare name', async 
 // is what the assertion covers, and assert BOTH the returned ticket and the
 // persisted row carry the canonical name.
 test('User tab: update_ticket pending toggle stamps pending_set_by as the Host bare name', async () => {
-  const key = await createApiKey(app, getDataSourceToken, managed.id, { workspaceId: ws.id, hostId: manager.id, label: 'upd-pend' });
+  const key = await createApiKey(app, getDataSourceToken, managed.id, { accountId: ws.id, hostId: manager.id, label: 'upd-pend' });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
   const updTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'park via update_ticket',
   });
 
@@ -200,7 +200,7 @@ test('User tab: update_ticket pending toggle stamps pending_set_by as the Host b
 // event-registry board_update.map projects actor_id→canonical, and the frame
 // lands on the SSE wire. Drive it truly end-to-end through /api/events/stream.
 test('Realtime board_update SSE: actor_name is the canonical Host display', async () => {
-  const key = await createApiKey(app, getDataSourceToken, manager.id, { workspaceId: ws.id, label: 'sse-sub' });
+  const key = await createApiKey(app, getDataSourceToken, manager.id, { accountId: ws.id, label: 'sse-sub' });
   // board_update has no subscriber filter (workspace scoping is the page's
   // job), so a plain stream receives every ticket-change frame.
   const sse = await openSseStream(port, key.raw_key, {});

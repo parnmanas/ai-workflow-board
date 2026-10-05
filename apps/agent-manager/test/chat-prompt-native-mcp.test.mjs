@@ -141,7 +141,7 @@ test('composeChatRoomPrompt ordinary chat uses capability-first operational poli
     'ordinary chat receives the operational policy',
   );
   assert.ok(
-    p.includes('search workspace Actions') && p.includes('run it exactly once'),
+    p.includes('search available Actions') && p.includes('run it exactly once'),
     'Action lookup and execution precede fallback',
   );
   assert.ok(p.includes('required MCP/tool itself is unavailable'));

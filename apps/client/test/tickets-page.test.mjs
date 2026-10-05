@@ -3,7 +3,7 @@
 // 순수 로직(필터 ⇄ URL, lane 위치 계산, 정렬)은 ticket-filters / ticket-kanban /
 // ticket-list-view-logic 테스트가 고정한다. 여기서는 그 조각들이 실제 페이지에서
 // 배선되는지를 프로덕션과 같은 provider 스택 위에서 확인한다:
-//   1. URL 필터가 GET /workspaces/:wsId/tickets 쿼리로 나가고, 상태 필터에 맞는 lane 만 그린다
+//   1. URL 필터가 GET /accounts/:wsId/tickets 쿼리로 나가고, 상태 필터에 맞는 lane 만 그린다
 //   2. 상태 칩을 누르면 URL 이 바뀌고 새 쿼리로 다시 불러온다
 //   3. `?ticket=<id>` 가 상세 패널을 열고(GET /tickets/:id), 닫으면 파라미터가 사라진다
 //   4. 워크스페이스 dispatch_paused_at 이면 일시정지 배너가 보인다
@@ -34,11 +34,11 @@ const { LegacyBoardsRedirect } = await import('../src/App.tsx');
 
 const h = React.createElement;
 const WS_ID = 'ws-1';
-const BASE = `/ws/${WS_ID}`;
+const BASE = ``;
 
 function card(id, status, position, extra = {}) {
   return {
-    id, workspace_id: WS_ID, parent_id: null, title: `Ticket ${id}`, status, priority: 'medium',
+    id, account_id: WS_ID, parent_id: null, title: `Ticket ${id}`, status, priority: 'medium',
     tags: [], project_id: null, base_branch: '', assignee: null, assignee_key: '', position,
     created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-02T00:00:00Z',
     comments: [], prerequisite_count: 0, children: [], ...extra,
@@ -72,18 +72,18 @@ function installFetchStub(state) {
       return ok({
         id: 'u1', name: 'Tester', email: 't@example.com', role: 'admin', status: 'active',
         permissions: ['admin.access'], resolved_permissions: ['admin.access'],
-        workspaces: [{ id: WS_ID, name: 'Workspace', slug: null, relations: [] }],
+        accounts: [{ id: WS_ID, name: 'Account', slug: null, relations: [] }],
       });
     }
     if (path === '/auth/setup-status') return ok({ needs_setup: false });
-    if (path === `/workspaces/${WS_ID}/tickets` && method === 'GET') {
+    if (path === '/tickets' && method === 'GET') {
       return ok({ tickets: state.tickets, tags: [{ tag: 'ui', count: 2 }, { tag: 'api', count: 1 }] });
     }
-    if (path === `/workspaces/${WS_ID}/projects`) {
-      return ok([{ id: 'p1', workspace_id: WS_ID, name: 'awb-web', description: '', repo_url: 'x', default_branch: 'main', credential_id: null, clone_policy: null, use_pr: false, instructions: '', default_assignee: null, host_folders: [] }]);
+    if (path === '/projects') {
+      return ok([{ id: 'p1', account_id: WS_ID, name: 'awb-web', description: '', repo_url: 'x', default_branch: 'main', credential_id: null, clone_policy: null, use_pr: false, instructions: '', default_assignee: null, host_folders: [] }]);
     }
     if (path === '/agent-templates/hosts') return ok([{ id: 'h1', name: 'rolf' }]);
-    if (path === `/workspaces/${WS_ID}`) return ok({ id: WS_ID, name: 'Workspace', description: '', dispatch_paused_at: state.pausedAt, created_at: '', updated_at: '' });
+    if (path === `/accounts/${WS_ID}`) return ok({ id: WS_ID, name: 'Account', description: '', dispatch_paused_at: state.pausedAt, created_at: '', updated_at: '' });
     if (path === '/tickets/unread-counts') return ok({ total: 0, perTicket: {} });
     if (path === '/chat-rooms/unread-counts') return ok({ total: 0, perRoom: {} });
     if (path.endsWith('/mentions/unread')) return ok({ count: 0, items: [] });
@@ -92,7 +92,7 @@ function installFetchStub(state) {
     if (path.endsWith('/read-state')) return ok({ ticket_id: 'x', last_read_at: null });
     if (path.includes('/presence')) return ok({ viewers: [] });
     if (path.includes('/mention-candidates')) return ok({ users: [], agents: [] });
-    if (path === `/workspaces/${WS_ID}/ticket-tags`) return ok({ tags: [{ tag: 'ui', count: 2 }, { tag: 'infra', count: 7 }] });
+    if (path === '/ticket-tags') return ok({ tags: [{ tag: 'ui', count: 2 }, { tag: 'infra', count: 7 }] });
     if (path.includes('/unread-by-source')) return ok({ items: [] });
     return ok([]);
   };
@@ -144,8 +144,8 @@ async function mountPage(t, { entry = `${BASE}/tickets`, pausedAt = null, view =
                 h(NotificationProvider, null,
                   h(LocationProbe),
                   h(Routes, null,
-                    h(Route, { path: '/ws/:wsId/tickets', element: h(TicketsPage) }),
-                    h(Route, { path: '/ws/:wsId/boards/*', element: h(LegacyBoardsRedirect) }),
+                    h(Route, { path: '/tickets', element: h(TicketsPage) }),
+                    h(Route, { path: '/boards/*', element: h(LegacyBoardsRedirect) }),
                   ),
                 ),
               ),
@@ -168,7 +168,7 @@ async function mountPage(t, { entry = `${BASE}/tickets`, pausedAt = null, view =
   return { view: viewHandle, state };
 }
 
-const ticketListCalls = (state) => state.calls.filter((c) => c.method === 'GET' && c.path === `/workspaces/${WS_ID}/tickets`);
+const ticketListCalls = (state) => state.calls.filter((c) => c.method === 'GET' && c.path === '/tickets');
 const laneStatuses = (view) => [...view.container.querySelectorAll('[data-status-lane]')].map((el) => el.getAttribute('data-status-lane'));
 
 test('① URL 필터가 목록 쿼리로 나가고 상태 필터의 lane 만 그린다', async (t) => {
@@ -250,8 +250,8 @@ test('⑥ 예전 /boards/* 딥링크는 쿼리를 유지한 채 /tickets 로 간
     const view = mount(
       h(MemoryRouter, { initialEntries: [`${BASE}/boards/b-old?ticket=t1&comment=c9`] },
         h(Routes, null,
-          h(Route, { path: '/ws/:wsId/boards/*', element: h(LegacyBoardsRedirect) }),
-          h(Route, { path: '/ws/:wsId/tickets', element: h(LocationProbe) }),
+          h(Route, { path: '/boards/*', element: h(LegacyBoardsRedirect) }),
+          h(Route, { path: '/tickets', element: h(LocationProbe) }),
         ),
       ),
     );
@@ -272,8 +272,8 @@ test('⑥-b /boards 인덱스도 /tickets 로 간다', () => {
     const view = mount(
       h(MemoryRouter, { initialEntries: [`${BASE}/boards`] },
         h(Routes, null,
-          h(Route, { path: '/ws/:wsId/boards/*', element: h(LegacyBoardsRedirect) }),
-          h(Route, { path: '/ws/:wsId/tickets', element: h(LocationProbe) }),
+          h(Route, { path: '/boards/*', element: h(LegacyBoardsRedirect) }),
+          h(Route, { path: '/tickets', element: h(LocationProbe) }),
         ),
       ),
     );

@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createProject, createUser, createWorkspace, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
+import { createAgent, createProject, createUser, createAccount, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { VirtualAgent } from './helpers/virtual-agent.mjs';
 
 const { app, port, modules } = await bootApp({ port: 0 });
@@ -25,7 +25,7 @@ const { AuthService } = await import('../dist/services/auth.service.js');
 const { TicketDispatchService, MAX_SUPERVISOR_REDISPATCHES } = await import('../dist/modules/agents/ticket-dispatch.service.js');
 const dispatcher = app.get(TicketDispatchService);
 
-const ws = await createWorkspace(app, gdst, 'dispatch');
+const ws = await createAccount(app, gdst, 'dispatch');
 const admin = await createUser(app, gdst, { name: 'admin', role: 'admin' });
 const token = app.get(AuthService).createSession(admin.id);
 const agent = await createAgent(app, gdst, ws.id, { name: 'worker', runtime: true });
@@ -44,7 +44,7 @@ test.after(async () => {
 async function api(method, path, body) {
   const res = await fetch(`http://localhost:${port}/api${path}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': ws.id },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -60,7 +60,7 @@ let first;
 let second;
 
 test('a todo ticket with an assignee starts at once and carries the work order', async () => {
-  const res = await api('POST', `/workspaces/${ws.id}/tickets`, {
+  const res = await api('POST', `/accounts/${ws.id}/tickets`, {
     title: 'implement terrain', assignee: agent.runtime_spec, project_id: project.id, tags: ['terrain'],
   });
   assert.equal(res.status, 201, JSON.stringify(res.body));
@@ -81,7 +81,7 @@ test('a todo ticket with an assignee starts at once and carries the work order',
 });
 
 test('a second ticket for a busy agent waits in todo until the first leaves in_progress', async () => {
-  const res = await api('POST', `/workspaces/${ws.id}/tickets`, { title: 'second', assignee: agent.runtime_spec });
+  const res = await api('POST', `/accounts/${ws.id}/tickets`, { title: 'second', assignee: agent.runtime_spec });
   second = res.body;
   await settle();
   assert.equal(await status(second.id), 'todo');
@@ -117,21 +117,21 @@ test('unpend re-sends the ticket', async () => {
 
 test('a paused workspace starts nothing until it is resumed', async () => {
   await api('PATCH', `/tickets/${second.id}/move`, { status: 'review' });
-  await api('PATCH', `/workspaces/${ws.id}`, { dispatch_paused_at: true });
-  const third = (await api('POST', `/workspaces/${ws.id}/tickets`, { title: 'third', assignee: agent.runtime_spec })).body;
+  await api('PATCH', `/accounts/${ws.id}`, { dispatch_paused_at: true });
+  const third = (await api('POST', `/accounts/${ws.id}/tickets`, { title: 'third', assignee: agent.runtime_spec })).body;
   await settle();
   assert.equal(await status(third.id), 'todo');
   const run = await api('POST', `/tickets/${third.id}/trigger`);
   assert.equal(run.body.dispatched, false);
   assert.equal(run.body.reason, 'workspace_paused');
 
-  await api('PATCH', `/workspaces/${ws.id}`, { dispatch_paused_at: null });
+  await api('PATCH', `/accounts/${ws.id}`, { dispatch_paused_at: null });
   await vagent.waitForTrigger((t) => t.ticket_id === third.id, 5000);
   assert.equal(await status(third.id), 'in_progress');
 });
 
 test('the supervisor re-sends a dead ticket, then parks it for a human', async () => {
-  const [third] = await ds.getRepository('Ticket').find({ where: { workspace_id: ws.id, title: 'third' } });
+  const [third] = await ds.getRepository('Ticket').find({ where: { account_id: ws.id, title: 'third' } });
   const later = Date.now() + 3 * 60 * 60 * 1000;
   for (let i = 0; i < MAX_SUPERVISOR_REDISPATCHES; i += 1) {
     await dispatcher.supervise(later + i * 60 * 60 * 1000);
@@ -149,12 +149,12 @@ test('the supervisor re-sends a dead ticket, then parks it for a human', async (
 });
 
 test('tickets list filters by status, tags and project', async () => {
-  const byTag = await api('GET', `/workspaces/${ws.id}/tickets?tags=terrain`);
+  const byTag = await api('GET', `/accounts/${ws.id}/tickets?tags=terrain`);
   assert.deepEqual(byTag.body.tickets.map((t) => t.id), [first.id]);
   assert.ok(byTag.body.tags.some((t) => t.tag === 'terrain'));
-  const byStatus = await api('GET', `/workspaces/${ws.id}/tickets?status=review`);
+  const byStatus = await api('GET', `/accounts/${ws.id}/tickets?status=review`);
   assert.deepEqual(byStatus.body.tickets.map((t) => t.id), [second.id]);
-  const byProject = await api('GET', `/workspaces/${ws.id}/tickets?project_id=${project.id}`);
+  const byProject = await api('GET', `/accounts/${ws.id}/tickets?project_id=${project.id}`);
   assert.deepEqual(byProject.body.tickets.map((t) => t.id), [first.id]);
   assert.equal(byProject.body.tickets[0].assignee.label, agent.runtime_spec.label);
 });

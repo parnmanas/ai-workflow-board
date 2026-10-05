@@ -540,11 +540,11 @@ test('dispatchChatRoomUpdate: open_join_changed 는 같은 워크스페이스면
     refreshActiveRoomParticipants: () => {
       rosterRefreshed = true;
     },
-    getCurrentWorkspaceId: () => 'ws-1',
+    getCurrentAccountId: () => 'ws-1',
   };
 
   dispatchChatRoomUpdate(deps, {
-    payload: { update_type: 'open_join_changed', room_id: 'B', open_join: true, workspace_id: 'ws-1' },
+    payload: { update_type: 'open_join_changed', room_id: 'B', open_join: true, account_id: 'ws-1' },
   });
   await flush();
 
@@ -557,9 +557,8 @@ test('dispatchChatRoomUpdate: open_join_changed 는 같은 워크스페이스면
   assert.equal(rosterRefreshed, false, '참여자 로스터와는 무관한 이벤트다');
 });
 
-test('dispatchChatRoomUpdate: open_join_changed 가 다른 워크스페이스면 무시한다 (ticket 995a9519)', async () => {
-  // 이 update type 만 워크스페이스 전체로 나가므로(서버 chatRoomUpdateFilter) 스코프를
-  // 수신 측이 좁혀야 한다 — users 가 워크스페이스에 소속되지 않아 서버가 판정할 수 없다.
+test('dispatchChatRoomUpdate: another accessible account refreshes the integrated room list', async () => {
+  // Membership filtering belongs to the server; work lists include all accessible owners.
   const roomsState = makeRoomsState([roomListItem('A', { open_join: false })]);
   let listCalls = 0;
   const deps = {
@@ -571,16 +570,16 @@ test('dispatchChatRoomUpdate: open_join_changed 가 다른 워크스페이스면
     },
     setRooms: roomsState.setRooms,
     refreshActiveRoomParticipants: () => {},
-    getCurrentWorkspaceId: () => 'ws-1',
+    getCurrentAccountId: () => 'ws-1',
   };
 
   dispatchChatRoomUpdate(deps, {
-    payload: { update_type: 'open_join_changed', room_id: 'Z', open_join: true, workspace_id: 'ws-OTHER' },
+    payload: { update_type: 'open_join_changed', room_id: 'Z', open_join: true, account_id: 'ws-OTHER' },
   });
   await flush();
 
-  assert.equal(listCalls, 0, '남의 워크스페이스 변경으로 내 목록을 재조회하면 안 된다');
-  assert.deepEqual(roomsState.get().map((r) => r.id), ['A'], '목록이 그대로다');
+  assert.equal(listCalls, 1, 'accessible account changes refresh the integrated list');
+  assert.deepEqual(roomsState.get().map((r) => r.id), [], 'the server result replaces the list');
 });
 
 test('dispatchChatRoomUpdate: open_join_changed 재조회 실패는 조용히 넘어간다 (ticket 995a9519)', async () => {
@@ -592,11 +591,11 @@ test('dispatchChatRoomUpdate: open_join_changed 재조회 실패는 조용히 �
     listChatRooms: () => Promise.reject(new Error('network down')),
     setRooms: roomsState.setRooms,
     refreshActiveRoomParticipants: () => {},
-    getCurrentWorkspaceId: () => 'ws-1',
+    getCurrentAccountId: () => 'ws-1',
   };
 
   dispatchChatRoomUpdate(deps, {
-    payload: { update_type: 'open_join_changed', room_id: 'A', open_join: true, workspace_id: 'ws-1' },
+    payload: { update_type: 'open_join_changed', room_id: 'A', open_join: true, account_id: 'ws-1' },
   });
   await flush();
 

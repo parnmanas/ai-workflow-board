@@ -5,7 +5,7 @@
  * GitHubConnectorService.getTokenForCredential, which has no workspace check
  * (bare `findOne({where:{id}})`), swallows failures, and falls back to
  * `process.env.GITHUB_TOKEN` (ticket 2500fea3 planning decision D1).
- * OutreachChannel is a workspace-scoped resource; a bare findOne() would let
+ * OutreachChannel is a account-scoped resource; a bare findOne() would let
  * workspace A's channel resolve workspace B's token. There is intentionally
  * NO env-var fallback here — a missing/invalid credential must fail the poll
  * loudly, not silently degrade to anonymous access or another workspace's
@@ -30,19 +30,19 @@ export interface OutreachCredential {
   extra: Record<string, string>;
 }
 
-/** Accepts a GLOBAL credential (workspace_id=NULL) or one scoped to
- *  `workspaceId`; throws (never silently degrades) for a missing row, a
+/** Accepts a GLOBAL credential (account_id=NULL) or one scoped to
+ *  `accountId`; throws (never silently degrades) for a missing row, a
  *  cross-workspace row, or an unreadable/empty token. Returns null only when `credentialId` itself is empty — "this
  *  channel has no credential configured" is a valid, callable-safe state. */
 export async function resolveOutreachCredential(
   credRepo: Repository<Credential>,
   credentialId: string | null | undefined,
-  workspaceId: string,
+  accountId: string,
 ): Promise<OutreachCredential | null> {
   if (!credentialId) return null;
   const cred = await credRepo.findOne({ where: { id: credentialId } });
   if (!cred) throw new OutreachCredentialResolutionError(`Selected credential ${credentialId} does not exist`);
-  if (cred.workspace_id !== null && cred.workspace_id !== workspaceId) {
+  if (cred.account_id !== null && cred.account_id !== accountId) {
     throw new OutreachCredentialResolutionError('Selected credential belongs to a different workspace');
   }
   try {

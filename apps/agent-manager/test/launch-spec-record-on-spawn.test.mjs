@@ -68,7 +68,7 @@ await new Promise((r) => setTimeout(r, 30));
 function makeAgentContext(cwd) {
   return {
     agent_id: AGENT_ID,
-    workspace_id: 'ws-record',
+    account_id: 'ws-record',
     api_key: 'agent-key',
     cwd,
     mcp_config_path: '',

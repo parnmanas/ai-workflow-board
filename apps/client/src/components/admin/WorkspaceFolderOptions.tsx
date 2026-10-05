@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import { tokens } from '../../tokens';
 import { Input, Select } from '../common';
 import type { CheckoutMode, BuildMode, RepoBranch, WorkspaceFolderRepoRef } from '../../types';
@@ -135,7 +135,7 @@ interface WorkspaceFolderOptionsProps {
   showBuildMode?: boolean;
   /** 프로젝트 목록을 조회할 workspace(티켓 af31e92d). 생략하면 다른 admin 화면들과
    *  동일하게 활성 workspace 로 폴백한다. */
-  workspaceId?: string;
+  accountId?: string;
 }
 
 const fieldLabel: React.CSSProperties = {
@@ -152,7 +152,7 @@ const linkButton: React.CSSProperties = {
 
 interface RepoRefPickerProps {
   /** 프로젝트 목록 조회에 쓸 workspace. 빈 문자열이면 조회를 건너뛴다. */
-  workspaceId: string;
+  accountId: string;
   state: RepoRefFormState;
   onChange: (patch: Partial<RepoRefFormState>) => void;
 }
@@ -170,8 +170,8 @@ interface RepoRefPickerProps {
  *  - url 직접 입력 경로는 프로젝트로 등록되지 않은 저장소용으로 남기되, 우선순위가
  *    낮다는 사실(프로젝트 선택 시 무시)을 UI 로 드러낸다.
  */
-export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerProps) {
-  const { projects, loading: projectsLoading, error: projectsError, reload } = useProjects(workspaceId);
+export function RepoRefPicker({ accountId, state, onChange }: RepoRefPickerProps) {
+  const { projects, loading: projectsLoading, error: projectsError, reload } = useProjects(accountId);
   const [projectSearch, setProjectSearch] = useState('');
   const [branchReload, setBranchReload] = useState(0);
 
@@ -185,7 +185,7 @@ export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerPro
   const [branchesError, setBranchesError] = useState('');
 
   useEffect(() => {
-    if (!workspaceId || !selectedProjectId) {
+    if (!accountId || !selectedProjectId) {
       setBranches([]);
       setDefaultBranch('');
       setBranchesLoading(false);
@@ -209,7 +209,7 @@ export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerPro
       })
       .finally(() => { if (!cancelled) setBranchesLoading(false); });
     return () => { cancelled = true; };
-  }, [workspaceId, selectedProjectId, branchReload]);
+  }, [accountId, selectedProjectId, branchReload]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) || null;
   const normalizedSearch = projectSearch.trim().toLocaleLowerCase();
@@ -297,10 +297,10 @@ export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerPro
         )}
         {!projectsLoading && !projectsError && projects.length === 0 && (
           <div style={helpText}>
-            이 워크스페이스에 등록된 프로젝트가 없습니다.
-            {workspaceId && (
+            등록된 프로젝트가 없습니다.
+            {accountId && (
               <>
-                {' '}<a href={`/ws/${encodeURIComponent(workspaceId)}/projects`} style={{ color: tokens.colors.accent }}>Projects</a>
+                {' '}<a href={`/projects`} style={{ color: tokens.colors.accent }}>Projects</a>
                 {' '}에서 저장소를 프로젝트로 등록하세요.
               </>
             )}
@@ -378,9 +378,9 @@ export function RepoRefPicker({ workspaceId, state, onChange }: RepoRefPickerPro
  * QA 시나리오 / 보안 프로파일 편집 폼에 끼워 넣는 작업폴더 옵션 블록.
  * read 표시 + 변경 시 onChange(patch) 로 상위 상태를 갱신한다(저장은 상위 폼이).
  */
-export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = true, workspaceId }: WorkspaceFolderOptionsProps) {
+export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = true, accountId }: WorkspaceFolderOptionsProps) {
   const defaultFolderHint = `${FOLDER_ROOT_BY_KIND[kind]}/<id>`;
-  const effectiveWorkspaceId = workspaceId || getActiveWorkspaceId() || '';
+  const effectiveAccountId = accountId || getActiveAccountId() || '';
   return (
     <div style={{ borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 12, marginTop: 4 }}>
       <div style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary }}>작업폴더 옵션</div>
@@ -426,7 +426,7 @@ export function WorkspaceFolderOptions({ kind, state, onChange, showBuildMode = 
           )}
         </div>
 
-        <RepoRefPicker workspaceId={effectiveWorkspaceId} state={state} onChange={onChange} />
+        <RepoRefPicker accountId={effectiveAccountId} state={state} onChange={onChange} />
       </div>
     </div>
   );

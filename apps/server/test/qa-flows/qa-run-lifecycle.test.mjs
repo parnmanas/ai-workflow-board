@@ -30,7 +30,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_RUN_LIFECYCLE_PORT || '0';
@@ -50,9 +50,9 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   const { getDataSourceToken } = modules;
   const { seed, prompt } = await loadQaModules();
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'qa-run');
+  const ws = await createAccount(app, getDataSourceToken, 'qa-run');
   const qaAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'qa-runner' });
-  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { workspaceId: ws.id, label: 'qa' });
+  const qaKey = await createApiKey(app, getDataSourceToken, qaAgent.id, { accountId: ws.id, label: 'qa' });
 
   const mcp = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: qaKey.raw_key });
   t.after(() => { void mcp.close().catch(() => {}); });
@@ -64,7 +64,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   assert.ok(Array.isArray(seed.QA_SEED_SCENARIOS) && seed.QA_SEED_SCENARIOS.length >= 8,
     'seed catalogue should ship a meaningful set');
   const payloads = seed.buildScenarioCreatePayloads({
-    workspace_id: ws.id,
+    account_id: ws.id,
     target_runtime: qaAgent.runtime_spec,
     only: ['ticket-lifecycle'],
   });
@@ -105,9 +105,9 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   const runId = started.run_id;
 
   // The freshly started run is in `running` with empty results.
-  let run = await mcp.callTool('get_qa_run', { run_id: runId, workspace_id: ws.id });
+  let run = await mcp.callTool('get_qa_run', { run_id: runId, account_id: ws.id });
   assert.equal(run.status, 'running');
-  assert.equal(run.workspace_id, ws.id, 'Workspace is stamped as execution context');
+  assert.equal(run.account_id, ws.id, 'Account is stamped as execution context');
   assert.deepEqual(run.step_results, []);
 
   // ── 3. record_qa_step ────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   for (const s of scenario.steps) {
     const res = await mcp.callTool('record_qa_step', {
       run_id: runId,
-      workspace_id: ws.id,
+      account_id: ws.id,
       idx: s.idx,
       status: 'passed',
       log: `step ${s.idx} ok`,
@@ -123,7 +123,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
     });
     assert.ok(!res?.isError, `record_qa_step ${s.idx} failed: ${JSON.stringify(res)}`);
   }
-  run = await mcp.callTool('get_qa_run', { run_id: runId, workspace_id: ws.id });
+  run = await mcp.callTool('get_qa_run', { run_id: runId, account_id: ws.id });
   assert.equal(run.step_results.length, scenario.steps.length, 'one result per step');
   assert.ok(run.step_results.every((r) => r.status === 'passed'));
   assert.equal(run.artifact_resource_ids.length, scenario.steps.length, 'artifacts accumulate at run level');
@@ -132,7 +132,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   const before = run.step_results.length;
   const reRec = await mcp.callTool('record_qa_step', {
     run_id: runId,
-    workspace_id: ws.id,
+    account_id: ws.id,
     idx: 0,
     status: 'failed',
     log: 're-recorded',
@@ -146,7 +146,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   step('complete_qa_run stamps final status + finished_at');
   const done = await mcp.callTool('complete_qa_run', {
     run_id: runId,
-    workspace_id: ws.id,
+    account_id: ws.id,
     status: 'failed',
     summary: 'QA lifecycle regression run',
   });
@@ -156,7 +156,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   assert.equal(done.summary, 'QA lifecycle regression run');
 
   step('list_qa_runs / get_qa_run reflect the completed run');
-  const runs = await mcp.callTool('list_qa_runs', { scenario_id: scenario.id, workspace_id: ws.id });
+  const runs = await mcp.callTool('list_qa_runs', { scenario_id: scenario.id, account_id: ws.id });
   assert.ok(Array.isArray(runs) && runs.some((r) => r.id === runId), 'run present in history');
 
   // ── 5. Breadth: 2 more representative scenarios through the whole loop ─────────
@@ -166,7 +166,7 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
   // one file = one test() = one result.
   step('Representative scenarios each run start → record → complete');
   const breadth = seed.buildScenarioCreatePayloads({
-    workspace_id: ws.id,
+    account_id: ws.id,
     target_runtime: qaAgent.runtime_spec,
     only: ['chat-room-messaging', 'archive-unarchive'],
   });
@@ -181,13 +181,13 @@ test('QA scenario run lifecycle: create → start → record → complete', asyn
 
     for (const s of sc.steps) {
       const res = await mcp.callTool('record_qa_step', {
-        run_id: run2.run_id, workspace_id: ws.id, idx: s.idx, status: 'passed', log: 'ok',
+        run_id: run2.run_id, account_id: ws.id, idx: s.idx, status: 'passed', log: 'ok',
       });
       assert.ok(!res?.isError, `record ${_key}#${s.idx}: ${JSON.stringify(res)}`);
     }
 
     const fin = await mcp.callTool('complete_qa_run', {
-      run_id: run2.run_id, workspace_id: ws.id, status: 'passed', summary: `${_key} ok`,
+      run_id: run2.run_id, account_id: ws.id, status: 'passed', summary: `${_key} ok`,
     });
     assert.ok(!fin?.isError, `complete ${_key}: ${JSON.stringify(fin)}`);
     assert.equal(fin.status, 'passed');

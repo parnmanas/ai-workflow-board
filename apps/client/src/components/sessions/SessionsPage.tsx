@@ -52,9 +52,9 @@ import {
 
 /**
  * Sessions — Agent Session(CLI 직접 세션) 표면.
- *   /ws/:wsId/sessions                        Runtime Host 목록
- *   /ws/:wsId/sessions/:managerId             그 장비의 모든 세션 (cwd 별 그룹)
- *   /ws/:wsId/sessions/:managerId/:cli/:id    트랜스크립트(장비의 기록) + 라이브 스트림 + 컴포저
+ *   /sessions                        Runtime Host 목록
+ *   /sessions/:managerId             그 장비의 모든 세션 (cwd 별 그룹)
+ *   /sessions/:managerId/:cli/:id    트랜스크립트(장비의 기록) + 라이브 스트림 + 컴포저
  *
  * Chat(ChatPage) 과는 데이터도 계약도 다르다: 방/참여자/멘션이 없고, 기록은 장비의 CLI 홈에서
  * 오며, 권한 요청은 여기서 사용자가 결정한다.
@@ -160,7 +160,7 @@ function HostsIndex({ wsId, hosts, loading, error, onReload, onNew }: {
                 <div style={{ marginTop: 4 }}>
                   <button
                     type="button"
-                    onClick={() => navigate(`/ws/${wsId}/sessions/${host.manager_id}`)}
+                    onClick={() => navigate(`/sessions/${host.manager_id}`)}
                     style={{
                       border: `1px solid ${tokens.colors.accent}66`, background: 'transparent', color: tokens.colors.accentSubtle,
                       borderRadius: tokens.radii.md, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
@@ -221,7 +221,7 @@ function CwdGroupCard({ group, wsId, managerId, onNew }: {
         <button
           key={s.session_id}
           type="button"
-          onClick={() => navigate(sessionPath(`/ws/${wsId}`, managerId, s.cli, s.session_id))}
+          onClick={() => navigate(sessionPath(``, managerId, s.cli, s.session_id))}
           style={{
             width: '100%', textAlign: 'left', border: 'none',
             borderTop: i === 0 ? 'none' : `1px solid ${tokens.colors.border}`,
@@ -318,7 +318,7 @@ function HostProjectsView({ wsId, managerId, host, onNew, onNewWithCwd }: {
         description={host ? `${host.hostname} — sessions grouped by working directory` : 'This Runtime Host is not connected right now.'}
         actions={(
           <>
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/ws/${wsId}/sessions`)}>All hosts</Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate(`/sessions`)}>All hosts</Button>
             <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>Reload</Button>
             {host && host.clis.map((cli) => {
               const bound = host.cli_settings?.[cli] ?? null;
@@ -682,7 +682,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         // 다른 operator 를 불렀다 — 그쪽이 깨어난다.
         playEarcon('wake');
         wakeStore.wake(match.operator.id, match.rest || null);
-        navigate(sessionPath(`/ws/${wsId}`, match.operator.manager_id, match.operator.cli, match.operator.session_id));
+        navigate(sessionPath(``, match.operator.manager_id, match.operator.cli, match.operator.session_id));
         return null;
       },
       onSleep: () => {
@@ -780,7 +780,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   if (error && !live && !summary) {
     return (
       <>
-        <PageHeader title="Session" actions={<Button variant="secondary" size="sm" onClick={() => navigate(`/ws/${wsId}/sessions/${managerId}`)}>Back to list</Button>} />
+        <PageHeader title="Session" actions={<Button variant="secondary" size="sm" onClick={() => navigate(`/sessions/${managerId}`)}>Back to list</Button>} />
         <div style={{ padding: 20 }}><ErrorState message={error} onRetry={() => void load()} /></div>
       </>
     );
@@ -811,7 +811,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
       >
         <button
           type="button"
-          onClick={() => navigate(`/ws/${wsId}/sessions/${managerId}`)}
+          onClick={() => navigate(`/sessions/${managerId}`)}
           aria-label="Back to sessions"
           title="Back to sessions"
           style={{ border: 'none', background: 'transparent', color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 16, padding: '0 4px' }}
@@ -1063,7 +1063,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
 // ─── 라우트 컨테이너 ────────────────────────────────────────────────────────
 
 export default function SessionsPage() {
-  const { wsId, managerId, cli, sessionId } = useParams<{ wsId: string; managerId?: string; cli?: string; sessionId?: string }>();
+  const { managerId, cli, sessionId } = useParams<{ managerId?: string; cli?: string; sessionId?: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { hosts, loading, error, reload } = useAgentSessionsNav(wsId ?? null);
@@ -1102,7 +1104,7 @@ export default function SessionsPage() {
         initialCwd={newInitialCwd}
         onCreated={(liveSession) => {
           setNewOpen(false);
-          navigate(sessionPath(`/ws/${wsId}`, liveSession.manager_id, liveSession.cli, liveSession.session_id));
+          navigate(sessionPath(``, liveSession.manager_id, liveSession.cli, liveSession.session_id));
         }}
       />
     </div>

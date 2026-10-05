@@ -9,13 +9,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * Auto-DDL'd by TypeORM `synchronize` (D-01).
  */
 @Entity('agent_session_cli_settings')
-@Index('uq_agent_session_cli_settings', ['workspace_id', 'manager_id', 'cli'], { unique: true })
+@Index('uq_agent_session_cli_settings', ['account_id', 'manager_id', 'cli'], { unique: true })
 export class AgentSessionCliSetting {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   /** Runtime Host identity (Agent.id, type 'manager'). */
   @Column({ type: 'varchar' })

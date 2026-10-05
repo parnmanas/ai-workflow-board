@@ -9,8 +9,8 @@ import { UserMention } from '../../entities/UserMention';
 import { TicketReadState } from '../../entities/TicketReadState';
 import { User } from '../../entities/User';
 import { AuthGuard } from '../../common/guards/auth.guard';
-import { WorkspaceGuard } from '../../common/guards/workspace.guard';
-import { TicketWorkspaceGuard } from './ticket-workspace.guard';
+import { AccountGuard } from '../../common/guards/account.guard';
+import { TicketAccountGuard } from './ticket-account.guard';
 import { ActivityService } from '../../services/activity.service';
 import { activityEvents } from '../../services/activity.service';
 import { InstanceQuiesceService } from '../../services/instance-quiesce.service';
@@ -53,7 +53,7 @@ import { parseTicketStatus, TICKET_STATUSES, type TicketStatus } from '../../com
 @ApiBearerAuth('user-session')
 @ApiTags('tickets')
 @Controller('api')
-@UseGuards(AuthGuard, WorkspaceGuard, TicketWorkspaceGuard)
+@UseGuards(AuthGuard, AccountGuard, TicketAccountGuard)
 export class TicketsController {
   constructor(
     @InjectRepository(Ticket) private readonly ticketRepo: Repository<Ticket>,
@@ -105,7 +105,7 @@ export class TicketsController {
 
   // ─── list / create ──────────────────────────────────────
 
-  @Get('workspaces/:wsId/tickets')
+  @Get(['tickets', 'accounts/:wsId/tickets'])
   async list(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
     const q = req.query as Record<string, string | undefined>;
     const split = (v: string | undefined) => (v || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -115,7 +115,7 @@ export class TicketsController {
       if (!status) return res.status(400).json({ error: `status must be one of ${TICKET_STATUSES.join(', ')}` });
       statuses.push(status);
     }
-    const result = await this.tickets.list(wsId, {
+    const result = await this.tickets.list(wsId || (req as any).accessibleAccountIds || [], {
       status: statuses,
       tags: split(q.tags),
       project_id: q.project_id || undefined,
@@ -128,15 +128,15 @@ export class TicketsController {
     return res.json(result);
   }
 
-  @Get('workspaces/:wsId/ticket-tags')
-  async tags(@Param('wsId') wsId: string, @Res() res: Response) {
-    return res.json({ tags: await this.tickets.tagSuggestions(wsId) });
+  @Get(['ticket-tags', 'accounts/:wsId/ticket-tags'])
+  async tags(@Param('wsId') wsId: string, @Req() req: Request, @Res() res: Response) {
+    return res.json({ tags: await this.tickets.tagSuggestions(wsId || (req as any).accessibleAccountIds || []) });
   }
 
-  @Post('workspaces/:wsId/tickets')
+  @Post(['tickets', 'accounts/:wsId/tickets'])
   async create(@Param('wsId') wsId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
-      const { ticket, duplicate_candidates } = await this.tickets.create(wsId, body, this.actorOf(req));
+      const { ticket, duplicate_candidates } = await this.tickets.create(wsId || (req as any).currentAccountId, body, this.actorOf(req));
       const full = await loadTicketFull(this.dataSource, ticket.id, { commentLimit: DETAIL_COMMENT_PAGE });
       return res.status(201).json({ ...full, duplicate_candidates });
     } catch (err) {
@@ -146,8 +146,8 @@ export class TicketsController {
 
   @Post('tickets/:id/duplicate-decision')
   async decideDuplicate(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = (req as any).currentWorkspaceId as string;
-    const existing = await this.ticketRepo.findOne({ where: { id, workspace_id: workspaceId } });
+    const accountId = (req as any).currentAccountId as string;
+    const existing = await this.ticketRepo.findOne({ where: { id, account_id: accountId } });
     if (!existing) return res.status(404).json({ error: 'Ticket not found' });
     const actor = this.resolveCreator(req, body);
     try {
@@ -191,13 +191,13 @@ export class TicketsController {
       tags: JSON.stringify(normalizeTags(body.tags ?? [])),
       channel_ids: JSON.stringify(Array.isArray(body.channel_ids) ? body.channel_ids : []),
       position,
-      workspace_id: parent.workspace_id || '',
+      account_id: parent.account_id || '',
       created_by: creator.created_by, created_by_type: creator.created_by_type, created_by_id: creator.created_by_id,
     }));
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: child.id, action: 'created',
       ticket_id: parent.depth === 0 ? parentId : parent.parent_id || parentId,
-      workspace_id: child.workspace_id,
+      account_id: child.account_id,
       actor_id: creator.created_by_id || undefined,
       actor_name: creator.created_by,
       new_value: title,
@@ -218,7 +218,7 @@ export class TicketsController {
     const ownTickets = await this.ticketRepo
       .createQueryBuilder('t')
       .select('t.id', 'id')
-      .where('t.workspace_id = :wsId', { wsId })
+      .where('t.account_id = :wsId', { wsId })
       .andWhere('t.created_by_id = :uid', { uid: userId })
       .andWhere('t.archived_at IS NULL')
       .getRawMany();
@@ -226,7 +226,7 @@ export class TicketsController {
       .createQueryBuilder('r')
       .select('r.ticket_id', 'id')
       .addSelect('r.last_read_at', 'last_read_at')
-      .where('r.user_id = :uid AND r.workspace_id = :wsId', { uid: userId, wsId })
+      .where('r.user_id = :uid AND r.account_id = :wsId', { uid: userId, wsId })
       .getRawMany();
     // A ticket the user once read and that has since been archived must not
     // keep pinging the badge.
@@ -237,7 +237,7 @@ export class TicketsController {
           .createQueryBuilder('t')
           .select('t.id', 'id')
           .where('t.id IN (:...ids)', { ids: readOnlyIds })
-          .andWhere('t.workspace_id = :wsId', { wsId })
+          .andWhere('t.account_id = :wsId', { wsId })
           .andWhere('t.archived_at IS NULL')
           .getRawMany()).map((r) => r.id as string)
       : [];
@@ -256,10 +256,13 @@ export class TicketsController {
   async unreadCounts(@Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const wsId = (req.headers['x-workspace-id'] as string) || '';
-    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+    const wsId = (req.headers['x-account-id'] as string) || '';
+    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
 
-    const { involvedIds, readBy } = await this._getInvolvedTicketIds(wsId, currentUser.id);
+    const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+    const involved = await Promise.all(ids.map(id => this._getInvolvedTicketIds(id, currentUser.id)));
+    const involvedIds = involved.flatMap(item => item.involvedIds);
+    const readBy = Object.assign({}, ...involved.map(item => item.readBy)) as Record<string, Date | null>;
     if (involvedIds.length === 0) return res.json({ total: 0, perTicket: {} });
 
     const perTicket: Record<string, number> = {};
@@ -287,22 +290,24 @@ export class TicketsController {
   async markAllTicketsRead(@Req() req: Request, @Res() res: Response) {
     const currentUser = (req as any).currentUser;
     if (!currentUser) return res.status(401).json({ error: 'Authentication required' });
-    const wsId = (req.headers['x-workspace-id'] as string) || '';
-    if (!wsId) return res.status(400).json({ error: 'Workspace ID required' });
+    const wsId = (req.headers['x-account-id'] as string) || '';
+    if (!wsId) return res.status(400).json({ error: 'Account ID required' });
 
-    const { involvedIds } = await this._getInvolvedTicketIds(wsId, currentUser.id);
-    if (involvedIds.length === 0) return res.json({ updated: 0 });
+    const ids: string[] = (req as any).accessibleAccountIds || [wsId];
+    const involved = await Promise.all(ids.map(async id => ({ account_id: id, ...(await this._getInvolvedTicketIds(id, currentUser.id)) })));
+    const updated = involved.reduce((n, item) => n + item.involvedIds.length, 0);
+    if (updated === 0) return res.json({ updated: 0 });
     const now = new Date();
-    await this.readStateRepo.upsert(involvedIds.map((id) => ({
-      user_id: currentUser.id, ticket_id: id, workspace_id: wsId, last_read_at: now,
-    })), ['user_id', 'ticket_id']);
-    activityEvents.emit('ticket_reads_cleared', {
-      user_id: currentUser.id,
-      workspace_id: wsId,
-      updated: involvedIds.length,
-      read_at: now.toISOString(),
-    });
-    return res.json({ updated: involvedIds.length });
+    for (const item of involved) {
+      if (!item.involvedIds.length) continue;
+      await this.readStateRepo.upsert(item.involvedIds.map((id) => ({
+        user_id: currentUser.id, ticket_id: id, account_id: item.account_id, last_read_at: now,
+      })), ['user_id', 'ticket_id']);
+      activityEvents.emit('ticket_reads_cleared', {
+        user_id: currentUser.id, account_id: item.account_id, updated: item.involvedIds.length, read_at: now.toISOString(),
+      });
+    }
+    return res.json({ updated });
   }
 
   // ─── read ───────────────────────────────────────────────
@@ -383,7 +388,7 @@ export class TicketsController {
       if (newParentId === ticket.id) return res.status(400).json({ error: 'A ticket cannot be its own parent' });
       const parent = await this.ticketRepo.findOne({ where: { id: newParentId } });
       if (!parent) return res.status(400).json({ error: 'Parent ticket not found' });
-      if (parent.workspace_id !== ticket.workspace_id) return res.status(400).json({ error: 'Parent must be in the same workspace' });
+      if (parent.account_id !== ticket.account_id) return res.status(400).json({ error: 'Parent must be in the same workspace' });
       depth = parent.depth + 1;
       const hasGrandchildren = await this.ticketRepo
         .createQueryBuilder('t')
@@ -415,7 +420,7 @@ export class TicketsController {
       await tRepo.createQueryBuilder().update().set({ depth: depth + 1 }).where('parent_id = :id', { id: ticket.id }).execute();
     });
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      entity_type: 'ticket', entity_id: ticket.id, action: 'updated', ticket_id: ticket.id, account_id: ticket.account_id,
       field_changed: 'parent_id', old_value: oldParentId || '', new_value: newParentId || '',
       actor_id: req.currentUser?.id, actor_name: req.currentUser?.name || '',
     });
@@ -450,7 +455,7 @@ export class TicketsController {
     const currentUser = req.currentUser;
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'archived',
-      ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      ticket_id: ticket.id, account_id: ticket.account_id,
       actor_id: currentUser?.id,
       actor_name: currentUser?.name || currentUser?.email || 'manual',
       field_changed: 'archived_at',
@@ -473,7 +478,7 @@ export class TicketsController {
     const currentUser = req.currentUser;
     await this.activityService.logActivity({
       entity_type: 'ticket', entity_id: ticket.id, action: 'unarchived',
-      ticket_id: ticket.id, workspace_id: ticket.workspace_id,
+      ticket_id: ticket.id, account_id: ticket.account_id,
       actor_id: currentUser?.id,
       actor_name: currentUser?.name || currentUser?.email || 'manual',
       field_changed: 'archived_at',
@@ -496,7 +501,7 @@ export class TicketsController {
     }
     const position = ticket.position;
     const parentId = ticket.parent_id;
-    const workspaceId = ticket.workspace_id;
+    const accountId = ticket.account_id;
     // Prereq cascade (ticket 48d14fff): drop links pointing AT this ticket and
     // re-evaluate dependents BEFORE remove() — the FK ON DELETE CASCADE would
     // otherwise wipe the link rows first, leaving nothing to read.
@@ -512,7 +517,7 @@ export class TicketsController {
     await this.ticketRepo.remove(ticket);
     if (parentId) await shiftTicketPositions(this.ticketRepo, { parent_id: parentId }, position, -1);
     await this.activityService.logActivity({
-      entity_type: 'ticket', entity_id: id, action: 'deleted', ticket_id: id, workspace_id: workspaceId,
+      entity_type: 'ticket', entity_id: id, action: 'deleted', ticket_id: id, account_id: accountId,
     });
     for (const depId of unblockedDependents) {
       try {
@@ -658,7 +663,7 @@ export class TicketsController {
           owner_type: 'ticket',
           owner_id: id,
           ticket_id: id,
-          workspace_id: ticket.workspace_id || '',
+          account_id: ticket.account_id || '',
           file_name: f.file_name,
           file_mimetype: mimetype,
           file_data: f.file_data,
@@ -740,7 +745,7 @@ export class TicketsController {
 
     const ticket = await findOrFail(this.ticketRepo, { where: { id } }, 'Ticket not found');
     if (ticket.archived_at) return res.status(409).json({ error: 'ticket_archived', hint: 'Call unarchive first', message: new TicketArchivedError(ticket.id).message });
-    const normalizedContent = await this.artifactRefs.normalizeStoredOutput(ticket.workspace_id, content);
+    const normalizedContent = await this.artifactRefs.normalizeStoredOutput(ticket.account_id, content);
 
     const preIds: string[] = Array.isArray(rawAttachmentIds)
       ? rawAttachmentIds.filter((v: any) => typeof v === 'string' && v)
@@ -792,7 +797,7 @@ export class TicketsController {
       for (const rid of preIds) {
         const r = found.get(rid);
         if (!r) return res.status(400).json({ error: `attachment_resource_ids contains unknown id: ${rid}` });
-        if (r.workspace_id !== null && r.workspace_id !== ticket.workspace_id) {
+        if (r.account_id !== null && r.account_id !== ticket.account_id) {
           return res.status(400).json({ error: `attachment resource ${rid} belongs to a different workspace` });
         }
         if (r.type !== 'comment_attachment') {
@@ -823,7 +828,7 @@ export class TicketsController {
         const mimetype = inferResourceMimetypeLocal(f.file_data, f.file_name, f.file_mimetype);
         const r = await manager.getRepository(Resource).save(
           manager.getRepository(Resource).create({
-            workspace_id: ticket.workspace_id,
+            account_id: ticket.account_id,
             credential_id: null,
             name: f.file_name,
             description: '',
@@ -841,7 +846,7 @@ export class TicketsController {
       const allIds = [...preIds, ...createdIds];
       return manager.getRepository(Comment).save(manager.getRepository(Comment).create({
         ticket_id: id,
-        workspace_id: ticket.workspace_id,
+        account_id: ticket.account_id,
         author_type: 'user',
         author_id: currentUser.id,
         author: currentUser.name,
@@ -913,7 +918,7 @@ export class TicketsController {
       row = this.readStateRepo.create({
         user_id: currentUser.id,
         ticket_id: id,
-        workspace_id: ticket.workspace_id || '',
+        account_id: ticket.account_id || '',
         last_read_at: cutoff,
       });
     } else {
@@ -957,7 +962,7 @@ export class TicketsController {
         type: 'user',
         id: currentUser.id,
         name: currentUser.name || '',
-        workspaceId: ticket.workspace_id,
+        accountId: ticket.account_id,
       });
     }
     return res.json({ ok: true, viewers: this.presence.list(id).map(v => ({ type: v.type, id: v.id, name: v.name })) });
@@ -978,7 +983,7 @@ export class TicketsController {
 
     activityEvents.emit('comment_typing', {
       ticket_id: id,
-      workspace_id: ticket.workspace_id,
+      account_id: ticket.account_id,
       actor_type: 'user',
       actor_id: currentUser.id,
       actor_name: currentUser.name || '',
@@ -1102,7 +1107,7 @@ export class TicketsController {
         activityEvents.emit('comment_mention', {
           ticket_id: ticket.id,
           comment_id: comment.id,
-          workspace_id: ticket.workspace_id,
+          account_id: ticket.account_id,
           agent_id: target.agentId,
           actor_id: actor.id,
           actor_type: 'user',
@@ -1127,7 +1132,7 @@ export class TicketsController {
         // User mention — persist + emit for badge sync
         const row = await this.mentionRepo.save(this.mentionRepo.create({
           user_id: m.id,
-          workspace_id: ticket.workspace_id,
+          account_id: ticket.account_id,
           source_type: 'comment',
           source_id: comment.id,
           ticket_id: ticket.id,
@@ -1141,7 +1146,7 @@ export class TicketsController {
         activityEvents.emit('user_mention', {
           mention_id: row.id,
           user_id: row.user_id,
-          workspace_id: row.workspace_id,
+          account_id: row.account_id,
           source_type: 'comment',
           source_id: comment.id,
           ticket_id: ticket.id,

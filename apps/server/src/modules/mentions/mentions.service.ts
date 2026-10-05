@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { UserMention } from '../../entities/UserMention';
 
 // API surface. Comment-type rows carry `ticket_id`; the inbox links them to
@@ -15,9 +15,11 @@ export class MentionsService {
   ) {}
 
   /** List the given user's unread mentions in one workspace, newest first. */
-  async listUnread(workspaceId: string, userId: string, limit = 50): Promise<UserMentionRow[]> {
+  async listUnread(accountId: string | string[], userId: string, limit = 50): Promise<UserMentionRow[]> {
+    const ids = Array.isArray(accountId) ? accountId : [accountId];
+    if (!ids.length) return [];
     return this.repo.find({
-      where: { workspace_id: workspaceId, user_id: userId, read_at: IsNull() },
+      where: { account_id: In(ids), user_id: userId, read_at: IsNull() },
       order: { created_at: 'DESC' },
       take: Math.min(limit, 200),
     });
@@ -26,9 +28,11 @@ export class MentionsService {
   /**
    * Count the given user's unread mentions in one workspace.
    */
-  async countUnread(workspaceId: string, userId: string): Promise<number> {
+  async countUnread(accountId: string | string[], userId: string): Promise<number> {
+    const ids = Array.isArray(accountId) ? accountId : [accountId];
+    if (!ids.length) return 0;
     return this.repo.count({
-      where: { workspace_id: workspaceId, user_id: userId, read_at: IsNull() },
+      where: { account_id: In(ids), user_id: userId, read_at: IsNull() },
     });
   }
 
@@ -100,12 +104,14 @@ export class MentionsService {
    * Mark every unread mention in a workspace as read for this user.
    * Returns the number of rows advanced.
    */
-  async markAllRead(workspaceId: string, userId: string): Promise<number> {
+  async markAllRead(accountId: string | string[], userId: string): Promise<number> {
+    const ids = Array.isArray(accountId) ? accountId : [accountId];
+    if (!ids.length) return 0;
     const result = await this.repo
       .createQueryBuilder()
       .update()
       .set({ read_at: () => 'CURRENT_TIMESTAMP' })
-      .where('workspace_id = :wsId AND user_id = :uid AND read_at IS NULL', { wsId: workspaceId, uid: userId })
+      .where('account_id IN (:...ids) AND user_id = :uid AND read_at IS NULL', { ids, uid: userId })
       .execute();
     return result.affected ?? 0;
   }

@@ -24,13 +24,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * the profile was deleted/disabled mid-batch).
  */
 @Entity('security_run_batches')
-@Index(['workspace_id', 'created_at'])
+@Index(['account_id', 'created_at'])
 export class SecurityRunBatch {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // Ordered profile ids to run, one after another.
   @Column({ type: 'simple-json', nullable: true, default: null })

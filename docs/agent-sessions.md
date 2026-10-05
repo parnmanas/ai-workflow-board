@@ -8,17 +8,33 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 이 세션의 기록은 무엇인가" 를 묻고, 살아 있는 턴의 스트림만 브라우저로 중계한다. 그 장비에서 터미널로
 쓰던 기존 세션도 그대로 목록에 뜨고 이어서 쓸 수 있다.
 
-기존 Chat(ChatRoom) 과는 별개의 기능이며, chat 모드의 기본 랜딩이 `/ws/:wsId/sessions` 다.
+기존 Chat(ChatRoom) 과는 별개의 기능이며, 기본 작업 랜딩이 `/sessions` 다. 작업 화면에는
+소유 계정 전환기가 없다. Account는 세션의 소유권·접근 권한·credential·기본 실행 정책을
+정하는 관리 경계다([ownership.md](ownership.md)).
+
+## 소유권과 실행 설정 고정
+
+전사는 계속 CLI가 보관한다. AWB DB의 `AgentSessionExecution`은
+`(manager_id, cli, session_id)`별 소유 `account_id`, `credential_id`,
+`config_defaults`, `runtime_profile`만 저장한다. 새 독립 세션은 기본 접근 계정을
+사용하고, 기존 네이티브 세션을 처음 실행할 때도 같은 방식으로 실행 메타데이터를
+고정한다. 이미 고정된 세션의 상세·실행 권한은 화면이나 요청의 계정 힌트가 아니라
+그 세션의 실제 소유 계정으로 검사한다.
+
+Account × Runtime Host × CLI 설정은 새 실행의 기본값이다. 이후 기본 credential,
+backend, 모델·승인 모드를 바꿔도 기존 세션의 snapshot은 바뀌지 않는다. 사용자가
+해당 세션에서 명시적으로 바꾼 mode/config는 snapshot에 기록하여 재개할 때 유지한다.
+기존 CLI 전사, 세션 id, credential 전용 홈과 기록 링크는 이 소유권 이관으로 이동하지 않는다.
 
 ## 왜 Chat 을 개편하지 않고 따로 두는가
 
 | | Chat (ChatRoom) | Agent Session |
 |---|---|---|
 | 단위 | 방(room) — DM/그룹 + Action/QA/Mission run 방 등 9종이 한 엔티티에 다중화 | (Runtime Host, CLI, 네이티브 세션 id) |
-| 저장 | AWB DB (chat_room_messages) | 없음 — CLI 홈의 세션 파일이 원본 |
+| 저장 | AWB DB (chat_room_messages) | 전사는 CLI 원본, 소유권·실행 설정은 `AgentSessionExecution` |
 | 에이전트 답변 | `send_chat_room_message` MCP 툴 호출로만 | ACP 스트림(text/tool/permission) 그대로 |
 | 프롬프트 | 매 턴 AWB 정책 프롬프트로 래핑, DB 히스토리를 재조립 | 사용자 텍스트가 그대로 `session/prompt` |
-| 실행 identity | AWB Agent(격리 cli-home, per-agent 키) | 장비 운영자의 CLI 홈 그대로 |
+| 실행 identity | RuntimeSpec 기반 실행 identity | 운영자 로그인 또는 고정된 credential 전용 cli-home |
 | 권한 | CLI 어댑터는 사전 결정(tier) | `session/request_permission` 을 사용자에게 릴레이 |
 | 의존 모듈 | 16개 모듈이 dispatch 버스로 재사용 | 없음 — 독립 모듈 |
 
@@ -26,19 +42,20 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 
 | 계층 | Chat | Session |
 |---|---|---|
-| 엔티티 | `ChatRoom` / `ChatRoomMessage` / `ChatRoomParticipant` | 없음 (메모리 라이브 상태만) |
+| 엔티티 | `ChatRoom` / `ChatRoomMessage` / `ChatRoomParticipant` | `AgentSessionExecution`(소유권·실행 설정), 라이브 상태는 메모리 |
 | 서버 모듈 | `modules/chat-rooms` | `modules/agent-sessions` |
 | 사용자 REST | `/api/chat-rooms/*` | `/api/agent-sessions/hosts/:managerId/:cli/sessions[/:id/...]` |
 | agent-manager REST | `/api/agent/chat-rooms/*` | `/api/agent/sessions/rpc/:requestId`, `/api/agent/sessions/:managerId/:cli/:id[/events]` |
 | SSE | `chat_request`, `chat_room_message`, … | `agent_session_request`(→manager, scope=manager_id), `agent_session_update` / `agent_session_event`(→driver UI) |
 | 권한 | `chat.view` / `chat.send` | `agent_sessions.use` (기본 admin 전용) |
-| 클라이언트 | `components/chat/*`, `/ws/:wsId/chat/:roomId` | `components/sessions/*`, `/ws/:wsId/sessions/:managerId/:cli/:id` |
+| 클라이언트 | `components/chat/*`, `/chat/:roomId` | `components/sessions/*`, `/sessions/:managerId/:cli/:id` |
 | 사이드바 | "Chat" 섹션 | "Sessions" 섹션 (Chat 위) — 행은 Runtime Host × CLI |
 | manager | `chat-session-manager.ts` | `agent-session-runner.ts` + `agent-session-store.ts` |
 
 ## 구성 요소
 
-- **서버 `modules/agent-sessions`** — 상태 없는 중계자. `InstanceRegistryService`(하트비트)에서 살아 있는
+- **서버 `modules/agent-sessions`** — 전사를 복제하지 않는 RPC·스트림 중계자. 실행 소유권과 설정은 DB에 고정한다.
+  `InstanceRegistryService`(하트비트)에서 살아 있는
   Runtime Host 와 그 장비의 세션 CLI(`acp_session_clis`)를 읽고, list/history/open 은 `agent_session_request{request_id}`
   → `POST /api/agent/sessions/rpc/:id` 로 왕복한다(fs-browser 와 같은 패턴, 타임아웃 list 20s / history 40s / open 120s).
   라이브 상태(status/mode/driver)만 메모리에 두고, 매니저가 중계한 이벤트를 driver(마지막으로 그 세션을 **연**
@@ -114,28 +131,29 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 | `available_commands_update` | 스냅샷 `available_commands[]` (`name, description, input_hint?`) | 컴포저에서 `/` 를 치면 자동완성(↑/↓, Enter/Tab 선택, Esc). 선택은 텍스트만 채우고 전송하지 않는다. 명령은 프롬프트 텍스트로 그대로 간다 |
 | `session/request_permission` (`title`/`description`/`toolCall`, claude 의 `_meta.permission`) | `permission_request` 행 + `awaiting_permission` | 권한 카드 → `POST …/permission` |
 | `elicitation/create` (form: JSON Schema, url) — claude 의 AskUserQuestion 등 | `elicitation_request` 행 + **`awaiting_input`** (form 만). url 은 링크 카드만 남기고 바로 accept, 완료는 `elicitation/complete` → `elicitation_decision{decided_by:'agent'}` | 폼 카드(문자열/숫자/불리언/단일·다중 선택, required 검사) → `POST …/elicitation {elicitation_id, action: accept\|decline\|cancel, content}` → op `elicitation` |
-| `_auth/status_update` (claude-agent-acp · codex-acp 공통 `_meta` 확장, push 전용) | 스냅샷 `auth` — 어댑터가 준 신원(`kind`/`label`/`detail`/`account`)에 매니저가 아는 **출처**(`source`: 워크스페이스 Credential 인지 장비 운영자 로그인인지)를 더한 것 | 세션 헤더에 한 줄로 표시(🔑 = credential, 👤 = 운영자 로그인). 어댑터가 알려 주지 않으면 **아무것도 그리지 않는다** — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다 |
+| `_auth/status_update` (claude-agent-acp · codex-acp 공통 `_meta` 확장, push 전용) | 스냅샷 `auth` — 어댑터가 준 신원(`kind`/`label`/`detail`/`account`)에 매니저가 아는 **출처**(`source`: 계정 Credential 인지 장비 운영자 로그인인지)를 더한 것 | 세션 헤더에 한 줄로 표시(🔑 = credential, 👤 = 운영자 로그인). 어댑터가 알려 주지 않으면 **아무것도 그리지 않는다** — "모른다" 와 "로그아웃(`kind:'none'`)" 은 다르다 |
 | `plan` / `plan_update` | `plan` 행(`entries[{content, priority, status}]`) — 같은 turn 의 최신 것이 이전 것을 대체 | 체크리스트 카드 |
 | `session_info_update` | 제목 패치 | — |
 
 재접속 시 작업 폴더 전달 여부와 관계없이 기존 저장소의 제목을 복원한다. 입력문으로 제목을 만드는 것은 새로 만든 무제목 세션의 첫 입력에만 적용하며, 기존 세션의 제목을 읽지 못한 경우에도 후속 입력으로 대체하지 않는다. CLI의 `session_info_update`는 `session/new`·`session/load` 응답 전과 라이브 턴 중 모두 반영하고, AWB 인덱스가 있는 세션은 갱신된 제목을 보존한다.
 
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
-**모델 선택지의 출처는 셋이고, 아래로 갈수록 덜 구체적이다.** (1) 이 호스트×CLI 로 세션을 열었을 때 캐시해 둔 ACP
-`configOptions` — 표시 이름·현재값까지 있어 가장 정확하다. (2) 지금 살아 있는 세션이 아는 선택지(서버 재시작 직후).
-(3) 하트비트 `available_models[cli]` 로 합성한 model 옵션 — **세션을 한 번도 연 적 없는 조합**에서도 고를 수 있게 한다.
-3번이 없던 동안에는 처음 쓰는 호스트×CLI 면 모델을 아예 못 골랐고, 사용자 눈에는 되는 조합과 안 되는 조합이
-뒤섞인 것처럼 보였다. 합성은 **덧붙이기만 하고 덮어쓰지 않는다** — 실제 세션이 보고한 목록이 항상 더 정확하다.
-두 출처의 id 형식이 같기 때문에 성립한다(rolf 실측: claude `opus/sonnet/haiku`, codex `gpt-6-astra…`,
-opencode `opencode/big-pickle` — ACP 값과 어댑터 `listModels()` 값이 일치).
+**모델 목록은 `HostModelsService` 한 경로로 해소한다.** 살아 있는 세션의 ACP 보고 → 가장 최근에
+영속된 `agent_session_cli_settings.known_config_options` → 하트비트 `available_models[cli]` 순서로
+처음 비지 않은 출처를 쓴다. ACP 보고가 있으면 하트비트 목록을 합치지 않고 표시 이름도 같은
+출처에서 가져온다. 클라이언트는 `useHostModels()`로 같은 목록을 읽으므로 새 세션·기존 세션·팀
+slot 사이에서 출처나 순서가 갈리지 않는다. 아직 세션을 열어 본 적 없는 Host × CLI는 하트비트를
+fallback으로 쓴다. 현재 세션의 선택값은 별도 실행 snapshot에서 재개한다.
 
 config option 의 id 키는 어댑터 세대에 따라 `id`(SDK 1.x 스키마 — codex-acp 1.12, claude-agent-acp 0.79 실측) 또는
 `configId`(v2 초안) 로 오므로 매니저는 둘 다 받는다(요청 `session/set_config_option` 은 항상 `configId`).
 **고른 설정은 기억된다.** 어댑터 프로세스는 매번 자기 기본값으로 시작하므로, 기억해 두지 않으면 유휴 회수·재접속마다
-approval 모드와 모델이 어댑터 기본값으로 돌아간다. `agent_session_cli_settings.default_config` 에 워크스페이스 × 호스트 × CLI
-로 `{ [configId]: value }` 를 남기고(레거시 `session/set_mode` 는 예약 키 `__mode`), open/prompt payload 의 `config_defaults`
-로 매니저에 실어 보내 세션이 열린 직후 다시 건다. 이미 그 값이면 왕복하지 않고, 어댑터가 더는 제공하지 않는 키는 조용히 건너뛴다.
-선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다(세션을 열 때 그 워크스페이스에
+approval 모드와 모델이 어댑터 기본값으로 돌아간다. `agent_session_cli_settings.default_config` 에 계정 × 호스트 × CLI의
+새 실행 기본값 `{ [configId]: value }` 를 남긴다(레거시 `session/set_mode` 는 예약 키 `__mode`).
+첫 실행에서 그 값을 `AgentSessionExecution.config_defaults`에 고정하고, 기존 세션에서는 명시적으로 바꾼 값을
+그 세션 snapshot에 반영한다. open/prompt payload는 계정의 최신 기본값 대신 고정된 `config_defaults`를
+매니저에 실어 보내 세션이 열린 직후 다시 건다. 이미 그 값이면 왕복하지 않고, 어댑터가 더는 제공하지 않는 키는 조용히 건너뛴다.
+선택지 자체는 어댑터가 살아 있어야 알 수 있어 마지막 목록을 `known_config_options` 에 캐시한다(세션을 열 때 그 계정에
 저장하고, 아직 비었으면 지금 살아 있는 세션의 목록으로 답한다 — credential 을 묶은 적 없는 호스트는 row 자체가 없어서 예전엔
 캐시가 영영 비어 있었다). 덕분에 **세션을 열기 전에** approval 모드와 모델을 고를 수 있다: 새 세션 모달과 호스트 목록의
 "CLI settings" 패널 두 곳에서. 그 둘만 여기 두고 나머지 설정은 세션 헤더에서 바꾼다.
@@ -158,15 +176,16 @@ Collaboration mode 가 plan 일 때 `elicitation/create` 폼(oneOf 선택지 + �
 
 ## CLI 설정 (credential · backend · 기본 설정)
 
-Runtime Host × CLI 마다 **어떤 워크스페이스 Credential(Settings → Credentials)로 인증할지** 와 **세션마다 다시 걸 설정**
+계정 × Runtime Host × CLI 마다 **어떤 Credential(Settings → Credentials)로 인증할지** 와 **새 세션에 적용할 기본 설정**
 (`default_config`, 위 "상호작용" 절 참조)을 정한다
 (`agent_session_cli_settings`, `GET/PUT /api/agent-sessions/hosts/:managerId/:cli/settings`, 화면은 호스트 세션
 목록의 "CLI settings"). 비워 두면 장비 운영자의 CLI 로그인(`claude login` / `codex login`)을 그대로 쓴다.
 
-- 후보는 워크스페이스 + global credential 중 provider 접두어가 CLI 와 맞는 것(`claude_*`, `codex_*`, `opencode_*`) —
-  agents 화면의 `CLI_TO_CREDENTIAL_PREFIX` 와 같은 규약. 불일치는 400, 다른 워크스페이스 것은 404, hermes 는 아직 미지원(409).
-- 매니저는 open/prompt 요청에 실린 `credential_id` 로 `GET /api/agent/sessions/credential/:id?workspace_id=` 를 부른다.
-  서버는 **그 매니저에 바인딩된 credential 만** 복호화해 준다(다른 매니저 키, 바인딩 없는 credential → 403).
+- 후보는 소유 계정 + global credential 중 provider 접두어가 CLI 와 맞는 것(`claude_*`, `codex_*`, `opencode_*`)이다.
+  불일치는 400, 다른 계정 것은 404, hermes 는 아직 미지원(409).
+- 매니저는 open/prompt 요청에 실린 `credential_id` 로 `GET /api/agent/sessions/credential/:id?account_id=` 를 부른다.
+  서버는 **그 매니저의 CLI 설정 또는 세션 실행 snapshot에 바인딩된 credential 만** 복호화해 준다
+  (다른 매니저 키, 바인딩 없는 credential → 403). 계정 기본 credential 변경 뒤에도 기존 snapshot은 계속 유효하다.
 - **기록 링크는 존재만으로 믿지 않는다.** 세션 전용 홈의 기록 디렉터리(`projects` / `sessions`)는 운영자 홈으로
   심볼릭 링크(Windows 는 junction)하는데, junction 은 끊어져도 경로가 남아 빈 디렉터리처럼 보인다. 그대로 두면
   codex 가 `no rollout found for thread id …` 로 재개를 거부하고, 그 credential 로 여는 **모든** 세션이 영영
@@ -215,7 +234,7 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
 - 서버가 처음 보는 세션에 매니저가 먼저 이벤트를 보내면(서버 재시작 뒤) 상태를 배치에서 읽는다 — 패치가 있으면 그것,
   턴 중에만 나오는 행(text/tool/permission …)이 있으면 busy, system 행뿐이면 idle. 예전엔 무조건 busy 로 심었다.
 - **driver 도 메모리에만 있다 — 그래서 세션을 읽는 것 자체가 driver 를 (다시) 잡는다.** 서버가 재시작하면 driver 가
-  사라지고, 그 뒤 매니저가 보내오는 이벤트는 받을 사람이 없다는 이유로 조용히 버려진다(서버는 세션을 저장하지 않는다).
+  사라지고, 그 뒤 매니저가 보내오는 이벤트는 받을 사람이 없다는 이유로 조용히 버려진다(전사와 driver는 서버 DB에 저장하지 않는다).
   진행 중이던 세션은 busy 라 prompt 가 409 이고 Connect 버튼도 나오지 않아, driver 를 쓰기 동작으로만 잡던 예전
   규칙 아래서는 되찾을 길이 아예 없었다 — 화면은 이미 끝난 작업을 "Working" 인 채로 붙들고 그 뒤 대화가 하나도
   흐르지 않았다. 화면 쪽도 짝을 이룬다: SSE 가 끊겼다 붙으면 세션 화면이 스스로 다시 읽어(`isConnected` 전이) 끊긴

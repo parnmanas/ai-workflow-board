@@ -8,9 +8,9 @@ import type { ToolContext } from './context';
 async function scopeAllowed(
   ctx: ToolContext,
   caller: ReturnType<typeof getCallerAgent>,
-  workspaceId: string,
+  accountId: string,
 ): Promise<boolean> {
-  return callerCanAccessWorkspace(ctx.dataSource, caller, workspaceId);
+  return callerCanAccessWorkspace(ctx.dataSource, caller, accountId);
 }
 
 export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContext): void {
@@ -18,15 +18,15 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'list_functions',
-    'List executable Functions resolved by Workspace → Global key precedence.',
+    'List executable Functions resolved by Account → Global key precedence.',
     {
-      workspace_id: z.string().describe('Workspace ID used to resolve inherited overrides'),
+      account_id: z.string().describe('Account ID used to resolve inherited overrides'),
     },
-    async ({ workspace_id }, extra: { sessionId?: string }) => {
+    async ({ account_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), account_id))) return err('Account scope mismatch');
       try {
-        const rows = await service.list(workspace_id);
+        const rows = await service.list(account_id);
         return ok(rows.map(row => withArtifactRef('function', row, row.name)));
       } catch (error: any) {
         return err(error?.message || 'Failed to list Functions');
@@ -37,13 +37,13 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
   server.tool(
     'get_function',
     'Get a Function definition by ID, including executor config and JSON input/output schemas.',
-    { id: z.string().describe('Function ID'), workspace_id: z.string().describe('Workspace scope boundary') },
-    async ({ id, workspace_id }, extra: { sessionId?: string }) => {
+    { id: z.string().describe('Function ID'), account_id: z.string().describe('Account scope boundary') },
+    async ({ id, account_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), account_id))) return err('Account scope mismatch');
       try {
         const view = await service.get(id);
-        if (view.workspace_id !== null && view.workspace_id !== workspace_id) return err('Function belongs to a different workspace');
+        if (view.account_id !== null && view.account_id !== account_id) return err('Function belongs to a different workspace');
         return ok(withArtifactRef('function', view, view.name));
       } catch (error: any) {
         return err(error?.message || 'Function not found');
@@ -53,9 +53,9 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'save_function',
-    'Create or update a Workspace Function. Global Functions are managed by authenticated admins from the Functions menu. Provide id to update.',
+    'Create or update a Account Function. Global Functions are managed by authenticated admins from the Functions menu. Provide id to update.',
     {
-      workspace_id: z.string().describe('Workspace scope (required; MCP cannot author global Functions)'),
+      account_id: z.string().describe('Account scope (required; MCP cannot author global Functions)'),
       id: z.string().optional(),
       key: z.string().describe('Stable lowercase identifier such as git.inspect_repository'),
       name: z.string(),
@@ -73,7 +73,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     },
     async (input, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!(await scopeAllowed(ctx, getCallerAgent(extra), input.workspace_id))) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), input.account_id))) return err('Account scope mismatch');
       try {
         const saved = input.id
           ? await service.update(input.id, input)
@@ -88,13 +88,13 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
   server.tool(
     'delete_function',
     'Delete a workspace-authored Function. Built-in Functions cannot be deleted.',
-    { id: z.string(), workspace_id: z.string() },
-    async ({ id, workspace_id }, extra: { sessionId?: string }) => {
+    { id: z.string(), account_id: z.string() },
+    async ({ id, account_id }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), account_id))) return err('Account scope mismatch');
       try {
         const view = await service.get(id);
-        if (view.workspace_id !== workspace_id) return err('Only Functions in the caller workspace can be deleted through MCP');
+        if (view.account_id !== account_id) return err('Only Functions in the caller workspace can be deleted through MCP');
         await service.remove(id);
         return ok({ success: true, id });
       } catch (error: any) {
@@ -107,7 +107,7 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     'execute_function',
     'Execute a Function by stable key or ID and persist an auditable run. Use idempotency_key when the Function requires it.',
     {
-      workspace_id: z.string(),
+      account_id: z.string(),
       function_key: z.string().optional(),
       function_id: z.string().optional(),
       ticket_id: z.string().optional(),
@@ -117,13 +117,13 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     async (input, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
-      if (!(await scopeAllowed(ctx, caller, input.workspace_id))) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, caller, input.account_id))) return err('Account scope mismatch');
       if (!input.function_key && !input.function_id) return err('function_key or function_id is required');
       try {
         return ok(await service.execute({
           functionKey: input.function_key,
           functionId: input.function_id,
-          workspaceId: input.workspace_id,
+          accountId: input.account_id,
           ticketId: input.ticket_id,
           inputs: input.inputs,
           idempotencyKey: input.idempotency_key,
@@ -141,16 +141,16 @@ export function registerWorkflowFunctionTools(server: McpServer, ctx: ToolContex
     'list_function_runs',
     'List auditable Function execution records for a workspace, optionally filtered by Function or ticket.',
     {
-      workspace_id: z.string(),
+      account_id: z.string(),
       function_id: z.string().optional(),
       ticket_id: z.string().optional(),
       limit: z.number().optional(),
     },
-    async ({ workspace_id, function_id, ticket_id, limit }, extra: { sessionId?: string }) => {
+    async ({ account_id, function_id, ticket_id, limit }, extra: { sessionId?: string }) => {
       if (!service) return err('Workflow Functions service unavailable in this MCP context');
-      if (!(await scopeAllowed(ctx, getCallerAgent(extra), workspace_id))) return err('Workspace scope mismatch');
+      if (!(await scopeAllowed(ctx, getCallerAgent(extra), account_id))) return err('Account scope mismatch');
       try {
-        return ok(await service.listRuns(workspace_id, function_id, ticket_id, limit));
+        return ok(await service.listRuns(account_id, function_id, ticket_id, limit));
       } catch (error: any) {
         return err(error?.message || 'Failed to list Function runs');
       }

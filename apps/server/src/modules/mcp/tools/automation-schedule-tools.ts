@@ -1,0 +1,212 @@
+/**
+ * Account scheduler MCP tools (AutomationSchedule — ticket 769eb260, on top of
+ * foundation 8845be79).
+ *
+ * A AutomationSchedule is a general-purpose "do this task at this time" trigger
+ * for a SINGLE agent: when due, the background WorkspaceScheduleService opens a
+ * fresh chat room, seats `target_agent_id`, and sends `task_prompt` as the
+ * opening message (the QA/Security RUN dispatch shape). These tools are the CRUD
+ * + manual run-now surface over that service; the background tick lives in the
+ * service, not here.
+ *
+ * Tools:
+ *   list_automation_schedules / get_automation_schedule / create_automation_schedule /
+ *   update_automation_schedule / delete_automation_schedule / run_automation_schedule_now
+ *
+ * Definitions are Account-owned. Cadence is exactly one of `cron` (5-field,
+ * UTC) or `interval_ms` (>= 1000).
+ */
+
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { AutomationSchedule } from '../../../entities/AutomationSchedule';
+import type { DispatchResult } from '../../automation-schedule/automation-schedule.service';
+import { ok, err, withArtifactRef } from '../shared/helpers';
+import { getCallerAgent } from '../shared/session-auth';
+import type { ToolContext } from './context';
+
+function scheduleToJson(s: AutomationSchedule) {
+  return withArtifactRef('schedule', {
+    id: s.id,
+    account_id: s.account_id,
+    name: s.name,
+    target_agent_id: s.target_agent_id,
+    task_prompt: s.task_prompt,
+    action_id: s.action_id,
+    cron: s.cron,
+    interval_ms: s.interval_ms,
+    enabled: s.enabled,
+    next_run_at: s.next_run_at,
+    last_run_at: s.last_run_at,
+    last_room_id: s.last_room_id,
+    triggered_by_type: s.triggered_by_type,
+    created_by: s.created_by,
+    created_at: s.created_at,
+    updated_at: s.updated_at,
+  }, s.name);
+}
+
+function dispatchToJson(d: DispatchResult) {
+  return {
+    schedule_id: d.schedule_id,
+    room_id: d.room_id,
+    agent_id: d.agent_id,
+  };
+}
+
+export function registerWorkspaceScheduleTools(server: McpServer, ctx: ToolContext): void {
+  const { workspaceScheduleService } = ctx;
+
+  server.tool(
+    'list_automation_schedules',
+    'List reusable Account schedules.',
+    {
+      account_id: z.string().describe('Account ID (required)'),
+    },
+    async ({ account_id }) => {
+      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      try {
+        const rows = await workspaceScheduleService.list(account_id);
+        return ok(rows.map(scheduleToJson));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to list workspace schedules');
+      }
+    },
+  );
+
+  server.tool(
+    'get_automation_schedule',
+    'Get a single workspace schedule by id (target agent, task prompt, cadence, next/last run, last room id).',
+    {
+      schedule_id: z.string().describe('AutomationSchedule ID'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
+    },
+    async ({ schedule_id, account_id }) => {
+      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      try {
+        return ok(scheduleToJson(await workspaceScheduleService.get(schedule_id, account_id)));
+      } catch (e: any) {
+        return err(e?.message || 'Account schedule not found');
+      }
+    },
+  );
+
+  server.tool(
+    'create_automation_schedule',
+    'Create a workspace schedule — a general-purpose "do this task at this time" trigger for ONE agent. ' +
+    '무엇을 할지는 둘 중 하나다 — `task_prompt`(+`target_agent_id`) 로 프롬프트를 직접 주거나, ' +
+    '`action_id` 로 등록된 Action 을 실행한다. 정확히 하나만 설정할 것. ' +
+    'Action 형태에서는 대상 에이전트·작업 폴더·승인(high_impact)·run 기록을 전부 Action 이 정의하고 ' +
+    '이 스케줄은 "언제" 만 정한다. (Action 자체의 `schedule_cron` 은 폐지됐다.) ' +
+    'When due with `task_prompt`, it opens a fresh chat room, seats `target_agent_id`, and sends it as the opening ' +
+    'message (the QA/Security RUN dispatch shape). Set EXACTLY ONE of `cron` (5 UTC fields, e.g. "0 3 * * *") ' +
+    'or `interval_ms` (>= 1000). `enabled` defaults true.',
+    {
+      account_id: z.string().describe('Account ID (required)'),
+      name: z.string().describe('Schedule name (required)'),
+      target_agent_id: z.string().optional().describe('The single agent the task is dispatched to (task_prompt 형태에서 필수 — target_runtime과 택일)'),
+      target_runtime: z.record(z.string(), z.any()).optional().describe('RuntimeSpec declaring execution without an Agent row (task_prompt 형태에서 target_agent_id와 택일)'),
+      task_prompt: z.string().optional().describe('Free-text task message sent to the agent when the schedule fires (action_id 와 택일)'),
+      action_id: z.string().optional().describe('실행할 Action 의 id (task_prompt 와 택일)'),
+      cron: z.string().optional().describe('5-field UTC cron (e.g. "0 3 * * *"). Mutually exclusive with interval_ms'),
+      interval_ms: z.number().optional().describe('Fixed interval in ms (>= 1000). Mutually exclusive with cron'),
+      enabled: z.boolean().optional().describe('Default true'),
+    },
+    async (args, extra: { sessionId?: string }) => {
+      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      try {
+        const row = await workspaceScheduleService.create({
+          accountId: args.account_id,
+          name: args.name,
+          targetAgentId: args.target_agent_id,
+          targetRuntime: (args as any).target_runtime,
+          taskPrompt: args.task_prompt,
+          actionId: args.action_id,
+          cron: args.cron,
+          intervalMs: args.interval_ms,
+          enabled: args.enabled,
+          createdBy: caller?.agentId ?? '',
+        });
+        return ok(scheduleToJson(row));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to create workspace schedule');
+      }
+    },
+  );
+
+  server.tool(
+    'update_automation_schedule',
+    'Update a workspace schedule. Only the provided fields change. `account_id` is required for scope ' +
+    'safety. Toggling `enabled`, or changing `cron`/`interval_ms`, recomputes next_run_at.',
+    {
+      schedule_id: z.string().describe('AutomationSchedule ID'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
+      name: z.string().optional(),
+      target_agent_id: z.string().optional(),
+      target_runtime: z.record(z.string(), z.any()).optional().describe('RuntimeSpec declaring execution without an Agent row'),
+      task_prompt: z.string().optional(),
+      action_id: z.string().nullable().optional(),
+      cron: z.string().optional(),
+      interval_ms: z.number().optional(),
+      enabled: z.boolean().optional(),
+    },
+    async ({ schedule_id, account_id, ...patch }) => {
+      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      try {
+        const row = await workspaceScheduleService.update(schedule_id, account_id, {
+          name: patch.name,
+          targetAgentId: patch.target_agent_id,
+          targetRuntime: (patch as any).target_runtime,
+          taskPrompt: patch.task_prompt,
+          actionId: patch.action_id,
+          cron: patch.cron,
+          intervalMs: patch.interval_ms,
+          enabled: patch.enabled,
+        });
+        return ok(scheduleToJson(row));
+      } catch (e: any) {
+        return err(e?.message || 'Failed to update workspace schedule');
+      }
+    },
+  );
+
+  server.tool(
+    'delete_automation_schedule',
+    'Delete a workspace schedule. Does NOT touch the chat rooms it already opened.',
+    {
+      schedule_id: z.string().describe('AutomationSchedule ID'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
+    },
+    async ({ schedule_id, account_id }) => {
+      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      try {
+        await workspaceScheduleService.remove(schedule_id, account_id);
+        return ok({ success: true, id: schedule_id });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to delete workspace schedule');
+      }
+    },
+  );
+
+  server.tool(
+    'run_automation_schedule_now',
+    'Manually dispatch a workspace schedule\'s task right now (ignores enabled; does NOT disturb the ' +
+    'automatic next_run_at). Returns the schedule + the dispatch result (schedule_id, room_id, agent_id) — ' +
+    'the spawned conversation lives in that chat room.',
+    {
+      schedule_id: z.string().describe('AutomationSchedule ID'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
+    },
+    async ({ schedule_id, account_id }, extra: { sessionId?: string }) => {
+      if (!workspaceScheduleService) return err('Account schedule service unavailable in this MCP context');
+      const caller = getCallerAgent(extra);
+      try {
+        const { schedule, dispatch } = await workspaceScheduleService.runNow(schedule_id, account_id, caller?.agentId ?? '');
+        return ok({ schedule: scheduleToJson(schedule), dispatch: dispatchToJson(dispatch) });
+      } catch (e: any) {
+        return err(e?.message || 'Failed to run workspace schedule');
+      }
+    },
+  );
+}

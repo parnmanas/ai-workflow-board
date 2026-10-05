@@ -1,22 +1,22 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 
 /**
- * Backfill data migration — attach legacy agents with empty `workspace_id` to
+ * Backfill data migration — attach legacy agents with empty `account_id` to
  * the first available workspace (usually the default one).
  *
- * Problem: `Agent.workspace_id` is declared as `varchar default ''`, and the
+ * Problem: `Agent.account_id` is declared as `varchar default ''`, and the
  * agents registration path did not always populate it at create time. This
- * left legacy agents with `workspace_id = ''`, which made them invisible to
+ * left legacy agents with `account_id = ''`, which made them invisible to
  * Phase 3's `GET /api/agents/dashboard` endpoint (it strictly filters by
- * workspace_id match, returning `[]` on empty values — see Plan 03-02).
+ * account_id match, returning `[]` on empty values — see Plan 03-02).
  *
  * Symptom: the dashboard shows "No agents yet" despite agents existing in
  * the database.
  *
- * Fix: this migration walks the agents table and sets `workspace_id` on any
+ * Fix: this migration walks the agents table and sets `account_id` on any
  * row where it's empty/null, pointing at the oldest workspace (which is the
- * Default Workspace seeded by DatabaseModule.onModuleInit when the server
+ * Default Account seeded by DatabaseModule.onModuleInit when the server
  * first booted).
  *
  * Invariants (inherited from 01-CONTEXT.md):
@@ -25,7 +25,7 @@ import { Workspace } from '../../entities/Workspace';
  * - D-03: Repository API via queryRunner.manager for all data manipulation.
  *         No raw SQL, no DB-specific branching. Runs portably on
  *         sqlite/mysql/postgres.
- * - D-04: Idempotent — if no agents have empty workspace_id, this is a no-op.
+ * - D-04: Idempotent — if no agents have empty account_id, this is a no-op.
  *         Re-running on an already-migrated DB touches zero rows.
  *
  * The down() method is a no-op — data migrations do not have a true inverse.
@@ -37,7 +37,7 @@ export class BackfillOrphanAgentWorkspace1760000000001 implements MigrationInter
     // P4c-4: agents 테이블 없음 — 이 백필의 대상 자체가 존재하지 않는다.
     if (!(await queryRunner.hasTable('agents'))) return;
     const manager = queryRunner.manager;
-    const wsRepo = manager.getRepository(Workspace);
+    const wsRepo = manager.getRepository(Account);
     // 문자열 기반 조회 — Agent 엔티티는 P4c-4 로 삭제됐고 이 본문은 위 가드로
     // 실행되지 않는다 (이미 적용된 DB 에서는 스킵).
     const agentRepo = manager.getRepository('agents');
@@ -48,13 +48,13 @@ export class BackfillOrphanAgentWorkspace1760000000001 implements MigrationInter
     // API normalizes both on read.
     const allAgents = await agentRepo.find();
     const orphans = allAgents.filter(
-      (a) => !a.workspace_id || a.workspace_id.trim() === '',
+      (a) => !a.account_id || a.account_id.trim() === '',
     );
 
     if (orphans.length === 0) return;
 
     // Resolve the target workspace — the oldest one by creation order.
-    // DatabaseModule.onModuleInit seeds a Default Workspace when none exist,
+    // DatabaseModule.onModuleInit seeds a Default Account when none exist,
     // so by the time this migration runs there is always at least one.
     const defaultWs = await wsRepo.findOne({ where: {}, order: { id: 'ASC' } });
     if (!defaultWs) {
@@ -65,14 +65,14 @@ export class BackfillOrphanAgentWorkspace1760000000001 implements MigrationInter
     }
 
     for (const agent of orphans) {
-      agent.workspace_id = defaultWs.id;
+      agent.account_id = defaultWs.id;
       await agentRepo.save(agent);
     }
   }
 
   public async down(_queryRunner: QueryRunner): Promise<void> {
     // Data migrations do not have a true inverse — we cannot reconstruct
-    // which agents originally had empty workspace_id without a separate
+    // which agents originally had empty account_id without a separate
     // audit log. Rollback is accomplished by restoring from a backup.
     // Empty method satisfies DataSource.undoLastMigration() for the
     // FOUND-01 round-trip test.

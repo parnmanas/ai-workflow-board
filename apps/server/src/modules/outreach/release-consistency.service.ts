@@ -110,17 +110,17 @@ export class ReleaseConsistencyService implements OnModuleInit, OnModuleDestroy 
   }
 
   private async _onDeploymentReported(signal: DeploymentReportedSignal): Promise<void> {
-    // Fail-closed on a GLOBAL deployment (workspace_id=null) — same reasoning
+    // Fail-closed on a GLOBAL deployment (account_id=null) — same reasoning
     // as OutreachPublisherService: fanning it out to every workspace's
-    // GitHub channels would generate reports for workspaces that never
+    // GitHub channels would generate reports for accounts that never
     // asked for it.
-    if (!signal.workspace_id) return;
+    if (!signal.account_id) return;
     const environment = (signal.environment || '').trim();
     const deployedCommitSha = (signal.deployed_commit_sha || '').trim();
     if (!environment || !deployedCommitSha) return;
 
     const channels = await this.channelRepo.find({
-      where: { workspace_id: signal.workspace_id, enabled: true, kind: 'github' },
+      where: { account_id: signal.account_id, enabled: true, kind: 'github' },
     });
     for (const channel of channels) {
       try {
@@ -140,7 +140,7 @@ export class ReleaseConsistencyService implements OnModuleInit, OnModuleDestroy 
     let claimed: OutreachOutboundPost;
     try {
       claimed = await this.postRepo.save(this.postRepo.create({
-        workspace_id: channel.workspace_id,
+        account_id: channel.account_id,
         channel_id: channel.id,
         dedupe_key: dedupeKey,
         kind: 'release_report',
@@ -161,7 +161,7 @@ export class ReleaseConsistencyService implements OnModuleInit, OnModuleDestroy 
         order: { published_at: 'DESC' },
       });
       const doneTickets = previous?.published_at
-        ? await this._collectDoneTickets(channel.workspace_id, previous.published_at)
+        ? await this._collectDoneTickets(channel.account_id, previous.published_at)
         : [];
 
       const body = await this._buildReport(channel, previous, deployedCommitSha, environment, doneTickets);
@@ -200,7 +200,7 @@ export class ReleaseConsistencyService implements OnModuleInit, OnModuleDestroy 
       return `## 릴리스 변경사항 정합성 점검\n\n채널의 첫 대상(${channel.targets[0]})이 "owner/repo" 형식이 아니어서 분석을 건너뜁니다.`;
     }
 
-    const credential = await resolveOutreachCredential(this.credentialRepo, channel.credential_id, channel.workspace_id);
+    const credential = await resolveOutreachCredential(this.credentialRepo, channel.credential_id, channel.account_id);
     if (!credential) {
       return '## 릴리스 변경사항 정합성 점검\n\n채널에 크레덴셜이 설정되지 않아 분석을 건너뜁니다.';
     }
@@ -238,9 +238,9 @@ export class ReleaseConsistencyService implements OnModuleInit, OnModuleDestroy 
 
   /** Tickets that reached Done strictly after `since` (mirrors
    *  OutreachPublisherService._collectDoneTickets exactly). */
-  private async _collectDoneTickets(workspaceId: string, since: Date): Promise<ReleaseConsistencyDoneTicket[]> {
+  private async _collectDoneTickets(accountId: string, since: Date): Promise<ReleaseConsistencyDoneTicket[]> {
     const rows = await this.dataSource.getRepository(Ticket).find({
-      where: { workspace_id: workspaceId, terminal_entered_at: MoreThan(since) },
+      where: { account_id: accountId, terminal_entered_at: MoreThan(since) },
       order: { terminal_entered_at: 'ASC' },
       take: MAX_DONE_TICKETS,
     });

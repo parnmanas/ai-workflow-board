@@ -31,7 +31,7 @@ function runDispatchFrame() {
     run_provision: {
       kind: 'qa',
       run_id: 'run-1',
-      workspace_id: 'ws-1',
+      account_id: 'ws-1',
       workspace_folder: '.awb/qa/scenario',
       checkout_mode: 'reuse',
       repo: {

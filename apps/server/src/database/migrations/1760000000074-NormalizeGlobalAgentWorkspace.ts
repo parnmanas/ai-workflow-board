@@ -10,8 +10,8 @@ export class NormalizeGlobalAgentWorkspace1760000000074 implements MigrationInte
     const repo = queryRunner.manager.getRepository('agents');
     const rows = await repo.find();
     for (const agent of rows) {
-      if (typeof agent.workspace_id === 'string' && !agent.workspace_id.trim()) {
-        agent.workspace_id = null;
+      if (typeof agent.account_id === 'string' && !agent.account_id.trim()) {
+        agent.account_id = null;
         await repo.save(agent);
       }
     }

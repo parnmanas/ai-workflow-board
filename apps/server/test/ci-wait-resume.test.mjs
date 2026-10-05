@@ -111,7 +111,7 @@ const projectRepo = ds.getRepository(Project);
 // is the status `resumeTicket` re-sends.
 async function makeTicket(overrides = {}) {
   return ticketRepo.save(ticketRepo.create({
-    title: 'T', status: 'in_progress', workspace_id: 'w1', pending_user_action: false, ...overrides,
+    title: 'T', status: 'in_progress', account_id: 'w1', pending_user_action: false, ...overrides,
   }));
 }
 
@@ -740,7 +740,7 @@ test('crash recovery: outcome already recorded (phase 1 done, process died befor
 
 test('sweep(): resolves credential_id from the ticket\'s project (same workspace) and passes it to getWorkflowRun', async () => {
   const project = await projectRepo.save(projectRepo.create({
-    workspace_id: 'w1', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-abc',
+    account_id: 'w1', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-abc',
   }));
   const ticket = await makeTicket({ project_id: project.id });
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
@@ -760,9 +760,9 @@ test('sweep(): resolves credential_id from the ticket\'s project (same workspace
 
 test('sweep(): a project in a DIFFERENT workspace never leaks its credential_id to this ticket\'s poll', async () => {
   const project = await projectRepo.save(projectRepo.create({
-    workspace_id: 'other-workspace', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-should-not-leak',
+    account_id: 'other-workspace', name: 'repo', repo_url: 'https://github.com/o/r', credential_id: 'cred-should-not-leak',
   }));
-  const ticket = await makeTicket({ workspace_id: 'w1', project_id: project.id });
+  const ticket = await makeTicket({ account_id: 'w1', project_id: project.id });
   await ciWaitService.registerWait(ticket.id, { owner: 'o', repo: 'r', run_id: '999' });
 
   let seenCredentialId = 'unset';

@@ -3,7 +3,7 @@
 // 여기서 고정하는 계약:
 //   1. WORK 는 맨 위 평평한 Tickets 한 줄 + 계층형 Teams → Orchestrations 순서다 (Boards 없음)
 //   2. 각 계층 메뉴가 자기 엔티티 목록을 서브메뉴로 갖고, 서브 경로가 기존 상세 화면을 가리킨다
-//   3. 형제 메뉴가 동시에 active 로 보이지 않는다 (예전 /orchestration/teams 접두사 겹침 회귀)
+//   3. 형제 메뉴가 동시에 active 로 보이지 않는다 (예전 /teams 접두사 겹침 회귀)
 //   4. 목록이 비면 메뉴별 empty state 문구를 갖는다
 //   5. Tickets 는 워크스페이스 전체 미읽음 배지를 싣는다
 //
@@ -13,11 +13,11 @@ import assert from 'node:assert/strict';
 
 import { buildTicketsNavItem, buildWorkNavGroups, activeWorkGroupKey } from '../src/components/workNavigation.ts';
 
-const BASE = '/ws/w1';
+const BASE = '';
 
 function build(overrides = {}) {
   return buildWorkNavGroups({
-    workspaceBase: BASE,
+    basePath: BASE,
     pathname: `${BASE}/tickets`,
     teams: [{ id: 't1', name: 'Platform squad' }],
     missions: [{ id: 'm1', title: 'Ship the nav' }],
@@ -28,7 +28,7 @@ function build(overrides = {}) {
 test('WORK 계층 메뉴는 Teams → Orchestrations 순서이고 Boards 는 없다', () => {
   const groups = build();
   assert.deepEqual(groups.map((g) => g.key), ['teams', 'orchestrations']);
-  assert.deepEqual(groups.map((g) => g.label), ['Teams', 'Orchestrations']);
+  assert.deepEqual(groups.map((g) => g.label), ['Teams', 'Missions']);
   // 단수 표기가 남으면 안 된다.
   assert.ok(!groups.some((g) => g.label === 'Orchestration'));
   assert.ok(!groups.some((g) => g.label === 'Boards'));
@@ -40,8 +40,8 @@ test('각 최상위 메뉴는 자기 목록 화면을, 서브메뉴는 기존 �
   assert.equal(teams.path, `${BASE}/teams`);
   assert.deepEqual(teams.children.map((c) => c.path), [`${BASE}/teams?team=t1`]);
 
-  assert.equal(orchestrations.path, `${BASE}/orchestration`);
-  assert.deepEqual(orchestrations.children.map((c) => c.path), [`${BASE}/orchestration/missions/m1`]);
+  assert.equal(orchestrations.path, `${BASE}/missions`);
+  assert.deepEqual(orchestrations.children.map((c) => c.path), [`${BASE}/missions/m1`]);
 });
 
 test('서브메뉴 라벨은 실제 팀/미션 이름이다', () => {
@@ -50,7 +50,7 @@ test('서브메뉴 라벨은 실제 팀/미션 이름이다', () => {
 });
 
 test('Teams 화면에서는 Teams 만 active 다 (Orchestrations 와 동시 활성 금지)', () => {
-  // 회귀 대상: Teams 가 /orchestration/teams 였을 때는 Orchestrations 의 경로
+  // 회귀 대상: Teams 가 /teams 였을 때는 Orchestrations 의 경로
   // 접두사에 걸려 두 메뉴가 함께 active 로 보였다.
   const groups = build({ pathname: `${BASE}/teams` });
   assert.deepEqual(groups.map((g) => g.active), [true, false]);
@@ -59,7 +59,7 @@ test('Teams 화면에서는 Teams 만 active 다 (Orchestrations 와 동시 활�
 
 test('미션 상세 딥링크는 Orchestrations 와 해당 서브 항목만 active 로 만든다', () => {
   const groups = build({
-    pathname: `${BASE}/orchestration/missions/m1`,
+    pathname: `${BASE}/missions/m1`,
     missions: [
       { id: 'm1', title: 'Ship the nav' },
       { id: 'm2', title: 'Other mission' },
@@ -111,7 +111,7 @@ test('아직 응답 전이면 loading 이 켜져 empty state 와 구분된다', 
 });
 
 test('Tickets 메뉴: /tickets 경로, 그 화면에서 active, 워크스페이스 전체 미읽음 배지', () => {
-  const item = buildTicketsNavItem({ workspaceBase: BASE, pathname: `${BASE}/tickets`, ticketUnreadTotal: 3 });
+  const item = buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/tickets`, ticketUnreadTotal: 3 });
   assert.equal(item.key, 'tickets');
   assert.equal(item.label, 'Tickets');
   assert.equal(item.path, `${BASE}/tickets`);
@@ -119,18 +119,18 @@ test('Tickets 메뉴: /tickets 경로, 그 화면에서 active, 워크스페이�
   assert.equal(item.badge, 3);
   assert.match(item.badgeLabel, /3건/);
 
-  assert.equal(buildTicketsNavItem({ workspaceBase: BASE, pathname: `${BASE}/teams` }).active, false);
-  assert.equal(buildTicketsNavItem({ workspaceBase: BASE, pathname: `${BASE}/tickets-archive` }).active, false, '접두사만 겹치는 경로는 아니다');
-  assert.equal(buildTicketsNavItem({ workspaceBase: BASE, pathname: `${BASE}/teams` }).badge, 0);
+  assert.equal(buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/teams` }).active, false);
+  assert.equal(buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/tickets-archive` }).active, false, '접두사만 겹치는 경로는 아니다');
+  assert.equal(buildTicketsNavItem({ basePath: BASE, pathname: `${BASE}/teams` }).badge, 0);
 });
 
-test('워크스페이스가 없으면 활성 그룹도 없다', () => {
+test('작업 메뉴는 소유 account 없이도 활성 상태를 판정한다', () => {
   const groups = buildWorkNavGroups({
-    workspaceBase: '',
+    basePath: '',
     pathname: '/admin/logs',
     teams: [],
     missions: [],
   });
   assert.equal(activeWorkGroupKey(groups), null);
-  assert.equal(buildTicketsNavItem({ workspaceBase: '', pathname: '/tickets' }).active, false);
+  assert.equal(buildTicketsNavItem({ basePath: '', pathname: '/tickets' }).active, true);
 });

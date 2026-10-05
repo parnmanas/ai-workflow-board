@@ -18,7 +18,7 @@ import {
   createAgent,
   createApiKey,
   createUser,
-  createWorkspace,
+  createAccount,
 } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.UPDATE_CLI_PORT || '0';
@@ -55,13 +55,13 @@ test('update_cli 는 허용된 verb 이고, 하트비트의 cli_versions 가 레
   });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'update-cli');
+  const workspace = await createAccount(app, getDataSourceToken, 'update-cli');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'update-cli-manager',
     type: 'manager',
   });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'update-cli-manager-key',
   });
   const admin = await createUser(app, getDataSourceToken, {

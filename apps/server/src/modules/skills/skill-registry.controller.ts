@@ -14,7 +14,7 @@ import { BuiltinSkillPackService } from './builtin-skill-pack.service';
  * feed it.
  *
  * Separate from SkillsController on purpose. That controller is mounted under
- * `/api/workspaces/:workspaceId/...` and is reachable by anyone with
+ * `/api/accounts/:accountId/...` and is reachable by anyone with
  * MANAGE_AGENTS in a workspace; global definitions are inherited by EVERY
  * workspace, so mutating them is gated on ADMIN_ACCESS instead — the
  * "Global 쓰기는 admin 권한으로 제한" rule in docs/catalog-scopes.md.

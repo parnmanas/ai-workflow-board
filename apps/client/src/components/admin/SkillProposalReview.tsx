@@ -6,14 +6,14 @@ import { useToast } from '../../contexts/ToastContext';
 import { Badge, Button, Card } from '../common';
 
 interface Props {
-  workspaceId: string;
+  accountId: string;
   proposal: SkillProposal;
   skills: Skill[];
   onReviewed: () => void;
 }
 
 export default function SkillProposalReview({
-  workspaceId,
+  accountId,
   proposal,
   skills,
   onReviewed,
@@ -30,7 +30,7 @@ export default function SkillProposalReview({
     }
     setBusy(decision);
     try {
-      await api.reviewSkillProposal(workspaceId, proposal.id, decision, {
+      await api.reviewSkillProposal(accountId, proposal.id, decision, {
         note,
         skill_id: targetSkillId,
       });

@@ -34,7 +34,7 @@ import type { ToolContext } from './context';
 function scheduleToJson(s: SecuritySchedule) {
   return {
     id: s.id,
-    workspace_id: s.workspace_id,
+    account_id: s.account_id,
     name: s.name,
     kind: s.kind ?? 'scan',
     scope: s.scope,
@@ -57,7 +57,7 @@ function batchToJson(b: SecurityRunBatch) {
   const ids = b.profile_ids ?? [];
   return {
     id: b.id,
-    workspace_id: b.workspace_id,
+    account_id: b.account_id,
     profile_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -78,12 +78,12 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'list_security_schedules',
     'List reusable security schedules in a workspace.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
     },
-    async ({ workspace_id }) => {
+    async ({ account_id }) => {
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       try {
-        const rows = await securityScheduleService.list(workspace_id);
+        const rows = await securityScheduleService.list(account_id);
         return ok(rows.map(scheduleToJson));
       } catch (e: any) {
         return err(e?.message || 'Failed to list security schedules');
@@ -96,12 +96,12 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'Get a single security schedule by id (scope, cadence, next/last run, last batch id).',
     {
       schedule_id: z.string().describe('SecuritySchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ schedule_id, workspace_id }) => {
+    async ({ schedule_id, account_id }) => {
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       try {
-        return ok(scheduleToJson(await securityScheduleService.get(schedule_id, workspace_id)));
+        return ok(scheduleToJson(await securityScheduleService.get(schedule_id, account_id)));
       } catch (e: any) {
         return err(e?.message || 'security schedule not found');
       }
@@ -115,14 +115,14 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'dispatches a checklist refresh (refresh_security_checklist) to each in-scope profile — it updates ' +
     'the profiles\' checklists with the latest security knowledge and creates NO run/batch row (so it ' +
     'never pollutes scan history; safe to run frequently). For BOTH kinds: `scope="all"` targets every ' +
-    'enabled profile in the Workspace at dispatch time — no id snapshot, so profile add/remove is reflected automatically; ' +
+    'enabled profile in the Account at dispatch time — no id snapshot, so profile add/remove is reflected automatically; ' +
     '`scope="selected"` targets the ordered `profile_ids`. Set EXACTLY ONE of `cron` (5 UTC fields, ' +
     'e.g. "0 3 * * *") or `interval_ms`. `enabled` defaults true. NOTE: a scan run inspects the ' +
     'RUNNING server\'s code — keep the cadence coarser than your main→prod deploy lag so a run lands ' +
     'after the deploy (each run records its scanned_commit regardless). A checklist_refresh has no ' +
     'such deploy-timing concern.',
     {
-      workspace_id: z.string().describe('Workspace ID (required)'),
+      account_id: z.string().describe('Account ID (required)'),
       name: z.string().describe('Schedule name (required)'),
       kind: z.enum(['scan', 'checklist_refresh']).optional().describe("'scan' (default, runs an inspection batch) or 'checklist_refresh' (updates profile checklists, no run row)"),
       scope: z.enum(['all', 'selected']).optional().describe("'all' (default) or 'selected'"),
@@ -137,7 +137,7 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
       const caller = getCallerAgent(extra);
       try {
         const row = await securityScheduleService.create({
-          workspaceId: args.workspace_id,
+          accountId: args.account_id,
           name: args.name,
           kind: args.kind,
           scope: args.scope,
@@ -157,11 +157,11 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
 
   server.tool(
     'update_security_schedule',
-    'Update a security schedule. Only the provided fields change. `workspace_id` is required for scope ' +
+    'Update a security schedule. Only the provided fields change. `account_id` is required for scope ' +
     'safety. Toggling `enabled`, or changing `cron`/`interval_ms`, recomputes next_run_at.',
     {
       schedule_id: z.string().describe('SecuritySchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
       name: z.string().optional(),
       kind: z.enum(['scan', 'checklist_refresh']).optional(),
       scope: z.enum(['all', 'selected']).optional(),
@@ -171,10 +171,10 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
       enabled: z.boolean().optional(),
       stop_on_fail: z.boolean().optional(),
     },
-    async ({ schedule_id, workspace_id, ...patch }) => {
+    async ({ schedule_id, account_id, ...patch }) => {
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       try {
-        const row = await securityScheduleService.update(schedule_id, workspace_id, {
+        const row = await securityScheduleService.update(schedule_id, account_id, {
           name: patch.name,
           kind: patch.kind,
           scope: patch.scope,
@@ -196,12 +196,12 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'Delete a security schedule. Does NOT touch the SecurityRunBatches it already started.',
     {
       schedule_id: z.string().describe('SecuritySchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ schedule_id, workspace_id }) => {
+    async ({ schedule_id, account_id }) => {
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       try {
-        await securityScheduleService.remove(schedule_id, workspace_id);
+        await securityScheduleService.remove(schedule_id, account_id);
         return ok({ success: true, id: schedule_id });
       } catch (e: any) {
         return err(e?.message || 'Failed to delete security schedule');
@@ -217,13 +217,13 @@ export function registerSecurityScheduleTools(server: McpServer, ctx: ToolContex
     'per-profile refresh dispatches ({ profile_id, room_id }). The `kind` field tells you which.',
     {
       schedule_id: z.string().describe('SecuritySchedule ID'),
-      workspace_id: z.string().describe('Workspace ID (required, scope guard)'),
+      account_id: z.string().describe('Account ID (required, scope guard)'),
     },
-    async ({ schedule_id, workspace_id }, extra: { sessionId?: string }) => {
+    async ({ schedule_id, account_id }, extra: { sessionId?: string }) => {
       if (!securityScheduleService) return err('security schedule service unavailable in this MCP context');
       const caller = getCallerAgent(extra);
       try {
-        const { schedule, kind, batch, refreshes } = await securityScheduleService.runNow(schedule_id, workspace_id, caller?.agentId ?? '');
+        const { schedule, kind, batch, refreshes } = await securityScheduleService.runNow(schedule_id, account_id, caller?.agentId ?? '');
         return ok({
           schedule: scheduleToJson(schedule),
           kind,

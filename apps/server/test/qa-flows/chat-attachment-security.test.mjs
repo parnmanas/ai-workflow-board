@@ -31,7 +31,7 @@ const __testDbName = `qa-chat-attach-security-${Date.now()}-${process.pid}.db`;
 process.env.SQLJS_DB_PATH = path.join(os.tmpdir(), __testDbName);
 
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createUser, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createUser, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_CHAT_ATTACH_SEC_PORT || '0';
@@ -52,7 +52,7 @@ async function createDmRoom(app, getDataSourceToken, { wsId, userA, userB }) {
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: wsId,
+    account_id: wsId,
     type: 'dm',
     name: '',
   }));
@@ -73,7 +73,7 @@ function authHeaders(token, wsId) {
   return {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${token}`,
-    'X-Workspace-Id': wsId,
+    'X-Account-Id': wsId,
   };
 }
 
@@ -82,7 +82,7 @@ test('chat-attachment security regressions: atomic claim + mime sniffing', async
   t.after(() => { void app.close().catch(() => {}); });
   const { AuthService, getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-attach-sec');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-attach-sec');
   const sender = await createUser(app, getDataSourceToken, { name: 'sender' });
   const peer = await createUser(app, getDataSourceToken, { name: 'peer' });
   const senderToken = app.get(AuthService).createSession(sender.id);
@@ -245,7 +245,7 @@ test('chat-attachment security regressions: atomic claim + mime sniffing', async
   step('P3.1 Create an agent MCP session for the cross-owner probe');
   const probeAgent = await createAgent(app, getDataSourceToken, ws.id, { name: 'probe' });
   const probeKey = await createApiKey(app, getDataSourceToken, probeAgent.id, {
-    workspaceId: ws.id, label: 'probe',
+    accountId: ws.id, label: 'probe',
   });
   const mcp = new McpClient({
     baseUrl: `http://localhost:${port}`,

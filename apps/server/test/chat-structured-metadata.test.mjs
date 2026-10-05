@@ -18,15 +18,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
-async function seedDmRoom(ds, { workspaceId, participants }) {
+async function seedDmRoom(ds, { accountId, participants }) {
   const roomRepo = ds.getRepository('ChatRoom');
   const partRepo = ds.getRepository('ChatRoomParticipant');
-  const room = await roomRepo.save(roomRepo.create({ workspace_id: workspaceId, type: 'dm', name: '' }));
+  const room = await roomRepo.save(roomRepo.create({ account_id: accountId, type: 'dm', name: '' }));
   for (const p of participants) {
     await partRepo.save(partRepo.create({
       room_id: room.id,
@@ -46,14 +46,14 @@ test('F-1: ticket-action metadata round-trips REST 201 + SSE wire + history read
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-meta');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-meta');
   const user = await createUser(app, getDataSourceToken, { name: 'human' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder' });
-  const responderKey = await createApiKey(app, getDataSourceToken, responder.id, { workspaceId: ws.id, label: 'responder' });
+  const responderKey = await createApiKey(app, getDataSourceToken, responder.id, { accountId: ws.id, label: 'responder' });
 
   const room = await seedDmRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'user', id: user.id }, { type: 'agent', id: responder.id }],
   });
 
@@ -188,14 +188,14 @@ test('F2-4: artifact_refs + detail round-trip REST 201 + SSE wire + history; 독
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-meta-f24');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-meta-f24');
   const user = await createUser(app, getDataSourceToken, { name: 'human24' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder24' });
-  const responderKey = await createApiKey(app, getDataSourceToken, responder.id, { workspaceId: ws.id, label: 'responder24' });
+  const responderKey = await createApiKey(app, getDataSourceToken, responder.id, { accountId: ws.id, label: 'responder24' });
 
   const room = await seedDmRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'user', id: user.id }, { type: 'agent', id: responder.id }],
   });
 
@@ -304,14 +304,14 @@ test('F-3: agent_refs round-trip REST 201 + SSE wire + history; board_refs dropp
   const ds = app.get(getDataSourceToken());
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'chat-meta-f3');
+  const ws = await createAccount(app, getDataSourceToken, 'chat-meta-f3');
   const user = await createUser(app, getDataSourceToken, { name: 'human3' });
   const userToken = app.get(AuthService).createSession(user.id);
   const responder = await createAgent(app, getDataSourceToken, ws.id, { name: 'responder3' });
-  const responderKey = await createApiKey(app, getDataSourceToken, responder.id, { workspaceId: ws.id, label: 'responder3' });
+  const responderKey = await createApiKey(app, getDataSourceToken, responder.id, { accountId: ws.id, label: 'responder3' });
 
   const room = await seedDmRoom(ds, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     participants: [{ type: 'user', id: user.id }, { type: 'agent', id: responder.id }],
   });
 

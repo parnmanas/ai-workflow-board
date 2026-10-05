@@ -9,7 +9,7 @@
 //   - The mentioned assignee receives the event (with its RuntimeSpec).
 //   - No sibling agent in the same workspace receives it — not even when the
 //     same comment @-tags the sibling (it is not on the ticket).
-//   - No agent in a different workspace receives it (workspace-scope safety).
+//   - No agent in a different workspace receives it (account-scope safety).
 //   - The mention is the wake-up: the human comment does not ALSO re-send an
 //     agent_trigger for the in_progress ticket (that would wake it twice).
 
@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createUser,
   createAgent,
   createTicket,
@@ -27,13 +27,13 @@ import { VirtualAgent } from '../helpers/virtual-agent.mjs';
 
 process.env.PORT = process.env.QA_MENTION_PORT || '0';
 
-test('comment_mention is delivered only to the mentioned assignee (workspace-scoped)', async (t) => {
+test('comment_mention is delivered only to the mentioned assignee (account-scoped)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'mention');
-  const ws2 = await createWorkspace(app, getDataSourceToken, 'other-ws');
+  const ws = await createAccount(app, getDataSourceToken, 'mention');
+  const ws2 = await createAccount(app, getDataSourceToken, 'other-ws');
   const user = await createUser(app, getDataSourceToken, { name: 'mentioner' });
   const token = app.get(AuthService).createSession(user.id);
 
@@ -42,7 +42,7 @@ test('comment_mention is delivered only to the mentioned assignee (workspace-sco
   const foreignAgent = await createAgent(app, getDataSourceToken, ws2.id, { name: 'foreign', runtime: true });
 
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'Mention target',
     status: 'in_progress',
     assignee: alphaAgent,
@@ -67,7 +67,7 @@ test('comment_mention is delivered only to the mentioned assignee (workspace-sco
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'X-Workspace-Id': ws.id,
+      'X-Account-Id': ws.id,
     },
     body: JSON.stringify({
       content: `@[agent:${alphaAgent.id}|alpha] please look at this — cc @[agent:${betaAgent.id}|beta]`,

@@ -181,7 +181,7 @@ export async function uploadIfNewErrors(
       },
       body: JSON.stringify({
         agent_id: agentId,
-        workspace_id: (config.workspace_id as string) ?? null,
+        account_id: (config.account_id as string) ?? null,
         plugin_version: pluginVersion,
         entries: combined,
       }),

@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { tokens } from '../tokens';
 import PageHeader from './PageHeader';
@@ -19,27 +19,28 @@ interface SettingsGroup {
 }
 
 export default function SettingsOverviewPage() {
-  const { wsId = '' } = useParams<{ wsId: string }>();
+  const { currentAccountId } = useAuth();
+  const wsId = currentAccountId || '';
   const { hasPermission } = useAuth();
   const navigate = useNavigate();
   const isAdmin = hasPermission('admin.access');
 
   const groups: SettingsGroup[] = [
     {
-      title: 'Workspace',
-      description: 'Identity, agent defaults, and access rules for this workspace.',
+      title: 'Ownership',
+      description: 'Personal and organization ownership, defaults, and access rules.',
       items: [
         {
-          title: 'Workspace Settings',
+          title: 'Ownership & defaults',
           description: 'Ticket dispatch, language, agent harness and clone policy defaults.',
-          path: `/ws/${wsId}/settings/workspace`,
+          path: `/settings/ownership`,
           icon: 'W',
           adminOnly: true,
         },
         {
           title: 'Members',
-          description: 'People who can access this workspace.',
-          path: `/ws/${wsId}/settings/members`,
+          description: 'People who can access this account.',
+          path: `/settings/members`,
           icon: 'M',
         },
       ],
@@ -50,26 +51,26 @@ export default function SettingsOverviewPage() {
       items: [
         {
           title: 'Credentials',
-          description: 'Global and workspace credentials used by resources and agents.',
-          path: `/ws/${wsId}/settings/credentials`,
+          description: 'Global and account credentials used by resources and agents.',
+          path: `/settings/credentials`,
           icon: 'C',
         },
         {
           title: 'Channels',
-          description: 'Notification channels connected to this workspace.',
-          path: `/ws/${wsId}/settings/channels`,
+          description: 'Notification channels connected to this account.',
+          path: `/settings/channels`,
           icon: 'N',
         },
         {
           title: 'API Keys',
           description: 'MCP API keys for agents and external clients.',
-          path: `/ws/${wsId}/settings/api-keys`,
+          path: `/settings/api-keys`,
           icon: 'K',
         },
         {
           title: 'Claude Profiles',
-          description: 'Claude backend definitions and workspace assignment.',
-          path: `/ws/${wsId}/settings/claude-profiles`,
+          description: 'Claude backend definitions and account settings.',
+          path: `/settings/claude-profiles`,
           icon: 'C',
         },
       ],
@@ -114,7 +115,7 @@ export default function SettingsOverviewPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
         title="Settings"
-        description="Workspace access, connections, agent defaults, and system administration"
+        description="Account access, connections, agent defaults, and system administration"
       />
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
         <div style={{ maxWidth: 1040, display: 'flex', flexDirection: 'column', gap: 28 }}>

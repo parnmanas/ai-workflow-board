@@ -63,7 +63,7 @@ process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'ontology.db');
 process.env.NODE_ENV = 'test';
 
 const dbUrl = 'file://' + path.join(DIST_ROOT, 'db.js');
-const wsUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'Workspace.js');
+const wsUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'Account.js');
 const nodeUrl = 'file://' + path.join(DIST_ROOT, 'entities', 'OntologyNode.js');
 
 const {
@@ -79,12 +79,12 @@ const {
   isOntologySqljsDirty,
   OntologySqljsWriteSubscriber,
 } = await import(dbUrl);
-const { Workspace } = await import(wsUrl);
+const { Account } = await import(wsUrl);
 const { OntologyNode } = await import(nodeUrl);
 
 function makeNode(i) {
   return {
-    workspace_id: 'ws-independence-test',
+    account_id: 'ws-independence-test',
     graph_id: 'graph-independence-test',
     symbol_id: `sym-${i}`,
     type: 'Callable',
@@ -197,7 +197,7 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     assert.equal(isSqljsDirty(), false);
 
     // 이제 반대 방향.
-    const wsRepo = AppDataSource.getRepository(Workspace);
+    const wsRepo = AppDataSource.getRepository(Account);
     await wsRepo.save(wsRepo.create({ name: 'dirty-flag-check', description: 'primary write' }));
     assert.equal(isSqljsDirty(), true, 'a primary write must mark the primary dirty flag');
     assert.equal(isOntologySqljsDirty(), false, 'a primary write must NOT mark the ontology dirty flag');
@@ -223,7 +223,7 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
       assert.equal(ontoSaves, 1, 'the ontology flush must export exactly once');
       assert.equal(primarySaves, 0, 'flushing ontology must NEVER touch the primary saveDatabase()');
 
-      const wsRepo = AppDataSource.getRepository(Workspace);
+      const wsRepo = AppDataSource.getRepository(Account);
       await wsRepo.save(wsRepo.create({ name: 'flush-independence', description: 'primary' }));
       await flushSqljs(AppDataSource);
       assert.equal(primarySaves, 1, 'the primary flush must export exactly once');
@@ -245,7 +245,7 @@ describe('ontology sql.js DataSource independence (ticket 6ca4894a)', () => {
     const hold = (manager, name) => async () => {
       active += 1;
       maxActive = Math.max(maxActive, active);
-      const repo = manager.getRepository(name === 'onto' ? OntologyNode : Workspace);
+      const repo = manager.getRepository(name === 'onto' ? OntologyNode : Account);
       if (name === 'onto') {
         await repo.save(repo.create(makeNode(`queue-independence-${Date.now()}`)));
       } else {

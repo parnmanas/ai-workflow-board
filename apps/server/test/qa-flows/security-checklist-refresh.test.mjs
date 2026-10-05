@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey } from '../helpers/fixtures.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
 process.env.PORT = process.env.QA_SECURITY_REFRESH_PORT || '0';
@@ -24,16 +24,16 @@ test('security checklist: source/added_at model + refresh_security_checklist dis
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'sec-refresh');
+  const ws = await createAccount(app, getDataSourceToken, 'sec-refresh');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'inspector' });
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: 'inspector' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: 'inspector' });
 
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 
   step('create_security_profile with a baseline item carrying a source link');
   const profile = await mcp.callTool('create_security_profile', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'AWB self code-review',
     target_runtime: agent.runtime_spec,
     scan_driver: 'code-review',
@@ -70,14 +70,14 @@ test('security checklist: source/added_at model + refresh_security_checklist dis
   assert.match(refresh.prompt, /REQUIRED for every item/, 'prompt requires a source link per item');
 
   // A refresh is not a run — the run history stays empty.
-  const runsAfterRefresh = await mcp.callTool('list_security_runs', { profile_id: profile.id, workspace_id: ws.id });
+  const runsAfterRefresh = await mcp.callTool('list_security_runs', { profile_id: profile.id, account_id: ws.id });
   assert.ok(Array.isArray(runsAfterRefresh) && runsAfterRefresh.length === 0, 'refresh does not stack a SecurityRun');
 
   step('agent writeback: update_security_profile with merged checklist (preserve baseline + add fresh items)');
   const EXPLICIT_ADDED = '2026-06-20T00:00:00.000Z';
   const merged = await mcp.callTool('update_security_profile', {
     profile_id: profile.id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     checklist: [
       // baseline item carried through with its original added_at preserved
       {

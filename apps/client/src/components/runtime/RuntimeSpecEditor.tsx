@@ -1,7 +1,7 @@
 import RuntimeSelectionFields from './RuntimeSelectionFields';
 import ProjectFolderHelper from './ProjectFolderHelper';
 import React, { useEffect, useState } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import type { Credential } from '../../types';
 import { Input, Select } from '../common';
 import { tokens } from '../../tokens';
@@ -28,7 +28,7 @@ interface RuntimeSpecEditorProps {
   onChange(value: RuntimeSpecDraft): void;
   /** Runtime Host 후보 — 호출자가 listManagers/getAgents 에서 만든다. */
   hosts: RuntimeHostChoice[];
-  workspaceId?: string;
+  accountId?: string;
   /** 폴더 공유 스코프 선택이 필요할 때만 (mission/step 계열). 기본 false. */
   showFolderScope?: boolean;
   /**
@@ -51,7 +51,7 @@ export default function RuntimeSpecEditor({
   value,
   onChange,
   hosts,
-  workspaceId,
+  accountId,
   showFolderScope = false,
   showProjectFolderHelper = true,
   disabled = false,
@@ -61,13 +61,13 @@ export default function RuntimeSpecEditor({
 
   useEffect(() => {
     let cancelled = false;
-    const wsId = workspaceId || getActiveWorkspaceId() || undefined;
+    const wsId = accountId || getActiveAccountId() || undefined;
     api.listCredentials(wsId).then((list) => {
       if (!cancelled) setCredentials(list as Credential[]);
     }).catch(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [accountId]);
 
   const dirError = value.working_dir.trim() && !isAbsoluteHostPath(value.working_dir.trim())
     ? 'Host 절대 경로여야 합니다 (예: /home/user/work)'
@@ -97,7 +97,7 @@ export default function RuntimeSpecEditor({
         {dirError && <div style={{ fontSize: 11, color: tokens.colors.danger, marginTop: 4 }}>{dirError}</div>}
         {showProjectFolderHelper && (
           <ProjectFolderHelper
-            workspaceId={workspaceId}
+            accountId={accountId}
             hostIds={value.manager_agent_id}
             currentDir={value.working_dir}
             disabled={disabled}

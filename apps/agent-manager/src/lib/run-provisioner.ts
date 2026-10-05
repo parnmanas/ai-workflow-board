@@ -1,3 +1,4 @@
+import { normalizeAccountScope } from './account-scope.js';
 // QA/security run-workspace provisioner (ticket 25db3cc6 — 작업폴더 옵션화 4/5).
 //
 // Runs JUST BEFORE a QA/security run subagent is spawned, driven by the
@@ -54,7 +55,7 @@ export interface RunRepoSpec {
    */
   credential?: RepoCredential | null;
   /**
-   * Repo Resource ⊕ Workspace 로 해석된 clone 정책(ticket bddb63ee) — 서버의
+   * Repo Resource ⊕ Account 로 해석된 clone 정책(ticket bddb63ee) — 서버의
    * `RunRepoSpec.clone_policy` 와 같은 wire 형태. 없으면 repo-credential 의 시스템
    * 기본값(60분 wall-clock / idle 비활성 / 전체 clone)이 적용된다.
    */
@@ -68,7 +69,7 @@ export interface RunRepoSpec {
  *  걸러야 한다(event-dispatcher의 handleChatRoomMessage 참고). 'orchestration'
  *  (ticket 2dc3c62f, Mission step 디스패치)은 'chat'과 같은 이유로 걸러야
  *  한다 — 하지만 다른 이유에서다: report_orchestration_step 은 run_id/
- *  workspace_id 가 아니라 step_id 로 완료 처리하는 다른 모양의 계약이라
+ *  account_id 가 아니라 step_id 로 완료 처리하는 다른 모양의 계약이라
  *  qa/security/action 이 공유하는 `resolveRunCompletionRoute` 에 억지로
  *  맞추지 않는다 — 대신 미션의 기존 `step_timeout_minutes` reaper 가 프로비저닝
  *  실패/스폰 실패로 응답 없는 step 을 회수한다(event-dispatcher 의
@@ -111,7 +112,7 @@ export function resolveRunCompletionRoute(kind: 'qa' | 'security' | 'action'): R
 export interface RunProvision {
   kind: RunProvisionKind;
   run_id: string;
-  workspace_id: string;
+  account_id: string;
   workspace_folder: string;
   checkout_mode: RunCheckoutMode;
   repo: RunRepoSpec | null;
@@ -198,12 +199,12 @@ const RUN_PROVISION_KINDS: RunProvisionKind[] = ['qa', 'security', 'action', 'ch
 
 export function parseRunProvision(raw: unknown): RunProvision | null {
   if (!raw || typeof raw !== 'object') return null;
-  const o = raw as Record<string, unknown>;
+  const o = normalizeAccountScope(raw) as Record<string, unknown>;
   const kind = RUN_PROVISION_KINDS.includes(o.kind as RunProvisionKind) ? (o.kind as RunProvisionKind) : null;
   const run_id = typeof o.run_id === 'string' ? o.run_id : '';
-  const workspace_id = typeof o.workspace_id === 'string' ? o.workspace_id : '';
+  const account_id = typeof o.account_id === 'string' ? o.account_id : '';
   const folderRaw = typeof o.workspace_folder === 'string' ? o.workspace_folder : '';
-  if (!kind || !run_id || !workspace_id || !folderRaw) return null;
+  if (!kind || !run_id || !account_id || !folderRaw) return null;
   const checkout_mode: RunCheckoutMode = o.checkout_mode === 'fresh' ? 'fresh' : 'reuse';
 
   let repo: RunRepoSpec | null = null;
@@ -215,7 +216,7 @@ export function parseRunProvision(raw: unknown): RunProvision | null {
     if (cred) repo.credential = cred;
   }
 
-  return { kind, run_id, workspace_id, workspace_folder: folderRaw, checkout_mode, repo };
+  return { kind, run_id, account_id, workspace_folder: folderRaw, checkout_mode, repo };
 }
 
 /** Drop trailing path separators so `<dir>` and `<dir>/` compare equal. */

@@ -1,7 +1,7 @@
 // Repo clone 정책 에디터 폼 로직 (ticket bddb63ee).
 //
 // 이 폼이 결정하는 것은 단 하나 — **무엇이 저장 payload 에 들어가는가** 다. 빈 칸은
-// "미지정"이라 키 자체가 빠져야 하고(그래야 Project → Workspace → 시스템
+// "미지정"이라 키 자체가 빠져야 하고(그래야 Project → Account → 시스템
 // 기본값 순으로 흘러내린다), 0 은 "미지정"이 아니라 유효한 값이다(idle 비활성).
 // 이 둘을 뭉개면 사용자가 idle 을 끈 저장소가 조용히 기본값 600초로 되돌아간다.
 //
@@ -46,7 +46,7 @@ test('load: idle 0(비활성)은 빈 칸이 아니라 "0" 으로 살아난다', 
   assert.equal(clonePolicyToForm({ clone_idle_timeout_seconds: 0 }).idleTimeout, '0');
 });
 
-test('load: Workspace 행처럼 원문 JSON 으로 저장된 정책도 읽는다', () => {
+test('load: Account 행처럼 원문 JSON 으로 저장된 정책도 읽는다', () => {
   const raw = JSON.stringify({ clone_depth: 1, clone_filter: 'blob:none' });
   const form = clonePolicyFormFromRaw(raw);
   assert.equal(form.depth, '1');

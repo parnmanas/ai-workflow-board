@@ -54,7 +54,7 @@ function Harness({ node, title }) {
 function renderArtifact(node, title = '아티팩트') {
   return mountWithBoardStream(h(ArtifactPanelProvider, null, h(Harness, { node, title })), {
     withAuth: false,
-    wrap: (tree) => h(MemoryRouter, { initialEntries: ['/ws/w1/chat'] }, tree),
+    wrap: (tree) => h(MemoryRouter, { initialEntries: ['/chat'] }, tree),
   });
 }
 
@@ -81,7 +81,7 @@ test('TicketArtifact "티켓 열기" — Tickets 페이지의 그 티켓으로 �
   const orig = api.getTicket;
   const origHosts = api.listTemplateHosts;
   api.getTicket = async () => ({
-    id: 't1', title: '샘플 티켓', workspace_id: 'w1', status: 'todo', tags: [], comments: [],
+    id: 't1', title: '샘플 티켓', account_id: 'w1', status: 'todo', tags: [], comments: [],
   });
   api.listTemplateHosts = async () => [];
   try {
@@ -94,7 +94,7 @@ test('TicketArtifact "티켓 열기" — Tickets 페이지의 그 티켓으로 �
 
     assert.match(
       view.container.querySelector('[data-testid="loc"]').textContent,
-      /^\/ws\/w1\/tickets\?ticket=t1$/,
+      /^\/tickets\?ticket=t1$/,
       'Tickets 페이지 딥링크로 이동한다',
     );
     assert.match(view.container.textContent, /CLOSED/, '이동 후 패널이 닫힌다');

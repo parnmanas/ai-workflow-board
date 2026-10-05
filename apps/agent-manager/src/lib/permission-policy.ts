@@ -6,7 +6,7 @@
 //      운영자가 admin UI 에서 에이전트별로 고르는 "신뢰 등급". 지금까지는
 //      Hermes(ACP) RuntimeSupervisor 만 이 값을 읽었고, CLI adapter 들은
 //      존재조차 몰랐다.
-//   2. workspace harness(구버전 서버: board ⊕ workspace) `permission_mode` — 자유 문자열(claude CLI 의
+//   2. account harness(구버전 서버: board ⊕ workspace) `permission_mode` — 자유 문자열(claude CLI 의
 //      `--permission-mode` 값)이며, CLI adapter 들이 실제 spawn 플래그를
 //      결정할 때 유일하게 보던 값.
 //
@@ -36,7 +36,7 @@ export const PERMISSION_TIERS: readonly PermissionTier[] = Object.freeze([
 export type PermissionSource =
   /** Agent `runtime_config.permission_mode` (기준값). */
   | 'agent_trust'
-  /** Agent trust 미설정 + workspace harness `permission_mode` 존재. */
+  /** Agent trust 미설정 + account harness `permission_mode` 존재. */
   | 'harness'
   /** 둘 다 없음 — 매니저 기본값(= 최고 권한, 종전 동작). */
   | 'default'

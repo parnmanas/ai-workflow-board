@@ -20,7 +20,7 @@ import type { OntologyEdge, OntologyEdgeResolution } from '../../../entities/Ont
 import type { DefNodeInfo, GraphSymbolIndex } from './symbol-index';
 
 /** resolve.ts의 baseEdgeFields(input) 반환 형태 그대로 — OVERRIDES 엣지도
- *  같은 workspace_id/graph_id/layer/... 공통 필드를 쓴다. */
+ *  같은 account_id/graph_id/layer/... 공통 필드를 쓴다. */
 export type EdgeCommonFields = Omit<
   OntologyEdge,
   'id' | 'src_id' | 'dst_id' | 'type' | 'confidence' | 'resolution' | 'props' | 'created_at' | 'updated_at'

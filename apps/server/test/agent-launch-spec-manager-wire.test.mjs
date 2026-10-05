@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createAccount } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
 process.env.PORT = process.env.AGENT_LAUNCH_SPEC_WIRE_PORT || '0';
@@ -37,7 +37,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   // `workflow` scope 이 없어 쓸 수 없다).
   if (!existsSync(MANAGER_DIST)) {
     // 워크스페이스는 경로로 지정한다 — 패키지 이름은 `awb-agent-manager` 라
-    // `-w agent-manager` 는 "No workspaces found" 로 실패한다.
+    // `-w agent-manager` 는 "No accounts found" 로 실패한다.
     execFileSync('npm', ['run', 'build', '-w', 'apps/agent-manager'], {
       cwd: REPO_ROOT,
       stdio: 'inherit',
@@ -86,7 +86,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   });
 
   const specs = computeAgentLaunchSpecs([{
-    agent_id: 'wire-agent', workspace_id: 'ws', name: 'T', cli: 'claude',
+    agent_id: 'wire-agent', account_id: 'ws', name: 'T', cli: 'claude',
     working_dir: '/srv/work', mcp_config_path: '/cfg/mcp.json', api_key: SECRET,
     subagent_log_path: '/l', cli_home_dir: '/home/x/cli-home', model: 'claude-opus-5',
     runtime_config: { strategy: 'single', permission_mode: 'trusted' },
@@ -98,12 +98,12 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
   const { app, port, modules } = await bootApp({ port: Number.parseInt(process.env.PORT, 10) });
   t.after(async () => { await app.close(); });
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'launch-spec-wire');
+  const workspace = await createAccount(app, getDataSourceToken, 'launch-spec-wire');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'launch-spec-wire', type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id, label: 'launch-spec-wire',
+    accountId: workspace.id, label: 'launch-spec-wire',
   });
 
   const res = await fetch(`http://127.0.0.1:${port}/api/agent/instance-heartbeat`, {
@@ -113,7 +113,7 @@ test('매니저의 실제 계산 결과가 서버 수용 경로를 손실 없이
       instance_id: 'launch-spec-wire',
       agent_id: manager.id,
       host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
-      workspace_id: workspace.id,
+      account_id: workspace.id,
       mode: 'manager',
       hostname: 'test-host',
       plugin_version: 'test',

@@ -19,7 +19,7 @@ function batchToJson(b: SecurityRunBatch) {
   const ids = b.profile_ids ?? [];
   return {
     id: b.id,
-    workspace_id: b.workspace_id,
+    account_id: b.account_id,
     profile_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -45,7 +45,7 @@ function batchToJson(b: SecurityRunBatch) {
 function scheduleToJson(s: SecuritySchedule) {
   return {
     id: s.id,
-    workspace_id: s.workspace_id,
+    account_id: s.account_id,
     name: s.name,
     kind: s.kind ?? 'scan',
     scope: s.scope,
@@ -89,12 +89,14 @@ export class SecurityProfileController {
 
   @Get('profiles')
   async list(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const rows = await this.profileService.list(workspaceId);
-    return res.json(rows);
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
+    const ids: string[] = (req as any)?.accessibleAccountIds || [accountId];
+    const rows = (await Promise.all(ids.map(id => this.profileService.list(id)))).flat();
+    return res.json(Array.from(new Map(rows.map(row => [row.id, row])).values()));
   }
 
   @Get('profiles/:id')
@@ -120,16 +122,16 @@ export class SecurityProfileController {
   @Patch('profiles/:id')
   async update(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      return res.json(await this.profileService.update(id, body?.workspace_id, body));
+      return res.json(await this.profileService.update(id, body?.account_id, body));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update security profile' });
     }
   }
 
   @Delete('profiles/:id')
-  async remove(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async remove(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.profileService.remove(id, workspaceId);
+      await this.profileService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete security profile' });
@@ -183,13 +185,13 @@ export class SecurityProfileController {
   @Get('profiles/:id/runs')
   async listRuns(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
   ) {
     try {
       const n = limit ? parseInt(limit, 10) : 20;
-      const runs = await this.runService.listRuns(id, workspaceId, Number.isFinite(n) ? n : 20);
+      const runs = await this.runService.listRuns(id, accountId, Number.isFinite(n) ? n : 20);
       return res.json(runs);
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list security runs' });
@@ -197,9 +199,9 @@ export class SecurityProfileController {
   }
 
   @Get('runs/:runId')
-  async getRun(@Param('runId') runId: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getRun(@Param('runId') runId: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.runService.getRun(runId, workspaceId));
+      return res.json(await this.runService.getRun(runId, accountId));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'security run not found' });
     }
@@ -207,7 +209,7 @@ export class SecurityProfileController {
 
   // ── Batches (수동 전체 점검 — sequential multi-profile runs) ───────────────────
 
-  // Start a sequential batch. Body: { workspace_id, profile_ids?[],
+  // Start a sequential batch. Body: { account_id, profile_ids?[],
   // all?, stop_on_fail? }. Only index 0 dispatches now; the rest are dispatched
   // one-at-a-time as each run finalizes (see SecurityRunService.onRunFinalized).
   @Post('batches')
@@ -215,7 +217,7 @@ export class SecurityProfileController {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
       const batch = await this.runService.startBatch({
-        workspaceId: body?.workspace_id,
+        accountId: body?.account_id,
         profileIds: Array.isArray(body?.profile_ids) ? body.profile_ids : undefined,
         all: !!body?.all,
         stopOnFail: !!body?.stop_on_fail,
@@ -229,9 +231,9 @@ export class SecurityProfileController {
   }
 
   @Get('batches/:id')
-  async getBatch(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getBatch(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(batchToJson(await this.runService.getBatch(id, workspaceId)));
+      return res.json(batchToJson(await this.runService.getBatch(id, accountId)));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'security batch not found' });
     }
@@ -241,12 +243,14 @@ export class SecurityProfileController {
 
   @Get('schedules')
   async listSchedules(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
     try {
-      const rows = await this.scheduleService.list(workspaceId);
+      const ids: string[] = (req as any)?.accessibleAccountIds || [accountId];
+      const rows = (await Promise.all(ids.map(id => this.scheduleService.list(id)))).flat();
       return res.json(rows.map(scheduleToJson));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list security schedules' });
@@ -254,9 +258,9 @@ export class SecurityProfileController {
   }
 
   @Get('schedules/:id')
-  async getSchedule(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getSchedule(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(scheduleToJson(await this.scheduleService.get(id, workspaceId)));
+      return res.json(scheduleToJson(await this.scheduleService.get(id, accountId)));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'security schedule not found' });
     }
@@ -267,7 +271,7 @@ export class SecurityProfileController {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
       const row = await this.scheduleService.create({
-        workspaceId: body?.workspace_id,
+        accountId: body?.account_id,
         name: body?.name,
         kind: body?.kind,
         scope: body?.scope,
@@ -287,7 +291,7 @@ export class SecurityProfileController {
   @Patch('schedules/:id')
   async updateSchedule(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      const row = await this.scheduleService.update(id, body?.workspace_id, {
+      const row = await this.scheduleService.update(id, body?.account_id, {
         name: body?.name,
         kind: body?.kind,
         scope: body?.scope,
@@ -304,9 +308,9 @@ export class SecurityProfileController {
   }
 
   @Delete('schedules/:id')
-  async removeSchedule(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async removeSchedule(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.scheduleService.remove(id, workspaceId);
+      await this.scheduleService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete security schedule' });
@@ -321,7 +325,7 @@ export class SecurityProfileController {
   async runScheduleNow(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
-      const { schedule, kind, batch, refreshes } = await this.scheduleService.runNow(id, body?.workspace_id, user?.id || '');
+      const { schedule, kind, batch, refreshes } = await this.scheduleService.runNow(id, body?.account_id, user?.id || '');
       return res.status(201).json({
         schedule: scheduleToJson(schedule),
         kind,

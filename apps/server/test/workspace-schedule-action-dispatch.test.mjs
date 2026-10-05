@@ -1,4 +1,4 @@
-// Workspace Schedule 이 등록된 Action 을 실행한다.
+// Account Schedule 이 등록된 Action 을 실행한다.
 //
 // 이관의 핵심은 "크론 필드를 옮겼다" 가 아니라 **발화 경로가 하나로 합쳐졌다** 는
 // 것이다. Action 형태 스케줄은 자기가 방을 만들지 않고 `ActionsService.dispatch` 를
@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { WorkspaceScheduleService } from '../dist/modules/workspace-schedule/workspace-schedule.service.js';
+import { WorkspaceScheduleService } from '../dist/modules/automation-schedule/automation-schedule.service.js';
 
 const logStub = { warn() {}, info() {}, error() {}, debug() {} };
 const notQuiesced = { isQuiesced: async () => false };
@@ -50,12 +50,12 @@ function makeService({ schedule, action, dispatchImpl, saved = [] }) {
   return { svc, saved };
 }
 
-const ACTION = { id: 'act-1', workspace_id: 'ws-1', name: '보안 점검' };
+const ACTION = { id: 'act-1', account_id: 'ws-1', name: '보안 점검' };
 
 test('Action 형태는 ActionsService.dispatch 로 가고 방을 직접 만들지 않는다', async () => {
   const calls = [];
   const schedule = {
-    id: 'sch-1', workspace_id: 'ws-1', name: '매일 보안 점검',
+    id: 'sch-1', account_id: 'ws-1', name: '매일 보안 점검',
     target_agent_id: '', task_prompt: '', action_id: 'act-1',
     cron: '0 19 * * *', interval_ms: null, enabled: true, next_run_at: null,
   };
@@ -79,7 +79,7 @@ test('Action 형태는 ActionsService.dispatch 로 가고 방을 직접 만들�
 
 test('Action 이 삭제됐으면 스케줄이 스스로 꺼진다', async () => {
   const schedule = {
-    id: 'sch-2', workspace_id: 'ws-1', name: '고아 스케줄',
+    id: 'sch-2', account_id: 'ws-1', name: '고아 스케줄',
     target_agent_id: '', task_prompt: '', action_id: 'act-gone',
     cron: '0 19 * * *', interval_ms: null, enabled: true, next_run_at: new Date(),
   };
@@ -113,7 +113,7 @@ test('task_prompt 와 action_id 를 둘 다 주면 거부한다', async () => {
   // 둘 다 허용하면 "어느 쪽이 이기는가" 가 dispatch 구현 세부에 숨는다 — 편집한
   // 사람이 자기가 무엇을 예약했는지 화면만 보고 알 수 없게 된다.
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', taskPrompt: '할 일', actionId: 'act-1', cron: '0 1 * * *' }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', taskPrompt: '할 일', actionId: 'act-1', cron: '0 1 * * *' }),
     /exactly one of task_prompt or action_id/,
   );
 });
@@ -121,7 +121,7 @@ test('task_prompt 와 action_id 를 둘 다 주면 거부한다', async () => {
 test('둘 다 없으면 거부한다', async () => {
   const { svc } = makeCreator(ACTION);
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', cron: '0 1 * * *' }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', cron: '0 1 * * *' }),
     /one of task_prompt or action_id is required/,
   );
 });
@@ -129,12 +129,12 @@ test('둘 다 없으면 거부한다', async () => {
 test('없는 Action / 다른 워크스페이스의 Action 은 거부한다', async () => {
   const { svc } = makeCreator(ACTION);
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', actionId: 'nope', cron: '0 1 * * *' }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', actionId: 'nope', cron: '0 1 * * *' }),
     /action not found/,
   );
   // 스케줄은 자기 워크스페이스 안에서만 무언가를 일으킬 수 있다.
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-other', name: 'x', actionId: 'act-1', cron: '0 1 * * *' }),
+    () => svc.create({ accountId: 'ws-other', name: 'x', actionId: 'act-1', cron: '0 1 * * *' }),
     /different workspace/,
   );
 });
@@ -142,7 +142,7 @@ test('없는 Action / 다른 워크스페이스의 Action 은 거부한다', asy
 test('Action 형태로 저장하면 대상·프롬프트는 비워 둔다', async () => {
   const { svc, savedRows } = makeCreator(ACTION);
   await svc.create({
-    workspaceId: 'ws-1', name: '매일 보안 점검', actionId: 'act-1',
+    accountId: 'ws-1', name: '매일 보안 점검', actionId: 'act-1',
     targetAgentId: 'stale-agent', cron: '0 19 * * *',
   });
   const row = savedRows[0];

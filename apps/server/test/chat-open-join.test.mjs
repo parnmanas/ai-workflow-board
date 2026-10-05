@@ -61,7 +61,7 @@ async function seedRoom(overrides = {}, participants = []) {
   const roomRepo = dataSource.getRepository(ChatRoom);
   const partRepo = dataSource.getRepository(ChatRoomParticipant);
   const room = await roomRepo.save(roomRepo.create({
-    workspace_id: WS,
+    account_id: WS,
     type: 'group',
     name: 'room',
     last_message_at: null,
@@ -99,8 +99,8 @@ function captureRoomUpdates() {
 }
 
 /** sendMessage 를 유저 발신으로 호출한다. */
-const sendAsUser = (roomId, workspaceId, senderId) =>
-  messaging.sendMessage(roomId, workspaceId, 'user', senderId, 'Sender', 'hello');
+const sendAsUser = (roomId, accountId, senderId) =>
+  messaging.sendMessage(roomId, accountId, 'user', senderId, 'Sender', 'hello');
 
 describe('chat 방 자유 참여(open_join)', () => {
   before(async () => {
@@ -154,9 +154,9 @@ describe('chat 방 자유 참여(open_join)', () => {
       empty,             // ticketRepo (P4c-4: agentRepo 삭제)
       empty,             // userMentionRepo
       empty,             // attachmentRepo
-      // workspaceRepo — 성공 경로는 커밋 뒤 chat_workspace_folder_enabled 를 읽는다.
+      // accountRepo — 성공 경로는 커밋 뒤 chat_workspace_folder_enabled 를 읽는다.
       // 이 테스트의 관심사가 아니므로 "설정 없음"으로 답한다.
-      { async findOne() { return null; } }, // workspaceRepo
+      { async findOne() { return null; } }, // accountRepo
       dataSource,        // dataSource
       noopLog,           // logService
       emitFailingMembership, // membership (emitParticipantAdded 만 주입 가능하게 감쌈)
@@ -310,7 +310,7 @@ describe('chat 방 자유 참여(open_join)', () => {
     assert.equal((await activeRows(room.id, OUTSIDER)).length, 0);
   });
 
-  it('옵션 ON: workspaceId 를 알 수 없으면 완화하지 않는다 (모르면 닫는다)', async () => {
+  it('옵션 ON: accountId 를 알 수 없으면 완화하지 않는다 (모르면 닫는다)', async () => {
     const room = await seedRoom({ open_join: true }, [{ type: 'user', id: MEMBER }]);
 
     await assert.rejects(
@@ -358,16 +358,16 @@ describe('chat 방 자유 참여(open_join)', () => {
     const open = await seedRoom({ open_join: true }, [{ type: 'user', id: MEMBER }]);
     const closed = await seedRoom({ open_join: false }, [{ type: 'user', id: MEMBER }]);
 
-    const rows = await messaging.getMessages(open.id, OUTSIDER, 50, undefined, { workspaceId: WS });
+    const rows = await messaging.getMessages(open.id, OUTSIDER, 50, undefined, { accountId: WS });
     assert.deepEqual(rows, [], '열린 방은 비참여자도 읽을 수 있다 (아직 메시지는 없다)');
 
     await assert.rejects(
-      () => messaging.getMessages(closed.id, OUTSIDER, 50, undefined, { workspaceId: WS }),
+      () => messaging.getMessages(closed.id, OUTSIDER, 50, undefined, { accountId: WS }),
       (e) => e.status === 403,
       '닫힌 방의 읽기 403 은 그대로다',
     );
     await assert.rejects(
-      () => messaging.getMessages(open.id, OUTSIDER, 50, undefined, { workspaceId: OTHER_WS }),
+      () => messaging.getMessages(open.id, OUTSIDER, 50, undefined, { accountId: OTHER_WS }),
       (e) => e.status === 403,
       '열린 방이어도 워크스페이스가 다르면 읽을 수 없다',
     );
@@ -381,7 +381,7 @@ describe('chat 방 자유 참여(open_join)', () => {
     const msgRepo = dataSource.getRepository(ChatRoomMessage);
     for (let i = 0; i < 3; i++) {
       await msgRepo.save(msgRepo.create({
-        room_id: open.id, workspace_id: WS, sender_type: 'user', sender_id: MEMBER,
+        room_id: open.id, account_id: WS, sender_type: 'user', sender_id: MEMBER,
         content: `m${i}`, type: 'message',
       }));
     }
@@ -408,7 +408,7 @@ describe('chat 방 자유 참여(open_join)', () => {
   });
 
   it('다른 워크스페이스의 자유 참여 방은 목록에 실리지 않는다', async () => {
-    const foreign = await seedRoom({ workspace_id: OTHER_WS, open_join: true }, []);
+    const foreign = await seedRoom({ account_id: OTHER_WS, open_join: true }, []);
     const rooms = await crud.listRooms(WS, OUTSIDER);
     assert.equal(rooms.find(r => r.id === foreign.id), undefined, '워크스페이스 경계는 옵션이 뚫지 않는다');
   });
@@ -512,7 +512,7 @@ describe('chat 방 자유 참여(open_join)', () => {
   });
 
   it('다른 워크스페이스의 방은 존재를 알려주지 않는다 (404)', async () => {
-    const foreign = await seedRoom({ workspace_id: OTHER_WS, open_join: false }, [{ type: 'user', id: MEMBER }]);
+    const foreign = await seedRoom({ account_id: OTHER_WS, open_join: false }, [{ type: 'user', id: MEMBER }]);
     await assert.rejects(
       () => crud.setOpenJoin(foreign.id, WS, MEMBER, true),
       (e) => e.status === 404,

@@ -6,10 +6,10 @@
 // provider 스택(Router > Toast > Auth > BoardStream > Notification) 위에 마운트한다.
 //
 // 여기서 고정하는 계약:
-//   1. WORK 에 Tickets(평평한 한 줄) / Teams / Orchestrations 가 그 순서로, 단수
+//   1. WORK 에 Tickets(평평한 한 줄) / Teams / Missions 가 그 순서로, 단수
 //      'Orchestration' 도 Boards 도 없이 보인다
-//   2. Teams / Orchestrations 아래 실제 팀/미션이 서브메뉴로 뜨고, 클릭하면 기존 상세 경로로 이동한다
-//   3. Teams 화면에서 Orchestrations 가 같이 active 로 보이지 않는다
+//   2. Teams / Missions 아래 실제 팀/미션이 서브메뉴로 뜨고, 클릭하면 기존 상세 경로로 이동한다
+//   3. Teams 화면에서 Missions 가 같이 active 로 보이지 않는다
 //   4. 접기/펼치기가 두 계층 메뉴 모두에서 같게 동작한다
 //   5. 목록이 비면 메뉴별 empty state 가 뜬다
 //   6. 이름이 길면 잘려도 title 툴팁으로 전체 이름을 볼 수 있다
@@ -17,7 +17,7 @@
 //   8. 페이지가 쏘는 목록 변경 이벤트로 서브메뉴가 갱신된다
 //   9. 접어둔 그룹이라도 그 영역으로 이동해 오면 다시 펴진다
 //  10. 서버가 보낸 미션 삭제 SSE 프레임으로 서브메뉴에서 그 항목이 사라진다
-//  11. 예전 /orchestration/teams 딥링크가 새 /teams 로 리다이렉트된다(딥링크 보존)
+//  11. 예전 /teams 딥링크가 새 /teams 로 리다이렉트된다(딥링크 보존)
 //
 // 실행: node --import tsx --test --test-force-exit test/sidebar-work-hierarchy.test.mjs
 import test from 'node:test';
@@ -37,7 +37,7 @@ import { LegacyOrchestrationTeamsRedirect } from '../src/App.tsx';
 const h = React.createElement;
 
 const WS_ID = 'ws-1';
-const BASE = `/ws/${WS_ID}`;
+const BASE = ``;
 
 const DEFAULT_TEAMS = [
   { id: 't1', name: 'Platform squad' },
@@ -50,10 +50,10 @@ const DEFAULT_MISSIONS = [
 
 function team(overrides) {
   return {
-    workspace_id: WS_ID,
+    account_id: WS_ID,
     is_global: false,
-    owner_workspace_id: WS_ID,
-    allowed_workspace_ids: [],
+    owner_account_id: WS_ID,
+    allowed_account_ids: [],
     description: '',
     orchestrator_agent_id: 'agent-1',
     orchestrator_name: 'Orchestrator',
@@ -72,7 +72,7 @@ function team(overrides) {
 
 function mission(overrides) {
   return {
-    workspace_id: WS_ID,
+    account_id: WS_ID,
     team_id: 't1',
     team_name: 'Platform squad',
     status: 'running',
@@ -94,7 +94,7 @@ function installFetchStub(state) {
   const json = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
   globalThis.fetch = (url) => {
     const path = String(url);
-    if (path.includes('/orchestration/teams')) return json(state.teams.map((t) => team(t)));
+    if (path.includes('/teams')) return json(state.teams.map((t) => team(t)));
     if (path.includes('/orchestration/missions')) return json(state.missions.map((m) => mission(m)));
     if (path.includes('/auth/me')) {
       return json({
@@ -104,7 +104,7 @@ function installFetchStub(state) {
         role: 'member',
         status: 'active',
         permissions: [],
-        workspaces: [{ id: WS_ID, name: 'Workspace', slug: null, relations: [] }],
+        accounts: [{ id: WS_ID, name: 'Account', slug: null, relations: [] }],
       });
     }
     if (path.includes('/tickets/unread-counts')) {
@@ -227,7 +227,7 @@ function orchestrationUpdateWire(overrides = {}) {
   return {
     event_type: 'orchestration_update',
     mission_id: 'm1',
-    workspace_id: WS_ID,
+    account_id: WS_ID,
     team_id: 't1',
     title: 'Ship the nav',
     status: 'completed',
@@ -283,14 +283,14 @@ function subItemLabels(view, label) {
     .filter((text) => !text.startsWith('더보기') && text !== '접기');
 }
 
-test('① WORK 에 Tickets / Teams / Orchestrations 가 그 순서로 보이고 단수 표기도 Boards 도 없다', async (t) => {
+test('① WORK 에 Tickets / Teams / Missions 가 그 순서로 보이고 단수 표기도 Boards 도 없다', async (t) => {
   const { view } = await mountSidebar(t);
   const section = workSection(view);
   const labels = buttonsIn(section)
     .map(labelOf)
-    .filter((text) => ['Tickets', 'Teams', 'Orchestrations', 'Boards', 'Orchestration'].includes(text));
+    .filter((text) => ['Tickets', 'Teams', 'Missions', 'Boards', 'Orchestration'].includes(text));
 
-  assert.deepEqual(labels, ['Tickets', 'Teams', 'Orchestrations']);
+  assert.deepEqual(labels, ['Tickets', 'Teams', 'Missions']);
   assert.equal(Boolean(subList(view, 'Boards')), false, 'Boards 서브메뉴는 없어졌다');
   assert.ok(!section.textContent.includes('Orchestration '), '단수 Orchestration 표기가 남아 있다');
   assert.doesNotMatch(section.textContent, /Orchestration(?!s)/);
@@ -300,7 +300,7 @@ test('② 계층 메뉴 아래 실제 팀/미션이 서브메뉴로 뜬다', asy
   const { view } = await mountSidebar(t);
 
   assert.deepEqual(subItemLabels(view, 'Teams'), ['Platform squad', 'Ops squad']);
-  assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
+  assert.deepEqual(subItemLabels(view, 'Missions'), ['Ship the nav', 'Backfill telemetry']);
 });
 
 test('②-b Tickets 줄은 워크스페이스 전체 읽지 않은 티켓 코멘트 수를 배지로 보인다', async (t) => {
@@ -313,8 +313,8 @@ test('②-b Tickets 줄은 워크스페이스 전체 읽지 않은 티켓 코멘
 test('③ 서브 항목을 누르면 기존 상세 화면 경로로 이동한다', async (t) => {
   const { view } = await mountSidebar(t);
 
-  click(findByText(subList(view, 'Orchestrations'), 'Ship the nav'));
-  assert.equal(probe.pathname, `${BASE}/orchestration/missions/m1`);
+  click(findByText(subList(view, 'Missions'), 'Ship the nav'));
+  assert.equal(probe.pathname, `${BASE}/missions/m1`);
 
   click(findByText(subList(view, 'Teams'), 'Ops squad'));
   assert.equal(probe.pathname, `${BASE}/teams`);
@@ -327,18 +327,18 @@ test('④ 최상위 메뉴를 누르면 각자의 목록 화면으로 이동한�
   click(groupRow(view, 'Teams'));
   assert.equal(probe.pathname, `${BASE}/teams`);
 
-  click(groupRow(view, 'Orchestrations'));
-  assert.equal(probe.pathname, `${BASE}/orchestration`);
+  click(groupRow(view, 'Missions'));
+  assert.equal(probe.pathname, `${BASE}/missions`);
 
   click(groupRow(view, 'Tickets'));
   assert.equal(probe.pathname, `${BASE}/tickets`);
 });
 
-test('⑤ Teams 화면에서 Orchestrations 가 같이 active 로 보이지 않는다', async (t) => {
+test('⑤ Teams 화면에서 Missions 가 같이 active 로 보이지 않는다', async (t) => {
   const { view } = await mountSidebar(t, { entry: `${BASE}/teams?team=t1` });
 
   assert.equal(groupRow(view, 'Teams').getAttribute('aria-current'), 'page');
-  assert.equal(groupRow(view, 'Orchestrations').getAttribute('aria-current'), null);
+  assert.equal(groupRow(view, 'Missions').getAttribute('aria-current'), null);
   assert.equal(groupRow(view, 'Tickets').getAttribute('aria-current'), null);
 
   // 선택된 팀 서브 항목만 active.
@@ -352,13 +352,13 @@ test('⑤ Teams 화면에서 Orchestrations 가 같이 active 로 보이지 않�
   );
 });
 
-test('⑥ 미션 상세 딥링크에서 Orchestrations 와 해당 미션만 active 다', async (t) => {
-  const { view } = await mountSidebar(t, { entry: `${BASE}/orchestration/missions/m2` });
+test('⑥ 미션 상세 딥링크에서 Missions 와 해당 미션만 active 다', async (t) => {
+  const { view } = await mountSidebar(t, { entry: `${BASE}/missions/m2` });
 
-  assert.equal(groupRow(view, 'Orchestrations').getAttribute('aria-current'), 'page');
+  assert.equal(groupRow(view, 'Missions').getAttribute('aria-current'), 'page');
   assert.equal(groupRow(view, 'Teams').getAttribute('aria-current'), null);
   assert.deepEqual(
-    buttonsIn(subList(view, 'Orchestrations')).map((b) => b.getAttribute('aria-current')),
+    buttonsIn(subList(view, 'Missions')).map((b) => b.getAttribute('aria-current')),
     [null, 'page'],
   );
 });
@@ -366,7 +366,7 @@ test('⑥ 미션 상세 딥링크에서 Orchestrations 와 해당 미션만 acti
 test('⑦ 접기/펼치기가 두 계층 메뉴 모두에서 같게 동작한다', async (t) => {
   const { view } = await mountSidebar(t);
 
-  for (const label of ['Teams', 'Orchestrations']) {
+  for (const label of ['Teams', 'Missions']) {
     const toggle = workSection(view).querySelector(`button[aria-label="Collapse ${label} list"]`);
     assert.ok(toggle, `${label} 에 접기 토글이 없다`);
     assert.equal(toggle.getAttribute('aria-expanded'), 'true');
@@ -388,14 +388,14 @@ test('⑧ 목록이 비면 메뉴별 empty state 가 뜬다', async (t) => {
   const { view } = await mountSidebar(t, { teams: [], missions: [] });
 
   assert.match(subList(view, 'Teams').textContent, /No teams yet/);
-  assert.match(subList(view, 'Orchestrations').textContent, /No missions yet/);
+  assert.match(subList(view, 'Missions').textContent, /No missions yet/);
 });
 
 test('⑨ 이름이 길어도 전체 이름을 title 툴팁으로 볼 수 있다', async (t) => {
   const longName = 'Extremely long orchestration mission title that will certainly be truncated';
   const { view } = await mountSidebar(t, { missions: [{ id: 'm9', title: longName }] });
 
-  const item = buttonsIn(subList(view, 'Orchestrations'))[0];
+  const item = buttonsIn(subList(view, 'Missions'))[0];
   assert.equal(item.getAttribute('title'), longName);
   // 잘림 처리 자체도 유지돼야 한다 — 라벨 span 이 ellipsis 를 갖는다.
   const labelSpan = [...item.querySelectorAll('span')].find((sp) => sp.textContent.trim() === longName);
@@ -408,13 +408,13 @@ test('⑩ 목록이 길면 더보기/접기로 점진 노출한다', async (t) =
   const many = Array.from({ length: 9 }, (_, i) => ({ id: `m${i}`, title: `Mission ${i}` }));
   const { view } = await mountSidebar(t, { missions: many });
 
-  assert.equal(subItemLabels(view, 'Orchestrations').length, 5);
-  const more = findByText(subList(view, 'Orchestrations'), '더보기 (4)');
+  assert.equal(subItemLabels(view, 'Missions').length, 5);
+  const more = findByText(subList(view, 'Missions'), '더보기 (4)');
   assert.ok(more, '더보기 버튼이 없다');
 
   click(more);
-  assert.equal(subItemLabels(view, 'Orchestrations').length, 9);
-  assert.ok(findByText(subList(view, 'Orchestrations'), '접기'), '접기 버튼이 없다');
+  assert.equal(subItemLabels(view, 'Missions').length, 9);
+  assert.ok(findByText(subList(view, 'Missions'), '접기'), '접기 버튼이 없다');
 });
 
 test('⑪ 축소(드로어) 사이드바에서도 같은 탐색이 되고 이동 후 드로어가 닫힌다', async (t) => {
@@ -427,8 +427,8 @@ test('⑪ 축소(드로어) 사이드바에서도 같은 탐색이 되고 이동
   assert.equal(probe.search, '?team=t1');
   assert.equal(closed.count, 1, '드로어에서 이동했는데 onClose 가 호출되지 않았다');
 
-  click(groupRow(view, 'Orchestrations'));
-  assert.equal(probe.pathname, `${BASE}/orchestration`);
+  click(groupRow(view, 'Missions'));
+  assert.equal(probe.pathname, `${BASE}/missions`);
   assert.equal(closed.count, 2);
 });
 
@@ -447,7 +447,7 @@ test('⑫ 페이지가 쏘는 목록 변경 이벤트로 서브메뉴가 갱신�
     window.dispatchEvent(new window.CustomEvent(MISSIONS_CHANGED_EVENT));
   });
   await flush();
-  assert.deepEqual(subItemLabels(view, 'Orchestrations'), [
+  assert.deepEqual(subItemLabels(view, 'Missions'), [
     'Ship the nav',
     'Backfill telemetry',
     'Fresh mission',
@@ -457,19 +457,19 @@ test('⑫ 페이지가 쏘는 목록 변경 이벤트로 서브메뉴가 갱신�
 test('⑬ 접어둔 그룹이라도 그 영역으로 이동하면 다시 펴져 현재 위치가 보인다', async (t) => {
   const { view } = await mountSidebar(t);
 
-  // Orchestrations 를 접어 둔다.
-  click(workSection(view).querySelector('button[aria-label="Collapse Orchestrations list"]'));
-  assert.equal(Boolean(subList(view, 'Orchestrations')), false, 'Orchestrations 를 접었는데 서브메뉴가 남아 있다');
+  // Missions 를 접어 둔다.
+  click(workSection(view).querySelector('button[aria-label="Collapse Missions list"]'));
+  assert.equal(Boolean(subList(view, 'Missions')), false, 'Missions 를 접었는데 서브메뉴가 남아 있다');
 
   // 그 상태에서 미션 목록으로 이동하면 접힘이 풀려 활성 항목이 드러나야 한다.
   click(groupRow(view, 'Tickets'));
   assert.equal(probe.pathname, `${BASE}/tickets`);
-  click(groupRow(view, 'Orchestrations'));
-  assert.equal(probe.pathname, `${BASE}/orchestration`);
+  click(groupRow(view, 'Missions'));
+  assert.equal(probe.pathname, `${BASE}/missions`);
 
-  const reopened = subList(view, 'Orchestrations');
-  assert.ok(reopened, '이동해 왔는데도 Orchestrations 가 접힌 채로 남았다');
-  assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
+  const reopened = subList(view, 'Missions');
+  assert.ok(reopened, '이동해 왔는데도 Missions 가 접힌 채로 남았다');
+  assert.deepEqual(subItemLabels(view, 'Missions'), ['Ship the nav', 'Backfill telemetry']);
 
   // 다른 그룹의 사용자 접힘은 그대로 유지된다.
   click(workSection(view).querySelector('button[aria-label="Collapse Teams list"]'));
@@ -484,7 +484,7 @@ test('⑭ 미션이 외부에서 삭제되면 실제 SSE 경로를 타고 서브
   // 여기서는 FakeEventSource → BoardStreamProvider → useWorkNavLists → Sidebar
   // 라는 프로덕션 SSE 경로를 그대로 태운다(훅을 직접 호출하지 않는다).
   const { view, state, FakeEventSource } = await mountSidebar(t);
-  assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
+  assert.deepEqual(subItemLabels(view, 'Missions'), ['Ship the nav', 'Backfill telemetry']);
 
   // 서버는 삭제된 행을 더 이상 돌려주지 않는다 — 재조회가 일어나도 결과가 같도록.
   state.missions = state.missions.filter((m) => m.id !== 'm1');
@@ -497,7 +497,7 @@ test('⑭ 미션이 외부에서 삭제되면 실제 SSE 경로를 타고 서브
   await flush();
 
   assert.deepEqual(
-    subItemLabels(view, 'Orchestrations'),
+    subItemLabels(view, 'Missions'),
     ['Backfill telemetry'],
     '삭제된 미션이 서브메뉴에 유령으로 남았다',
   );
@@ -516,21 +516,21 @@ test('⑮ 삭제가 아닌 상태 변화 프레임은 미션을 목록에서 지
   });
   await flush();
 
-  assert.deepEqual(subItemLabels(view, 'Orchestrations'), ['Ship the nav', 'Backfill telemetry']);
+  assert.deepEqual(subItemLabels(view, 'Missions'), ['Ship the nav', 'Backfill telemetry']);
 
-  // 다른 워크스페이스의 삭제 프레임도 이 워크스페이스 목록을 건드리면 안 된다.
+  // 같은 리소스 id에 다른 실제 소유자를 주장하는 삭제 프레임은 무시한다.
   await act(async () => {
     es.emit(
       'orchestration_update',
-      orchestrationUpdateWire({ mission_id: 'm1', workspace_id: 'other-ws', deleted: true }),
+      orchestrationUpdateWire({ mission_id: 'm1', account_id: 'other-ws', deleted: true }),
     );
   });
   await flush();
 
   assert.deepEqual(
-    subItemLabels(view, 'Orchestrations'),
+    subItemLabels(view, 'Missions'),
     ['Ship the nav', 'Backfill telemetry'],
-    '다른 워크스페이스의 삭제 프레임이 이 목록을 건드렸다',
+    '잘못된 리소스 소유자가 이 목록을 건드렸다',
   );
 });
 
@@ -543,21 +543,42 @@ test('⑯ 예전 /orchestration/teams 딥링크는 새 /teams 로 리다이렉�
     const view = mount(
       h(
         MemoryRouter,
-        { initialEntries: ['/ws/ws-1/orchestration/teams'] },
+        { initialEntries: ['/orchestration/teams'] },
         h(
           Routes,
           null,
           h(Route, {
-            path: '/ws/:wsId/orchestration/teams',
+            path: '/orchestration/teams',
             element: h(LegacyOrchestrationTeamsRedirect),
           }),
-          h(Route, { path: '/ws/:wsId/teams', element: h(LocationProbe) }),
+          h(Route, { path: '/teams', element: h(LocationProbe) }),
         ),
       ),
     );
-    assert.equal(probe.pathname, '/ws/ws-1/teams');
+    assert.equal(probe.pathname, '/teams');
     view.unmount();
   } finally {
     dom.cleanup();
   }
+});
+
+
+test('missions owned by another accessible account stay live in the global sidebar', async (t) => {
+  const { view, FakeEventSource } = await mountSidebar(t, {
+    missions: [{ id: 'm1', title: 'Organization task', account_id: 'organization' }],
+  });
+  await act(async () => {
+    FakeEventSource.instances[0].emit('orchestration_update', orchestrationUpdateWire({
+      mission_id: 'm1', account_id: 'organization', title: 'Organization result', status: 'completed',
+    }));
+  });
+  await flush();
+  assert.deepEqual(subItemLabels(view, 'Missions'), ['Organization result']);
+  await act(async () => {
+    FakeEventSource.instances[0].emit('orchestration_update', orchestrationUpdateWire({
+      mission_id: 'm1', account_id: 'organization', deleted: true,
+    }));
+  });
+  await flush();
+  assert.deepEqual(subItemLabels(view, 'Missions'), []);
 });

@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createAccount } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.SUDO_TICKET_PORT || '0';
 // 이 파일은 **실제 인증 경로**를 타야 한다. 부팅 헬퍼 기본값(AGENT_DEV_MODE=true)은
@@ -31,13 +31,13 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
   });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'sudo-ticket');
+  const workspace = await createAccount(app, getDataSourceToken, 'sudo-ticket');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'sudo-ticket-manager',
     type: 'manager',
   });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'sudo-ticket-manager-key',
   });
   // 같은 워크스페이스의 **다른** 매니저 — 남의 티켓을 집으려 시도하는 쪽.
@@ -46,7 +46,7 @@ test('sudo 티켓은 1회용이고, 발급 대상 매니저만 집을 수 있으
     type: 'manager',
   });
   const otherKey = await createApiKey(app, getDataSourceToken, other.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'sudo-ticket-other-key',
   });
   const admin = await createUser(app, getDataSourceToken, { name: 'sudo-ticket-admin', role: 'admin' });

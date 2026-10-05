@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step as logStep } from '../helpers/boot.mjs';
-import { createWorkspace, createApiKey } from '../helpers/fixtures.mjs';
+import { createAccount, createApiKey } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -63,23 +63,23 @@ test('예산을 채워 같은 노드를 다시 돌린다 — 복제 노드를 �
   const runner = app.get(services.OrchestrationRunnerService);
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'retry-budget');
+  const ws = await createAccount(app, getDataSourceToken, 'retry-budget');
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Budget squad',
     team: { max_parallel_steps: 2, created_by: HUMAN.id },
     members: [{ role_label: 'builder' }],
   });
   const lead = squad.orchestrator;
   const worker = squad.member('builder');
-  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { workspaceId: ws.id, label: 'lead' });
-  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { workspaceId: ws.id, label: 'worker' });
+  const leadKey = await createApiKey(app, getDataSourceToken, lead.id, { accountId: ws.id, label: 'lead' });
+  const workerKey = await createApiKey(app, getDataSourceToken, worker.id, { accountId: ws.id, label: 'worker' });
   const leadMcp = new McpClient({ baseUrl: base, apiKey: leadKey.raw_key });
   const workerMcp = new McpClient({ baseUrl: base, apiKey: workerKey.raw_key });
   t.after(() => { void leadMcp.close().catch(() => {}); void workerMcp.close().catch(() => {}); });
 
   const mission = await missions.createMission({
-    workspace_id: ws.id, team_id: squad.team.id, title: 'Budget mission',
+    account_id: ws.id, team_id: squad.team.id, title: 'Budget mission',
     objective: 'get it right', created_by: HUMAN.id,
   });
   await runner.startMission(mission.id, ws.id, HUMAN);

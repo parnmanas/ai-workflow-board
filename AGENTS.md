@@ -2,7 +2,9 @@
 
 **AI Workflow Board (AWB)**
 
-AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티켓을 처리하는 워크플로우 자동화 플랫폼이다. 티켓 하나는 **한 Agent(assignee)** 가 처음부터 끝까지 맡아(혼자 하든, 자기 subagent 들에게 나눠 하든) 처리하고, 결과를 comment 로 남긴 뒤 상태를 `done`(또는 사람 확인용 `review`)으로 옮긴다. 보드는 없다 — 티켓은 워크스페이스 단위 풀이고 **tag** 와 **project** 로 분류·필터링한다.
+AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작업 표면으로 삼고, 티켓과 프로젝트 및 팀 미션으로 업무를 추적·자동화하는 플랫폼이다. 티켓 하나는 **한 Agent(assignee)** 가 처음부터 끝까지 맡아(혼자 하든, 자기 subagent 들에게 나눠 하든) 처리하고, 결과를 comment 로 남긴 뒤 상태를 `done`(또는 사람 확인용 `review`)으로 옮긴다. 보드는 없다 — 티켓은 접근 가능한 계정의 업무를 합쳐 보여주고 **tag** 와 **project** 로 분류·필터링한다.
+
+**Workspace 작업 개념은 제거됐다.** `/sessions`, `/tickets`, `/projects`, `/missions` 작업 페이지에는 소유 계정 전환기가 없다. `Account`는 소유권·ReBAC membership·credential·정책·예산의 관리 경계다. 목록과 unread는 접근 가능한 계정을 합치며, 상세·쓰기·artifact ref·SSE는 실제 객체의 소유 계정으로 권한을 검사한다. 새 독립 작업은 기본 접근 계정에, 선택한 Project/계정 소유 Team의 작업은 그 객체의 계정에 귀속된다. 계약: `docs/ownership.md`.
 
 **Core Value:** Agent가 MCP로 연결되어 티켓을 자율 처리하고, 큐에 쌓인 다음 티켓이 그 Agent 에게 자동으로 이어지는 연속 자동화 루프.
 
@@ -12,7 +14,8 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - **MCP 호환**: @modelcontextprotocol/sdk 기반 Streamable HTTP 유지
 - **DB 호환**: SQLite(개발) + PostgreSQL(운영) 이중 지원 유지
 - **Agent 독립성**: AWB는 Agent의 내부 구현에 의존하지 않음 — MCP 인터페이스만 사용
-- **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (workspace root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `docs/runbooks/agent-manager-release.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Workspace CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 와 `status` / `project` / `base_repo.main_clone_dir` (docs/tickets.md) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
+- **Agent Manager sync**: SSE 이벤트, subagent 위임, persistent ticket/chat session, CLI lifecycle 변경은 `apps/agent-manager/` 에서 처리. 절차 → (1) `apps/agent-manager/src/` 수정, (2) `npm run build` 통과 확인 (monorepo root turbo 빌드 포함), (3) commit + push — **버전은 손으로 범프하지 말 것**: `main` 랜딩 시 `.github/workflows/publish-agent-manager.yml` 이 `apps/agent-manager/scripts/compute-publish-version.mjs` 로 버전을 자동 계산해 publish 한다 (상세 절차는 `docs/runbooks/agent-manager-release.md` 참조). SSE 이벤트 타입을 추가/변경한 경우 서버측 (`apps/server/src/modules/agent-manager/`) 변경과 같은 PR 으로 묶을 것 — agent-manager 와 AWB 서버가 같은 contract 를 본다. `agent_trigger` payload 의 `harness_config` (Account CLI 하네스, `apps/server/src/common/harness-config.ts` 스키마) 와 `status` / `project` / `base_repo.main_clone_dir` (docs/tickets.md) 도 이 SSE contract 에 포함 — 키 추가/변경 시 server·agent-manager 양쪽을 같은 PR 로 (필드별 CLI 매핑은 `docs/agent-manager.md` → "Harness config" 참조).
+- **소유 계약과 호환**: 정본은 `account_id`, `X-Account-Id`, `*_account`, `*_automation_schedule`이다. 구 workspace URL/REST body·query·header·MCP 인자·manager config는 경계에서 alias로 읽는다. 기존 소유 UUID는 그대로 유지하며, 소유권 rename으로 credential/MCP 파일 suffix나 native session 홈 경로를 바꾸지 말 것. `workspace_folder`, `RunWorkspace`, CLI workspace trust, Codex `workspace-write`는 실제 파일 작업공간 의미라 유지한다.
 
 ## Technology Stack
 
@@ -109,19 +112,19 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Service files: kebab-case with `.service.ts` suffix (e.g., `auth.service.ts`) - located in `apps/server/src/services/`
 - Module files: kebab-case with `.module.ts` suffix (e.g., `projects.module.ts`)
 - React components: PascalCase (e.g., `TicketsPage.tsx`, `TicketCard.tsx`) - located in `apps/client/src/components/`
-- Hooks: camelCase with `use` prefix (e.g., `useWorkspaces.ts`) - located in `apps/client/src/hooks/`
+- Hooks: camelCase with `use` prefix (e.g., `useAuth`) - located in `apps/client/src/hooks/`
 - Context files: PascalCase with `Context.tsx` suffix (e.g., `AuthContext.tsx`) - located in `apps/client/src/contexts/`
 - Guards: kebab-case with `.guard.ts` suffix (e.g., `auth.guard.ts`) - located in `apps/server/src/common/guards/`
 - Decorators: kebab-case with `.decorator.ts` suffix (e.g., `current-user.decorator.ts`) - located in `apps/server/src/common/decorators/`
 - Async functions: camelCase (e.g., `async login(email, password)`, `async refresh()`)
 - NestJS handlers: camelCase with method name (e.g., `@Get() list(...)`, `@Post() create(...)`)
-- React hooks: camelCase starting with `use` (e.g., `useWorkspaces`, `useAuth`)
+- React hooks: camelCase starting with `use` (e.g., `useHostModels`, `useAuth`)
 - Private methods: camelCase prefixed with underscore (e.g., `private _resolveAgentId(...)`)
 - Helper functions: camelCase (e.g., `parseTicket()`, `parseComments()`)
 - Constants: UPPER_SNAKE_CASE (e.g., `MAX_IMAGE_SIZE`, `SESSION_TTL_MS`, `SALT_ROUNDS`)
 - Local variables: camelCase (e.g., `projectId`, `currentUser`, `showToast`)
-- Database/API fields: snake_case (e.g., `workspace_id`, `created_at`, `channel_ids`)
-- TypeScript/React state: camelCase (e.g., `isAuthenticated`, `currentWorkspaceId`, `selectedChannelIds`)
+- Database/API fields: snake_case (e.g., `account_id`, `created_at`, `channel_ids`)
+- TypeScript/React state: camelCase (e.g., `isAuthenticated`, `accountId`, `selectedChannelIds`)
 - Interfaces: PascalCase, often plural for collections (e.g., `User`, `Project`, `TicketDetailProps`)
 - Types: PascalCase (e.g., `CurrentUserData`)
 - Enum values: UPPER_SNAKE_CASE
@@ -197,7 +200,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Context-based state management on frontend
 - REST API with session-based authentication
 - Real-time activity logging and notifications
-- Multi-workspace organization with hierarchical tickets (root → child → grandchild)
+- Session-first work views with account ownership and hierarchical tickets (root → child → grandchild)
 ## Layers
 - Purpose: Expose endpoints for tickets, projects, authentication, and user management
 - Location: `apps/server/src/modules/*/` (16 feature modules)
@@ -257,7 +260,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 - Triggers: `npm run dev` or build via `npm run build`
 - Responsibilities: Render React app into DOM, wrap with BrowserRouter
 - Location: `apps/client/src/App.tsx`
-- Routes: "/ws/:wsId/tickets" (Tickets), "/ws/:wsId/projects" (Projects), "/admin/*" (AdminPage), auth guards before routes
+- Routes: "/sessions" (native CLI sessions), "/tickets", "/projects", "/missions", "/settings/ownership" (ownership administration), auth guards before routes
 - Responsibilities: Check auth state, render login or main interface
 ## Error Handling
 - Backend: AllExceptionsFilter (in `apps/server/src/common/filters/http-exception.filter.ts`) catches all exceptions, logs via LogService, returns HTTP 500
@@ -281,7 +284,7 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 
 - **보드·컬럼·워크스페이스 역할·컬럼 role 라우팅·prompt template·board lesson·합의(consensus)·cross-board handoff·benchmark·feature chain·merge lease/gate 는 전부 제거됐다.** 다시 들이지 말 것 — 계약 문서는 `docs/tickets.md`.
 - 티켓 상태는 고정 집합 `backlog → todo → in_progress → review → done` (`apps/server/src/common/ticket-status.ts` 가 단일 원천 — 상태 문자열을 다른 곳에 손으로 쓰지 말 것). 분류는 `tags`(자유 문자열 배열)와 `project_id`.
-- 티켓마다 **assignee 한 명**(RuntimeSpec, `Ticket.assignee` + `assignee_key = runtimeIdentityKey(spec)`). 디스패치는 `TicketDispatchService`(`modules/agents/ticket-dispatch.service.ts`) **한 곳**이다: `todo` 큐 → 용량(`workspace.max_concurrent_tickets_per_agent`)이 나면 `in_progress` 로 옮기며 `agent_trigger`, 사람 코멘트/unpend/선행 완료/CI 대기 해제/수동 Run 에 재전송, 죽은 agent 는 supervisor 가 최대 3회 재전송 후 pend. 다른 경로에서 `agent_trigger` 를 직접 emit 하지 말 것 — "막혔던 게 풀렸다" 는 `resumeTicket(id, source)` 하나로 부른다.
+- 티켓마다 **assignee 한 명**(RuntimeSpec, `Ticket.assignee` + `assignee_key = runtimeIdentityKey(spec)`). 디스패치는 `TicketDispatchService`(`modules/agents/ticket-dispatch.service.ts`) **한 곳**이다: `todo` 큐 → 소유 Account의 용량(`account.max_concurrent_tickets_per_agent`)이 나면 `in_progress` 로 옮기며 `agent_trigger`, 사람 코멘트/unpend/선행 완료/CI 대기 해제/수동 Run 에 재전송, 죽은 agent 는 supervisor 가 최대 3회 재전송 후 pend. 다른 경로에서 `agent_trigger` 를 직접 emit 하지 말 것 — "막혔던 게 풀렸다" 는 `resumeTicket(id, source)` 하나로 부른다.
 - 티켓 쓰기(생성·수정·이동·pend/unpend)는 `TicketService`(`modules/tickets/ticket.service.ts`) 를 거친다 — REST·MCP·QA/Security 실패 티켓·CI red·outreach·채팅 fallback 이 같은 부수효과(terminal stamp, activity, dispatch)를 공유해야 한다. 티켓 행을 직접 `save` 해 상태를 바꾸지 말 것.
 - **Project = 저장소 1개 + 호스트별 main clone 폴더**(`Project`, `ProjectHostFolder`). repository Resource 를 **같은 id 로** 이관했으므로 저장된 repo id(`repo_ref.project_id`, 온톨로지 graph 의 `resource_id`)는 project id 다. 티켓 dispatch 는 assignee 호스트의 main clone 을 `base_repo.main_clone_dir` 로 실어 보내고, 매니저는 거기서 `<main_clone>/.awb/wt/<ticket8>` worktree 를 뜬다(main clone 자체는 절대 reset/clean 하지 않는다). 미션 step 지시문도 각 멤버 호스트의 project 폴더를 명시한다.
 - `board_update` SSE 이름은 wire 호환 때문에 유지한다(티켓 변경 이벤트다). `current_column_*` 는 `statusColumnProjection(status)` 로 채워 구버전 매니저가 계속 dispatch 한다 — 새 필드는 `status`.
@@ -312,9 +315,9 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 
 ## Agent Sessions (CLI 직접 세션)
 
-- Chat 과 **별개 표면**: Runtime Host 장비에 있는 CLI(Claude Code / Codex / Hermes)의 세션을 AWB 화면에서 직접 몬다. 단위는 **(Runtime Host, CLI, 네이티브 세션 id)** 이고 **AWB 는 세션 내용을 저장하지 않는다** — 목록·기록은 매니저가 CLI 홈(`~/.claude/projects`, `~/.codex/sessions`)에서 읽어 reverse RPC 로 답하고, 라이브 턴의 스트림만 driver 사용자에게 SSE 로 중계한다. 그 장비에서 터미널로 쓰던 세션도 그대로 뜬다. chat 모드 기본 랜딩이 `/ws/:wsId/sessions` 다. ChatRoom 은 그대로(다자간 대화 + run dispatch 버스) — 세션 기능을 방(room)에 분기로 얹지 말 것.
-- 이름 규약: 엔티티 없음(메모리 라이브 상태만), 모듈 `modules/agent-sessions`, REST `/api/agent-sessions/hosts/:managerId/:cli/sessions[/:id/...]`(사용자) · `/api/agent/sessions/rpc/:requestId`, `/api/agent/sessions/:managerId/:cli/:id[/events]`(매니저), SSE `agent_session_request`(→manager, scope 는 매니저 identity) · `agent_session_update`/`agent_session_event`(→driver UI), 권한 `agent_sessions.use`(기본 admin 전용), 클라이언트 `components/sessions/*`, 매니저 `agent-session-runner.ts` + `agent-session-store.ts`, 하트비트 `acp_session_clis`. 상수 단일 원천은 `apps/server/src/common/types/agent-sessions.ts`.
-- **CLI 설정**: Runtime Host × CLI 마다 워크스페이스 Credential 을 묶는다(`agent_session_cli_settings`, `PUT /api/agent-sessions/hosts/:managerId/:cli/settings`). 매니저는 바인딩된 credential 만 `GET /api/agent/sessions/credential/:id` 로 받아 **세션 전용 cli-home**(`session-homes/<cli>/<credential_id>`, 기록 디렉터리만 운영자 홈으로 링크)에 기존 어댑터 `prepareCliHome` 으로 적용한다 — 운영자 홈의 로그인 파일은 절대 건드리지 않는다. 비워 두면 장비의 `claude login` 상태를 그대로 쓴다.
+- Chat 과 **별개 표면**: Runtime Host 장비에 있는 CLI(Claude Code / Codex / Hermes)의 세션을 AWB 화면에서 직접 몬다. 단위는 **(Runtime Host, CLI, 네이티브 세션 id)** 이고 **트랜스크립트 원본은 CLI가 보관한다** — 목록·기록은 매니저가 CLI 홈(`~/.claude/projects`, `~/.codex/sessions`)에서 읽어 reverse RPC 로 답하고, 라이브 턴의 스트림만 driver 사용자에게 SSE 로 중계한다. AWB는 `AgentSessionExecution`에 실행 소유권과 설정만 저장한다. 그 장비에서 터미널로 쓰던 세션도 그대로 뜬다. 기본 랜딩이 `/sessions` 다. ChatRoom 은 그대로(다자간 대화 + run dispatch 버스) — 세션 기능을 방(room)에 분기로 얹지 말 것.
+- 이름 규약: 실행 메타데이터 엔티티 `AgentSessionExecution` + 메모리 라이브 상태, 모듈 `modules/agent-sessions`, REST `/api/agent-sessions/hosts/:managerId/:cli/sessions[/:id/...]`(사용자) · `/api/agent/sessions/rpc/:requestId`, `/api/agent/sessions/:managerId/:cli/:id[/events]`(매니저), SSE `agent_session_request`(→manager, scope 는 매니저 identity) · `agent_session_update`/`agent_session_event`(→driver UI), 권한 `agent_sessions.use`(기본 admin 전용), 클라이언트 `components/sessions/*`, 매니저 `agent-session-runner.ts` + `agent-session-store.ts`, 하트비트 `acp_session_clis`. 상수 단일 원천은 `apps/server/src/common/types/agent-sessions.ts`.
+- **CLI 설정과 실행 고정**: Account × Runtime Host × CLI의 credential/backend/default_config는 새 세션의 기본값이다(`agent_session_cli_settings`, `PUT /api/agent-sessions/hosts/:managerId/:cli/settings`). 처음 AWB에서 실행할 때 `AgentSessionExecution`이 소유 `account_id`, `credential_id`, `config_defaults`, `runtime_profile`을 고정한다. 이후 계정 기본값 변경은 기존 세션에 소급하지 않는다. 사용자가 해당 세션에서 명시적으로 바꾼 mode/config는 실행 snapshot에도 기록하며 재개 시 유지한다. 매니저는 바인딩된 credential 만 `GET /api/agent/sessions/credential/:id` 로 받아 **세션 전용 cli-home**(`session-homes/<cli>/<credential_id>`, 기록 디렉터리만 운영자 홈으로 링크)에 기존 어댑터 `prepareCliHome` 으로 적용한다 — 운영자 홈의 로그인 파일은 절대 건드리지 않는다. 비워 두면 장비의 CLI 로그인 상태를 그대로 쓴다.
 - `agent_session_request` payload(`credential_id` 포함) · `/api/agent/sessions/*` 바디·credential 응답 · 하트비트 `acp_session_clis` · `agent_sessions[]`(새 세션의 MCP 연결 참조 `mcp_session_ref` 포함) 는 server·agent-manager 공동 contract — 변경은 같은 PR. 상세: `docs/agent-sessions.md`.
 
 ## Terminal (Runtime Host 셸)
@@ -337,8 +340,8 @@ AI Workflow Board는 AI Agent가 MCP를 통해 연결하여 자율적으로 티�
 
 ## Skills (AWB 기능)
 
-- Global(`workspace_id NULL`) / Workspace 2계층. 같은 slug면 Workspace가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.
-- Global 쓰기는 admin 전용(`/api/admin/skill-registry`). Workspace 사용자는 global을 읽고 배정만 할 수 있다.
+- Global(`account_id NULL`) / Account 2계층. 같은 slug면 Account가 Global을 shadow — 커스터마이즈는 global 직접 수정이 아니라 **fork**.
+- Global 쓰기는 admin 전용(`/api/admin/skill-registry`). Account 사용자는 global을 읽고 배정만 할 수 있다.
 - Global을 채우는 소스 두 개: 저장소 안의 **내장 팩** `skills/` (부팅 시 멱등 시드, 네트워크 불필요 — "최신"은 서버 업그레이드로 따라온다)과 **tap**(외부 git repo, **기본 비활성**, 부팅 시 절대 동기화 안 함).
 - 동기화는 **append-only**: 변경은 새 불변 버전을 추가할 뿐이고, assignment는 특정 버전을 핀하므로 이미 배정된 에이전트가 읽는 내용은 절대 바뀌지 않는다. `quarantined` 는 운영자 거부권이라 동기화가 되살리지 않는다.
 - 새 SKILL.md 레이아웃/스코프/동기화 규칙은 `docs/skills.md`, 스코프 모델 전반은 `docs/catalog-scopes.md`.

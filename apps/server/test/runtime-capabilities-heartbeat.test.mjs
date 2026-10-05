@@ -5,7 +5,7 @@ import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
   createAgent,
   createApiKey,
-  createWorkspace,
+  createAccount,
 } from './helpers/fixtures.mjs';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 
@@ -18,13 +18,13 @@ test('Runtime Host heartbeat stores structured runtime health and capabilities',
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'runtime-health');
+  const workspace = await createAccount(app, getDataSourceToken, 'runtime-health');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host',
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'runtime-health',
   });
   const runtimeCapabilities = {
@@ -76,7 +76,7 @@ test('Runtime Host heartbeat stores structured runtime health and capabilities',
         instance_id: 'runtime-host-test',
         agent_id: manager.id,
         host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
-        workspace_id: workspace.id,
+        account_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',
         plugin_version: 'test',
@@ -109,13 +109,13 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'runtime-health-profiles');
+  const workspace = await createAccount(app, getDataSourceToken, 'runtime-health-profiles');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host-profiles',
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'runtime-health-profiles',
   });
   const hermesCapabilities = {
@@ -142,7 +142,7 @@ test('Runtime Host heartbeat carries hermes profiles through, sanitized', async 
         instance_id: 'runtime-host-test-profiles',
         agent_id: manager.id,
         host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
-        workspace_id: workspace.id,
+        account_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',
         plugin_version: 'test',
@@ -187,13 +187,13 @@ test('Runtime Host heartbeat carries permission_tiers through, all-or-nothing', 
   t.after(async () => { await app.close(); });
 
   const { getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'runtime-health-tiers');
+  const workspace = await createAccount(app, getDataSourceToken, 'runtime-health-tiers');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'runtime-host-tiers',
     type: 'manager',
   });
   const key = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'runtime-health-tiers',
   });
   const base = {
@@ -220,7 +220,7 @@ test('Runtime Host heartbeat carries permission_tiers through, all-or-nothing', 
         instance_id: 'runtime-host-test-tiers',
         agent_id: manager.id,
         host_id: manager.id, // P4c-4: heartbeat 정체성은 Host (fixture manager.id = host id)
-        workspace_id: workspace.id,
+        account_id: workspace.id,
         mode: 'manager',
         hostname: 'test-host',
         plugin_version: 'test',

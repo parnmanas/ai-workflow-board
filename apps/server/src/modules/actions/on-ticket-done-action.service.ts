@@ -206,7 +206,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
         if (typeof id !== 'string' || !id || byId.has(id)) continue;
         const a = await actionRepo.findOne({ where: { id } });
         if (!a) continue;
-        if (a.workspace_id !== ticket.workspace_id) continue;
+        if (a.account_id !== ticket.account_id) continue;
         if (!a.enabled) continue;
         byId.set(a.id, a);
       }
@@ -216,7 +216,7 @@ export class OnTicketDoneActionService implements OnModuleInit, OnModuleDestroy 
     // match in JS (tags live as a JSON string — keep the query DB-portable).
     const qb = actionRepo
       .createQueryBuilder('a')
-      .where('a.workspace_id = :ws', { ws: ticket.workspace_id })
+      .where('a.account_id = :ws', { ws: ticket.account_id })
       .andWhere('a.trigger = :trig', { trig: ON_TICKET_DONE_TRIGGER })
       .andWhere('a.enabled = :en', { en: true });
     const policyActions = await qb.getMany();

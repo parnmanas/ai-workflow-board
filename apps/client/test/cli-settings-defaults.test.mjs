@@ -72,7 +72,7 @@ function stubApi(t, initial) {
 // 패널은 useNavigate("Manage credentials") 와 useToast 를 쓴다 — 라우터·토스트 컨텍스트가 필요하다.
 const panel = (props) => h(
   MemoryRouter,
-  { initialEntries: ['/ws/ws-1/sessions/m-rolf'] },
+  { initialEntries: ['/sessions/m-rolf'] },
   h(ToastProvider, null, h(CliSettingsPanel, { wsId: 'ws-1', managerId: 'm-rolf', cli: 'codex', hostName: 'rolf', ...props })),
 );
 const saveButton = () => [...document.querySelectorAll('button')].find((b) => b.textContent === 'Save');

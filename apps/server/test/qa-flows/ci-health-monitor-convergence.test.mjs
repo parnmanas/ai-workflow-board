@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createWorkspace, createProject, createAgent } from '../helpers/fixtures.mjs';
+import { createAccount, createProject, createAgent } from '../helpers/fixtures.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', '..', 'dist');
@@ -99,10 +99,10 @@ test('CiHealthMonitorService — 교차 프로젝트 incident 수렴 / 비수렴
   const ticketService = app.get(TicketService, { strict: false });
 
   step('Seed workspace + alerts room + 같은 저장소를 보는 프로젝트 2개');
-  const ws = await createWorkspace(app, getDataSourceToken, 'ci-converge');
+  const ws = await createAccount(app, getDataSourceToken, 'ci-converge');
   const roomRepo = ds.getRepository('ChatRoom');
-  const room = await roomRepo.save(roomRepo.create({ workspace_id: ws.id, type: 'group', name: 'qa-alerts' }));
-  await ds.getRepository('Workspace').update(ws.id, { alerts_chat_room_id: room.id });
+  const room = await roomRepo.save(roomRepo.create({ account_id: ws.id, type: 'group', name: 'qa-alerts' }));
+  await ds.getRepository('Account').update(ws.id, { alerts_chat_room_id: room.id });
 
   // 프로젝트 default_assignee — 수렴의 목적이 "같은 수정이 두 번 dispatch 되지 않는 것"
   // 이므로, dispatch 표면인 assignee 가 실제로 한 티켓에만 붙는지까지 본다.
@@ -172,7 +172,7 @@ test('CiHealthMonitorService — 교차 프로젝트 incident 수렴 / 비수렴
 
     // 이 workspace 를 통틀어 이 저장소의 CI-red 실행 티켓이 1건뿐이어야 한다 — 예전에는
     // 감시 단위마다 1건씩 2건이 열렸고 그게 이 티켓의 원인이다.
-    const wsTickets = await ticketRepo.find({ where: { workspace_id: ws.id } });
+    const wsTickets = await ticketRepo.find({ where: { account_id: ws.id } });
     const convergeTickets = wsTickets.filter((tk) => tk.title.includes('acme/converge'));
     assert.equal(convergeTickets.length, 1, '프로젝트 수만큼 실행 티켓이 열리면 안 된다');
 
@@ -285,7 +285,7 @@ test('CiHealthMonitorService — 교차 프로젝트 incident 수렴 / 비수렴
     assert.equal(adoption.length, 1, '채택 코멘트는 채택한 프로젝트당 1회');
 
     // dispatch 표면 — 열린 실행 티켓은 여전히 1건이다(새 incident 도 프로젝트마다 열리지 않는다).
-    const openConverge = (await ticketRepo.find({ where: { workspace_id: ws.id } }))
+    const openConverge = (await ticketRepo.find({ where: { account_id: ws.id } }))
       .filter((tk) => tk.title.includes('acme/converge') && tk.status !== 'done');
     assert.equal(openConverge.length, 1, '열린 실행 티켓은 1건이어야 한다');
     assert.equal(openConverge[0].id, holder.id);

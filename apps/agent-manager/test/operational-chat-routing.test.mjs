@@ -15,7 +15,7 @@ import { fetchOrdinaryWorkCandidates, fetchOrdinaryWorkBoardCandidates } from '.
 import { composeChatRoomPrompt } from '../dist/lib/prompts.js';
 import { ordinaryWorkCandidatesForChat } from '../dist/lib/event-dispatcher.js';
 
-const config = { url: 'https://awb.invalid', apiKey: 'key', workspace_id: 'workspace-1' };
+const config = { url: 'https://awb.invalid', apiKey: 'key', account_id: 'workspace-1' };
 const marker = (operation = 'deploy awb') =>
   `진행 수단을 확인했습니다.\nAWB_OPERATIONAL_FALLBACK: ${JSON.stringify({ operation, missing_capability: 'awb deploy mcp', original_request: 'AWB 올려줘' })}`;
 
@@ -159,7 +159,7 @@ test('non-native one-shot ordinary code change creates one focused ticket linked
     assert.deepEqual(ticketCalls[0].body.tags, ['bug', 'auth']);
     assert.equal(ticketCalls[0].body.project_id, 'project-web');
     assert.equal('board_id' in ticketCalls[0].body, false);
-    assert.equal(ticketCalls[0].body.workspace_id, 'workspace-1');
+    assert.equal(ticketCalls[0].body.account_id, 'workspace-1');
     assert.ok(ticketCalls[0].body.dedupe_key);
     assert.equal(ticketCalls[0].body.room_id, 'room-source');
     assert.equal(ticketCalls[0].body.message_id, 'msg-code-change');
@@ -180,14 +180,14 @@ test('non-native prompt receives real project + tag candidates before filing a t
       tags: [{ tag: 'bug', count: 4 }, { tag: 'auth', count: 1 }],
     }), { status: 200 });
   });
-  assert.deepEqual(calls, ['https://awb.invalid/api/agent/ordinary-work-candidates?workspace_id=workspace-1']);
+  assert.deepEqual(calls, ['https://awb.invalid/api/agent/ordinary-work-candidates?account_id=workspace-1']);
   const prompt = composeChatRoomPrompt(
     'room-1', [], { content: '로그인 오류를 고쳐줘', sender_name: '사용자', sender_id: 'user-1' },
     undefined, false, undefined, '', false, '', candidates,
   );
   assert.match(prompt, /웹 클라이언트 \| project-web \| https:\/\/github.com\/acme\/web.git/);
   assert.match(prompt, /use only these UUIDs as project_id/);
-  assert.match(prompt, /Tags already used in this workspace: bug \(4\), auth \(1\)/);
+  assert.match(prompt, /Existing tags: bug \(4\), auth \(1\)/);
   assert.match(prompt, /AWB_ORDINARY_WORK_FALLBACK: \{"title"/);
   assert.match(prompt, /"tags":\["<tag>"\],"project_id"/);
   assert.doesNotMatch(prompt, /board_id|existing board/);
@@ -201,7 +201,7 @@ test('empty project list still files a ticket (tags only) instead of a direct-ch
     undefined, false, undefined, '', false, '', candidates,
   );
   assert.match(prompt, /\(none; leave project_id null\)/);
-  assert.match(prompt, /Tags already used in this workspace: \(none yet\)/);
+  assert.match(prompt, /Existing tags: \(none yet\)/);
   assert.match(prompt, /AWB_ORDINARY_WORK_FALLBACK/);
 });
 
@@ -238,7 +238,7 @@ test('pre-board-less server (404) falls back to legacy board candidates and boar
     return new Response(JSON.stringify([{ id: 'board-real', name: '제품 개발', description: '제품 코드 변경' }]), { status: 200 });
   });
   assert.equal(calls.length, 2);
-  assert.match(calls[1], /\/api\/agent\/ordinary-work-board-candidates\?workspace_id=workspace-1$/);
+  assert.match(calls[1], /\/api\/agent\/ordinary-work-board-candidates\?account_id=workspace-1$/);
   assert.deepEqual(candidates.boards, [{ id: 'board-real', name: '제품 개발', description: '제품 코드 변경' }]);
   const prompt = composeChatRoomPrompt(
     'room-1', [], { content: '로그인 오류를 고쳐줘', sender_name: '사용자', sender_id: 'user-1' },

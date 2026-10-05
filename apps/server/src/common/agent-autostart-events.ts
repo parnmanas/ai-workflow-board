@@ -15,6 +15,6 @@ export interface AutostartRequestEvent {
   agent_id: string;
   agent_name?: string;
   room_id: string;
-  workspace_id: string;
+  account_id: string;
   source: 'chat';
 }

@@ -227,7 +227,7 @@ export async function loadTicketFull(
       : ['children', 'children.children'],
   });
   if (!ticket) return null;
-  const effectiveWorkspaceId = ticket.workspace_id || '';
+  const effectiveAccountId = ticket.account_id || '';
   const out: any = {
     ...ticket,
     tags: safeJsonParse(ticket.tags),
@@ -385,13 +385,13 @@ export async function loadTicketFull(
 
   // Project the ticket is about — summary plus every host's main clone
   // folder, so the panel and the agent see where it lives without a second
-  // round-trip. Workspace-scoped: a stale cross-workspace id resolves to null.
+  // round-trip. Account-scoped: a stale cross-workspace id resolves to null.
   // `base_repo` keeps the pre-project shape agent-managers read on REST.
   out.project = null;
   out.base_repo = null;
   if (ticket.project_id) {
     const project = await scope.getRepository(Project).findOne({ where: { id: ticket.project_id } }).catch(() => null);
-    if (project && project.workspace_id === effectiveWorkspaceId) {
+    if (project && project.account_id === effectiveAccountId) {
       const folders: ProjectHostFolder[] = await scope.getRepository(ProjectHostFolder).find({ where: { project_id: project.id } }).catch(() => [] as ProjectHostFolder[]);
       const assigneeHost = out.assignee?.manager_agent_id || '';
       out.project = {
@@ -415,13 +415,13 @@ export async function loadTicketFull(
   }
 
   // Hydrate the linked next-ticket snapshot so the picker UI can render its
-  // title + status without a second round-trip. Workspace-scoped so a stale
+  // title + status without a second round-trip. Account-scoped so a stale
   // id pointing at another workspace's row never leaks its title here.
   out.next_ticket = null;
   if (ticket.next_ticket_id) {
     const next = await scope.getRepository(Ticket).findOne({
-      where: ticket.workspace_id
-        ? { id: ticket.next_ticket_id, workspace_id: ticket.workspace_id }
+      where: ticket.account_id
+        ? { id: ticket.next_ticket_id, account_id: ticket.account_id }
         : { id: ticket.next_ticket_id },
     }).catch(() => null);
     if (next) out.next_ticket = { id: next.id, title: next.title, status: next.status };

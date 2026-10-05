@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createTicket,
   createApiKey,
@@ -37,10 +37,10 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   const { getDataSourceToken } = modules;
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'actbudget');
+  const ws = await createAccount(app, getDataSourceToken, 'actbudget');
   // Tight run-creation-rate ceiling — the FIRST dispatch consumes the only
   // slot in the window, so the bounded retry's re-dispatch trips it.
-  await ds.getRepository('Workspace').update(ws.id, {
+  await ds.getRepository('Account').update(ws.id, {
     hard_budget_config: JSON.stringify({ max_runs_per_window: 1, window_minutes: 60, notify: false }),
   });
 
@@ -55,7 +55,7 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   // (TicketDispatchService.resumeTicket) has someone to re-send it to (mirrors
   // action-run-resume-mcp.test.mjs's CASE 1 setup).
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'blocked on flaky deploy step',
     status: 'in_progress',
     assignee: agent,
@@ -66,13 +66,13 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   await vagent.start();
   t.after(() => vagent.stop());
 
-  const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, scope: 'full' });
+  const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, scope: 'full' });
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 
   step('Register a low-impact Action (not deploy/publish/release — no approval gate)');
   const action = await mcp.callTool('save_action', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Reindex search',
     prompt: 'reindex {{workspace.name}}',
     target_runtimes: [RUNTIME_SPEC],
@@ -87,7 +87,7 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   step('Failure triggers a bounded-retry re-dispatch, which the run-budget guard now rejects');
   const done = await mcp.callTool('complete_action_run', {
     run_id: run1.run_id,
-    workspace_id: ws.id,
+    account_id: ws.id,
     status: 'failed',
     summary: 'flaky step timed out',
   });
@@ -101,7 +101,7 @@ test('Action retry blocked by an exhausted workspace run-budget surfaces as exha
   await vagent.waitForTrigger((tr) => tr.ticket_id === ticket.id && tr.trigger_source === 'action_run_failed', 5000);
 
   step('Exactly one run still exists — the budget-rejected retry left no phantom row');
-  const runs = await mcp.callTool('list_action_runs', { workspace_id: ws.id, action_id: action.id });
+  const runs = await mcp.callTool('list_action_runs', { account_id: ws.id, action_id: action.id });
   assert.equal(runs.length, 1, 'only the original run — the retry never persisted a row');
   assert.equal(runs[0].status, 'failed');
 

@@ -9,7 +9,7 @@ import { renderMentionPreview } from '../../utils/mentionPreview';
 import { NavBadge } from './NavBadge';
 
 interface Props {
-  workspaceId: string | null;
+  accountId: string | null;
 }
 
 /** Where the mention came from. Anything unrecognised says so rather than
@@ -40,10 +40,10 @@ function formatMentionTime(value: string | null | undefined): string {
  * Every row must be navigable — an unread mention you cannot open is just a
  * number that will not go away.
  */
-export function MentionInboxBadge({ workspaceId }: Props) {
+export function MentionInboxBadge({ accountId }: Props) {
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { unreadCount, unreadItems, hasMoreThanListed, refresh, markRead, markAllRead } = useMentions(workspaceId);
+  const { unreadCount, unreadItems, hasMoreThanListed, refresh, markRead, markAllRead } = useMentions(accountId);
   const [open, setOpen] = useState(false);
 
   // Re-fetch the list every time the drop-down opens.
@@ -66,20 +66,20 @@ export function MentionInboxBadge({ workspaceId }: Props) {
     setOpen(false);
     void markRead(item.id);
 
-    if (item.source_type === 'chat_message' && item.room_id && workspaceId) {
+    if (item.source_type === 'chat_message' && item.room_id && accountId) {
       // Chat deep link: the canonical route selects the room and `?message=`
       // scrolls to and highlights the targeted message.
       const roomParam = encodeURIComponent(item.room_id);
       const messageParam = encodeURIComponent(item.source_id);
-      navigate(`/ws/${workspaceId}/chat/${roomParam}?message=${messageParam}`);
+      navigate(`/chat/${roomParam}?message=${messageParam}`);
       return;
     }
 
-    if (item.source_type === 'comment' && item.ticket_id && workspaceId) {
+    if (item.source_type === 'comment' && item.ticket_id && accountId) {
       // Tickets live in one workspace pool, so the ticket id alone addresses
       // it — the Tickets page opens `?ticket=` (fetching it by id even when
       // the current filters hide it) and scrolls to `?comment=`.
-      navigate(ticketPath(workspaceId, item.ticket_id, { commentId: item.source_id }));
+      navigate(ticketPath(accountId, item.ticket_id, { commentId: item.source_id }));
       return;
     }
 

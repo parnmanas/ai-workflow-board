@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
   createUser,
@@ -24,10 +24,10 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
   t.after(() => { void app.close().catch(() => {}); });
   const { getDataSourceToken, AuthService } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'roundtrip');
+  const ws = await createAccount(app, getDataSourceToken, 'roundtrip');
   const worker = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
   const workerKey = await createApiKey(app, getDataSourceToken, worker.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     label: 'worker',
   });
   const user = await createUser(app, getDataSourceToken, { name: 'manager' });
@@ -55,9 +55,9 @@ test('Virtual agent reacts to agent_trigger by calling MCP move_ticket + add_com
   await new Promise((r) => setTimeout(r, 200));
 
   step('Create a todo ticket for the worker over REST — the dispatcher starts it');
-  const res = await fetch(`http://localhost:${port}/api/workspaces/${ws.id}/tickets`, {
+  const res = await fetch(`http://localhost:${port}/api/accounts/${ws.id}/tickets`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': ws.id },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': ws.id },
     body: JSON.stringify({
       title: 'Roundtrip ticket',
       prompt_text: 'Move me to review and leave a note.',

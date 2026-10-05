@@ -7,7 +7,7 @@ import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { Ticket } from '../../entities/Ticket';
 import { UserMention } from '../../entities/UserMention';
 import { TicketAttachment } from '../../entities/TicketAttachment';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
 import { AgentConnectivityRegistry } from '../../services/agent-connectivity.registry';
@@ -21,7 +21,7 @@ import { cliDescriptor } from '../../common/cli-catalog';
 import { ChatRoomMessageMetadata, ChatMessageTicketRef, ChatMessageArtifactRef, ChatMessageAgentRef, ChatMessageTicketAction } from '../../common/types/stream-events';
 import { computeChainDepth } from '../../common/agent-chain-depth';
 import { ArtifactRefsService } from '../artifact-refs/artifact-refs.service';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { CliRuntimeProfile } from '../../common/cli-runtime-profiles';
 import { resolveClaudeBackendProfileForDispatch } from '../../common/claude-backend-registry';
 import { requiredManagerCapability, evaluateManagerCapability, checkManagerCapabilityForDispatch } from '../../common/manager-capability-gate';
@@ -189,7 +189,7 @@ function parseChatMessageMetadata(raw: unknown): ChatRoomMessageMetadata | undef
  *  - send (with @mention / DM-agent dispatch)
  *  - paginated history (cursor on composite created_at + id)
  *  - monotonic read marker advance
- *  - workspace-scoped message search
+ *  - account-scoped message search
  *
  * Participant validation and member-id lookups are delegated to RoomMembershipService
  * so the 403 / active-participant invariant lives in one place. Mention dispatch
@@ -217,8 +217,8 @@ export class RoomMessagingService {
     @InjectRepository(TicketAttachment)
     private readonly attachmentRepo: Repository<TicketAttachment>,
 
-    @InjectRepository(Workspace)
-    private readonly workspaceRepo: Repository<Workspace>,
+    @InjectRepository(Account)
+    private readonly accountRepo: Repository<Account>,
 
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -257,7 +257,7 @@ export class RoomMessagingService {
     userId: string,
     limit: number,
     before?: string,
-    options?: { observer?: boolean; excludeProgress?: boolean; workspaceId?: string },
+    options?: { observer?: boolean; excludeProgress?: boolean; accountId?: string },
   ): Promise<any[]> {
     // v0.32: observer mode skips the active-participant gate so admins can
     // read agent-to-agent rooms they're not a member of (workspace-wide chat
@@ -268,13 +268,13 @@ export class RoomMessagingService {
     // 403 이면 "참여자가 아니어도 대화에 참여할 수 있다"가 성립하지 않는다 — 발화만
     // 열고 읽기를 막으면 사용자는 빈 방을 보게 된다.
     //
-    // `workspaceId` 를 받은 호출부에서만 완화한다. 참여자 행이 없어도 되게 만드는
+    // `accountId` 를 받은 호출부에서만 완화한다. 참여자 행이 없어도 되게 만드는
     // 순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, sendMessage 와 같은
-    // 규칙으로 방의 workspace_id 를 직접 대조한다. 넘기지 않은 호출부(에이전트 경로
+    // 규칙으로 방의 account_id 를 직접 대조한다. 넘기지 않은 호출부(에이전트 경로
     // 등)는 완화 없이 예전 그대로 동작한다.
     let clearedAt: Date | null = null;
     if (!options?.observer) {
-      const openJoinRelaxed = await this._isOpenJoinReadable(roomId, options?.workspaceId);
+      const openJoinRelaxed = await this._isOpenJoinReadable(roomId, options?.accountId);
       if (!openJoinRelaxed) {
         await this.membership.requireActiveParticipant(roomId, userId);
       }
@@ -334,7 +334,7 @@ export class RoomMessagingService {
         return {
           id: msg.id,
           room_id: msg.room_id,
-          workspace_id: msg.workspace_id,
+          account_id: msg.account_id,
           sender_type: msg.sender_type,
           sender_id: msg.sender_id,
           sender_name: senderName,
@@ -360,7 +360,7 @@ export class RoomMessagingService {
    */
   async sendMessage(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     senderType: string,
     senderId: string,
     senderName: string,
@@ -413,7 +413,7 @@ export class RoomMessagingService {
     //      흘리면 uuid 아닌 participant 행을 새로 만든다.
     //   4. 방이 **호출자의 워크스페이스** 소속일 것. 참여자 행이 없어도 되게 만드는
     //      순간 그 행이 대신 서 주던 워크스페이스 경계가 사라지므로, 여기서 직접
-    //      대조한다. `workspaceId` 가 비어 들어오면(경계를 확인할 수 없으면) 완화하지
+    //      대조한다. `accountId` 가 비어 들어오면(경계를 확인할 수 없으면) 완화하지
     //      않는다 — 모르면 닫는 쪽이 안전한 실패다.
     //
     // 조건 1 의 근거는 mission 방에서만 달라진다(티켓 9cfd8161). 그 방의 자유 참여 여부는
@@ -446,8 +446,8 @@ export class RoomMessagingService {
       openJoinAllowed &&
       senderType === 'user' &&
       UUID_RE.test(senderId) &&
-      !!workspaceId &&
-      roomForName.workspace_id === workspaceId;
+      !!accountId &&
+      roomForName.account_id === accountId;
 
     if (!openJoinRelaxed) {
       await this.membership.requireActiveParticipant(roomId, senderId, senderType);
@@ -463,7 +463,7 @@ export class RoomMessagingService {
       throw makeError(400, 'content must be a string');
     }
     const normalizedContent = this.artifactRefs
-      ? await this.artifactRefs.normalizeStoredOutput(workspaceId, content ?? '')
+      ? await this.artifactRefs.normalizeStoredOutput(accountId, content ?? '')
       : content ?? '';
     const trimmed = normalizedContent.trim();
     // Server dispatch (opts.bypassContentLimit) is machine-rendered and may run
@@ -485,7 +485,7 @@ export class RoomMessagingService {
     }
     const attachmentRows = await this._validatePendingAttachments(
       roomId,
-      workspaceId,
+      accountId,
       senderType,
       senderId,
       resolvedAttachmentIds,
@@ -539,7 +539,7 @@ export class RoomMessagingService {
       const created = await messageRepoTx.save(
         messageRepoTx.create({
           room_id: roomId,
-          workspace_id: workspaceId,
+          account_id: accountId,
           sender_type: senderType,
           sender_id: senderId,
           type,
@@ -629,7 +629,7 @@ export class RoomMessagingService {
     // DM / @멘션)를 위한 FALLBACK이다 — 모든 전송 경로(REST, MCP,
     // agent-api)가 이미 통과하는 단일 병목 지점인 여기서 계산해두므로,
     // 호출자가 각자 사본을 들고 있을 필요가 없다. 티켓의 단계적 롤아웃
-    // 권고에 따라 opt-in Workspace 플래그(기본값 OFF)로 게이팅한다: manager
+    // 권고에 따라 opt-in Account 플래그(기본값 OFF)로 게이팅한다: manager
     // 에이전트 자신의 운영용 채팅도 이 경로를 함께 타기 때문에, 폴더 고정
     // (pinning) 동작 변경을 모든 워크스페이스에 조용히 강제해서는 안 된다.
     // Action Run / Orchestration Mission / QA / security 방은 제외한다 —
@@ -645,7 +645,7 @@ export class RoomMessagingService {
     // 아래 조회 대상에서 제외된다(위 chain-depth 스킵과 같은 이유): 새로운
     // 디스패치 턴을 여는 일이 절대 없다 — 그 하트비트가 서술하는 런은 이미
     // 최초 디스패치 시점에 자신의 cwd를 확정했다 — 그래서 모든 tool-call
-    // 하트비트마다 Workspace 조회를 소비하면, 앱에서 가장 트래픽이 많은
+    // 하트비트마다 Account 조회를 소비하면, 앱에서 가장 트래픽이 많은
     // 메시지 타입에 아무도 읽지 않는 값을 위한 비용을 물리는 셈이 된다.
     //
     // _processMentions/_handleDmAgentRequest보다 먼저 계산한다(원래 아래
@@ -665,12 +665,12 @@ export class RoomMessagingService {
       !roomForName?.orchestration_mission_id &&
       !roomForName?.run_kind
     ) {
-      const ws = await this.workspaceRepo.findOne({ where: { id: workspaceId } });
+      const ws = await this.accountRepo.findOne({ where: { id: accountId } });
       if (ws?.chat_workspace_folder_enabled) {
         effectiveRunProvision = {
           kind: 'chat',
           run_id: roomId,
-          workspace_id: workspaceId,
+          account_id: accountId,
           workspace_folder: resolveWorkspaceFolder(null, 'chat', roomId),
           checkout_mode: 'reuse',
           // ChatRoom에는 repo_ref 노브가 없다(티켓 9fd27487 인수 기준 3) —
@@ -683,8 +683,8 @@ export class RoomMessagingService {
     // CHAT-18: only parse mentions from user messages — prevents agent-to-agent loops
     let explicitDispatchAgentIds: string[] = [];
     if (isRealMessage && senderType === 'user') {
-      const dispatched = await this._processMentions(roomId, workspaceId, senderId, senderName, trimmed, savedMsg, effectiveRunProvision);
-      await this._handleDmAgentRequest(roomId, workspaceId, senderId, trimmed, savedMsg, dispatched, effectiveRunProvision);
+      const dispatched = await this._processMentions(roomId, accountId, senderId, senderName, trimmed, savedMsg, effectiveRunProvision);
+      await this._handleDmAgentRequest(roomId, accountId, senderId, trimmed, savedMsg, dispatched, effectiveRunProvision);
       explicitDispatchAgentIds = Array.from(dispatched);
     }
 
@@ -717,7 +717,7 @@ export class RoomMessagingService {
     if (isRealMessage && agentMemberIds.size > 0) {
       const { profiles, incompatibleAgentIds } = await this._resolveChatRuntimeProfilesForMembers(
         Array.from(agentMemberIds),
-        workspaceId,
+        accountId,
         agentMemberRuntimes,
       );
       if (Object.keys(profiles).length > 0) cliRuntimeProfiles = profiles;
@@ -749,7 +749,7 @@ export class RoomMessagingService {
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
       room_name: roomForName?.name ?? '',
-      workspace_id: workspaceId,
+      account_id: accountId,
       message_id: savedMsg.id,
       sender_type: senderType,
       sender_id: senderId,
@@ -811,7 +811,7 @@ export class RoomMessagingService {
     return {
       id: savedMsg.id,
       room_id: savedMsg.room_id,
-      workspace_id: savedMsg.workspace_id,
+      account_id: savedMsg.account_id,
       sender_type: savedMsg.sender_type,
       sender_id: savedMsg.sender_id,
       sender_name: senderName,
@@ -850,7 +850,7 @@ export class RoomMessagingService {
    * badge without joining against User/Agent. Caller supplies the
    * markdown content; length cap matches user-sent messages.
    */
-  async sendSystemMessage(roomId: string, workspaceId: string, content: string): Promise<any> {
+  async sendSystemMessage(roomId: string, accountId: string, content: string): Promise<any> {
     if (!content || typeof content !== 'string') {
       throw makeError(400, 'content is required');
     }
@@ -866,7 +866,7 @@ export class RoomMessagingService {
     const savedMsg = await this.messageRepo.save(
       this.messageRepo.create({
         room_id: roomId,
-        workspace_id: workspaceId || room.workspace_id || '',
+        account_id: accountId || room.account_id || '',
         sender_type: 'system',
         sender_id: 'system',
         content: trimmed,
@@ -885,7 +885,7 @@ export class RoomMessagingService {
 
     activityEvents.emit('chat_room_message', {
       room_id: roomId,
-      workspace_id: savedMsg.workspace_id,
+      account_id: savedMsg.account_id,
       message_id: savedMsg.id,
       sender_type: 'system',
       sender_id: 'system',
@@ -912,13 +912,13 @@ export class RoomMessagingService {
     });
 
     this.logService.info('ChatRooms', `system message posted to room ${roomId}`, {
-      room_id: roomId, workspace_id: savedMsg.workspace_id, message_id: savedMsg.id,
+      room_id: roomId, account_id: savedMsg.account_id, message_id: savedMsg.id,
     });
 
     return {
       id: savedMsg.id,
       room_id: savedMsg.room_id,
-      workspace_id: savedMsg.workspace_id,
+      account_id: savedMsg.account_id,
       sender_type: 'system',
       sender_id: 'system',
       sender_name: 'System',
@@ -1066,7 +1066,7 @@ export class RoomMessagingService {
    * participant_type='user') and the search silently returns nothing.
    */
   async searchMessages(
-    workspaceId: string,
+    accountId: string,
     callerId: string,
     query: string,
     limit = 20,
@@ -1091,7 +1091,7 @@ export class RoomMessagingService {
         `${t('p.room_id')} = ${t('m.room_id')} AND p.participant_id = :callerId AND p.participant_type = :participantType AND p.left_at IS NULL`,
         { callerId, participantType },
       )
-      .where('m.workspace_id = :wsId', { wsId: workspaceId })
+      .where('m.account_id = :wsId', { wsId: accountId })
       .andWhere('LOWER(m.content) LIKE :pattern', { pattern })
       .orderBy('m.created_at', 'DESC')
       .limit(limit)
@@ -1185,22 +1185,22 @@ export class RoomMessagingService {
    * 이 방이 호출자에게 **자유 참여로 열려 있는가** (티켓 995a9519).
    *
    * `sendMessage` 의 완화 조건과 같은 두 축을 본다 — 방의 `open_join` 이 켜져 있고,
-   * 방이 호출자의 워크스페이스 소속일 것. `workspaceId` 를 모르면(넘기지 않은 호출부)
+   * 방이 호출자의 워크스페이스 소속일 것. `accountId` 를 모르면(넘기지 않은 호출부)
    * 경계를 확인할 수 없으므로 완화하지 않는다: 모르면 닫는 쪽이 안전한 실패다.
    *
    * 읽기 전용 판정이라 발신자 종류는 보지 않는다. 에이전트 호출부는 애초에 이
-   * `workspaceId` 를 넘기지 않으며(observer 모드로 읽는다), 발신 완화는 sendMessage
+   * `accountId` 를 넘기지 않으며(observer 모드로 읽는다), 발신 완화는 sendMessage
    * 쪽에서 유저로 따로 좁힌다.
    */
-  private async _isOpenJoinReadable(roomId: string, workspaceId?: string): Promise<boolean> {
-    if (!workspaceId) return false;
+  private async _isOpenJoinReadable(roomId: string, accountId?: string): Promise<boolean> {
+    if (!accountId) return false;
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
-    return !!room?.open_join && room.workspace_id === workspaceId;
+    return !!room?.open_join && room.account_id === accountId;
   }
 
   private async _validatePendingAttachments(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     senderType: string,
     senderId: string,
     attachmentIds: string[],
@@ -1220,7 +1220,7 @@ export class RoomMessagingService {
         throw makeError(400, `attachment ${id} is already attached`);
       }
       if (row.room_id !== roomId) throw makeError(400, `attachment ${id} belongs to a different room`);
-      if (row.workspace_id !== workspaceId) throw makeError(400, `attachment ${id} belongs to a different workspace`);
+      if (row.account_id !== accountId) throw makeError(400, `attachment ${id} belongs to a different workspace`);
       if (row.uploaded_by_type !== senderType || row.uploaded_by_id !== senderId) {
         throw makeError(403, `attachment ${id} was uploaded by a different sender`);
       }
@@ -1282,7 +1282,7 @@ export class RoomMessagingService {
   private async _resolveDmBackendProfile(
     spec: Record<string, any> | null | undefined,
     _roomId: string,
-    _workspaceId: string,
+    _accountId: string,
   ): Promise<{ profile: CliRuntimeProfile | null; blocked: string | null }> {
     const raw = (spec?.cli_runtime_profile ?? null) as string | null;
     if (!raw) return { profile: null, blocked: null };
@@ -1337,13 +1337,13 @@ export class RoomMessagingService {
 
   private async _resolveChatRuntimeProfilesForMembers(
     agentIds: string[],
-    workspaceId: string,
+    accountId: string,
     specs: Record<string, Record<string, any>>,
   ): Promise<{ profiles: Record<string, CliRuntimeProfile>; incompatibleAgentIds: string[] }> {
     const profiles: Record<string, CliRuntimeProfile> = {};
     const incompatibleAgentIds: string[] = [];
     if (agentIds.length === 0) return { profiles, incompatibleAgentIds };
-    void workspaceId;
+    void accountId;
     for (const id of agentIds) {
       const spec = specs[id];
       if (!spec || typeof spec !== 'object') continue;
@@ -1394,7 +1394,7 @@ export class RoomMessagingService {
    */
   private async _processMentions(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     senderId: string,
     senderName: string,
     content: string,
@@ -1469,7 +1469,7 @@ export class RoomMessagingService {
             const rtInstances = this.instanceRegistry?.listForAgent(String((rtRuntime as any).manager_agent_id || '')) ?? [];
             const rtVerdict = evaluateManagerCapability(rtInstances, rtCapability);
             if (!rtVerdict.ok) {
-              await this.sendSystemMessage(roomId, workspaceId,
+              await this.sendSystemMessage(roomId, accountId,
                 `⚠️ **${rtName}**에게 dispatch할 수 없습니다 — ${rtVerdict.detail} ` +
                 '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.');
               continue;
@@ -1501,7 +1501,7 @@ export class RoomMessagingService {
         // assignment 스냅샷, Agent 행 없음). 해소 불가면 스킵.
         const legacy = ticket ? await resolveMentionTarget(this.dataSource, ticket, m.id) : null;
         if (!legacy) continue;
-        // Workspace-scope safety: resolveMentionTarget 은 ticket 스코프
+        // Account-scope safety: resolveMentionTarget 은 ticket 스코프
         // assignment 또는 workspace-less Host/링크에서 해소하므로, ticket 방의
         // 멘션은 구조적으로 같은 티켓/방 경계 안에 있다. ticket 없는 방의 uuid
         // 멘션은 위에서 null 로 스킵된다.
@@ -1514,7 +1514,7 @@ export class RoomMessagingService {
             ) ?? [];
             const legacyVerdict = evaluateManagerCapability(legacyInstances, legacyCapability);
             if (!legacyVerdict.ok) {
-              await this.sendSystemMessage(roomId, workspaceId,
+              await this.sendSystemMessage(roomId, accountId,
                 `⚠️ **${legacy.displayName}**에게 dispatch할 수 없습니다 — ${legacyVerdict.detail} ` +
                 '백엔드가 응답 없이 대기하는 대신 여기서 즉시 실패로 표시합니다.');
               continue;
@@ -1548,12 +1548,12 @@ export class RoomMessagingService {
           `@mention routed to agent ${legacy.displayName} (${legacy.agentId}) in room ${roomId}`,
         );
         // Never-started / offline agent (ticket bfdd80b7) — autostart 피드백.
-        this._flagUnreachableAgent({ id: legacy.agentId, name: legacy.displayName }, roomId, workspaceId);
+        this._flagUnreachableAgent({ id: legacy.agentId, name: legacy.displayName }, roomId, accountId);
       } else {
         // User mention — persist + emit user_mention for sidebar badge sync.
         const row = await this.userMentionRepo.save(this.userMentionRepo.create({
           user_id: m.id,
-          workspace_id: workspaceId,
+          account_id: accountId,
           source_type: 'chat_message',
           source_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
@@ -1567,7 +1567,7 @@ export class RoomMessagingService {
         activityEvents.emit('user_mention', {
           mention_id: row.id,
           user_id: row.user_id,
-          workspace_id: row.workspace_id,
+          account_id: row.account_id,
           source_type: 'chat_message',
           source_id: savedMessage.id,
           ticket_id: ticket?.id ?? null,
@@ -1593,7 +1593,7 @@ export class RoomMessagingService {
    */
   private async _handleDmAgentRequest(
     roomId: string,
-    workspaceId: string,
+    accountId: string,
     senderId: string,
     content: string,
     savedMessage: ChatRoomMessage,
@@ -1623,10 +1623,10 @@ export class RoomMessagingService {
       const rtSpec = (otherParticipant as any).runtime_spec as Record<string, any> | null ?? null;
       if (!rtSpec || typeof rtSpec !== 'object') return;
       const { profile: rtProfile, blocked: rtBlocked } = await this._resolveDmBackendProfile(
-        rtSpec, roomId, workspaceId,
+        rtSpec, roomId, accountId,
       );
       if (rtBlocked) {
-        await this.sendSystemMessage(roomId, workspaceId, rtBlocked);
+        await this.sendSystemMessage(roomId, accountId, rtBlocked);
         return;
       }
       const rtName = ((rtSpec.label || '').trim() || otherParticipant.participant_id.slice(0, 11)) as string;
@@ -1662,10 +1662,10 @@ export class RoomMessagingService {
     if (alreadyDispatched.has(otherParticipant.participant_id)) return;
 
     const { profile: cliRuntimeProfile, blocked: dmBlocked } = await this._resolveDmBackendProfile(
-      participantSpec, roomId, workspaceId,
+      participantSpec, roomId, accountId,
     );
     if (dmBlocked) {
-      await this.sendSystemMessage(roomId, workspaceId, dmBlocked);
+      await this.sendSystemMessage(roomId, accountId, dmBlocked);
       return;
     }
     activityEvents.emit('chat_request', {
@@ -1689,7 +1689,7 @@ export class RoomMessagingService {
     this.logService.info('ChatRooms', `DM auto-routed to agent ${dmName} (${otherParticipant.participant_id}) in room ${roomId}`);
     // Never-started / offline agent (ticket bfdd80b7) — same flag as the
     // @mention path so a DM to a not-started agent gets feedback + auto-start.
-    this._flagUnreachableAgent({ id: otherParticipant.participant_id, name: dmName }, roomId, workspaceId);
+    this._flagUnreachableAgent({ id: otherParticipant.participant_id, name: dmName }, roomId, accountId);
   }
 
   /**
@@ -1701,7 +1701,7 @@ export class RoomMessagingService {
    * pre-filter here; the hub is the authority, so a false pre-filter is a no-op
    * there (it finds the agent reachable and does nothing).
    */
-  private _flagUnreachableAgent(agent: { id: string; name: string }, roomId: string, workspaceId: string): void {
+  private _flagUnreachableAgent(agent: { id: string; name: string }, roomId: string, accountId: string): void {
     // Reachable only through a live Runtime Host delivery session. A persisted
     // heartbeat bit alone does not authorize execution.
     if (this.connectivity.isReachable(agent.id)) return;
@@ -1709,7 +1709,7 @@ export class RoomMessagingService {
       agent_id: agent.id,
       agent_name: agent.name,
       room_id: roomId,
-      workspace_id: workspaceId,
+      account_id: accountId,
       source: 'chat',
     };
     activityEvents.emit(AGENT_AUTOSTART_REQUESTED, evt);

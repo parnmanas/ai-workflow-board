@@ -31,7 +31,7 @@ import {
  *   1. Sidebar is forbidden from importing BoardStreamContext directly
  *      (see its own header comment); a context sitting above it lets the
  *      sidebar stay a dumb reader while still getting live updates.
- *   2. One fetch of each `/…/unread-counts` endpoint per workspace switch
+ *   2. One fetch of each `/…/unread-counts` endpoint for the signed-in user
  *      instead of one per badge site.
  *   3. Cross-tab sync: a BroadcastChannel coordinates read-marker changes
  *      between tabs of the same browser so marking read in tab A
@@ -57,7 +57,7 @@ export type NotificationSource = 'mentions' | 'chat' | 'tickets' | 'pendingUsers
 interface BadgeCounts {
   mentions: number;
   chat: { total: number; perRoom: Record<string, number> };
-  // `{ total, perTicket }` — tickets are one workspace pool, so there is no
+  // `{ total, perTicket }` — tickets are one accessible pool, so there is no
   // per-board roll-up (docs/tickets.md).
   tickets: {
     total: number;
@@ -70,7 +70,7 @@ interface BadgeCounts {
 interface NotificationContextValue {
   counts: BadgeCounts;
   /**
-   * False until the first successful count fetch for the current workspace.
+   * False until the first successful count fetch for the signed-in user.
    * Consumers that also hold a local snapshot (e.g. the sidebar room list)
    * use it to know whether an absent entry means "server says zero" or
    * "not loaded yet" — otherwise a zero-by-omission looks like a real zero
@@ -182,7 +182,7 @@ type BroadcastMsg =
   | { type: 'refresh' };
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
-  const { user, currentWorkspaceId, hasPermission } = useAuth();
+  const { user, hasPermission } = useAuth();
   const navigate = useNavigate();
   const { showToast, playNotifySound } = useToast();
   const [counts, setCounts] = useState<BadgeCounts>(empty);
@@ -199,12 +199,10 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   const bcRef = useRef<BroadcastChannel | null>(null);
 
   // SSE handlers are registered once and would otherwise close over a stale
-  // `prefs` / `currentWorkspaceId`. Refs keep the gate decisions current
+  // preferences. Refs keep the gate decisions current
   // without re-subscribing on every preference flip.
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
-  const wsIdRef = useRef(currentWorkspaceId);
-  wsIdRef.current = currentWorkspaceId;
 
   // Mirror of `counts` readable synchronously inside an event handler. A
   // setCounts updater is NOT guaranteed to run at dispatch time, so a handler
@@ -232,7 +230,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   // whose badge was hard-wired to zero.
   const isAdmin = hasPermission('admin.access');
 
-  // ─── Initial fetch + per-workspace refetch ──────────────────────────
+  // ─── Initial fetch + inbox refresh ──────────────────────────
   const refresh = useCallback(async () => {
     // Auth gate — endpoints 401 without token; guard against running
     // during the pre-auth flash.
@@ -242,11 +240,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       return;
     }
     const results = await Promise.allSettled([
-      currentWorkspaceId ? api.getUnreadMentions(currentWorkspaceId) : Promise.resolve({ count: 0, items: [] }),
-      currentWorkspaceId ? api.getChatUnreadCounts() : Promise.resolve({ total: 0, perRoom: {} }),
-      currentWorkspaceId
-        ? api.getTicketUnreadCounts()
-        : Promise.resolve({ total: 0, perTicket: {} }),
+      api.getUnreadMentions(),
+      api.getChatUnreadCounts(),
+      api.getTicketUnreadCounts(),
       isAdmin ? api.getPendingUsersCount() : Promise.resolve({ count: 0 }),
       isAdmin
         ? api.getAgentErrorsUnseenCount(localStorage.getItem(AGENT_ERRORS_LAST_SEEN_KEY))
@@ -279,15 +275,13 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         notiArmed.current = true;
       }, 1500);
     }
-  }, [user, currentWorkspaceId, isAdmin, replaceCounts]);
+  }, [user, isAdmin, replaceCounts]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  // A workspace switch invalidates every workspace-scoped count. Clear them
-  // eagerly so the previous workspace's numbers don't linger on screen for
-  // the duration of the refetch.
+  // Clear the previous user's inbox while authentication changes.
   useEffect(() => {
     setCountsLoaded(false);
     mutateCounts((prev) => ({
@@ -296,7 +290,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       chat: { total: 0, perRoom: {} },
       tickets: { total: 0, perTicket: {} },
     }));
-  }, [currentWorkspaceId, mutateCounts]);
+  }, [user?.id, mutateCounts]);
 
   // Pure state mutation — shared between local mark-read and broadcast
   // receiver so both paths converge on the same shape.
@@ -359,7 +353,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     mutateCounts((prev) => ({ ...prev, mentions: Math.max(0, prev.mentions - count) }));
   }, [mutateCounts]);
 
-  // 워크스페이스 전체 "모두 읽음" 액션을 위한 순수 상태 변경 — 사이드바 배지와
+  // 접근 가능한 티켓 전체 "모두 읽음" 액션을 위한 순수 상태 변경 — 사이드바 배지와
   // 모든 TicketCard 배지가 N번의 개별 클리어에 뒤처지지 않고 함께 0으로 떨어진다.
   const applyMarkAllTicketsRead = useCallback(() => {
     mutateCounts((prev) => (
@@ -477,8 +471,6 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     if (!user) return;
     const raw = unwrapStreamEvent(rawFrame);
     if (!raw?.mention_id) return;
-    const wsId = wsIdRef.current;
-    if (raw?.workspace_id && wsId && raw.workspace_id !== wsId) return;
     mutateCounts((prev) => ({ ...prev, mentions: prev.mentions + 1 }));
     announce({
       source: 'mentions',
@@ -488,7 +480,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       // middle of the notification body.
       body: renderMentionPreview(raw?.preview).slice(0, 140),
       tag: `mention:${raw.mention_id}`,
-      navigateTo: mentionTarget(raw, wsId),
+      navigateTo: mentionTarget(raw),
     });
   });
 
@@ -496,12 +488,6 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   // I'm not the sender, and I'm not currently viewing that room.
   useBoardStreamEvent('chat_room_message', (raw: any) => {
     if (!user) return;
-    const wsId = wsIdRef.current;
-    // SSE delivery is scoped by room membership, not workspace, so a user in
-    // two workspaces gets both workspaces' traffic here. Without this check
-    // the badge for the workspace on screen counted foreign rooms it never
-    // lists — a number the user could not act on or clear.
-    if (raw?.workspace_id && wsId && raw.workspace_id !== wsId) return;
     // Action-Run and Orchestration-Step rooms reuse the chat pipeline but are
     // deliberately hidden from the chat list (they live inside the Action /
     // Mission detail views). Counting them produced a total that no visible
@@ -529,7 +515,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       title: raw?.sender_name || 'New message',
       body: typeof raw?.content === 'string' ? raw.content.slice(0, 140) : '',
       tag: `chat:${roomId}`,
-      navigateTo: wsId ? `/ws/${wsId}/chat/${encodeURIComponent(roomId)}` : undefined,
+      navigateTo: `/chat/${encodeURIComponent(roomId)}`,
     });
   });
 
@@ -557,8 +543,6 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     if (!user) return;
     const raw = unwrapStreamEvent(rawFrame);
     if (!raw?.user_id || raw.user_id !== user.id) return;
-    const wsId = wsIdRef.current;
-    if (raw?.workspace_id && wsId && raw.workspace_id !== wsId) return;
     applyMarkAllTicketsRead();
   });
 
@@ -601,7 +585,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       title: `New comment from ${raw?.actor_name || 'someone'}`,
       body: raw?.status ? `in ${ticketStatusLabel(raw.status)}` : '',
       tag: `ticket-comment:${ticketId}`,
-      navigateTo: ticketTarget(wsIdRef.current, ticketId),
+      navigateTo: ticketTarget(ticketId),
     });
   });
 
@@ -707,21 +691,19 @@ export function unwrapStreamEvent(raw: any): any {
 // and the announcement can never drift apart.
 
 /** Ticket deep link consumed by the Tickets page's `?ticket=` param. */
-function ticketTarget(wsId: string | null, ticketId: string): string | undefined {
-  if (!wsId) return undefined;
-  return ticketPath(wsId, ticketId);
+function ticketTarget(ticketId: string): string | undefined {
+  return ticketPath('', ticketId);
 }
 
 /** Mention deep link — comment mentions land on the ticket, chat on the room. */
-function mentionTarget(raw: any, wsId: string | null): string | undefined {
-  if (!wsId) return undefined;
+function mentionTarget(raw: any): string | undefined {
   if (raw?.source_type === 'chat_message' && raw?.room_id) {
     const room = encodeURIComponent(raw.room_id);
     const msg = raw.source_id ? `?message=${encodeURIComponent(raw.source_id)}` : '';
-    return `/ws/${wsId}/chat/${room}${msg}`;
+    return `/chat/${room}${msg}`;
   }
   if (raw?.source_type === 'comment' && raw?.ticket_id) {
-    return ticketPath(wsId, raw.ticket_id, { commentId: raw.source_id || null });
+    return ticketPath('', raw.ticket_id, { commentId: raw.source_id || null });
   }
   return undefined;
 }
@@ -732,8 +714,7 @@ function mentionTarget(raw: any, wsId: string | null): string | undefined {
 function isRoomActive(roomId: string): boolean {
   if (typeof window === 'undefined') return false;
   const p = window.location.pathname;
-  // Chat page paths: /ws/:wsId/chat (rooms all on one page) OR
-  // /ws/:wsId/chat/:roomId if per-room routes get added.
+  // Chat routes are /chat or /chat/:roomId.
   if (!p.includes('/chat')) return false;
   // Per-room route check — best-effort, false-positives only mean we
   // skip a badge bump that the user would see on-screen anyway.

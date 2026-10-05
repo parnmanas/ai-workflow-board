@@ -43,7 +43,7 @@ import { applyTypingFrame, pruneRoomWorking, roomWorkingNames } from '../src/hoo
 
 const h = React.createElement;
 const WS_ID = 'ws-1';
-const BASE = `/ws/${WS_ID}`;
+const BASE = ``;
 const MANAGER_ID = 'mgr-1';
 
 test('① 네 표면의 "작업 중"은 같은 색이다', () => {
@@ -168,7 +168,7 @@ test('⑥ 왼쪽 프레임 — 돌고 있는 세션과 작업 중인 방에 같�
       return json({
         id: 'u1', name: 'Tester', email: 't@example.com', role: 'member', status: 'active',
         permissions: ['agent_sessions.use'], resolved_permissions: ['agent_sessions.use'],
-        workspaces: [{ id: WS_ID, name: 'Workspace', slug: null, relations: [] }],
+        accounts: [{ id: WS_ID, name: 'Account', slug: null, relations: [] }],
       });
     }
     if (p.includes('/tickets/unread-counts')) return json({ total: 0, perTicket: {} });

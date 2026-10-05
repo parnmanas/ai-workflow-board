@@ -14,14 +14,14 @@ import type { PendActionCandidate } from './pend-action-gate';
 
 export async function loadPendActionCandidates(
   dataSource: DataSource,
-  ticket: { workspace_id?: string | null },
+  ticket: { account_id?: string | null },
 ): Promise<PendActionCandidate[]> {
-  const workspaceId = ticket.workspace_id || '';
-  if (!workspaceId) return [];
+  const accountId = ticket.account_id || '';
+  if (!accountId) return [];
   // Typed find (not raw SQL) so the boolean column transform holds on both
   // sqlite (0/1) and Postgres.
   const actions = await dataSource.getRepository(Action).find({
-    where: { workspace_id: workspaceId, enabled: true },
+    where: { account_id: accountId, enabled: true },
     order: { name: 'ASC' },
   });
   return actions.map((a) => ({

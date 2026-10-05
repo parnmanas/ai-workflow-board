@@ -81,13 +81,17 @@ tick 은 `QaRunReaperService`/`DbRetentionService` 패턴 그대로:
 
 ## REST / MCP
 
+사용자 목록은 접근 가능한 Account의 스케줄을 합친다. 새 스케줄은 `account_id`의
+계정에 귀속되며, 상세·수정·실행 권한과 credential·정책·예산은 실제 소유 계정으로
+검사한다. 구 `workspace_id`는 입력 호환 alias다.
+
 ```
-GET    /api/qa/schedules?workspace_id=..
-GET    /api/qa/schedules/:id?workspace_id=..
-POST   /api/qa/schedules                     { workspace_id, name, scope, scenario_ids?, cron|interval_ms, .. }
-PATCH  /api/qa/schedules/:id                 { workspace_id, ..부분 갱신.. }
-DELETE /api/qa/schedules/:id?workspace_id=..
-POST   /api/qa/schedules/:id/run-now         { workspace_id }   # enabled 무시, next_run_at 안 건드림
+GET    /api/qa/schedules                      # 접근 가능한 계정 합산
+GET    /api/qa/schedules/:id                   # 실제 owner 권한
+POST   /api/qa/schedules                     { account_id, name, scope, scenario_ids?, cron|interval_ms, .. }
+PATCH  /api/qa/schedules/:id                 { account_id, ..부분 갱신.. }
+DELETE /api/qa/schedules/:id?account_id=..
+POST   /api/qa/schedules/:id/run-now         { account_id }   # enabled 무시, next_run_at 안 건드림
 ```
 
 모든 엔드포인트는 컨트롤러 레벨 `MANAGE_ACTIONS` 권한(시나리오/batch 와 동일).

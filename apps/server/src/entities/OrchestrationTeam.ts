@@ -17,13 +17,13 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
  * and concurrency cap, and so an agent-scoped query ("which teams is this agent
  * on?") stays a plain indexed lookup.
  *
- * `workspace_id`는 nullable이다(티켓 1b62b437): null = 글로벌 팀 — 모든 workspace에서
+ * `account_id`는 nullable이다(티켓 1b62b437): null = 글로벌 팀 — 모든 workspace에서
  * 보이고 로스터는 글로벌 에이전트로만 제한된다. 이는 로스터 축에만 해당하는 변경이다 —
  * 이 팀이 실행하는 Mission은 여전히 workspace에 종속되므로(OrchestrationMission.workspace_id는
  * 그대로 필수) 글로벌 팀의 budget/room 격리는 workspace 종속 팀과 동일하게 강하다.
  */
 @Entity('orchestration_teams')
-@Index('idx_orch_teams_workspace', ['workspace_id'])
+@Index('idx_orch_teams_workspace', ['account_id'])
 export class OrchestrationTeam {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -35,17 +35,17 @@ export class OrchestrationTeam {
    * 스코프 축이고, workspace 비종속이 될 수 있는 건 전자뿐이다.
    */
   @Column({ type: 'varchar', nullable: true, default: null })
-  workspace_id: string | null;
+  account_id: string | null;
 
   /**
    * 이 팀을 생성한 workspace. workspace 종속 팀에도 항상 찍힌다(그 경우엔 이미
-   * `workspace_id`가 권위 있는 스코프라 무해함). 글로벌 팀에게는 "MANAGE_ACTIONS을 가진
+   * `account_id`가 권위 있는 스코프라 무해함). 글로벌 팀에게는 "MANAGE_ACTIONS을 가진
    * 아무 workspace나 공유 로스터를 편집할 수 있다"와 "만든 workspace만 편집할 수 있다"를
    * 가르는 유일한 값이다 — OrchestrationTeamService.assertTeamWritable 참고. 읽기(getTeam/
    * listTeams)는 이 값으로 게이팅되지 않는다 — 로스터/설정 쓰기만 게이팅된다.
    */
   @Column({ type: 'varchar', nullable: true, default: null })
-  owner_workspace_id: string | null;
+  owner_account_id: string | null;
 
   /**
    * 글로벌 팀의 오케스트레이터가 create_orchestration_mission으로 지정할 수 있는
@@ -55,7 +55,7 @@ export class OrchestrationTeam {
    * create_orchestration_mission 참고.
    */
   @Column({ type: 'simple-json', nullable: true, default: null })
-  allowed_workspace_ids: string[] | null;
+  allowed_account_ids: string[] | null;
 
   @Column({ type: 'varchar' })
   name: string;

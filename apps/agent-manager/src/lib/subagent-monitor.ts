@@ -71,7 +71,7 @@ type PostResult = 'ok' | 'dead' | 'transient';
 
 export class SubagentMonitor {
   #config: SubagentMonitorConfig;
-  #workspaceId: string | null;
+  #accountId: string | null;
   #enabled: boolean;
   // Live subagent_ids partitioned by the apiKey they were registered under.
   // Each partition reconciles independently against the server because the
@@ -86,14 +86,14 @@ export class SubagentMonitor {
   #reconcileTimer: NodeJS.Timeout | null = null;
   #reconcileInitialTimer: NodeJS.Timeout | null = null;
 
-  constructor(config: SubagentMonitorConfig, workspaceId: string | null) {
+  constructor(config: SubagentMonitorConfig, accountId: string | null) {
     this.#config = config;
-    this.#workspaceId = workspaceId || null;
+    this.#accountId = accountId || null;
     this.#enabled = this.#config?.subagent_monitor?.enabled !== false;
     if (this.#enabled) {
       log(
-        `[subagent-monitor] enabled (workspace=${
-          this.#workspaceId ? this.#workspaceId.slice(0, 8) + '...' : 'auto-bind via api key'
+        `[subagent-monitor] enabled (account=${
+          this.#accountId ? this.#accountId.slice(0, 8) + '...' : 'auto-bind via api key'
         })`,
       );
       this.#startReconcileLoop();
@@ -123,7 +123,7 @@ export class SubagentMonitor {
       started_at: startedAt,
       label: args.label,
     };
-    if (this.#workspaceId) body.workspace_id = this.#workspaceId;
+    if (this.#accountId) body.account_id = this.#accountId;
     if (args.ticketId) body.ticket_id = args.ticketId;
     if (args.ticketTitle) body.ticket_title = args.ticketTitle;
     if (args.role) body.role = args.role;

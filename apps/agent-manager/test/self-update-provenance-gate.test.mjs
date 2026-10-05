@@ -42,7 +42,7 @@ test('accepts a version that carries an SLSA provenance attestation', () => {
 
 test('tolerates npm chatter before the JSON body', () => {
   // 셸 래퍼가 stderr 를 stdout 에 섞어 넘기는 환경에서도 판정이 흔들리면 안 된다.
-  const v = parseProvenanceView(`npm warn Ignoring workspaces for specified package(s)\n${GOOD}`);
+  const v = parseProvenanceView(`npm warn Ignoring accounts for specified package(s)\n${GOOD}`);
   assert.equal(v.ok, true, v.reason);
   assert.equal(v.version, '1.6.115');
 });

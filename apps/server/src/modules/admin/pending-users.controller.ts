@@ -4,7 +4,7 @@ import { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../../entities/User';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { ReBACService } from '../../services/rebac.service';
@@ -18,14 +18,14 @@ import { findOrFail } from '../../common/find-or-fail';
 export class PendingUsersController {
   constructor(
     @InjectRepository(User) private readonly userRepo: Repository<User>,
-    @InjectRepository(Workspace) private readonly workspaceRepo: Repository<Workspace>,
+    @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
     private readonly rebacService: ReBACService,
     private readonly activityService: ActivityService,
   ) {}
 
   // Lightweight count for the admin sidebar badge. Separate from GET / so
   // the admin nav can poll/listen without materializing the full user list
-  // (which joins to workspaces) every time.
+  // (which joins to accounts) every time.
   @Get('count')
   async count(@Res() res: Response) {
     const count = await this.userRepo.count({ where: { status: 'pending' } as any });
@@ -38,17 +38,17 @@ export class PendingUsersController {
 
     const result = await Promise.all(users.map(async user => {
       const u = user as any;
-      let requested_workspace_name: string | null = null;
-      if (u.requested_workspace_id) {
-        const ws = await this.workspaceRepo.findOne({ where: { id: u.requested_workspace_id } });
-        requested_workspace_name = ws?.name || null;
+      let requested_account_name: string | null = null;
+      if (u.requested_account_id) {
+        const ws = await this.accountRepo.findOne({ where: { id: u.requested_account_id } });
+        requested_account_name = ws?.name || null;
       }
       return {
         id: u.id,
         name: u.name,
         email: u.email,
-        requested_workspace_id: u.requested_workspace_id || null,
-        requested_workspace_name,
+        requested_account_id: u.requested_account_id || null,
+        requested_account_name,
         created_at: u.created_at,
       };
     }));
@@ -82,16 +82,16 @@ export class PendingUsersController {
 
   @Post(':id/assign')
   async assign(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
-    const { workspace_id, relation = 'member' } = body;
-    if (!workspace_id) return res.status(400).json({ error: 'workspace_id is required' });
+    const { account_id, relation = 'member' } = body;
+    if (!account_id) return res.status(400).json({ error: 'account_id is required' });
 
     await findOrFail(this.userRepo, { where: { id } }, 'User not found');
-    await findOrFail(this.workspaceRepo, { where: { id: workspace_id } }, 'Workspace not found');
+    await findOrFail(this.accountRepo, { where: { id: account_id } }, 'Account not found');
 
     await this.rebacService.grant(
       { type: 'user', id },
       relation,
-      { type: 'workspace', id: workspace_id },
+      { type: 'account', id: account_id },
     );
 
     return res.json({ success: true });

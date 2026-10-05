@@ -20,7 +20,7 @@ import {
   createAgent,
   createApiKey,
   createUser,
-  createWorkspace,
+  createAccount,
 } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.REFRESH_AVAILABLE_MODELS_PORT || '0';
@@ -52,13 +52,13 @@ test('refresh_available_models 는 무관한 하트비트가 아니라 같은 co
   });
 
   const { AuthService, getDataSourceToken } = modules;
-  const workspace = await createWorkspace(app, getDataSourceToken, 'refresh-available-models');
+  const workspace = await createAccount(app, getDataSourceToken, 'refresh-available-models');
   const manager = await createAgent(app, getDataSourceToken, null, {
     name: 'refresh-models-manager',
     type: 'manager',
   });
   const managerKey = await createApiKey(app, getDataSourceToken, manager.id, {
-    workspaceId: workspace.id,
+    accountId: workspace.id,
     label: 'refresh-models-manager-key',
   });
   const admin = await createUser(app, getDataSourceToken, {

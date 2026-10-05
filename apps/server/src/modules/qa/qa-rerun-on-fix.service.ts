@@ -48,7 +48,7 @@ interface PendingRerun {
   generation: number;
   fixTicketId: string;
   scenarioName: string;
-  workspaceId: string | null;
+  accountId: string | null;
   environment: string;
   /** '' when no `fix-commit:` tag → the gate uses deploy-freshness ordering. */
   fixCommitSha: string;
@@ -267,7 +267,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     environment: string,
   ): Promise<void> {
     const fixSha = resolveFixCommitLabel(ticket.tags);
-    const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), scenario.workspace_id, environment);
+    const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), scenario.account_id, environment);
     if (this._deploymentSatisfies(dep, fixSha, ticket.terminal_entered_at)) {
       this.logService.info('QA', 'rerun-on-fix deployment gate already satisfied — firing now', {
         ticket_id: ticket.id, scenario_id: scenario.id, environment,
@@ -286,7 +286,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
       generation,
       fixTicketId: ticket.id,
       scenarioName: scenario.name,
-      workspaceId: scenario.workspace_id,
+      accountId: scenario.account_id,
       environment,
       fixCommitSha: fixSha,
       notBefore: ticket.terminal_entered_at ?? null,
@@ -324,7 +324,7 @@ export class QaRerunOnFixService implements OnModuleInit, OnModuleDestroy {
     // Snapshot entries — _firePending mutates the map mid-loop.
     for (const [key, p] of [...this._pending.entries()]) {
       if (p.environment !== env) continue;
-      const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), p.workspaceId, env);
+      const dep = await findLatestDeployment(this.dataSource.getRepository(Deployment), p.accountId, env);
       if (!this._deploymentSatisfies(dep, p.fixCommitSha, p.notBefore)) continue;
       this.logService.info('QA', 'rerun-on-fix deployment gate satisfied — firing', {
         fix_ticket_id: p.fixTicketId, scenario_id: p.scenarioId, environment: env,

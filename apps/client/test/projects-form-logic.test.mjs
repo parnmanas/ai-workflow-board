@@ -24,7 +24,7 @@ import {
 function project(overrides = {}) {
   return {
     id: 'p-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     name: 'AWB',
     description: 'board-less',
     repo_url: 'https://github.com/parnmanas/ai-workflow-board.git',
@@ -120,9 +120,9 @@ test('isProjectFormDirty — 편집하면 dirty, 새 프로젝트는 무엇이�
 
 test('credential 후보는 global + 이 워크스페이스 것, 현재 값은 목록 밖이어도 남는다', () => {
   const creds = [
-    { id: 'g', workspace_id: null, scope: 'global', name: 'G', provider: 'github' },
-    { id: 'w', workspace_id: 'ws-1', scope: 'workspace', name: 'W', provider: 'github' },
-    { id: 'other', workspace_id: 'ws-2', scope: 'workspace', name: 'O', provider: 'github' },
+    { id: 'g', account_id: null, scope: 'global', name: 'G', provider: 'github' },
+    { id: 'w', account_id: 'ws-1', scope: 'account', name: 'W', provider: 'github' },
+    { id: 'other', account_id: 'ws-2', scope: 'account', name: 'O', provider: 'github' },
   ];
   assert.deepEqual(projectCredentialChoices(creds, 'ws-1').map((c) => c.id), ['g', 'w']);
   assert.deepEqual(projectCredentialChoices(creds, 'ws-1', 'other').map((c) => c.id), ['g', 'w', 'other']);

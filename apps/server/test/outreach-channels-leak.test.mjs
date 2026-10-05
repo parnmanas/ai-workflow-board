@@ -6,9 +6,9 @@
 // mismatch — are caught here too.
 //
 // Two concerns, both against the REAL HTTP response:
-//   1. Workspace isolation — a channel created in workspace A never appears
+//   1. Account isolation — a channel created in workspace A never appears
 //      when listing/getting scoped to workspace B (the query-level
-//      workspace_id filter, exercised through the full guard+controller
+//      account_id filter, exercised through the full guard+controller
 //      stack this time, not just the service directly).
 //   2. Credential non-exposure — the ticket's "자격증명이... API 응답 어디에도
 //      평문 노출되지 않음" completion criterion, checked against the RAW
@@ -77,7 +77,7 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
     const authService = app.get(AuthService);
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
-    const wsRepo = dataSource.getRepository('Workspace');
+    const wsRepo = dataSource.getRepository('Account');
     const credRepo = dataSource.getRepository('Credential');
 
     const adminUser = await userRepo.save(userRepo.create({
@@ -94,7 +94,7 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
     // from the polling sweep) — the plain marker is enough to prove the value
     // never round-trips into an HTTP response regardless.
     credA = await credRepo.save(credRepo.create({
-      workspace_id: wsA.id, name: 'outreach-cred-a', provider: 'github',
+      account_id: wsA.id, name: 'outreach-cred-a', provider: 'github',
       encrypted_data: `enc:${RAW_SECRET_TOKEN}`,
     }));
 
@@ -102,7 +102,7 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
       token: adminToken,
       method: 'POST',
       body: {
-        workspace_id: wsA.id,
+        account_id: wsA.id,
         kind: 'github',
         name: `Leak Channel WS-A ${randomUUID()}`,
         credential_id: credA.id,
@@ -135,7 +135,7 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
   });
 
   it('admin listing workspace A sees the created channel', async () => {
-    const res = await apiRequest(BASE_URL, `/outreach-channels?workspace_id=${wsA.id}`, { token: adminToken });
+    const res = await apiRequest(BASE_URL, `/outreach-channels?account_id=${wsA.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     const rows = Array.isArray(res.data) ? res.data : [];
     assert.ok(rows.some((c) => c.id === channelA.id), 'workspace A listing includes channel A');
@@ -145,19 +145,19 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
   });
 
   it('admin listing workspace B never sees workspace A\'s channel', async () => {
-    const res = await apiRequest(BASE_URL, `/outreach-channels?workspace_id=${wsB.id}`, { token: adminToken });
+    const res = await apiRequest(BASE_URL, `/outreach-channels?account_id=${wsB.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     const rows = Array.isArray(res.data) ? res.data : [];
     assert.equal(rows.filter((c) => c.id === channelA.id).length, 0, 'channel A must not leak into workspace B\'s listing');
   });
 
   it('get(:id) scoped to workspace B 404s for a channel that belongs to workspace A', async () => {
-    const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}?workspace_id=${wsB.id}`, { token: adminToken });
+    const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}?account_id=${wsB.id}`, { token: adminToken });
     assert.equal(res.status, 404, 'cross-workspace get must not resolve');
   });
 
   it('get(:id) scoped to the correct workspace resolves without leaking the secret', async () => {
-    const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}?workspace_id=${wsA.id}`, { token: adminToken });
+    const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}?account_id=${wsA.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     assert.equal(res.data.id, channelA.id);
     const raw = JSON.stringify(res.data);
@@ -166,7 +166,7 @@ describe('outreach-channels-leak: cross-workspace isolation + credential non-exp
   });
 
   it('the status endpoint never leaks the secret either', async () => {
-    const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}/status?workspace_id=${wsA.id}`, { token: adminToken });
+    const res = await apiRequest(BASE_URL, `/outreach-channels/${channelA.id}/status?account_id=${wsA.id}`, { token: adminToken });
     assert.equal(res.status, 200);
     const raw = JSON.stringify(res.data);
     assert.doesNotMatch(raw, /credential_id/);

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { canonicalWorkPath } from './utils/workRoutes';
 import { ToastProvider, useToast } from './contexts/ToastContext';
 import { LoadingProvider } from './contexts/LoadingContext';
 import { ConfirmProvider } from './contexts/ConfirmContext';
@@ -17,11 +18,11 @@ const TicketsPage = lazy(() => import('./components/tickets/TicketsPage'));
 const ProjectsPage = lazy(() => import('./components/projects/ProjectsPage'));
 const AdminPage = lazy(() => import('./components/admin/AdminPage'));
 const ChatPage = lazy(() => import('./components/ChatPage'));
-const WorkspaceUsersPage = lazy(() => import('./components/WorkspaceUsersPage'));
-const WorkspaceChannelsPage = lazy(() => import('./components/WorkspaceChannelsPage'));
-const WorkspaceApiKeysPage = lazy(() => import('./components/WorkspaceApiKeysPage'));
-const WorkspaceManagementPage = lazy(() => import('./components/WorkspaceManagementPage'));
-const WorkspaceSettingsPage = lazy(() => import('./components/WorkspaceSettingsPage'));
+const AccountUsersPage = lazy(() => import('./components/AccountUsersPage'));
+const AccountChannelsPage = lazy(() => import('./components/AccountChannelsPage'));
+const AccountApiKeysPage = lazy(() => import('./components/AccountApiKeysPage'));
+const AccountManagementPage = lazy(() => import('./components/AccountManagementPage'));
+const AccountSettingsPage = lazy(() => import('./components/AccountSettingsPage'));
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 // Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 기본 랜딩.
@@ -51,55 +52,27 @@ function RouteFallback() {
   );
 }
 
-// Redirects the user to /ws/:currentWorkspaceId/:to, waiting for auth to resolve.
-// Preserves the incoming query string so deep-link params (?ticket=&comment=)
-// survive the redirect instead of being dropped on the floor (에픽 리뷰 MINOR-1).
-export function WorkspacedRedirect({ to }: { to: string }) {
-  const { currentWorkspaceId } = useAuth();
-  const { search } = useLocation();
-  if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/${to}${search}`} replace />;
+// Old links keep their query and fragment while work uses stable routes.
+export function GlobalRedirect({ to }: { to: string }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/${to}${search}${hash}`} replace />;
 }
 
-// Redirects / to the workspace's default section (sessions — Agent Session 목록이
-// 주 작업 표면). Carries the query string through
-// so a bookmarked `/?ticket=<id>` deep-link reaches the shell (에픽 리뷰 MINOR-1).
-export function WorkspaceDefaultRedirect() {
-  const { currentWorkspaceId } = useAuth();
-  const { search } = useLocation();
-  if (!currentWorkspaceId) return null;
-  return <Navigate to={`/ws/${currentWorkspaceId}/sessions${search}`} replace />;
+export function DefaultRedirect() {
+  return <GlobalRedirect to="sessions" />;
 }
 
-// Redirects /ws/:wsId to the default section (sessions). Preserves the
-// query string so `/ws/:wsId?ticket=<id>` keeps the deep-link param (MINOR-1).
-export function WorkspaceSectionRedirect() {
-  const { search } = useLocation();
-  return <Navigate to={`sessions${search}`} replace />;
+export function LegacyWorkspaceRedirect() {
+  const { pathname, search, hash } = useLocation();
+  return <Navigate to={`${canonicalWorkPath(pathname)}${search}${hash}`} replace />;
 }
 
-// Boards are gone (docs/tickets.md). Every old board URL — the index, a board,
-// and its features/settings/archive/leaderboard sub-pages — lands on the
-// workspace Tickets page. The query string is kept so a bookmarked or
-// notification deep link (`/boards/<id>?ticket=<id>&comment=<id>`) still opens
-// the ticket (and scrolls to the comment).
 export function LegacyBoardsRedirect() {
-  const { wsId } = useParams<{ wsId: string }>();
-  const { search } = useLocation();
-  return <Navigate to={`/ws/${wsId}/tickets${search}`} replace />;
+  return <GlobalRedirect to="tickets" />;
 }
 
-function LegacyCatalogRedirect() {
-  const { wsId } = useParams<{ wsId: string }>();
-  return <Navigate to={`/ws/${wsId}/functions`} replace />;
-}
-
-// Teams 가 WORK 의 독립 최상위 메뉴로 승격되면서 정식 경로가 /ws/:wsId/teams 로
-// 옮겨졌다(티켓 03ca8b5b). 예전 /ws/:wsId/orchestration/teams 딥링크(북마크,
-// 기존 코멘트 링크)가 깨지지 않도록 절대 경로로 리다이렉트한다.
 export function LegacyOrchestrationTeamsRedirect() {
-  const { wsId } = useParams<{ wsId: string }>();
-  return <Navigate to={`/ws/${wsId}/teams`} replace />;
+  return <GlobalRedirect to="teams" />;
 }
 
 function AppContent() {
@@ -203,65 +176,50 @@ function AppContent() {
       <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route element={<AppLayout />}>
-            {/* Legacy redirects */}
-            <Route index element={<WorkspaceDefaultRedirect />} />
-            {/* P4c-4: agents 표면 제거 — 세션으로 보낸다. */}
-            <Route path="agents" element={<WorkspacedRedirect to="sessions" />} />
-            <Route path="dashboard" element={<WorkspacedRedirect to="sessions" />} />
-            <Route path="chat" element={<WorkspacedRedirect to="chat" />} />
-            <Route path="sessions" element={<WorkspacedRedirect to="sessions" />} />
-            <Route path="hosts" element={<WorkspacedRedirect to="hosts" />} />
-            <Route path="terminals" element={<WorkspacedRedirect to="terminals" />} />
-            <Route path="board/settings" element={<WorkspacedRedirect to="tickets" />} />
-            <Route path="boards" element={<WorkspacedRedirect to="tickets" />} />
-            <Route path="tickets" element={<WorkspacedRedirect to="tickets" />} />
-
-            {/* Admin routes — all management pages live here */}
+            <Route index element={<DefaultRedirect />} />
+            <Route path="ws/:wsId/*" element={<LegacyWorkspaceRedirect />} />
+            <Route path="agents/*" element={<GlobalRedirect to="sessions" />} />
+            <Route path="dashboard" element={<DefaultRedirect />} />
+            <Route path="assistant" element={<ChatFirstHome />} />
+            <Route path="hosts" element={<HostsPage />} />
+            <Route path="sessions" element={<SessionsPage />} />
+            <Route path="sessions/:managerId" element={<SessionsPage />} />
+            <Route path="sessions/:managerId/:cli/:sessionId" element={<SessionsPage />} />
+            <Route path="terminals" element={<TerminalsPage />} />
+            <Route path="terminals/:managerId" element={<TerminalsPage />} />
+            <Route path="terminals/:managerId/:terminalId" element={<TerminalsPage />} />
+            <Route path="tickets" element={<TicketsPage />} />
+            <Route path="boards/*" element={<LegacyBoardsRedirect />} />
+            <Route path="board/settings" element={<LegacyBoardsRedirect />} />
+            <Route path="teams" element={<OrchestrationTeamsPage />} />
+            <Route path="missions" element={<OrchestrationPage />} />
+            <Route path="missions/:missionId" element={<MissionDetailPage />} />
+            <Route path="orchestration/*" element={<LegacyWorkspaceRedirect />} />
+            <Route path="chat" element={<ChatPage />} />
+            <Route path="chat/:roomId" element={<ChatPage />} />
+            <Route path="projects" element={<ProjectsPage />} />
+            <Route path="resources" element={<AccountManagementPage kind="resources" />} />
+            <Route path="ontology-graph" element={<OntologyGraphPage />} />
+            <Route path="actions" element={<AccountManagementPage kind="actions" />} />
+            <Route path="functions" element={<AccountManagementPage kind="functions" />} />
+            <Route path="qa" element={<AccountManagementPage kind="qa" />} />
+            <Route path="security" element={<AccountManagementPage kind="security" />} />
+            <Route path="schedules" element={<AccountManagementPage kind="schedules" />} />
+            <Route path="settings" element={<SettingsOverviewPage />} />
+            <Route path="settings/ownership" element={<AccountSettingsPage />} />
+            <Route path="settings/workspace" element={<GlobalRedirect to="settings/ownership" />} />
+            <Route path="settings/members" element={<AccountUsersPage />} />
+            <Route path="settings/credentials" element={<AccountManagementPage kind="credentials" />} />
+            <Route path="settings/channels" element={<AccountChannelsPage />} />
+            <Route path="settings/api-keys" element={<AccountApiKeysPage />} />
+            <Route path="settings/claude-profiles" element={<AccountManagementPage kind="claude-backend-profiles" />} />
+            <Route path="users" element={<GlobalRedirect to="settings/members" />} />
+            <Route path="channels" element={<GlobalRedirect to="settings/channels" />} />
+            <Route path="api-keys" element={<GlobalRedirect to="settings/api-keys" />} />
+            <Route path="credentials" element={<GlobalRedirect to="settings/credentials" />} />
+            <Route path="catalog" element={<GlobalRedirect to="functions" />} />
+            <Route path="claude-backend-profiles" element={<GlobalRedirect to="settings/claude-profiles" />} />
             <Route path="admin/*" element={<AdminPage />} />
-
-            {/* Workspace-scoped routes */}
-            <Route path="ws/:wsId">
-              <Route index element={<WorkspaceSectionRedirect />} />
-              <Route path="assistant" element={<ChatFirstHome />} />
-              <Route path="hosts" element={<HostsPage />} />
-              <Route path="sessions" element={<SessionsPage />} />
-              <Route path="sessions/:managerId" element={<SessionsPage />} />
-              <Route path="sessions/:managerId/:cli/:sessionId" element={<SessionsPage />} />
-              {/* Terminal(Runtime Host 셸) — 세션과 같은 (호스트 → 목록 → 하나) 계층. */}
-              <Route path="terminals" element={<TerminalsPage />} />
-              <Route path="terminals/:managerId" element={<TerminalsPage />} />
-              <Route path="terminals/:managerId/:terminalId" element={<TerminalsPage />} />
-              <Route path="tickets" element={<TicketsPage />} />
-              <Route path="boards/*" element={<LegacyBoardsRedirect />} />
-              <Route path="teams" element={<OrchestrationTeamsPage />} />
-              <Route path="orchestration" element={<OrchestrationPage />} />
-              <Route path="orchestration/teams" element={<LegacyOrchestrationTeamsRedirect />} />
-              <Route path="orchestration/missions/:missionId" element={<MissionDetailPage />} />
-              <Route path="chat" element={<ChatPage />} />
-              <Route path="chat/:roomId" element={<ChatPage />} />
-              <Route path="users" element={<Navigate to="settings/members" replace />} />
-              {/* P4c-4: agents 표면 제거 (Agent 테이블 삭제). */}
-              <Route path="channels" element={<Navigate to="settings/channels" replace />} />
-              <Route path="api-keys" element={<Navigate to="settings/api-keys" replace />} />
-              <Route path="catalog" element={<LegacyCatalogRedirect />} />
-              <Route path="projects" element={<ProjectsPage />} />
-              <Route path="resources" element={<WorkspaceManagementPage kind="resources" />} />
-              <Route path="ontology-graph" element={<OntologyGraphPage />} />
-              <Route path="actions" element={<WorkspaceManagementPage kind="actions" />} />
-              <Route path="functions" element={<WorkspaceManagementPage kind="functions" />} />
-              <Route path="credentials" element={<Navigate to="settings/credentials" replace />} />
-              <Route path="qa" element={<WorkspaceManagementPage kind="qa" />} />
-              <Route path="security" element={<WorkspaceManagementPage kind="security" />} />
-              <Route path="schedules" element={<WorkspaceManagementPage kind="schedules" />} />
-              <Route path="settings" element={<SettingsOverviewPage />} />
-              <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
-              <Route path="settings/members" element={<WorkspaceUsersPage />} />
-              <Route path="settings/credentials" element={<WorkspaceManagementPage kind="credentials" />} />
-              <Route path="settings/channels" element={<WorkspaceChannelsPage />} />
-              <Route path="settings/api-keys" element={<WorkspaceApiKeysPage />} />
-              <Route path="settings/claude-profiles" element={<WorkspaceManagementPage kind="claude-backend-profiles" />} />
-              <Route path="claude-backend-profiles" element={<Navigate to="settings/claude-profiles" replace />} />
-            </Route>
           </Route>
         </Routes>
       </Suspense>

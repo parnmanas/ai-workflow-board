@@ -61,7 +61,7 @@ export interface StartSecurityRunResult {
 }
 
 export interface StartSecurityBatchArgs {
-  workspaceId: string;
+  accountId: string;
   // Explicit ordered profile ids, OR `all: true` to expand to every enabled
   // profile in the workspace. Exactly one is used —
   // profileIds wins if both are given.
@@ -127,19 +127,19 @@ export class SecurityRunService {
 
   // ── Reads ─────────────────────────────────────────────────────────────────
 
-  async listRuns(profileId: string, workspaceId: string, limit = 20): Promise<SecurityRun[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    await findOrFail(this.profileRepo, { where: { id: profileId, workspace_id: workspaceId } }, 'security profile not found in workspace');
+  async listRuns(profileId: string, accountId: string, limit = 20): Promise<SecurityRun[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    await findOrFail(this.profileRepo, { where: { id: profileId, account_id: accountId } }, 'security profile not found in workspace');
     return this.runRepo.find({
-      where: { profile_id: profileId, workspace_id: workspaceId },
+      where: { profile_id: profileId, account_id: accountId },
       order: { created_at: 'DESC' },
       take: Math.min(limit, 100),
     });
   }
 
-  async getRun(runId: string, workspaceId: string): Promise<SecurityRun> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.runRepo, { where: { id: runId, workspace_id: workspaceId } }, 'security run not found in workspace');
+  async getRun(runId: string, accountId: string): Promise<SecurityRun> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'security run not found in workspace');
   }
 
   // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ export class SecurityRunService {
     const runId = randomUUID();
 
     const room = await this.roomRepo.save(this.roomRepo.create({
-      workspace_id: profile.workspace_id,
+      account_id: profile.account_id,
       type: 'group',
       name: `Security: ${profile.name} · ${runId.slice(0, 8)}`,
       last_message_at: null,
@@ -179,7 +179,7 @@ export class SecurityRunService {
     const run = await this.runRepo.save(this.runRepo.create({
       id: runId,
       profile_id: profile.id,
-      workspace_id: profile.workspace_id,
+      account_id: profile.account_id,
       status: 'running',
       room_id: room.id,
       findings: [],
@@ -232,7 +232,7 @@ export class SecurityRunService {
       kind: 'security',
       id: profile.id,
       runId,
-      workspaceId: profile.workspace_id,
+      accountId: profile.account_id,
       workspaceFolder: profile.workspace_folder,
       repoRef: profile.repo_ref,
       checkoutMode: profile.checkout_mode,
@@ -241,7 +241,7 @@ export class SecurityRunService {
     try {
       await this.messaging.sendMessage(
         room.id,
-        profile.workspace_id,
+        profile.account_id,
         'user',
         'system',
         'Security',
@@ -297,7 +297,7 @@ export class SecurityRunService {
     }
 
     const room = await this.roomRepo.save(this.roomRepo.create({
-      workspace_id: profile.workspace_id,
+      account_id: profile.account_id,
       type: 'group',
       name: `Security checklist refresh: ${profile.name}`,
       last_message_at: null,
@@ -333,7 +333,7 @@ export class SecurityRunService {
     try {
       await this.messaging.sendMessage(
         room.id,
-        profile.workspace_id,
+        profile.account_id,
         'user',
         'system',
         'Security',
@@ -362,7 +362,7 @@ export class SecurityRunService {
    * abort the rest. Used by the checklist_refresh schedule kind (tick + run-now).
    */
   async refreshChecklistsForScope(args: StartSecurityBatchArgs): Promise<RefreshChecklistResult[]> {
-    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!args.accountId) throw makeError(400, 'account_id is required');
     const profileIds = await this._resolveBatchProfileIds(args);
     if (profileIds.length === 0) {
       throw makeError(400, 'no runnable profiles for this checklist refresh (none selected, or none enabled in scope)');
@@ -385,8 +385,8 @@ export class SecurityRunService {
   // ── Finding accumulation ────────────────────────────────────────────────────
 
   /** Record (upsert by finding id) one or more findings on a running run. */
-  async recordFindings(runId: string, workspaceId: string, findings: any[]): Promise<SecurityRun> {
-    const run = await this.getRun(runId, workspaceId);
+  async recordFindings(runId: string, accountId: string, findings: any[]): Promise<SecurityRun> {
+    const run = await this.getRun(runId, accountId);
     const current: SecurityFinding[] = Array.isArray(run.findings) ? [...run.findings] : [];
     for (const raw of findings || []) {
       const entry = normalizeFinding(raw);
@@ -398,8 +398,8 @@ export class SecurityRunService {
     return this.runRepo.save(run);
   }
 
-  async attachArtifact(runId: string, workspaceId: string, resourceIds: string[]): Promise<SecurityRun> {
-    const run = await this.getRun(runId, workspaceId);
+  async attachArtifact(runId: string, accountId: string, resourceIds: string[]): Promise<SecurityRun> {
+    const run = await this.getRun(runId, accountId);
     const add = (resourceIds || []).filter(Boolean);
     if (add.length) {
       const all = new Set([...(run.artifact_resource_ids || []), ...add]);
@@ -408,8 +408,8 @@ export class SecurityRunService {
     return this.runRepo.save(run);
   }
 
-  async completeRun(runId: string, workspaceId: string, status: SecurityRunStatus, args: CompleteSecurityRunArgs = {}): Promise<SecurityRun> {
-    const run = await this.getRun(runId, workspaceId);
+  async completeRun(runId: string, accountId: string, status: SecurityRunStatus, args: CompleteSecurityRunArgs = {}): Promise<SecurityRun> {
+    const run = await this.getRun(runId, accountId);
     const valid: SecurityRunStatus[] = ['pending', 'running', 'passed', 'failed', 'error'];
     if (!valid.includes(status)) throw makeError(400, `status must be one of ${valid.join(', ')}`);
     run.status = status;
@@ -455,9 +455,9 @@ export class SecurityRunService {
 
   // ── Sequential batches (수동 전체 점검) ───────────────────────────────────────
 
-  async getBatch(batchId: string, workspaceId: string): Promise<SecurityRunBatch> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.batchRepo, { where: { id: batchId, workspace_id: workspaceId } }, 'security batch not found in workspace');
+  async getBatch(batchId: string, accountId: string): Promise<SecurityRunBatch> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.batchRepo, { where: { id: batchId, account_id: accountId } }, 'security batch not found in workspace');
   }
 
   /**
@@ -468,14 +468,14 @@ export class SecurityRunService {
    * would fire them all at once, since startRun returns before the run completes.
    */
   async startBatch(args: StartSecurityBatchArgs): Promise<SecurityRunBatch> {
-    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!args.accountId) throw makeError(400, 'account_id is required');
     const profileIds = await this._resolveBatchProfileIds(args);
     if (profileIds.length === 0) {
       throw makeError(400, 'no runnable profiles for this batch (none selected, or none enabled in scope)');
     }
 
     const batch = await this.batchRepo.save(this.batchRepo.create({
-      workspace_id: args.workspaceId,
+      account_id: args.accountId,
       profile_ids: profileIds,
       run_ids: [],
       current_index: 0,
@@ -493,7 +493,7 @@ export class SecurityRunService {
     // dispatch throws (deleted/disabled), so a bad first profile can't wedge the
     // whole batch.
     await this._dispatchBatchIndex(batch, 0);
-    return this.getBatch(batch.id, args.workspaceId);
+    return this.getBatch(batch.id, args.accountId);
   }
 
   /**
@@ -550,7 +550,7 @@ export class SecurityRunService {
     // profiles in this workspace so a stale/foreign id can't wedge the batch.
     if (Array.isArray(args.profileIds) && args.profileIds.length > 0) {
       const found = await this.profileRepo.find({
-        where: { id: In(args.profileIds), workspace_id: args.workspaceId },
+        where: { id: In(args.profileIds), account_id: args.accountId },
       });
       const byId = new Map(found.map((p) => [p.id, p]));
       return args.profileIds.filter((id) => {
@@ -562,7 +562,7 @@ export class SecurityRunService {
       // Resolve definitions at dispatch time so profile add/remove is
       // reflected without a schedule snapshot.
       const qb = this.profileRepo.createQueryBuilder('p')
-        .where('p.workspace_id = :ws', { ws: args.workspaceId })
+        .where('p.account_id = :ws', { ws: args.accountId })
         .andWhere('p.enabled = :en', { en: true });
       const rows = await qb.orderBy('p.name', 'ASC').getMany();
       return rows.map((p) => p.id);

@@ -4,24 +4,24 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Backfill: make every existing `type='manager'` Agent row workspace-less.
  *
  * Background: pairing redemption used to pin the manager Agent identity to
- * the workspace that minted the token (`rec.workspace_id`). That made
+ * the workspace that minted the token (`rec.account_id`). That made
  * managers invisible to every other workspace's AI Agents tab, even though
  * a manager can supervise managed children across any workspace.
  *
  * New contract (ticket 22cc3950): manager identities are global. The
- * controller now creates them with `workspace_id=''` and the agents list
- * query returns rows with `workspace_id IN (currentWorkspace, '')`. This
+ * controller now creates them with `account_id=''` and the agents list
+ * query returns rows with `account_id IN (currentAccount, '')`. This
  * migration normalises previously-paired managers to the same shape.
  *
  * Invariants (inherited from 01-CONTEXT.md):
  *
  * - D-02: DATA only, no schema DDL.
  * - D-03: Repository API for portability across sqlite/mysql/postgres.
- * - D-04: Idempotent — if every manager row already has `workspace_id=''`,
+ * - D-04: Idempotent — if every manager row already has `account_id=''`,
  *         this is a no-op. Re-running touches zero rows.
  *
  * The down() method is a no-op: data migrations have no faithful inverse,
- * and reconstructing the original workspace_id per manager would need an
+ * and reconstructing the original account_id per manager would need an
  * audit log we don't keep.
  */
 export class MakeManagerAgentsWorkspaceless1760000000018 implements MigrationInterface {
@@ -37,11 +37,11 @@ export class MakeManagerAgentsWorkspaceless1760000000018 implements MigrationInt
     // store NULL where others store '', and the Repository API normalises
     // both shapes on read.
     const managers = await agentRepo.find({ where: { type: 'manager' } });
-    const orphaned = managers.filter((a) => !!a.workspace_id && a.workspace_id.trim() !== '');
+    const orphaned = managers.filter((a) => !!a.account_id && a.account_id.trim() !== '');
     if (orphaned.length === 0) return;
 
     for (const agent of orphaned) {
-      agent.workspace_id = '';
+      agent.account_id = '';
       await agentRepo.save(agent);
     }
   }

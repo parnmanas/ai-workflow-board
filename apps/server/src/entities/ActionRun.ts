@@ -17,7 +17,7 @@ export class ActionRun {
   action_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // 이 run을 수행하는 대상 에이전트 (티켓 fc3906c5). fan-out 이전에는 run에
   // 에이전트 식별자가 아예 없어서 방 참여자로만 역추적할 수 있었고, 한 Action의

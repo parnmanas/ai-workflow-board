@@ -10,7 +10,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { PERMISSIONS } from '../../common/types/permissions';
 import { LogService } from '../../services/log.service';
 import { MemoryMetricsRegistry } from '../../services/memory-metrics.registry';
-import { Workspace } from '../../entities/Workspace';
+import { Account } from '../../entities/Account';
 import {
   DEFAULT_SUPERVISOR_STALE_MS,
   DEFAULT_SUPERVISOR_RESEND_MS,
@@ -66,14 +66,14 @@ function resolveCadenceField(configured: unknown, def: number): {
 export class PublicDiagnosticsController {
   constructor(
     private readonly metricsRegistry: MemoryMetricsRegistry,
-    @InjectRepository(Workspace) private readonly wsRepo: Repository<Workspace>,
+    @InjectRepository(Account) private readonly wsRepo: Repository<Account>,
   ) {}
 
   /**
    * Per-workspace supervisor cadence / liveness diagnostic (ticket 1fcba693).
    *
    * The `ticketSupervisor.staleMsElevated` gauge on `GET memory` only counts how
-   * MANY workspaces are mis-set — it can't tell you WHICH one or by how much.
+   * MANY accounts are mis-set — it can't tell you WHICH one or by how much.
    * This endpoint answers "why is recovery paced slowly here": for every
    * workspace it shows the configured value, the in-code default, the EFFECTIVE
    * value the supervisor tick actually uses, and the source (configured vs
@@ -87,20 +87,20 @@ export class PublicDiagnosticsController {
    */
   @Get('supervisor-cadence')
   async getSupervisorCadence() {
-    const workspaces = await this.wsRepo.find({ order: { created_at: 'ASC' } });
+    const accounts = await this.wsRepo.find({ order: { created_at: 'ASC' } });
     const livenessFloorMs = resolveSupervisorLivenessFloorMs();
     const livenessFloorSource =
       livenessFloorMs === DEFAULT_SUPERVISOR_LIVENESS_FLOOR_MS ? 'default' : 'env';
 
     // Effective output-liveness retention TTL, derived the same way the runtime
     // sweep does (AgentStatusService._resolveOutputLivenessTtlMs): from the
-    // LARGEST effective supervisor_stale_ms across workspaces, floored at 6 h.
+    // LARGEST effective supervisor_stale_ms across accounts, floored at 6 h.
     // The leaked_with_output recovery bound needs it because the absentStrand
     // gate clamps the output-liveness window to min(staleMs, this) — so a leaked
     // seat with recent output recovers off that gate, not the 15 min TTL
     // (ticket 1fcba693, reviewer AC). Derived here (pure) rather than injecting
     // AgentStatusService: the diagnostic reports what the NEXT sweep will use.
-    const maxStaleMs = workspaces.reduce(
+    const maxStaleMs = accounts.reduce(
       (m, w) => Math.max(m, resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS).effective),
       DEFAULT_SUPERVISOR_STALE_MS,
     );
@@ -130,10 +130,10 @@ export class PublicDiagnosticsController {
         output_liveness_ttl_ms: outputLivenessTtlMs,
       },
       liveness_floor: { effective_ms: livenessFloorMs, source: livenessFloorSource },
-      elevated_count: workspaces.filter(
+      elevated_count: accounts.filter(
         (w) => classifySupervisorStaleMs(resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS).effective).elevated,
       ).length,
-      workspaces: workspaces.map((w) => {
+      accounts: accounts.map((w) => {
         const stale = resolveCadenceField(w.supervisor_stale_ms, DEFAULT_SUPERVISOR_STALE_MS);
         const resend = resolveCadenceField(w.supervisor_resend_ms, DEFAULT_SUPERVISOR_RESEND_MS);
         const { elevated } = classifySupervisorStaleMs(stale.effective);
@@ -154,7 +154,7 @@ export class PublicDiagnosticsController {
           tickMs: SUPERVISOR_TICK_MS,
         });
         return {
-          workspace_id: w.id,
+          account_id: w.id,
           name: w.name,
           supervisor_stale_ms: stale,
           supervisor_resend_ms: resend,

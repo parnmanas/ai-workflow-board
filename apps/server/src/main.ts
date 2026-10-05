@@ -1,8 +1,9 @@
-import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
-import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
-import { buildDataSourceOptions } from './db';
 import 'dotenv/config';
 import 'reflect-metadata';
+import { preSyncAgentCleanup } from './database/pre-sync-agent-cleanup';
+import { preSyncAccountOwnership } from './database/pre-sync-account-ownership';
+import { preSyncBoardRemoval } from './database/pre-sync-board-removal';
+import { buildDataSourceOptions } from './db';
 import { join } from 'path';
 import compression from 'compression';
 import helmet from 'helmet';
@@ -26,7 +27,6 @@ async function bootstrap() {
   // type-mismatch rebuild path (uuid → varchar realignment) and lingering
   // NULL rows on NOT-NULL columns. No-op on sqlite/mysql.
   // See pre-sync-postgres.ts for the rationale.
-  await preSyncPostgres();
 
   // Catch a corrupt dev sql.js data.db here, before NestFactory.create()
   // triggers DatabaseModule's TypeOrmModule.forRoot() — which would otherwise
@@ -40,6 +40,8 @@ async function bootstrap() {
   // 검사한다(ticket b646ed54).
   await ensureOntologySqljsDbHealthy();
 
+  await preSyncAccountOwnership(buildDataSourceOptions());
+  await preSyncPostgres();
   await preSyncAgentCleanup(buildDataSourceOptions());
   // Board removal phase 1 — snapshot what synchronize is about to drop.
   await preSyncBoardRemoval(buildDataSourceOptions());

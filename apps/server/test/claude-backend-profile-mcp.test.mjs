@@ -36,9 +36,9 @@ before(async () => {
   managerAgent = await ds.getRepository('RuntimeHost').save(ds.getRepository('RuntimeHost').create({
     name: 'Profile manager',
     hostname: 'profile-test',
-    workspace_id: null,
+    account_id: null,
   }));
-  workspace = await ds.getRepository('Workspace').save(ds.getRepository('Workspace').create({
+  workspace = await ds.getRepository('Account').save(ds.getRepository('Account').create({
     name: 'Profile MCP workspace',
   }));
 });
@@ -63,7 +63,7 @@ describe('Claude backend profile MCP operations', () => {
       ds.getRepository('RuntimeHost').create({
         name: 'Ordinary profile operator',
         hostname: 'profile-test',
-        workspace_id: workspace.id,
+        account_id: workspace.id,
       }),
     );
     assert.equal(
@@ -71,7 +71,7 @@ describe('Claude backend profile MCP operations', () => {
         agentId: ordinary.id,
         source: 'db',
         scope: 'full',
-        workspaceId: '00000000-0000-0000-0000-000000000000',
+        accountId: '00000000-0000-0000-0000-000000000000',
       }),
       null,
     );
@@ -242,8 +242,8 @@ describe('Claude backend profile MCP operations', () => {
   // 워크스페이스가 소유하지는 않는다"며 거부했다. 배정 개념이 사라진 지금은
   // 대조할 대상이 없으므로, 존재하는 credential 이면 그대로 저장된다.
   it('워크스페이스 소유 credential 도 전역 프로필에 그대로 붙는다', async () => {
-    const ownerWorkspace = await ds.getRepository('Workspace').save(
-      ds.getRepository('Workspace').create({ name: 'Credential owner workspace' }),
+    const ownerWorkspace = await ds.getRepository('Account').save(
+      ds.getRepository('Account').create({ name: 'Credential owner workspace' }),
     );
     const profile = await tools.upsertClaudeBackendProfile(ds, {
       name: 'Shared assigned profile',
@@ -253,7 +253,7 @@ describe('Claude backend profile MCP operations', () => {
     });
     const credential = await ds.getRepository('Credential').save(
       ds.getRepository('Credential').create({
-        workspace_id: ownerWorkspace.id,
+        account_id: ownerWorkspace.id,
         name: 'First workspace credential',
         provider: 'anthropic',
         encrypted_data: 'test-only',

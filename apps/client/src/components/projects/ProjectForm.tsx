@@ -35,7 +35,7 @@ const HELP: React.CSSProperties = { fontSize: 11, color: tokens.colors.textMuted
 interface ProjectFormProps {
   /** null = new project. */
   project: Project | null;
-  workspaceId: string;
+  accountId: string;
   credentials: Credential[];
   hosts: Array<{ id: string; name: string }>;
   onSaved(project: Project, created: boolean): void;
@@ -43,7 +43,7 @@ interface ProjectFormProps {
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-export default function ProjectForm({ project, workspaceId, credentials, hosts, onSaved, onCancel, showToast }: ProjectFormProps) {
+export default function ProjectForm({ project, accountId, credentials, hosts, onSaved, onCancel, showToast }: ProjectFormProps) {
   const [form, setForm] = useState<ProjectFormState>(() => (project ? projectToForm(project) : emptyProjectForm()));
   const [errors, setErrors] = useState<ProjectFormErrors>({});
   const [saving, setSaving] = useState(false);
@@ -59,8 +59,8 @@ export default function ProjectForm({ project, workspaceId, credentials, hosts, 
   useEffect(() => { setTest(null); }, [form.repoUrl, form.credentialId]);
 
   const credentialChoices = useMemo(
-    () => projectCredentialChoices(credentials, workspaceId, form.credentialId),
-    [credentials, workspaceId, form.credentialId],
+    () => projectCredentialChoices(credentials, accountId, form.credentialId),
+    [credentials, accountId, form.credentialId],
   );
   const dirty = isProjectFormDirty(form, project);
   const hostName = (id: string) => hosts.find((h) => h.id === id)?.name;
@@ -77,7 +77,7 @@ export default function ProjectForm({ project, workspaceId, credentials, hosts, 
       const result = await api.testProjectConnection({
         repo_url: repoUrl,
         credential_id: form.credentialId || null,
-        workspace_id: workspaceId,
+        account_id: accountId,
       });
       const view = testConnectionView(result);
       setTest(view);
@@ -103,7 +103,7 @@ export default function ProjectForm({ project, workspaceId, credentials, hosts, 
     try {
       const saved = project
         ? await api.updateProject(project.id, built.value)
-        : await api.createProject(workspaceId, built.value);
+        : await api.createProject(accountId, built.value);
       setForm(projectToForm(saved));
       showToast(project ? '프로젝트를 저장했습니다.' : '프로젝트를 만들었습니다.', 'success');
       onSaved(saved, !project);
@@ -272,7 +272,7 @@ export default function ProjectForm({ project, workspaceId, credentials, hosts, 
         )}
         <DeclareRuntimeSection
           key={assigneeKey}
-          workspaceId={workspaceId}
+          accountId={accountId}
           initialValue={form.defaultAssignee}
           onResolved={(spec) => {
             set({ defaultAssignee: spec as RuntimeSpecDraft });

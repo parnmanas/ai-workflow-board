@@ -52,7 +52,7 @@ function item(over = {}) {
 
 function context(over = {}) {
   return {
-    workspaceId: 'ws-1',
+    accountId: 'ws-1',
     channelId: 'chan-1',
     channelKind: 'github',
     classifierRuntime: null,
@@ -96,8 +96,8 @@ function makeMessaging(onSend) {
   const calls = [];
   return {
     calls,
-    async sendMessage(roomId, workspaceId, senderType, senderId, senderName, content) {
-      calls.push({ roomId, workspaceId, senderType, senderId, senderName, content });
+    async sendMessage(roomId, accountId, senderType, senderId, senderName, content) {
+      calls.push({ roomId, accountId, senderType, senderId, senderName, content });
       onSend?.();
       return {};
     },
@@ -149,14 +149,14 @@ test('classifier_runtime set but agent not found falls back to rule-based, no di
 });
 
 test('host removed after channel configuration falls back to rule-based, no dispatch', async () => {
-  const agents = [{ id: 'agent-1', workspace_id: 'ws-1' }]; // matched when the channel was configured
+  const agents = [{ id: 'agent-1', account_id: 'ws-1' }]; // matched when the channel was configured
   const { classifier, roomRepo, messaging, bridge } = makeClassifier({ agents });
   agents.splice(0); // agent moved to another workspace afterward
 
   const rb = new RuleBasedClassifier();
   const expected = await rb.classify(item());
 
-  const result = await classifier.classify(item(), context({ classifierRuntime: spec('agent-1'), workspaceId: 'ws-1' }));
+  const result = await classifier.classify(item(), context({ classifierRuntime: spec('agent-1'), accountId: 'ws-1' }));
 
   assert.deepEqual(result, expected);
   assert.equal(roomRepo.rooms.length, 0);
@@ -164,10 +164,10 @@ test('host removed after channel configuration falls back to rule-based, no disp
   assert.equal(bridge.pendingCount(), 0, 'a rejected agent must never reach bridge.register()');
 });
 
-test('classifier_runtime resolving to a global agent (workspace_id null) still dispatches', async () => {
+test('classifier_runtime resolving to a global agent (account_id null) still dispatches', async () => {
   const sent = deferred();
   const { classifier, roomRepo, bridge, messaging } = makeClassifier({
-    agents: [{ id: 'agent-global', workspace_id: null }],
+    agents: [{ id: 'agent-global', account_id: null }],
     onSend: sent.resolve,
   });
 
@@ -185,7 +185,7 @@ test('classifier_runtime resolving to a global agent (workspace_id null) still d
 test('dispatch + matching report resolves with the reported classification', async () => {
   const sent = deferred();
   const { classifier, roomRepo, participantRepo, messaging, bridge } = makeClassifier({
-    agents: [{ id: 'agent-1', workspace_id: 'ws-1' }],
+    agents: [{ id: 'agent-1', account_id: 'ws-1' }],
     onSend: sent.resolve,
   });
 
@@ -227,7 +227,7 @@ test('no report before timeout falls back to rule-based', async () => {
   // MIN_TIMEOUT_MS is clampEnv's floor — anything lower is silently clamped
   // up to it, so drive the real floor rather than an arbitrary small number.
   const { classifier, bridge } = makeClassifier({
-    agents: [{ id: 'agent-1', workspace_id: 'ws-1' }],
+    agents: [{ id: 'agent-1', account_id: 'ws-1' }],
     timeoutMs: MIN_TIMEOUT_MS,
   });
   const rb = new RuleBasedClassifier();
@@ -245,7 +245,7 @@ test('dispatch failure cancels the pending bridge entry immediately, not after t
   // block must cancel that entry right away — otherwise a sustained outage
   // leaves one doomed, never-to-be-reported entry per item sitting in the
   // bridge for up to timeoutMs each.
-  const dataSource = makeHostScope([{ id: 'agent-1', workspace_id: 'ws-1' }]);
+  const dataSource = makeHostScope([{ id: 'agent-1', account_id: 'ws-1' }]);
   const roomRepo = makeRoomRepo();
   const participantRepo = makeParticipantRepo();
   const messaging = { calls: [], async sendMessage() { throw new Error('messaging unavailable'); } };

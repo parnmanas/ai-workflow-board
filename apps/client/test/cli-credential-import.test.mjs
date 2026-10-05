@@ -57,8 +57,8 @@ test('CLI login imports use the existing encrypted subscription credential API',
 test('Codex config is optional and credential scope follows the host page scope selection', () => {
   assert.match(catalogSource, /extra_file_field: 'config_toml'/);
   assert.match(source, /\[details\.extraFile\]: extraFileContents/);
-  assert.match(source, /scope: createScope === 'global' \? 'global' : 'workspace'/);
-  assert.match(source, /workspace_id: createScope === 'global' \? undefined : workspaceId/);
+  assert.match(source, /scope: createScope === 'global' \? 'global' : 'account'/);
+  assert.match(source, /account_id: createScope === 'global' \? undefined : accountId/);
 });
 
 function buttonsByText(container, label) {
@@ -93,7 +93,7 @@ async function mountCredentialManagerForImport(t) {
     role: 'admin',
     status: 'active',
     permissions: [],
-    workspaces: [{ id: 'workspace-1', name: 'Workspace', slug: null, relations: [] }],
+    accounts: [{ id: 'workspace-1', name: 'Account', slug: null, relations: [] }],
   });
   api.getSetupStatus = async () => ({ needs_setup: false });
 
@@ -107,9 +107,9 @@ async function mountCredentialManagerForImport(t) {
     createCredentialCalls.push(data);
     const created = {
       id: 'cred-imported-1',
-      workspace_id: data.workspace_id ?? null,
+      account_id: data.account_id ?? null,
       board_id: null,
-      scope: data.scope || 'workspace',
+      scope: data.scope || 'account',
       name: data.name,
       description: data.description || '',
       provider: data.provider,
@@ -123,7 +123,7 @@ async function mountCredentialManagerForImport(t) {
   };
 
   const view = mountWithBoardStream(
-    React.createElement(CredentialManager, { workspaceId: 'workspace-1' }),
+    React.createElement(CredentialManager, { accountId: 'workspace-1' }),
   );
   await flush();
 
@@ -165,8 +165,8 @@ test('importing a CLI login credential from the Credentials page appears in the 
   });
 
   assert.equal(createCredentialCalls.length, 1);
-  assert.equal(createCredentialCalls[0].scope, 'workspace');
-  assert.equal(createCredentialCalls[0].workspace_id, 'workspace-1');
+  assert.equal(createCredentialCalls[0].scope, 'account');
+  assert.equal(createCredentialCalls[0].account_id, 'workspace-1');
   assert.equal(createCredentialCalls[0].provider, 'codex_subscription');
 
   // 모달이 닫히고(= Resources 로 이동하지 않고 같은 화면에서) 새 credential 이

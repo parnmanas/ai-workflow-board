@@ -396,7 +396,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       summary: kind === 'mission_completed' ? mission.result_summary : kind === 'mission_failed' ? (mission.failure_reason || mission.result_summary) : null,
       stepTitle,
     }, announcementLanguage(config.stt.languages));
-    this.announce(recipients, kind, text, { type: 'mission', workspace_id: mission.workspace_id, mission_id: mission.id });
+    this.announce(recipients, kind, text, { type: 'mission', account_id: mission.account_id, mission_id: mission.id });
   }
 
   /**
@@ -406,7 +406,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
    */
   private async missionRecipients(mission: any): Promise<string[]> {
     if (mission.created_by_type === 'user' && mission.created_by) return [mission.created_by];
-    const owners = await this.rebac.listSubjects({ type: 'workspace', id: mission.workspace_id }, 'owner');
+    const owners = await this.rebac.listSubjects({ type: 'account', id: mission.account_id }, 'owner');
     return Array.from(new Set(owners.filter((s: any) => s.type === 'user' && !!s.id).map((s: any) => s.id)));
   }
 

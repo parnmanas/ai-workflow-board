@@ -8,7 +8,7 @@ export class CreateWorkflowFunctions1760000000067 implements MigrationInterface 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS workflow_functions (
         id UUID PRIMARY KEY,
-        workspace_id VARCHAR NULL,
+        account_id VARCHAR NULL,
         key VARCHAR NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,
         name VARCHAR NOT NULL,
@@ -34,7 +34,7 @@ export class CreateWorkflowFunctions1760000000067 implements MigrationInterface 
         function_id VARCHAR NOT NULL,
         function_key VARCHAR NOT NULL,
         function_version INTEGER NOT NULL DEFAULT 1,
-        workspace_id VARCHAR NOT NULL,
+        account_id VARCHAR NOT NULL,
         board_id VARCHAR NULL,
         ticket_id VARCHAR NULL,
         parent_run_id VARCHAR NULL,
@@ -54,10 +54,10 @@ export class CreateWorkflowFunctions1760000000067 implements MigrationInterface 
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )
     `);
-    await queryRunner.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_functions_global_key ON workflow_functions(key) WHERE workspace_id IS NULL');
-    await queryRunner.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_functions_workspace_key ON workflow_functions(workspace_id, key) WHERE workspace_id IS NOT NULL');
+    await queryRunner.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_functions_global_key ON workflow_functions(key) WHERE account_id IS NULL');
+    await queryRunner.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_functions_workspace_key ON workflow_functions(account_id, key) WHERE account_id IS NOT NULL');
     await queryRunner.query('CREATE INDEX IF NOT EXISTS idx_workflow_function_runs_function_created ON workflow_function_runs(function_id, created_at)');
-    await queryRunner.query('CREATE INDEX IF NOT EXISTS idx_workflow_function_runs_ticket_created ON workflow_function_runs(workspace_id, ticket_id, created_at)');
+    await queryRunner.query('CREATE INDEX IF NOT EXISTS idx_workflow_function_runs_ticket_created ON workflow_function_runs(account_id, ticket_id, created_at)');
   }
 
   public async down(_queryRunner: QueryRunner): Promise<void> {}

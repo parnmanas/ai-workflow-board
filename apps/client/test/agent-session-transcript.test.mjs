@@ -123,7 +123,7 @@ test('session list helpers: activity sort, canonical paths', () => {
     { cli: 'claude', session_id: 'new', cwd: '/a', title: 'new', created_at: null, updated_at: '2026-09-10T00:00:00Z', source: 'cli' },
   ]);
   assert.deepEqual(sorted.map((s) => s.session_id), ['new', 'old']);
-  assert.equal(sessionPath('/ws/w1', 'm1', 'claude', 'abc def'), '/ws/w1/sessions/m1/claude/abc%20def');
+  assert.equal(sessionPath('', 'm1', 'claude', 'abc def'), '/sessions/m1/claude/abc%20def');
 });
 
 test('cwdBaseName 은 표시용 마지막 경로 요소를 뽑는다 — POSIX·Windows·후행 구분자·빈 입력', () => {

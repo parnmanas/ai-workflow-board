@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import { useAuth } from '../contexts/AuthContext';
 import { getNotificationPrefs } from '../contexts/notificationPrefs';
 import { sessionPath } from '../components/sessions/sessionList.logic';
 import { playEarcon } from './earcon';
@@ -38,10 +37,9 @@ export default function WakeListener() {
   const wake = useWakeState();
   const operators = useVoiceOperators(!!config);
   const navigate = useNavigate();
-  const { currentWorkspaceId } = useAuth();
   const speech = useSpeechState();
-  const latest = useRef({ operators, workspaceId: currentWorkspaceId, navigate });
-  latest.current = { operators, workspaceId: currentWorkspaceId, navigate };
+  const latest = useRef({ operators, navigate });
+  latest.current = { operators, navigate };
   const sessionRef = useRef<HandsFreeSession | null>(null);
   const [hasLock, setHasLock] = useState(false);
   const cancelFollowUpSpeech = useRef<() => void>(() => {});
@@ -122,7 +120,7 @@ export default function WakeListener() {
       api.transcribeVoice(wav, 'wake')
         .then((t) => {
           if (run.cancelled || wakeStore.state.mode !== 'sleeping') return;
-          const { operators: list, workspaceId, navigate: go } = latest.current;
+          const { operators: list, navigate: go } = latest.current;
           const text = (t.text || '').trim();
           if (!text) { failure = transcriptionFeedback(t); return; }
           const match = matchWake(text, list);
@@ -134,13 +132,9 @@ export default function WakeListener() {
             ? list.find((op) => op.id === reportOperatorId) ?? null : null;
           const operator = match?.operator ?? answering ?? reporting;
           if (!operator) return;
-          if (!workspaceId) {
-            failure = `"${operator.name}" 을(를) 들었지만 열 워크스페이스가 없습니다 — 워크스페이스를 한 번 연 뒤에 다시 불러 주세요.`;
-            return;
-          }
           playEarcon('wake');
           wakeStore.wake(operator.id, match ? (match.rest || null) : text);
-          go(sessionPath(`/ws/${workspaceId}`, operator.manager_id, operator.cli, operator.session_id));
+          go(sessionPath(``, operator.manager_id, operator.cli, operator.session_id));
         })
         .catch((err: any) => { failure = err?.message || '이름을 확인하지 못했습니다'; })
         .finally(() => {

@@ -23,7 +23,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WorkspaceScheduleService } from '../dist/modules/workspace-schedule/workspace-schedule.service.js';
+import { WorkspaceScheduleService } from '../dist/modules/automation-schedule/automation-schedule.service.js';
 
 const MIN = 60_000;
 const NOW = new Date('2026-06-29T12:00:00Z');
@@ -66,7 +66,7 @@ function makeScheduleRepo(rows) {
       return res;
     },
     async findOne({ where }) {
-      return rows.find((r) => r.id === where.id && (where.workspace_id === undefined || r.workspace_id === where.workspace_id)) || null;
+      return rows.find((r) => r.id === where.id && (where.account_id === undefined || r.account_id === where.account_id)) || null;
     },
     async save(row) {
       this.saves.push(row.id);
@@ -84,7 +84,7 @@ function makeScheduleRepo(rows) {
         where(_clause, params) { this._ws = params?.ws ?? null; return this; },
         andWhere() { return this; },
         orderBy() { return this; },
-        async getMany() { return self.rows.filter((r) => this._ws === null || r.workspace_id === this._ws); },
+        async getMany() { return self.rows.filter((r) => this._ws === null || r.account_id === this._ws); },
       };
       return q;
     },
@@ -124,8 +124,8 @@ function makeParticipantRepo() {
 function makeMessaging() {
   return {
     calls: [],
-    async sendMessage(roomId, workspaceId, senderType, senderId, senderName, content) {
-      this.calls.push({ roomId, workspaceId, senderType, senderId, senderName, content });
+    async sendMessage(roomId, accountId, senderType, senderId, senderName, content) {
+      this.calls.push({ roomId, accountId, senderType, senderId, senderName, content });
       return { id: 'msg-1' };
     },
   };
@@ -137,7 +137,7 @@ const AGENT_UUID = '22222222-2222-2222-2222-222222222222';
 function makeSchedule(over = {}) {
   return {
     id: 'sch-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     name: 'nightly-task',
     target_agent_id: AGENT_UUID,
     task_prompt: 'do the thing',
@@ -153,7 +153,7 @@ function makeSchedule(over = {}) {
   };
 }
 
-function svcWith(rows, agents = [{ id: AGENT_UUID, workspace_id: 'ws-1', name: 'Bot' }]) {
+function svcWith(rows, agents = [{ id: AGENT_UUID, account_id: 'ws-1', name: 'Bot' }]) {
   const scheduleRepo = makeScheduleRepo(rows);
   const roomRepo = makeRoomRepo();
   const participantRepo = makeParticipantRepo();
@@ -180,7 +180,7 @@ test('due schedule opens a room, seats agent + system, sends task_prompt, advanc
 
   assert.deepEqual(dispatched, ['sch-1'], 'the due schedule is dispatched');
   assert.equal(roomRepo.created.length, 1, 'one fresh room per run');
-  assert.equal(roomRepo.created[0].workspace_id, 'ws-1');
+  assert.equal(roomRepo.created[0].account_id, 'ws-1');
   assert.equal(roomRepo.created[0].type, 'group');
   assert.equal(roomRepo.created[0].name, 'Schedule: nightly-task', 'room is named after the schedule');
   // agent + synthetic 'system' user seated
@@ -242,11 +242,11 @@ test('missing target agent fails that schedule but does not stall the sweep (cur
 
 test('cross-workspace target agent is rejected (no dispatch)', async () => {
   const sch = makeSchedule({ target_agent_id: 'agent-x' });
-  const { svc, messaging } = svcWith([sch], [{ id: 'agent-x', workspace_id: 'ws-OTHER', name: 'Foreign' }]);
+  const { svc, messaging } = svcWith([sch], [{ id: 'agent-x', account_id: 'ws-OTHER', name: 'Foreign' }]);
 
   const { dispatched } = await svc.runOnce(NOW);
   assert.deepEqual(dispatched, [], 'cross-workspace agent not dispatched');
-  assert.equal(messaging.calls.length, 0, 'no message sent across workspaces');
+  assert.equal(messaging.calls.length, 0, 'no message sent across accounts');
 });
 
 test('runNow fires regardless of enabled, stamps last_room_id, and does NOT disturb next_run_at', async () => {
@@ -265,30 +265,30 @@ test('runNow fires regardless of enabled, stamps last_room_id, and does NOT dist
 test('create: rejects both/neither cadence, requires target_agent_id + task_prompt', async () => {
   const { svc } = svcWith([]);
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p', cron: '0 3 * * *', intervalMs: 5 * MIN }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p', cron: '0 3 * * *', intervalMs: 5 * MIN }),
     /exactly one of cron or interval_ms/,
   );
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p' }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p' }),
     /one of cron or interval_ms is required/,
   );
   // 프롬프트 형태에서만 대상 에이전트가 필수다(Action 형태는 Action 이 정한다).
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetAgentId: '', taskPrompt: 'p', intervalMs: 5 * MIN }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', targetAgentId: '', taskPrompt: 'p', intervalMs: 5 * MIN }),
     /target_runtime is required/,
   );
   // 프롬프트도 action_id 도 없으면 "무엇을 할지" 가 비어 있다. Action 참조가
   // 생기면서(크론 이관) 문구가 둘을 함께 말하도록 바뀌었다 — 하나만 말하면
   // 사용자는 나머지 선택지를 모른다.
   await assert.rejects(
-    () => svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: '  ', intervalMs: 5 * MIN }),
+    () => svc.create({ accountId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: '  ', intervalMs: 5 * MIN }),
     /one of task_prompt or action_id is required/,
   );
 });
 
 test('create: a valid interval schedule precomputes next_run_at forward', async () => {
   const { svc } = svcWith([]);
-  const created = await svc.create({ workspaceId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p', intervalMs: 5 * MIN });
+  const created = await svc.create({ accountId: 'ws-1', name: 'x', targetRuntime: { manager_agent_id: AGENT_UUID, cli: 'codex', working_dir: '/tmp/work', runtime_config: { strategy: 'single', permission_mode: 'approve' } }, taskPrompt: 'p', intervalMs: 5 * MIN });
   assert.ok(created.next_run_at instanceof Date, 'next_run_at precomputed');
   assert.ok(created.next_run_at.getTime() > Date.now() - 1000, 'cursor is in the (near) future');
   assert.equal(created.interval_ms, 5 * MIN);

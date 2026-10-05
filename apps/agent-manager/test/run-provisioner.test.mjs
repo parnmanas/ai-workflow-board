@@ -83,7 +83,7 @@ test('parseRunProvision: valid object, missing fields, and bad repo', () => {
   const ok = parseRunProvision({
     kind: 'qa',
     run_id: 'r1',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: '.awb/qa/s1',
     checkout_mode: 'reuse',
     repo: { url: 'https://x/r.git', branch: 'dev' },
@@ -94,7 +94,7 @@ test('parseRunProvision: valid object, missing fields, and bad repo', () => {
   assert.deepEqual(ok.repo, { url: 'https://x/r.git', branch: 'dev' });
 
   // Defaults + coercion: unknown checkout_mode → reuse; security kind kept.
-  const sec = parseRunProvision({ kind: 'security', run_id: 'r', workspace_id: 'w', workspace_folder: 'f', checkout_mode: 'weird' });
+  const sec = parseRunProvision({ kind: 'security', run_id: 'r', account_id: 'w', workspace_folder: 'f', checkout_mode: 'weird' });
   assert.equal(sec.kind, 'security');
   assert.equal(sec.checkout_mode, 'reuse');
   assert.equal(sec.repo, null);
@@ -102,11 +102,11 @@ test('parseRunProvision: valid object, missing fields, and bad repo', () => {
   // Missing required fields / wrong type → null (ordinary chat turn).
   assert.equal(parseRunProvision(null), null);
   assert.equal(parseRunProvision({}), null);
-  assert.equal(parseRunProvision({ kind: 'qa', run_id: 'r', workspace_id: 'w' }), null); // no folder
-  assert.equal(parseRunProvision({ kind: 'bogus', run_id: 'r', workspace_id: 'w', workspace_folder: 'f' }), null);
+  assert.equal(parseRunProvision({ kind: 'qa', run_id: 'r', account_id: 'w' }), null); // no folder
+  assert.equal(parseRunProvision({ kind: 'bogus', run_id: 'r', account_id: 'w', workspace_folder: 'f' }), null);
 
   // repo without a usable url → repo null.
-  const noUrl = parseRunProvision({ kind: 'qa', run_id: 'r', workspace_id: 'w', workspace_folder: 'f', repo: { branch: 'x' } });
+  const noUrl = parseRunProvision({ kind: 'qa', run_id: 'r', account_id: 'w', workspace_folder: 'f', repo: { branch: 'x' } });
   assert.equal(noUrl.repo, null);
 });
 
@@ -116,7 +116,7 @@ test('parseRunProvision: accepts the new action/chat kinds', () => {
   const action = parseRunProvision({
     kind: 'action',
     run_id: 'run-a1',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: '.awb/act/abc12345',
     checkout_mode: 'reuse',
     repo: { url: 'https://x/r.git' },
@@ -130,7 +130,7 @@ test('parseRunProvision: accepts the new action/chat kinds', () => {
   const chat = parseRunProvision({
     kind: 'chat',
     run_id: 'room-c1',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: '.awb/chat/def67890',
     checkout_mode: 'reuse',
   });
@@ -142,7 +142,7 @@ test('parseRunProvision: orchestration kind을 수용한다(ticket 2dc3c62f, Mis
   const orch = parseRunProvision({
     kind: 'orchestration',
     run_id: 'step-1',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: '.awb/orch/mission12/only-step',
     checkout_mode: 'reuse',
   });
@@ -155,7 +155,7 @@ test('provisionRunWorkspace: repo 없는 orchestration step은 격리된 폴더 
   const r = await provisionRunWorkspace({
     kind: 'orchestration',
     run_id: 'step-2',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: '.awb/orch/mission34/step-two',
     checkout_mode: 'reuse',
     repo: null,
@@ -172,7 +172,7 @@ test('provisionRunWorkspace: orchestration workspace_folder의 path traversal은
   const r = await provisionRunWorkspace({
     kind: 'orchestration',
     run_id: 'step-3',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: `../../../../../../../../../..${victimRoot}`,
     checkout_mode: 'fresh',
     repo: null,
@@ -209,7 +209,7 @@ test('provisionRunWorkspace: touches a .awb-last-used marker on every successful
 
   // repo 없는 경로(모든 채팅 프로비저닝이 취하는 형태 — repo:null).
   const noRepo = await provisionRunWorkspace(
-    { kind: 'chat', run_id: 'room-m1', workspace_id: 'w1', workspace_folder: '.awb/chat/marker-noop', checkout_mode: 'reuse', repo: null },
+    { kind: 'chat', run_id: 'room-m1', account_id: 'w1', workspace_folder: '.awb/chat/marker-noop', checkout_mode: 'reuse', repo: null },
     BASE,
   );
   assert.equal(noRepo.ok, true);
@@ -221,7 +221,7 @@ test('provisionRunWorkspace: touches a .awb-last-used marker on every successful
   // 다시 touch 해야 한다 — sweepRunWorkspaces 는 이를 "마지막 사용"으로 읽지 "최초 사용"으로 읽지 않는다.
   await new Promise((r) => setTimeout(r, 5));
   const again = await provisionRunWorkspace(
-    { kind: 'chat', run_id: 'room-m1', workspace_id: 'w1', workspace_folder: '.awb/chat/marker-noop', checkout_mode: 'reuse', repo: null },
+    { kind: 'chat', run_id: 'room-m1', account_id: 'w1', workspace_folder: '.awb/chat/marker-noop', checkout_mode: 'reuse', repo: null },
     BASE,
   );
   assert.equal(again.ok, true);
@@ -231,7 +231,7 @@ test('provisionRunWorkspace: touches a .awb-last-used marker on every successful
   // 클론(action) 경로도 마커를 받는다.
   const remote = makeRemote();
   const cloned = await provisionRunWorkspace(
-    { kind: 'action', run_id: 'run-m2', workspace_id: 'w1', workspace_folder: '.awb/act/marker-clone', checkout_mode: 'reuse', repo: { url: remote.url } },
+    { kind: 'action', run_id: 'run-m2', account_id: 'w1', workspace_folder: '.awb/act/marker-clone', checkout_mode: 'reuse', repo: { url: remote.url } },
     BASE,
   );
   assert.equal(cloned.ok, true);
@@ -240,7 +240,7 @@ test('provisionRunWorkspace: touches a .awb-last-used marker on every successful
   // 실패한 프로비저닝(path traversal 거부)은 마커를 써서는 안 된다 —
   // 최근 사용됨으로 표시할 폴더 자체가 없기 때문이다.
   const failed = await provisionRunWorkspace(
-    { kind: 'action', run_id: 'run-m3', workspace_id: 'w1', workspace_folder: '../../../../etc/awb-marker-traversal', checkout_mode: 'fresh', repo: null },
+    { kind: 'action', run_id: 'run-m3', account_id: 'w1', workspace_folder: '../../../../etc/awb-marker-traversal', checkout_mode: 'fresh', repo: null },
     BASE,
   );
   assert.equal(failed.ok, false);
@@ -248,7 +248,7 @@ test('provisionRunWorkspace: touches a .awb-last-used marker on every successful
 
 test('reuse: rooted at working_dir; first clones, second fetch+ff-pulls the same folder', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'r1', workspace_id: 'w1', workspace_folder: '.awb/qa/reuse-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'r1', account_id: 'w1', workspace_folder: '.awb/qa/reuse-s', checkout_mode: 'reuse', repo: { url: remote.url } };
 
   const first = await provisionRunWorkspace(base, BASE);
   assert.equal(first.ok, true);
@@ -272,7 +272,7 @@ test('reuse: rooted at working_dir; first clones, second fetch+ff-pulls the same
 
 test('fresh: wipes the folder and re-clones (a stray file is gone)', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'r2', workspace_id: 'w1', workspace_folder: '.awb/qa/fresh-s', checkout_mode: 'fresh', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'r2', account_id: 'w1', workspace_folder: '.awb/qa/fresh-s', checkout_mode: 'fresh', repo: { url: remote.url } };
 
   const first = await provisionRunWorkspace(base, BASE);
   assert.equal(first.ok, true);
@@ -289,7 +289,7 @@ test('fresh: wipes the folder and re-clones (a stray file is gone)', async () =>
 });
 
 test('no repo: ensures the folder exists without cloning', async () => {
-  const r = await provisionRunWorkspace({ kind: 'security', run_id: 'r3', workspace_id: 'w1', workspace_folder: '.awb/qa/p1', checkout_mode: 'reuse', repo: null }, BASE);
+  const r = await provisionRunWorkspace({ kind: 'security', run_id: 'r3', account_id: 'w1', workspace_folder: '.awb/qa/p1', checkout_mode: 'reuse', repo: null }, BASE);
   assert.equal(r.ok, true);
   assert.equal(r.dir, join(BASE, '.awb/qa/p1'), 'rooted at working_dir');
   assert.ok(existsSync(r.dir), 'folder created');
@@ -298,7 +298,7 @@ test('no repo: ensures the folder exists without cloning', async () => {
 });
 
 test('fallback: an empty baseWorkingDir roots at AGENT_MANAGER_HOME (degenerate dispatch) and WARNS', async () => {
-  const r = await provisionRunWorkspace({ kind: 'qa', run_id: 'r6', workspace_id: 'w1', workspace_folder: '.awb/qa/fallback-s', checkout_mode: 'reuse', repo: null }, '');
+  const r = await provisionRunWorkspace({ kind: 'qa', run_id: 'r6', account_id: 'w1', workspace_folder: '.awb/qa/fallback-s', checkout_mode: 'reuse', repo: null }, '');
   assert.equal(r.ok, true);
   assert.equal(r.dir, join(HOME, '.awb/qa/fallback-s'), 'falls back to the manager home when no working_dir');
   assert.ok(existsSync(r.dir), 'folder created');
@@ -353,7 +353,7 @@ test('path traversal: a ../ workspace_folder is rejected and does NOT rm outside
   const r = await provisionRunWorkspace({
     kind: 'qa',
     run_id: 'r5',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: `../../../../../../../../../..${victimRoot}`,
     checkout_mode: 'fresh',
     repo: null,
@@ -367,7 +367,7 @@ test('clone failure (bad url): ok=false with an error, no throw', async () => {
   const r = await provisionRunWorkspace({
     kind: 'qa',
     run_id: 'r4',
-    workspace_id: 'w1',
+    account_id: 'w1',
     workspace_folder: '.awb/qa/badurl-s',
     checkout_mode: 'reuse',
     repo: { url: join(tmpdir(), 'definitely-not-a-repo-xyz.git') },
@@ -379,7 +379,7 @@ test('clone failure (bad url): ok=false with an error, no throw', async () => {
 
 test('concurrency: two same-folder provisionings are serialized (no index.lock race; later run notes the wait)', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'cc1', workspace_id: 'w1', workspace_folder: '.awb/qa/concurrent-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'cc1', account_id: 'w1', workspace_folder: '.awb/qa/concurrent-s', checkout_mode: 'reuse', repo: { url: remote.url } };
 
   // Fire two provisionings for the SAME folder at once. Without the per-folder
   // mutex their concurrent clone/fetch/pull would collide on .git/index.lock and
@@ -408,7 +408,7 @@ test('concurrency: two same-folder provisionings are serialized (no index.lock r
 
 test('stale index.lock (aged crash remnant) is swept proactively; run proceeds and notes it', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'lk1', workspace_id: 'w1', workspace_folder: '.awb/qa/lock-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'lk1', account_id: 'w1', workspace_folder: '.awb/qa/lock-s', checkout_mode: 'reuse', repo: { url: remote.url } };
 
   const first = await provisionRunWorkspace(base, BASE);
   assert.equal(first.ok, true);
@@ -433,7 +433,7 @@ test('stale index.lock (aged crash remnant) is swept proactively; run proceeds a
 
 test('fresh index.lock actively blocking a git op is reclaimed reactively and retried', async () => {
   const remote = makeRemote();
-  const base = { kind: 'qa', run_id: 'lk2', workspace_id: 'w1', workspace_folder: '.awb/qa/lock-reactive-s', checkout_mode: 'reuse', repo: { url: remote.url } };
+  const base = { kind: 'qa', run_id: 'lk2', account_id: 'w1', workspace_folder: '.awb/qa/lock-reactive-s', checkout_mode: 'reuse', repo: { url: remote.url } };
 
   const first = await provisionRunWorkspace(base, BASE);
   assert.equal(first.ok, true);
@@ -487,7 +487,7 @@ test('provisionRunWorkspace: credential 주입 — fresh clone origin scrub + aw
     const p = {
       kind: 'qa',
       run_id: 'cred1',
-      workspace_id: 'w1',
+      account_id: 'w1',
       workspace_folder: '.awb/qa/cred-priv',
       checkout_mode: 'reuse',
       repo: { url: cleanUrl, branch: 'main', credential: { username: 'tok-user', token: 'sekret' } },
@@ -538,7 +538,7 @@ test('parseRunProvision: repo.credential 파싱 (유효 / 토큰 없음 / userna
   const withCred = parseRunProvision({
     kind: 'qa',
     run_id: 'r',
-    workspace_id: 'w',
+    account_id: 'w',
     workspace_folder: '.awb/qa/s',
     checkout_mode: 'reuse',
     repo: { url: 'https://x/r.git', credential: { username: 'u', token: 't' } },
@@ -549,7 +549,7 @@ test('parseRunProvision: repo.credential 파싱 (유효 / 토큰 없음 / userna
   const tokenOnly = parseRunProvision({
     kind: 'qa',
     run_id: 'r',
-    workspace_id: 'w',
+    account_id: 'w',
     workspace_folder: '.awb/qa/s',
     checkout_mode: 'reuse',
     repo: { url: 'https://x/r.git', credential: { token: 't' } },
@@ -561,7 +561,7 @@ test('parseRunProvision: repo.credential 파싱 (유효 / 토큰 없음 / userna
     const r = parseRunProvision({
       kind: 'qa',
       run_id: 'r',
-      workspace_id: 'w',
+      account_id: 'w',
       workspace_folder: '.awb/qa/s',
       checkout_mode: 'reuse',
       repo: { url: 'https://x/r.git', credential: bad },

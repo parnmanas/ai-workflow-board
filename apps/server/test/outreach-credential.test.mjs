@@ -1,6 +1,6 @@
 // Unit tests for resolveOutreachCredential (ticket 2500fea3 D1) — mirrors
 // git-credential-resolution.test.mjs's shape, since outreach-credential.ts
-// deliberately copies resolveGitCredential's workspace-scope contract.
+// deliberately copies resolveGitCredential's account-scope contract.
 // Priority case per the ticket's plan: (c) a credential scoped to a DIFFERENT
 // workspace must be REJECTED, not silently resolved to no token — that gap
 // is this feature's biggest security risk.
@@ -23,9 +23,9 @@ test('no credential_id resolves to null without querying', async () => {
   assert.equal(resolved, null);
 });
 
-test('a GLOBAL credential (workspace_id=null) resolves regardless of caller workspace', async () => {
+test('a GLOBAL credential (account_id=null) resolves regardless of caller workspace', async () => {
   const resolved = await resolveOutreachCredential(repoWith({
-    id: 'cred-1', workspace_id: null,
+    id: 'cred-1', account_id: null,
     encrypted_data: JSON.stringify({ token: 'global-token' }),
   }), 'cred-1', 'ws-1');
   assert.deepEqual(resolved, { username: undefined, token: 'global-token', extra: {} });
@@ -33,7 +33,7 @@ test('a GLOBAL credential (workspace_id=null) resolves regardless of caller work
 
 test('a credential scoped to the SAME workspace resolves', async () => {
   const resolved = await resolveOutreachCredential(repoWith({
-    id: 'cred-1', workspace_id: 'ws-1',
+    id: 'cred-1', account_id: 'ws-1',
     encrypted_data: JSON.stringify({ token: 'ws-token' }),
   }), 'cred-1', 'ws-1');
   assert.deepEqual(resolved, { username: undefined, token: 'ws-token', extra: {} });
@@ -41,7 +41,7 @@ test('a credential scoped to the SAME workspace resolves', async () => {
 
 test('extra passthrough: non-standard string fields (e.g. Reddit client_id/client_secret) survive', async () => {
   const resolved = await resolveOutreachCredential(repoWith({
-    id: 'cred-1', workspace_id: 'ws-1',
+    id: 'cred-1', account_id: 'ws-1',
     encrypted_data: JSON.stringify({
       token: 'refresh-token-abc',
       username: 'bot-user',
@@ -59,7 +59,7 @@ test('extra passthrough: non-standard string fields (e.g. Reddit client_id/clien
 
 test('extra passthrough drops non-string fields and empty strings', async () => {
   const resolved = await resolveOutreachCredential(repoWith({
-    id: 'cred-1', workspace_id: 'ws-1',
+    id: 'cred-1', account_id: 'ws-1',
     encrypted_data: JSON.stringify({ token: 'tok', extra_num: 42, extra_empty: '  ', extra_null: null }),
   }), 'cred-1', 'ws-1');
   assert.deepEqual(resolved.extra, {});
@@ -68,7 +68,7 @@ test('extra passthrough drops non-string fields and empty strings', async () => 
 test('a credential with no token still throws even when extra fields are present', async () => {
   await assert.rejects(
     resolveOutreachCredential(repoWith({
-      id: 'cred-1', workspace_id: 'ws-1',
+      id: 'cred-1', account_id: 'ws-1',
       encrypted_data: JSON.stringify({ client_id: 'x', client_secret: 'y' }),
     }), 'cred-1', 'ws-1'),
     /has no token/,
@@ -80,7 +80,7 @@ test('client_secret in the blob never leaks into a thrown error message', async 
   let caught = null;
   try {
     await resolveOutreachCredential(repoWith({
-      id: 'cred-1', workspace_id: 'ws-other',
+      id: 'cred-1', account_id: 'ws-other',
       encrypted_data: JSON.stringify({ token: 'tok', client_secret: secret }),
     }), 'cred-1', 'ws-1');
   } catch (err) {
@@ -93,7 +93,7 @@ test('client_secret in the blob never leaks into a thrown error message', async 
 test('a credential scoped to a DIFFERENT workspace is rejected, not silently ignored', async () => {
   await assert.rejects(
     resolveOutreachCredential(repoWith({
-      id: 'cred-1', workspace_id: 'ws-other',
+      id: 'cred-1', account_id: 'ws-other',
       encrypted_data: JSON.stringify({ token: 'other-ws-token' }),
     }), 'cred-1', 'ws-1'),
     (err) => err instanceof OutreachCredentialResolutionError && /different workspace/.test(err.message),
@@ -110,7 +110,7 @@ test('a nonexistent credential id is rejected (never falls back to anonymous)', 
 test('an unreadable credential never falls back to anonymous access', async () => {
   await assert.rejects(
     resolveOutreachCredential(repoWith({
-      id: 'cred-1', workspace_id: 'ws-1', encrypted_data: 'enc:corrupted',
+      id: 'cred-1', account_id: 'ws-1', encrypted_data: 'enc:corrupted',
     }), 'cred-1', 'ws-1'),
     (err) => err instanceof OutreachCredentialResolutionError && /unreadable/.test(err.message),
   );
@@ -119,7 +119,7 @@ test('an unreadable credential never falls back to anonymous access', async () =
 test('a credential with an empty token reports the real error', async () => {
   await assert.rejects(
     resolveOutreachCredential(repoWith({
-      id: 'cred-1', workspace_id: 'ws-1', encrypted_data: JSON.stringify({ token: '' }),
+      id: 'cred-1', account_id: 'ws-1', encrypted_data: JSON.stringify({ token: '' }),
     }), 'cred-1', 'ws-1'),
     /has no token/,
   );
@@ -130,7 +130,7 @@ test('rejecting a cross-workspace credential never leaks its token in the error 
   let caught = null;
   try {
     await resolveOutreachCredential(repoWith({
-      id: 'cred-1', workspace_id: 'ws-other',
+      id: 'cred-1', account_id: 'ws-other',
       encrypted_data: JSON.stringify({ token: secretToken }),
     }), 'cred-1', 'ws-1');
   } catch (err) {

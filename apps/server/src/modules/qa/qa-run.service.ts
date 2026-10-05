@@ -72,7 +72,7 @@ export interface StartQaRunResult {
 }
 
 export interface StartBatchArgs {
-  workspaceId: string;
+  accountId: string;
   // Explicit ordered scenario ids, OR `all: true` to expand to every enabled
   // scenario in the workspace. Exactly one is used —
   // scenarioIds wins if both are given.
@@ -85,7 +85,7 @@ export interface StartBatchArgs {
 
 export interface RecordStepArgs {
   runId: string;
-  workspaceId: string;
+  accountId: string;
   idx: number;
   status: QaStepResult['status'];
   log?: string;
@@ -94,7 +94,7 @@ export interface RecordStepArgs {
 
 export interface RecordHeartbeatArgs {
   runId: string;
-  workspaceId: string;
+  accountId: string;
   /** Monotonic progress token; only a STRICT increase resets the liveness deadline. */
   progressToken: number;
   note?: string;
@@ -146,19 +146,19 @@ export class QaRunService {
 
   // ── Reads ─────────────────────────────────────────────────────────────────
 
-  async listRuns(scenarioId: string, workspaceId: string, limit = 20): Promise<QaRun[]> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    await findOrFail(this.scenarioRepo, { where: { id: scenarioId, workspace_id: workspaceId } }, 'QA scenario not found in workspace');
+  async listRuns(scenarioId: string, accountId: string, limit = 20): Promise<QaRun[]> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    await findOrFail(this.scenarioRepo, { where: { id: scenarioId, account_id: accountId } }, 'QA scenario not found in workspace');
     return this.runRepo.find({
-      where: { scenario_id: scenarioId, workspace_id: workspaceId },
+      where: { scenario_id: scenarioId, account_id: accountId },
       order: { created_at: 'DESC' },
       take: Math.min(limit, 100),
     });
   }
 
-  async getRun(runId: string, workspaceId: string): Promise<QaRun> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.runRepo, { where: { id: runId, workspace_id: workspaceId } }, 'QA run not found in workspace');
+  async getRun(runId: string, accountId: string): Promise<QaRun> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.runRepo, { where: { id: runId, account_id: accountId } }, 'QA run not found in workspace');
   }
 
   // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -166,11 +166,11 @@ export class QaRunService {
   async startQaRun(args: StartQaRunArgs): Promise<StartQaRunResult> {
     const scenario = await findOrFail(this.scenarioRepo, { where: { id: args.scenarioId } }, 'QA scenario not found');
     // Run-creation-rate ceiling (ticket a51ec6d9) — head of the chokepoint,
-    // before any side effect below. Workspace-scoped; throws 429 on breach.
+    // before any side effect below. Account-scoped; throws 429 on breach.
     await enforceRunBudget(
       { dataSource: this.dataSource, roomMessagingService: this.messaging, logger: this.logService },
       'qa',
-      scenario.workspace_id,
+      scenario.account_id,
     );
     if (!scenario.target_agent_id) throw makeError(400, 'QA scenario has no target agent set');
     if (scenario.enabled === false) throw makeError(400, 'QA scenario is disabled');
@@ -187,7 +187,7 @@ export class QaRunService {
     const prompt = renderQaRunPrompt(scenario, runId);
 
     const room = await this.roomRepo.save(this.roomRepo.create({
-      workspace_id: scenario.workspace_id,
+      account_id: scenario.account_id,
       type: 'group',
       name: `QA: ${scenario.name} · ${runId.slice(0, 8)}`,
       last_message_at: null,
@@ -211,7 +211,7 @@ export class QaRunService {
     if (targetEnv) {
       const dep = await findLatestDeployment(
         this.dataSource.getRepository(Deployment),
-        scenario.workspace_id,
+        scenario.account_id,
         targetEnv,
       );
       testedCommit = dep?.deployed_commit_sha ?? '';
@@ -220,7 +220,7 @@ export class QaRunService {
     const run = await this.runRepo.save(this.runRepo.create({
       id: runId,
       scenario_id: scenario.id,
-      workspace_id: scenario.workspace_id,
+      account_id: scenario.account_id,
       status: 'running',
       room_id: room.id,
       step_results: [],
@@ -277,7 +277,7 @@ export class QaRunService {
       kind: 'qa',
       id: scenario.id,
       runId,
-      workspaceId: scenario.workspace_id,
+      accountId: scenario.account_id,
       workspaceFolder: scenario.workspace_folder,
       repoRef: scenario.repo_ref,
       checkoutMode: scenario.checkout_mode,
@@ -286,7 +286,7 @@ export class QaRunService {
     try {
       await this.messaging.sendMessage(
         room.id,
-        scenario.workspace_id,
+        scenario.account_id,
         'user',
         'system',
         'QA',
@@ -344,7 +344,7 @@ export class QaRunService {
   // ── Result accumulation ────────────────────────────────────────────────────
 
   async recordStep(args: RecordStepArgs): Promise<QaRun> {
-    const run = await this.getRun(args.runId, args.workspaceId);
+    const run = await this.getRun(args.runId, args.accountId);
     const results: QaStepResult[] = Array.isArray(run.step_results) ? [...run.step_results] : [];
     const artifacts = (args.artifactResourceIds || []).filter(Boolean);
 
@@ -384,7 +384,7 @@ export class QaRunService {
    * Rejected once the run is terminal — there is nothing left to keep alive.
    */
   async recordHeartbeat(args: RecordHeartbeatArgs): Promise<QaRun> {
-    const run = await this.getRun(args.runId, args.workspaceId);
+    const run = await this.getRun(args.runId, args.accountId);
     if (TERMINAL_QA_RUN_STATUSES.includes(run.status)) {
       throw makeError(409, `QA run is already '${run.status}'; heartbeats are only accepted while running/pending`);
     }
@@ -410,14 +410,14 @@ export class QaRunService {
    * finished run). The phase id is stored verbatim — it need not exist in the
    * resolved qa_phases model; an unmatched phase simply falls back in the reaper.
    *
-   * workspaceId is required (scopes the read, like recordStep/completeRun). The
+   * accountId is required (scopes the read, like recordStep/completeRun). The
    * MCP/REST surface that exposes this is a follow-up ticket; this is the service
    * entry point so callers (and tests) can drive transitions now.
    */
-  async setPhase(runId: string, workspaceId: string, phase: string): Promise<QaRun> {
+  async setPhase(runId: string, accountId: string, phase: string): Promise<QaRun> {
     const phaseId = (phase || '').trim();
     if (!phaseId) throw makeError(400, 'phase is required');
-    const run = await this.getRun(runId, workspaceId);
+    const run = await this.getRun(runId, accountId);
     if (TERMINAL_QA_RUN_STATUSES.includes(run.status)) {
       throw makeError(409, `QA run is already '${run.status}'; phase transitions are only accepted while running/pending`);
     }
@@ -436,8 +436,8 @@ export class QaRunService {
     return this.runRepo.save(run);
   }
 
-  async attachArtifact(runId: string, workspaceId: string, resourceIds: string[]): Promise<QaRun> {
-    const run = await this.getRun(runId, workspaceId);
+  async attachArtifact(runId: string, accountId: string, resourceIds: string[]): Promise<QaRun> {
+    const run = await this.getRun(runId, accountId);
     const add = (resourceIds || []).filter(Boolean);
     if (add.length) {
       const all = new Set([...(run.artifact_resource_ids || []), ...add]);
@@ -446,8 +446,8 @@ export class QaRunService {
     return this.runRepo.save(run);
   }
 
-  async completeRun(runId: string, workspaceId: string, status: QaRunStatus, summary?: string, builtCommit?: string): Promise<QaRun> {
-    const run = await this.getRun(runId, workspaceId);
+  async completeRun(runId: string, accountId: string, status: QaRunStatus, summary?: string, builtCommit?: string): Promise<QaRun> {
+    const run = await this.getRun(runId, accountId);
     // `build_failed` (ticket 80d52250) is accepted here — it is set by
     // report_build_failure via this same choke point. It bypasses the PASSED
     // gates below (they only fire on status==='passed') and is treated as a
@@ -635,9 +635,9 @@ export class QaRunService {
 
   // ── Sequential batches ──────────────────────────────────────────────────────
 
-  async getBatch(batchId: string, workspaceId: string): Promise<QaRunBatch> {
-    if (!workspaceId) throw makeError(400, 'workspace_id is required');
-    return findOrFail(this.batchRepo, { where: { id: batchId, workspace_id: workspaceId } }, 'QA batch not found in workspace');
+  async getBatch(batchId: string, accountId: string): Promise<QaRunBatch> {
+    if (!accountId) throw makeError(400, 'account_id is required');
+    return findOrFail(this.batchRepo, { where: { id: batchId, account_id: accountId } }, 'QA batch not found in workspace');
   }
 
   /**
@@ -648,14 +648,14 @@ export class QaRunService {
    * at once, since startQaRun returns before the run completes.)
    */
   async startBatch(args: StartBatchArgs): Promise<QaRunBatch> {
-    if (!args.workspaceId) throw makeError(400, 'workspace_id is required');
+    if (!args.accountId) throw makeError(400, 'account_id is required');
     const scenarioIds = await this._resolveBatchScenarioIds(args);
     if (scenarioIds.length === 0) {
       throw makeError(400, 'no runnable scenarios for this batch (none selected, or none enabled in scope)');
     }
 
     const batch = await this.batchRepo.save(this.batchRepo.create({
-      workspace_id: args.workspaceId,
+      account_id: args.accountId,
       scenario_ids: scenarioIds,
       run_ids: [],
       current_index: 0,
@@ -678,7 +678,7 @@ export class QaRunService {
     // misleadingly "successful" empty batch (ticket a51ec6d9 review round 2,
     // subsidiary point).
     await this._dispatchBatchIndex(batch, 0, { throwOnBudget: true });
-    return this.getBatch(batch.id, args.workspaceId);
+    return this.getBatch(batch.id, args.accountId);
   }
 
   /**
@@ -769,7 +769,7 @@ export class QaRunService {
     // scenarios in this workspace so a stale/foreign id can't wedge the batch.
     if (Array.isArray(args.scenarioIds) && args.scenarioIds.length > 0) {
       const found = await this.scenarioRepo.find({
-        where: { id: In(args.scenarioIds), workspace_id: args.workspaceId },
+        where: { id: In(args.scenarioIds), account_id: args.accountId },
       });
       const byId = new Map(found.map((s) => [s.id, s]));
       return args.scenarioIds.filter((id) => {
@@ -779,7 +779,7 @@ export class QaRunService {
     }
     if (args.all) {
       const qb = this.scenarioRepo.createQueryBuilder('s')
-        .where('s.workspace_id = :ws', { ws: args.workspaceId })
+        .where('s.account_id = :ws', { ws: args.accountId })
         .andWhere('s.enabled = :en', { en: true });
       const rows = await qb.orderBy('s.name', 'ASC').getMany();
       return rows.map((s) => s.id);

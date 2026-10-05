@@ -95,8 +95,8 @@ export const buildRepoRefSchema = z
 // ── Prompt block — "check the registry before you build" (ticket #2/#3) ────────
 
 export interface BuildRegistryPromptInput {
-  /** Workspace id to pass to the tools. */
-  workspace_id: string;
+  /** Account id to pass to the tools. */
+  account_id: string;
   /** The QA/SecurityRun id — report_build_failure finalizes this run. */
   run_id: string;
   kind: 'qa' | 'security';
@@ -153,16 +153,16 @@ export function renderBuildRegistryBlock(input: BuildRegistryPromptInput): strin
     ``,
     `1. Resolve the working-folder HEAD: \`HEAD=$(git -C ${input.work_path} rev-parse HEAD)\`.`,
     `2. **Query the registry** — call \`get_latest_artifact\` with`,
-    `   \`{ "workspace_id": "${input.workspace_id}", "repo": ${repoJson}, "target": "${target}", "commit_sha": "$HEAD" }\`${repoNote}.`,
+    `   \`{ "account_id": "${input.account_id}", "repo": ${repoJson}, "target": "${target}", "commit_sha": "$HEAD" }\`${repoNote}.`,
     `   - If the result has \`"is_fresh": true\`, an \`ok\` artifact for THIS commit already exists at`,
     `     \`commit_match.artifact_path\` — **REUSE it and SKIP the build entirely**. Go straight to the run steps.`,
     `   - Otherwise, run the build as described in the working-folder block.`,
     `3. **On a successful build**, register it so the next run (any scenario on this repo) can reuse it —`,
     `   \`register_build_artifact\` with`,
-    `   \`{ "workspace_id": "${input.workspace_id}", "repo": ${repoJson}, "target": "${target}", "commit_sha": "$HEAD", "artifact_path": "<abs path to the built exe/output>", "host": "$(hostname)" }\`.`,
+    `   \`{ "account_id": "${input.account_id}", "repo": ${repoJson}, "target": "${target}", "commit_sha": "$HEAD", "artifact_path": "<abs path to the built exe/output>", "host": "$(hostname)" }\`.`,
     `4. **If the build FAILS**, do NOT call \`complete_qa_run\`. Call`,
     `   \`report_build_failure\` with`,
-    `   \`{ "workspace_id": "${input.workspace_id}", "run_id": "${input.run_id}", "repo": ${repoJson}, "target": "${target}", "commit_sha": "$HEAD", "log_summary": "<the build error tail, ~last 40 lines>" }\`.`,
+    `   \`{ "account_id": "${input.account_id}", "run_id": "${input.run_id}", "repo": ${repoJson}, "target": "${target}", "commit_sha": "$HEAD", "log_summary": "<the build error tail, ~last 40 lines>" }\`.`,
     `   This finalizes the run as \`build_failed\` (a first-class build death — never a phantom \`running\` or a`,
     `   generic \`error\`) and attaches the build log to the auto-filed fix ticket.`,
   ].join('\n');

@@ -73,7 +73,7 @@ function registerTools(ctxOverrides = {}) {
 
 async function makeTicket(overrides = {}) {
   return ticketRepo.save(ticketRepo.create({
-    title: 'T', workspace_id: 'w1', pending_user_action: false, ...overrides,
+    title: 'T', account_id: 'w1', pending_user_action: false, ...overrides,
   }));
 }
 /** agent-manager가 fire-and-forget 자동 알림에 사용하는 페어링 발급 신원이다. */
@@ -93,7 +93,7 @@ function parse(res) {
 function authenticatedExtra(agent) {
   const sessionId = `auto-notice-${agent.id}-${Math.random()}`;
   sessionStore.register(sessionId, { close: async () => {} }, {}, {
-    agentId: agent.id, agentName: agent.name, workspaceId: 'w1', source: 'db',
+    agentId: agent.id, agentName: agent.name, accountId: 'w1', source: 'db',
   });
   return { sessionId };
 }

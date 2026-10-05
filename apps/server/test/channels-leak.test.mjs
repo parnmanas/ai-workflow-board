@@ -4,14 +4,14 @@
 //
 // Purpose: Verify that workspace A's channels cannot be accessed by users belonging only to
 // workspace B. This test establishes the isolation CONTRACT that Phase 6 must satisfy
-// when WorkspaceGuard is applied to ChannelsController.
+// when AccountGuard is applied to ChannelsController.
 //
 // Current state (Phase 5):
 //   - ChannelsController uses PermissionGuard + MANAGE_CHANNELS — no workspace scoping.
-//   - GET /api/channels returns ALL channels across all workspaces (no workspace_id filter).
-//   - Cross-workspace isolation is NOT enforced until Phase 6 adds WorkspaceGuard.
+//   - GET /api/channels returns ALL channels across all accounts (no account_id filter).
+//   - Cross-workspace isolation is NOT enforced until Phase 6 adds AccountGuard.
 //
-// Tests marked it.todo() will pass after Phase 6 applies WorkspaceGuard to ChannelsController.
+// Tests marked it.todo() will pass after Phase 6 applies AccountGuard to ChannelsController.
 //
 // Design (mirrors proxy-passthrough.test.mjs):
 //   - Boots NestJS app in-process from compiled dist/.
@@ -81,7 +81,7 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
     const authService = app.get(AuthService);
     const dataSource = app.get(getDataSourceToken());
     const userRepo = dataSource.getRepository('User');
-    const wsRepo = dataSource.getRepository('Workspace');
+    const wsRepo = dataSource.getRepository('Account');
 
     // ─── Create admin user directly via TypeORM ────────────────────────────────
     const adminUser = await userRepo.save(userRepo.create({
@@ -92,7 +92,7 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
     }));
     adminToken = authService.createSession(adminUser.id);
 
-    // ─── Create two workspaces directly ───────────────────────────────────────
+    // ─── Create two accounts directly ───────────────────────────────────────
     wsA = await wsRepo.save(wsRepo.create({ name: 'Leak WS A (channels)', description: 'Leak test' }));
     wsB = await wsRepo.save(wsRepo.create({ name: 'Leak WS B (channels)', description: 'Leak test' }));
 
@@ -109,18 +109,18 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
     await rebacRepo.save(rebacRepo.create({
       subject_type: 'user', subject_id: userBRec.id,
       relation: 'member',
-      object_type: 'workspace', object_id: wsB.id,
+      object_type: 'account', object_id: wsB.id,
     }));
 
     // ─── Create a channel in workspace A via HTTP ──────────────────────────────
-    // Phase 6+: the channels controller persists workspace_id from the
-    // X-Workspace-Id header (ChannelsController.create → workspace_id: workspaceId).
-    // Create channel A scoped to ws_a so the workspace-scoped list/get paths
+    // Phase 6+: the channels controller persists account_id from the
+    // X-Account-Id header (ChannelsController.create → account_id: accountId).
+    // Create channel A scoped to ws_a so the account-scoped list/get paths
     // below can find (or correctly exclude) it.
     const channelRes = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
       method: 'POST',
-      workspaceId: wsA.id,
+      accountId: wsA.id,
       body: {
         name: `Leak Channel WS-A ${randomUUID()}`,
         type: 'discord',
@@ -149,11 +149,11 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
   });
 
   it('admin can list channels and sees the created channel (control)', async () => {
-    // Channels are workspace-scoped — the admin must supply the ws_a header to
+    // Channels are account-scoped — the admin must supply the ws_a header to
     // see ws_a's channels (an admin with no workspace context gets an empty list).
     const res = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
-      workspaceId: wsA.id,
+      accountId: wsA.id,
     });
     assert.equal(res.status, 200);
     const channels = Array.isArray(res.data) ? res.data : [];
@@ -181,18 +181,18 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
   });
 
   // ─── Phase 6 isolation contract ───────────────────────────────────────────
-  // The following tests document the EXPECTED behavior once WorkspaceGuard is applied
-  // to ChannelsController in Phase 6. Current ChannelsController has no workspace_id
-  // column on Channel entity — Phase 6 must add workspace_id to Channel and apply scoping.
+  // The following tests document the EXPECTED behavior once AccountGuard is applied
+  // to ChannelsController in Phase 6. Current ChannelsController has no account_id
+  // column on Channel entity — Phase 6 must add account_id to Channel and apply scoping.
 
-  it('user B with X-Workspace-Id: ws_b cannot list channels from ws_a — returns empty or 403 after Phase 6', async () => {
-    // User B is a member of ws_b, not ws_a — channels created without workspace_id
-    // should not be visible when scoped to ws_b (empty list since channelA has no workspace_id)
+  it('user B with X-Account-Id: ws_b cannot list channels from ws_a — returns empty or 403 after Phase 6', async () => {
+    // User B is a member of ws_b, not ws_a — channels created without account_id
+    // should not be visible when scoped to ws_b (empty list since channelA has no account_id)
     const res = await apiRequest(BASE_URL, '/channels', {
       token: tokenB,
-      workspaceId: wsB.id,
+      accountId: wsB.id,
     });
-    // WorkspaceGuard passes (user B is member of ws_b), but channel list filtered to ws_b scope → empty
+    // AccountGuard passes (user B is member of ws_b), but channel list filtered to ws_b scope → empty
     assert.ok(
       res.status === 200 || res.status === 403,
       `Expected 200 (empty) or 403 for ws_b scoped channel list, got ${res.status}`,
@@ -202,26 +202,26 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
       assert.equal(
         channels.filter(ch => ch.id === channelA.id).length,
         0,
-        'Workspace A channel must not appear in workspace B listing',
+        'Account A channel must not appear in workspace B listing',
       );
     }
   });
 
-  it('user B with X-Workspace-Id: ws_a cannot access ws_a channels — returns 403 after Phase 6 WorkspaceGuard', async () => {
-    // User B is NOT a member of ws_a — WorkspaceGuard should reject with 403
+  it('user B with X-Account-Id: ws_a cannot access ws_a channels — returns 403 after Phase 6 AccountGuard', async () => {
+    // User B is NOT a member of ws_a — AccountGuard should reject with 403
     const res = await apiRequest(BASE_URL, '/channels', {
       token: tokenB,
-      workspaceId: wsA.id,
+      accountId: wsA.id,
     });
     assert.equal(res.status, 403, `Expected 403 for cross-workspace channel access, got ${res.status}: ${JSON.stringify(res.data)}`);
   });
 
-  it('GET /api/channels with X-Workspace-Id: ws_b returns empty list when no channels in ws_b — Phase 6', async () => {
+  it('GET /api/channels with X-Account-Id: ws_b returns empty list when no channels in ws_b — Phase 6', async () => {
     // Admin bypasses workspace guard membership check but we verify the result
-    // by checking ws_b has no channels (channelA was created without workspace_id)
+    // by checking ws_b has no channels (channelA was created without account_id)
     const res = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
-      workspaceId: wsB.id,
+      accountId: wsB.id,
     });
     assert.equal(res.status, 200);
     const channels = Array.isArray(res.data) ? res.data : [];
@@ -232,12 +232,12 @@ describe('channels-leak: cross-workspace channel isolation', async () => {
     );
   });
 
-  it('admin with X-Workspace-Id: ws_a can list channels scoped to ws_a — Phase 6 workspace-scoped channel query', async () => {
-    // Admin passes WorkspaceGuard bypass; channels are not yet workspace-scoped in the query
-    // This test verifies admin access is not broken by WorkspaceGuard
+  it('admin with X-Account-Id: ws_a can list channels scoped to ws_a — Phase 6 account-scoped channel query', async () => {
+    // Admin passes AccountGuard bypass; channels are not yet account-scoped in the query
+    // This test verifies admin access is not broken by AccountGuard
     const res = await apiRequest(BASE_URL, '/channels', {
       token: adminToken,
-      workspaceId: wsA.id,
+      accountId: wsA.id,
     });
     assert.equal(res.status, 200, `Admin should be able to list channels with ws_a header, got ${res.status}`);
     assert.ok(Array.isArray(res.data), 'Response should be an array');

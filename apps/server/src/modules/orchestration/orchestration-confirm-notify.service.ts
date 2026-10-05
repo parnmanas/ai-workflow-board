@@ -228,7 +228,7 @@ export class OrchestrationConfirmNotifyService {
         'Orchestration',
         `confirm gate ${kind} notice for step ${step.step_key} (visit ${step.visit ?? 1}): ` +
           `recipients=${result.recipients} sent=${result.sent} failed=${result.failed}`,
-        { mission_id: mission.id, workspace_id: mission.workspace_id },
+        { mission_id: mission.id, account_id: mission.account_id },
       );
 
       await this.recordNotifiedEvent(mission, step, kind, result);
@@ -286,7 +286,7 @@ export class OrchestrationConfirmNotifyService {
     if (mission.created_by_type === 'user' && mission.created_by) {
       return [mission.created_by];
     }
-    const object = { type: 'workspace', id: mission.workspace_id };
+    const object = { type: 'account', id: mission.account_id };
     const [owners, members] = await Promise.all([
       this.rebac.listSubjects(object, 'owner'),
       this.rebac.listSubjects(object, 'member'),
@@ -336,7 +336,7 @@ export class OrchestrationConfirmNotifyService {
   private missionUrl(mission: OrchestrationMission): string | undefined {
     const base = process.env.AWB_PUBLIC_URL?.replace(/\/$/, '') || '';
     if (!base) return undefined;
-    return `${base}/ws/${mission.workspace_id}/orchestration/missions/${mission.id}`;
+    return `${base}/missions/${mission.id}`;
   }
 }
 

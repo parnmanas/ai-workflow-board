@@ -44,6 +44,8 @@ export interface ActionTicketContext {
 }
 
 export interface ActionRenderContext {
+  account?: { id?: string; name?: string };
+  /** Compatibility for previously saved templates. */
   workspace?: { id?: string; name?: string };
   // The finished ticket's project (hook runs only) — `{{project.name}}`,
   // `{{project.repo_url}}`, `{{project.default_branch}}`.
@@ -102,6 +104,7 @@ export function buildRenderContext(args: {
   const now = args.now ?? new Date();
   const iso = now.toISOString();
   return {
+    account: args.workspace ? { id: args.workspace.id, name: args.workspace.name } : undefined,
     workspace: args.workspace ? { id: args.workspace.id, name: args.workspace.name } : undefined,
     project: args.project
       ? { id: args.project.id, name: args.project.name, repo_url: args.project.repo_url, default_branch: args.project.default_branch }

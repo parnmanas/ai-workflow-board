@@ -6,18 +6,18 @@
 // agent-usage-stats.test.mjs — this file does NOT re-test that math. It proves
 // only the new HTTP surface this ticket adds, none of which agent-usage-stats
 // exercises (that file calls the service directly, bypassing every guard):
-//   - AdminGuard + WorkspaceGuard composition (the first controller in the
-//     codebase to combine these two) actually resolves req.currentWorkspaceId
-//     from both the X-Workspace-Id header and the ?workspace_id= query param.
-//   - missing workspace_id / malformed from|to query params 400 instead of
+//   - AdminGuard + AccountGuard composition (the first controller in the
+//     codebase to combine these two) actually resolves req.currentAccountId
+//     from both the X-Account-Id header and the ?account_id= query param.
+//   - missing account_id / malformed from|to query params 400 instead of
 //     500ing or silently misbehaving.
-//   - the endpoint is workspace-scoped end-to-end through the real guard —
-//     two workspaces' rollup rows stay isolated.
+//   - the endpoint is account-scoped end-to-end through the real guard —
+//     two accounts' rollup rows stay isolated.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createAccount } from '../helpers/fixtures.mjs';
 
 process.env.PORT = process.env.QA_WORKFLOW_HEALTH_LTU_PORT || '0';
 
@@ -29,25 +29,24 @@ test('workflow-health/long-term-usage: guard composition, validation, workspace 
 
   const admin = await createUser(app, getDataSourceToken, { name: 'ltu-admin', role: 'admin' });
   const token = app.get(AuthService).createSession(admin.id);
-  const wsA = await createWorkspace(app, getDataSourceToken, 'ltu-ws-a');
-  const wsB = await createWorkspace(app, getDataSourceToken, 'ltu-ws-b');
+  const wsA = await createAccount(app, getDataSourceToken, 'ltu-ws-a');
+  const wsB = await createAccount(app, getDataSourceToken, 'ltu-ws-b');
 
   const base = `http://localhost:${port}/api/admin/workflow-health/long-term-usage`;
   const authed = (extra = {}) => ({ headers: { authorization: `Bearer ${token}`, ...extra } });
 
-  await t.test('no workspace_id (header or query) → 400, not 500 or a silently-empty 200', async () => {
+  await t.test('no account_id selects the authorized default ownership account', async () => {
     const res = await fetch(base, authed());
-    assert.equal(res.status, 400);
-    const body = await res.json();
-    assert.match(body.error, /workspace_id/);
+    assert.equal(res.status, 200);
+    assert.ok((await res.json()).from === null);
   });
 
   await t.test('malformed from/to → 400 naming the offending param', async () => {
-    const resFrom = await fetch(`${base}?from=not-a-date`, authed({ 'x-workspace-id': wsA.id }));
+    const resFrom = await fetch(`${base}?from=not-a-date`, authed({ 'x-account-id': wsA.id }));
     assert.equal(resFrom.status, 400);
     assert.match((await resFrom.json()).error, /from/);
 
-    const resTo = await fetch(`${base}?to=also-not-a-date`, authed({ 'x-workspace-id': wsA.id }));
+    const resTo = await fetch(`${base}?to=also-not-a-date`, authed({ 'x-account-id': wsA.id }));
     assert.equal(resTo.status, 400);
     assert.match((await resTo.json()).error, /to/);
   });
@@ -55,7 +54,7 @@ test('workflow-health/long-term-usage: guard composition, validation, workspace 
   step('seed one persisted rollup row in wsA only (wsB stays empty)');
   const rollupRepo = ds.getRepository('AgentUsageDailyRollup');
   await rollupRepo.save(rollupRepo.create({
-    workspace_id: wsA.id,
+    account_id: wsA.id,
     usage_date: '2026-01-15',
     agent_id: 'ltu-fixture-agent',
     runs_total: 3,
@@ -68,34 +67,34 @@ test('workflow-health/long-term-usage: guard composition, validation, workspace 
     total_cost_usd: 4.5,
   }));
 
-  await t.test('X-Workspace-Id header resolves scoping — wsA sees the row, wsB does not', async () => {
-    const resA = await fetch(`${base}?from=2026-01-01&to=2026-01-31`, authed({ 'x-workspace-id': wsA.id }));
+  await t.test('X-Account-Id header resolves scoping — wsA sees the row, wsB does not', async () => {
+    const resA = await fetch(`${base}?from=2026-01-01&to=2026-01-31`, authed({ 'x-account-id': wsA.id }));
     assert.equal(resA.status, 200);
     const bodyA = await resA.json();
     assert.equal(bodyA.totals.input_tokens, 1000);
     assert.equal(bodyA.totals.total_cost_usd, 4.5);
     assert.equal(bodyA.priced_runs, 2);
 
-    const resB = await fetch(`${base}?from=2026-01-01&to=2026-01-31`, authed({ 'x-workspace-id': wsB.id }));
+    const resB = await fetch(`${base}?from=2026-01-01&to=2026-01-31`, authed({ 'x-account-id': wsB.id }));
     assert.equal(resB.status, 200);
     assert.equal((await resB.json()).totals.input_tokens, 0);
   });
 
-  await t.test('?workspace_id= query param resolves scoping too (EventSource-style callers)', async () => {
-    const res = await fetch(`${base}?workspace_id=${wsA.id}&from=2026-01-01&to=2026-01-31`, authed());
+  await t.test('?account_id= query param resolves scoping too (EventSource-style callers)', async () => {
+    const res = await fetch(`${base}?account_id=${wsA.id}&from=2026-01-01&to=2026-01-31`, authed());
     assert.equal(res.status, 200);
     assert.equal((await res.json()).totals.input_tokens, 1000);
   });
 
   await t.test('from omitted → all-time, from:null echoed back', async () => {
-    const res = await fetch(base, authed({ 'x-workspace-id': wsA.id }));
+    const res = await fetch(base, authed({ 'x-account-id': wsA.id }));
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.from, null);
     assert.equal(body.totals.input_tokens, 1000);
   });
 
-  await rollupRepo.delete({ workspace_id: wsA.id, usage_date: '2026-01-15' });
+  await rollupRepo.delete({ account_id: wsA.id, usage_date: '2026-01-15' });
 });
 
 test.after?.(() => exitAfterTests(0));

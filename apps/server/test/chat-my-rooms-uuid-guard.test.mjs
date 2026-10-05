@@ -79,7 +79,7 @@ function pgUuidRepo(rows, calls) {
 
 function makeService(calls) {
   const rooms = [
-    { id: ROOM_QA, type: 'group', name: 'QA: probe · abcdef01', workspace_id: WS, action_id: null, last_message_at: new Date() },
+    { id: ROOM_QA, type: 'group', name: 'QA: probe · abcdef01', account_id: WS, action_id: null, last_message_at: new Date() },
   ];
   // The per-room raw projection listRooms reads: unread_count (COUNT string) and
   // cleared_at (null = no Clear cutoff, so the last-message preview survives).

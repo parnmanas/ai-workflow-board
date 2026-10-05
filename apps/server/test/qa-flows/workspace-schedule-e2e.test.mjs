@@ -1,8 +1,8 @@
-// Workspace scheduler E2E (ticket 4dca7de7) — the live due → fresh room →
+// Account scheduler E2E (ticket 4dca7de7) — the live due → fresh room →
 // task_prompt → spawn-trigger path, end to end, against a booted server with a
 // real DB + the real RoomMessagingService (NOT the stubbed repos that
-// workspace-schedule-behavior.test.mjs uses, and NOT the run_now-only round-trip
-// that workspace-schedule-mcp.test.mjs covers).
+// automation-schedule-behavior.test.mjs uses, and NOT the run_now-only round-trip
+// that automation-schedule-mcp.test.mjs covers).
 //
 // What "spawn" means here: agent-manager spawns a subagent when a
 // `chat_room_message` SSE frame arrives in a room one of its managed agents is
@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootApp, closeTestApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   runtimeHostKeyForAgent,
 } from '../helpers/fixtures.mjs';
@@ -43,18 +43,18 @@ process.env.PORT = process.env.WS_SCHED_E2E_PORT || '0';
 
 const TASK_PROMPT = 'E2E: run the scheduled task.';
 
-test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → spawn-trigger SSE (idempotent)', async (t) => {
+test('Account schedule E2E: scheduler tick → fresh room → task_prompt → spawn-trigger SSE (idempotent)', async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(() => closeTestApp(app));
   const { getDataSourceToken } = modules;
 
   const { WorkspaceScheduleService } = await import(
-    'file://' + path.join(DIST_ROOT, 'modules', 'workspace-schedule', 'workspace-schedule.service.js')
+    'file://' + path.join(DIST_ROOT, 'modules', 'automation-schedule', 'automation-schedule.service.js')
   );
   const svc = app.get(WorkspaceScheduleService);
   const ds = app.get(getDataSourceToken());
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'ws-sched-e2e');
+  const ws = await createAccount(app, getDataSourceToken, 'ws-sched-e2e');
   // The schedule dispatches to this agent; we also subscribe to SSE as it.
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'scheduled-worker', runtime: true });
   const runtimeHostKey = runtimeHostKeyForAgent(agent.id);
@@ -65,9 +65,9 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   const sse = await openSseStream(port, runtimeHostKey);
   t.after(() => sse.close());
 
-  step('create an interval schedule (workspace-scoped)');
+  step('create an interval schedule (account-scoped)');
   const schedule = await svc.create({
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'e2e nightly task',
     targetRuntime: agent.runtime_spec,
     taskPrompt: TASK_PROMPT,
@@ -102,7 +102,7 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   const room = await ds.getRepository('ChatRoom').findOne({ where: { id: roomId } });
   assert.ok(room, 'room row persisted');
   assert.equal(room.name, `Schedule: ${schedule.name}`, 'room named after the schedule');
-  assert.equal(room.workspace_id, ws.id, 'room scoped to the workspace');
+  assert.equal(room.account_id, ws.id, 'room scoped to the workspace');
 
   const seats = (await ds.getRepository('ChatRoomParticipant').find({ where: { room_id: roomId } }))
     .map((p) => `${p.participant_type}:${p.participant_id}`)
@@ -126,7 +126,7 @@ test('Workspace schedule E2E: scheduler tick → fresh room → task_prompt → 
   assert.deepEqual(second.dispatched, [], 'cursor already advanced → re-entrant sweep no-ops');
   const dupFrames = await sse.drainOfType('chat_room_message', 700);
   assert.equal(dupFrames.length, 0, 'no second spawn-triggering message emitted');
-  const scheduledRooms = (await ds.getRepository('ChatRoom').find({ where: { workspace_id: ws.id } }))
+  const scheduledRooms = (await ds.getRepository('ChatRoom').find({ where: { account_id: ws.id } }))
     .filter((r) => r.name === `Schedule: ${schedule.name}`);
   assert.equal(scheduledRooms.length, 1, 'still exactly one scheduled room — no duplicate dispatch');
 

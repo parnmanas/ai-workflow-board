@@ -57,12 +57,12 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
     'Auth precedence: explicit credential_id → (when updating) the target resource\'s stored ' +
     'credential → the global GitHub token.',
     {
-      workspace_id: z.string().describe('Workspace ID'),
+      account_id: z.string().describe('Account ID'),
       url: z.string().describe('GitHub repository URL'),
       resource_id: z.string().optional().describe('Existing resource ID to update (omit to create new)'),
       credential_id: z.string().optional().describe('Credential ID for GitHub auth (overrides global token)'),
     },
-    async ({ workspace_id, url, resource_id, credential_id }) => {
+    async ({ account_id, url, resource_id, credential_id }) => {
       const resourceRepo = dataSource.getRepository(Resource);
 
       // Load the target resource up front (when updating) so we can fall back
@@ -73,7 +73,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       // resource is properly authenticated. (ticket c90653d9)
       let existing: Resource | null = null;
       if (resource_id) {
-        existing = await resourceRepo.findOne({ where: { id: resource_id, workspace_id } });
+        existing = await resourceRepo.findOne({ where: { id: resource_id, account_id } });
         if (!existing) return err('Resource not found in workspace');
       }
       // Auth precedence: explicit param → the resource's stored credential →
@@ -119,7 +119,7 @@ export function registerGitHubTools(server: McpServer, ctx: ToolContext): void {
       }
 
       const created = resourceRepo.create({
-        workspace_id,
+        account_id,
         credential_id: credential_id || null,
         name: info.full_name,
         description: info.description,

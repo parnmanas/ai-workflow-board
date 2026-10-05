@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createTicket,
   createApiKey,
@@ -28,11 +28,11 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   });
   const { getDataSourceToken } = modules;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'pendgate');
+  const ws = await createAccount(app, getDataSourceToken, 'pendgate');
   const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'worker', runtime: true });
 
   const key = await createApiKey(app, getDataSourceToken, agent.id, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     scope: 'full',
   });
   const mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
@@ -41,7 +41,7 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   // ── Control: no Actions in scope → pend succeeds ──────────────────
   step('Control — no Actions in scope: pend succeeds');
   const t0 = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'no-action blocker',
     status: 'in_progress',
   });
@@ -55,14 +55,14 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   // ── Register an enabled Action → the gate must now fire ───────────
   step('Register an enabled Action, then pend a fresh ticket');
   const saved = await mcp.callTool('save_action', {
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'Deploy prod',
     prompt: 'deploy',
     target_runtimes: [agent.runtime_spec],
   });
   assert.ok(!saved.isError, 'save_action succeeds');
   const t1 = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'deploy blocker',
     status: 'in_progress',
   });
@@ -106,7 +106,7 @@ test('pend_ticket MCP tool: blocked while a runnable Action exists, allowed with
   // that earlier gate to be observable on its own.
   step('Terminal gate — pend_ticket on a done ticket is rejected and does NOT park it');
   const terminalTicket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'already done',
     status: 'done',
   });

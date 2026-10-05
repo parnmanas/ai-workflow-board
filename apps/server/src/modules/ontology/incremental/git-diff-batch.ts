@@ -16,7 +16,7 @@ import { runPhaseC, type PhaseCResult } from './phase-c';
 
 export interface GitDiffBatchInput {
   graphId: string;
-  workspaceId: string;
+  accountId: string;
   resourceId: string;
   folderPath: string;
   extractionRunId: string;
@@ -47,7 +47,7 @@ async function processOneChange(
     if (phaseA.shortCircuit) return { skipped: false, phaseA, phaseBRan: false };
     const b = await runPhaseB(dataSource, {
       graphId: input.graphId,
-      workspaceId: input.workspaceId,
+      accountId: input.accountId,
       commit: headCommit,
       extractionRunId: input.extractionRunId,
       changedFilePath: change.path,
@@ -64,7 +64,7 @@ async function processOneChange(
   const oldPath = change.status === 'R' ? change.oldPath ?? change.path : change.path;
   const phaseA = await runPhaseA(dataSource, {
     graphId: input.graphId,
-    workspaceId: input.workspaceId,
+    accountId: input.accountId,
     resourceId: input.resourceId,
     folderPath: input.folderPath,
     commit: headCommit,
@@ -77,7 +77,7 @@ async function processOneChange(
   if (phaseA.shortCircuit) return { skipped: false, phaseA, phaseBRan: false };
   const b = await runPhaseB(dataSource, {
     graphId: input.graphId,
-    workspaceId: input.workspaceId,
+    accountId: input.accountId,
     commit: headCommit,
     extractionRunId: input.extractionRunId,
     changedFilePath: change.path,

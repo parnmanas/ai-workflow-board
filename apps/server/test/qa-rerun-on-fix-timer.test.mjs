@@ -63,7 +63,7 @@ function makeScenario(overrides = {}) {
   return {
     id: 'scenario-1',
     name: 'Timer regression scenario',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     target_environment: '',
     on_failure_ticket: {
       enabled: true,

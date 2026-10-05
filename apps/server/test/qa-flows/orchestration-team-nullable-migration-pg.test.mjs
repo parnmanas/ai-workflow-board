@@ -1,7 +1,7 @@
-// Postgres 전용: OrchestrationTeam.workspace_id non-null → nullable 마이그레이션
+// Postgres 전용: OrchestrationTeam.account_id non-null → nullable 마이그레이션
 // (티켓 1b62b437, 완료 조건 7).
 //
-// 이 티켓의 엔티티 변경은 기존 컬럼의 타입 전환이다(`workspace_id: string` →
+// 이 티켓의 엔티티 변경은 기존 컬럼의 타입 전환이다(`account_id: string` →
 // `string | null`) — additive 컬럼 추가가 아니다. SQLite/sql.js에서는 TypeORM의
 // `synchronize`에 ALTER COLUMN이 없어서 `orchestration_teams` 테이블 전체를
 // 재작성한다(새 테이블 생성, 행 복사, 기존 테이블 삭제, 이름 변경) — 복사 단계에서
@@ -12,8 +12,8 @@
 // 미검증 경로다. 이 테스트는 LEGACY 엔티티 형태(이 티켓 이전, 커밋 b5a4a3d5의
 // OrchestrationTeam을 그대로 반영)로 행을 하나 심고, CURRENT 엔티티로 `synchronize`를
 // 재부팅한 뒤 그 행이 그대로 살아남는지, 신규 컬럼이 null 기본값으로 채워지는지,
-// `workspace_id`가 카탈로그 레벨에서 실제로 nullable로 전환됐는지, 그리고 실제
-// 글로벌 팀(workspace_id NULL)을 그 뒤에 insert할 수 있는지(마이그레이션 이전
+// `account_id`가 카탈로그 레벨에서 실제로 nullable로 전환됐는지, 그리고 실제
+// 글로벌 팀(account_id NULL)을 그 뒤에 insert할 수 있는지(마이그레이션 이전
 // NOT NULL 제약이었다면 통째로 거절됐을 것)를 검증한다.
 //
 // `npm run test:qa:pg`(CI 잡 `postgres-dialect-matrix`) 아래에서 실행된다. 다른
@@ -49,14 +49,14 @@ function pgClientOptions() {
   };
 }
 
-// Legacy 형태(이 티켓 이전, 커밋 b5a4a3d5): workspace_id NOT NULL,
-// owner_workspace_id / allowed_workspace_ids 컬럼 없음.
+// Legacy 형태(이 티켓 이전, 커밋 b5a4a3d5): account_id NOT NULL,
+// owner_account_id / allowed_account_ids 컬럼 없음.
 const LegacyOrchestrationTeam = new EntitySchema({
   name: 'OrchestrationTeam',
   tableName: 'orchestration_teams',
   columns: {
     id: { primary: true, type: 'uuid', generated: 'uuid' },
-    workspace_id: { type: 'varchar', nullable: false },
+    account_id: { type: 'varchar', nullable: false },
     name: { type: 'varchar' },
     description: { type: 'text', default: '' },
     orchestrator_agent_id: { type: 'varchar', nullable: true, default: null },
@@ -87,7 +87,7 @@ after(async () => {
   }
 });
 
-test('OrchestrationTeam.workspace_id non-null → nullable synchronize preserves existing rows and unlocks global teams (Postgres)', { skip: SKIP }, async () => {
+test('OrchestrationTeam.account_id non-null → nullable synchronize preserves existing rows and unlocks global teams (Postgres)', { skip: SKIP }, async () => {
   if (!/^[a-z_][a-z0-9_]*$/i.test(SCHEMA)) throw new Error(`unsafe pg schema: ${SCHEMA}`);
 
   const { Client } = await import('pg');
@@ -107,13 +107,13 @@ test('OrchestrationTeam.workspace_id non-null → nullable synchronize preserves
   const { buildDataSourceOptions } = await import('file://' + path.join(DIST, 'db.js'));
   const baseOptions = buildDataSourceOptions();
 
-  // Step 1 — LEGACY(이 티켓 이전) 형태로 행을 하나 심는다: workspace_id NOT NULL,
-  // owner_workspace_id / allowed_workspace_ids 없음.
+  // Step 1 — LEGACY(이 티켓 이전) 형태로 행을 하나 심는다: account_id NOT NULL,
+  // owner_account_id / allowed_account_ids 없음.
   legacyDs = new DataSource({ ...baseOptions, entities: [LegacyOrchestrationTeam], synchronize: true });
   await legacyDs.initialize();
   const legacyRepo = legacyDs.getRepository('OrchestrationTeam');
   const seeded = await legacyRepo.save(legacyRepo.create({
-    workspace_id: '11111111-1111-4111-8111-111111111111',
+    account_id: '11111111-1111-4111-8111-111111111111',
     name: 'Pre-migration team',
     orchestrator_agent_id: '22222222-2222-4222-8222-222222222222',
     max_parallel_steps: 5,
@@ -124,7 +124,7 @@ test('OrchestrationTeam.workspace_id non-null → nullable synchronize preserves
   await legacyDs.destroy();
   legacyDs = null;
 
-  // Step 2 — CURRENT 엔티티(workspace_id nullable + 신규 컬럼)를 같은 schema/테이블
+  // Step 2 — CURRENT 엔티티(account_id nullable + 신규 컬럼)를 같은 schema/테이블
   // 대상으로 재부팅해 synchronize가 실제 ALTER를 실행하게 한다.
   const entities = await import('file://' + path.join(DIST, 'entities', 'index.js'));
   currentDs = new DataSource({ ...baseOptions, entities: [entities.OrchestrationTeam], synchronize: true });
@@ -132,32 +132,32 @@ test('OrchestrationTeam.workspace_id non-null → nullable synchronize preserves
   const repo = currentDs.getRepository(entities.OrchestrationTeam);
 
   const survived = await repo.findOne({ where: { id: seeded.id } });
-  assert.ok(survived, 'the pre-migration row must survive ALTER COLUMN workspace_id DROP NOT NULL');
-  assert.equal(survived.workspace_id, seeded.workspace_id, 'existing non-null workspace_id must be preserved verbatim');
+  assert.ok(survived, 'the pre-migration row must survive ALTER COLUMN account_id DROP NOT NULL');
+  assert.equal(survived.account_id, seeded.account_id, 'existing non-null account_id must be preserved verbatim');
   assert.equal(survived.name, 'Pre-migration team');
   assert.equal(survived.orchestrator_agent_id, seeded.orchestrator_agent_id);
   assert.equal(survived.max_parallel_steps, 5);
   assert.equal(survived.max_open_missions, 2);
-  assert.equal(survived.owner_workspace_id, null, 'a new column must default to null on a pre-existing row');
-  assert.equal(survived.allowed_workspace_ids, null, 'a new column must default to null on a pre-existing row');
+  assert.equal(survived.owner_account_id, null, 'a new column must default to null on a pre-existing row');
+  assert.equal(survived.allowed_account_ids, null, 'a new column must default to null on a pre-existing row');
 
-  // Step 3 — 이 마이그레이션의 실제 요점: 진짜 글로벌 팀(workspace_id NULL)이 이제는
+  // Step 3 — 이 마이그레이션의 실제 요점: 진짜 글로벌 팀(account_id NULL)이 이제는
   // insert되어야 한다 — 이전 NOT NULL 제약이었다면 통째로 거절됐을 것이다.
   const global = await repo.save(repo.create({
-    workspace_id: null,
-    owner_workspace_id: '33333333-3333-4333-8333-333333333333',
-    allowed_workspace_ids: ['33333333-3333-4333-8333-333333333333'],
+    account_id: null,
+    owner_account_id: '33333333-3333-4333-8333-333333333333',
+    allowed_account_ids: ['33333333-3333-4333-8333-333333333333'],
     name: 'Global team post-migration',
     orchestrator_agent_id: null,
     created_by: 'post-migration',
   }));
-  assert.equal(global.workspace_id, null);
-  assert.deepEqual(global.allowed_workspace_ids, ['33333333-3333-4333-8333-333333333333']);
+  assert.equal(global.account_id, null);
+  assert.deepEqual(global.allowed_account_ids, ['33333333-3333-4333-8333-333333333333']);
 
   const col = await currentDs.query(
     `SELECT is_nullable FROM information_schema.columns
-     WHERE table_schema = $1 AND table_name = 'orchestration_teams' AND column_name = 'workspace_id'`,
+     WHERE table_schema = $1 AND table_name = 'orchestration_teams' AND column_name = 'account_id'`,
     [SCHEMA],
   );
-  assert.equal(col[0]?.is_nullable, 'YES', 'workspace_id must be nullable at the catalog level post-migration');
+  assert.equal(col[0]?.is_nullable, 'YES', 'account_id must be nullable at the catalog level post-migration');
 });

@@ -250,7 +250,7 @@ export default function CliSettingsPanel({ wsId, managerId, cli, hostName, onCha
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving} loading={saving}>Save</Button>
           {settings.supports_credential && (
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/ws/${wsId}/settings/credentials`)}>Manage credentials</Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate(`/settings/credentials`)}>Manage credentials</Button>
           )}
         </div>
       )}

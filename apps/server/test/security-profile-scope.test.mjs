@@ -1,8 +1,8 @@
-// Security profiles are Workspace-scoped definitions. The Board layer (and the
+// Security profiles are Account-scoped definitions. The Board layer (and the
 // legacy board_id column it left behind) is gone with the board-less ticket
-// model (docs/tickets.md), so the only scope left to guard is the Workspace:
+// model (docs/tickets.md), so the only scope left to guard is the Account:
 // (1) create() refuses a profile without a workspace, and (2) list() returns a
-// Workspace's own profiles and never another Workspace's.
+// Account's own profiles and never another Account's.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -30,7 +30,7 @@ describe('Security Profile workspace scope', () => {
     const runRepo = dataSource.getRepository(SecurityRun);
     // P4c-4: 타겟 해소는 Host 행이다 ('agent-1' id 로 직접 심는다).
     const hostRepo = dataSource.getRepository(RuntimeHost);
-    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'sec-host', hostname: 'sec', workspace_id: null }));
+    await hostRepo.save(hostRepo.create({ id: 'agent-1', name: 'sec-host', hostname: 'sec', account_id: null }));
     // (profile, run, dataSource, host, runService) — list/create never touch runService.
     service = new SecurityProfileService(profileRepo, runRepo, dataSource, hostRepo, {});
   });
@@ -46,27 +46,27 @@ describe('Security Profile workspace scope', () => {
         target_runtime: TARGET_RUNTIME,
         scan_driver: 'code-review',
       }),
-      /workspace_id is required/,
+      /account_id is required/,
     );
   });
 
-  it('list() returns only the requested Workspace profiles', async () => {
+  it('list() returns only the requested Account profiles', async () => {
     await service.create({
-      workspace_id: 'workspace-a',
-      name: 'Workspace A profile',
+      account_id: 'workspace-a',
+      name: 'Account A profile',
       target_runtime: TARGET_RUNTIME,
       scan_driver: 'code-review',
     });
     await service.create({
-      workspace_id: 'workspace-b',
-      name: 'Workspace B profile',
+      account_id: 'workspace-b',
+      name: 'Account B profile',
       target_runtime: TARGET_RUNTIME,
       scan_driver: 'code-review',
     });
 
     const rows = await service.list('workspace-a');
-    assert.ok(rows.some(row => row.name === 'Workspace A profile'));
-    assert.equal(rows.some(row => row.name === 'Workspace B profile'), false, 'another Workspace profile never leaks in');
-    assert.ok(rows.every(row => row.workspace_id === 'workspace-a'));
+    assert.ok(rows.some(row => row.name === 'Account A profile'));
+    assert.equal(rows.some(row => row.name === 'Account B profile'), false, 'another Account profile never leaks in');
+    assert.ok(rows.every(row => row.account_id === 'workspace-a'));
   });
 });

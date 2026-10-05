@@ -78,7 +78,7 @@ const inert = new Proxy({}, { get: () => async () => undefined });
 function makeMission(overrides = {}) {
   return {
     id: 'm-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     team_id: 'team-1',
     title: 'Mission',
     status: 'running',
@@ -102,7 +102,7 @@ function makeStep(overrides = {}) {
   return {
     id: 's-1',
     mission_id: 'm-1',
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     team_id: 'team-1',
     step_key: 'deploy',
     title: 'Deploy the thing',
@@ -155,8 +155,8 @@ function makeRunner({ mission, steps }) {
     },
   };
   const agentRepo = makeRepo([
-    { id: 'agent-member', name: 'Member', workspace_id: 'ws-1', is_online: true },
-    { id: 'agent-orch', name: 'Orchestrator', workspace_id: 'ws-1', is_online: true },
+    { id: 'agent-member', name: 'Member', account_id: 'ws-1', is_online: true },
+    { id: 'agent-orch', name: 'Orchestrator', account_id: 'ws-1', is_online: true },
   ]);
   // dispatchStep 이 실제로 완주하려면 room 생성과 메시지 전송이 동작해야 한다.
   // 자동 재디스패치 경로를 검증하려면 이 둘이 inert 여서는 안 된다(그러면 dispatch

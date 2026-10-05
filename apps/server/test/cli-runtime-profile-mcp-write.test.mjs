@@ -12,7 +12,7 @@ import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { bootApp } from './helpers/boot.mjs';
-import { createAgent, createApiKey, createUser, createWorkspace } from './helpers/fixtures.mjs';
+import { createAgent, createApiKey, createUser, createAccount } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 
 let app;
@@ -30,7 +30,7 @@ const assigneeWith = (cli_runtime_profile) => ({ ...agent.runtime_spec, cli: 'cl
 async function api(method, path, body) {
   const res = await fetch(`http://localhost:${port}/api${path}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Workspace-Id': workspace.id },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Account-Id': workspace.id },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -42,7 +42,7 @@ async function api(method, path, body) {
 // backlog 티켓은 디스패치되지 않는다 — 핀 저장 경로만 본다.
 async function makeTicket(cliRuntimeProfile = null) {
   const created = await mcp.callTool('create_ticket', {
-    workspace_id: workspace.id,
+    account_id: workspace.id,
     title: `profile pin ${randomUUID().slice(0, 8)}`,
     status: 'backlog',
     assignee: assigneeWith(cliRuntimeProfile),
@@ -62,11 +62,11 @@ before(async () => {
   ({ resolveClaudeBackendProfileForDispatch } = await import('../dist/common/claude-backend-registry.js'));
   const { AuthService } = await import('../dist/services/auth.service.js');
 
-  workspace = await createWorkspace(app, gdst, 'cli-profile-mcp-write');
+  workspace = await createAccount(app, gdst, 'cli-profile-mcp-write');
   const admin = await createUser(app, gdst, { name: 'admin', role: 'admin' });
   token = app.get(AuthService).createSession(admin.id);
   agent = await createAgent(app, gdst, workspace.id, { name: 'profile-writer', runtime: true });
-  const key = await createApiKey(app, gdst, agent.id, { workspaceId: workspace.id, label: 'profile-writer' });
+  const key = await createApiKey(app, gdst, agent.id, { accountId: workspace.id, label: 'profile-writer' });
   mcp = new McpClient({ baseUrl: `http://localhost:${port}`, apiKey: key.raw_key });
   await mcp.initialize();
 

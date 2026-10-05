@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
 import {
-  createWorkspace,
+  createAccount,
   createAgent,
   createApiKey,
   createTicket,
@@ -55,7 +55,7 @@ const missions = app.get(OrchestrationMissionService);
 // DIFFERENT managers. That is the case a bare name cannot express, and it is
 // why this contract exists: without the prefix the operator (and the
 // orchestrator's own roster prompt) sees two identical entries.
-const ws = await createWorkspace(app, getDataSourceToken, 'orch-fullname');
+const ws = await createAccount(app, getDataSourceToken, 'orch-fullname');
 
 const mgrA = await createAgent(app, getDataSourceToken, ws.id, { name: 'MgrA', type: 'manager' });
 const mgrB = await createAgent(app, getDataSourceToken, ws.id, { name: 'MgrB', type: 'manager' });
@@ -67,7 +67,7 @@ const memberB = await createAgent(app, getDataSourceToken, ws.id, { name: 'Coder
 // P4c-4: managed→manager 연결은 api_keys 페어링 링크다 (Agent 행 없음).
 // 링크된 uuid 는 Host bare name 으로 해소된다.
 for (const [agentId, hostId] of [[orchestrator.id, mgrA.id], [memberA.id, mgrA.id], [memberB.id, mgrB.id]]) {
-  await createApiKey(app, getDataSourceToken, agentId, { workspaceId: ws.id, hostId, label: 'display-link' });
+  await createApiKey(app, getDataSourceToken, agentId, { accountId: ws.id, hostId, label: 'display-link' });
 }
 
 const MEMBER_A_DISPLAY = mgrA.name;
@@ -113,7 +113,7 @@ const SLOT_SPEC = (managerId, extra = {}) => ({
 
 test('team view: orchestrator_name and member agent_name are <Host>/<leaf>', async () => {
   const team = await teams.createTeam({
-    workspace_id: ws.id,
+    account_id: ws.id,
     name: 'fullname-team',
     orchestrator: SLOT_SPEC(mgrA.id),
   });
@@ -146,7 +146,7 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
   const team = teamList.find((t) => t.name === 'fullname-team');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'fullname mission',
     objective: 'prove names',
@@ -185,7 +185,7 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
   await ds.getRepository('OrchestrationStep').save(
     ds.getRepository('OrchestrationStep').create({
       mission_id: mission.id,
-      workspace_id: ws.id,
+      account_id: ws.id,
       step_key: 's1',
       title: 'do the thing',
       instructions: '',
@@ -213,15 +213,15 @@ test('mission: recordEvent resolves an agent actor_name to the Host display, ass
 // "e9d0e8bc-… is typing". Drive set_typing through the real /mcp transport.
 test('agent_typing SSE: actor_name is the Host display, never the raw agent id', async () => {
   const ticket = await createTicket(app, getDataSourceToken, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     title: 'typing target',
   });
 
-  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'typing-sub' });
+  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { accountId: ws.id, label: 'typing-sub' });
   const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
-  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'typing-caller' });
+  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { accountId: ws.id, label: 'typing-caller' });
   const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: callerKey.raw_key });
   after(() => { void client.close().catch(() => {}); });
 
@@ -254,7 +254,7 @@ test('agent_typing SSE: actor_name is the Host display, never the raw agent id',
 test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supplied name', async () => {
   const room = await ds.getRepository('ChatRoom').save(
     ds.getRepository('ChatRoom').create({
-      workspace_id: ws.id,
+      account_id: ws.id,
       name: 'typing room',
       type: 'group',
       created_by_type: 'user',
@@ -262,7 +262,7 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
     }),
   );
 
-  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-typing-sub' });
+  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { accountId: ws.id, label: 'chat-typing-sub' });
   await ds.getRepository('ChatRoomParticipant').save(
     ds.getRepository('ChatRoomParticipant').create({
       room_id: room.id,
@@ -274,7 +274,7 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
   const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
-  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-typing-caller' });
+  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { accountId: ws.id, label: 'chat-typing-caller' });
   const resp = await fetch(
     `http://127.0.0.1:${port}/api/agent/chat-rooms/${room.id}/typing`,
     {
@@ -310,7 +310,7 @@ test('chat_room_typing: server re-resolves agent_id, ignoring a bare caller-supp
 test('chat_room_session_status: server re-resolves agent_id and forwards keep-alive/background-task fields', async () => {
   const room = await ds.getRepository('ChatRoom').save(
     ds.getRepository('ChatRoom').create({
-      workspace_id: ws.id,
+      account_id: ws.id,
       name: 'session-status room',
       type: 'group',
       created_by_type: 'user',
@@ -318,7 +318,7 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
     }),
   );
 
-  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-status-sub' });
+  const subKey = await createApiKey(app, getDataSourceToken, mgrA.id, { accountId: ws.id, label: 'chat-status-sub' });
   await ds.getRepository('ChatRoomParticipant').save(
     ds.getRepository('ChatRoomParticipant').create({
       room_id: room.id,
@@ -330,7 +330,7 @@ test('chat_room_session_status: server re-resolves agent_id and forwards keep-al
   const sse = await openSseStream(port, subKey.raw_key, {});
   after(() => sse.close());
 
-  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { workspaceId: ws.id, label: 'chat-status-caller' });
+  const callerKey = await createApiKey(app, getDataSourceToken, mgrA.id, { accountId: ws.id, label: 'chat-status-caller' });
   const keepAliveUntilMs = Date.now() + 8 * 60_000;
   const resp = await fetch(
     `http://127.0.0.1:${port}/api/agent/chat-rooms/${room.id}/session-status`,

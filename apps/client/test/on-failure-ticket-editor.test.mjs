@@ -17,8 +17,8 @@ import SecurityManager from '../src/components/admin/SecurityManager.tsx';
 
 const WS = 'ws-oft';
 const PROJECTS = [
-  { id: 'proj-awb', workspace_id: WS, name: 'AWB', repo_url: 'https://example.com/awb.git', default_branch: 'main', host_folders: [] },
-  { id: 'proj-game', workspace_id: WS, name: 'GameClient', repo_url: 'https://example.com/game.git', default_branch: 'develop', host_folders: [] },
+  { id: 'proj-awb', account_id: WS, name: 'AWB', repo_url: 'https://example.com/awb.git', default_branch: 'main', host_folders: [] },
+  { id: 'proj-game', account_id: WS, name: 'GameClient', repo_url: 'https://example.com/game.git', default_branch: 'develop', host_folders: [] },
 ];
 const AGENTS = [{ id: 'agent-1', name: 'Programmer', manager_name: 'Rolf' }];
 const TARGET_RUNTIME = { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/repo', runtime_config: { strategy: 'single', permission_mode: 'approve' } };
@@ -78,7 +78,7 @@ test('QA: legacy board row opens with labels as tags and saves project/status/ta
   const dom = setupDom();
   const updated = [];
   const scenario = {
-    id: 'qa-1', workspace_id: WS, name: '로그인', description: '',
+    id: 'qa-1', account_id: WS, name: '로그인', description: '',
     target_agent_id: 'rt-1', target_runtime: TARGET_RUNTIME, qa_driver: 'browser', qa_driver_config: {}, steps: [], tags: [],
     enabled: true, target_environment: '', on_failure_ticket: LEGACY_OFT, qa_phases: null,
     workspace_folder: '', repo_ref: null, checkout_mode: 'reuse', build_mode: 'cold_then_warm', last_built_commit: null,
@@ -92,7 +92,7 @@ test('QA: legacy board row opens with labels as tags and saves project/status/ta
     listDeployments: async () => [],
     updateQaScenario: async (id, payload) => { updated.push({ id, payload }); return { ...scenario, ...payload }; },
   });
-  const view = mount(React.createElement(QaManager, { workspaceId: WS }));
+  const view = mount(React.createElement(QaManager, { accountId: WS }));
   await flush();
   t.after(() => { view.unmount(); dom.cleanup(); });
 
@@ -140,7 +140,7 @@ test('Security: target picks a project (or self) and on-failure ticket drops boa
   const dom = setupDom();
   const updated = [];
   const profile = {
-    id: 'sec-1', workspace_id: WS, name: '감사', description: '',
+    id: 'sec-1', account_id: WS, name: '감사', description: '',
     target_agent_id: 'rt-1', target_runtime: TARGET_RUNTIME, target_resource_id: null, scan_driver: 'code-review',
     scan_driver_config: {}, scope_mode: 'incremental', checklist: [], tags: [],
     enabled: true, max_runs: 20, on_failure_ticket: { ...LEGACY_OFT, min_severity: 'medium' },
@@ -155,7 +155,7 @@ test('Security: target picks a project (or self) and on-failure ticket drops boa
     listSecurityRuns: async () => [],
     updateSecurityProfile: async (id, payload) => { updated.push({ id, payload }); return { ...profile, ...payload }; },
   });
-  const view = mount(React.createElement(SecurityManager, { workspaceId: WS }));
+  const view = mount(React.createElement(SecurityManager, { accountId: WS }));
   await flush();
   t.after(() => { view.unmount(); dom.cleanup(); });
 

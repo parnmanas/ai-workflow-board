@@ -25,10 +25,9 @@ test('routes: hosts index, host projects view, and session detail render Session
   // 중간 레벨: managerId 단위 (cwd 기준 그룹 뷰) — 이전의 :managerId/:cli 라우트를 대체
   assert.match(app, /path="sessions\/:managerId" element=\{<SessionsPage \/>\}/);
   assert.match(app, /path="sessions\/:managerId\/:cli\/:sessionId" element=\{<SessionsPage \/>\}/);
-  assert.match(app, /<Route path="sessions" element=\{<WorkspacedRedirect to="sessions" \/>\} \/>/);
-  // 기본 랜딩은 sessions (단일 랜딩)
-  assert.match(app, /<Navigate to=\{`\/ws\/\$\{currentWorkspaceId\}\/sessions\$\{search\}`\}/);
-  assert.match(app, /<Navigate to=\{`sessions\$\{search\}`\}/);
+  assert.match(app, /<Route index element=\{<DefaultRedirect \/>\} \/>/);
+  assert.match(app, /<GlobalRedirect to="sessions" \/>/);
+  assert.match(app, /path="ws\/:wsId\/\*" element=\{<LegacyWorkspaceRedirect \/>\}/);
   // Chat-first 홈은 사라지지 않는다 — Chat 섹션에서 여전히 도달 가능.
   assert.match(app, /path="assistant" element=\{<ChatFirstHome \/>\}/);
 });

@@ -13,6 +13,8 @@ export interface SubscriberIdentity {
   name: string;
   agentId?: string;
   userId?: string;
+  /** Ownership accounts visible to this human subscriber. */
+  accountIds?: Set<string>;
   /** Server-generated UUID for this SSE connection. */
   sseSessionId?: string;
   /**
@@ -46,7 +48,7 @@ export interface EventMapContext {
    */
   resolveTicketSnapshot(ticketId: string, entityId: string): Promise<{
     root_id: string;
-    workspace_id: string;
+    account_id: string;
     status: string;
     project_id: string;
   } | null>;

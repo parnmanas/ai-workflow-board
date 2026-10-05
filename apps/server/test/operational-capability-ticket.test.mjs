@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp, exitAfterTests } from './helpers/boot.mjs';
-import { createProject, createTicket, createWorkspace } from './helpers/fixtures.mjs';
+import { createProject, createTicket, createAccount } from './helpers/fixtures.mjs';
 
 // 이 파일의 테스트들은 각자 자기 NestJS 앱을 부팅한다. 예전에는 전부
 // 고정 포트 하나(7827)를 다시 바인딩했는데, close() 한 앞 서버가 아직
@@ -17,11 +17,11 @@ async function bootCapabilityScene(t, name) {
   const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
-  const ws = await createWorkspace(app, modules.getDataSourceToken, name);
+  const ws = await createAccount(app, modules.getDataSourceToken, name);
   const post = (messageId, roomId = 'room-1') => fetch(`http://127.0.0.1:${port}/api/agent/operational-capability-ticket`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      workspace_id: ws.id, dedupe_key: 'deploy-awb-key',
+      account_id: ws.id, dedupe_key: 'deploy-awb-key',
       operation: 'deploy awb', missing_capability: 'awb deploy action',
       original_request: 'AWB 배포해라', room_id: roomId, message_id: messageId,
     }),
@@ -82,10 +82,10 @@ test('ordinary work fallback creates one focused ticket with tags, project and c
   const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const ds = app.get(modules.getDataSourceToken());
-  const ws = await createWorkspace(app, modules.getDataSourceToken, 'ordinary-work-fallback');
+  const ws = await createAccount(app, modules.getDataSourceToken, 'ordinary-work-fallback');
   const project = await createProject(app, modules.getDataSourceToken, ws.id, { name: 'ordinary-work' });
   const payload = {
-    workspace_id: ws.id, dedupe_key: 'room-message-key',
+    account_id: ws.id, dedupe_key: 'room-message-key',
     title: '일반 코드 수정', description: '회귀 테스트와 함께 수정한다.',
     original_request: '코드를 수정해줘', room_id: 'room-source', message_id: 'message-source',
     tags: ['bugfix'], project_id: project.id,
@@ -101,7 +101,7 @@ test('ordinary work fallback creates one focused ticket with tags, project and c
   assert.equal(firstBody.id, secondBody.id);
   const tickets = await ds.getRepository('Ticket').find({ where: { operational_dedupe_key: 'ordinary:room-message-key' } });
   assert.equal(tickets.length, 1, '동일 채팅 요청은 focused ticket 한 건만 만든다');
-  assert.equal(tickets[0].workspace_id, ws.id);
+  assert.equal(tickets[0].account_id, ws.id);
   assert.equal(tickets[0].status, 'todo', '일반 작업은 바로 큐에 들어간다');
   assert.equal(tickets[0].source_kind, 'chat');
   assert.equal(tickets[0].source_chat_room_id, 'room-source');
@@ -109,7 +109,7 @@ test('ordinary work fallback creates one focused ticket with tags, project and c
   assert.deepEqual(JSON.parse(tickets[0].tags).sort(), ['bugfix', 'source:chat']);
 
   // A project from another workspace is rejected instead of silently dropped.
-  const otherWs = await createWorkspace(app, modules.getDataSourceToken, 'ordinary-work-other');
+  const otherWs = await createAccount(app, modules.getDataSourceToken, 'ordinary-work-other');
   const foreign = await createProject(app, modules.getDataSourceToken, otherWs.id, { name: 'foreign' });
   const rejected = await post({ ...payload, dedupe_key: 'foreign-project-key', project_id: foreign.id });
   assert.equal(rejected.status, 404);
@@ -120,17 +120,17 @@ test('ordinary work candidates list the workspace projects and its tag suggestio
   const { app, port, modules } = await bootApp({ port: 0 });
   t.after(() => { void app.close().catch(() => {}); });
   const gdst = modules.getDataSourceToken;
-  const ws = await createWorkspace(app, gdst, 'ordinary-work-candidates');
-  const otherWs = await createWorkspace(app, gdst, 'ordinary-work-candidates-other');
+  const ws = await createAccount(app, gdst, 'ordinary-work-candidates');
+  const otherWs = await createAccount(app, gdst, 'ordinary-work-candidates-other');
   const project = await createProject(app, gdst, ws.id, { name: 'game' });
   const foreign = await createProject(app, gdst, otherWs.id, { name: 'foreign' });
-  await createTicket(app, gdst, { workspaceId: ws.id, title: 'one', tags: ['terrain', 'bug'] });
-  await createTicket(app, gdst, { workspaceId: ws.id, title: 'two', tags: ['terrain'] });
-  const archived = await createTicket(app, gdst, { workspaceId: ws.id, title: 'archived', tags: ['stale-tag'] });
+  await createTicket(app, gdst, { accountId: ws.id, title: 'one', tags: ['terrain', 'bug'] });
+  await createTicket(app, gdst, { accountId: ws.id, title: 'two', tags: ['terrain'] });
+  const archived = await createTicket(app, gdst, { accountId: ws.id, title: 'archived', tags: ['stale-tag'] });
   await app.get(gdst()).getRepository('Ticket').update(archived.id, { archived_at: new Date() });
-  await createTicket(app, gdst, { workspaceId: otherWs.id, title: 'elsewhere', tags: ['foreign-tag'] });
+  await createTicket(app, gdst, { accountId: otherWs.id, title: 'elsewhere', tags: ['foreign-tag'] });
 
-  const response = await fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-candidates?workspace_id=${ws.id}`);
+  const response = await fetch(`http://127.0.0.1:${port}/api/agent/ordinary-work-candidates?account_id=${ws.id}`);
   assert.equal(response.status, 200);
   const candidates = await response.json();
   assert.deepEqual(candidates.projects.map(p => p.id), [project.id], '다른 워크스페이스 project 는 후보가 아니다');

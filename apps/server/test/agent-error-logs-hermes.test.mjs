@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { createWorkspace, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey, createUser } from './helpers/fixtures.mjs';
 
 process.env.PORT = process.env.TEST_SERVER_PORT || '0';
 
@@ -23,12 +23,12 @@ test('Hermes error-log entry survives POST /api/agent/error-logs → GET (agent-
   const { getDataSourceToken, AuthService } = modules;
   const base = `http://localhost:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'agent-error-logs');
+  const ws = await createAccount(app, getDataSourceToken, 'agent-error-logs');
   // type='manager' models the real caller: agent-manager uploads error-log
   // entries under its OWN (Runtime Host) identity, not the managed Hermes
   // agent's — see apps/agent-manager/src/lib/error-log-uploader.ts.
   const hermesHost = await createAgent(app, getDataSourceToken, ws.id, { name: 'hermes-host', type: 'manager' });
-  const hostKey = await createApiKey(app, getDataSourceToken, hermesHost.id, { workspaceId: ws.id, label: 'hermes-host' });
+  const hostKey = await createApiKey(app, getDataSourceToken, hermesHost.id, { accountId: ws.id, label: 'hermes-host' });
   const admin = await createUser(app, getDataSourceToken, { name: 'admin' });
   const adminToken = app.get(AuthService).createSession(admin.id);
 
@@ -41,7 +41,7 @@ test('Hermes error-log entry survives POST /api/agent/error-logs → GET (agent-
     headers: { 'Content-Type': 'application/json', 'X-Agent-Key': hostKey.raw_key },
     body: JSON.stringify({
       agent_id: hermesHost.id,
-      workspace_id: ws.id,
+      account_id: ws.id,
       plugin_version: 'test-1.0.0',
       entries: [{
         occurred_at: occurredAt,

@@ -1,4 +1,4 @@
-export { Workspace } from './Workspace';
+export { Account } from './Account';
 export { Ticket } from './Ticket';
 // Projects (docs/tickets.md) — one repository + its main clone folder per Runtime Host.
 export { Project } from './Project';
@@ -46,7 +46,7 @@ export { SecurityProfile } from './SecurityProfile';
 export { SecurityRun } from './SecurityRun';
 export { SecurityRunBatch } from './SecurityRunBatch';
 export { SecuritySchedule } from './SecuritySchedule';
-export { WorkspaceSchedule } from './WorkspaceSchedule';
+export { AutomationSchedule } from './AutomationSchedule';
 export { WorkflowFunction } from './WorkflowFunction';
 export { WorkflowFunctionRun } from './WorkflowFunctionRun';
 // Deployment awareness (ticket 8ce72b18) — the current live commit per environment.
@@ -130,5 +130,6 @@ export { MigrationRun } from './MigrationRun';
 // Credential 로 인증할지. 세션 내용은 저장하지 않는다(docs/agent-sessions.md).
 // Auto-DDL'd by TypeORM `synchronize` (D-01).
 export { AgentSessionCliSetting } from './AgentSessionCliSetting';
+export { AgentSessionExecution } from './AgentSessionExecution';
 
 export { AgentTemplate } from './AgentTemplate';

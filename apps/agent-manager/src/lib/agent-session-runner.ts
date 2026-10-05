@@ -1,3 +1,4 @@
+import { normalizeAccountScope } from './account-scope.js';
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
 // 세션의 단위는 **(이 Runtime Host, CLI, CLI 네이티브 세션 id)** 다. AWB 서버는
@@ -62,7 +63,7 @@ import type { RuntimeEvent } from './runtime/runtime-events.js';
 /** 서버 payload (apps/server/src/common/types/stream-events.ts AgentSessionRequestPayload). */
 export interface AgentSessionRequest {
   manager_id: string;
-  workspace_id?: string;
+  account_id?: string;
   cli: string;
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
@@ -138,7 +139,7 @@ export interface AgentSessionRunnerOptions {
   /** credential 이 묶인 세션의 전용 cli-home 루트. 기본 `$AWB_AGENT_MANAGER_HOME/session-homes`. */
   sessionHomesDir?: string;
   /** 테스트용 credential 조회 override. */
-  credentialFetcher?: (credentialId: string, workspaceId: string) => Promise<SessionCredential | null>;
+  credentialFetcher?: (credentialId: string, accountId: string) => Promise<SessionCredential | null>;
   /** stdout 한 줄 상한 override — 테스트가 64MiB 를 쓰지 않고 초과 경로를 돌기 위한 주입점. */
   maxLineBytes?: number;
 }
@@ -545,6 +546,7 @@ export class AgentSessionRunner {
   // ─── 디스패처 진입점 ──────────────────────────────────────────────────
 
   async handle(request: AgentSessionRequest): Promise<void> {
+    request = normalizeAccountScope(request);
     const cli = String(request.cli || '').toLowerCase();
     const sessionId = request.session_id || '';
     const tag = `[agent-session ${cli}${sessionId ? ` ${sessionId.slice(0, 8)}` : ''}]`;
@@ -1198,7 +1200,7 @@ export class AgentSessionRunner {
     if (!prefix) throw Object.assign(new Error(`${cli} sessions cannot use an AWB credential.`), { code: 'credential_unsupported' });
     const fetcher = this.#options.credentialFetcher
       ?? ((id: string, ws: string) => fetchSessionCredential(this.#config, this.#options.getManagerId(), id, ws));
-    const fetched = await fetcher(credentialId, request.workspace_id || '');
+    const fetched = await fetcher(credentialId, request.account_id || '');
     if (!fetched) throw Object.assign(new Error('The credential assigned in CLI settings could not be fetched from AWB.'), { code: 'credential_unavailable' });
     if (!fetched.provider.startsWith(prefix)) {
       throw Object.assign(new Error(`CLI settings credential provider ${fetched.provider} does not match ${cli}.`), { code: 'credential_provider_mismatch' });

@@ -51,7 +51,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createUser, createWorkspace } from '../helpers/fixtures.mjs';
+import { createUser, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 
 process.env.PORT = process.env.ORCHESTRATION_CONVERSATION_PORT || '0';
@@ -120,7 +120,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   const membership = app.get(services.RoomMembershipService);
   const base = `http://127.0.0.1:${port}`;
 
-  const ws = await createWorkspace(app, getDataSourceToken, 'mission-conversation');
+  const ws = await createAccount(app, getDataSourceToken, 'mission-conversation');
 
   // owner  = 미션을 만든 사람.        admin 이므로 MANAGE_ACTIONS 를 갖는다.
   // peer   = 미션을 만들지 않은 운영자. 역시 admin — join 으로 들어와야 한다.
@@ -139,18 +139,18 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'X-Workspace-Id': ws.id,
+        'X-Account-Id': ws.id,
       },
       body: JSON.stringify(body ?? {}),
     });
   const say = (roomId, token, content) => post(`/api/chat-rooms/${roomId}/messages`, token, { content });
   const join = (missionId, token) =>
-    post(`/api/orchestration/missions/${missionId}/join-conversation`, token, { workspace_id: ws.id });
+    post(`/api/orchestration/missions/${missionId}/join-conversation`, token, { account_id: ws.id });
 
   // 로스터 슬롯은 (Runtime Host, CLI, working folder) 로 선언하고 백킹 Agent 정체성은
   // AWB 가 만든다 — 그래서 여기서 lead/worker 를 미리 만들지 않고 만들어진 것을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: 'Conversation squad',
     team: { max_parallel_steps: 2, created_by: owner.id },
     members: [{ role_label: 'worker' }],
@@ -162,7 +162,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // ── 1. 생성자는 시작 직후 바로 말할 수 있다 ────────────────────────────────
   step('미션 생성자가 시작 직후 mission 방에 메시지를 보낸다');
   const created = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Ship the export',
     objective: 'Add a CSV export.',
@@ -240,7 +240,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // participant 행을 지우면, 변경 전 코드가 남겨 놓았을 행 구성과 정확히 같아진다.
   step('변경 전에 만들어진 user-owned 미션(사람 participant 없음)도 join 하면 대화가 된다');
   const legacyMission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Legacy user-owned mission',
     objective: 'Created before human participants existed.',
@@ -306,7 +306,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // ── 2b. 참여자 없는 미션 백필 ──────────────────────────────────────────────
   step('에이전트가 만든 미션(사람 참여자 없음)은 join 전에는 막히고 join 뒤에는 된다');
   const agentOwned = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Agent-authored mission',
     objective: 'Something an agent planned.',
@@ -454,7 +454,7 @@ test('사람이 mission 방에서 orchestrator 와 대화할 수 있다', async 
   // 참여와 발화를 막으면 그 기능 자체가 없어진다. 화면도 입력창을 열어 둔다.
   step('종료된 미션에도 참여하고 발화할 수 있다 — 되살리기의 입구다');
   const closed = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: 'Closed mission',
     objective: 'Already over.',

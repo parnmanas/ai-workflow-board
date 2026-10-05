@@ -53,8 +53,8 @@ export interface WorkNavGroup {
 }
 
 export interface WorkNavInput {
-  /** `/ws/<id>` 또는 워크스페이스가 없으면 빈 문자열. */
-  workspaceBase: string;
+  /** Optional mount prefix; ownership is never part of a work address. */
+  basePath?: string;
   /** 현재 위치. pathname 만 넘긴다 — 쿼리는 selectedTeamId 로 따로 받는다. */
   pathname: string;
   /** `?team=<id>` 로 선택된 팀(Teams 서브메뉴 active 판정용). */
@@ -94,18 +94,19 @@ export interface TicketsNavItem {
 }
 
 export function buildTicketsNavItem(input: {
-  workspaceBase: string;
+  /** Optional mount prefix; ownership is never part of a work address. */
+  basePath?: string;
   pathname: string;
   ticketUnreadTotal?: number;
 }): TicketsNavItem {
-  const path = `${input.workspaceBase}/tickets`;
+  const path = '/tickets';
   const total = input.ticketUnreadTotal || 0;
   return {
     key: 'tickets',
     label: 'Tickets',
     icon: '#',
     path,
-    active: !!input.workspaceBase && isUnder(input.pathname, path),
+    active: isUnder(input.pathname, path),
     badge: total,
     badgeLabel: `읽지 않은 티켓 코멘트 ${total}건`,
   };
@@ -117,7 +118,7 @@ export function buildTicketsNavItem(input: {
  */
 export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
   const {
-    workspaceBase,
+    basePath = '',
     pathname,
     selectedTeamId = null,
     teams,
@@ -126,8 +127,8 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
     missionsLoading = false,
   } = input;
 
-  const teamsPath = `${workspaceBase}/teams`;
-  const orchestrationsPath = `${workspaceBase}/orchestration`;
+  const teamsPath = '/teams';
+  const orchestrationsPath = '/missions';
 
   return [
     {
@@ -149,15 +150,15 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
     },
     {
       key: 'orchestrations',
-      label: 'Orchestrations',
+      label: 'Missions',
       icon: 'O',
       path: orchestrationsPath,
       active: isUnder(pathname, orchestrationsPath),
       children: missions.map((mission) => ({
         id: mission.id,
         label: mission.title,
-        path: `${orchestrationsPath}/missions/${mission.id}`,
-        active: pathname === `${orchestrationsPath}/missions/${mission.id}`,
+        path: `${orchestrationsPath}/${mission.id}`,
+        active: pathname === `${orchestrationsPath}/${mission.id}`,
         activity: mission.status ? missionActivityView(mission.status) : undefined,
       })),
       emptyLabel: 'No missions yet',

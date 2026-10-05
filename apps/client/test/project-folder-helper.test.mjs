@@ -79,7 +79,7 @@ test('RuntimeSpecEditor — 프로젝트를 고르면 선택된 Host 의 메인 
     value,
     onChange: (next) => changes.push(next),
     hosts: [{ id: 'host-rolf', name: 'rolf' }],
-    workspaceId: 'ws-helper',
+    accountId: 'ws-helper',
   }));
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   t.after(() => { view.unmount(); Object.assign(api, originals); dom.cleanup(); });
@@ -104,7 +104,7 @@ test('RuntimeSpecEditor — showProjectFolderHelper={false} 면 헬퍼를 숨긴
     value: emptyRuntimeSpec(),
     onChange: () => {},
     hosts: [],
-    workspaceId: 'ws-helper-hidden',
+    accountId: 'ws-helper-hidden',
     showProjectFolderHelper: false,
   }));
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });

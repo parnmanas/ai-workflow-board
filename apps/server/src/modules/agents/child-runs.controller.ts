@@ -10,16 +10,16 @@ import { ChildRunService } from './child-run.service';
 @ApiBearerAuth('user-session')
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)
-@Controller('api/workspaces/:workspaceId/runs/:runId/children')
+@Controller('api/accounts/:accountId/runs/:runId/children')
 export class ChildRunsController {
   constructor(private readonly childRuns: ChildRunService) {}
 
   @Get()
   list(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('runId') runId: string,
   ) {
-    return this.childRuns.list(workspaceId, runId);
+    return this.childRuns.list(accountId, runId);
   }
 }
 
@@ -27,15 +27,15 @@ export class ChildRunsController {
 @ApiBearerAuth('user-session')
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.VIEW_ACTIVITY)
-@Controller('api/workspaces/:workspaceId/agents/:agentId/child-runs')
+@Controller('api/accounts/:accountId/agents/:agentId/child-runs')
 export class AgentChildRunsController {
   constructor(private readonly childRuns: ChildRunService) {}
 
   @Get()
   list(
-    @Param('workspaceId') workspaceId: string,
+    @Param('accountId') accountId: string,
     @Param('agentId') agentId: string,
   ) {
-    return this.childRuns.listForAgent(workspaceId, agentId);
+    return this.childRuns.listForAgent(accountId, agentId);
   }
 }

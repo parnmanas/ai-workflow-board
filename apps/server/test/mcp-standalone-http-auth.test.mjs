@@ -16,8 +16,8 @@
 // the source calls the right function.
 //
 // Runs against compiled dist/ (requires `npm run build`, satisfied by the
-// test script). Uses an isolated SQLJS_DB_PATH temp file so it never touches
-// the shared dev database/data.db, and a free port picked at runtime — this
+// test script). Uses isolated primary and ontology temp files so it never
+// touches the shared dev database files, and a free port picked at runtime — this
 // server takes its port from MCP_PORT and never exposes the http.Server, so
 // `port: 0` 의 실제 바인딩 포트를 회수할 수 없다(ticket f2d82793).
 
@@ -45,6 +45,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-mcp-http-auth-'));
 // values, so this wins over any apps/server/.env).
 process.env.DB_TYPE = 'sqlite';
 process.env.SQLJS_DB_PATH = path.join(tmpDir, 'mcp-http-auth-test.db');
+process.env.SQLJS_ONTOLOGY_DB_PATH = path.join(tmpDir, 'mcp-http-auth-ontology.db');
 process.env.NODE_ENV = 'test';
 process.env.MCP_TRANSPORT = 'http';
 process.env.MCP_PORT = String(PORT);
@@ -139,7 +140,7 @@ test('standalone mcp-server.js HTTP mode enforces authentication end-to-end', as
     agent_id: null,
     scope: 'full',
     is_active: 1,
-    workspace_id: '',
+    account_id: '',
   }));
 
   let sessionId;

@@ -9,7 +9,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
  * the business of vendoring other people's content.
  *
  * Taps are GLOBAL by construction: a synced skill lands as a global Skill row
- * (`workspace_id = NULL`, `source_kind = 'tap'`). There is no per-workspace
+ * (`account_id = NULL`, `source_kind = 'tap'`). There is no per-workspace
  * tap — a workspace that wants to diverge forks the skill into its own scope,
  * where it shadows the global one by slug.
  *

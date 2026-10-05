@@ -3,17 +3,18 @@
 **When:** you touch ticket creation, ticket status, ticket dispatch to an agent,
 ticket filtering (tags / project), repositories, or a per-host working folder.
 
-The Board concept is gone. There are no boards, no columns, no workspace roles,
-no column → role routing, no prompt templates and no board lessons. What used
-to be "a board per purpose" is now **one ticket pool per workspace**, classified
-by **tags** and an optional **project**, and every ticket is done by **one agent**
+The Board and workspace work-navigation concepts are gone. `/tickets` combines
+the accounts the user may access, classified by **tags** and an optional
+**project**, and every ticket is done by **one agent**
 (the assignee), who may fan the work out to its own subagents.
+Accounts remain ownership, membership, credential, policy, and budget boundaries;
+they do not create separate work surfaces. See [ownership.md](ownership.md).
 
 ## Ticket
 
 | Field | Meaning |
 | --- | --- |
-| `workspace_id` | Owning workspace. The only scope a ticket has. |
+| `account_id` | Owning account. Determines authorization, credentials, policy, and budget. |
 | `status` | One of the fixed set below. Replaces columns. |
 | `tags` | `string[]`. Free-form classification (kind, area, old board name, …). Filterable. |
 | `project_id` | Optional → `Project`. Which repository the work is about. Filterable. |
@@ -43,12 +44,12 @@ Constants live in `apps/server/src/common/ticket-status.ts` (`TICKET_STATUSES`,
 typed by hand elsewhere — import the constant.
 
 Capacity: an agent identity (`runtimeIdentityKey(assignee)`) works on at most
-`workspace.max_concurrent_tickets_per_agent` (default 1) non-pending
+`account.max_concurrent_tickets_per_agent` (default 1) non-pending
 `in_progress` tickets at a time. Queued `todo` tickets for that identity are
 started in `priority` → `position` → `created_at` order when a slot frees up.
 
-`workspace.dispatch_paused_at` (non-null) stops all ticket dispatch in the
-workspace — humans can still edit, comment and move tickets.
+`account.dispatch_paused_at` (non-null) stops all ticket dispatch owned by that
+account — humans can still edit, comment and move tickets.
 
 Never dispatched regardless of status: checklist children, archived and pending
 tickets, and confirmed duplicates (`canonical_ticket_id` set) — a duplicate is
@@ -58,7 +59,7 @@ worked through its canonical ticket and is closed with it
 key files new work instead of folding into the finished ticket.
 
 The assignee RuntimeSpec is checked on write the same way team slots are: an
-unknown `cli_runtime_profile` or a credential the workspace cannot use is a
+unknown `cli_runtime_profile` or a credential the owning account cannot use is a
 400, not a dispatch-time failure.
 
 ## Project
@@ -69,11 +70,11 @@ id**, so stored references keep resolving).
 
 | Field | Meaning |
 | --- | --- |
-| `id`, `workspace_id`, `name`, `description` | |
+| `id`, `account_id`, `name`, `description` | |
 | `repo_url` | Clone URL. |
 | `default_branch` | Base branch when a ticket/run does not name one. Empty → `origin/HEAD`. |
-| `credential_id` | Workspace Credential used to clone/push. |
-| `clone_policy` | JSON (`common/clone-policy.ts`), project ⊕ workspace default. |
+| `credential_id` | Account or Global Credential used to clone/push. |
+| `clone_policy` | JSON (`common/clone-policy.ts`), project ⊕ account default. |
 | `use_pr` | Land through a pull request instead of a direct fast-forward merge. |
 | `instructions` | Free text shown to every agent that works on the project (build/test commands, conventions). |
 | `default_assignee` | `RuntimeSpec \| null`. Applied to new tickets of this project that do not name an assignee (UI, MCP, QA/Security failure tickets, CI-red tickets, outreach). |
@@ -99,15 +100,22 @@ the project on that machine:
 
 ## REST (user session)
 
-All under `/api`. Workspace header `X-Workspace-Id` as before. For non-admins
-a `/workspaces/:wsId/...` path must name the same workspace as the header
-(403 otherwise), and a `/tickets/:id/...` of another workspace answers 404.
+All under `/api`. Work lists aggregate accessible accounts. `X-Account-Id` is
+an optional creation/management hint; headerless standalone creation uses the
+default accessible account. Selecting a Project derives the ticket's account
+from that Project. Detail, writes, artifact references, and SSE use the actual
+entity owner for authorization, even when a request carries another account hint.
+Access to an account the caller has not joined is denied.
+
+Explicit `/accounts/:accountId/...` routes remain for scoped management.
+Legacy `/workspaces/...`, `workspace_id`, and `X-Workspace-Id` are compatibility
+aliases; new clients use the canonical account contract.
 
 ### Tickets
 | Method | Path | Body / query | Response |
 | --- | --- | --- | --- |
-| GET | `/workspaces/:wsId/tickets` | `?status=todo,in_progress&tags=a,b&project_id=&assignee_key=&q=&include_archived=1&archived_only=1` (tags = AND) | `{ tickets: TicketCard[], tags: {tag,count}[] }` — root tickets only |
-| POST | `/workspaces/:wsId/tickets` | `{ title, description?, status? (default todo), priority?, tags?, project_id?, base_branch?, assignee?: RuntimeSpec\|null, prompt_text?, position? }` | full ticket |
+| GET | `/tickets` | `?status=todo,in_progress&tags=a,b&project_id=&assignee_key=&q=&include_archived=1&archived_only=1` (tags = AND) | `{ tickets: TicketCard[], tags: {tag,count}[] }` — accessible accounts, root tickets only |
+| POST | `/tickets` | `{ title, description?, status? (default todo), priority?, tags?, project_id?, base_branch?, assignee?: RuntimeSpec\|null, prompt_text?, position? }` | full ticket |
 | GET | `/tickets/:id` | | full ticket (as before + fields above, `project` summary, children, comments…) |
 | PATCH | `/tickets/:id` | any of `title, description, priority, tags, project_id, base_branch, assignee, prompt_text, pending_*, next_ticket_id, on_done_action_ids` | full ticket |
 | PATCH | `/tickets/:id/move` | `{ status, position? }` | full ticket |
@@ -115,10 +123,10 @@ a `/workspaces/:wsId/...` path must name the same workspace as the header
 | POST | `/tickets/:parentId/children` | `{ title, description?, tags? }` | child |
 | POST | `/tickets/:id/archive` · `/unarchive` · DELETE `/tickets/:id` | | as before |
 | comments / attachments / prerequisites / read-state / presence / typing | unchanged paths | | |
-| GET | `/tickets/unread-counts` | | `{ total, perTicket }` (no `perBoard`) |
-| GET | `/workspaces/:wsId/ticket-tags` | | `{ tags: {tag,count}[] }` — tag suggestions across the workspace |
+| GET | `/tickets/unread-counts` | | `{ total, perTicket }` across accessible accounts (no `perBoard`) |
+| GET | `/ticket-tags` | | `{ tags: {tag,count}[] }` — tag suggestions across accessible accounts |
 | PATCH | `/tickets/:id/parent` | `{ parent_id \| null }` | full ticket — make a ticket a subtask / promote it to a root |
-| POST | `/tickets/read-all` | `{}` (workspace from header) | |
+| POST | `/tickets/read-all` | `{}` | marks accessible accounts only |
 
 Prerequisite rows (`GET /tickets/:id` → `prerequisites[]`, `GET /tickets/:id/prerequisites`)
 carry `prerequisite: { id, title, status, is_done, archived_at }` (no column fields).
@@ -137,15 +145,15 @@ created_at, updated_at, parent_id`) + `comments` (projection
 ### Projects
 | Method | Path | Body | Response |
 | --- | --- | --- | --- |
-| GET | `/workspaces/:wsId/projects` | | `Project[]` (with `host_folders`) |
-| POST | `/workspaces/:wsId/projects` | `{ name, repo_url, description?, default_branch?, credential_id?, clone_policy?, use_pr?, instructions?, default_assignee? }` | Project |
+| GET | `/projects` | | `Project[]` across accessible accounts (with `host_folders`) |
+| POST | `/projects` | `{ name, repo_url, description?, default_branch?, credential_id?, clone_policy?, use_pr?, instructions?, default_assignee? }` | Project |
 | GET | `/projects/:id` | | Project |
 | PATCH | `/projects/:id` | same fields as POST | Project |
 | DELETE | `/projects/:id` | | `{ ok }` (409 `project_in_use` with counts unless `?force=1`) |
 | PUT | `/projects/:id/host-folders/:hostId` | `{ path }` | Project |
 | DELETE | `/projects/:id/host-folders/:hostId` | | Project |
 | GET | `/projects/:id/branches` | | `{ branches, default_branch }` |
-| POST | `/projects/test-connection` | `{ repo_url, credential_id?, workspace_id }` | `{ ok, branches?, default_branch?, error? }` |
+| POST | `/projects/test-connection` | `{ repo_url, credential_id?, account_id }` | `{ ok, branches?, default_branch?, error? }` |
 | GET | `/projects/:id/refs` · `/commits` · `/commits/:sha` · `/tree` · `/file` | same query params as the old resource repo browser | same shapes |
 
 ### QA / Security failure tickets
@@ -162,8 +170,8 @@ else the scenario/profile `target_runtime` → else the project's
 `long-term-usage`). Storms / respawns / suppressions and the `?board_id=`
 filter are gone with the respawn-storm detector.
 
-### Workspace settings (moved from boards)
-`PATCH /workspaces/:id` additionally accepts `language`, `max_concurrent_tickets_per_agent`,
+### Account policy (moved from boards)
+`PATCH /accounts/:id` accepts `language`, `max_concurrent_tickets_per_agent`,
 `auto_archive_days`, `dispatch_paused_at` (ISO or null).
 
 ## MCP
@@ -175,7 +183,7 @@ handoff / benchmark / feature / merge-lease / review-drift tool,
 
 | Tool | Notes |
 | --- | --- |
-| `list_tickets` | `{ workspace_id?, status?: string[], tags?: string[], project_id?, assignee_key?, query?, include_archived?, limit? }` |
+| `list_tickets` | `{ account_id?, status?: string[], tags?: string[], project_id?, assignee_key?, query?, include_archived?, limit? }` |
 | `get_ticket` | unchanged |
 | `create_ticket` | `{ title, description?, status?, priority?, tags?, project_id?, base_branch?, assignee? (RuntimeSpec), parent_id? … }` |
 | `update_ticket` | same fields as create (partial) |
@@ -184,8 +192,8 @@ handoff / benchmark / feature / merge-lease / review-drift tool,
 | `get_my_tickets` | tickets whose assignee identity is the caller |
 | `list_projects`, `get_project`, `save_project` | projects; `get_project` includes host folders |
 | `list_repo_branches` | `{ project_id }` |
-| `subscribe_events` | `{ workspace_id?, tags?, since?, assigned_to_me? }` (no `board_id`) |
-| `list_archived_tickets` | `{ workspace_id?, cursor?, limit?, q? }` (no `board_id`) |
+| `subscribe_events` | `{ account_id?, tags?, since?, assigned_to_me? }` (no `board_id`) |
+| `list_archived_tickets` | `{ account_id?, cursor?, limit?, q? }` (no `board_id`) |
 
 ## SSE `agent_trigger` (server ↔ agent-manager contract)
 
@@ -204,7 +212,9 @@ Same event, same envelope. Changes:
   host, or `null`.
 - `worktree_mode` is always `'per_ticket'`; `use_pr` comes from the project.
 - `effort_preset` is `null` — effort rides `runtime.runtime_config.extra.effort`.
-- `environment_config` = the workspace's only (no board layer).
+- `account_id` is canonical; outgoing manager events also carry `workspace_id`
+  for installed managers that predate the owner rename.
+- `environment_config` = the owning account's only (no board layer).
 
 `board_update` keeps its name (it is the ticket-change event). `current_column_*`
 in it are derived from status the same way, plus a new `status` field.
@@ -214,10 +224,10 @@ Repository credentials: `GET /api/agent-manager/projects/:projectId/git-credenti
 projects by id).
 
 Chat "ordinary work" fallback (manager → server):
-- `GET /api/agent/ordinary-work-candidates?workspace_id=` →
+- `GET /api/agent/ordinary-work-candidates?account_id=` →
   `{ projects: [{ id, name, repo_url }], tags: [{ tag, count }] }` (replaces
   `ordinary-work-board-candidates`).
 - `POST /api/agent/ordinary-work-ticket` body
-  `{ workspace_id, dedupe_key, title, description?, original_request?, tags?: string[], project_id?, room_id, message_id }`
+  `{ account_id, dedupe_key, title, description?, original_request?, tags?: string[], project_id?, room_id, message_id }`
   (no `board_id`). The fallback line is
   `AWB_ORDINARY_WORK_FALLBACK:{"title":…,"description":…,"tags":[…],"project_id":…}`.

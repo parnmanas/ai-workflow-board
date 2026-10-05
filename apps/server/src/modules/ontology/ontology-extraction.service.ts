@@ -5,7 +5,7 @@
 // 서버 사이드 job(NestJS 서비스)이라는 판단(scout-server.md §7 "extraction
 // runs as an agent... / server-side job..." 분기의 후자)이고, graph_status
 // 같은 lifecycle/자동 프로비저닝 배선은 ticket #6(미배정)의 몫이라 이
-// 서비스는 (workspaceId, resourceId, folderPath, graphId)를 호출자가 이미
+// 서비스는 (accountId, resourceId, folderPath, graphId)를 호출자가 이미
 // 안다고 가정한다.
 //
 // `resourceId` 는 이름만 남은 것이다 — 값은 **Project id** 다. 저장소
@@ -38,12 +38,12 @@ function redactWorkerError(raw: string): string {
 }
 
 export interface ExtractRepoOptions {
-  workspaceId: string;
+  accountId: string;
   /** Project id (예전 저장소 Resource id — 같은 값으로 이관됐다). */
   resourceId: string;
   /** 빈 문자열 = 저장소 루트. */
   folderPath: string;
-  /** 이 (workspace_id, resource_id, folder_path) 그래프의 graph_id — 이
+  /** 이 (account_id, resource_id, folder_path) 그래프의 graph_id — 이
    *  서비스는 lifecycle/프로비저닝을 하지 않는다(ticket #6 범위), 호출자가
    *  이미 갖고 있는 값을 그대로 받는다. */
   graphId: string;
@@ -125,13 +125,13 @@ export class OntologyExtractionService {
   }
 
   async extractRepo(opts: ExtractRepoOptions): Promise<ExtractRepoResult> {
-    const project = await this.projects.getInWorkspace(opts.resourceId, opts.workspaceId);
+    const project = await this.projects.getInWorkspace(opts.resourceId, opts.accountId);
     if (!project) throw new Error('Project not found in workspace');
     if (!project.repo_url) {
       throw new Error("project has no repo_url — set the project's repository URL before extracting its ontology graph");
     }
 
-    const credential = await this.resolveGitCredential(this.credentialRepo, project.credential_id, opts.workspaceId);
+    const credential = await this.resolveGitCredential(this.credentialRepo, project.credential_id, opts.accountId);
     // 캐시 키는 project id — 저장소 Resource 시절과 같은 값이라 기존 캐시 클론을 그대로 재사용한다.
     const repoPath = await this.ensureRepoCache({ resourceId: project.id, url: project.repo_url, credential });
     const ref = opts.ref || project.default_branch || 'HEAD';
@@ -191,7 +191,7 @@ export class OntologyExtractionService {
     const dataSource = opts.dataSource ?? this.resolveOntologyDataSource();
     const summary = await this.persistFactBundles(dataSource, {
       graphId: opts.graphId,
-      workspaceId: opts.workspaceId,
+      accountId: opts.accountId,
       resourceId: opts.resourceId,
       folderPath: opts.folderPath,
       commit,

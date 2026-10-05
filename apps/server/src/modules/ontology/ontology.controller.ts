@@ -59,13 +59,13 @@ export class OntologyController {
    *  이관됐다). 이 호출의 실패는 호출부에서 항상 `freshness_error`로만
    *  흡수한다(그래프 자체의 status/indexed_at/commit은 DB에만 의존하므로 git
    *  접근 실패가 전체 응답을 깨서는 안 된다). */
-  private async resolveRepoPath(projectId: string, workspaceId: string): Promise<string> {
-    const project = await this.projects.getInWorkspace(projectId, workspaceId);
+  private async resolveRepoPath(projectId: string, accountId: string): Promise<string> {
+    const project = await this.projects.getInWorkspace(projectId, accountId);
     if (!project) throw new Error('Project not found in workspace');
     if (!project.repo_url) {
       throw new Error("project has no repo_url — set the project's repository URL before checking freshness");
     }
-    const credential = await resolveGitCredential(this.credentialRepo, project.credential_id, workspaceId);
+    const credential = await resolveGitCredential(this.credentialRepo, project.credential_id, accountId);
     return ensureRepoCache({ resourceId: project.id, url: project.repo_url, credential });
   }
 
@@ -80,7 +80,7 @@ export class OntologyController {
   // 호환을 위해 유지하고, `project_id` 도 같은 뜻의 별칭으로 받는다.
   @Get('status')
   async status(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('graph_id') graphId: string | undefined,
     @Query('resource_id') resourceIdParam: string | undefined,
     @Query('folder_path') folderPath: string | undefined,
@@ -88,7 +88,7 @@ export class OntologyController {
     // 맨 뒤에 둔다 — 핸들러를 위치 인자로 직접 부르는 호출부(테스트)가 밀리지 않게.
     @Query('project_id') projectIdParam?: string,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
     const resourceId = resourceIdParam || projectIdParam || undefined;
     if (!graphId && !resourceId) {
       return res.status(400).json({ error: 'graph_id or resource_id (project id) is required' });
@@ -96,7 +96,7 @@ export class OntologyController {
 
     let graph;
     try {
-      graph = await this.lifecycleService.resolveOrProvision({ workspaceId, graphId, resourceId, folderPath });
+      graph = await this.lifecycleService.resolveOrProvision({ accountId, graphId, resourceId, folderPath });
     } catch (e: any) {
       if (e instanceof GraphRefResolutionError) {
         return res.status(e.code === 'not_found' ? 404 : 400).json({ error: e.message, code: e.code });
@@ -111,7 +111,7 @@ export class OntologyController {
     let freshnessError: string | null = null;
     if (graph.commit) {
       try {
-        const repoPath = await this.resolveRepoPath(graph.resource_id, workspaceId);
+        const repoPath = await this.resolveRepoPath(graph.resource_id, accountId);
         // countBehindAhead(repoPath, baseRef, headRef)의 behind/ahead는
         // "baseRef 쪽에만 있는 커밋 수 / headRef 쪽에만 있는 커밋 수"다
         // (merge-gate.ts의 base-vs-feature 자세와 동일). 여기서 baseRef는
@@ -149,12 +149,12 @@ export class OntologyController {
   // 엔드포인트와 같은 자세.
   @Post('refresh')
   async refresh(@Body() body: any, @Res() res: Response) {
-    const workspaceId = body?.workspace_id;
+    const accountId = body?.account_id;
     const graphId = body?.graph_id;
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id is required' });
     if (!graphId) return res.status(400).json({ error: 'graph_id is required' });
     try {
-      const { graph, started } = await this.lifecycleService.forceRebuild({ graphId, workspaceId });
+      const { graph, started } = await this.lifecycleService.forceRebuild({ graphId, accountId });
       return res.json({ graph_id: graph.id, status: graph.status, started });
     } catch (e: any) {
       if (e instanceof GraphRefResolutionError) {
@@ -169,16 +169,16 @@ export class OntologyController {
    * Graphology 메모리 사용량이 예측 가능하게 유지된다. */
   @Get('graph')
   async graph(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('graph_id') graphId: string,
     @Res() res: Response,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
     if (!graphId) return res.status(400).json({ error: 'graph_id query parameter is required' });
 
     let graph;
     try {
-      graph = await this.lifecycleService.resolveOrProvision({ workspaceId, graphId });
+      graph = await this.lifecycleService.resolveOrProvision({ accountId, graphId });
     } catch (e: any) {
       if (e instanceof GraphRefResolutionError) {
         return res.status(e.code === 'not_found' ? 404 : 400).json({ error: e.message, code: e.code });
@@ -249,11 +249,11 @@ export class OntologyController {
   // 폴링 빈도가 아니라 실제 사람의 방문 횟수를 반영한다.
   @Post('view-opened')
   async viewOpened(@Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const workspaceId = body?.workspace_id;
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id is required' });
+    const accountId = body?.account_id;
+    if (!accountId) return res.status(400).json({ error: 'account_id is required' });
     const user = (req as any).currentUser;
     this.logService.info('Ontology', 'graph view opened', {
-      workspace_id: workspaceId,
+      account_id: accountId,
       resource_id: body?.resource_id || body?.project_id || null,
       folder_path: typeof body?.folder_path === 'string' ? body.folder_path : '',
       user_id: user?.id || null,

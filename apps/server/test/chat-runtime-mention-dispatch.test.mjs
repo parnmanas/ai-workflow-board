@@ -69,7 +69,7 @@ function makeSvc({ room, ticket, participantSpec }) {
       };
     },
   };
-  const workspaceRepo = { async findOne() { return { id: 'ws-1' }; } };
+  const accountRepo = { async findOne() { return { id: 'ws-1' }; } };
   const messageRepo = {
     createQueryBuilder: makeQueryBuilder,
     manager: {
@@ -105,7 +105,7 @@ function makeSvc({ room, ticket, participantSpec }) {
   const connectivity = { isReachable: () => true };
   return new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, ticketRepo, {}, {},
-    workspaceRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
     { listForAgent: () => [] },
   );
 }
@@ -122,13 +122,13 @@ function captureOnce(eventName) {
 // assignee went through TicketService's RuntimeSpec normalisation, which
 // requires runtime_config — parseRuntimeSpec rejects a spec without it.
 const TICKET = {
-  id: 'ticket-1', workspace_id: 'ws-1', status: 'in_progress',
+  id: 'ticket-1', account_id: 'ws-1', status: 'in_progress',
   assignee: { ...SPEC, runtime_config: { strategy: 'single', permission_mode: 'strict' } },
   assignee_key: RT,
 };
 
 test('ticket room @rt-mention emits chat_request from the assignee spec (no Agent row)', async () => {
-  const room = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, workspace_id: 'ws-1', ticket_id: 'ticket-1' };
+  const room = { id: 'room-1', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, account_id: 'ws-1', ticket_id: 'ticket-1' };
   const svc = makeSvc({ room, ticket: TICKET, participantSpec: null });
   const chatRequest = captureOnce('chat_request');
   try {
@@ -146,7 +146,7 @@ test('ticket room @rt-mention emits chat_request from the assignee spec (no Agen
 });
 
 test('ticket-less room @rt-mention emits chat_request from the participant snapshot', async () => {
-  const room = { id: 'room-2', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, workspace_id: 'ws-1', ticket_id: null };
+  const room = { id: 'room-2', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, account_id: 'ws-1', ticket_id: null };
   const svc = makeSvc({ room, ticket: null, participantSpec: { ...SPEC } });
   const chatRequest = captureOnce('chat_request');
   try {

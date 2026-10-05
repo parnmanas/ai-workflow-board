@@ -38,7 +38,7 @@ function batchToJson(b: QaRunBatch) {
   const ids = b.scenario_ids ?? [];
   return {
     id: b.id,
-    workspace_id: b.workspace_id,
+    account_id: b.account_id,
     scenario_ids: ids,
     run_ids: b.run_ids ?? [],
     current_index: b.current_index,
@@ -64,7 +64,7 @@ function batchToJson(b: QaRunBatch) {
 function scheduleToJson(s: QaSchedule) {
   return {
     id: s.id,
-    workspace_id: s.workspace_id,
+    account_id: s.account_id,
     name: s.name,
     scope: s.scope,
     scenario_ids: s.scenario_ids ?? [],
@@ -111,12 +111,15 @@ export class QaScenarioController {
 
   @Get('scenarios')
   async list(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
-    const rows = await this.qaService.list(workspaceId);
-    return res.json(rows);
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
+    const ids: string[] = (req as any)?.accessibleAccountIds || [accountId];
+    const rows = (await Promise.all(ids.map(id => this.qaService.list(id)))).flat();
+    const unique = Array.from(new Map(rows.map(row => [row.id, row])).values());
+    return res.json(unique);
   }
 
   @Get('scenarios/:id')
@@ -156,16 +159,16 @@ export class QaScenarioController {
         ...body,
         ...(phases.value === undefined ? {} : { qa_phases: phases.value }),
       };
-      return res.json(await this.qaService.update(id, body?.workspace_id, patch));
+      return res.json(await this.qaService.update(id, body?.account_id, patch));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to update QA scenario' });
     }
   }
 
   @Delete('scenarios/:id')
-  async remove(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async remove(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.qaService.remove(id, workspaceId);
+      await this.qaService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete QA scenario' });
@@ -197,13 +200,13 @@ export class QaScenarioController {
   @Get('scenarios/:id/runs')
   async listRuns(
     @Param('id') id: string,
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Query('limit') limit: string | undefined,
     @Res() res: Response,
   ) {
     try {
       const n = limit ? parseInt(limit, 10) : 20;
-      const runs = await this.qaRunService.listRuns(id, workspaceId, Number.isFinite(n) ? n : 20);
+      const runs = await this.qaRunService.listRuns(id, accountId, Number.isFinite(n) ? n : 20);
       return res.json(runs);
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list QA runs' });
@@ -238,9 +241,9 @@ export class QaScenarioController {
   }
 
   @Get('runs/:runId')
-  async getRun(@Param('runId') runId: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getRun(@Param('runId') runId: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(await this.qaRunService.getRun(runId, workspaceId));
+      return res.json(await this.qaRunService.getRun(runId, accountId));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'QA run not found' });
     }
@@ -248,7 +251,7 @@ export class QaScenarioController {
 
   // ── Batches (sequential multi-scenario runs) ────────────────────────────────
 
-  // Start a sequential batch. Body: { workspace_id, scenario_ids?[],
+  // Start a sequential batch. Body: { account_id, scenario_ids?[],
   // all?, stop_on_fail? }. Only index 0 dispatches now; the rest are dispatched
   // one-at-a-time as each run finalizes (see QaRunService.onRunFinalized).
   @Post('batches')
@@ -256,7 +259,7 @@ export class QaScenarioController {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
       const batch = await this.qaRunService.startBatch({
-        workspaceId: body?.workspace_id,
+        accountId: body?.account_id,
         scenarioIds: Array.isArray(body?.scenario_ids) ? body.scenario_ids : undefined,
         all: !!body?.all,
         stopOnFail: !!body?.stop_on_fail,
@@ -270,9 +273,9 @@ export class QaScenarioController {
   }
 
   @Get('batches/:id')
-  async getBatch(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getBatch(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(batchToJson(await this.qaRunService.getBatch(id, workspaceId)));
+      return res.json(batchToJson(await this.qaRunService.getBatch(id, accountId)));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'QA batch not found' });
     }
@@ -282,12 +285,14 @@ export class QaScenarioController {
 
   @Get('schedules')
   async listSchedules(
-    @Query('workspace_id') workspaceId: string,
+    @Query('account_id') accountId: string,
     @Res() res: Response,
+    @Req() req: Request,
   ) {
-    if (!workspaceId) return res.status(400).json({ error: 'workspace_id query parameter is required' });
+    if (!accountId) return res.status(400).json({ error: 'account_id query parameter is required' });
     try {
-      const rows = await this.qaScheduleService.list(workspaceId);
+      const ids: string[] = (req as any)?.accessibleAccountIds || [accountId];
+      const rows = (await Promise.all(ids.map(id => this.qaScheduleService.list(id)))).flat();
       return res.json(rows.map(scheduleToJson));
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to list QA schedules' });
@@ -295,9 +300,9 @@ export class QaScenarioController {
   }
 
   @Get('schedules/:id')
-  async getSchedule(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async getSchedule(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      return res.json(scheduleToJson(await this.qaScheduleService.get(id, workspaceId)));
+      return res.json(scheduleToJson(await this.qaScheduleService.get(id, accountId)));
     } catch (e: any) {
       return res.status(e?.status || 404).json({ error: e?.message || 'QA schedule not found' });
     }
@@ -308,7 +313,7 @@ export class QaScenarioController {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
       const row = await this.qaScheduleService.create({
-        workspaceId: body?.workspace_id,
+        accountId: body?.account_id,
         name: body?.name,
         scope: body?.scope,
         scenarioIds: body?.scenario_ids,
@@ -327,7 +332,7 @@ export class QaScenarioController {
   @Patch('schedules/:id')
   async updateSchedule(@Param('id') id: string, @Body() body: any, @Res() res: Response) {
     try {
-      const row = await this.qaScheduleService.update(id, body?.workspace_id, {
+      const row = await this.qaScheduleService.update(id, body?.account_id, {
         name: body?.name,
         scope: body?.scope,
         scenarioIds: body?.scenario_ids,
@@ -343,9 +348,9 @@ export class QaScenarioController {
   }
 
   @Delete('schedules/:id')
-  async removeSchedule(@Param('id') id: string, @Query('workspace_id') workspaceId: string, @Res() res: Response) {
+  async removeSchedule(@Param('id') id: string, @Query('account_id') accountId: string, @Res() res: Response) {
     try {
-      await this.qaScheduleService.remove(id, workspaceId);
+      await this.qaScheduleService.remove(id, accountId);
       return res.json({ success: true, id });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to delete QA schedule' });
@@ -358,7 +363,7 @@ export class QaScenarioController {
   async runScheduleNow(@Param('id') id: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     try {
       const user = (req as any).currentUser as { id: string } | undefined;
-      const { schedule, batch } = await this.qaScheduleService.runNow(id, body?.workspace_id, user?.id || '');
+      const { schedule, batch } = await this.qaScheduleService.runNow(id, body?.account_id, user?.id || '');
       return res.status(201).json({ schedule: scheduleToJson(schedule), batch: batchToJson(batch) });
     } catch (e: any) {
       return res.status(e?.status || 400).json({ error: e?.message || 'Failed to run QA schedule' });

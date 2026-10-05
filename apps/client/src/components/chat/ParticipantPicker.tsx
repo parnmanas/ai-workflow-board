@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { api, getActiveWorkspaceId } from '../../api';
+import { api, getActiveAccountId } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { tokens } from '../../tokens';
 import type { ChatRoomDetail } from '../../types';
@@ -311,7 +311,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
         {/* P4b: runtime 선언 → Agent 매칭/생성 후 선택에 추가. */}
         <div style={{ padding: '0 16px 8px', flexShrink: 0 }}>
           <DeclareRuntimeSection
-            workspaceId={getActiveWorkspaceId() || ''}
+            accountId={getActiveAccountId() || ''}
             onResolved={(spec) => {
               // P4c-4: 항상 새 spec — 임시 칩 + 저장 시 runtime 동봉 (서버가 키 매김).
               if (!spec) { setError(null); return; }

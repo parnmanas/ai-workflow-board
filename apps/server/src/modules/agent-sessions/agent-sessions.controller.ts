@@ -8,7 +8,7 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { AgentSessionError, AgentSessionsService } from './agent-sessions.service';
 
 /**
- * 사용자 표면. 워크스페이스는 chat-rooms 와 같은 `X-Workspace-Id` 헤더 규약.
+ * 사용자 표면. 워크스페이스는 chat-rooms 와 같은 `X-Account-Id` 헤더 규약.
  * 모든 경로가 (Runtime Host, CLI) 아래에 있다 — 세션은 AWB 의 것이 아니라 그 장비의 것이다.
  */
 @ApiBearerAuth('user-session')
@@ -19,11 +19,11 @@ import { AgentSessionError, AgentSessionsService } from './agent-sessions.servic
 export class AgentSessionsController {
   constructor(private readonly sessions: AgentSessionsService) {}
 
-  private workspaceId(req: Request, res: Response): string | null {
-    const raw = req.headers['x-workspace-id'];
+  private accountId(req: Request, res: Response): string | null {
+    const raw = req.headers['x-account-id'];
     const value = Array.isArray(raw) ? raw[0] : raw;
     if (!value) {
-      res.status(400).json({ error: 'workspace_required', message: 'X-Workspace-Id header is required' });
+      res.status(400).json({ error: 'workspace_required', message: 'X-Account-Id header is required' });
       return null;
     }
     return String(value);
@@ -46,7 +46,7 @@ export class AgentSessionsController {
 
   @Get('hosts')
   async hosts(@Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.listHosts(ws));
   }
@@ -54,7 +54,7 @@ export class AgentSessionsController {
   /** CLI 설정 — 이 Runtime Host 의 이 CLI 를 어떤 워크스페이스 Credential 로 인증할지. */
   @Get('hosts/:managerId/:cli/settings')
   async getSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.getCliSettings(ws, managerId, cli));
   }
@@ -66,7 +66,7 @@ export class AgentSessionsController {
    */
   @Put('hosts/:managerId/:cli/settings')
   async setSettings(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.setCliSettings(ws, this.userId(req), managerId, cli, body?.credential_id ?? null, body?.default_config, body?.backend_profile_id));
   }
@@ -88,7 +88,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     try {
       const bytes = await this.sessions.readImage(ws, this.userId(req), managerId, cli, sessionId, imageRef);
@@ -122,7 +122,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     try {
       const image = await this.sessions.readLocalImage(ws, this.userId(req), managerId, cli, sessionId, String(path ?? ''), String(cwd ?? ''));
@@ -142,16 +142,16 @@ export class AgentSessionsController {
 
   @Get('hosts/:managerId/:cli/sessions')
   async list(@Param('managerId') managerId: string, @Param('cli') cli: string, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
-    return this.run(res, 200, () => this.sessions.listSessions(ws, this.userId(req), managerId, cli));
+    return this.run(res, 200, () => this.sessions.listSessions(ws, this.userId(req), managerId, cli, (req as any).accessibleAccountIds));
   }
 
   /** `{ session_id?, cwd?, title?, force? }` — session_id 없으면 새 세션(session/new), 있으면 복원(session/load).
    *  `force` 는 잠금을 쥔 외부 프로세스까지 종료하고 연다(화면의 확인 대화상자를 거친 재요청). */
   @Post('hosts/:managerId/:cli/sessions')
   async open(@Param('managerId') managerId: string, @Param('cli') cli: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 201, () => this.sessions.openSession(ws, this.userId(req), managerId, cli, {
       session_id: typeof body?.session_id === 'string' ? body.session_id : null,
@@ -169,7 +169,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.getSession(ws, this.userId(req), managerId, cli, sessionId));
   }
@@ -183,7 +183,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 202, () => this.sessions.prompt(ws, this.userId(req), managerId, cli, sessionId, body?.text, body?.images));
   }
@@ -197,7 +197,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.decidePermission(ws, this.userId(req), managerId, cli, sessionId, body?.request_id, body?.option_id ?? null));
   }
@@ -212,7 +212,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.answerElicitation(ws, this.userId(req), managerId, cli, sessionId, body?.elicitation_id, body?.action, body?.content));
   }
@@ -227,7 +227,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 202, () => this.sessions.setConfigOption(ws, this.userId(req), managerId, cli, sessionId, body?.config_id, body?.value));
   }
@@ -240,7 +240,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 202, () => this.sessions.cancel(ws, this.userId(req), managerId, cli, sessionId));
   }
@@ -254,7 +254,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 202, () => this.sessions.setMode(ws, this.userId(req), managerId, cli, sessionId, body?.mode_id));
   }
@@ -267,7 +267,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 202, () => this.sessions.restart(ws, this.userId(req), managerId, cli, sessionId));
   }
@@ -280,7 +280,7 @@ export class AgentSessionsController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ws = this.workspaceId(req, res);
+    const ws = this.accountId(req, res);
     if (!ws) return;
     return this.run(res, 200, () => this.sessions.close(ws, this.userId(req), managerId, cli, sessionId));
   }

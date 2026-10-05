@@ -24,10 +24,10 @@ export function useAgentSessionsNav(wsId: string | null): AgentSessionsNav {
   const [error, setError] = useState<string | null>(null);
   const generationRef = useRef(0);
 
-  const fetchHosts = useCallback(async (workspaceId: string, generation: number) => {
+  const fetchHosts = useCallback(async (accountId: string, generation: number) => {
     setLoading(true);
     try {
-      const list = await api.listAgentSessionHosts(workspaceId);
+      const list = await api.listAgentSessionHosts(accountId);
       if (generationRef.current !== generation) return;
       setHosts(Array.isArray(list) ? list : []);
       setError(null);

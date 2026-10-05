@@ -1,5 +1,5 @@
-// Credentials live in exactly two catalog layers — Global (`workspace_id NULL`)
-// and one Workspace (common/catalog-scope.ts). The Board layer and its dead
+// Credentials live in exactly two catalog layers — Global (`account_id NULL`)
+// and one Account (common/catalog-scope.ts). The Board layer and its dead
 // `board_id` column are gone with boards. git-credential-resolution.test.mjs
 // covers the git credential resolution path and credentials-scope-switch
 // covers update(); this file pins the REST CRUD (list/create) scope contract.
@@ -22,7 +22,7 @@ function response() {
 const adminReq = { currentUser: { id: 'u-admin', name: 'Admin', role: 'admin', permissions: [] } };
 const memberReq = { currentUser: { id: 'u-member', name: 'Member', role: 'user', permissions: ['admin.credentials'] } };
 
-describe('Credentials REST scope contract (Global / Workspace)', () => {
+describe('Credentials REST scope contract (Global / Account)', () => {
   let dataSource;
   let controller;
 
@@ -48,7 +48,7 @@ describe('Credentials REST scope contract (Global / Workspace)', () => {
     await controller.create(
       {
         scope: 'board',
-        workspace_id: 'workspace-a',
+        account_id: 'workspace-a',
         name: 'Board credential',
         provider: 'github',
         credentials: { token: 'secret' },
@@ -57,7 +57,7 @@ describe('Credentials REST scope contract (Global / Workspace)', () => {
       res,
     );
     assert.equal(res.statusCode, 400);
-    assert.match(res.body.error, /scope must be 'global' or 'workspace'/);
+    assert.match(res.body.error, /scope must be 'global' or 'account'/);
   });
 
   it('refuses a global credential without admin.global_credentials', async () => {
@@ -71,10 +71,10 @@ describe('Credentials REST scope contract (Global / Workspace)', () => {
     assert.match(res.body.error, /admin\.global_credentials/);
   });
 
-  it('list() returns the Workspace own credentials plus inherited globals, never another Workspace', async () => {
+  it('list() returns the Account own credentials plus inherited globals, never another Account', async () => {
     for (const [body, req] of [
-      [{ workspace_id: 'workspace-a', name: 'Workspace credential', provider: 'github', credentials: { token: 'a' } }, memberReq],
-      [{ workspace_id: 'workspace-b', name: 'Other workspace credential', provider: 'github', credentials: { token: 'b' } }, memberReq],
+      [{ account_id: 'workspace-a', name: 'Account credential', provider: 'github', credentials: { token: 'a' } }, memberReq],
+      [{ account_id: 'workspace-b', name: 'Other workspace credential', provider: 'github', credentials: { token: 'b' } }, memberReq],
       [{ scope: 'global', name: 'Global credential', provider: 'github', credentials: { token: 'g' } }, adminReq],
     ]) {
       const res = response();
@@ -85,9 +85,9 @@ describe('Credentials REST scope contract (Global / Workspace)', () => {
     const listRes = response();
     await controller.list('workspace-a', undefined, undefined, undefined, listRes);
     const names = listRes.body.map((row) => row.name).sort();
-    assert.deepEqual(names, ['Global credential', 'Workspace credential']);
+    assert.deepEqual(names, ['Account credential', 'Global credential']);
     assert.equal(listRes.body.find((r) => r.name === 'Global credential').scope, 'global');
-    assert.equal(listRes.body.find((r) => r.name === 'Workspace credential').scope, 'workspace');
+    assert.equal(listRes.body.find((r) => r.name === 'Account credential').scope, 'account');
     // The response shape carries no Board layer at all.
     assert.ok(listRes.body.every((row) => !('board_id' in row)));
 

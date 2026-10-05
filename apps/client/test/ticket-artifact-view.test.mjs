@@ -116,15 +116,15 @@ test('설명에 티켓 토큰이 있으면 중첩 카드로 렌더', () => {
 // ─── "티켓 열기" 버튼 (티켓 7815a958 → board-less: Tickets 페이지로) ──────────
 
 test('onOpen 없으면 열기 버튼 미노출', () => {
-  const ticket = { id: 't1', title: 'T', workspace_id: 'w1' };
+  const ticket = { id: 't1', title: 'T', account_id: 'w1' };
   const html = render({ status: 'loaded', ticket });
   assert.doesNotMatch(html, /티켓 열기/);
 });
 
-test('workspace_id 가 있으면 활성 버튼 (보관된 티켓도 Tickets 페이지가 id 로 연다)', () => {
+test('account_id 가 있으면 활성 버튼 (보관된 티켓도 Tickets 페이지가 id 로 연다)', () => {
   for (const ticket of [
-    { id: 't1', title: 'T', workspace_id: 'w1' },
-    { id: 't1', title: 'T', workspace_id: 'w1', archived_at: '2026-01-01T00:00:00.000Z' },
+    { id: 't1', title: 'T', account_id: 'w1' },
+    { id: 't1', title: 'T', account_id: 'w1', archived_at: '2026-01-01T00:00:00.000Z' },
   ]) {
     const html = renderToStaticMarkup(
       React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpen: () => {} }),
@@ -134,11 +134,11 @@ test('workspace_id 가 있으면 활성 버튼 (보관된 티켓도 Tickets 페�
   }
 });
 
-test('workspace_id 없으면 버튼 비활성 + 안내', () => {
+test('ticket id가 있으면 owner 메타데이터 없이도 직접 열 수 있다', () => {
   const ticket = { id: 't1', title: 'T' };
   const html = renderToStaticMarkup(
     React.createElement(TicketArtifactView, { state: { status: 'loaded', ticket }, onOpen: () => {} }),
   );
-  assert.match(html, /disabled=""/);
-  assert.match(html, /워크스페이스를 찾을 수 없습니다/);
+  assert.doesNotMatch(html, /disabled=""/);
+  assert.match(html, /티켓 열기/);
 });

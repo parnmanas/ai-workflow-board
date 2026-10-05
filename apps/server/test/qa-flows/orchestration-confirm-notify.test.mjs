@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bootApp, exitAfterTests, step } from '../helpers/boot.mjs';
-import { createApiKey, createWorkspace } from '../helpers/fixtures.mjs';
+import { createApiKey, createAccount } from '../helpers/fixtures.mjs';
 import { buildTeam } from '../helpers/orchestration-team.mjs';
 import { McpClient } from '../helpers/mcp-client.mjs';
 
@@ -97,8 +97,8 @@ async function sharedApp() {
   return shared;
 }
 
-async function readSteps(missions, missionId, workspaceId) {
-  const detail = await missions.getMissionDetail(missionId, workspaceId);
+async function readSteps(missions, missionId, accountId) {
+  const detail = await missions.getMissionDetail(missionId, accountId);
   return { detail, byKey: Object.fromEntries(detail.steps.map((s) => [s.step_key, s])) };
 }
 
@@ -132,10 +132,10 @@ async function stage(t, { label } = {}) {
     dispatcher.dispatchForUser = original;
   });
 
-  const ws = await createWorkspace(app, getDataSourceToken, `orch-cn-${label}`);
+  const ws = await createAccount(app, getDataSourceToken, `orch-cn-${label}`);
 
   const mcpFor = async (agent, name) => {
-    const key = await createApiKey(app, getDataSourceToken, agent.id, { workspaceId: ws.id, label: name });
+    const key = await createApiKey(app, getDataSourceToken, agent.id, { accountId: ws.id, label: name });
     const client = new McpClient({ baseUrl: `http://127.0.0.1:${port}`, apiKey: key.raw_key });
     t.after(() => {
       void client.close().catch(() => {});
@@ -145,7 +145,7 @@ async function stage(t, { label } = {}) {
 
   // 슬롯 spec 으로 팀을 만들고, AWB 가 프로비저닝한 정체성을 돌려받는다.
   const squad = await buildTeam(app, getDataSourceToken, teams, {
-    workspaceId: ws.id,
+    accountId: ws.id,
     name: `Notify squad ${label}`,
     team: { max_parallel_steps: 2, created_by: HUMAN.id },
     members: [{ role_label: 'builder', capabilities: 'builds things', max_concurrent: 4 }],
@@ -155,7 +155,7 @@ async function stage(t, { label } = {}) {
   const worker = squad.member('builder');
 
   const mission = await missions.createMission({
-    workspace_id: ws.id,
+    account_id: ws.id,
     team_id: team.id,
     title: `Notify mission ${label}`,
     objective: 'Exercise the confirm gate notification path.',
@@ -287,7 +287,7 @@ test('게이트가 열리면 알림이 정확히 1회, 미션명·질문·판정
   assert.match(payload.body, /pass only if the layout matches/, '질문(instructions)');
   assert.equal(
     payload.url,
-    `https://awb.test/ws/${ws.id}/orchestration/missions/${mission.id}`,
+    `https://awb.test/missions/${mission.id}`,
     '판정 화면으로 가는 링크',
   );
 
@@ -666,7 +666,7 @@ test('실행 중 미션이 100개를 넘어도 뒤쪽 게이트가 후속 스윕
   for (let i = 0; i < TOTAL; i += 1) {
     const m = await missionRepo.save(
       missionRepo.create({
-        workspace_id: ws.id,
+        account_id: ws.id,
         team_id: team.id,
         title: `Starve mission ${i}`,
         objective: 'starvation regression',
@@ -678,7 +678,7 @@ test('실행 중 미션이 100개를 넘어도 뒤쪽 게이트가 후속 스윕
     await stepRepo.save(
       stepRepo.create({
         mission_id: m.id,
-        workspace_id: ws.id,
+        account_id: ws.id,
         team_id: team.id,
         step_key: 'gate',
         title: `Gate ${i}`,

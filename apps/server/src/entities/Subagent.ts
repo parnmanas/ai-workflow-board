@@ -21,7 +21,7 @@ import { SubagentLogLine } from './SubagentLogLine';
  *                      (CASCADE removes lines via FK in SubagentLogLine).
  */
 @Entity('subagents')
-@Index(['workspace_id', 'started_at'])
+@Index(['account_id', 'started_at'])
 @Index(['agent_id'])
 @Index(['expires_at'])
 // Ticket ef53fdf4's hard-budget token gate runs countWindowTokens on EVERY
@@ -39,7 +39,7 @@ export class Subagent {
   agent_id: string;
 
   @Column({ type: 'varchar' })
-  workspace_id: string;
+  account_id: string;
 
   // 'chat' | 'ticket' | 'oneshot'
   @Column({ type: 'varchar' })

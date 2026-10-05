@@ -12,7 +12,7 @@ import { activityEvents } from '../../services/activity.service';
 import { LogService } from '../../services/log.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
-import { agentIsVisibleInWorkspace } from '../../common/agent-workspace-scope';
+import { agentIsVisibleInWorkspace } from '../../common/agent-account-scope';
 import { catalogLoginCapable } from '../../common/cli-catalog';
 
 function makeError(status: number, message: string): Error & { status: number } {
@@ -49,7 +49,7 @@ export const REQUIRED_FIELD: Record<string, string> = Object.fromEntries(
 );
 
 export interface StartCliLoginSessionArgs {
-  workspaceId: string;
+  accountId: string;
   isGlobal: boolean;
   cli: string;
   /** opencode 전용 — `opencode auth login -p <cliProvider> -m <cliMethod>`. */
@@ -111,17 +111,17 @@ export class CliLoginSessionService {
     // 리뷰 지적(round 1): instance_id는 클라이언트가 그대로 제출하는 값이라,
     // 이 검증이 없으면 다른 workspace의 manager instance_id를 직접 넣어
     // command를 보낼 수 있었다. 전역(is_global) 세션은 자기 자신의
-    // listCliLoginInstances(workspace_id 없음)가 이미 모든 workspace의
+    // listCliLoginInstances(account_id 없음)가 이미 모든 workspace의
     // 인스턴스를 보여주는 것과 동일하게 어떤 instance든 허용하고, workspace
     // 세션은 그 instance가 이 workspace에서 실제로 보이는 경우(전역
     // instance 포함)에만 허용한다.
-    if (!args.isGlobal && !agentIsVisibleInWorkspace(inst.workspace_id, args.workspaceId)) {
+    if (!args.isGlobal && !agentIsVisibleInWorkspace(inst.account_id, args.accountId)) {
       throw makeError(403, 'That Runtime Host instance is not available in this workspace');
     }
 
     const session = await this.sessionRepo.save(
       this.sessionRepo.create({
-        workspace_id: args.workspaceId,
+        account_id: args.accountId,
         is_global: args.isGlobal,
         cli: args.cli,
         cli_provider: cliProvider,
@@ -149,18 +149,18 @@ export class CliLoginSessionService {
     return session;
   }
 
-  async getSession(sessionId: string, workspaceId: string): Promise<CliLoginSession | null> {
+  async getSession(sessionId: string, accountId: string): Promise<CliLoginSession | null> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) return null;
     // 글로벌 세션(is_global)은 어느 workspace에서든 조회 가능 — Credential의
     // "글로벌은 어디서든 read 가능" 규약과 동일.
-    if (!session.is_global && session.workspace_id !== workspaceId) return null;
+    if (!session.is_global && session.account_id !== accountId) return null;
     return session;
   }
 
-  async cancelSession(sessionId: string, workspaceId: string): Promise<CliLoginSession> {
+  async cancelSession(sessionId: string, accountId: string): Promise<CliLoginSession> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
-    if (!session || (!session.is_global && session.workspace_id !== workspaceId)) {
+    if (!session || (!session.is_global && session.account_id !== accountId)) {
       throw makeError(404, 'Login session not found');
     }
     if (TERMINAL_CLI_LOGIN_SESSION_STATUSES.includes(session.status)) {
@@ -262,7 +262,7 @@ export class CliLoginSessionService {
       }
       const credential = await this.credRepo.save(
         this.credRepo.create({
-          workspace_id: session.is_global ? null : session.workspace_id,
+          account_id: session.is_global ? null : session.account_id,
           name: session.credential_name,
           description: session.cli_provider
             ? `Automatically created via CLI device-auth login (${session.cli} / ${session.cli_provider}).`
@@ -312,7 +312,7 @@ export class CliLoginSessionService {
   private emitProgress(session: CliLoginSession): void {
     activityEvents.emit('cli_login_progress', {
       session_id: session.id,
-      workspace_id: session.workspace_id,
+      account_id: session.account_id,
       status: session.status,
       verification_url: session.verification_url,
       user_code: session.user_code,

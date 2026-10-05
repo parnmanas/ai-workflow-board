@@ -64,9 +64,9 @@ async function bulkInsertNodes(rows) {
     const batch = rows.slice(i, i + INSERT_BATCH);
     const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
     const params = [];
-    for (const r of batch) params.push(r.id, r.workspace_id, r.graph_id, r.symbol_id, r.type, r.layer, r.name, r.confidence, r.status);
+    for (const r of batch) params.push(r.id, r.account_id, r.graph_id, r.symbol_id, r.type, r.layer, r.name, r.confidence, r.status);
     await AppOntologyDataSource.query(
-      `INSERT INTO ontology_nodes (id, workspace_id, graph_id, symbol_id, type, layer, name, confidence, status) VALUES ${placeholders}`,
+      `INSERT INTO ontology_nodes (id, account_id, graph_id, symbol_id, type, layer, name, confidence, status) VALUES ${placeholders}`,
       params,
     );
   }
@@ -77,9 +77,9 @@ async function bulkInsertEdges(rows) {
     const batch = rows.slice(i, i + INSERT_BATCH);
     const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
     const params = [];
-    for (const r of batch) params.push(r.id, r.workspace_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
+    for (const r of batch) params.push(r.id, r.account_id, r.graph_id, r.src_id, r.dst_id, r.type, r.layer, r.confidence, r.status);
     await AppOntologyDataSource.query(
-      `INSERT INTO ontology_edges (id, workspace_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
+      `INSERT INTO ontology_edges (id, account_id, graph_id, src_id, dst_id, type, layer, confidence, status) VALUES ${placeholders}`,
       params,
     );
   }
@@ -102,16 +102,16 @@ describe('(A) 작지만 조밀한 fixture — rowCap이 실제로 잘린다', ()
   const WIDTH = 40; // depth1 40개, depth2 최대 40*40=1600개 도달 가능(전부 물리적으로 저장) — rowCap(예: 50)보다 훨씬 크다.
 
   before(async () => {
-    const nodes = [{ id: 'root', workspace_id: 'ws', graph_id: GRAPH_ID, symbol_id: 'sym:root', type: 'Callable', layer: 'structural', name: 'root', confidence: 1, status: 'active' }];
+    const nodes = [{ id: 'root', account_id: 'ws', graph_id: GRAPH_ID, symbol_id: 'sym:root', type: 'Callable', layer: 'structural', name: 'root', confidence: 1, status: 'active' }];
     const edges = [];
     for (let i = 0; i < WIDTH; i++) {
       const mid = `m${i}`;
-      nodes.push({ id: mid, workspace_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${mid}`, type: 'Callable', layer: 'structural', name: mid, confidence: 1, status: 'active' });
-      edges.push({ id: `e-root-${i}`, workspace_id: 'ws', graph_id: GRAPH_ID, src_id: 'root', dst_id: mid, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
+      nodes.push({ id: mid, account_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${mid}`, type: 'Callable', layer: 'structural', name: mid, confidence: 1, status: 'active' });
+      edges.push({ id: `e-root-${i}`, account_id: 'ws', graph_id: GRAPH_ID, src_id: 'root', dst_id: mid, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
       for (let j = 0; j < WIDTH; j++) {
         const leaf = `leaf-${i}-${j}`;
-        nodes.push({ id: leaf, workspace_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${leaf}`, type: 'Callable', layer: 'structural', name: leaf, confidence: 1, status: 'active' });
-        edges.push({ id: `e-${i}-${j}`, workspace_id: 'ws', graph_id: GRAPH_ID, src_id: mid, dst_id: leaf, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
+        nodes.push({ id: leaf, account_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${leaf}`, type: 'Callable', layer: 'structural', name: leaf, confidence: 1, status: 'active' });
+        edges.push({ id: `e-${i}-${j}`, account_id: 'ws', graph_id: GRAPH_ID, src_id: mid, dst_id: leaf, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
       }
     }
     await bulkInsertNodes(nodes);
@@ -142,7 +142,7 @@ describe('(B) 진짜 대형 fixture — 300k 노드 / 300만 엣지, 현실적 �
     const nodeRows = [];
     for (let i = 0; i < NODE_COUNT; i++) {
       const id = `n${i}`;
-      nodeRows.push({ id, workspace_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${id}`, type: 'Callable', layer: 'structural', name: id, confidence: 1, status: 'active' });
+      nodeRows.push({ id, account_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${id}`, type: 'Callable', layer: 'structural', name: id, confidence: 1, status: 'active' });
     }
     await bulkInsertNodes(nodeRows);
 
@@ -158,7 +158,7 @@ describe('(B) 진짜 대형 fixture — 300k 노드 / 300만 엣지, 현실적 �
       for (let k = 0; k < AVG_OUT_DEGREE; k++) {
         const dst = Math.floor(Math.random() * NODE_COUNT);
         batch.push({
-          id: `e${edgeSeq}`, workspace_id: 'ws', graph_id: GRAPH_ID,
+          id: `e${edgeSeq}`, account_id: 'ws', graph_id: GRAPH_ID,
           src_id: `n${i}`, dst_id: `n${dst}`, type: 'CALLS', layer: 'structural',
           confidence: 0.75 + Math.random() * 0.25, status: 'active',
         });
@@ -205,10 +205,10 @@ describe('(C) 합류 후 재확산(다이아몬드) fixture — 재귀 CTE 중�
     // 노드 id는 이 파일의 다른 describe 블록들과 전역 PK(ontology_nodes.id는
     // graph_id와 무관하게 그 자체로 유니크)가 겹치지 않도록 'dm-' 접두사를
     // 쓴다((A)의 'root'와 충돌했던 리뷰 후속 수정 라운드에서 발견).
-    const nodes = [{ id: 'dm-root', workspace_id: 'ws', graph_id: GRAPH_ID, symbol_id: 'sym:dm-root', type: 'Callable', layer: 'structural', name: 'root', confidence: 1, status: 'active' }];
+    const nodes = [{ id: 'dm-root', account_id: 'ws', graph_id: GRAPH_ID, symbol_id: 'sym:dm-root', type: 'Callable', layer: 'structural', name: 'root', confidence: 1, status: 'active' }];
     const edges = [];
-    const mkNode = (id) => ({ id, workspace_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${id}`, type: 'Callable', layer: 'structural', name: id, confidence: 1, status: 'active' });
-    const mkEdge = (id, src, dst) => ({ id, workspace_id: 'ws', graph_id: GRAPH_ID, src_id: src, dst_id: dst, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
+    const mkNode = (id) => ({ id, account_id: 'ws', graph_id: GRAPH_ID, symbol_id: `sym:${id}`, type: 'Callable', layer: 'structural', name: id, confidence: 1, status: 'active' });
+    const mkEdge = (id, src, dst) => ({ id, account_id: 'ws', graph_id: GRAPH_ID, src_id: src, dst_id: dst, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
 
     nodes.push(mkNode('dm-hub1'), mkNode('dm-hub2'));
     for (let i = 0; i < WIDTH; i++) {
@@ -258,7 +258,7 @@ describe('(D) 단일 허브 fixture — BFS 방문 상한이 진짜 하드 캡�
     // 쓴다(리뷰 후속 수정 라운드에서 발견한 충돌).
     let batch = [];
     for (let i = 0; i < HUB_OUT_DEGREE; i++) {
-      batch.push({ id: `hub-e${i}`, workspace_id: 'ws', graph_id: GRAPH_ID, src_id: 'hub', dst_id: `leaf${i}`, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
+      batch.push({ id: `hub-e${i}`, account_id: 'ws', graph_id: GRAPH_ID, src_id: 'hub', dst_id: `leaf${i}`, type: 'CALLS', layer: 'structural', confidence: 0.9, status: 'active' });
       if (batch.length >= INSERT_BATCH) {
         await bulkInsertEdges(batch);
         batch = [];

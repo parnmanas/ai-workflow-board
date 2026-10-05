@@ -18,11 +18,11 @@ export interface ClassificationResult {
  * Per-call context classify() needs beyond the item's own content. `item`
  * (InboundItem) carries no workspace/channel reference at all — it's the
  * channel-agnostic connector shape — so a dispatch-based classifier that
- * needs to open a chat room (workspace-scoped) and pick a target agent
+ * needs to open a chat room (account-scoped) and pick a target agent
  * (channel-configured) has no way to get there from `item` alone.
  */
 export interface ClassificationContext {
-  workspaceId: string;
+  accountId: string;
   channelId: string;
   channelKind: OutreachChannelKind;
   /** OutreachChannel.classifier_runtime — null means "stay rule-based". */

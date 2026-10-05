@@ -36,7 +36,7 @@ const RESOLVER_OWNED_EDGE_TYPES = ['IMPORTS', 'CALLS', 'INSTANTIATES', 'USES_TYP
 
 export interface ResolveCrossFileEdgesInput {
   graphId: string;
-  workspaceId: string;
+  accountId: string;
   /** persist.ts와 동일 — 이 리졸버 실행이 대상으로 삼은 커밋 sha. */
   commit: string;
   extractionRunId: string;
@@ -72,7 +72,7 @@ export interface ResolveSummary {
 
 function baseEdgeFields(input: ResolveCrossFileEdgesInput) {
   return {
-    workspace_id: input.workspaceId,
+    account_id: input.accountId,
     graph_id: input.graphId,
     layer: 'structural' as const,
     confidence_method: 'constant' as const, // 캐스케이드 confidence는 tier별 고정값 — persist.ts DECORATES와 같은 자세(Tier 3의 "계산된, 자가보고 아님" 요구는 여기 해당 없음)

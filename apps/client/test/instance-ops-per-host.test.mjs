@@ -37,7 +37,7 @@ function host(id, hostname) {
   return {
     instance_id: id,
     agent_id: `mgr-${id}`,
-    workspace_id: 'ws-1',
+    account_id: 'ws-1',
     mode: 'manager',
     hostname,
     plugin_version: '1.0.0',

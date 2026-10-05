@@ -12,10 +12,10 @@ import { TeamFormModal } from '../src/components/orchestration/OrchestrationTeam
 function baseTeam(overrides) {
   return {
     id: 'team-1',
-    workspace_id: null,
+    account_id: null,
     is_global: false,
-    owner_workspace_id: null,
-    allowed_workspace_ids: [],
+    owner_account_id: null,
+    allowed_account_ids: [],
     name: 'Platform squad',
     description: '',
     orchestrator_agent_id: 'agent-1',
@@ -33,7 +33,7 @@ function baseTeam(overrides) {
   };
 }
 
-async function mountModal(t, { team, workspaces = [] }) {
+async function mountModal(t, { team, accounts = [] }) {
   const dom = setupDom();
   const view = mount(
     React.createElement(TeamFormModal, {
@@ -48,7 +48,7 @@ async function mountModal(t, { team, workspaces = [] }) {
       hosts: [],
       credentials: [],
       backendProfiles: [],
-      workspaces,
+      accounts,
       team,
       onClose: () => {},
       onSaved: () => {},
@@ -65,19 +65,19 @@ async function mountModal(t, { team, workspaces = [] }) {
 }
 
 test('workspace 종속 팀 Edit은 Scope와 workspace 이름을 보여준다', async (t) => {
-  const team = baseTeam({ is_global: false, workspace_id: 'ws-1', owner_workspace_id: 'ws-1' });
+  const team = baseTeam({ is_global: false, account_id: 'ws-1', owner_account_id: 'ws-1' });
   const { container } = await mountModal(t, {
     team,
-    workspaces: [{ id: 'ws-1', name: 'Platform' }],
+    accounts: [{ id: 'ws-1', name: 'Platform' }],
   });
   assert.match(container.textContent, /Scope/);
-  assert.match(container.textContent, /This workspace/);
+  assert.match(container.textContent, /This account/);
   assert.match(container.textContent, /Platform/);
 });
 
 test('글로벌 팀 Edit은 workspace 종속 팀과 동일한 Scope 라벨/레이아웃으로 Global을 보여준다', async (t) => {
-  const team = baseTeam({ is_global: true, workspace_id: null, owner_workspace_id: 'ws-1' });
-  const { container } = await mountModal(t, { team, workspaces: [] });
+  const team = baseTeam({ is_global: true, account_id: null, owner_account_id: 'ws-1' });
+  const { container } = await mountModal(t, { team, accounts: [] });
   assert.match(container.textContent, /Scope/);
   assert.match(container.textContent, /Global/);
 
@@ -86,9 +86,9 @@ test('글로벌 팀 Edit은 workspace 종속 팀과 동일한 Scope 라벨/레�
 });
 
 test('workspace 이름 해석에 실패해도 (undefined)나 빈 괄호를 출력하지 않는다', async (t) => {
-  const team = baseTeam({ is_global: false, workspace_id: 'ws-missing', owner_workspace_id: 'ws-missing' });
-  const { container } = await mountModal(t, { team, workspaces: [] });
-  assert.match(container.textContent, /This workspace/);
+  const team = baseTeam({ is_global: false, account_id: 'ws-missing', owner_account_id: 'ws-missing' });
+  const { container } = await mountModal(t, { team, accounts: [] });
+  assert.match(container.textContent, /This account/);
   assert.doesNotMatch(container.textContent, /\(undefined\)/);
-  assert.doesNotMatch(container.textContent, /This workspace \(\)/);
+  assert.doesNotMatch(container.textContent, /This account \(\)/);
 });
