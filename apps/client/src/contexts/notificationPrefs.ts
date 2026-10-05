@@ -32,6 +32,7 @@ export interface NotificationPrefs {
    */
   voice: boolean;
   workSound: NotificationSound;
+  listenAfterWorkSound: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -42,6 +43,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   audio: true,
   voice: true,
   workSound: 'chime',
+  listenAfterWorkSound: true,
 };
 
 const PREFS_KEY = 'awb.notifications.prefs';

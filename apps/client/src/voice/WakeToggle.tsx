@@ -7,14 +7,20 @@ import { useWakeState, wakeStore, type WakeSnapshot } from './wakeState';
 /** 지금 상태를 한 줄로 — 버튼의 툴팁과 스크린 리더가 읽는다. */
 export function describeWake(state: WakeSnapshot, operators: readonly VoiceOperator[], unavailable: string | null): string {
   if (unavailable) return unavailable;
-  if (!state.enabled) return '이름 부르기 꺼짐 — 누르면 "헤이 <이름>" 을 듣기 시작합니다';
   if (state.mode === 'awake') {
     const name = operators.find((op) => op.id === state.operatorId)?.name || 'operator';
     return `${name} 깨어 있음 — 이름 없이 말하면 됩니다`;
   }
   const names = operators.map((op) => `"헤이 ${op.name}"`).join(', ');
   const answering = state.followUp ? operators.find((op) => op.id === state.followUp!.operatorId) : null;
-  if (answering) return `${answering.name} 에게 답을 듣는 중 — 이름 없이 바로 말하세요`;
+  if (answering) {
+    if (state.listener === 'error') return `음성 입력 오류: ${state.error || '마이크를 열지 못했습니다'}`;
+    if (state.listener === 'other-tab') return `다른 탭에서 ${answering.name}에게 듣고 있습니다`;
+    if (state.listener === 'starting') return `${answering.name}의 마이크 여는 중…`;
+    if (state.listener === 'waiting-gesture') return '화면을 한 번 누르면 알림을 보낸 operator에게 듣기 시작합니다';
+    return `${answering.name}에게 듣는 중 — 이름 없이 "보고해"라고 말하세요`;
+  }
+  if (!state.enabled) return '이름 부르기 꺼짐 — 누르면 "헤이 <이름>" 을 듣기 시작합니다';
   switch (state.listener) {
     case 'waiting-gesture': return '화면을 한 번 누르면 듣기 시작합니다(브라우저가 사용자 동작 전에는 마이크 소리를 막습니다)';
     case 'other-tab': return '다른 탭이 듣고 있습니다';
@@ -37,7 +43,7 @@ export default function WakeToggle({ operators }: { operators: readonly VoiceOpe
     : !config.wake.ready ? (config.wake.error || `음성 인식이 준비되지 않았습니다${config.stt.error ? ` — ${config.stt.error}` : ''}`)
       : null;
   const label = describeWake(state, operators, unavailable);
-  const on = state.enabled && !unavailable;
+  const on = (state.enabled || !!state.followUp || state.mode === 'awake') && !unavailable;
   const color = !on ? tokens.colors.textMuted
     : state.mode === 'awake' ? tokens.colors.successLight
       : state.listener === 'error' ? tokens.colors.warningLight
@@ -47,13 +53,13 @@ export default function WakeToggle({ operators }: { operators: readonly VoiceOpe
     <button
       type="button"
       role="switch"
-      aria-checked={state.enabled}
+      aria-checked={on}
       aria-label={label}
       title={label}
       data-wake-listener={on ? (state.mode === 'awake' ? 'awake' : state.listener) : 'off'}
       disabled={!!unavailable && !state.enabled}
       onClick={() => {
-        const next = !state.enabled;
+        const next = !on;
         if (next) speechPlayer.unlock();
         wakeStore.setEnabled(next);
       }}
@@ -65,7 +71,7 @@ export default function WakeToggle({ operators }: { operators: readonly VoiceOpe
       }}
     >
       <span aria-hidden="true">{state.mode === 'awake' && on ? '●' : state.listener === 'error' && on ? '!' : '👂'}</span>
-      {on ? (state.mode === 'awake' ? 'awake' : state.followUp ? 'answer' : state.listener === 'waiting-gesture' ? 'tap' : 'on') : 'off'}
+      {on ? (state.mode === 'awake' ? 'awake' : state.followUp ? 'listen' : state.listener === 'waiting-gesture' ? 'tap' : 'on') : 'off'}
     </button>
   );
 }

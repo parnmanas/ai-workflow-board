@@ -10,6 +10,7 @@ import { announcementPath, announcementPlayback, claimAnnouncement, isViewingTar
 import { speechPlayer } from './speechPlayer';
 import { useSpeechState, useVoiceConfig } from './useVoice';
 import { notificationSoundClip } from './notificationSound';
+import { wakeStore } from './wakeState';
 
 const KEY_PREFIX = 'announcement:';
 
@@ -26,8 +27,12 @@ export default function VoiceAnnouncer() {
   const navigate = useNavigate();
   const speech = useSpeechState();
 
-  const latest = useRef({ ready: false, enabled: true, audio: true, sound: prefs.workSound, workspaceId: currentWorkspaceId });
-  latest.current = { ready: !!config?.tts.ready, enabled: prefs.voice, audio: prefs.audio, sound: prefs.workSound, workspaceId: currentWorkspaceId };
+  const latest = useRef({ ready: false, wakeReady: false, enabled: true, audio: true, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId });
+  latest.current = { ready: !!config?.tts.ready, wakeReady: !!config?.wake.ready, enabled: prefs.voice, audio: prefs.audio, listen: prefs.listenAfterWorkSound, sound: prefs.workSound, workspaceId: currentWorkspaceId };
+
+  useEffect(() => {
+    if (!prefs.voice || !prefs.audio || !prefs.listenAfterWorkSound) wakeStore.closeNotificationFollowUp();
+  }, [prefs.voice, prefs.audio, prefs.listenAfterWorkSound]);
 
   // 알림은 사용자 제스처 없이 나온다 — 앱에서 처음 누르는 순간 재생 요소를 깨워 둔다
   // (iOS 는 제스처 안에서 한 번 재생된 요소만 나중에 소리를 낸다).
@@ -61,8 +66,12 @@ export default function VoiceAnnouncer() {
       if (playback === 'speech') {
         speechPlayer.enqueueClip(() => api.getVoiceAnnouncementAudio(data.id), key);
       } else if (audio) {
-        // A cue invites a question, not an unheard approval choice. No automatic answer window.
-        speechPlayer.enqueueClip(async () => notificationSoundClip(sound), key);
+        speechPlayer.enqueueClip(async () => notificationSoundClip(sound), key, () => {
+          const now = latest.current;
+          if (data.operator && now.wakeReady && now.enabled && now.audio && now.listen) {
+            wakeStore.openNotificationFollowUp(data.operator.id);
+          }
+        });
       }
     })();
   }, [navigate, showToast]));

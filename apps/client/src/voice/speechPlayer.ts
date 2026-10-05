@@ -33,7 +33,7 @@ class SpeechPlayer {
   #endCurrent: (() => void) | null = null;
   #state: SpeechState = { speaking: false, key: null, error: null };
   #listeners = new Set<Listener>();
-  #queue: Array<{ key: string; fetch: () => Promise<Blob> }> = [];
+  #queue: Array<{ key: string; fetch: () => Promise<Blob>; onEnded?: () => void }> = [];
 
   get state(): SpeechState {
     return this.#state;
@@ -158,8 +158,8 @@ class SpeechPlayer {
   }
 
   /** 미리 합성된 소리 하나(음성 알림)를 줄 세운다. 지금 아무것도 안 나오면 바로 튼다. */
-  enqueueClip(fetchClip: () => Promise<Blob>, key: string): void {
-    this.#queue.push({ key, fetch: fetchClip });
+  enqueueClip(fetchClip: () => Promise<Blob>, key: string, onEnded?: () => void): void {
+    this.#queue.push({ key, fetch: fetchClip, onEnded });
     if (!this.#state.speaking) void this.#drain();
   }
 
@@ -176,6 +176,7 @@ class SpeechPlayer {
         if (generation !== this.#generation) return;
         this.#releaseUrl();
         this.#set({ speaking: false, key: item.key, error: null });
+        item.onEnded?.();
       } catch (err: any) {
         if (generation !== this.#generation) return;
         this.#releaseUrl();

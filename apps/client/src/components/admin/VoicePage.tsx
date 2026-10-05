@@ -591,12 +591,13 @@ export default function VoicePage() {
 
       <Card padding="20px">
         <div style={sectionTitle}>Work update sound</div>
-        <div style={sectionHint}>The operator keeps work reports and plays a short cue. Ask the operator for details when you want to hear them. This choice applies to this browser.</div>
+        <div style={sectionHint}>After the cue, the operator listens for 15 seconds. Say "보고해" or "Tell me what happened" without its name. Requires microphone permission; persistent name calling can stay off. These choices apply to this browser.</div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}>
           <Select label="Notification sound" value={prefs.workSound} options={NOTIFICATION_SOUNDS.map((s) => ({ value: s.value, label: s.label }))} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)} />
           <Button size="sm" variant="ghost" onClick={() => { speechPlayer.unlock(); speechPlayer.enqueueClip(async () => notificationSoundClip(prefs.workSound), 'sound-preview'); }}>Preview</Button>
           <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.voice} onChange={(e) => setPref('voice', e.target.checked)} /> Work updates</label>
           <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.audio} onChange={(e) => setPref('audio', e.target.checked)} /> Audio cues</label>
+          <label style={{ fontSize: 12 }}><input type="checkbox" checked={prefs.listenAfterWorkSound} onChange={(e) => setPref('listenAfterWorkSound', e.target.checked)} /> Listen after work sound</label>
         </div>
       </Card>
 

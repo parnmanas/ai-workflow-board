@@ -242,3 +242,56 @@ test('after a decision is read out, a short window takes the answer without the 
   wakeStore.setEnabled(false);
   assert.equal(wakeStore.openFollowUp('j'), false, 'name calling off: the mic is not ours to open');
 });
+
+test('a notification temporarily listens with name calling off and closes on silence', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  wakeStore.setEnabled(false);
+  assert.equal(wakeStore.openNotificationFollowUp('j'), true);
+  assert.equal(wakeStore.state.enabled, false);
+  assert.equal(wakeStore.state.mode, 'sleeping');
+  assert.equal(wakeStore.activeFollowUp(), 'j');
+  t.mock.timers.tick(15_001);
+  assert.equal(wakeStore.state.followUp, null);
+  assert.equal(wakeStore.state.mode, 'off', 'persistent microphone remains off');
+});
+
+test('a started report request survives timeout and STT without switching operator', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  wakeStore.setEnabled(false);
+  wakeStore.openNotificationFollowUp('j');
+  t.mock.timers.tick(14_000);
+  const utterance = wakeStore.holdFollowUp();
+  assert.equal(utterance.operatorId, 'j');
+  t.mock.timers.tick(2_000);
+  assert.equal(wakeStore.activeFollowUp(), null, 'no new utterance starts after the deadline');
+  assert.equal(wakeStore.state.mode, 'sleeping', 'finish recognition of the already started request');
+  assert.equal(wakeStore.openNotificationFollowUp('f'), false, 'another cue cannot steal a spoken report request');
+  wakeStore.wake(utterance.operatorId, '보고해');
+  assert.equal(wakeStore.takeFirstPrompt('f'), null);
+  assert.equal(wakeStore.takeFirstPrompt('j'), '보고해');
+  utterance.release();
+  assert.equal(wakeStore.state.mode, 'awake');
+  assert.equal(wakeStore.openNotificationFollowUp('f'), false, 'do not interrupt an ongoing conversation');
+  wakeStore.sleep('j');
+  assert.equal(wakeStore.state.mode, 'off');
+});
+
+test('temporary input expires after an ignored utterance; manual off cancels pending recognition', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  wakeStore.setEnabled(false);
+  wakeStore.openNotificationFollowUp('j');
+  const utterance = wakeStore.holdFollowUp();
+  t.mock.timers.tick(15_001);
+  utterance.release(); utterance.release();
+  assert.equal(wakeStore.state.mode, 'off');
+  wakeStore.openNotificationFollowUp('j');
+  const pending = wakeStore.holdFollowUp();
+  wakeStore.setEnabled(false);
+  assert.equal(wakeStore.state.followUp, null);
+  assert.equal(wakeStore.state.mode, 'off');
+  assert.equal(pending.isValid(), false, 'a cancelled transcription cannot route an unnamed request');
+  pending.release();
+  wakeStore.openNotificationFollowUp('f');
+  assert.equal(wakeStore.activeFollowUp(), 'f', 'the old lease cannot close a later notification');
+  wakeStore.closeNotificationFollowUp();
+});

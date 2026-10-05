@@ -38,14 +38,16 @@ export interface WakeSnapshot {
   /** 마이크를 쓰는 대화 모드 수 — 0 일 때만 상시 청취가 마이크를 연다. */
   micClaims: number;
   /**
-   * 답을 기다리는 짧은 창 — operator 가 결정이 필요한 보고(선택지)를 읽어 준 직후다. 이 동안은 이름을 부르지
-   * 않아도 들린 말이 그 operator 에게 간다(스마트 스피커의 후속 질문처럼).
+   * 알림음 뒤의 보고 요청 또는 선택지 설명 뒤의 답변을 이름 없이 듣는 짧은 창.
+   * 상시 이름 부르기를 꺼 두어도 알림음 뒤에는 잠깐 마이크를 연다.
    */
-  followUp: { operatorId: string; until: number } | null;
+  followUp: { operatorId: string; until: number; source: 'decision' | 'notification' } | null;
 }
 
 /** 결정이 필요한 보고를 읽은 뒤 이름 없이 답을 기다리는 시간. */
 export const FOLLOW_UP_MS = 8_000;
+export const NOTIFICATION_FOLLOW_UP_MS = 15_000;
+export const NOTIFICATION_FOLLOW_UP_KEY = 'awb.voice.notification-listen';
 
 const ENABLED_KEY = 'awb.voice.wake';
 /** 깨어났는데 그 operator 의 화면이 이만큼 안에 열리지 않으면(이동 실패) 다시 잠든다. */
@@ -62,6 +64,8 @@ class WakeStore {
     enabled: false, mode: 'off', operatorId: null, wokeAt: 0, listener: 'idle', error: null, micClaims: 0, followUp: null,
   };
   #followUpTimer: ReturnType<typeof setTimeout> | null = null;
+  #followUpRevision = 0;
+  #followUpHolds = 0;
   #listeners = new Set<Listener>();
   #firstPrompt: { operatorId: string; text: string } | null = null;
   #attached = new Map<string, number>();
@@ -153,10 +157,53 @@ class WakeStore {
    */
   openFollowUp(operatorId: string, ms = FOLLOW_UP_MS): boolean {
     if (!this.#state.enabled || this.#state.mode !== 'sleeping') return false;
-    if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
-    this.#followUpTimer = setTimeout(() => this.#clearFollowUp(), ms);
-    this.#set({ followUp: { operatorId, until: Date.now() + ms } });
+    return this.#openFollowUp(operatorId, ms, 'decision');
+  }
+
+  /** A cue opens a temporary input window without enabling persistent name calling. */
+  openNotificationFollowUp(operatorId: string, ms = NOTIFICATION_FOLLOW_UP_MS, broadcast = true): boolean {
+    if (this.#state.mode === 'awake' || this.#state.micClaims > 0) return false;
+    if (!this.#openFollowUp(operatorId, ms, 'notification')) return false;
+    if (broadcast) {
+      // The tab playing the cue can differ from the tab that owns the microphone lock.
+      try {
+        localStorage.setItem(NOTIFICATION_FOLLOW_UP_KEY, JSON.stringify({ operatorId, until: this.#state.followUp!.until }));
+        localStorage.removeItem(NOTIFICATION_FOLLOW_UP_KEY);
+      } catch { /* this tab still listens if storage is unavailable */ }
+    }
     return true;
+  }
+
+  #openFollowUp(operatorId: string, ms: number, source: 'decision' | 'notification'): boolean {
+    if (this.#followUpHolds > 0) return false; // Keep an utterance with the operator it started addressing.
+    if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
+    this.#followUpRevision += 1;
+    this.#followUpTimer = setTimeout(() => {
+      this.#followUpTimer = null;
+      if (!this.#followUpHolds) this.#clearFollowUp();
+      else this.#followUpTimer = setTimeout(() => this.#clearFollowUp(), 60_000);
+    }, ms);
+    this.#set({ mode: 'sleeping', followUp: { operatorId, until: Date.now() + ms, source } });
+    return true;
+  }
+
+  /** Keep a started utterance alive through the deadline and its STT request. */
+  holdFollowUp(): { operatorId: string; isValid: () => boolean; release: () => void } | null {
+    const operatorId = this.activeFollowUp();
+    if (!operatorId) return null;
+    const revision = this.#followUpRevision;
+    this.#followUpHolds += 1;
+    let released = false;
+    return { operatorId, isValid: () => revision === this.#followUpRevision, release: () => {
+      if (released || revision !== this.#followUpRevision) return;
+      released = true;
+      this.#followUpHolds -= 1;
+      if (!this.#followUpHolds && this.#state.followUp && Date.now() >= this.#state.followUp.until) this.#clearFollowUp();
+    } };
+  }
+
+  closeNotificationFollowUp(): void {
+    if (this.#state.followUp?.source === 'notification') this.#clearFollowUp();
   }
 
   /** 지금 답을 기다리는 창이 열려 있으면 그 operator. */
@@ -168,7 +215,10 @@ class WakeStore {
   #clearFollowUp(): void {
     if (this.#followUpTimer) clearTimeout(this.#followUpTimer);
     this.#followUpTimer = null;
-    if (this.#state.followUp) this.#set({ followUp: null });
+    this.#followUpRevision += 1;
+    this.#followUpHolds = 0;
+    if (this.#state.followUp) this.#set({ followUp: null,
+      ...(!this.#state.enabled && this.#state.mode === 'sleeping' ? { mode: 'off' as const } : {}) });
   }
 
   setListener(listener: WakeListenerStatus, error: string | null = null): void {

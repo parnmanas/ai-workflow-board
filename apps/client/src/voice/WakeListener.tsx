@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../contexts/AuthContext';
+import { getNotificationPrefs } from '../contexts/notificationPrefs';
 import { sessionPath } from '../components/sessions/sessionList.logic';
 import { playEarcon } from './earcon';
 import { startHandsFree, type HandsFreeSession } from './handsFree';
@@ -10,7 +11,7 @@ import { voiceRecordingSupported } from './recorder';
 import { speechPlayer } from './speechPlayer';
 import { useSpeechState, useVoiceConfig } from './useVoice';
 import { isFillerUtterance, matchWake } from './wake.logic';
-import { useWakeState, wakeStore } from './wakeState';
+import { NOTIFICATION_FOLLOW_UP_KEY, NOTIFICATION_FOLLOW_UP_MS, useWakeState, wakeStore } from './wakeState';
 
 /** 한 단말에서 한 탭만 이름을 듣는다 — 탭마다 마이크를 열면 같은 부름에 여러 탭이 깨어난다. */
 const WAKE_LOCK = 'awb-voice-wake-listener';
@@ -42,8 +43,26 @@ export default function WakeListener() {
   latest.current = { operators, workspaceId: currentWorkspaceId, navigate };
   const sessionRef = useRef<HandsFreeSession | null>(null);
   const [hasLock, setHasLock] = useState(false);
+  const cancelFollowUpSpeech = useRef<() => void>(() => {});
 
-  const wanted = !!config?.wake.ready && operators.length > 0 && voiceRecordingSupported() && wake.enabled;
+  const wanted = !!config?.wake.ready && operators.length > 0 && voiceRecordingSupported() && (wake.enabled || !!wake.followUp);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== NOTIFICATION_FOLLOW_UP_KEY || !event.newValue || !config?.wake.ready) return;
+      const prefs = getNotificationPrefs();
+      if (!prefs.voice || !prefs.audio || !prefs.listenAfterWorkSound) return;
+      try {
+        const notice = JSON.parse(event.newValue);
+        const remaining = Number(notice.until) - Date.now();
+        if (remaining > 0 && remaining <= NOTIFICATION_FOLLOW_UP_MS && operators.some((op) => op.id === notice.operatorId)) {
+          wakeStore.openNotificationFollowUp(notice.operatorId, remaining, false);
+        }
+      } catch { /* ignore invalid or expired input windows */ }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [config?.wake.ready, operators]);
 
   // 1. 이 단말의 듣는 탭이 된다.
   useEffect(() => {
@@ -79,11 +98,14 @@ export default function WakeListener() {
     let checking = 0;
 
     // 말을 시작한 순간 답을 기다리는 창이 열려 있었나 — 말하는 동안·받아 적는 동안 창이 닫혀도 그 말은 답이다.
-    let followUpAtSpeechStart: string | null = null;
-    const onSpeechStart = () => { followUpAtSpeechStart = wakeStore.activeFollowUp(); };
+    let followUpAtSpeechStart: ReturnType<typeof wakeStore.holdFollowUp> = null;
+    const cancelFollowUp = () => { followUpAtSpeechStart?.release(); followUpAtSpeechStart = null; };
+    cancelFollowUpSpeech.current = cancelFollowUp;
+    const onSpeechStart = () => { cancelFollowUp(); followUpAtSpeechStart = wakeStore.holdFollowUp(); };
     const onUtterance = (wav: Blob) => {
       if (run.cancelled) return;
-      const followUpOperatorId = followUpAtSpeechStart ?? wakeStore.activeFollowUp();
+      const followUp = followUpAtSpeechStart ?? wakeStore.holdFollowUp();
+      const followUpOperatorId = followUp?.operatorId;
       followUpAtSpeechStart = null;
       checking += 1;
       wakeStore.setListener('checking');
@@ -94,8 +116,8 @@ export default function WakeListener() {
           const { operators: list, workspaceId, navigate: go } = latest.current;
           const text = (t.text || '').trim();
           const match = matchWake(text, list);
-          // 이름을 불렀으면 그 operator, 아니면 — 결정을 묻고 답을 기다리던 operator 에게 그 말 그대로.
-          const answering = !match && followUpOperatorId && !isFillerUtterance(text)
+          // Name calling wins; otherwise send the report request to the operator whose cue just played.
+          const answering = !match && followUpOperatorId && followUp?.isValid() && !isFillerUtterance(text)
             ? list.find((op) => op.id === followUpOperatorId) ?? null
             : null;
           const operator = match?.operator ?? answering;
@@ -110,6 +132,7 @@ export default function WakeListener() {
         })
         .catch((err: any) => { failure = err?.message || '이름을 확인하지 못했습니다'; })
         .finally(() => {
+          followUp?.release();
           checking -= 1;
           if (run.cancelled || wakeStore.state.mode !== 'sleeping') return;
           if (failure) wakeStore.setListener('error', failure);
@@ -129,7 +152,7 @@ export default function WakeListener() {
       }
       wakeStore.setListener('starting');
       try {
-        const session = await startHandsFree({ onSpeechStart, onUtterance });
+        const session = await startHandsFree({ onSpeechStart, onUtterance, onMisfire: cancelFollowUp });
         if (run.cancelled) {
           void session.destroy();
           return;
@@ -147,6 +170,7 @@ export default function WakeListener() {
 
     return () => {
       run.cancelled = true;
+      cancelFollowUp();
       gesture.abort();
       const session = sessionRef.current;
       sessionRef.current = null;
@@ -158,7 +182,7 @@ export default function WakeListener() {
   useEffect(() => {
     const session = sessionRef.current;
     if (!session) return;
-    if (speech.speaking) void session.pause();
+    if (speech.speaking) { cancelFollowUpSpeech.current(); void session.pause(); }
     else void session.resume();
   }, [speech.speaking]);
 

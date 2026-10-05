@@ -160,6 +160,7 @@ export function NotificationSettingsPanel() {
           {voiceConfig && (
             <>
               <Toggle label="Work updates (sound, details on request)" checked={prefs.voice} onChange={(v) => setPref('voice', v)} rowStyle={rowStyle} />
+              <Toggle label="Listen for 15 seconds after work sound" checked={prefs.listenAfterWorkSound} onChange={(v) => setPref('listenAfterWorkSound', v)} rowStyle={rowStyle} />
               <label style={rowStyle}>Work update sound
                 <select value={prefs.workSound} onChange={(e) => setPref('workSound', e.target.value as NotificationSound)}>
                   {NOTIFICATION_SOUNDS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
