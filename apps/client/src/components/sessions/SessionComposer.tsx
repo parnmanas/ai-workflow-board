@@ -358,11 +358,11 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
   const locked = disabled || sending;
   return (
     <div
+      className="awb-session-composer"
       style={{
         borderTop: `1px solid ${tokens.colors.border}`,
         background: tokens.colors.surfaceCard,
-        // 오른쪽 여백은 AppLayout 의 고정 알림 벨(우하단)이 Send/Cancel 버튼을 덮지 않게 한다.
-        padding: '10px 64px 12px 16px',
+        padding: '10px 16px 12px',
         flexShrink: 0,
       }}
     >
@@ -374,7 +374,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           ref={commandListRef}
           aria-label="Queued prompts"
           style={{
-            listStyle: 'none', margin: '0 0 6px', padding: 0, display: 'flex', flexDirection: 'column', gap: 4,
+            listStyle: 'none', margin: '0 0 6px', padding: 0, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 112, overflowY: 'auto',
           }}
         >
           {queue.map((q, i) => (
@@ -443,12 +443,12 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           aria-live="polite"
           data-conversation-phase={conversation.phase}
           style={{
-            display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6, padding: '6px 10px',
+            display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 8, marginBottom: 6, padding: '6px 10px',
             borderRadius: tokens.radii.md, background: tokens.colors.surface, border: `1px solid ${tokens.colors.border}`,
             fontSize: 12, color: tokens.colors.textSecondary,
           }}
         >
-          <span style={{ flexShrink: 0, color: conversation.phase === 'hearing' ? tokens.colors.dangerLight : awake ? tokens.colors.successLight : tokens.colors.textMuted }}>
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere', color: conversation.phase === 'hearing' ? tokens.colors.dangerLight : awake ? tokens.colors.successLight : tokens.colors.textMuted }}>
             {awake && wake ? awakePhaseLabel(conversation.phase, wake.name) : CONVERSATION_PHASE_LABEL[conversation.phase]}
           </span>
           {conversation.caption && (
@@ -492,13 +492,13 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
                 background: i === selected ? tokens.colors.surfaceHover : 'transparent',
               }}
             >
-              <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12.5, color: tokens.colors.textPrimary, whiteSpace: 'nowrap' }}>/{c.name}{c.input_hint ? <span style={{ color: tokens.colors.textMuted }}> {c.input_hint}</span> : null}</span>
-              <span style={{ fontSize: 12, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.description}</span>
+              <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12.5, color: tokens.colors.textPrimary, minWidth: 0, overflowWrap: 'anywhere' }}>/{c.name}{c.input_hint ? <span style={{ color: tokens.colors.textMuted }}> {c.input_hint}</span> : null}</span>
+              <span style={{ minWidth: 0, fontSize: 12, color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.description}</span>
             </li>
           ))}
         </ul>
       )}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+      <div className="awb-composer-row">
         {!!commands?.length && (
           <button
             type="button"
@@ -561,6 +561,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           </button>
         )}
         <textarea
+          className="awb-composer-input"
           ref={ref}
           value={text}
           rows={1}
@@ -574,6 +575,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           onPaste={onPaste}
           style={{
             flex: 1,
+            minWidth: 0,
             minHeight: 40,
             maxHeight: 220,
             resize: 'none',
@@ -610,6 +612,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         )}
         <button
           type="button"
+          className="awb-composer-send"
           onClick={() => void submit()}
           disabled={locked || !canSend || stillReading}
           title={busy ? '지금 보내지 않고, 현재 턴이 끝나면 큐 순서대로 전송합니다' : undefined}
@@ -628,7 +631,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           {sending ? 'Sending…' : busy ? 'Queue' : 'Send'}
         </button>
       </div>
-      <div style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
+      <div className="awb-composer-help" style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
         {busy ? 'Enter queues — sent once the current turn finishes' : 'Enter to send'} · Shift+Enter for a new line · 📎 or paste images to attach{showMic ? ' · 🎙 conversation mode: just talk, pause to send' : ''}{commands && commands.length ? ` · type / for ${commands.length} commands` : ' · slash commands go straight to the CLI'}
       </div>
     </div>

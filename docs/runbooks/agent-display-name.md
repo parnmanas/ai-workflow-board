@@ -1,34 +1,27 @@
-# Agent Display Name (`<Manager>/<Agent>`) Contract
+# Runtime / Host Display Name Contract
 
-**When:** The `<Manager>/<Agent>` display-name contract for every surface that shows an agent — pickers, dropdowns, rosters, typing/status indicators, timelines, SSE frames, prompts. Use whenever code renders an agent's name, adds an agent picker, denormalizes an agent name into a payload or a DB column, or emits an event carrying an actor/agent name. Rendering a bare `agent.name` (or a raw agent id) is a bug, not a style choice — the same leaf name legitimately exists under multiple managers, so the prefix is the only thing that makes them distinguishable.
+**When:** You render a Host/runtime label in pickers, rosters, typing/status indicators, timelines, SSE frames, or prompts. Use the shared label source for that object; preserve host context and snapshot names, and do not render an execution ID as a human name.
 
-## The rule
+## Current identities and labels
 
-An agent's identity in the UI is **always** `<ManagerName>/<AgentName>`.
-(P4c-3b: spec-direct runtime slots — `rt-` identities with no Agent row —
-render as their spec `label`, falling back to `cli`/folder leaf. They never
-go through the formatters below; the snapshot label travels with the row.)
+The Agent table is removed. Choose the label source for the object being shown:
 
-An agent with no manager (a Runtime Host / manager identity itself, or a
-historical / non-executable identity) renders as its **bare name, with no
-prefix**. Nothing else is ever acceptable — not a bare leaf name for a managed
-agent, not a raw agent UUID, not a hand-rolled `${a.manager_name}/${a.name}`.
+| Object | Display source |
+| --- | --- |
+| Runtime Host | `RuntimeHost.name`, a bare host name. |
+| Ticket assignee | `<Host>/<RuntimeSpec.label>`, through the assignee helpers below. |
+| Team slot / runtime execution | The slot/spec label and host context supplied by its projection; `rt-` keys are execution addresses, not names. |
+| Snapshot with `{ name, manager_name }` | `formatAgentDisplayName`, retaining `<Manager>/<name>` when both are present. |
+| Historical actor without a current Host lookup | Preserve its stored display name. |
 
-Two managers can each host an agent called `coder`. Without the prefix the
-operator cannot tell them apart, and neither can an orchestrator reading its own
-roster prompt.
+The server's `resolveAgentDisplayName` / `resolveAgentDisplayNamesByIds` resolve
+UUID-shaped IDs against Runtime Hosts. They do not reconstruct removed Agent
+rows and do not resolve `rt-` keys to template IDs. An unresolved runtime needs
+its spec/snapshot label, not a shortened ID rendered as a human name. Client
+`agentIdentityLabel` exposes an ID as a tooltip when needed.
 
-(P4c-4: the `Agent` table is dropped, so the server can no longer resolve a
-managed uuid to a leaf name — the leaf lives only in denormalized snapshots
-(chat participants) and RuntimeSpec labels, never in a row the
-read-side resolvers (`hostNameById` in `apps/server/src/utils/agent-name.ts`)
-can join to. A linked legacy uuid therefore resolves to its **Host's bare
-name** — the Host IS the execution identity, so this is unambiguous, not a
-bare leaf: there is no leaf on screen to confuse. `rt-` slots render their spec
-`label` (P4c-3b rule, unchanged). Snapshot-carried `{ name, manager_name }`
-pairs (chat participants, session dashboards) still render `<Manager>/<Agent>`
-via the client `agentIdentityLabel`/`formatAgentDisplayName` helpers —
-that contract is unchanged where the data exists.)
+Names can repeat across hosts. Carry host context through the relevant helpers
+rather than inventing a different prefix at each call site.
 
 ## Ticket assignee — `<Host>/<label>`
 
@@ -57,13 +50,13 @@ Do not join `${host}/${spec.label}` by hand anywhere else.
 
 | Side | Module | Use |
 |---|---|---|
-| Server | `apps/server/src/utils/agent-name.ts` | `formatAgentDisplayName({ name, manager_name })`, `resolveAgentDisplayName(repo, id)` (single), `resolveAgentDisplayMap(repo, agents)` (batched — prefer for lists), `resolveAgentDisplayNamesByIds(repo, ids)` (mixed id sets; non-agent ids are absent from the map) |
+| Server | `apps/server/src/utils/agent-name.ts` | `formatAgentDisplayName({ name, manager_name })`, `resolveAgentDisplayName(scope, id)` (single), `resolveAgentDisplayMap(scope, snapshots)` (batched — prefer for lists), `resolveAgentDisplayNamesByIds(scope, ids)` (mixed id sets; IDs without a Host lookup are absent from the map) |
 | Client | `apps/client/src/utils/agentName.ts` | `formatAgentDisplayName(agent)`, `parseAgentDisplayName(input)`, `agentMatchesQuery(agent, query)` |
 
-There is **no `fullName` field on the `Agent` entity** and there should not be:
-the manager name lives on a different row (`Agent.manager_agent_id` →
-`Agent.name`), so it is a resolved projection, never a stored column. That is
-why every read path must go through one of the helpers above.
+`scope` is a DataSource/EntityManager exposing `getRepository`, not an Agent
+repository. Host-name lookup and snapshot formatting are different operations:
+use the former for Host identities and the latter when the payload carries both
+name components. There is no Agent entity to add a `fullName` column to.
 
 ## Checklist — 6 touch points
 
@@ -72,10 +65,10 @@ at least once.
 
 | # | Touch point | What to do | Failure if missed |
 |---|---|---|---|
-| 1 | **Server list/detail projection** | Batch-resolve with `resolveAgentDisplayMap` and emit the resolved string (or emit `manager_name` alongside `name`) | Every consumer shows the bare leaf name |
-| 2 | **API payload shape** | If the client formats, the payload MUST carry `manager_name`. Add it to the TS interface in `apps/client/src/types.ts` too | The client *cannot* render the prefix even if it wants to |
+| 1 | **Server list/detail projection** | Resolve Host/spec labels in the projection; for name snapshots, preserve `manager_name` alongside `name` | Every consumer shows the bare leaf name |
+| 2 | **API payload shape** | For name snapshots carry `manager_name`; for specs carry the spec and use the shared host-name source. Update the matching client type | The client lacks the host context needed to render the label |
 | 3 | **Client state mapping** | `.map((a) => ({ id, name }))` **drops** `manager_name` — carry it through | Picker renders bare names although the API returned the manager |
-| 4 | **Client render** | `formatAgentDisplayName(a)` — never `{a.name}`, never a manual `/` join | Inconsistent labels across pages |
+| 4 | **Client render** | Use `formatAgentDisplayName` for snapshots and `assigneeDisplayName` for ticket specs; no manual `/` join | Inconsistent labels across pages |
 | 5 | **Denormalized writes / SSE frames** | Any `actor_name` / `agent_name` / `assignee_name` / `sender_name` written to a row or put on the wire must be resolved at emit time (or re-resolved on read, if a companion id is stored) | Stale or bare names; worst case a raw UUID on screen |
 | 6 | **Agent-facing prompts** | Roster / dependency / assignee names in a prompt are user-visible too — resolve them | The orchestrator cannot distinguish two same-named members when assigning work |
 
@@ -97,19 +90,18 @@ at least once.
   sites that will drift.
 - **Non-agent actors must survive verbatim.** System labels (`AWB` on
   dispatcher activity rows), user names, and deleted rows have no Agent row.
-  The resolvers return `null` / omit them from the map for exactly this reason —
+  The Host resolvers return `null` / omit unresolved IDs from the map for this reason —
   always fall back to the stored value rather than overwriting it.
 
 ## Verify
 
 ```bash
+# From the repository root; tests import compiled dist.
 npm run build
-# server-side contract (activity, pending, SSE, orchestration, typing)
-cd apps/server && node test/run-suite.mjs \
+(cd apps/server && node test/run-suite.mjs \
   test/agent-fullname-display.test.mjs \
-  test/agent-fullname-orchestration-typing.test.mjs
-# agent-manager side: typing is attributed to the responder, not the manager
-cd apps/agent-manager && npm test -- test/chat-typing-attribution.test.mjs
+  test/agent-fullname-orchestration-typing.test.mjs)
+node --test apps/agent-manager/test/chat-typing-attribution.test.mjs
 ```
 
 Add a case to `agent-fullname-orchestration-typing.test.mjs` for the surface you
@@ -120,11 +112,9 @@ Quick sweep for regressions before you ship:
 
 ```bash
 # client: agent labels that bypass the helper
-grep -rn "agents\.map\|\.agent_name\|agent\.name" --include=*.tsx apps/client/src \
-  | grep -v formatAgentDisplayName
+rg -n 'agents\.map|\.agent_name|agent\.name' apps/client/src -g '*.tsx'
 # server: bare-name denormalization into a payload
-grep -rn "_name: .*\.name" --include=*.ts apps/server/src \
-  | grep -vi "team\|mission\|column\|board\|workspace\|file"
+rg -n '_name: .*\.name' apps/server/src -g '*.ts'
 ```
 
 ## Related

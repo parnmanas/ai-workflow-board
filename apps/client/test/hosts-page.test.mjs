@@ -67,8 +67,9 @@ test('Hosts separates connection management from templates and ignores retired A
   assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Agent 템플릿 등록');
 });
 
-test('mobile Hosts returns from details to the Host list and pairing uses Host terminology', async (t) => {
-  await renderHosts(t, { width: 390 });
+for (const width of [390, 768, 1024]) {
+test(`narrow Hosts (${width}px) returns from details to the Host list and pairing uses Host terminology`, async (t) => {
+  await renderHosts(t, { width });
   assert.equal(document.querySelector('[data-testid="runtime-hosts-list"]').parentElement.style.display, 'flex');
   click([...document.querySelectorAll('button')].find(node => node.textContent.includes('Build host')));
   assert.equal(document.querySelector('[data-testid="runtime-hosts-list"]').parentElement.style.display, 'none');
@@ -79,6 +80,8 @@ test('mobile Hosts returns from details to the Host list and pairing uses Host t
   assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Runtime Host 연결');
   assert.ok(document.querySelector('[role="dialog"]').textContent.includes('Host 이름 (선택 사항)'));
 });
+
+}
 
 test('Hosts retains its admin permission boundary even on the template URL', async (t) => {
   const { list } = await renderHosts(t, { admin: false, entry: '/hosts?tab=templates' });

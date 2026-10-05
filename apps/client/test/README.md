@@ -1,8 +1,8 @@
 # 클라이언트 테스트 하네스
 
-AWB 레포에는 jest/vitest/jsdom 이 없다(루트 `CLAUDE.md` 참조). 클라이언트 로직
-회귀는 Node 내장 test runner(`node:test`)로 검증한다 — 서버(`apps/server/test`)와
-동일한 방식이다. 브라우저·별도 러너 불필요.
+클라이언트 테스트는 Node 내장 test runner(`node:test`)와 `tsx`를 사용한다.
+순수 로직은 Node에서, React DOM 상호작용은 공용 jsdom 하네스에서 검증한다.
+실제 크기·스크롤·클릭 겹침·반응형 레이아웃은 Playwright Chromium으로 검사한다.
 
 ## 실행
 
@@ -11,7 +11,8 @@ AWB 레포에는 jest/vitest/jsdom 이 없다(루트 `CLAUDE.md` 참조). 클라
 npm test -w client
 
 # 또는 직접
-node --import tsx --test apps/client/test/chat-participants.test.mjs
+cd apps/client
+node --import tsx --test test/chat-participants.test.mjs
 ```
 
 - `--import tsx` 는 테스트가 import 하는 `.ts`/`.tsx` 소스를 온더플라이로
@@ -19,6 +20,30 @@ node --import tsx --test apps/client/test/chat-participants.test.mjs
   `.ts` 모듈은 `import type` 만 갖고 있어 런타임에 React/DOM 을 끌어오지 않는다.
 - CI: 루트 `npm ci` 후 `npm test -w client`. 빌드 게이트(`tsc && vite build`)와는
   별개로, 로직 회귀는 이 테스트가 지킨다.
+
+## 브라우저 반응형 검사
+
+```bash
+# 레포 루트에서: 최초 1회 브라우저 설치
+npx playwright install chromium
+npm run test:e2e:responsive -w client
+```
+
+`test:e2e`의 기본 대상도 `responsive-layout.e2e.mjs`다. 기존 브라우저를 쓸 때는
+`CHROME_PATH=/absolute/path/to/chrome`을 지정할 수 있다. Playwright가 테스트용 Vite
+서버를 4173 포트에 띄운다. 실제 AWB DB나 Runtime Host에는 접속하지 않는다.
+
+- 긴 세션 제목·작업 경로와 여러 설정·명령·마이크가 함께 있는 화면을 작은 폭,
+  태블릿, 데스크톱, 가로 화면, breakpoint 양쪽에서 검사한다.
+- 프롬프트 전송·대기열·설정 펼치기·작성 중 회전·탐색 메뉴의 Escape·티켓 링크에서
+  편집기로 이동·Host 목록 복귀를 실제 브라우저 클릭으로 확인한다.
+- 주요 작업/설정 페이지와 새 세션 모달의 가로 넘침을 확인한다. 티켓 목록의 Kanban,
+  탭, 데이터 표 등 의도적인 내부 스크롤은 허용한다.
+- visual viewport 이벤트로 키보드 높이 감소와 pinch zoom을 시뮬레이션한다.
+  실제 iOS/Android 키보드, 음성 인식, 네트워크·호스트 실행 검증은 별도다.
+- CI의 브라우저 잡에서 실행한다. 화면 캡처는 무시되는 `test-results/`에 남는다.
+
+상세 범위: [반응형 UI 점검 기록](../../../docs/audit/2026-10-responsive-ui.md).
 
 ## 테스트 목록
 
@@ -45,7 +70,7 @@ node --import tsx --test apps/client/test/chat-participants.test.mjs
 
 **커버 경계(정직한 잔여물):** 컴포넌트에 남는 미검증 코드는 `useBoardStreamEvent(...)`
 등록과 DI 리터럴(어떤 ref/세터를 주입하는지)뿐이다 — 이 React glue 는 jsdom 풀마운트가
-있어야 실행되며, 이 레포는 jsdom 이 없다(루트 `CLAUDE.md`). 위 두 함수 추출로 그 미검증
+필요하다. 현재 `test/helpers/jsdom.mjs`의 공용 하네스로 이를 검증한다. 위 두 함수 추출로 해당
 표면을 "한 줄 위임 + 리터럴"까지 최소화했다. 실제 dispatch/branch/load/exclusion 로직은
 전부 이 테스트가 구동한다.
 

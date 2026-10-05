@@ -1,7 +1,7 @@
 # AWB built-in global skill pack
 
 Every `SKILL.md` under this directory is seeded into AWB's **global** skill
-scope (`Skill.workspace_id = NULL`) when the server boots, so a fresh install
+scope (`Skill.account_id = NULL`) when the server boots, so a fresh install
 comes up with a usable skill set without network access or any operator action.
 
 ```
@@ -40,8 +40,8 @@ Seeding is **idempotent** and **append-only**:
   free.
 - A change publishes a **new immutable `SkillVersion`**. Existing versions are
   never edited or deleted.
-- Every `AgentSkillAssignment` pins a specific `skill_version_id`, so an update
-  never changes what an already-assigned agent runs. Re-point the assignment
+- Every `RuntimeSkillAssignment` pins a specific `skill_version_id`, so an update
+  never changes what an already-assigned runtime identity runs (`runtime_key`). Re-point the assignment
   when you are ready.
 - A skill an operator **quarantined** is skipped. An upgrade never revives it.
 - A global slug already owned by a *tap* or by a hand-authored (`local`) skill
@@ -67,11 +67,11 @@ clones and syncs on demand. Taps are **disabled by default** and never sync at
 boot — a skill body becomes agent-facing prompt text, so pulling one from a
 third-party repository is an explicit operator decision. Use `dry_run` first.
 
-## Workspace forks
+## Account forks
 
-A workspace skill **shadows** a global one with the same slug (the precedence
+An account skill **shadows** a global one with the same slug (the precedence
 `WorkflowFunction` uses for its key). To diverge from a built-in, fork it into
-the workspace — the global keeps receiving upstream updates underneath, and the
+the account — the global keeps receiving upstream updates underneath, and the
 fork keeps winning. Editing the global in place is not the way to customize.
 
 ## Attribution

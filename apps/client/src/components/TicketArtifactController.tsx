@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { useArtifactPanel } from '../contexts/ArtifactPanelContext';
 import { TicketArtifactOpenerProvider } from '../contexts/ticketArtifactOpener';
 import TicketArtifact from './TicketArtifact';
@@ -28,14 +28,16 @@ export default function TicketArtifactController({ children }: { children: React
 
   // `?ticket=<id>` 딥링크 → 패널 오픈 후 파라미터 제거(뒤로가기 재발화 방지).
   const [searchParams, setSearchParams] = useSearchParams();
+  const { pathname } = useLocation();
   useEffect(() => {
     const ticketId = searchParams.get('ticket');
-    if (!ticketId) return;
+    // Tickets owns its editable detail view and keeps the query for Back/close.
+    if (!ticketId || pathname === '/tickets') return;
     openTicket(ticketId);
     const next = new URLSearchParams(searchParams);
     next.delete('ticket');
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, openTicket]);
+  }, [searchParams, setSearchParams, openTicket, pathname]);
 
   return <TicketArtifactOpenerProvider value={openTicket}>{children}</TicketArtifactOpenerProvider>;
 }

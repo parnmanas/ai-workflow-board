@@ -1,5 +1,11 @@
 # Ticket Hierarchy (Subtask as Ticket) & Comment Image Attachment
 
+> Historical design/implementation record from April 2026. Board, column,
+> workspace-navigation, and Agent-row examples below describe that version.
+> Current behavior: [Tickets & Projects](tickets.md), [Ownership](ownership.md),
+> and the [documentation index](README.md).
+
+
 **Date:** 2026-04-07
 **Status:** Approved
 

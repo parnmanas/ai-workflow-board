@@ -45,8 +45,13 @@ RuntimeSpec; there is no Agent create/edit surface or Agent database row.
 Every executable RuntimeSpec must have:
 
 1. a `manager_agent_id` identifying its Runtime Host;
-2. an explicit runtime id (`type`);
-3. an explicit `runtime_config`.
+2. an explicit `cli` and an absolute `working_dir` on that host;
+3. a `runtime_config` with explicit strategy and permission mode.
+
+The execution payload derives `runtime.type` from the spec's `cli`. Runtime
+identity keys are computed from CLI, working directory, and credential; they
+are not Agent-template IDs. See [Tickets](tickets.md) and the shared
+`common/runtime-spec.ts` contract.
 
 There is no default runtime, default strategy, or fallback to an editor/plugin
 session. A missing, unknown, unavailable, or invalid runtime fails with a
@@ -105,8 +110,8 @@ awb-agent-manager service install
 (`scripts/audit-published-deps.mjs` 가 매일 재확인), bin 링크는 lifecycle script 가
 아니라 npm 코어 동작이라 이 플래그로 잃는 것이 없다.
 
-The setup flow redeems a one-time pairing token created in **Admin → Runtime
-Hosts** and writes host configuration under `$AWB_AGENT_MANAGER_HOME` (or the
+The setup flow redeems a one-time pairing token created in **Hosts → Runtime
+Hosts** (`/hosts`) and writes host configuration under `$AWB_AGENT_MANAGER_HOME` (or the
 platform configuration directory).
 
 Useful commands:

@@ -1,5 +1,11 @@
 # Ticket Hierarchy & Comment Images Implementation Plan
 
+> Historical design/implementation record from April 2026. Board, column,
+> workspace-navigation, and Agent-row examples below describe that version.
+> Current behavior: [Tickets & Projects](tickets.md), [Ownership](ownership.md),
+> and the [documentation index](README.md).
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the Subtask entity with a self-referencing Ticket hierarchy (parent_id + depth) and add image attachment support (base64 BLOB) to Comments.

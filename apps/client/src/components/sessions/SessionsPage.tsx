@@ -5,6 +5,7 @@ import { useBoardStream, useBoardStreamEvent } from '../../contexts/BoardStreamC
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { AGENT_SESSIONS_CHANGED_EVENT, useAgentSessionsNav } from '../../hooks/useAgentSessionsNav';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useConversationScroll } from '../../hooks/useConversationScroll';
 import { tokens } from '../../tokens';
 import type {
@@ -375,6 +376,8 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   wsId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
 }) {
   const navigate = useNavigate();
+  const compact = useMediaQuery('(max-width: 1100px), (max-height: 500px)');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { showToast } = useToast();
   const confirm = useConfirm();
   const [summary, setSummary] = useState<AgentSessionSummary | null>(null);
@@ -804,11 +807,13 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
   return (
     <>
       <header
+        className="awb-session-header"
         style={{
           background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}`, padding: '10px 16px',
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0,
         }}
       >
+        <div className="awb-session-identity">
         <button
           type="button"
           onClick={() => navigate(`/sessions/${managerId}`)}
@@ -818,20 +823,21 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         >
           ←
         </button>
-        <div style={{ flex: 1, minWidth: 200, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
           <span style={{ color: tokens.colors.textPrimary, fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {sessionDisplayTitle({ title, cli, session_id: sessionId })}
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, color: tokens.colors.textSecondary, flexWrap: 'wrap' }}>
             <span>{host?.name || live?.manager_name || managerId.slice(0, 8)}</span>
             <CliBadge cli={cli} />
-            <span style={{ fontFamily: MONO, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }} title={cwd}>
+            <span className="awb-session-extra" style={{ fontFamily: MONO, color: tokens.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }} title={cwd}>
               {cwd || '(cwd unknown)'}
             </span>
-            <span style={{ fontFamily: MONO, color: tokens.colors.textMuted }} title={sessionId}>{sessionId.slice(0, 8)}</span>
+            <span className="awb-session-extra" style={{ fontFamily: MONO, color: tokens.colors.textMuted }} title={sessionId}>{sessionId.slice(0, 8)}</span>
             {/* 이 세션이 어떤 계정으로 도는지 — 어댑터가 알려 줄 때만 나온다(모르면 아무것도 그리지 않는다) */}
             {authView && (
               <span
+                className="awb-session-extra"
                 data-session-auth={live?.auth?.source ?? ''}
                 title={authView.title}
                 style={{
@@ -847,6 +853,9 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
           </div>
         </div>
         <StatusPill status={status} />
+        </div>
+        <div id="session-settings" className="awb-session-settings" hidden={compact && !settingsOpen}>
+          {compact && <div className="awb-session-context"><span title={cwd}>{cwd || '(cwd unknown)'}</span><span>{sessionId.slice(0, 8)}{authView ? ` · ${authView.text}` : ''}</span></div>}
         {/* 프로세스만 다시 띄운다. CLI 를 올린 뒤 새 모델·기능이 보이지 않을 때 쓰는
             정식 경로다 — 살아 있는 프로세스는 기동 시점의 CLI 를 계속 물고 있다.
             여는 중(starting)에만 잠근다: 턴 중이라도 운영자가 일부러 죽이려는 것일 수
@@ -938,7 +947,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
             {live.available_modes.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.name}</option>)}
           </select>
         )}
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div className="awb-session-secondary-actions" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {canManageOperators && (
             <Button
               variant={thisOperator ? 'secondary' : 'ghost'}
@@ -974,14 +983,19 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
               {speakingHere ? '■ Stop reading' : readReplies ? '🔊 Read aloud' : '🔈 Read aloud'}
             </Button>
           )}
+          <Button variant="ghost" size="sm" onClick={() => void load()} title="Reload the transcript from the Runtime Host">Reload</Button>
+          <Button variant="ghost" size="sm" onClick={onNew}>New</Button>
+
+        </div>
+        </div>
+        <div className="awb-session-actions">
+          {compact && <Button variant="secondary" size="sm" aria-expanded={settingsOpen} aria-controls="session-settings" onClick={() => setSettingsOpen((open) => !open)}>Settings {settingsOpen ? '▴' : '▾'}</Button>}
           {canConnect(status) && !connecting && (
             <Button variant="primary" size="sm" onClick={() => void connect(false)} title="Start the CLI process for this session on the Runtime Host and load its settings">
               {status === 'error' ? 'Reconnect' : 'Connect'}
             </Button>
           )}
           {(connecting || status === 'starting') && <Button variant="secondary" size="sm" disabled loading>Connecting…</Button>}
-          <Button variant="ghost" size="sm" onClick={() => void load()} title="Reload the transcript from the Runtime Host">Reload</Button>
-          <Button variant="ghost" size="sm" onClick={onNew}>New</Button>
           {(status === 'ready' || busy || status === 'error') && <Button variant="secondary" size="sm" onClick={() => void close()}>Stop</Button>}
         </div>
       </header>
@@ -999,7 +1013,7 @@ function SessionView({ wsId, managerId, cli, sessionId, host, onNew }: {
         </div>
       )}
 
-      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
+      <div className="awb-session-transcript" ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
         {loading && events.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>Reading the session from the Runtime Host…</div>
         ) : blocks.length === 0 ? (

@@ -814,7 +814,7 @@ export function InstanceDetail({ inst }: { inst: AgentManagerInstance }) {
 }
 
 export default function AgentManagerPage() {
-  const isMobile = useMediaQuery('(max-width: 767px)');
+  const isMobile = useMediaQuery('(max-width: 1100px)');
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

@@ -28,6 +28,7 @@ import TicketFilterBar from './TicketFilterBar';
 import StatusLane, { LANE_DROPPABLE_PREFIX } from './StatusLane';
 import TicketListView from './TicketListView';
 import { useTicketsData } from './useTicketsData';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useDragToScroll } from '../../hooks/useDragToScroll';
 
 function storage(): Storage | null {
@@ -48,6 +49,7 @@ function storage(): Storage | null {
 export default function TicketsPage() {
   const { currentAccountId } = useAuth();
   const wsId = currentAccountId || '';
+  const compact = useMediaQuery('(max-width: 1100px)');
   const [searchParams, setSearchParams] = useSearchParams();
   const { showToast } = useToast();
   const { withLoading } = useLoading();
@@ -368,7 +370,8 @@ export default function TicketsPage() {
   const rootCount = data.tickets.length;
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, position: 'relative' }}>
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, visibility: compact && panel ? 'hidden' : undefined }}>
       <PageHeader
         title="Tickets"
         description={filters.archived
@@ -443,7 +446,7 @@ export default function TicketsPage() {
       {/* One DragDropContext around lanes + panel (the list view has no
           draggables; the context is harmless there). */}
       <DragDropContext onDragEnd={(r) => { void handleDragEnd(r); }}>
-        {panel ? (
+        {panel && !compact ? (
           <Group orientation="horizontal" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
             <Panel minSize="35">
               <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>{body}</div>
@@ -457,6 +460,12 @@ export default function TicketsPage() {
           <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>{body}</div>
         )}
       </DragDropContext>
+      </div>
+      {compact && panel && (
+        <div className="awb-ticket-detail" role="region" aria-label="Ticket detail" style={{ position: 'absolute', inset: 0, minWidth: 0, overflow: 'hidden', background: tokens.colors.surface }}>
+          {panel}
+        </div>
+      )}
 
       <CreateTicketForm
         isOpen={createOpen}

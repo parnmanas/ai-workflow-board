@@ -46,13 +46,15 @@ export HERMES_ACP_COMMAND=/absolute/path/to/hermes-acp
 awb-agent-manager
 ```
 
-The host creates an isolated `HERMES_HOME` below each managed Agent directory.
+The host creates an isolated `HERMES_HOME` below each runtime identity's directory.
 Provider credentials must be available to the Runtime Host service account.
 
-## Agent configuration
+## Runtime configuration
 
-Hermes is never selected implicitly. Configure the Agent with `type: "hermes"`,
-a Runtime Host owner, and one of the following policies.
+Hermes is never selected implicitly. Select `cli: "hermes"` in a RuntimeSpec
+(host + working folder + runtime settings). The execution request derives
+`runtime.type: "hermes"`; configure its `runtime_config` with one of the policies
+below. There is no Agent create/edit API or prerequisite Agent row.
 
 ### Single
 
@@ -108,7 +110,8 @@ task and the host reports a healthy Hermes ACP capability probe.
 
 Swarm is not a durable team model. It is a runtime strategy inside one parent
 run. If participants need separate queues, identities, authorization, or
-long-lived accountability, create multiple AWB Agents instead.
+long-lived accountability, declare Team slots and use a Mission instead
+([Orchestration](orchestration.md)).
 
 ## Permission modes
 

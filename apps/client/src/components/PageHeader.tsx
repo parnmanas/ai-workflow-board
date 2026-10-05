@@ -10,6 +10,7 @@ interface PageHeaderProps {
 export default function PageHeader({ title, description, actions }: PageHeaderProps) {
   return (
     <header
+      className="awb-page-header"
       style={{
         background: tokens.gradients.surfaceCard,
         borderBottom: `1px solid ${tokens.colors.border}`,
@@ -20,14 +21,14 @@ export default function PageHeader({ title, description, actions }: PageHeaderPr
         flexShrink: 0,
       }}
     >
-      <div>
+      <div style={{ minWidth: 0, flex: 1 }}>
         <h1 style={{ fontSize: '16px', fontWeight: 700, color: tokens.colors.textPrimary, margin: 0 }}>{title}</h1>
         {description && (
           <p style={{ fontSize: '11px', color: tokens.colors.textSecondary, margin: '2px 0 0 0' }}>{description}</p>
         )}
       </div>
       {actions && (
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div className="awb-page-actions" style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {actions}
         </div>
       )}

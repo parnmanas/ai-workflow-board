@@ -175,6 +175,7 @@ export function ArtifactPanelView({
           role="dialog"
           aria-modal="true"
           aria-label={ariaLabel}
+          className="awb-artifact-overlay"
           style={{
             position: 'fixed',
             top: 0,

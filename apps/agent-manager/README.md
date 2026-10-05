@@ -1,277 +1,132 @@
 # awb-agent-manager
 
-Runtime Host for [AI Workflow Board](../../README.md). It connects to AWB over
-SSE + REST, owns managed Agent execution, advertises runtime capabilities, and
-supports Hermes over the official ACP stdio protocol alongside registered CLI
-adapters.
+The host-side execution service for [AI Workflow Board](../../README.md). Run it on the machine where your AI CLIs, repositories, and native session history live, then pair that machine with an AWB server.
 
-agent-manager owns SSE event delivery, persistent ticket/chat sessions,
-subagent supervision, fs browser, instance heartbeats, and CLI lifecycle
-management.
+The architectural name is **Runtime Host**. The npm package, binary, configuration directory, and API retain `agent-manager` for compatibility. The manager handles SSE delivery, ticket/chat execution, subagent supervision, native CLI sessions, terminals, filesystem browsing, heartbeats, and CLI lifecycle. AWB owns work, authorization, runtime selection, policy, and audit records. Native transcripts remain with the CLI.
 
-The package, binary, config directory, and API retain the `agent-manager` name
-for compatibility. Architecturally it is an execution-plane service: AWB owns
-durable Agent identity, authorization, work state, skills, collaboration
-policy, and audit history. There is no editor/plugin execution fallback.
-
-See [the Runtime Host reference](../../docs/agent-manager.md) and
-[the Hermes runtime guide](../../docs/hermes-runtime.md).
-
+```text
+AWB server: work, accounts, permissions, MCP tools
+              ↕ SSE + REST
+awb-agent-manager: processes, sessions, terminals, capabilities
+              ↕ CLI / ACP
+Installed runtimes + repositories + native CLI history
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  AWB server (NestJS)                                            │
-│   ├── /api/agent-manager/*    pairing, agent identity RPC       │
-│   ├── /api/admin/agent-manager/*    instance dashboard, command │
-│   └── SSE event stream  ─────────────┐                          │
-└─────────────────────────────────────┬─┘                          │
-                                      │ HTTP (Bearer key)          │
-                                      ▼                            │
-┌─────────────────────────────────────────────────────────────────┐│
-│  awb-agent-manager  (this package)                              ││
-│   ├── EventStream       SSE consumer + reconnect                ││
-│   ├── EventDispatcher   route → ticket / chat / fs / command    ││
-│   ├── ManagedAgents     isolate / start / stop Agent runtimes   ││
-│   ├── HermesRuntime     one ACP process per durable AWB Agent   ││
-│   └── InstanceHeartbeat per-process registry ping ──────────────┘
-└─────────────────────────────────────────────────────────────────┘
-       │ stdio
-       ▼
-   hermes-acp / claude / codex / antigravity / pi / custom CLI
-```
+
+For the full application setup, start with the [main README](../../README.md). Deep reference: [Runtime Host](../../docs/agent-manager.md), [Agent Sessions](../../docs/agent-sessions.md), and [CLI modules](../../docs/cli-modules.md).
+
+## Requirements
+
+- **Node.js 22+** for the published manager; **22.12+** when building the entire AWB repository.
+- npm, and connectivity to the AWB server.
+- A supported CLI installed/configured as the OS user running the manager. Installing this package does not install or sign in to every CLI.
+- Git for repository checkout/worktrees. Browser terminals also need the optional PTY dependency to load successfully.
+
+The host can run multiple runtimes. Ticket/chat/team/automation RuntimeSpecs and native session forms select the CLI per execution; there is no manager-wide CLI selection during setup. Capabilities and models are reported to AWB and determine what the UI offers.
 
 ## Install
-
-### npm (recommended)
 
 ```bash
 npm i -g --ignore-scripts awb-agent-manager
 awb-agent-manager --version
 ```
 
-`--ignore-scripts` matches what self-update does. The SLSA provenance gate
-covers **our** tarball, but the ~95 transitive dependencies below it are
-re-resolved from the registry at install time, and `npm i -g` would otherwise
-run any `preinstall`/`postinstall` they carry as your user — no CVE required.
-This package's published tree has **zero** install-script packages
-(`scripts/audit-published-deps.mjs` re-checks that every night), and bin
-linking is npm core rather than a lifecycle script, so the flag costs nothing.
+npm is the release/update channel. Self-update verifies the published package's provenance and installs from npm; it does not fetch or build a Git checkout. The `--ignore-scripts` flag matches self-update's installation path.
 
-Published to the public npm registry as
-[`awb-agent-manager`](https://www.npmjs.com/package/awb-agent-manager) (unscoped);
-`npm i -g` always pulls the latest release. Publishing is automated by
-[`.github/workflows/publish-agent-manager.yml`](../../.github/workflows/publish-agent-manager.yml):
-a push to `main` that touches the agent-manager **source** triggers a publish
-whose version is **computed at publish time** as the npm registry `latest` +
-patch (see [`scripts/compute-publish-version.mjs`](scripts/compute-publish-version.mjs)),
-and that version is stamped into the tarball but **not committed back to
-`main`**. So the `version` field in this `package.json` is only a *seed floor*
-for the first-ever publish and is expected to trail npm's `latest` — a lower
-value here is **by design, not drift** (ticket 433f6cbd removed the old
-manual-bump model).
+## Pair and start
 
-> **npm is the only distribution channel.** Self-update never fetches, checks
-> out, or builds from a git remote — it verifies the published SLSA provenance
-> and then runs `npm install -g awb-agent-manager@<verified version>`. When npm
-> isn't reachable the admin badge reads "manual updates only" and nothing is
-> updated automatically.
-
-### Update channel
-
-`AWB_AGENT_MANAGER_UPDATE_CHANNEL` selects what self-update tracks:
-
-| Value | Behavior |
-|---|---|
-| _(unset)_ / `latest` | Track the published release line (default). |
-| any dist-tag (e.g. `next`) | Track a pre-release line published by the same provenance-signed workflow. |
-| exact version (e.g. `1.6.99`) | Pin to one published build. |
-| `off` | Disable auto-update entirely; the admin badge reads "(pinned)". |
-
-The value is validated against the npm dist-tag/version charset — anything else
-falls back to `latest`, so the env var can't inject arguments into the
-`npm view` / `npm install -g` calls.
-
-### Testing an unpublished build
-
-Use npm's own local-tarball install — no git checkout, no registry publish:
-
-```bash
-npm run build -w apps/agent-manager
-npm pack -w apps/agent-manager                  # → awb-agent-manager-<v>.tgz
-npm i -g ./awb-agent-manager-<v>.tgz
-export AWB_AGENT_MANAGER_UPDATE_CHANNEL=off     # keep your build installed
-awb-agent-manager --version
-```
-
-The install still classifies as `npm-global`, so everything except auto-update
-behaves exactly like a released build. Drop the env var (or set it back to
-`latest`) to rejoin the release line. For a shared pre-release, publish to a
-dist-tag instead (`npm publish --tag next`) and point testers at
-`AWB_AGENT_MANAGER_UPDATE_CHANNEL=next` — that path keeps the provenance gate
-armed, which a local tarball does not.
-
-### Docker
-
-```bash
-docker run --rm -it \
-  -v "$HOME/.config/awb-agent-manager:/data" \
-  -e AWB_AGENT_MANAGER_HOME=/data \
-  ghcr.io/parnmanas/awb-agent-manager:latest
-```
-
-The image bundles `node:22-alpine` plus the manager binary. Mount a host
-directory for `AWB_AGENT_MANAGER_HOME` so config + lockfile survive container
-restarts. Bind-mount each agent's working directory the same way (e.g.
-`-v $HOME/repos:/repos`) and configure those paths inside AWB.
-
-## First run — pairing with an AWB server
-
-The manager bootstraps from a one-time pairing token minted by an AWB admin.
-After redeeming, the manager stores its API key and agent identity in
-`$AWB_AGENT_MANAGER_HOME/config.json` (default
-`~/.config/awb-agent-manager/config.json`).
-
-1. **Mint** — In the AWB UI: _Workspace → AI Agents → Agent Manager Runtime → Pair manager…_.
-   The dialog returns a raw token (long-form) and a 6-char display code; copy
-   either. Both are shown only once. TTL 10 minutes, single-use.
-2. **Run the wizard** — On the host that will run the manager:
+1. Sign in to AWB as an administrator and open **Hosts** (`/hosts`) → **Runtime Hosts** → **Pair manager…**.
+2. Copy the pairing token or six-character code. Both are single-use and expire after ten minutes; an AWB server restart also invalidates outstanding tokens.
+3. Run the wizard on the execution machine:
 
    ```bash
    awb-agent-manager setup
    ```
 
-   You'll be prompted for:
-   - AWB server URL (e.g. `https://awb.example.com:7700`)
-   - Pairing token (paste from step 1)
-   - CLI to drive (`claude` / `codex` / `antigravity` / `pi`, default `claude`)
+   It asks for the **server base URL** and **pairing token**. For a local server use `http://localhost:7701`; for another machine use its reachable hostname or deployed HTTPS URL. Do not append `/mcp`.
 
-   The wizard calls `/api/agent-manager/pair/redeem`, then writes
-   `~/.config/awb-agent-manager/config.json` with mode 0600. Output:
-
-   ```
-     ✓ paired
-       agent_id     <uuid>
-       workspace_id <uuid>
-       apiKey       awb_abcd***xyz9
-     ✓ wrote ~/.config/awb-agent-manager/config.json (mode 0600)
-
-     Next: run `awb-agent-manager` to start the manager.
-   ```
-
-   Non-interactive form (CI / Ansible — fails fast on missing fields):
+4. Start in the foreground:
 
    ```bash
-   awb-agent-manager setup \
-     --url https://awb.example.com:7700 \
-     --token ABCXYZ123 \
-     --cli claude \
-     --non-interactive
+   awb-agent-manager
    ```
 
-   `instance_id` defaults to `<hostname>-<rand6>` — pass `--instance-id <id>`
-   for a stable label across re-pairings on the same box. `--force`
-   overwrites an existing config.json.
+5. Confirm the host is online in AWB. Use **Sessions → New session**, select a ticket assignee, or declare a team/automation runtime to start work. There is no New Managed Agent creation step.
 
-3. **Start** — `awb-agent-manager`. The process registers with the AWB
-   instance dashboard and starts listening for `agent_manager_command` SSE
-   events.
+Setup redeems `/api/agent-manager/pair/redeem` and writes **both** `config.json` and `agent.json` with private file permissions where supported. New pairings create a Runtime Host and a host-bound key. The compatibility `agent_id` field contains the Host identity; it does not refer to an Agent database row. `account_id` is the canonical ownership field.
 
-4. **Add managed agents** — Back in AWB, open _Workspace → AI Agents_ and
-   choose _New Managed Agent_. Pick the CLI (`claude` / `codex` / `antigravity` / `pi` / `custom`),
-   point at a working directory, and leave _Spawn on this manager after create_
-   on for one-click setup. The manager provisions a per-agent apiKey, writes its
-   on-disk config + mcp-config.json, and starts routing matching ticket /
-   chat / mention events to subagents that run under that agent's identity.
+Non-interactive setup:
 
-   Managed Codex agents also receive native MCP entries in their isolated
-   `CODEX_HOME/config.toml`. AWB is marked `required = true`, uses the
-   per-process `AWB_API_KEY` bearer token, and fails the Codex run if the MCP
-   endpoint cannot initialize. Manager restart/rehydrate and
-   `refresh_mcp_config` both repair this native config automatically.
+```bash
+awb-agent-manager setup \
+  --url https://awb.example.com \
+  --token YOUR_PAIRING_TOKEN \
+  --instance-id my-workstation \
+  --non-interactive
+```
 
-   **PI has no credential concept at all** (not even the optional per-agent
-   credential every other adapter supports) — every spawn simply inherits
-   whatever the operator already configured on the manager host via `pi
-   /login` (including a credential-free local llama.cpp server). **PI has no
-   *native* MCP client** — its own upstream philosophy is "No MCP, build an
-   extension that adds MCP support" — so instead of a native `mcp.json`,
-   `prepareCliHome` writes a small dependency-free pi extension
-   (`~/.pi/agent/extensions/awb-mcp-bridge.ts`, regenerated on every
-   spawn_agent) that hand-rolls the MCP `initialize`/`tools/list`/`tools/call`
-   handshake against AWB's Streamable HTTP endpoint using only pi's own
-   `pi.registerTool()` API and Node's built-in `fetch` — no
-   `@modelcontextprotocol/sdk` or other npm dependency, so there is no
-   per-spawn `npm install` network-failure mode. A managed PI agent therefore
-   calls `get_ticket` / `add_comment` / `move_ticket` itself, same as
-   claude/codex (see `cli-adapters/pi.ts` for the verified wire details and
-   ticket d5a6100d for the end-to-end transcript).
-
-   On manager restart, agents previously spawned this way auto-rehydrate
-   from disk — no need to re-click Spawn.
+`--instance-id` is optional (default `<hostname>-<random>`). `setup --force` overwrites an existing pairing configuration; back it up when replacing a host binding used by saved specs.
 
 ## Run as a background service
 
-`awb-agent-manager service install` registers the manager so it starts on
-boot/logon and auto-restarts on crash. The installer detects your host's
-service manager and dispatches accordingly:
-
-| Host                         | Backend                | Default unit path                                  |
-|------------------------------|------------------------|----------------------------------------------------|
-| Linux + systemd              | systemd unit           | `~/.config/systemd/user/awb-agent-manager.service` |
-| Linux + Synology DSM         | rc.d boot script       | `/usr/local/etc/rc.d/awb-agent-manager.sh`         |
-| Linux without systemd        | sysvinit               | `/etc/init.d/awb-agent-manager`                    |
-| macOS                        | launchd                | `~/Library/LaunchAgents/com.awb.agent-manager.plist` |
-| Windows                      | Task Scheduler         | task `awb-agent-manager` (logon trigger)           |
+After verifying a foreground connection, stop that process and install the service:
 
 ```bash
-# user scope (no admin/sudo) — runs at logon, recommended for laptops
 awb-agent-manager service install
-
-# system scope — runs at boot, requires sudo / Administrator shell
-awb-agent-manager service install --system
-
-# preview without writing or running registrar
-awb-agent-manager service install --dry-run
-
-# force a specific backend (e.g. testing sysvinit on a systemd host)
-awb-agent-manager service install --platform sysvinit
-
-# remove
-awb-agent-manager service uninstall [--system]
 ```
 
-Notes:
-- Linux user-mode systemd services stop at logout. Run
-  `sudo loginctl enable-linger $USER` to keep the manager running after the
-  installing user logs out.
-- Synology DSM and bare sysvinit always install at system scope (the boot
-  directories are root-owned). The `--system` flag is implied.
-- Windows user-mode tasks fire at logon only. Re-run with `--system` from
-  an elevated PowerShell for a boot-time task running as `LocalSystem`.
-  The task launches through a hidden `wscript.exe` wrapper, so no npm/Node
-  console window appears. When replacing a legacy task that was registered
-  by an Administrator shell, the installer requests UAC approval automatically.
-- macOS uses `launchctl bootstrap` on modern macOS and falls back to
-  `launchctl load -w` on older releases. Logs land in `/tmp/awb-agent-manager.log`.
+The installer detects the platform, writes the service definition, and registers it. Ensure the service's OS user can find and run your CLIs, read its login configuration, and access the chosen working folders.
+
+| Host | Backend | Default user/system location |
+| --- | --- | --- |
+| Linux with systemd | systemd | `~/.config/systemd/user/awb-agent-manager.service` |
+| Synology DSM | rc.d boot script | `/usr/local/etc/rc.d/awb-agent-manager.sh` |
+| Linux without systemd | sysvinit | `/etc/init.d/awb-agent-manager` |
+| macOS | launchd | `~/Library/LaunchAgents/com.awb.agent-manager.plist` |
+| Windows | Task Scheduler | Task `awb-agent-manager` (logon trigger) |
+
+```bash
+awb-agent-manager service install --dry-run  # preview only
+awb-agent-manager service install --system   # boot/system scope; needs elevation
+awb-agent-manager service install --platform sysvinit
+awb-agent-manager service uninstall
+```
+
+For system-scope removal, use `service uninstall --system`.
+
+- Linux user services normally stop at logout. `sudo loginctl enable-linger "$USER"` keeps the service running after logout.
+- Synology and sysvinit require system scope because their service directories are root-owned.
+- Windows user tasks start at logon. System scope uses a boot-time task running as `LocalSystem`; that account has different files, credentials, and PATH from your user. The service uses a hidden script wrapper to avoid a console window.
+- macOS uses launchd; logs are written to `/tmp/awb-agent-manager.log`.
+
+See [process ownership](../../docs/agent-manager.md#process-and-session-ownership) and [self-update policy](../../docs/agent-manager.md#self-update-policy) before changing an existing service.
 
 ## Configuration
 
-| Source                                           | Precedence       |
-|--------------------------------------------------|------------------|
-| `--config <path>` flag                           | 1 (highest)      |
-| `$AWB_AGENT_MANAGER_HOME/config.json`            | 2                |
-| `$XDG_CONFIG_HOME/awb-agent-manager/config.json` | 3 (Linux)        |
-| `%APPDATA%\awb-agent-manager\config.json`        | 3 (Windows)      |
-| `~/.config/awb-agent-manager/config.json`        | 4 (fallback)     |
+Config search order:
 
-Schema (`config.json`):
+| Priority | Source |
+| --- | --- |
+| 1 | `--config <path>` |
+| 2 | `$AWB_AGENT_MANAGER_HOME/config.json` |
+| 3 | `$XDG_CONFIG_HOME/awb-agent-manager/config.json` on Linux, or `%APPDATA%\awb-agent-manager\config.json` on Windows |
+| 4 | `~/.config/awb-agent-manager/config.json` |
+
+Pairing writes a configuration of this shape:
 
 ```json
 {
   "url": "https://awb.example.com",
-  "apiKey": "<bearer key from pairing>",
-  "workspace_id": "<workspace uuid>",
-  "agent_id": "<manager agent uuid>",
-  "cli": "claude",
+  "apiKey": "<host key from pairing>",
+  "account_id": "<pairing account UUID>",
+  "agent_id": "<Runtime Host UUID>",
+  "host_id": "<Runtime Host UUID>"
+}
+```
+
+Optional delegation settings can be added:
+
+```json
+{
   "delegation": {
     "enabled": true,
     "max_concurrent_subagents": 4
@@ -279,43 +134,85 @@ Schema (`config.json`):
 }
 ```
 
-CLI flags (`awb-agent-manager --help`):
+Legacy `workspace_id` config is still read as `account_id`. The owner UUID and existing credential/MCP filename suffixes and native session home paths are preserved. A paired host supervises authorized work across accounts; selecting an account is not needed for ordinary host use.
 
-| Flag                    | Meaning                                                 |
-|-------------------------|---------------------------------------------------------|
-| `-c, --config <path>`   | Override config.json path                               |
-| `-w, --workspace <id>`  | Override `workspace_id` from config                     |
-| `-f, --force`           | Take over a lockfile owned by a stale or live owner     |
-| `--dry-run`             | Load config, log what would happen, exit                |
-| `-h, --help`            | Show full usage                                         |
-| `-v, --version`         | Print version                                           |
+| Flag | Purpose |
+| --- | --- |
+| `-c, --config <path>` | Override config path. |
+| `--account <id>` | Optional manual `account_id` override. |
+| `-w, --workspace <id>` | Deprecated alias for `--account`. |
+| `--runtime-profile <path\|none>` | Manager-run profile override. |
+| `-f, --force` | Lock takeover; supervised managers hand restart to their service. |
+| `--dry-run` | Load config and exit without starting execution. |
+| `-h, --help` | Show commands and current options. |
+| `-v, --version` | Print the installed binary's version. |
 
-Signals:
+Signals on platforms that support them:
 
-| Signal       | Behavior                                                  |
-|--------------|-----------------------------------------------------------|
-| `SIGTERM`/`SIGINT` | Graceful drain (stop subagents, release lock)       |
-| `SIGHUP`     | Re-read `config.json` (delegation tunables hot-reload)    |
-| `SIGUSR1`    | Self-update: verify provenance, drain sessions, `npm install -g` latest, re-exec (git checkout is fallback-only when npm is unavailable) |
-| `SIGUSR2`    | Unconditional restart: re-exec in place, no version check / install / build. Use for on-disk config that's only read at startup (e.g. `--runtime-profile`), where SIGUSR1 would no-op because the package version didn't change |
+| Signal | Behavior |
+| --- | --- |
+| `SIGTERM` / `SIGINT` | Graceful drain, release lock, exit. |
+| `SIGHUP` | Reload config/delegation tunables. |
+| `SIGUSR1` | Request npm self-update, draining before restart. |
+| `SIGUSR2` | Restart in place without installing a package. |
 
-## Development
+The service retains runtime-local files for resume/recovery. These filesystem identities are separate from optional **Agent templates**, which only copy reusable preferences into new execution forms.
+
+## Updates
+
+Hosts shows the running version, installed version, and whether restart is required. Installing a newer global package does not replace code already loaded by the process; use the Hosts update/restart action to apply it.
+
+`AWB_AGENT_MANAGER_UPDATE_CHANNEL` selects the update target:
+
+| Value | Behavior |
+| --- | --- |
+| unset / `latest` | Published release line. |
+| dist-tag, e.g. `next` | A release line published by the same provenance-signed workflow. |
+| exact version | Pin the update target to that published version. |
+| `off` | Disable automatic updates. |
+
+The channel selects **what** can be installed; update policy controls **when**. Automatic scheduled updates use the documented approval policy. Manual actions, draining, retry/backoff, and service restart details are in [self-update policy](../../docs/agent-manager.md#self-update-policy).
+
+The [publishing workflow](../../.github/workflows/publish-agent-manager.yml) computes the release version at publish time and records it in the tarball/tag, without committing it back to `main`. The source `package.json` version is a seed floor and may lag the published release. Do not bump it manually. README/test-only changes do not trigger a package publish.
+
+## Development and unpublished builds
+
+From the repository root:
 
 ```bash
-# from this directory
-npm install            # workspace install at the repo root also works
-npm run build          # tsc → dist/
-npm run dev            # tsx watch src/main.ts
-node dist/main.js -h
+npm ci --ignore-scripts
+npm run build                       # client + server + manager
+npm run dev:agent-manager            # local manager, requires pairing config
+npm test -w awb-agent-manager
 ```
 
-The full AWB workspace builds via turbo from the repo root:
+To test the compiled binary without starting it:
 
 ```bash
-cd ../..               # submodules/ai-workflow-board
-npm install
-npm run build          # builds agent-manager + client + server
+node apps/agent-manager/dist/main.js --help
 ```
 
-For deep reference (config schema, SSE event types, security model, internals)
-see [`docs/agent-manager.md`](../../docs/agent-manager.md).
+To install an unpublished local package:
+
+```bash
+npm run build -w awb-agent-manager
+npm pack -w awb-agent-manager
+# Replace the filename with the tarball printed by npm pack.
+npm i -g --ignore-scripts "./awb-agent-manager-<version>.tgz"
+```
+
+Set `AWB_AGENT_MANAGER_UPDATE_CHANNEL=off` **in the environment of the process/service** so automatic updates do not replace that build. Restore the normal channel to return to published releases. A local tarball is for local testing and does not have registry provenance.
+
+Manager source/wire changes require a full repository build and coordinated server changes. Follow the [release runbook](../../docs/runbooks/agent-manager-release.md).
+
+## Troubleshooting
+
+- **Host offline:** verify the URL/key, network access, and service logs. Re-pair with a fresh token if the binding was lost.
+- **CLI missing in AWB:** check the executable and login as the service's OS user, then refresh capabilities/models in Hosts.
+- **Session does not resume:** preserve the native CLI history and manager homes; check the pinned credential/backend and [session troubleshooting](../../docs/agent-sessions.md#운영-메모).
+- **Terminals unavailable:** the optional PTY module must load on that platform. See [Terminals](../../docs/terminals.md).
+- **Updated but behavior is old:** compare running and installed versions; restart the supervised process through Hosts.
+
+## License
+
+[MIT](LICENSE).

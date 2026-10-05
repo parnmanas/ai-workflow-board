@@ -109,43 +109,14 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     info: { border: tokens.colors.info, color: tokens.colors.info },
   };
 
-  const [muteHovered, setMuteHovered] = useState(false);
-
   return (
     <ToastContext.Provider value={{ showToast, muted, toggleMute, playNotifySound }}>
       {children}
-      <div style={{
+      <div className="awb-toasts" style={{
         position: 'fixed', bottom: 20, right: 20, zIndex: 9999,
         display: 'flex', flexDirection: 'column', gap: 8,
         pointerEvents: 'none',
       }}>
-        {/* Mute toggle button */}
-        <div style={{ pointerEvents: 'auto', alignSelf: 'flex-end' }}>
-          <button
-            onClick={toggleMute}
-            aria-label={muted ? 'Unmute notifications' : 'Mute notifications'}
-            aria-pressed={muted}
-            onMouseEnter={() => setMuteHovered(true)}
-            onMouseLeave={() => setMuteHovered(false)}
-            style={{
-              width: 32,
-              height: 32,
-              background: tokens.colors.surfaceCard,
-              border: `1px solid ${tokens.colors.border}`,
-              borderRadius: tokens.radii.lg,
-              fontSize: 14,
-              color: muteHovered ? tokens.colors.textPrimary : tokens.colors.textSecondary,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
-          >
-            {muted ? '\uD83D\uDD15' : '\uD83D\uDD14'}
-          </button>
-        </div>
-
         {/* Toast list */}
         {toasts.map(toast => {
           const s = typeStyles[toast.type] || typeStyles.info;
@@ -182,5 +153,28 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         })}
       </div>
     </ToastContext.Provider>
+  );
+}
+
+
+/** Lives in the application header so it never covers a composer action. */
+export function NotificationMuteButton() {
+  const { muted, toggleMute } = useToast();
+  return (
+    <button
+      type="button"
+      className="awb-notification-mute"
+      onClick={toggleMute}
+      aria-label={muted ? 'Unmute notifications' : 'Mute notifications'}
+      aria-pressed={muted}
+      title={muted ? 'Unmute notifications' : 'Mute notifications'}
+      style={{
+        width: 32, height: 32, flexShrink: 0, borderRadius: tokens.radii.md,
+        background: tokens.colors.surfaceCard, border: `1px solid ${tokens.colors.border}`,
+        color: tokens.colors.textSecondary, cursor: 'pointer', fontSize: 14,
+      }}
+    >
+      {muted ? '🔕' : '🔔'}
+    </button>
   );
 }

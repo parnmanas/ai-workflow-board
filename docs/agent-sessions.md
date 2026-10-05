@@ -1,6 +1,6 @@
 # Agent Sessions (CLI 직접 세션)
 
-Runtime Host 장비에 있는 CLI(Claude Code / Codex / Hermes)의 세션을 AWB 화면에서 직접 모는 표면이다.
+Runtime Host 장비에 있는 CLI(Claude Code / Codex / OpenCode / Hermes)의 세션을 AWB 화면에서 직접 모는 표면이다.
 세션의 단위는 **(Runtime Host, CLI, CLI 네이티브 세션 id)** 이고, **AWB 는 세션 내용을 저장하지 않는다.**
 Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessions/…/rollout-*.jsonl`, opencode 는
 `~/.local/share/opencode/opencode.db`(SQLite) 에
@@ -11,6 +11,20 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 기존 Chat(ChatRoom) 과는 별개의 기능이며, 기본 작업 랜딩이 `/sessions` 다. 작업 화면에는
 소유 계정 전환기가 없다. Account는 세션의 소유권·접근 권한·credential·기본 실행 정책을
 정하는 관리 경계다([ownership.md](ownership.md)).
+
+## 작은 화면에서 사용하기
+
+- 좁은 화면과 낮은 가로 화면에서는 **Settings**를 눌러 모델·권한·effort·Fast mode,
+  Restart, Operator, Read aloud, Reload, New를 펼친다. 상태와 Connect/Stop은 바로 보인다.
+  작업 폴더·세션 id·인증 정보도 펼친 설정에서 확인한다.
+- 입력 영역 자체의 폭이 좁으면 프롬프트가 전체 너비를 차지하고, 명령·첨부·마이크와
+  Send/Queue/Cancel은 그 아래 행으로 내려간다. 사이드바나 Artifact 패널로 본문이 좁아져도
+  같은 배치를 적용한다. 실행 중 입력은 계속 가능하며 Queue로 다음 턴에 보낼 수 있다.
+- 알림 음소거 벨은 상단에 있다. 하단 전송 버튼을 가리지 않는다.
+- 브라우저의 동적 높이와 visual viewport 변화를 따라 입력 영역을 배치한다.
+  모바일 입력 글자 크기는 16px로 유지하고, 사용자의 확대/축소는 제한하지 않는다.
+
+검증 범위와 브라우저 회귀 테스트는 [반응형 UI 점검 기록](audit/2026-10-responsive-ui.md)을 참고한다.
 
 ## 소유권과 실행 설정 고정
 

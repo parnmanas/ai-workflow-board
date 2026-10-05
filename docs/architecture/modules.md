@@ -23,9 +23,9 @@ AppModule
 ├── SharedServicesModule        ← @Global() cross-cutting services
 ├── ServeStaticModule           ← client SPA, cache-control headers
 ├── AuthModule                  /api/auth/*
-├── WorkspacesModule            /api/workspaces/*
-├── ProjectsModule              /api/workspaces/:wsId/projects, /api/projects/*   (@Global — ProjectsService)
-├── TicketsModule               /api/workspaces/:wsId/tickets, /api/tickets/*
+├── AccountsModule              /api/accounts/*
+├── ProjectsModule              /api/projects/*, /api/accounts/:accountId/projects   (@Global — ProjectsService)
+├── TicketsModule               /api/tickets/*, /api/accounts/:accountId/tickets
 ├── UsersModule                 /api/users/*
 ├── AgentsModule                TicketService + TicketDispatchService; /api/subagent-monitor/*, fs-browser, child-runs
 ├── ChannelsModule              /api/channels/*
@@ -48,18 +48,22 @@ AppModule
 ├── ActionsModule               /api/actions/*
 ├── CredentialsModule           /api/credentials/*, /api/agent-manager/cli-login/*
 ├── AgentLogsModule             /api/agent/error-logs, /api/admin/agent-logs
-├── MentionsModule              /api/workspaces/:id/mentions/*
+├── MentionsModule              /api/mentions/*, /api/accounts/:accountId/mentions/*
 ├── AgentManagerModule          /api/agent-manager/*, /api/agent-templates, /api/runtime-specs   (+ @Global InstanceRegistryModule)
 ├── UserChannelsModule          /api/me/channels/*, /api/admin/users/:userId/channels
-├── WorkspaceScheduleModule     /api/workspace-schedules/*
+├── WorkspaceScheduleModule     /api/automation-schedules/*
 ├── WorkflowFunctionsModule     /api/functions/*
-├── SkillsModule                /api/workspaces/:workspaceId/skills/*, /api/admin/skill-registry/*
+├── SkillsModule                /api/accounts/:accountId/skills/*, /api/admin/skill-registry/*
 ├── ArtifactRefsModule          /api/artifact-refs
 ├── OutreachModule              /api/outreach-channels/*
 ├── OrchestrationModule         /api/orchestration/*
 ├── OntologyModule              /api/ontology/*
 └── MigrationModule             /api/admin/migration/*, /api/migration/export/*
 ```
+
+Canonical work lists aggregate accessible accounts; ID-addressed operations check
+the actual owner. The `/api/workspaces` routes/headers remain transport aliases,
+not separate work surfaces. See [ownership](../ownership.md).
 
 There is no Boards, Columns, PromptTemplates or WorkspaceRoles module any more —
 boards, columns, prompt templates and ticket role assignments were removed (see
@@ -138,8 +142,17 @@ with the Agent table, P4c-4.)
 
 ## Feature modules (alphabetical)
 
+### `AccountsModule`
+- Imports: `TypeOrmModule.forFeature([Account, Ticket, User])`
+- Controllers: `AccountsController`
+- Providers: `AuthGuard`
+- Account settings hold ownership/membership and execution policy: `language`,
+  `max_concurrent_tickets_per_agent`, `auto_archive_days`, `dispatch_paused_at`,
+  `harness_config`. Hosts the `/api/accounts/:id/mention-candidates`
+  endpoint that powers the client-side `@`-mention autocomplete composer.
+
 ### `ActionsModule`
-- Imports: Action, ActionRun, ActionApproval, ChatRoom(+Participant/Message), TicketAttachment, RuntimeHost, Workspace, User, Ticket, Comment, ActivityLog repositories; `ChatRoomsModule`, `SharedServicesModule`, `AgentsModule`
+- Imports: Action, ActionRun, ActionApproval, ChatRoom(+Participant/Message), TicketAttachment, RuntimeHost, Account, User, Ticket, Comment, ActivityLog repositories; `ChatRoomsModule`, `SharedServicesModule`, `AgentsModule`
 - Controllers: `ActionsController`
 - Providers: `ActionsService`, `ActionRunReaperService`, `OnTicketDoneActionService` (fires on a ticket entering `done` — [`docs/on-ticket-done-action-hook.md`](../on-ticket-done-action-hook.md))
 - Exports: `ActionsService`
@@ -151,7 +164,7 @@ with the Agent table, P4c-4.)
   `SharedServicesModule` export chain.
 
 ### `AdminModule`
-- Imports: `TypeOrmModule.forFeature([User, Workspace, SystemSetting, ClaudeBackendProfile])`, `forwardRef(AgentsModule)` (workflow health reads `AgentUsageService`)
+- Imports: `TypeOrmModule.forFeature([User, Account, SystemSetting, ClaudeBackendProfile])`, `forwardRef(AgentsModule)` (workflow health reads `AgentUsageService`)
 - Controllers: `DiagnosticsController`, `PublicDiagnosticsController`, `LogsController`, `PendingUsersController`, `SettingsController`, `WorkflowHealthController`, `ClaudeBackendProfilesController`, `ClaudeBackendProfileCatalogController`
 - Providers: `AuthGuard`, `AdminGuard`, `PermissionGuard`
 
@@ -166,7 +179,7 @@ with the Agent table, P4c-4.)
 - Providers: `AgentLogsService`, `AgentAuthGuard`, `AuthGuard`, `AdminGuard`
 
 ### `AgentManagerModule`
-- Imports: `forwardRef(AgentsModule)`, `InstanceRegistryModule`, `SkillsModule`, `TypeOrmModule.forFeature([AgentTemplate, RuntimeHost, AgentSessionCliSetting, ApiKey, Credential, Ticket, Workspace])`
+- Imports: `forwardRef(AgentsModule)`, `InstanceRegistryModule`, `SkillsModule`, `TypeOrmModule.forFeature([AgentTemplate, RuntimeHost, AgentSessionCliSetting, ApiKey, Credential, Ticket, Account])`
 - Controllers: `AgentTemplatesController`, `AgentManagerController`, `HostModelsController`, `RuntimeSpecController`
 - Providers: `PairingService`, `CommandLedgerService`, `SudoTicketService`, `PrivilegedCommandService`, `AgentManagerCommandService`, `HostModelsService`, `ManagerDriftMonitorService`, guards
 - Exports: `PairingService`, `AgentManagerCommandService`, `PrivilegedCommandService`, `CommandLedgerService`, `HostModelsService`
@@ -179,7 +192,7 @@ with the Agent table, P4c-4.)
 - Controllers: `AgentSessionsController` (`/api/agent-sessions/hosts/*`, user), `AgentSessionsAgentController` (`/api/agent/sessions/*`, `X-Agent-Key`)
 - Providers: `AgentSessionsService`, guards
 - Exports: `AgentSessionsService`
-- Agent Session (CLI 직접 세션) — 엔티티 없는 상태 없는 중계자(reverse RPC + 라이브 SSE). ChatRoomsModule 과 독립. `docs/agent-sessions.md`.
+- Agent Session (CLI 직접 세션) — reverse RPC + 라이브 SSE 중계, ChatRoomsModule과 독립. Native transcript는 CLI에 있고, `AgentSessionExecution`은 소유 account·credential·config·backend만 영속한다(전역 DatabaseModule의 repository로 접근). `docs/agent-sessions.md`.
 
 ### `ApiKeysModule`
 - Controllers: `ApiKeysController` (`/api/keys`)
@@ -187,12 +200,12 @@ with the Agent table, P4c-4.)
 - `ApiKeyService` comes from `SharedServicesModule`.
 
 ### `ArtifactRefsModule`
-- Imports: `TypeOrmModule.forFeature([Ticket, Action, WorkflowFunction, Workspace, WorkspaceSchedule])`
+- Imports: `TypeOrmModule.forFeature([Ticket, Action, WorkflowFunction, Account, AutomationSchedule])`
 - Controllers: `ArtifactRefsController`; Providers/Exports: `ArtifactRefsService`
 - Resolves `#[type:id|name]` references — [`docs/entity-references.md`](../entity-references.md).
 
 ### `AuthModule`
-- Imports: `TypeOrmModule.forFeature([User, Workspace, SystemSetting])`
+- Imports: `TypeOrmModule.forFeature([User, Account, SystemSetting])`
 - Controllers: `AuthController`; Providers: `GoogleOAuthService`
 - `AuthService` / `ApiKeyService` / `ReBACService` come from `SharedServicesModule`.
 
@@ -202,7 +215,7 @@ with the Agent table, P4c-4.)
 - Providers: `AuthGuard`, `PermissionGuard`
 
 ### `ChatRoomsModule`
-- Imports: `TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Ticket, UserMention, TicketAttachment, Workspace, OrchestrationMission])`, `SharedServicesModule`, `ArtifactRefsModule`
+- Imports: `TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Ticket, UserMention, TicketAttachment, Account, OrchestrationMission])`, `SharedServicesModule`, `ArtifactRefsModule`
 - Controllers: `ChatRoomsController`
 - Providers / Exports: `RoomCrudService`, `RoomMembershipService`, `RoomMessagingService`
 
@@ -215,7 +228,7 @@ with the Agent table, P4c-4.)
 - Providers: `CliLoginSessionService`, `CliLoginSessionReaperService`, guards
 
 ### `EventsModule`
-- Imports: `TypeOrmModule.forFeature([Ticket, Workspace, RuntimeHost, ApiKey])`, `AgentManagerModule`
+- Imports: `TypeOrmModule.forFeature([Ticket, Account, RuntimeHost, ApiKey])`, `AgentManagerModule`
 - Controllers: `EventsController`
 - `EventsController` owns the single SSE endpoint `/api/events/stream`
   and the table-driven event registry (`event-registry.ts`). Keepalive
@@ -247,7 +260,7 @@ with the Agent table, P4c-4.)
 - Graphs are keyed by the repository's project id — [`docs/ontology-graph/DESIGN.md`](../ontology-graph/DESIGN.md).
 
 ### `OrchestrationModule`
-- Imports: Orchestration{Team,TeamMember,Mission,Step,Event}, ChatRoom(+Participant/Message), RuntimeHost, ApiKey, Action, ActionRun, Workspace, Credential repositories; `ChatRoomsModule`, `AgentManagerModule`, `ActionsModule`, `SharedServicesModule`
+- Imports: Orchestration{Team,TeamMember,Mission,Step,Event}, ChatRoom(+Participant/Message), RuntimeHost, ApiKey, Action, ActionRun, Account, Credential repositories; `ChatRoomsModule`, `AgentManagerModule`, `ActionsModule`, `SharedServicesModule`
 - Controllers: `OrchestrationController`
 - Providers: `OrchestrationTeamService`, `OrchestrationHostsService`, `OrchestrationMissionService`, `OrchestrationConfirmNotifyService`, `OrchestrationRunnerService`, `OrchestrationReaperService`
 - Exports: `OrchestrationTeamService`, `OrchestrationMissionService`, `OrchestrationRunnerService`
@@ -298,8 +311,8 @@ with the Agent table, P4c-4.)
 
 ### `TicketsModule`
 - Imports: `TypeOrmModule.forFeature([Ticket, Comment, UserMention, TicketReadState, TicketAttachment])`, `AgentsModule` (`TicketService` / `TicketDispatchService` / `TicketDuplicateService`), `ArtifactRefsModule`
-- Controllers: `TicketsController` (`/api/workspaces/:wsId/tickets`, `/api/tickets/*` incl. `/move`, `/trigger`, children, comments, attachments, prerequisites)
-- Providers: `AuthGuard`, `TicketArchiverService` (auto-archive by `workspace.auto_archive_days`)
+- Controllers: `TicketsController` (`/api/accounts/:accountId/tickets`, `/api/tickets/*` incl. `/move`, `/trigger`, children, comments, attachments, prerequisites)
+- Providers: `AuthGuard`, `TicketArchiverService` (auto-archive by `account.auto_archive_days`)
 
 ### `UserChannelsModule`
 - Imports: `TypeOrmModule.forFeature([UserChannel])`
@@ -321,17 +334,14 @@ with the Agent table, P4c-4.)
 - Controllers: `WorkflowFunctionsController`; Providers/Exports: `WorkflowFunctionsService`
 
 ### `WorkspaceScheduleModule`
-- Imports: `TypeOrmModule.forFeature([WorkspaceSchedule, ChatRoom, ChatRoomParticipant, RuntimeHost, Action])`, `ChatRoomsModule`, `ActionsModule`, `SharedServicesModule`
+
+The class/service/controller names are retained internal names. The entity is
+`AutomationSchedule`, the folder is `modules/automation-schedule`, and canonical
+REST/MCP names use automation schedules. Legacy workspace routes are aliases.
+
+- Imports: `TypeOrmModule.forFeature([AutomationSchedule, ChatRoom, ChatRoomParticipant, RuntimeHost, Action])`, `ChatRoomsModule`, `ActionsModule`, `SharedServicesModule`
 - Controllers: `WorkspaceScheduleController`; Providers/Exports: `WorkspaceScheduleService`
 
-### `WorkspacesModule`
-- Imports: `TypeOrmModule.forFeature([Workspace, Ticket, User])`
-- Controllers: `WorkspacesController`
-- Providers: `AuthGuard`
-- Workspace settings now also hold what used to be per-board: `language`,
-  `max_concurrent_tickets_per_agent`, `auto_archive_days`, `dispatch_paused_at`,
-  `harness_config`. Hosts the `/api/workspaces/:id/mention-candidates`
-  endpoint that powers the client-side `@`-mention autocomplete composer.
 
 ---
 

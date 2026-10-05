@@ -47,8 +47,10 @@ global skill은 "없었다"가 아니라 **표현 자체가 불가능**했다. �
 - Global 유일성은 데코레이터의 복합 unique index가 아니라 **partial unique
   index** 두 개(`uq_skills_global_slug` / `uq_skills_workspace_slug`)가 보장한다.
   Postgres에서 `NULL != NULL` 이라 `(account_id, slug)` 복합 index는 global 행을
-  전혀 제약하지 못한다 — `workflow_functions`가 쓰는 것과 같은 분리다. 데코레이터
-  쪽 index는 partial index를 모르는 sql.js 개발 백엔드용으로만 남아 있다.
+  전혀 제약하지 못한다 — `workflow_functions`가 쓰는 것과 같은 분리다. 두 부분
+  인덱스는 `Skill.ts`의 `@Index(..., { unique: true, where })`로 선언하며
+  PostgreSQL과 SQLite(sql.js) 모두에 적용된다. `workspace`가 들어간 인덱스 이름은
+  기존 DB와의 호환을 위해 유지한 이름이다.
 
 Skill은 slug 기준으로 Account가 Global을 **shadow** 한다(Function의 key와 같은
 우선순위). 그래서 built-in을 커스터마이즈하는 방법은 global을 직접 고치는 것이
@@ -79,7 +81,7 @@ Function, Credential, Resource, Action, QA, Security, Schedule은 각각 독립�
 
 계정 선택은 소유권 관리와 새 정의의 귀속을 정하는 곳에만 둔다. Actions,
 Automation Schedules, QA Scenarios/Schedules, Security Profiles/Schedules의 목록은
-접근 가능한 계정을 합친다. Global QA Scenario는 합산 과정에서 ID로 중복을 제거한다.
+접근 가능한 계정을 합친다. QA Scenario는 Account 전용이며 합산 과정에서 ID로 중복을 제거한다.
 Global을 지원하는 정의의 생성 시 계정을 비워 두면 Global, 계정을 지정하면 Account 전용으로 저장한다.
 상세·수정 권한은 선택한 계정이나 화면 경로 대신 해당 행의 실제 소유 계정으로 검사한다.
 

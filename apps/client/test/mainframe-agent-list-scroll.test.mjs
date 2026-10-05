@@ -35,7 +35,7 @@ test('Mainframe detail pane owns vertical scrolling without trapping the mobile 
 });
 
 test('small viewport preserves the same independently scrollable Host list', () => {
-  assert.match(agentManagerPageSource, /const isMobile = useMediaQuery\('\(max-width: 767px\)'\)/);
+  assert.match(agentManagerPageSource, /const isMobile = useMediaQuery\('\(max-width: 1100px\)'\)/);
   assert.match(
     agentManagerPageSource,
     /width:\s*isMobile \? '100%' : 320[\s\S]*?flexDirection:\s*'column',\s*minHeight:\s*0/,

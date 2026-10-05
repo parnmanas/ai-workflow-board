@@ -1402,7 +1402,7 @@ export default function TicketPanel({
       background: tokens.colors.surface, borderLeft: `1px solid ${tokens.colors.border}`, overflow: 'hidden',
     }}>
       {/* Header */}
-      <div style={{
+      <div className="awb-ticket-header" style={{
         padding: '12px 16px', borderBottom: `1px solid ${tokens.colors.border}`,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         flexShrink: 0,
@@ -1539,7 +1539,7 @@ export default function TicketPanel({
             background: tokens.colors.dangerBg, color: tokens.colors.dangerLight, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '12px', cursor: 'pointer',
           }}>Delete</button>
-          <button onClick={requestClose} style={{
+          <button aria-label="Close ticket" onClick={requestClose} style={{
             background: tokens.colors.border, color: tokens.colors.textStrong, border: 'none', borderRadius: tokens.radii.md,
             padding: '4px 12px', fontSize: '16px', cursor: 'pointer',
           }}>x</button>
@@ -1547,7 +1547,7 @@ export default function TicketPanel({
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', borderBottom: `1px solid ${tokens.colors.border}`, flexShrink: 0 }}>
+      <div className="awb-ticket-tabs" style={{ display: 'flex', borderBottom: `1px solid ${tokens.colors.border}`, flexShrink: 0 }}>
         {(['detail', 'comments', 'activity', 'user'] as const).map(tab => {
           // Pending-user-action highlight on the User tab (ticket a57517be).
           // Pulses warning-coloured when the ticket needs intervention so the
@@ -1598,7 +1598,7 @@ export default function TicketPanel({
       </div>
 
       {/* Body — scrollable */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, minHeight: 0, minWidth: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column' }}>
         {activeTab === 'detail' ? (
           <>
             {/* Title */}

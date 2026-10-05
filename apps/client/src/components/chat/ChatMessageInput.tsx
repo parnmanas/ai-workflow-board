@@ -304,6 +304,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   return (
     <div
       ref={rootRef}
+      className="awb-chat-composer"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -374,7 +375,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             {sendError}
           </div>
         )}
-        <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'flex-end' }}>
+        <div className="awb-chat-composer-row" style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'flex-end' }}>
           <input
             ref={fileInputRef}
             type="file"
@@ -418,7 +419,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             // handleSend (`|| sending` early-return) and by the Send button's
             // canSend gate, so keeping the field editable is safe.
             ariaLabel="Message"
-            placeholder="Type a message… (@ to tag · paste / drop files to attach)"
+            placeholder="Type a message…"
             style={{
               flex: 1,
               background: tokens.colors.surface,
@@ -461,8 +462,8 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             {isMobile ? '▶' : 'Send Message'}
           </button>
         </div>
-        <div style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs }}>
-          Enter to send · Shift+Enter for new line · Drop or paste files to attach
+        <div className="awb-chat-composer-help" style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs }}>
+          Enter to send · Shift+Enter for new line · @ to tag · Drop or paste files to attach
         </div>
       </div>
     </div>

@@ -24,22 +24,22 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - HTML/CSS - Client UI rendering
 - JavaScript (Node.js) - Runtime and build tooling
 ## Runtime
-- Node.js (version specified via packageManager: npm@11.6.1)
+- Node.js 22.12+ for the full source build; packageManager pins npm@11.6.1
 - npm 11.6.1
 - Lockfile: package-lock.json present
 ## Frameworks
 - NestJS 11.0.0 - Backend REST API framework
 - React 18.3.0 - Frontend UI library
 - React Router 7.14.0 - Client-side routing
-- None detected in package.json (no jest, vitest, mocha configured)
-- Vite 6.0.0 - Frontend bundler and dev server
+- Node.js built-in test runner; suites in each workspace (no root npm test script)
+- Vite 8 - Frontend bundler and dev server (exact versions: apps/client/package.json + package-lock.json)
 - Turbo 2.4.0 - Monorepo build orchestration
 - TypeScript 5.6.0 - Language compiler
 - tsx 4.19.0 - TypeScript executor (server dev)
 - @nestjs/serve-static 5.0.0 - Serves client dist from server
 ## Key Dependencies
 - @modelcontextprotocol/sdk 1.29.0 - MCP server implementation (core feature)
-- TypeORM 0.3.20 - ORM for database abstraction
+- TypeORM 0.3 - ORM for database abstraction
 - pg 8.20.0 - PostgreSQL client driver
 - sql.js 1.12.0 - SQLite (for embedded database mode)
 - bcryptjs 3.0.3 - Password hashing (SALT_ROUNDS: 10)
@@ -58,14 +58,14 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - `tsc && vite build` - Builds client (TypeScript + Vite bundle)
 - Turbo handles monorepo task orchestration
 - Client dist served from server's static directory: `join(__dirname, '..', '..', 'client', 'dist')`
-- Development: `nest start --watch` (via tsx)
+- Development: server `nest start --watch`; client Vite; manager `tsx watch src/main.ts`
 - Production: `node dist/main.js`
 - Compiled output: `apps/server/dist/`
 - Development: Vite dev server on port 7700 (proxies /api and /mcp to 7701)
 - Build output: `apps/client/dist/`
 - React entry: `src/main.tsx`
 ## Platform Requirements
-- Node.js with npm 11.6.1+
+- Node.js 22.12+ with npm 11.6.1
 - Port 7700 available (Vite dev server)
 - Port 7701 available (NestJS server)
 - Port 5432 available (PostgreSQL, if using Postgres in dev)
@@ -75,13 +75,13 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - Port 7701 for server
 - GitHub Container Registry access (image: ghcr.io/parnmanas/ai-workflow-board:latest)
 ## Database Configuration
-- Type: SQLite (sql.js)
+- Development default: SQLite (sql.js); deployment: PostgreSQL
 - Location: `database/data.db` (auto-created)
-- Auto-save enabled
+- Batched sql.js persistence: SqljsFlushService / standalone flush timer + graceful shutdown
 - Synchronize enabled (auto-migrate schema)
-- Port: 5432
+- PostgreSQL port: 5432 (SQLite uses a local file, no listener)
 - Connection via TypeORM DataSource
-- Schema auto-sync disabled in production
+- Schema synchronize is enabled in all current DB configurations, including production; back up before upgrades
 - Also supported via TypeORM (configurable via DB_TYPE env var)
 - **Corrupt dev DB**: a malformed `data.db` ("database disk image is malformed") used to hang boot ~25s (killing agent subagents at exit 143). `ensureSqljsDbHealthy()` in `db.ts` now runs a sql.js integrity check *before* TypeORM initializes (wired into both `initDb()` and `main.ts` bootstrap) — sql.js/dev only, Postgres untouched. A corrupt file aborts in ~1s with a clear message; `rm database/data.db` to recreate, or set `AWB_DB_AUTORECOVER=1` to auto-backup to `data.db.corrupt-<ts>` + recreate empty. The same guard also covers the independent Ontology Graph sql.js file (`database/ontology.db`, ticket 6ca4894a) via the sibling `ensureOntologySqljsDbHealthy()` (ticket b646ed54), wired at the same two call sites. See README → Development → Troubleshooting.
 - **트랜잭션 직렬화 큐 — sql.js**: sql.js 백엔드(`db.ts`의 `AppDataSource`)는 단일 WASM 인스턴스/단일 커넥션이라 진짜 풀링이 없다 — 겹치는(overlapping) `dataSource.transaction()` 호출이 같은 커넥션을 공유해 "cannot start a transaction within a transaction" 또는 "Transaction is not started yet, start transaction before committing or rolling it back." 에러로 실패하거나, 한쪽의 실패 처리가 다른 쪽의 진행 중이던 트랜잭션까지 롤백시켜 쓰기가 조용히 유실될 수 있었다. `db.ts`의 `serializeSqljsTransactions()`가 sqljs 백엔드에서만 `dataSource.manager.transaction()` 호출을 FIFO 큐로 직렬화해 해소 — `AppDataSource`(standalone 진입점)와 `DatabaseModule`(NestJS 진입점) 생성 시 양쪽에 적용된다. 같은 호출 체인 내 중첩(nested) `transaction()` 호출은 AsyncLocalStorage로 감지해 큐를 우회하고 즉시 실행한다(SAVEPOINT로 이미 안전 — 큐잉하면 데드락). Postgres/MySQL은 그대로 네이티브 풀 기반 동시 트랜잭션을 유지하며 영향 없음. 이 큐는 겹치는 호출이 에러·유실 없이 끝나도록 순차 실행만 보장할 뿐 진짜 병렬 격리를 재현하지는 않으므로, sql.js 기준 동시성 테스트의 통과를 Postgres의 실제 동시 트랜잭션 동작과 동일시하지 말 것 — 진짜 병렬 트랜잭션 검증은 Postgres 전용으로 분리할 것. outreach 모듈 등 기존 claim-first + 보상삭제(compensate) 우회 코드는 이 큐 도입과 별개로 유지 중이며, 트랜잭션 기반으로 되돌릴지는 별도 판단 사항.
@@ -94,11 +94,11 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - `DB_NAME` - Database name (default: ai_workflow)
 - `NODE_ENV` - 'development' | 'production'
 - `PORT` - Server port (default: 7701)
-- `CORS_ORIGIN` - CORS origin (default: true = reflect request origin in dev)
+- `CORS_ORIGIN` - Explicit origin; unset reflects origins in dev and rejects cross-origin requests in production
 - `MCP_API_KEYS` - Comma-separated API keys, optionally with agent names (format: "agentName:key,key2")
-- `MCP_DEV_MODE` - Set to 'true' to disable API key requirement in dev
+- `MCP_DEV_MODE` - Explicit dev bypass only outside production and with no active DB/env MCP keys
 - `AGENT_API_KEY` - Static API key for agent authentication (checked via X-Agent-Key header)
-- `AGENT_DEV_MODE` - Set to 'true' to allow unauthenticated agent access
+- `AGENT_DEV_MODE` - Explicit dev bypass only outside production and without AGENT_API_KEY
 ## Port Configuration
 - 7700 - Vite client dev server (with /api and /mcp proxies)
 - 7701 - NestJS server API and MCP endpoint
@@ -203,18 +203,18 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - Session-first work views with account ownership and hierarchical tickets (root → child → grandchild)
 ## Layers
 - Purpose: Expose endpoints for tickets, projects, authentication, and user management
-- Location: `apps/server/src/modules/*/` (16 feature modules)
+- Location: `apps/server/src/modules/*/` (see docs/architecture/modules.md for the current module map)
 - Contains: Controllers (one per module) and request/response handling
 - Depends on: Services (shared and module-specific), Guards, Filters
 - Used by: Frontend via `apps/client/src/api.ts`
 - Purpose: Business logic, entity management, cross-cutting concerns
-- Location: `apps/server/src/services/` (8 services) and module-level services
+- Location: `apps/server/src/services/` and feature-local services under `apps/server/src/modules/`
 - Contains: Activity logging, authentication, API key management, Discord integration, notifications
 - Depends on: Repositories (via TypeORM), External APIs (Discord)
 - Used by: Controllers, other services, guards
 - Purpose: Database abstraction and entity relationships
-- Location: `apps/server/src/entities/` (10 entities)
-- Contains: TypeORM entities with decorators (@Entity, @Column, @ManyToOne, etc.)
+- Location: `apps/server/src/entities/` (see entities/index.ts and migration-entity-registry.ts)
+- Contains: TypeORM entities with decorators (@Entity, @Column, @ManyToOne, etc.); entities/index.ts is paired with the migration registry
 - Depends on: TypeORM, Database connection
 - Used by: Services, Controllers via repository injection
 - Purpose: Cross-cutting authentication and authorization
@@ -270,12 +270,12 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 
 ## Agent Manager (standalone subagent runner)
 - Location: `apps/agent-manager/`
-- Standalone Node binary (`awb-agent-manager`) — runs without Claude CLI, drives Claude / Codex / Gemini / custom CLIs
+- Standalone Node binary (`awb-agent-manager`) — the manager starts independently of any one CLI; supported features come from the server CLI catalog and manager CliModules (`docs/cli-modules.md`)
 - Owns the SSE pipeline (`EventStream` → `EventDispatcher`), subagent supervision (`SubagentManager`), persistent ticket/chat sessions, fs-browser reverse-RPC, instance heartbeat, agent lockfile
-- Bootstraps via one-time pairing token minted from AWB admin UI; persists `config.json` at `$AWB_AGENT_MANAGER_HOME` (default `~/.config/awb-agent-manager/`). **redeem은 RuntimeHost 행만 만든다 (manager Agent 행 Mint 중단, P4c-4)**: 응답 `agent_id` 자리에는 Host id 가 들어가고 키는 `agent_id NULL + host_id` 바인딩이다. heartbeat는 host-first 해소 (`body.host_id` → 키 `host_id` → Host 행, Agent 행은 best-effort), `registry.host_id` 스탬프, `AgentAuthGuard.currentAgentId = agent_id || host_id` + `currentHostId`. 소유권 검사는 직접 uuid 또는 `api_keys` 페어링 링크 둘 다 인정 (`callerOwnsAgent`, legacy managed 자식 브릿지). 회귀: `test/pair-redeem-host-only.test.mjs`, `test/runtime-host-heartbeat.test.mjs`, `test/manager-ownership-host-bridge.test.mjs`.
+- Bootstraps via a one-time pairing token from Hosts; persists `config.json` and `agent.json` under `$AWB_AGENT_MANAGER_HOME` (default `~/.config/awb-agent-manager/`). Pairing creates a RuntimeHost + host-bound key, not an Agent row; response/config `agent_id` is the compatibility Host identity. Heartbeat resolves the Host (`body.host_id` → key `host_id`) and stamps the live registry. `AgentAuthGuard.currentAgentId` is the runtime key parsed from a provisioned key name, or the Host id; `currentHostId` stays the Host id. Paired manager keys can supervise work across accounts, while runtime keys keep their execution account. See `docs/agent-manager.md` and host-pairing/ownership regression tests.
 - AWB → manager control surface: SSE event `agent_manager_command` — payload 필드는 `command_id`/`instance_id`/`agent_id`/`command`/`args`/`issued_by`/`issued_at`(`AgentManagerCommandPayload`, `apps/agent-manager/src/lib/agent-manager-commands.ts` 및 `apps/server/src/common/types/stream-events.ts`에 동일 이름으로 정의). verb 목록은 여기 하드코딩하지 말고 그 파일의 `CommandKind`/`KNOWN_COMMANDS`를 근거로 볼 것 — "5 verbs"로 개수를 적어뒀다가 stale해진 전례가 있어 개수 표현 자체를 없앰(리뷰 지적: 소스 티켓에서 verb 추가가 예정돼 있어 개수를 다시 적으면 병합 순서에 따라 즉시 또 stale해짐). ack via `POST /api/agent-manager/command/ack`
 - `action`→role(항상 `assignee`) / `field_changed`→trigger_id / `actor_name`→agent_id 매핑은 `agent_manager_command`가 아니라 **`agent_trigger`(티켓 dispatch) SSE 계열** 전용 필드 별칭이다 — `apps/agent-manager/src/lib/event-dispatcher.ts`의 트리거 처리부(`dispatchTrigger`/`#ackDispatch`) 참조.
-- **모델 목록은 한 경로로만 읽고 갱신한다**: 매니저 하트비트 `available_models` + `available_models_at`(재열거 시각; server·agent-manager 공동 contract) → 서버 `HostModelsService`(`GET/POST /api/agent-manager/hosts/:managerAgentId/models[/refresh]`) → 클라이언트 `src/cli/hostModels.ts` 의 `useHostModels()`. 모델을 보여주는 화면(Agent 다이얼로그·팀 슬롯·세션 설정·새 세션·Runtime Hosts)은 전부 이 훅을 쓰고, 열릴 때 오래된/빈 목록을 스스로 재열거한다. `available_models` 를 직접 읽거나 `refresh_available_models` 를 화면에서 직접 보내지 말 것. 상세: `docs/cli-modules.md` → "모델 목록". **서버 쪽도 마찬가지다**: `HostModelsService.modelsFor()/modelsByCli()` 가 유일한 답이고, 하트비트 `available_models` 를 직접 읽어 자기만의 합집합을 만들지 말 것 — 오케스트레이션 로스터가 "하트비트 + 기존 agent 행에 핀된 모델, 알파벳 재정렬" 로 따로 계산해서 같은 호스트의 목록이 mission 과 session/chat 에서 **내용도 순서도** 달랐다(2026-09-27). ACP 어댑터가 보고한 모델은 반대로 그 출처로 흘려보낸다 — 살아 있는 세션은 `noteObservedModels()`, 이미 영속된 것(`agent_session_cli_settings.known_config_options`)은 `HostModelsService` 가 부팅·조회 시 직접 읽는다. **영속본을 빠뜨리면 "이 프로세스에서 세션을 한 번 열었는가"에 따라 목록이 갈린다**(실측: Ralf opencode = ACP 108개 vs 하트비트 짧은 목록). **ACP 보고가 있으면 그것만 쓰고 하트비트와 합치지 않는다**(라이브 → 가장 최근 영속본 → 하트비트 순으로 처음 비지 않은 하나) — 하트비트는 CLI 바이너리 스캔이라 `claude-sonnet-5-5` 같은 id 가 섞이고, 합집합이던 동안 새 세션·팀 슬롯에는 있고 세션 안에는 없었다(2026-10-02 ragnar). 이름(`labels`)도 같은 출처에서 내려간다. 회귀: `apps/server/test/host-models-single-source.test.mjs`(세 경로의 결과가 글자 그대로 같은지), `apps/client/test/mission-slot-model-list.test.mjs`(팀 슬롯 dropdown 이 스토어만 읽는지).
+- **모델 목록은 한 경로로만 읽고 갱신한다**: 매니저 하트비트 `available_models` + `available_models_at`(재열거 시각; server·agent-manager 공동 contract) → 서버 `HostModelsService`(`GET/POST /api/agent-manager/hosts/:managerAgentId/models[/refresh]`) → 클라이언트 `src/cli/hostModels.ts` 의 `useHostModels()`. 모델을 보여주는 화면(Agent 템플릿/RuntimeSpec 선택기·팀 슬롯·세션 설정·새 세션·Runtime Hosts)은 전부 이 훅을 쓰고, 열릴 때 오래된/빈 목록을 스스로 재열거한다. `available_models` 를 직접 읽거나 `refresh_available_models` 를 화면에서 직접 보내지 말 것. 상세: `docs/cli-modules.md` → "모델 목록". **서버 쪽도 마찬가지다**: `HostModelsService.modelsFor()/modelsByCli()` 가 유일한 답이고, 하트비트 `available_models` 를 직접 읽어 자기만의 합집합을 만들지 말 것 — 오케스트레이션 로스터가 "하트비트 + 기존 agent 행에 핀된 모델, 알파벳 재정렬" 로 따로 계산해서 같은 호스트의 목록이 mission 과 session/chat 에서 **내용도 순서도** 달랐다(2026-09-27). ACP 어댑터가 보고한 모델은 반대로 그 출처로 흘려보낸다 — 살아 있는 세션은 `noteObservedModels()`, 이미 영속된 것(`agent_session_cli_settings.known_config_options`)은 `HostModelsService` 가 부팅·조회 시 직접 읽는다. **영속본을 빠뜨리면 "이 프로세스에서 세션을 한 번 열었는가"에 따라 목록이 갈린다**(실측: Ralf opencode = ACP 108개 vs 하트비트 짧은 목록). **ACP 보고가 있으면 그것만 쓰고 하트비트와 합치지 않는다**(라이브 → 가장 최근 영속본 → 하트비트 순으로 처음 비지 않은 하나) — 하트비트는 CLI 바이너리 스캔이라 `claude-sonnet-5-5` 같은 id 가 섞이고, 합집합이던 동안 새 세션·팀 슬롯에는 있고 세션 안에는 없었다(2026-10-02 ragnar). 이름(`labels`)도 같은 출처에서 내려간다. 회귀: `apps/server/test/host-models-single-source.test.mjs`(세 경로의 결과가 글자 그대로 같은지), `apps/client/test/mission-slot-model-list.test.mjs`(팀 슬롯 dropdown 이 스토어만 읽는지).
 - **CLI 별 지식은 `src/lib/clis/<id>/index.ts` 의 `CliModule` 한 곳에 있다** (바이너리 경로 · credential provider · device-auth 로그인 · Agent Session 스캐너 · effort 슬라이스 · 디스패치 게이트). 소비자(`cli-login.ts`, `agent-session-*.ts`, `cli-resolver.ts`, `agent-manager-commands.ts`, `event-dispatcher.ts`)는 `clis/index.ts` 로 조회만 한다 — `if (cli === 'claude')` 를 새로 쓰지 말 것. 서버 `cli-catalog.ts` 와의 일치는 `test/cli-catalog-contract.test.mjs` 가 강제한다. 상세: `docs/cli-modules.md`.
 - **버전은 두 개다**: 실행 중(`plugin_version`, 부팅 때 `setRunningVersion`)과 디스크 설치본(`installed_version`, `dist/package.json`). 프로세스 밖에서 `npm i -g awb-agent-manager` 를 돌리면 둘이 갈리고 하트비트가 `restart_required` 를 광고한다 — 그때 `update_manager` 는 설치 없이 재기동만 한다. 세션/셸에서 매니저 바이너리를 직접(`--force`) 띄우면 감독 중인 서비스를 죽이지 않고 SIGUSR2 로 재기동을 넘긴다(`docs/agent-manager.md` → Self-update policy).
 - Reference: `docs/agent-manager.md` (internals), `apps/agent-manager/README.md` (quickstart)
@@ -288,18 +288,18 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - 티켓 쓰기(생성·수정·이동·pend/unpend)는 `TicketService`(`modules/tickets/ticket.service.ts`) 를 거친다 — REST·MCP·QA/Security 실패 티켓·CI red·outreach·채팅 fallback 이 같은 부수효과(terminal stamp, activity, dispatch)를 공유해야 한다. 티켓 행을 직접 `save` 해 상태를 바꾸지 말 것.
 - **Project = 저장소 1개 + 호스트별 main clone 폴더**(`Project`, `ProjectHostFolder`). repository Resource 를 **같은 id 로** 이관했으므로 저장된 repo id(`repo_ref.project_id`, 온톨로지 graph 의 `resource_id`)는 project id 다. 티켓 dispatch 는 assignee 호스트의 main clone 을 `base_repo.main_clone_dir` 로 실어 보내고, 매니저는 거기서 `<main_clone>/.awb/wt/<ticket8>` worktree 를 뜬다(main clone 자체는 절대 reset/clean 하지 않는다). 미션 step 지시문도 각 멤버 호스트의 project 폴더를 명시한다.
 - `board_update` SSE 이름은 wire 호환 때문에 유지한다(티켓 변경 이벤트다). `current_column_*` 는 `statusColumnProjection(status)` 로 채워 구버전 매니저가 계속 dispatch 한다 — 새 필드는 `status`.
-- 데이터 이관: `database/pre-sync-board-removal.ts`(synchronize 전 스냅샷) + 마이그레이션 `1760000000091-BoardlessTickets`(컬럼→상태, 보드 이름→tag, repo→project, 보드 설정→워크스페이스, 구 테이블 drop). 운영 배포 전 DB 백업 필수 — down 은 없다.
+- 데이터 이관: `database/pre-sync-board-removal.ts`(synchronize 전 스냅샷) + 마이그레이션 `1760000000091-BoardlessTickets`(컬럼→상태, 보드 이름→tag, repo→project, 보드 설정→소유 Account, 구 테이블 drop). 운영 배포 전 DB 백업 필수 — down 은 없다.
 
 ## Orchestration mode (팀 기반 자율 업무 오케스트레이션)
 
-- 칸반 보드와 같은 레벨의 두 번째 작업 표면. Team(오케스트레이터 1 + 멤버 N) 에게 Mission 을 통째로 맡기면, 오케스트레이터 Agent 가 런타임에 Step DAG 계획을 세우고 팀원에게 배분한다.
-- **로스터는 Agent 를 고르는 게 아니라 slot 을 선언한다**: `Runtime Host + CLI + model + working folder + folder_scope` (`apps/server/src/common/orchestration-member-spec.ts` 의 `TeamAgentSpec`, `OrchestrationTeamMember.spec` / `OrchestrationTeam.orchestrator_spec` 에 저장). slot 주소는 `runtimeIdentityKey(spec)` (`common/runtime-spec.ts`) 이고 **Agent 행을 만들지 않는다** — dispatch 는 튜플 매칭 후 없으면 첫 디스패치 때 auto-provision 한다. `Agent.origin='orchestration'` 레거시 행은 이력 보존용으로만 남고 새로 만들지 않는다. 같은 spec 의 두 슬롯은 같은 identity 를 공유한다 (shared 폴더 협업이 기본값, 상한은 identity 단위 max 합산).
-- **Agent 쓰기 제거 (P4c-3b)**: `create/update/delete/move_agent` MCP 툴, `POST/PATCH/DELETE /agents`, `POST /admin/agent-manager/agents`, Agent 생성/편집 UI 가 삭제됐다. 새 실행 선언은 전부 RuntimeSpec (`POST /api/runtime-specs/validate` 로 검증). `list/get_agents` 와 기존 행 읽기는 P4c-4 테이블 제거 때까지 유지된다.
-- **Hosts 카탈로그는 Host 원천 (P4c-4)**: `listRuntimeHosts` 가 `runtime_hosts` + manager Agent 행을 `api_keys` 링크로 합쳐 보여준다. view 키는 Host id 우선, 구 spec(agent uuid) 매칭용 `legacy_agent_id` 별칭 동봉 — 팀 슬롯은 둘 중 하나만 맞아도 같은 Host 로 본다. 새 spec 은 Host id 를 들고 나간다. `HostModelsService.liveRecord` 는 agent/host 바인딩 둘 다 본다. 회귀: `test/orchestration-runtime-hosts-union.test.mjs`.
+- Tickets와 같은 레벨의 팀 미션 작업 표면. Team(오케스트레이터 1 + 멤버 N) 에게 Mission 을 통째로 맡기면, 오케스트레이터 Agent 가 런타임에 Step DAG 계획을 세우고 팀원에게 배분한다.
+- **로스터는 Agent 를 고르는 게 아니라 slot 을 선언한다**: `Runtime Host + CLI + model + working folder + folder_scope` (`apps/server/src/common/orchestration-member-spec.ts` 의 `TeamAgentSpec`, `OrchestrationTeamMember.spec` / `OrchestrationTeam.orchestrator_spec` 에 저장). slot 주소는 `runtimeIdentityKey(spec)` (`common/runtime-spec.ts`) 이고 **Agent 행을 만들지 않는다** — dispatch는 spec을 해소하고 첫 실행에 runtime key·cli-home을 준비한다. Agent 테이블은 제거됐으며 실행 이력의 runtime key만 유지한다. 같은 spec 의 두 슬롯은 같은 identity 를 공유한다 (shared 폴더 협업이 기본값, 상한은 identity 단위 max 합산).
+- **Agent 쓰기 제거 (P4c-3b)**: `create/update/delete/move_agent` MCP 툴, `POST/PATCH/DELETE /agents`, `POST /admin/agent-manager/agents`, Agent 생성/편집 UI 가 삭제됐다. 새 실행 선언은 전부 RuntimeSpec (`POST /api/runtime-specs/validate` 로 검증). `list/get_agents`와 Agent 행 읽기도 P4c-4 테이블 제거와 함께 없어졌다. 현재 선택은 RuntimeSpec/Host 카탈로그를 사용한다.
+- **Hosts 카탈로그는 Host 원천 (P4c-4)**: `listRuntimeHosts`는 `runtime_hosts`와 live registry에서 읽는다(Agent 테이블 없음). 새 spec의 `manager_agent_id`는 Host id다. 오프라인 폴더/CLI 후보는 저장된 팀 spec에서 복원하며 모델 목록은 `HostModelsService`만 사용한다. `legacy_agent_id` 응답 필드는 구 소비자 호환용으로 남고 현재 카탈로그는 null을 내린다. 회귀: `test/orchestration-runtime-hosts-union.test.mjs`.
 - `folder_scope`: `shared`(기본, step 이 `working_dir` 자체에서 돌고 **RunProvision 을 보내지 않는다** — provision 의 `fresh` 가 운영자 작업폴더를 `rm -rf` 하므로) / `isolated`(기존 `.awb/orch/<mission>/<step>` 격리 + repo 체크아웃). 같은 Host·같은 폴더를 가리키는 slot 끼리 한 working tree 를 공유하는 것이 이 모델의 요점이고, 플래닝 로스터와 step work order 가 공유 사실·동시 편집 위험을 모두 명시한다.
 - Location: `apps/server/src/modules/orchestration/` · MCP 툴 `modules/mcp/tools/orchestration-tools.ts` · UI `apps/client/src/components/orchestration/`
-- **디스패치는 QA/Action 런과 같은 ChatRoom 파이프라인을 재사용한다** — `chat_rooms.orchestration_mission_id/_step_id` 로 표시하고 기존 `is_action_room` SSE 마커를 켠다. 따라서 **agent-manager 변경 없음, SSE contract 변경 없음**. `run_provision` 은 v1 범위 밖 (붙이려면 `RunProvision.kind` 에 `'orchestration'` 추가 → agent-manager `run-provisioner.ts` 파서와 같은 PR).
-- `orchestration_update` SSE 는 `consensus_update` 와 같은 **UI 전용** 이벤트 (user-only filter) — agent 비소비이므로 agent-manager contract 무관.
+- **디스패치는 QA/Action 런과 같은 ChatRoom 파이프라인을 재사용한다** — `chat_rooms.orchestration_mission_id/_step_id` 로 표시하고 기존 `is_action_room` SSE 마커를 켠다. 따라서 **agent-manager 변경 없음, SSE contract 변경 없음**. `isolated` step은 `run_provision` (`kind: 'orchestration'`)을 보내며 server·manager 공동 contract다. `shared`에는 보내지 않는다.
+- `orchestration_update` SSE는 **UI 전용** 이벤트 (user-only filter) — agent 비소비이므로 agent-manager contract 무관.
 - 미션은 **암묵적으로 끝나지 않는다**: `complete_orchestration_mission` (또는 운영자 cancel) 만이 종료 경로. 엔진은 스스로 진행 못 할 때만 오케스트레이터를 깨운다(실패/차단, 디스패치 불가, 전 step 종료).
 - **실행 그래프(Graph mode, ticket 1ca9e49b)**: 미션 단위 feature flag `graph_enabled`(기본 off)로 켜면 `depends_on` DAG 위에 버전된 `GraphSpec`(typed edge, 조건 분기, join policy, bounded loop)이 얹힌다. 순수 로직은 `orchestration-graph.ts`, graph/wave 판정 분기는 `computeMissionProgress()` **한 곳에만** 둔다. 순환은 `loop_back` edge로만 만들 수 있고, 종료 조건·node별 `max_visits`·미션 `max_total_visits`가 없으면 `validateGraphSpec()`이 실행 전에 거부한다. 꺼진 미션의 동작은 이 기능 도입 전과 동일하며, wave adapter(`graphFromWavePlan`)의 무손실성은 회귀 테스트가 상태 조합 전수로 단언한다.
 - **실행 중 그래프 수정 + 템플릿(ticket 2fc8f99a)**: `patch_orchestration_graph`가 그래프**만** 부분 수정한다(node 추가/삭제는 없음 — node는 step과 1:1이라 `submit_orchestration_plan`의 일). plan을 안 건드리므로 `plan_version` 대신 `graph_revision`이 오른다. 원칙은 **이미 일어난 실행 이력을 소급 무효화하지 않는다**: `max_visits`/`max_total_visits`를 이미 소진한 값 아래로 낮추는 것은 거부(정확히 소진량으로 낮추면 "이번이 마지막"), `loop_back` 제거는 진행 중이어도 항상 허용(폭주 loop 탈출구). 구조 검증은 patch 전용 경로를 만들지 말고 결과 전체를 `validateGraphSpec()`에 다시 통과시킨다. `GraphSpec.version`은 스키마 버전이라 수정 카운터로 재사용 금지. 템플릿(`orchestration-graph-templates.ts`, `linear`/`review_loop`/`fan_out_aggregate`)은 저작 편의일 뿐 실행 규칙 면제가 아니다.

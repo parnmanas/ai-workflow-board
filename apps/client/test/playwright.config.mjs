@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
-  testMatch: process.env.PLAYWRIGHT_TEST_MATCH || 'agent-detail-scroll.e2e.mjs',
+  testMatch: process.env.PLAYWRIGHT_TEST_MATCH || 'responsive-layout.e2e.mjs',
   workers: 1,
   reporter: 'line',
   use: {

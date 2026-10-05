@@ -1,6 +1,6 @@
 # Automation Schedules
 
-AWB 에서 **"언제"** 를 정하는 단 하나의 표면. `/schedules`에서 "이 시각에 이걸
+일반 프롬프트와 Action의 **"언제"** 를 정하는 표면. `/schedules`에서 "이 시각에 이걸
 해라" 를 등록한다. 스케줄은 Account가 소유하며, 목록은 접근 가능한 계정을 합친다.
 실행 credential·정책·예산과 상세·수정 권한은 스케줄의 실제 소유 계정에서 해소한다.
 
@@ -8,7 +8,7 @@ AWB 에서 **"언제"** 를 정하는 단 하나의 표면. `/schedules`에서 "
 
 | 형태 | 설정하는 값 | 실행 방식 |
 | --- | --- | --- |
-| 인라인 프롬프트 | `task_prompt` + `target_agent_id` | 새 채팅방을 열고 대상 에이전트를 앉힌 뒤 프롬프트를 첫 메시지로 보낸다 (QA/Security run dispatch 와 같은 모양) |
+| 인라인 프롬프트 | `task_prompt` + `target_runtime` (RuntimeSpec) | 새 채팅방을 열고 대상 에이전트를 앉힌 뒤 프롬프트를 첫 메시지로 보낸다 (QA/Security run dispatch 와 같은 모양) |
 | **Action 실행** | `action_id` | 등록된 Action 을 `ActionsService.dispatch` 로 발화한다 |
 
 둘 다 설정하면 저장이 거부된다. 허용하면 "어느 쪽이 이기는가" 가 dispatch 구현
@@ -18,7 +18,7 @@ AWB 에서 **"언제"** 를 정하는 단 하나의 표면. `/schedules`에서 "
 ## Action 형태
 
 대상 에이전트 · 작업 폴더 · repo · 승인(`high_impact`) · fan-out · run 기록은 전부
-**Action 이 정의**한다. 스케줄은 시각만 정한다. 그래서 `target_agent_id` 와
+**Action 이 정의**한다. 스케줄은 시각만 정한다. 그래서 `target_runtime` 과
 `task_prompt` 는 비어 있다 — 남겨 두면 화면에 실행되지 않을 값이 계속 보인다.
 
 발화는 **수동 Run 버튼과 완전히 같은 경로**다(`ActionsService.dispatch`). 스케줄러가
@@ -29,6 +29,12 @@ AWB 에서 **"언제"** 를 정하는 단 하나의 표면. `/schedules`에서 "
 Action 이 삭제되면 그 스케줄은 **스스로 비활성화**된다. 영영 성공할 수 없는 것이
 확정이라 재시도에 의미가 없고, 매 틱 실패 로그를 쌓는 것보다 꺼진 줄이 목록에 남아
 운영자 눈에 띄는 편이 낫다.
+
+새 프롬프트 스케줄은 `target_runtime`을 지정한다. 응답의 `target_agent_id`는
+그 spec에서 계산한 runtime identity key이며 Agent 행을 고르는 입력이 아니다.
+`action_id` 형태에는 프롬프트/runtime을 함께 넣지 않는다. QA·Security batch
+예약은 각 Quality 화면의 별도 스케줄러를 사용한다
+([QA](qa-scheduler.md), [Security](security-scheduler.md)).
 
 ## Cadence
 

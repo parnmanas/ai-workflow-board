@@ -76,6 +76,7 @@ export function registerFooTools(server: McpServer, ctx: ToolContext): void {
 실례 — `create_orchestration_mission`(`orchestration-tools.ts`): 게이트 티어는 `'caller'`(세션리스만 거름). 진짜 소유권 검사는 핸들러 안에서 직접:
 
 ```ts
+// orchestrator_agent_id is computed from orchestrator_spec (a runtime key).
 const team = await teamSvc.requireTeamById(args.team_id);
 if (!team.orchestrator_agent_id || !callerHoldsId(caller, team.orchestrator_agent_id)) {
   return err('you are not the orchestrator of this team — ...', { status: 403 });
@@ -136,4 +137,4 @@ cd apps/agent-manager && npm run build && node --test --test-force-exit test/too
 
 ## Related
 
-- `docs/runbooks/agent-display-name.md` — if the tool returns, stamps, or emits an agent name (`actor_name`, `agent_name`, `assignee_name`, `pending_set_by`, …), it must be the canonical `<Manager>/<Agent>` display, resolved through `apps/server/src/utils/agent-name.ts`. A bare `agent.name` is a bug.
+- [Display-name contract](agent-display-name.md) — choose Host/spec/snapshot labels through the shared helpers. Ticket assignees use `<Host>/<label>`; Host identities use their bare name; snapshot pairs retain `<Manager>/<name>`. Agent rows no longer exist, and an `rt-` key is not a display name.

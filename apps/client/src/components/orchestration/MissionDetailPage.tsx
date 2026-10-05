@@ -10,6 +10,7 @@ import type {
 } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
@@ -42,6 +43,8 @@ export default function MissionDetailPage() {
   const { currentAccountId } = useAuth();
   const wsId = currentAccountId || '';
   const navigate = useNavigate();
+  const compact = useMediaQuery('(max-width: 1100px)');
+  const [stepsOpen, setStepsOpen] = useState(false);
   const { showToast } = useToast();
 
   const [mission, setMission] = useState<OrchestrationMissionDetail | null>(null);
@@ -236,7 +239,9 @@ export default function MissionDetailPage() {
         내용. 한 화면에 전부 쌓아 두던 이전 구조는 스크롤 위치가 곧 맥락이라, 대화를
         읽다가 step 상태를 보려면 화면을 잃어버렸다.
       */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', marginTop: 10, borderTop: `1px solid ${tokens.colors.border}` }}>
+      <div className="awb-mission-body" style={{ flex: 1, minHeight: 0, display: 'flex', marginTop: 10, borderTop: `1px solid ${tokens.colors.border}` }}>
+        {compact && <Button variant="secondary" size="sm" aria-expanded={stepsOpen} aria-controls="mission-steps" onClick={() => setStepsOpen((open) => !open)}>Steps ({mission.steps.length}) {stepsOpen ? '▴' : '▾'}</Button>}
+        <div id="mission-steps" className="awb-mission-rail" hidden={compact && !stepsOpen}>
         <MissionStepRail
           steps={mission.steps}
           graph={mission.graph_spec}
@@ -245,6 +250,7 @@ export default function MissionDetailPage() {
           onSelect={(id) => {
             setSelectedStepId(id);
             setTab('session');
+            setStepsOpen(false);
           }}
           counts={mission.counts}
           planVersion={mission.plan_version}
@@ -256,9 +262,11 @@ export default function MissionDetailPage() {
                 : 'No steps in this mission.'
           }
         />
+        </div>
 
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div
+            className="awb-mission-tabs"
             style={{
               display: 'flex',
               alignItems: 'center',

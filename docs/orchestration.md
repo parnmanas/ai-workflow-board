@@ -25,7 +25,7 @@ Account는 membership·credential·정책·예산의 경계다. 계정 소유 Te
 | 개념 | 설명 |
 | --- | --- |
 | **Team** | 로스터. **오케스트레이터 1명 필수** + 멤버 N명. |
-| **Slot** | 로스터의 한 자리(오케스트레이터 또는 멤버). **Runtime Host + CLI + model + working folder** 로 선언하며, 그 뒤의 Agent 정체성은 AWB 가 만든다. |
+| **Slot** | 로스터의 한 자리(오케스트레이터 또는 멤버). **Runtime Host + CLI + model + working folder** 로 선언하며 실행 identity는 spec에서 계산한다. Agent 행을 만들지 않는다. |
 | **Member** | 팀원 slot. `capabilities` 문구가 오케스트레이터의 배정 판단에 그대로 쓰인다. |
 | **Mission** | 팀에 맡기는 업무 한 건. objective / context / acceptance_criteria 로 기술. |
 | **Step** | 오케스트레이터가 만든 계획의 노드. `depends_on` 으로 DAG 를 이룬다. |
@@ -33,7 +33,7 @@ Account는 membership·credential·정책·예산의 경계다. 계정 소유 Te
 
 ---
 
-## 로스터 — slot 과 backing agent
+## 로스터 — slot 과 runtime identity
 
 팀을 만들 때 **Agent 를 미리 만들어 둘 필요가 없다.** slot 하나는 다음 튜플이다:
 
@@ -41,10 +41,10 @@ Account는 membership·credential·정책·예산의 경계다. 계정 소유 Te
 | --- | --- |
 | `manager_agent_id` | 이 slot 이 도는 Runtime Host(페어링된 agent-manager 장비). |
 | `cli` | 그 장비에 설치된 CLI (`claude`/`codex`/`hermes`/…). `custom` 은 매니저가 자동 spawn 하지 못하므로 제외. |
-| `model` | 그 CLI 에 넘길 모델. 비우면 CLI 기본값. 후보는 Host 하트비트의 `available_models`. |
+| `model` | 그 CLI 에 넘길 모델. 비우면 CLI 기본값. 후보는 `HostModelsService` → `useHostModels()` 한 경로로 읽는다(라이브 ACP → 영속 ACP → 하트비트 중 첫 비어 있지 않은 출처). |
 | `working_dir` | 그 장비의 **절대 경로**. 매니저는 working_dir 없이는 spawn 을 거부한다. |
 | `folder_scope` | `shared`(기본) / `isolated`. 아래 참고. |
-| `credential_id` · `cli_runtime_profile` · `runtime_config` | 선택 — 관리자 Agent 생성 폼과 같은 노브. |
+| `credential_id` · `cli_runtime_profile` · `runtime_config` | 선택 — 공통 `RuntimeSelectionFields`에서 지정하는 credential, backend, 실행 전략/권한 설정. |
 
 각 slot 은 **runtime identity key**(`runtimeIdentityKey(spec)`,
 `common/runtime-spec.ts`) 로 주소가 정해진다 — Agent 행을 만들지 않는다.
@@ -53,20 +53,16 @@ dispatch 는 그 키를 레지스트리 튜플 매칭으로 해소하고, 없으
 같은 키이므로, 폴더를 공유하는 두 멤버는 **서로 다른 slot 행 + 같은 실행 위치**
 가 아니라 **같은 identity** 로 합쳐진다 — 한 트리를 공유하는 협업이 기본값이다.
 
-Host 가 바뀌면 identity key 자체가 바뀐다. 이전 키의 cli-home/api key 는 그
-장비에 남지만 새 키와 충돌하지 않으므로(키가 다르다) 고아 상태가 되지 않는다 —
-이전 키의 행은 미션 이력이 참조할 수 있어 삭제하지 않는다.
+현재 키는 `lower(cli) + working_dir + credential_id`를 해시한 `rt-<hex16>`이다.
+model·label·Host id는 해시 입력이 아니다. 실행할 장비는 spec의
+`manager_agent_id`로 별도 해소한다. Host만 바꿨다고 키가 바뀐다고 가정하지 말 것.
+정확한 계약은 server·manager의 `runtimeIdentityKey()`이며 양쪽을 함께 유지한다.
 
-레거시: `Agent.origin='orchestration'` 행(provisioner 시절에 만들어진 것)은
-그대로 두고 절대 건드리지 않는다. 그 행을 가리키는 기존 미션/step 은 예전
-경로로 계속 디스패치된다.
-
-`Agent.origin='orchestration'` 행은 `GET /api/agents` 기본 목록에서 **숨는다**
-(`?include_orchestration=1` 로 옵트인). 그 목록의 소비자는 전부 picker(티켓 담당자,
-채팅 참여자)이고 거기서 팀 slot 정체성은 정답인 적이 없다 — 직접 디스패치하면 그
-정체성을 소유한 미션 밖에서 일이 돌아간다. 관리 표면은 계속 보인다:
-`/agents/dashboard`(AI Agents 화면)는 필터링하지 않고, Runtime Host 의 managed-agent
-패널은 명시적으로 옵트인한다.
+Agent 테이블과 Agent CRUD/목록 화면은 제거됐다. Runtime Host는 `/hosts`, 실행
+선언은 팀 slot/티켓 assignee/채팅·자동화의 inline RuntimeSpec에서 관리한다.
+Agent 템플릿은 선택한 설정을 복사하는 편의 기능이고 실행 identity가 아니다.
+실행 이력의 `*_agent_id` 필드에는 계산된 runtime key가 남을 수 있지만 이를
+Agent 행이나 템플릿 id로 조회하지 않는다.
 
 ### folder_scope — 폴더를 공유한다는 것
 
@@ -1067,7 +1063,7 @@ QA 런·Action 런과 **동일한 파이프라인**을 쓴다: `ChatRoom` 생성
 
 | 대상 | 생성 경로 | 비고 |
 | --- | --- | --- |
-| **Team**(로스터·오케스트레이터 지정) | **영구히 사람 전용** — UI/REST만 | 로스터는 "이 Agent 가 누구에게 일을 시켜도 되는가"라는 권한 범위 그 자체라, Agent 가 자기 지휘 범위를 스스로 넓히는 것은 어떤 가드로도 정당화하지 않는다. `create_orchestration_team` MCP 툴은 존재하지 않고, 앞으로도 추가하지 않는다. slot 이 Agent 를 **생성**하게 된 뒤로 이 경계는 더 강해졌다 — 로스터 쓰기는 이제 장비에 프로세스를 띄울 정체성을 발급하는 행위다. |
+| **Team**(로스터·오케스트레이터 지정) | **영구히 사람 전용** — UI/REST만 | 로스터는 "이 Agent 가 누구에게 일을 시켜도 되는가"라는 권한 범위 그 자체라, Agent 가 자기 지휘 범위를 스스로 넓히는 것은 어떤 가드로도 정당화하지 않는다. `create_orchestration_team` MCP 툴은 존재하지 않고, 앞으로도 추가하지 않는다. slot의 inline RuntimeSpec도 이 경계를 지킨다 — 로스터 쓰기는 장비에서 실행할 위치·credential·권한을 선언하는 행위다. |
 | **Mission** | 사람(UI, `start:true` 로 즉시 브리핑) **또는** 그 Team 의 오케스트레이터 Agent 자신(`create_orchestration_mission` MCP 툴) | 사람이 이미 Team 을 만들며 권한을 승인해 둔 상태이므로, 오케스트레이터의 Mission 자기-생성은 새 자율성 표면이 아니라 **이미 승인된 권한의 반복 행사**다. |
 
 `create_orchestration_mission` 입력은 `team_id` / `title` / `objective` / `context?` /

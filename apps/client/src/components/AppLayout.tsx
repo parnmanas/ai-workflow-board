@@ -13,6 +13,7 @@ import { TicketMetaProvider } from '../contexts/TicketMetaContext';
 import VoiceAnnouncer from '../voice/VoiceAnnouncer';
 import WakeListener from '../voice/WakeListener';
 import { useAuth } from '../contexts/AuthContext';
+import { NotificationMuteButton } from '../contexts/ToastContext';
 import { tokens } from '../tokens';
 import type { ChatRoomListItem } from '../types';
 
@@ -37,7 +38,26 @@ export default function AppLayout() {
   // Desktop keeps the Hermes-style navigation visible. Only narrow mobile
   // viewports use the off-canvas drawer.
   const drawerMode = isMobile;
+  const artifactOverlay = useMediaQuery('(max-width: 1100px)');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  // Mobile keyboards can resize only the visual viewport. Keep the composer
+  // inside that visible area; pinch zoom remains under the user's control.
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const shell = shellRef.current;
+    if (!viewport || !shell) return;
+    const syncHeight = () => {
+      if (viewport.scale === 1) shell.style.setProperty('--awb-viewport-height', `${viewport.height}px`);
+    };
+    syncHeight();
+    viewport.addEventListener('resize', syncHeight);
+    return () => {
+      viewport.removeEventListener('resize', syncHeight);
+      shell.style.removeProperty('--awb-viewport-height');
+    };
+  }, []);
   const { currentAccountId } = useAuth();
   const [sidebarRooms, setSidebarRooms] = useState<ChatRoomListItem[]>([]);
   const [sidebarRoomsLoading, setSidebarRoomsLoading] = useState(false);
@@ -120,7 +140,7 @@ export default function AppLayout() {
     <ArtifactPanelProvider>
     <TicketMetaProvider>
     <TicketArtifactController>
-    <div className="awb-shell" data-testid="app-shell">
+    <div ref={shellRef} className="awb-shell" data-testid="app-shell">
       <Sidebar
         overlay={drawerMode}
         isOpen={drawerOpen}
@@ -166,6 +186,7 @@ export default function AppLayout() {
             </button>
             <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</div>
             <div style={{ flex: 1 }} />
+            <NotificationMuteButton />
             <ArtifactToggleButton />
           </div>
         )}
@@ -187,6 +208,7 @@ export default function AppLayout() {
           >
             <span style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textPrimary }}>AWB</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <NotificationMuteButton />
               <ArtifactToggleButton />
             </div>
           </div>
@@ -198,7 +220,7 @@ export default function AppLayout() {
       </div>
       {/* 우측 Artifact 패널 — 데스크톱은 본문 옆 영역, 모바일은 오버레이 시트.
           닫혀 있으면 null 을 반환해 레이아웃에 영향 없음. */}
-      <ArtifactPanel isMobile={isMobile} />
+      <ArtifactPanel isMobile={artifactOverlay} />
     </div>
     </TicketArtifactController>
     </TicketMetaProvider>

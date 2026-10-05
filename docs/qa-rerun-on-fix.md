@@ -145,7 +145,7 @@ Mitigations, in order of preference. This order is the one the code declares —
    only changes *when* the rerun runs, whereas this changes *what* it validates.
    Still unimplemented — and not merely unbuilt: there is no preview target to aim
    at, since `main` is the only branch that ships and `Deployment` is keyed by
-   `(workspace_id, environment)` with no branch/ref column. Noted for completeness.
+   `(account_id, environment)` with no branch/ref column. Noted for completeness.
 
 If you can't satisfy any of these, leave `rerun_on_fix` **off** and re-run QA
 manually after you've confirmed the deploy.

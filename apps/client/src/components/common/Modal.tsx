@@ -39,6 +39,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
 
   return (
     <div
+      className="awb-modal-backdrop"
       style={{
         position: 'fixed',
         inset: 0,
@@ -57,6 +58,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
+        className="awb-dialog"
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -66,7 +68,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
           padding: tokens.spacing.lg,
           width: isMobile ? 'calc(100% - 32px)' : '90%',
           maxWidth: isMobile ? 'none' : (maxWidth || 480),
-          maxHeight: isMobile ? '90vh' : '85vh',
+          maxHeight: isMobile ? '90dvh' : '85dvh',
           overflowY: 'auto' as const,
           boxShadow: tokens.shadows.modal,
           position: 'relative' as const,
@@ -93,6 +95,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
               display: 'flex',
               justifyContent: 'flex-end',
               gap: tokens.spacing.sm,
+              flexWrap: 'wrap',
               marginTop: tokens.spacing.md,
             }}
           >

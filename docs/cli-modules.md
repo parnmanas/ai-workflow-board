@@ -84,7 +84,7 @@ credential 폼, 로그인 화면, effort 편집기가 그 CLI 를 그린다.
 거치고, 세션 CLI 설정은 ACP 가 보고한 목록에 호스트가 그 뒤 알게 된 모델을 덧붙인다.
 
 클라이언트는 `src/cli/hostModels.ts` 의 `useHostModels(managerAgentId, cli)` 하나를 쓴다 —
-Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모달, Runtime Hosts 화면 전부.
+Agent 템플릿/RuntimeSpec 선택기, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모달, Runtime Hosts 화면 전부.
 훅은 열릴 때 목록이 비었거나(host×cli 당 한 번) 재열거 시각이 10분보다 오래됐으면 조용히
 갱신하고, 각 화면의 "Refresh" 버튼은 같은 `refresh()` 를 부른다. 모델을 보여주는 새 화면을
 만들 때 `available_models` 를 직접 읽거나 `refresh_available_models` 를 직접 보내지 말 것.
@@ -101,7 +101,7 @@ Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모�
    유효하며, `onModuleInit` + 스냅샷 조회(60초 간격)로 읽는다.
 3. 하트비트 `available_models[cli]` — 그 host×cli 로 세션을 한 번도 연 적이 없을 때만.
 
-이름(`labels`, id → 표시 이름)도 같은 출처에서 함께 내려가 팀 슬롯·Agent 다이얼로그가 세션과
+이름(`labels`, id → 표시 이름)도 같은 출처에서 함께 내려가 팀 슬롯·Agent 템플릿/RuntimeSpec 선택기가 세션과
 같은 이름(`sonnet` → `Sonnet 5.5`)으로 그린다.
 
 합치지 않는 이유: 하트비트 열거는 CLI 바이너리 문자열 스캔이라(claude: alias + 바이너리에서
@@ -110,7 +110,7 @@ Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모�
 `claude-sonnet-5-5` 가 있고 세션 안 드롭다운에는 없었다(운영 보고 2026-10-02, ragnar).
 세션 안은 어댑터가 아는 값만 받으므로(모르는 id 는 거절) 그쪽을 넓힐 수는 없고, 그래서 모든
 화면이 어댑터 목록 하나로 좁혀진다. 어댑터 값(`sonnet`·`opus`·`claude-fable-5-1`)은 CLI
-`--model` 도 받으므로 팀 슬롯·Agent 에서도 유효하다. 어댑터를 올린 뒤 목록이 따라오려면
+`--model` 도 받으므로 팀 슬롯·RuntimeSpec 에서도 유효하다. 어댑터를 올린 뒤 목록이 따라오려면
 그 host×cli 로 세션을 한 번 열면 된다(보고가 새로 영속된다).
 
 2번이 없으면 "이 서버 프로세스에서 세션을 한 번 열었는가"에 따라 목록이 갈린다 — 실측
@@ -121,7 +121,7 @@ Agent 다이얼로그, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모�
 전에는 두 곳이 자기만의 합집합을 만들었다:
 
 - 세션 화면: 하트비트를 직접 읽고 ACP 목록과 합쳤지만, 그 ACP 지식이 화면 밖으로 나가지
-  않아 Agent 다이얼로그·팀 슬롯은 더 가난한 목록을 봤다.
+  않아 Agent 템플릿/RuntimeSpec 선택기·팀 슬롯은 더 가난한 목록을 봤다.
 - 오케스트레이션 로스터: 하트비트 + **기존 agent 행에 핀된 `model`** 을 합쳐 알파벳순으로
   재정렬했다. 그래서 같은 호스트의 opencode 목록이 mission 과 다른 화면에서 내용도 순서도
   달랐다(운영 보고). 저장된 값이 목록에 없을 때의 대비는 화면이 이미 한다 — 팀 슬롯이

@@ -202,7 +202,7 @@ export default function OrchestrationTeamsPage() {
                   opacity: team.enabled ? 1 : 0.6,
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <div className="awb-team-heading" style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 15, fontWeight: 700, color: tokens.colors.textPrimary }}>{team.name}</span>

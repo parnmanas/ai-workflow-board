@@ -204,7 +204,7 @@ export function MissionRow({
         fontFamily: 'inherit',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div className="awb-mission-heading" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span
           style={{
             padding: '2px 8px',
@@ -229,7 +229,7 @@ export function MissionRow({
         </span>
       </div>
 
-      <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 14, fontSize: 11, color: tokens.colors.textSecondary }}>
+      <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, fontSize: 11, color: tokens.colors.textSecondary }}>
         <span>
           Team <strong style={{ color: tokens.colors.textStrong }}>{mission.team_name}</strong>
         </span>

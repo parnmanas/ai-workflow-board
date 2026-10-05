@@ -1,0 +1,100 @@
+/* Container width matters when navigation or an artifact panel is open. */
+.awb-session-composer { container-type: inline-size; min-width: 0; overflow-wrap: anywhere; padding-bottom: max(12px, env(safe-area-inset-bottom)) !important; }
+.awb-composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.awb-composer-row > button { flex-shrink: 0; }
+.awb-session-identity { display: flex; align-items: center; gap: 10px; flex: 1 1 320px; min-width: 0; }
+.awb-session-identity > button { flex-shrink: 0; }
+.awb-session-settings { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.awb-session-settings[hidden] { display: none; }
+.awb-session-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.awb-session-context { display: flex; flex-direction: column; gap: 4px; width: 100%; min-width: 0; font-size: 11px; overflow-wrap: anywhere; }
+.awb-session-transcript { overflow-wrap: anywhere; }
+.awb-page-actions > * { max-width: 100%; }
+
+@container (max-width: 640px) {
+  .awb-composer-row { flex-wrap: wrap; gap: 6px; }
+  .awb-composer-input { order: -1; flex-basis: 100% !important; width: 100%; font-size: 16px !important; max-height: min(160px, 25dvh) !important; }
+  .awb-composer-row > button { min-height: 44px; padding-left: 10px !important; padding-right: 10px !important; }
+  .awb-composer-send { margin-left: auto; }
+  .awb-composer-help { display: none; }
+}
+
+@media (max-width: 1100px), (max-height: 500px) {
+  .awb-session-header { gap: 8px !important; }
+  .awb-session-identity { flex-basis: 100%; }
+  .awb-session-extra { display: none !important; }
+  .awb-session-identity > button { min-width: 36px; min-height: 36px; }
+  .awb-session-settings { width: 100%; max-height: min(240px, 32dvh); overflow-y: auto; padding: 8px 0; border-bottom: 1px solid var(--awb-border); }
+  .awb-session-settings select { min-height: 40px; min-width: 0; max-width: 100% !important; font-size: 16px !important; }
+  .awb-session-settings label { min-height: 40px; }
+  .awb-session-settings button, .awb-session-actions button { min-height: 36px; }
+  .awb-session-actions { width: 100%; justify-content: space-between; }
+}
+
+@media (max-width: 767px) {
+  .awb-page-header { padding: 12px 16px !important; flex-wrap: wrap; align-items: flex-start !important; gap: 10px !important; }
+  .awb-page-header > div:first-child { flex-basis: 100% !important; }
+  .awb-page-actions { width: 100%; margin-left: 0 !important; }
+  .awb-page-actions button { min-height: 40px; white-space: nowrap; }
+  .awb-page-actions select { min-width: 0; width: auto !important; }
+  .awb-session-composer { padding-left: 12px !important; padding-right: 12px !important; }
+  .awb-session-transcript { padding: 12px !important; }
+  .awb-team-heading > div:first-child { flex-basis: 100% !important; }
+  .awb-team-heading button { min-height: 40px; }
+  .awb-mission-heading > span:nth-child(2) { flex-basis: calc(100% - 90px); overflow-wrap: anywhere; }
+  .awb-mission-heading > span:last-child { width: 100%; }
+  .awb-dialog { padding: 16px !important; overflow-wrap: anywhere; }
+  .awb-sidebar--overlay:not(.awb-sidebar--open) { visibility: hidden; }
+  .awb-sidebar--overlay button { min-height: 36px; }
+  /* Prevent iOS focus zoom without disabling the user's zoom controls. */
+  input:not([type=checkbox]):not([type=radio]), textarea, select { font-size: 16px !important; }
+}
+
+@media (max-height: 500px) {
+  .awb-topbar { height: 40px !important; }
+  .awb-session-header { padding-top: 4px !important; padding-bottom: 4px !important; }
+  .awb-session-composer { padding-top: 6px !important; padding-bottom: max(6px, env(safe-area-inset-bottom)) !important; max-height: 45dvh; overflow-y: auto; }
+  .awb-composer-input { max-height: 80px !important; }
+  .awb-composer-help { display: none; }
+}
+
+@media (max-width: 767px) {
+  .awb-main { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  .awb-modal-backdrop { bottom: auto !important; height: var(--awb-viewport-height, 100dvh); }
+}
+
+.awb-toasts { max-width: calc(100vw - 32px); overflow-wrap: anywhere; }
+@media (max-width: 767px) { .awb-notification-mute { width: 44px !important; height: 44px !important; } }
+
+.awb-ticket-tabs { overflow-x: auto; }
+.awb-ticket-tabs > button { flex-shrink: 0; }
+.awb-ticket-header { flex-wrap: wrap; gap: 8px; }
+.awb-ticket-header > div { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.awb-ticket-header [aria-label^="Ticket ID"] { max-width: 100%; overflow-wrap: anywhere; }
+.awb-mission-rail { display: flex; min-height: 0; }
+.awb-mission-rail[hidden] { display: none; }
+.awb-mission-tabs { overflow-x: auto; flex-shrink: 0; }
+.awb-mission-tabs > button, .awb-mission-tabs > label { flex-shrink: 0; white-space: nowrap; }
+@media (max-width: 1100px) {
+  .awb-mission-body { flex-direction: column; }
+  .awb-mission-body > button { min-height: 40px; align-self: flex-start; margin: 6px 12px; flex-shrink: 0; }
+  .awb-mission-rail { max-height: 35%; flex-shrink: 0; }
+  .awb-mission-rail > div { width: 100% !important; border-right: none !important; border-bottom: 1px solid var(--awb-border); }
+  .awb-ticket-header button { min-height: 40px; }
+}
+
+.awb-artifact-overlay { bottom: auto !important; height: var(--awb-viewport-height, 100dvh); }
+.awb-dialog { max-height: min(85dvh, calc(var(--awb-viewport-height, 100dvh) - 32px)) !important; }
+@media (max-width: 767px) {
+  .awb-main, .awb-sidebar--overlay { padding-top: env(safe-area-inset-top); }
+}
+
+.awb-chat-composer { container-type: inline-size; min-width: 0; padding-bottom: env(safe-area-inset-bottom); }
+@container (max-width: 640px) {
+  .awb-chat-composer-row { flex-wrap: wrap; }
+  .awb-chat-composer-row > div { order: -1; flex-basis: 100% !important; width: 100%; }
+  .awb-chat-composer-row textarea { font-size: 16px !important; }
+  .awb-chat-composer-row > button { min-width: 44px; }
+  .awb-chat-composer-row > button:last-child { margin-left: auto; }
+  .awb-chat-composer-help { display: none; }
+}

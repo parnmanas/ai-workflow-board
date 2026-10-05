@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
+import './responsive.css';
 import { tokens } from './tokens';
 import { shouldReloadForChunkError } from './utils/chunkReload';
 
@@ -21,6 +22,7 @@ const style = document.createElement('style');
 style.textContent = `
   /* 문서 배경/기본 텍스트의 권위 원천은 토큰이다(F2-2). index.html 의 인라인
      body 규칙은 번들 로드 전 flash 방지용 fallback 이며 이 값과 미러링한다. */
+  :root { --awb-border: ${tokens.colors.border}; }
   body { background: ${tokens.colors.surface}; color: ${tokens.colors.textStrong}; }
 
   /* 키보드 포커스 가시성 통일(F2-5). 인라인 스타일 위주라 전역 :focus-visible 규칙으로
@@ -57,6 +59,7 @@ style.textContent = `
   .awb-shell {
     display: flex;
     height: 100vh;
+    height: var(--awb-viewport-height, 100dvh);
     overflow: hidden;
     background: ${tokens.colors.surface};
   }
@@ -71,6 +74,7 @@ style.textContent = `
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    min-width: 0;
   }
   /* Off-canvas(드로어) 사이드바 — 모바일 전용.
      AppLayout 이 drawerMode 일 때 .awb-sidebar--overlay 를 부여하므로 미디어쿼리에
